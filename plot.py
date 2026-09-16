@@ -15,9 +15,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Import plotting utilities with fallback
 try:
-    from plotting_utils import get_divergent_color, get_marker_size, get_plot_color, PLOT_COLORS
+    from plotting_utils import (
+        apply_autophot_mplstyle,
+        get_divergent_color,
+        get_marker_size,
+        get_plot_color,
+        PLOT_COLORS,
+    )
 except ImportError:
     logger.warning("plotting_utils module not found, some plotting features may be limited")
+    apply_autophot_mplstyle = lambda: None
     get_divergent_color = None
     get_marker_size = None
     get_plot_color = None
@@ -26,6 +33,7 @@ except ImportError:
 try:
     from lightcurve import (
         _normalize_photometry_columns,
+        _time_axis_transform,
         BAND_COLORS,
         canonical_band_label_map_from_filter_series,
         canonical_bands_from_filter_series,
@@ -34,6 +42,7 @@ try:
     )
 except ImportError:
     _normalize_photometry_columns = None
+    _time_axis_transform = None
     BAND_COLORS = None
     canonical_band_label_map_from_filter_series = None
     canonical_bands_from_filter_series = None
@@ -124,8 +133,7 @@ class Plot:
 
         try:
             # Setup
-            dir_path = os.path.dirname(os.path.realpath(__file__))
-            plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+            apply_autophot_mplstyle()
 
             base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
@@ -669,8 +677,7 @@ class Plot:
             return
 
         # Plot setup
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+        apply_autophot_mplstyle()
 
         base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
         write_dir = os.path.dirname(self.input_yaml["fpath"])
@@ -791,8 +798,7 @@ class Plot:
             from scipy.spatial import cKDTree
 
             # Set up matplotlib style
-            dir_path = os.path.dirname(os.path.realpath(__file__))
-            plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+            apply_autophot_mplstyle()
 
             # Extract file path and base name
             fpath = self.input_yaml["fpath"]
@@ -1248,10 +1254,7 @@ class Plot:
                 by_label.keys(),
                 loc="lower center",
                 bbox_to_anchor=(0.5, 1.0),
-                frameon=True,
-                facecolor="white",
-                framealpha=1.0,
-                edgecolor="black",
+                frameon=False,
                 fontsize=8,
                 handlelength=1.5,
                 handletextpad=0.5,
@@ -1274,7 +1277,8 @@ class Plot:
                 )
 
             fig.savefig(
-                save_loc, dpi=150, bbox_extra_artists=[leg], facecolor=PLOT_COLORS.get('figure_facecolor', 'white')
+                save_loc, dpi=150, bbox_inches="tight", bbox_extra_artists=[leg],
+                facecolor=PLOT_COLORS.get('figure_facecolor', 'white')
             )
             plt.close(fig)
 
@@ -1312,6 +1316,7 @@ class Plot:
         adaptive_snr_selection=False,
         input_yaml=None,
         max_plot_err=0.5,
+        chi2_marginal_threshold=5.0,
     ):
         """
         Plot lightcurve with detections and optional upper limits.
@@ -1389,7 +1394,7 @@ class Plot:
                 if all_snr_values:
                     median_snr = np.median(all_snr_values)
                     # Get configured S/N thresholds for adaptive selection
-                    lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
+                    lim_cfg = input_yaml.get("limiting_magnitude") or {}
                     snr_thresholds = lim_cfg.get("snr_thresholds", [3.0, 5.0])
                     
                     # Use 5sigma limit if median S/N < 3, otherwise use 3sigma
@@ -1410,9 +1415,22 @@ class Plot:
         if data.columns.duplicated().any():
             data = data.loc[:, ~data.columns.duplicated()].copy()
 
+        # Intra-night data (< 1 day span): switch to minutes/hours since the
+        # first observation instead of raw MJD (shared with lightcurve.py).
+        if _time_axis_transform is not None and "mjd" in data.columns:
+            x_transform, lc_xlabel, subday_unit = _time_axis_transform(
+                data["mjd"].values, reference_epoch
+            )
+        else:
+            x_transform = lambda m: pd.to_numeric(m, errors="coerce") - reference_epoch
+            lc_xlabel = None
+            subday_unit = None
+
         filter_series = (
             photometry_filter_series(data) if photometry_filter_series else None
         )
+        method_low = str(method).strip().lower()
+        method_u = str(method).strip().upper()
         uniform_mag = (
             f"mag_{method_low}" in data.columns
             and f"mag_{method_low}_err" in data.columns
@@ -1449,6 +1467,8 @@ class Plot:
         else:
             dm = 0
 
+        apply_autophot_mplstyle()
+
         fig = plt.figure(figsize=set_size(*default_size))
         ax1 = fig.add_subplot(111)
         ax1.invert_yaxis()
@@ -1480,8 +1500,7 @@ class Plot:
 
         num_detect = 0
         num_nondetect = 0
-        method_low = str(method).strip().lower()
-        method_u = str(method).strip().upper()
+        plotted_marginal_chi2 = False
         for b in loop_bands:
             # Prefer new uniform columns, then fall back to legacy per-band columns.
             band = b + "_" + method
@@ -1597,29 +1616,61 @@ class Plot:
                         detects = detects[good_err].copy()
 
             if not detects.empty:
-                x_det = pd.to_numeric(detects["mjd"], errors="coerce") - reference_epoch
+                x_det = x_transform(detects["mjd"])
                 leg_label = (
                     label_map.get(str(b).strip().lower(), str(b))
                     if use_filter_bands
                     else str(b)
                 )
-                ax1.errorbar(
-                    x_det,
-                    detects[mag_col],
-                    yerr=detects[err_col],
-                    c=_color_for_band(b),
-                    ls="",
-                    capsize=2,
-                    marker=marker,
-                    label=leg_label,
+                # Split detections by chi2 quality: marginal detections
+                # (reduced_chi2 > threshold) get white face + faded edge.
+                _band_c = _color_for_band(b)
+                chi2_marginal_enabled = (
+                    chi2_marginal_threshold is not None
+                    and float(chi2_marginal_threshold) > 0
+                    and "reduced_chi2" in detects.columns
                 )
+                if chi2_marginal_enabled:
+                    _chi2_vals = pd.to_numeric(
+                        detects["reduced_chi2"], errors="coerce"
+                    )
+                    marginal_mask = _chi2_vals > float(chi2_marginal_threshold)
+                else:
+                    marginal_mask = pd.Series(False, index=detects.index)
+
+                good_detects = detects[~marginal_mask]
+                marginal_detects = detects[marginal_mask]
+
+                if not good_detects.empty:
+                    ax1.errorbar(
+                        x_det[~marginal_mask],
+                        good_detects[mag_col],
+                        yerr=good_detects[err_col],
+                        c=_band_c,
+                        ls="",
+                        capsize=3,
+                        marker=marker,
+                        label=leg_label,
+                    )
+                if not marginal_detects.empty:
+                    plotted_marginal_chi2 = True
+                    ax1.errorbar(
+                        x_det[marginal_mask],
+                        marginal_detects[mag_col],
+                        yerr=marginal_detects[err_col],
+                        c=_band_c,
+                        ls="",
+                        capsize=3,
+                        marker=marker,
+                        markerfacecolor="white",
+                        markeredgewidth=0.8,
+                        alpha=0.5,
+                        label=leg_label if good_detects.empty else "",
+                    )
                 # Optional: draw line connecting detection points
                 if ls:
                     sorted_detects = detects.sort_values("mjd")
-                    x_line = (
-                        pd.to_numeric(sorted_detects["mjd"], errors="coerce")
-                        - reference_epoch
-                    )
+                    x_line = x_transform(sorted_detects["mjd"])
                     ax1.plot(
                         x_line,
                         sorted_detects[mag_col],
@@ -1649,9 +1700,7 @@ class Plot:
                     y_lim = nondetects["lmag"]
                 else:
                     y_lim = nondetects[mag_col]
-                x_nd = (
-                    pd.to_numeric(nondetects["mjd"], errors="coerce") - reference_epoch
-                )
+                x_nd = x_transform(nondetects["mjd"])
                 ax1.errorbar(
                     x_nd,
                     y_lim,
@@ -1659,6 +1708,7 @@ class Plot:
                     ls="",
                     marker="v",
                     markersize=5,
+                    capsize=5,
                     markerfacecolor="none",
                     markeredgewidth=0.5,
                     alpha=0.85,
@@ -1677,10 +1727,17 @@ class Plot:
 
         ax1.set_ylabel("App. Magnitude")
 
-        if reference_epoch != 0.0:
+        if lc_xlabel is not None:
+            ax1.set_xlabel(lc_xlabel)
+        elif reference_epoch != 0.0:
             ax1.set_xlabel(rf"Days since {reference_epoch}")
         else:
             ax1.set_xlabel("Modified Julian Date")
+
+        if subday_unit == "min":
+            from matplotlib.ticker import MaxNLocator as _MaxNLocator
+
+            ax1.xaxis.set_major_locator(_MaxNLocator(integer=True, nbins=8))
 
         if show_details:
             text = rf"# detect {num_detect}" + "\n" + rf"# nondetect {num_nondetect}"
@@ -1695,6 +1752,25 @@ class Plot:
             )
 
         handles, labels = ax1.get_legend_handles_labels()
+        # Add marginal-chi2 legend entry if any were plotted
+        if plotted_marginal_chi2:
+            from matplotlib.lines import Line2D as _L2
+            _marg_label = f"Marginal (high χ², >{chi2_marginal_threshold:g})"
+            if _marg_label not in labels:
+                _marg_handle = _L2(
+                    [0], [0],
+                    color="black",
+                    marker="o",
+                    markersize=5,
+                    markerfacecolor="white",
+                    markeredgecolor="black",
+                    markeredgewidth=0.8,
+                    alpha=0.5,
+                    ls="",
+                    label=_marg_label,
+                )
+                handles.append(_marg_handle)
+                labels.append(_marg_label)
         by_label = dict(zip(labels, handles))
 
         _n_entries = len(by_label.values())
@@ -1704,10 +1780,7 @@ class Plot:
             by_label.keys(),
             loc="lower center",
             bbox_to_anchor=(0.5, 1.0),
-            frameon=True,
-            facecolor="white",
-            framealpha=1.0,
-            edgecolor="black",
+            frameon=False,
             fontsize=8,
             handlelength=1.5,
             handletextpad=0.5,
@@ -1741,8 +1814,7 @@ class Plot:
         import numpy as np
 
         try:
-            dir_path = os.path.dirname(os.path.realpath(__file__))
-            plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+            apply_autophot_mplstyle()
 
             base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
@@ -1823,6 +1895,7 @@ class Plot:
                     fmt="none",
                     ecolor=PLOT_COLORS.get('error_bar', '#999999'),
                     elinewidth=0.5,
+                    capsize=3.5,
                     alpha=0.5,
                     zorder=1,
                 )
@@ -2021,8 +2094,7 @@ class Plot:
         import astropy.units as u
 
         try:
-            dir_path = os.path.dirname(os.path.realpath(__file__))
-            plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+            apply_autophot_mplstyle()
 
             base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
@@ -2206,6 +2278,7 @@ class Plot:
                     fmt="none",
                     ecolor=PLOT_COLORS.get('error_bar', '#999999'),
                     elinewidth=0.5,
+                    capsize=3.5,
                     alpha=0.5,
                     zorder=1,
                 )
@@ -2411,8 +2484,7 @@ class Plot:
             )
             from matplotlib.patches import Circle
 
-            dir_path = os.path.dirname(os.path.realpath(__file__))
-            plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+            apply_autophot_mplstyle()
             plt.ioff()
 
             base = os.path.splitext(

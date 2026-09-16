@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import astroalign as aa
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as mpatheffects
 import numpy as np
 from astropy.coordinates import SkyCoord, search_around_sky
 from astropy.io import fits
@@ -640,6 +641,9 @@ NNW
             zscale = ZScaleInterval()
             vmin, vmax = zscale.get_limits(data)
 
+            from plotting_utils import apply_autophot_mplstyle
+            apply_autophot_mplstyle()
+
             # Plot image
             fig, ax = plt.subplots(figsize=figsize)
             # Render NaNs as white "no data" regions.
@@ -672,7 +676,7 @@ NNW
                         (x_0based, y_0based),
                         fwhm,
                         facecolor="none",
-                        edgecolor="#FF0000",
+                        edgecolor="#D94F4F",
                         linewidth=0.5,
                         alpha=0.7,
                     )
@@ -681,7 +685,7 @@ NNW
                         x_0based,
                         y_0based - fwhm - 2,
                         str(i),
-                        color="#FF0000",
+                        color="#D94F4F",
                         fontsize=8,
                         ha="center",
                         va="top",
@@ -1153,7 +1157,21 @@ NNW
                         cleaned['ERRX2WIN_WORLD'] = cleaned['ERRX2WIN_IMAGE']
                     if 'ERRY2WIN_WORLD' not in cleaned.colnames:
                         cleaned['ERRY2WIN_WORLD'] = cleaned['ERRY2WIN_IMAGE']
+                    # Convert image-coordinate errors (pixels) to world errors
+                    # (degrees) using the actual image pixel scale; fall back
+                    # to a nominal value only if the WCS is unusable.
                     pixel_scale = 0.1585 / 3600.0
+                    try:
+                        from wcs import get_wcs as _get_wcs_for_err
+                        _wcs_err = _get_wcs_for_err(fits.getheader(fits_image))
+                        if _wcs_err is not None:
+                            _ps = np.asarray(
+                                _wcs_err.proj_plane_pixel_scales(), float
+                            )
+                            if np.all(np.isfinite(_ps)) and np.all(_ps > 0):
+                                pixel_scale = float(np.mean(_ps))
+                    except Exception:
+                        pass
                     if 'ERRA_WORLD' not in cleaned.colnames:
                         cleaned['ERRA_WORLD'] = cleaned['ERRAWIN_IMAGE'] * pixel_scale
                     if 'ERRDEC_WORLD' not in cleaned.colnames:
@@ -2397,6 +2415,18 @@ NNW
                         "Only %d matched sources (< %d minimum). Retrying with %.1f\" radius (was %.1f\").",
                         _num_matched, min_matched, retry_radius, crossid_radius,
                     )
+                    # filter_matched_sources rewrites both catalogs in place
+                    # with matched-only subsets, so the unfiltered catalogs
+                    # must be restored before re-matching or the retry can
+                    # never find additional pairs.
+                    try:
+                        shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
+                        shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
+                    except OSError as _restore_err:
+                        self.logger.debug(
+                            "Could not restore full catalogs for retry: %s",
+                            _restore_err,
+                        )
                     _num_matched, _ = _do_match(retry_radius)
                     crossid_radius = retry_radius
 
@@ -2961,11 +2991,11 @@ NNW
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
                     output_plot_path=output_dir / f"Matched_Sources_{Path(sci_image_copy).stem}.png",
-                    label_color="#FF0000",
+                    label_color="#D94F4F",
                     label_fontsize=7,
                     circle_radius_sci=fwhm_sci_pix,
                     circle_radius_ref=fwhm_ref_pix,
-                    matched_circle_color="#FF0000",
+                    matched_circle_color="#D94F4F",
                     unmatched_circle_color="blue",
                     scamp_matched_sources=_scamp_sources,
                 )
@@ -3552,11 +3582,81 @@ NNW
                             "worst_quadrant_offset": _worst_quadrant_offset,
                         }
 
+                        # Spatial coverage check: matched sources confined to
+                        # a small region of the detector cannot validate
+                        # rotation/scale over the full field.  Defer the
+                        # decision to SCAMP's own astrometric residuals (the
+                        # elif branch below) instead of accepting on the
+                        # cluster alone.
+                        try:
+                            _v_hdr = fits.getheader(str(aligned_sci))
+                            _v_nx = float(_v_hdr.get("NAXIS1") or 0.0)
+                            _v_ny = float(_v_hdr.get("NAXIS2") or 0.0)
+                        except Exception:
+                            _v_nx = _v_ny = 0.0
+                        if _v_nx > 0 and _v_ny > 0 and len(_matched_xy) >= 2:
+                            _span_x = (
+                                float(_matched_xy[:, 0].max())
+                                - float(_matched_xy[:, 0].min())
+                            ) / _v_nx
+                            _span_y = (
+                                float(_matched_xy[:, 1].max())
+                                - float(_matched_xy[:, 1].min())
+                            ) / _v_ny
+                            if _span_x < 0.25 or _span_y < 0.25:
+                                self.logger.warning(
+                                    "Post-SWarp verification: %d matched sources "
+                                    "cover only %.0f%%x%.0f%% of the field - "
+                                    "cluster-limited verification; deferring "
+                                    "acceptance to SCAMP astrometric residuals.",
+                                    n_matched_verify, 100 * _span_x, 100 * _span_y,
+                                )
+                                alignment_metadata = {
+                                    "coverage_ok": False,
+                                    "n_matched": n_matched_verify,
+                                }
+
                     else:
                         self.logger.info(
-                            "Alignment verification: only %d matches (< %d); skipping.",
+                            "Alignment verification: only %d matches (< %d); "
+                            "checking for a coherent offset among mutual pairs.",
                             n_matched_verify, _min_matches,
                         )
+                        # Distinguish a genuinely sparse field from a coherent
+                        # misregistration larger than the match tolerance: if
+                        # most mutual nearest neighbours share a common
+                        # displacement, the alignment is measurably wrong even
+                        # though few pairs survive the tolerance cut.
+                        _n_mut = int(mutual.sum())
+                        if _n_mut >= 3:
+                            _dx_all = (
+                                sci_xy[mutual, 0] - ref_xy[i_sr[mutual], 0]
+                            )
+                            _dy_all = (
+                                sci_xy[mutual, 1] - ref_xy[i_sr[mutual], 1]
+                            )
+                            _mdx = float(np.median(_dx_all))
+                            _mdy = float(np.median(_dy_all))
+                            _res = np.hypot(_dx_all - _mdx, _dy_all - _mdy)
+                            _n_coh = int(np.sum(_res <= match_tol))
+                            _coh_min = max(3, int(np.ceil(0.6 * _n_mut)))
+                            _med_off = float(np.hypot(_mdx, _mdy))
+                            if _n_coh >= _coh_min and _med_off > match_tol:
+                                self.logger.warning(
+                                    "Post-SWarp verification: %d mutual pairs "
+                                    "share a coherent offset of %.2f px "
+                                    "(> %.2f px tolerance) - misregistration "
+                                    "detected.",
+                                    _n_coh, _med_off, match_tol,
+                                )
+                                alignment_metadata = {
+                                    "offset_x": _mdx,
+                                    "offset_y": _mdy,
+                                    "rms_x": float(np.std(_dx_all)),
+                                    "rms_y": float(np.std(_dy_all)),
+                                    "n_matched": _n_coh,
+                                    "coherent_misregistration": True,
+                                }
                 else:
                     self.logger.info(
                         "Alignment verification: SExtractor detected insufficient sources "
@@ -4912,6 +5012,82 @@ NNW
                                 "p95_offset": _p95_reproj,
                                 "worst_quadrant_offset": _reproj_worst_quad,
                             }
+                            # Spatial coverage warning: clustered matched
+                            # sources cannot validate the full field.  The
+                            # reproject transform is WCS-derived (not fit to
+                            # the cluster), so coverage limits the
+                            # verification, not the solution itself.
+                            try:
+                                _v_hdr2 = fits.getheader(science_image)
+                                _v_nx2 = float(_v_hdr2.get("NAXIS1") or 0.0)
+                                _v_ny2 = float(_v_hdr2.get("NAXIS2") or 0.0)
+                            except Exception:
+                                _v_nx2 = _v_ny2 = 0.0
+                            if (
+                                _v_nx2 > 0 and _v_ny2 > 0
+                                and len(_reproj_matched_xy) >= 2
+                            ):
+                                _rspan_x = (
+                                    float(_reproj_matched_xy[:, 0].max())
+                                    - float(_reproj_matched_xy[:, 0].min())
+                                ) / _v_nx2
+                                _rspan_y = (
+                                    float(_reproj_matched_xy[:, 1].max())
+                                    - float(_reproj_matched_xy[:, 1].min())
+                                ) / _v_ny2
+                                if _rspan_x < 0.25 or _rspan_y < 0.25:
+                                    self.logger.warning(
+                                        "Reproject verification: %d matched "
+                                        "sources cover only %.0f%%x%.0f%% of "
+                                        "the field - coverage-limited "
+                                        "verification.",
+                                        _n_match_reproj,
+                                        100 * _rspan_x, 100 * _rspan_y,
+                                    )
+                                    reproject_metadata["coverage_ok"] = False
+                    else:
+                        # Few pairs survive the tolerance cut - distinguish a
+                        # genuinely sparse field from a coherent
+                        # misregistration larger than the tolerance: mutual
+                        # nearest neighbours sharing a common displacement are
+                        # evidence the reprojected image is measurably wrong.
+                        _n_mut_r = int(_mutual.sum())
+                        if _n_mut_r >= 3:
+                            _dx_all_r = (
+                                _sci_xy[_mutual, 0] - _ref_xy[_i_sr[_mutual], 0]
+                            )
+                            _dy_all_r = (
+                                _sci_xy[_mutual, 1] - _ref_xy[_i_sr[_mutual], 1]
+                            )
+                            _mdx_r = float(np.median(_dx_all_r))
+                            _mdy_r = float(np.median(_dy_all_r))
+                            _res_r = np.hypot(_dx_all_r - _mdx_r, _dy_all_r - _mdy_r)
+                            _n_coh_r = int(np.sum(_res_r <= _reproj_match_tol))
+                            _coh_min_r = max(3, int(np.ceil(0.6 * _n_mut_r)))
+                            _med_off_r = float(np.hypot(_mdx_r, _mdy_r))
+                            if _n_coh_r >= _coh_min_r and _med_off_r > _reproj_match_tol:
+                                self.logger.warning(
+                                    "Reproject verification: %d mutual pairs "
+                                    "share a coherent offset of %.2f px "
+                                    "(> %.2f px tolerance) - misregistration "
+                                    "detected; rejecting.",
+                                    _n_coh_r, _med_off_r, _reproj_match_tol,
+                                )
+                                return {
+                                    "science_aligned": science_image,
+                                    "reference_aligned": str(aligned_reference_fpath),
+                                    "alignment_method": f"reproject/{used_method}",
+                                    "rejected": True,
+                                    "reject_rms": float(np.hypot(
+                                        np.std(_dx_all_r), np.std(_dy_all_r)
+                                    )),
+                                    "reject_p95": float("inf"),
+                                    "reject_offset": _med_off_r,
+                                    "reject_max": float(np.max(
+                                        np.hypot(_dx_all_r, _dy_all_r)
+                                    )),
+                                    "reject_n_matched": _n_coh_r,
+                                }
             except Exception as _ve:
                 self.logger.debug("Post-reproject verification failed (non-fatal): %s", _ve)
 
@@ -6068,7 +6244,7 @@ NNW
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
                     output_plot_path=science_aligned_dir / f"Matched_Sources_{Path(sci_image_copy).stem}.png",
-                    label_color="#FF0000",
+                    label_color="#D94F4F",
                     label_fontsize=10,
                     circle_radius_sci=fwhm_sci_pix,
                     circle_radius_ref=fwhm_ref_pix,
@@ -6120,6 +6296,14 @@ NNW
             ref_img = _load_and_clean_image(ref_image_copy)
             sci_img = _load_and_clean_image(sci_image_copy)
             MAX_CONTROL_POINTS = 300
+            # Undersampling threshold for interpolation-order decisions.  Must
+            # be defined before the aafitrans branch: when aafitrans is missing
+            # or fails, the astroalign fallback below still references it.
+            _aa_us_thresh = float(
+                (iy.get("photometry", {}) or {}).get(
+                    "undersampled_fwhm_threshold", 2.5
+                )
+            ) if isinstance(iy, dict) else 2.5
             use_aafitrans = False
             try:
                 import aafitrans
@@ -6163,11 +6347,6 @@ NNW
                     _nd_offset = np.array([inv_matrix[1, 2], inv_matrix[0, 2]])
                     # Use bilinear (order=1) for undersampled images to avoid
                     # ringing artifacts from cubic interpolation on sparse PSFs.
-                    _aa_us_thresh = float(
-                        (iy.get("photometry", {}) or {}).get(
-                            "undersampled_fwhm_threshold", 2.5
-                        )
-                    ) if isinstance(iy, dict) else 2.5
                     _aa_interp_order = 1 if (
                         fwhm_sci_pix < _aa_us_thresh or fwhm_ref_pix < _aa_us_thresh
                     ) else 3
@@ -6946,12 +7125,63 @@ NNW
                     "GAIA cache hit: using cached catalog %s", cached_gaia_path
                 )
 
+        # Honour the documented scamp_* keys from the wcs config section
+        # (same names as wcs.py).  These act as defaults only - explicit
+        # per-call `config` entries still take precedence.
+        _yaml_scamp = {
+            "REF_TIMEOUT": int(wcs_cfg.get("scamp_ref_timeout", 60)),
+            "REF_SERVER": str(
+                wcs_cfg.get("scamp_ref_server") or "vizier.cfa.harvard.edu"
+            ),
+            "CROSSID_RADIUS": float(wcs_cfg.get("scamp_crossid_radius", 2.5)),
+            "POSITION_MAXERR": float(
+                wcs_cfg.get("scamp_position_maxerr", 1.0)
+            ),
+            "FWHM_THRESHOLDS": str(
+                wcs_cfg.get("scamp_fwhm_thresholds", "1.0,15.0")
+            ),
+            "SN_THRESHOLDS": str(
+                wcs_cfg.get("scamp_sn_thresholds", "3.0,100000.0")
+            ),
+            "MOSAIC_TYPE": str(wcs_cfg.get("scamp_mosaic_type", "UNCHANGED")),
+            "STABILITY_TYPE": str(
+                wcs_cfg.get("scamp_stability_type", "EXPOSURE")
+            ),
+            "PIXSCALE_MAXERR": float(
+                wcs_cfg.get("scamp_pixscale_maxerr", 1.2)
+            ),
+            "POSANGLE_MAXERR": float(
+                wcs_cfg.get("scamp_posangle_maxerr", 5.0)
+            ),
+            "MATCH_NMAX": int(wcs_cfg.get("scamp_match_nmax", 0)),
+            "ASTREF_WEIGHT": int(wcs_cfg.get("scamp_astref_weight", 1)),
+            "ASTREFMAG_KEY": str(wcs_cfg.get("scamp_astrefmag_key", "MAG_AUTO")),
+            "ASTREFMAGERR_KEY": str(
+                wcs_cfg.get("scamp_astrefmagerr_key", "MAGERR_AUTO")
+            ),
+            "ASTREFCENT_KEYS": str(
+                wcs_cfg.get("scamp_astrefcent_keys", "XWIN_WORLD,YWIN_WORLD")
+            ),
+            "ASTREFERR_KEYS": str(
+                wcs_cfg.get(
+                    "scamp_astreferr_keys",
+                    "ERRA_WORLD,ERRB_WORLD,ERRTHETA_WORLD",
+                )
+            ),
+            "DISTORT_KEYS": str(
+                wcs_cfg.get("scamp_distort_keys", "XWIN_IMAGE,YWIN_IMAGE")
+            ),
+        }
         final_config = {
             **self.DEFAULT_SCAMP_CONFIG,
+            **_yaml_scamp,
             "DISTORT_DEGREES": distort_degrees,
-            "ASTREF_CATALOG": "FILE" if reference_cat else "GAIA-DR3",
+            "ASTREF_CATALOG": (
+                "FILE" if reference_cat
+                else str(wcs_cfg.get("scamp_astref_catalog", "GAIA-DR3"))
+            ),
             "ASTREFCAT_NAME": reference_cat,
-            "NTHREADS": self.default_threads,
+            "NTHREADS": int(wcs_cfg.get("scamp_nthreads", self.default_threads)),
             **(config or {}),
         }
         # COMBINE is a SWarp keyword, not a SCAMP keyword. Do not pass it to SCAMP.
@@ -7180,7 +7410,7 @@ NNW
         # Run SCAMP to compute WCS solution for image_path aligned to ref_cat_path.
         # run_scamp signature: (catalog_path, reference_cat, output_dir, config)
         scamp_res = self.run_scamp(
-            catalog_path=cat_path,
+            catalog_paths=cat_path,
             reference_cat=ref_cat_path,
             output_dir=str(out_dir),
             config=scamp_config,
@@ -7290,17 +7520,17 @@ NNW
         sci_cat_path: str,
         ref_cat_path: str,
         output_plot_path: str = "Matched_Sources_Side_By_Side.png",
-        label_color: str = "#FF0000",
+        label_color: str = "#D94F4F",
         label_fontsize: int = 8,
         figsize: Optional[tuple] = None,
         cmap: str = "gray",
         draw_lines: bool = True,
-        line_color: str = "#FF0000",
+        line_color: str = "#D94F4F",
         line_alpha: float = 0.5,
         line_width: float = 0.5,
         circle_radius_sci: float = 5.0,
         circle_radius_ref: float = 5.0,
-        matched_circle_color: str = "#FF0000",
+        matched_circle_color: str = "#D94F4F",
         unmatched_circle_color: str = "blue",
         circle_alpha: float = 0.7,
         circle_edge_color: str = "none",
@@ -7346,6 +7576,9 @@ NNW
                 rebin_scale = 0.25  # Coordinates must be scaled by 1/4
                 logging.info("Rebinned images by 4x for display, coordinates will be scaled by %s", rebin_scale)
             
+            from plotting_utils import apply_autophot_mplstyle
+            apply_autophot_mplstyle()
+
             fig, (ax1, ax2) = plt.subplots(
                 1, 2, figsize=figsize, constrained_layout=True
             )
@@ -7539,6 +7772,7 @@ NNW
                         fontsize=label_fontsize,
                         ha="center",
                         va="top",
+                        path_effects=[mpatheffects.withStroke(linewidth=1.2, foreground="white")],
                     )
             
             ref_positions = []
@@ -7583,6 +7817,7 @@ NNW
                         fontsize=label_fontsize,
                         ha="center",
                         va="top",
+                        path_effects=[mpatheffects.withStroke(linewidth=1.2, foreground="white")],
                     )
             
             # Handle remaining sources that exceed the limit
@@ -7668,8 +7903,7 @@ NNW
                 handles.append(_scamp_handle)
                 labels.append("SCAMP matched")
                 ax1.legend(handles, labels, loc="lower center",
-                          bbox_to_anchor=(0.5, 1.0), frameon=True,
-                          facecolor="white", framealpha=1.0, edgecolor="black",
+                          bbox_to_anchor=(0.5, 1.0), frameon=False,
                           handlelength=1.5, handletextpad=0.5, ncol=3)
 
             # Plot remaining sources for science image
@@ -7784,6 +8018,20 @@ NNW
             n_dropped = n_before - n_after
 
             if n_dropped > 0:
+                if n_after == 0:
+                    # Every science source lacks a counterpart within the
+                    # radius - this indicates a large WCS offset or a
+                    # degenerate catalog, not 100% ghosts.  Writing an empty
+                    # table here would silently give SCAMP an empty
+                    # astrometric reference, so leave the catalog untouched
+                    # and report n_before (unchanged).
+                    self.logger.warning(
+                        "[sci-to-ref filter] All %d science sources lack a "
+                        "reference counterpart within %.1f\"; refusing to "
+                        "empty the catalog (likely a large WCS offset).",
+                        n_before, match_radius_arcsec,
+                    )
+                    return n_before
                 sci_filtered = sci_tab[has_counterpart]
                 with fits.open(sci_cat_path, mode="update") as hdul:
                     hdul[2].data = sci_filtered.as_array()
@@ -8136,7 +8384,7 @@ NNW
                 color=get_ransac_color('alignment'),
                 ecolor="lightgrey",
                 elinewidth=0.4,
-                capsize=0,
+                capsize=get_marker_size('medium'),
                 alpha=get_alpha('dark'),
                 label=f"Matched [{len(sci_cat_matched)}]",
             )

@@ -232,15 +232,24 @@ class Find_FWHM:
         mean, median, std = sigma_clipped_stats(image, sigma=3.0)
         threshold = detect_threshold(image, nsigma=3)
         segment_map = detect_sources(image, threshold, npixels=npixels)
-        deblended_map = deblend_sources(
-            image,
-            segment_map,
-            npixels=npixels,
-            contrast=contrast,
-            mode="exponential",
-            progress_bar=False,
-        )
+        if segment_map is None or segment_map.nlabels == 0:
+            self.logger.info("Segmentation found no sources; returning empty table.")
+            return coordinates_df.iloc[[]].copy()
+        try:
+            deblended_map = deblend_sources(
+                image,
+                segment_map,
+                npixels=npixels,
+                contrast=contrast,
+                mode="exponential",
+                progress_bar=False,
+            )
+        except Exception:
+            # Deblending can fail on pathological segment maps; use the raw map.
+            deblended_map = segment_map
         catalog = SourceCatalog(image, deblended_map)
+        if len(catalog) == 0:
+            return coordinates_df.iloc[[]].copy()
         coms = np.column_stack((
             catalog.x_centroid if hasattr(catalog, 'x_centroid') else catalog.xcentroid,
             catalog.y_centroid if hasattr(catalog, 'y_centroid') else catalog.ycentroid,
@@ -270,10 +279,8 @@ class Find_FWHM:
         cleaned_df = coordinates_df[coordinates_df["is_isolated"]].copy()
 
         if plot:
-            dir_path = os.path.dirname(os.path.realpath(__file__))
-            _style = os.path.join(dir_path, "autophot.mplstyle")
-            if os.path.exists(_style):
-                plt.style.use(_style)
+            from plotting_utils import apply_autophot_mplstyle, get_marker_size
+            apply_autophot_mplstyle()
             zscale = ZScaleInterval()
             norm = ImageNormalize(image, interval=zscale)
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.3))
@@ -283,7 +290,7 @@ class Find_FWHM:
             ax.contour(
                 deblended_map.data,
                 levels=np.unique(deblended_map.data[deblended_map.data > 0]),
-                colors="#FF0000",
+                colors="#D94F4F",
                 linewidths=0.5,
             )
             ax.scatter(
@@ -302,7 +309,7 @@ class Find_FWHM:
                 s=get_marker_size('medium'),
             )
             ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
-                      frameon=True, facecolor="white", framealpha=1.0, edgecolor="black")
+                      frameon=False)
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]
@@ -444,15 +451,6 @@ class Find_FWHM:
                 df["m_peak_err"] = (2.5 / np.log(10)) * (pe / peak_safe)
             else:
                 df["m_peak_err"] = np.nan
-
-            # --- Per-source weights ---
-            var = np.square(df["m_inst_err"].values) + np.square(
-                df["m_peak_err"].values
-            )
-            with np.errstate(divide="ignore", invalid="ignore"):
-                w = 1.0 / var
-            w[~np.isfinite(w)] = 1.0
-            w = np.clip(w, 1e-6, np.inf)
 
             # --- RANSAC fitting ---
             delta = df["m_peak"] - df["m_inst"]
@@ -615,7 +613,7 @@ class Find_FWHM:
                         color=outlier_color,
                         ecolor="lightgrey",
                         alpha=get_alpha('medium'),
-                        capsize=0,
+                        capsize=get_marker_size('medium'),
                         elinewidth=0.4,
                         label=f"Outliers [{len(df_out)}]",
                     )
@@ -629,7 +627,7 @@ class Find_FWHM:
                     color=inlier_color,
                     ecolor="lightgrey",
                     alpha=get_alpha('dark'),
-                    capsize=0,
+                    capsize=get_marker_size('medium'),
                     elinewidth=0.4,
                     label=f"Inliers [{len(df_lin)}]",
                 )
@@ -682,12 +680,14 @@ class Find_FWHM:
                 ax.invert_xaxis()
                 ax.invert_yaxis()
                 ransac_grid(ax)
-                ransac_legend_top_outside(ax, ncol=2)
+                ransac_legend_top_outside(
+                    ax, ncol=max(1, len(ax.get_legend_handles_labels()[0]))
+                )
                 if write_dir:
                     fpath = self.input_yaml["fpath"]
-                    write_dir = self.input_yaml["write_dir"]
+                    _write_dir = self.input_yaml["write_dir"]
                     base = os.path.basename(fpath).split(".")[0]
-                    png_out = os.path.join(write_dir, f"Linear_{base}.png")
+                    png_out = os.path.join(_write_dir, f"Linear_{base}.png")
                     ransac_savefig(fig, png_out)
                 plt.close(fig)
             except Exception as _pe:
@@ -766,8 +766,19 @@ class Find_FWHM:
                 params["centery"].set(
                     value=y, min=max(1, y - dy), max=(min(height - 1, y + dy))
                 )
+                # Amplitude init: source peak above the fitted background
+                # (data_max - median), not a fraction of the raw max which is
+                # wrong when the background dominates.  Bounds must span the
+                # data range in EITHER sign: on difference images the source
+                # can be entirely negative (data_min < data_max < 0), where
+                # min=data_min*1e-6 > max=data_max*1e6 would invert the bounds
+                # and break the fit.
+                amp0 = float(data_max - data_median)
+                if not np.isfinite(amp0) or amp0 == 0.0:
+                    amp0 = float(data_max) if np.isfinite(data_max) else 1.0
+                amp_span = max(abs(float(data_max)), abs(float(data_min)), abs(amp0), 1.0)
                 params["amplitude"].set(
-                    value=data_max * 0.25, min=data_min * 1e-6, max=data_max * 1e6
+                    value=amp0, min=-10.0 * amp_span, max=10.0 * amp_span
                 )
                 params["c"].set(
                     value=data_median, min=data_min - abs(data_max), max=data_max + abs(data_max)
@@ -934,13 +945,6 @@ class Find_FWHM:
                 bkg = np.full_like(image, med)
                 bkg_rms = np.full_like(image, std)
 
-            # --- Pre-smoothing ---
-            sigma_smooth = max(0.8, 0.42466 * fwhm_initial)
-            kernel = Gaussian2DKernel(
-                sigma_smooth, x_size=7, y_size=7, mode="oversample"
-            )
-            smooth = convolve(image - bkg, kernel, normalize_kernel=True)
-
             # --- Direct run with provided fwhm and sigma ---
             if (fwhm is not None) and (sigma is not None):
                 thr = sigma * std
@@ -1006,6 +1010,19 @@ class Find_FWHM:
                 return float(fwhm_global), df.reset_index(drop=True), scale_out
 
             # --- Automatic detection and FWHM estimation ---
+            # Pre-smoothing (only needed on this path — the direct run above
+            # operates on the unsmoothed image).
+            sigma_smooth = max(0.8, 0.42466 * fwhm_initial)
+            kernel = Gaussian2DKernel(
+                sigma_smooth, x_size=7, y_size=7, mode="oversample"
+            )
+            smooth = convolve(image - bkg, kernel, normalize_kernel=True)
+            # Smoothing suppresses the per-pixel noise by the kernel's L2 norm:
+            # std_smooth = std * sqrt(sum(kernel^2)).  Needed when comparing
+            # smoothed-image peaks against the detection S/N.
+            kernel_l2 = float(np.sqrt(np.sum(np.asarray(kernel.array, dtype=float) ** 2)))
+            std_smooth = float(std) * kernel_l2 if np.isfinite(kernel_l2) and kernel_l2 > 0 else float(std)
+
             # Use 3.0 sigma to match SExtractor's default detection threshold.
             # The old 5.0 sigma was too high, producing far fewer sources than
             # SExtractor and making the pythonic fallback unreliable.
@@ -1109,7 +1126,9 @@ class Find_FWHM:
                     fwhm_meas.append(float(np.mean(fit)))
                 else:
                     fwhm_meas.append(np.nan)
-                s2n_list.append(_peaks[i] / max(std, 1e-12))
+                # Peak comes from the SMOOTHED image -> compare against the
+                # smoothed noise level (std * kernel L2 norm), not the raw std.
+                s2n_list.append(_peaks[i] / max(std_smooth, 1e-12))
             df["fwhm"] = np.asarray(fwhm_meas, dtype=float)
             df["s2n"] = np.asarray(s2n_list, dtype=float)
             df["x_pix"] = df[_xcol].astype(float)
@@ -1359,8 +1378,21 @@ class Find_FWHM:
         if total <= 0:
             return None
         y_arr, x_arr = np.mgrid[0:ny, 0:nx]
-        x0 = (x_arr * np.abs(data)).sum() / total
-        y0 = (y_arr * np.abs(data)).sum() / total
+        # Centroid weights: positive part of the background-subtracted data.
+        # |data| also works but lets negative noise pixels pull the centroid
+        # toward the cutout centre on faint sources; positive weights are the
+        # standard choice.  Fall back to |data| when nothing is positive
+        # (e.g. negative-residual cutouts on difference images).
+        w_pos = np.clip(data, 0.0, None)
+        w_tot = float(w_pos.sum())
+        if w_tot > 0 and np.isfinite(w_tot):
+            w_cen = w_pos
+            w_sum = w_tot
+        else:
+            w_cen = np.abs(data)
+            w_sum = total
+        x0 = (x_arr * w_cen).sum() / w_sum
+        y0 = (y_arr * w_cen).sum() / w_sum
 
         # --- Primary: Moffat radial profile fit (photutils 3.0) ---
         try:

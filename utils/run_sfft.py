@@ -635,13 +635,13 @@ def run_sfft() -> Optional[int]:
     if _frac_invalid_max > 0.50:
         log_warning(
             f"High invalid-pixel fraction: sci={_frac_invalid_sci*100:.1f}%, "
-            f"ref={_frac_invalid_ref*100:.1f}%%. SFFT kernel fitting may fail or "
-            f"produce poor results with >50%% invalid pixels."
+            f"ref={_frac_invalid_ref*100:.1f}%. SFFT kernel fitting may fail or "
+            f"produce poor results with >50% invalid pixels."
         )
     elif _frac_invalid_max > 0.25:
         log_info(
             f"Moderate invalid-pixel fraction: sci={_frac_invalid_sci*100:.1f}%, "
-            f"ref={_frac_invalid_ref*100:.1f}%%."
+            f"ref={_frac_invalid_ref*100:.1f}%."
         )
 
     # Build a combined invalid-pixel mask from both inputs so that no-data regions
@@ -655,7 +655,7 @@ def run_sfft() -> Optional[int]:
     if np.any(combined_invalid_mask):
         log_info(
             f"Combined invalid mask: {int(np.count_nonzero(combined_invalid_mask))} pixels "
-            f"({float(np.count_nonzero(combined_invalid_mask))/_n_pixels*100:.1f}%%) "
+            f"({float(np.count_nonzero(combined_invalid_mask))/_n_pixels*100:.1f}%) "
             "will be forced to NaN in both images before SFFT."
         )
 
@@ -1037,7 +1037,18 @@ def run_sfft() -> Optional[int]:
     # Ensure integer type throughout (SFFT expects int for GKerHW)
     kernel_half_width = int(_odd(kernel_half_width))
     log_info(f"Using kernel half width: {kernel_half_width} px")
+    # BoundarySIZE drops catalog sources within this many pixels of the edge
+    # (kernel stamps need full support).  Cap it so a large kernel on a small
+    # image cannot exclude every source.
     boundary = kernel_half_width
+    _ny_img, _nx_img = data_sci.shape
+    _boundary_cap = max(10, int(0.2 * min(_ny_img, _nx_img)))
+    if boundary > _boundary_cap:
+        log_info(
+            f"BoundarySIZE {boundary} px exceeds 20% of the smaller image axis "
+            f"({_boundary_cap} px); capping to avoid excluding all sources."
+        )
+        boundary = _boundary_cap
 
     # --- SFFT Parameters ---
     # (From SFFT source: thomasvrussell/sfft, EasySparsePacket.ESP / EasyCrowdedPacket.ECP)
@@ -1333,12 +1344,22 @@ def run_sfft() -> Optional[int]:
                     log_warning(f"Could not write ECP diff to {FITS_DIFF}: {e}")
             # Optional: write a minimal matching-sources CSV from ECP catalog if present
             cat_key = "SExCatalog-SubSource"
-            if cat_key in prep_data:
+            if isinstance(prep_data, dict) and cat_key in prep_data:
                 catalog = prep_data[cat_key]
                 matched_sources = _to_dataframe(catalog)
                 log_info(
                     f"Number of sources used in crowded-field matching: {len(matched_sources)}"
                 )
+                # Same under-constrained-kernel gate as the sparse path: too
+                # few matched sources cannot determine the kernel + scaling.
+                _min_matched_ecp = 2 if constant_phot_ratio else 3
+                if len(matched_sources) < _min_matched_ecp:
+                    raise RuntimeError(
+                        f"SFFT kernel fitting failed: only {len(matched_sources)} "
+                        f"matched sources (minimum {_min_matched_ecp} required for a "
+                        "constrained kernel solution). Field is too sparse for "
+                        "reliable SFFT subtraction."
+                    )
                 xcol, ycol = _pick_xy_columns(matched_sources)
                 out_csv = os.path.join(
                     out_dir, f"SFFT_Matching_Sources_{out_base}.csv"
@@ -1391,61 +1412,71 @@ def run_sfft() -> Optional[int]:
                     f"(adapted for {_n_priors} prior sources)"
                 )
 
+            # Shared ESP kwargs; prior/unvetted attempts differ only in the
+            # source lists and Hough thresholds.
+            _esp_common = dict(
+                FITS_REF=FITS_REF,
+                FITS_SCI=FITS_SCI,
+                FITS_DIFF=FITS_DIFF,
+                FITS_Solution=fits_solution,
+                GKerHW=int(kernel_half_width),
+                KerHWRatio=KerHWRatio,
+                KerHWLimit=KerHWLimit,
+                KerPolyOrder=kernel_poly_order,
+                ForceConv=ForceConv,
+                BACK_TYPE=BACK_TYPE,
+                BACK_VALUE=BACK_VALUE,
+                BACK_SIZE=BACK_SIZE,
+                BACK_FILTERSIZE=BACK_FILTERSIZE,
+                BACKPHOTO_TYPE=BACKPHOTO_TYPE,
+                BGPolyOrder=bg_poly_order,
+                DETECT_THRESH=DETECT_THRESH,
+                DETECT_MINAREA=detect_minarea,
+                DETECT_MAXAREA=detect_maxarea,
+                DEBLEND_MINCONT=DEBLEND_MINCON,
+                MaskSatContam=False,
+                ConstPhotRatio=constant_phot_ratio,
+                GAIN_KEY=GAIN_KEY,
+                SATUR_KEY=SATUR_KEY,
+                XY_PriorBan=masked_sources,
+                MatchTol=None,
+                # Tighter cross-match: factor=2.0 halves the auto tolerance
+                # (~12px -> ~6px), ensuring only well-aligned sources are
+                # used for the kernel fit. Misaligned sources produce
+                # off-center stamps and dipole residuals.
+                MatchTolFactor=float(getattr(args, "match_tol_factor", 2.0)),
+                BeltHW=0.2,
+                PointSource_MINELLIP=float(getattr(args, "point_source_min_ellip", 0.3)),
+                ANALYSIS_THRESH=DETECT_THRESH,
+                COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
+                CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
+                ELABO_VAR_REJECTION=ELABO_VAR_REJECTION,
+                EVREJ_RATIO_THREH=EVREJ_RATIO_THREH,
+                EVREJ_SAFE_MAGDEV=EVREJ_SAFE_MAGDEV,
+                StarExt_iter=StarExt_iter,
+                PostAnomalyCheck=True,
+                PAC_RATIO_THRESH=PAC_RATIO_THRESH,
+                BoundarySIZE=boundary,
+                ONLY_FLAGS=ONLY_FLAGS,
+                BACKEND_4SUBTRACT=BACKEND_4SUBTRACT,
+                CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
+                NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
+            )
+
+            def _run_esp(use_priors: bool):
+                kw = dict(_esp_common)
+                kw["XY_PriorSelect"] = matching_sources if use_priors else None
+                # Relaxed Hough thresholds when SFFT must find its own
+                # sources (SFFT defaults).
+                kw["Hough_MINFR"] = _hough_minfr if use_priors else 0.1
+                kw["Hough_PeakClip"] = _hough_peakclip if use_priors else 0.7
+                return Easy_SparsePacket.ESP(**kw)
+
+            _used_unvetted = False
             try:
                 # First attempt: honour prior matching/ban lists from the pipeline.
-                result = Easy_SparsePacket.ESP(
-                    FITS_REF=FITS_REF,
-                    FITS_SCI=FITS_SCI,
-                    FITS_DIFF=FITS_DIFF,
-                    FITS_Solution=fits_solution,
-                    GKerHW=int(kernel_half_width),
-                    KerHWRatio=KerHWRatio,
-                    # UPDATED: tighter kernel HW limits
-                    KerHWLimit=KerHWLimit,
-                    KerPolyOrder=kernel_poly_order,
-                    ForceConv=ForceConv,
-                    BACK_TYPE=BACK_TYPE,
-                    BACK_VALUE=BACK_VALUE,
-                    BACK_SIZE=BACK_SIZE,
-                    BACK_FILTERSIZE=BACK_FILTERSIZE,
-                    BACKPHOTO_TYPE=BACKPHOTO_TYPE,
-                    BGPolyOrder=bg_poly_order,
-                    DETECT_THRESH=DETECT_THRESH,
-                    DETECT_MINAREA=detect_minarea,
-                    DETECT_MAXAREA=detect_maxarea,
-                    DEBLEND_MINCONT=DEBLEND_MINCON,
-                    MaskSatContam=False,
-                    ConstPhotRatio=constant_phot_ratio,
-                    GAIN_KEY=GAIN_KEY,
-                    SATUR_KEY=SATUR_KEY,
-                    XY_PriorSelect=matching_sources,
-                    XY_PriorBan=masked_sources,
-                    MatchTol=None,
-                    # Tighter cross-match: factor=2.0 halves the auto tolerance
-                    # (~12px -> ~6px), ensuring only well-aligned sources are
-                    # used for the kernel fit. Misaligned sources produce
-                    # off-center stamps and dipole residuals.
-                    MatchTolFactor=float(getattr(args, "match_tol_factor", 2.0)),
-                    Hough_MINFR=_hough_minfr,
-                    Hough_PeakClip=_hough_peakclip,
-                    BeltHW=0.2,
-                    PointSource_MINELLIP=float(getattr(args, "point_source_min_ellip", 0.3)),
-                    ANALYSIS_THRESH=DETECT_THRESH,
-                    COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
-                    CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
-                    ELABO_VAR_REJECTION=ELABO_VAR_REJECTION,
-                    EVREJ_RATIO_THREH=EVREJ_RATIO_THREH,
-                    EVREJ_SAFE_MAGDEV=EVREJ_SAFE_MAGDEV,
-                    StarExt_iter=StarExt_iter,
-                    PostAnomalyCheck=True,
-                    PAC_RATIO_THRESH=PAC_RATIO_THRESH,
-                    BoundarySIZE=boundary,
-                    ONLY_FLAGS=ONLY_FLAGS,
-                    BACKEND_4SUBTRACT=BACKEND_4SUBTRACT,
-                    CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
-                    NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
-                )
-            except (np.linalg.LinAlgError, AssertionError, ValueError, RuntimeError) as e:
+                result = _run_esp(True)
+            except Exception as e:
                 log_info(
                     f"SFFT ESP failed with {type(e).__name__} when using vetted priors: {e}"
                 )
@@ -1455,65 +1486,91 @@ def run_sfft() -> Optional[int]:
                         "automatic unvetted source matching."
                     ) from e
                 log_info(
-                    f"SFFT ESP failed with {type(e).__name__} when using priors ({e}). "
                     "This typically occurs when:"
-                    "  1. Too few prior sources for reliable kernel fitting (default minimum: 10)"
+                    f"  1. Too few prior sources for reliable kernel fitting (minimum: {args.min_prior_sources})"
                     "  2. Prior sources are collinear or poorly distributed"
                     "  3. Prior sources have large positional errors"
                     "Retrying without prior-selected sources (keeping prior-ban list)."
                 )
-                result = Easy_SparsePacket.ESP(
-                    FITS_REF=FITS_REF,
-                    FITS_SCI=FITS_SCI,
-                    FITS_DIFF=FITS_DIFF,
-                    FITS_Solution=fits_solution,
-                    GKerHW=int(kernel_half_width),
-                    KerHWRatio=KerHWRatio,
-                    KerHWLimit=KerHWLimit,
-                    KerPolyOrder=kernel_poly_order,
-                    ForceConv=ForceConv,
-                    BACK_TYPE=BACK_TYPE,
-                    BACK_VALUE=BACK_VALUE,
-                    BACK_SIZE=BACK_SIZE,
-                    BACK_FILTERSIZE=BACK_FILTERSIZE,
-                    BACKPHOTO_TYPE=BACKPHOTO_TYPE,
-                    BGPolyOrder=bg_poly_order,
-                    DETECT_THRESH=DETECT_THRESH,
-                    DETECT_MINAREA=detect_minarea,
-                    DETECT_MAXAREA=detect_maxarea,
-                    DEBLEND_MINCONT=DEBLEND_MINCON,
-                    MaskSatContam=False,
-                    ConstPhotRatio=constant_phot_ratio,
-                    GAIN_KEY=GAIN_KEY,
-                    SATUR_KEY=SATUR_KEY,
-                    XY_PriorSelect=None,
-                    XY_PriorBan=masked_sources,
-                    MatchTol=None,
-                    MatchTolFactor=float(getattr(args, "match_tol_factor", 2.0)),
-                    Hough_MINFR=0.1,
-                    Hough_PeakClip=0.7,
-                    BeltHW=0.2,
-                    ANALYSIS_THRESH=DETECT_THRESH,
-                    COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
-                    CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
-                    ELABO_VAR_REJECTION=ELABO_VAR_REJECTION,
-                    EVREJ_RATIO_THREH=EVREJ_RATIO_THREH,
-                    EVREJ_SAFE_MAGDEV=EVREJ_SAFE_MAGDEV,
-                    StarExt_iter=StarExt_iter,
-                    PostAnomalyCheck=True,
-                    PAC_RATIO_THRESH=PAC_RATIO_THRESH,
-                    BoundarySIZE=boundary,
-                    ONLY_FLAGS=ONLY_FLAGS,
-                    BACKEND_4SUBTRACT=BACKEND_4SUBTRACT,
-                    CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
-                    NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
-                )
+                _used_unvetted = True
+                result = _run_esp(False)
             # ESP returns (diff_image, prep_data, ...); support tuple or list.
             if len(result) < 2:
                 raise ValueError(
                     f"SFFT ESP returned {len(result)} value(s), expected at least 2"
                 )
             diff_image, prep_data = result[0], result[1]
+
+            # --- Extract matched-source catalog and gate on source count ---
+            # Do this BEFORE the B-Spline refinement so an under-constrained
+            # first pass can still fall back to SFFT's own source matching.
+            cat_key = "SExCatalog-SubSource"
+
+            def _extract_matched_df(pd_obj):
+                if not isinstance(pd_obj, dict) or cat_key not in pd_obj:
+                    raise KeyError(
+                        f"SFFT prep_data missing '{cat_key}'; incompatible SFFT version?"
+                    )
+                return _to_dataframe(pd_obj[cat_key])
+
+            matched_sources = _extract_matched_df(prep_data)
+            _n_matched = len(matched_sources)
+
+            # If the vetted priors yielded too few matched sources, SFFT's own
+            # SExtractor detection may still find enough — retry once without
+            # priors before declaring the field too sparse.
+            _min_matched = 2 if constant_phot_ratio else 3
+            if (
+                _n_matched < _min_matched
+                and matching_sources is not None
+                and not _used_unvetted
+                and ALLOW_UNVETTED_SOURCE_RETRY
+            ):
+                log_warning(
+                    f"Prior-vetted matching produced only {_n_matched} matched "
+                    f"sources (< {_min_matched}). Retrying without priors so SFFT "
+                    "can use its own source detection."
+                )
+                _used_unvetted = True
+                result = _run_esp(False)
+                if len(result) < 2:
+                    raise ValueError(
+                        f"SFFT ESP returned {len(result)} value(s), expected at least 2"
+                    )
+                diff_image, prep_data = result[0], result[1]
+                matched_sources = _extract_matched_df(prep_data)
+                _n_matched = len(matched_sources)
+
+            log_info(f"Number of sources used in matching: {_n_matched}")
+
+            # Quality gate: warn when too few sources were used for kernel fitting.
+            # With < 10 sources, the kernel solution is poorly constrained and
+            # may produce dipole residuals in the difference image.
+            if _n_matched < 10:
+                log_info(
+                    f"WARNING: Only {_n_matched} sources used for SFFT kernel fitting. "
+                    f"Kernel solution may be unreliable - dipole residuals likely. "
+                    f"Consider providing more pipeline-matched sources or relaxing source filtering."
+                )
+
+            # BUG 110: Hard abort when too few sources for a constrained kernel.
+            # With < 3 matched sources, the kernel solution is mathematically
+            # unconstrained (2 points cannot determine a 2D kernel + flux scaling).
+            # SFFT will produce a wildly wrong kernel (e.g., flux scaling = -24
+            # vs true ~2.5).  Abort so templates.py can fall back to HOTPANTS.
+            #
+            # Exception: when ConstPhotRatio=True, the flux scaling is
+            # constrained to the photometric ratio, removing one free
+            # parameter.  This allows proceeding with 2 matched sources
+            # (the kernel shape is still under-constrained, but the flux
+            # scaling is anchored, preventing the most catastrophic failures).
+            if _n_matched < _min_matched:
+                raise RuntimeError(
+                    f"SFFT kernel fitting failed: only {_n_matched} matched sources "
+                    f"(minimum {_min_matched} required for a constrained kernel solution"
+                    f"{' with ConstPhotRatio=True' if constant_phot_ratio else ''}). "
+                    f"Field is too sparse for reliable SFFT subtraction."
+                )
 
             # Apply B-Spline kernel if requested (SFFT v1.5.0+)
             if use_bspline_kernel and _HAS_BSPLINE:
@@ -1541,6 +1598,7 @@ def run_sfft() -> Optional[int]:
                         FITS_mREF=_bsp_mref,
                         FITS_mSCI=_bsp_msci,
                         FITS_DIFF=FITS_DIFF,
+                        FITS_Solution=fits_solution,
                         ForceConv=ForceConv,
                         GKerHW=int(kernel_half_width),
                         KerSpType="Polynomial",
@@ -1556,50 +1614,24 @@ def run_sfft() -> Optional[int]:
                         VERBOSE_LEVEL=2,
                     )
                     bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
-                    if bspline_result and len(bspline_result) >= 2:
-                        diff_image, prep_data = bspline_result[0], bspline_result[1]
+                    # BSP returns (Solution, PixA_DIFF) — NOTE the order differs
+                    # from ESP/ECP, which return (PixA_DIFF, SFFTPrepDict, ...).
+                    # Keep the ESP prep_data (BSP performs no source detection)
+                    # and adopt the BSP Solution so downstream kernel
+                    # realization (decorrelation, SOLPATH) matches the written
+                    # difference image.
+                    if bspline_result is not None and len(bspline_result) >= 2:
+                        _bsp_solution, diff_image = bspline_result[0], bspline_result[1]
+                        result = (result[0], result[1], _bsp_solution) + tuple(result[3:])
                         log_info("B-Spline kernel refinement completed successfully")
                     # Clean up mask files
                     for _mf in [_bsp_mref, _bsp_msci]:
                         try:
-                            Path(_mf).unlink()
+                            os.remove(_mf)
                         except Exception:
                             pass
                 except Exception as e:
                     log_warning(f"B-Spline kernel refinement failed: {e}. Using standard kernel result.")
-
-            cat_key = "SExCatalog-SubSource"
-            if cat_key not in prep_data:
-                raise KeyError(
-                    f"SFFT prep_data missing '{cat_key}'; incompatible SFFT version?"
-                )
-            catalog = prep_data[cat_key]
-            matched_sources = _to_dataframe(catalog)
-
-            log_info(f"Number of sources used in matching: {len(matched_sources)}")
-
-            # Quality gate: warn when too few sources were used for kernel fitting.
-            # With < 10 sources, the kernel solution is poorly constrained and
-            # may produce dipole residuals in the difference image.
-            _n_matched = len(matched_sources)
-            if _n_matched < 10:
-                log_info(
-                    f"WARNING: Only {_n_matched} sources used for SFFT kernel fitting. "
-                    f"Kernel solution may be unreliable - dipole residuals likely. "
-                    f"Consider providing more pipeline-matched sources or relaxing source filtering."
-                )
-
-            # BUG 110: Hard abort when too few sources for a constrained kernel.
-            # With < 3 matched sources, the kernel solution is mathematically
-            # unconstrained (2 points cannot determine a 2D kernel + flux scaling).
-            # SFFT will produce a wildly wrong kernel (e.g., flux scaling = -24
-            # vs true ~2.5).  Abort so templates.py can fall back to HOTPANTS.
-            if _n_matched < 3:
-                raise RuntimeError(
-                    f"SFFT kernel fitting failed: only {_n_matched} matched sources "
-                    f"(minimum 3 required for a constrained kernel solution). "
-                    f"Field is too sparse for reliable SFFT subtraction."
-                )
 
             # main.py expects columns X_IMAGE_REF_SCI_MEAN, Y_IMAGE_REF_SCI_MEAN
             xcol, ycol = _pick_xy_columns(matched_sources)
@@ -1675,7 +1707,61 @@ def run_sfft() -> Optional[int]:
             convd = fits.getheader(FITS_DIFF).get("CONVD", "UNKNOWN")
             log_info(f"[{convd}] is convolved in subtraction.")
         except Exception:
-            pass
+            convd = "UNKNOWN"
+
+        # Record the convolution/photometric flux scalings in the diff header
+        # directly from SFFT's return values — more robust than downstream
+        # log parsing (templates.py still falls back to the log if missing).
+        #   result[3]/[4] = SFFT_FSCAL_MEAN / SFFT_FSCAL_SIG (convolution-based)
+        #   PHOT_FSCAL    = 10^(MAG_OFFSET / -2.5) in SFFTPrepDict, inverted
+        #                   when the science image was convolved.
+        try:
+            if (
+                result is not None
+                and len(result) >= 4
+                and FITS_DIFF
+                and os.path.isfile(FITS_DIFF)
+            ):
+                _fscal_conv = float(result[3])
+                _fscal_sig = float(result[4]) if len(result) > 4 else float("nan")
+                _phot_fscal = float("nan")
+                try:
+                    _mag_off = prep_data.get("MAG_OFFSET")
+                    if _mag_off is not None and np.isfinite(float(_mag_off)):
+                        _phot_fscal = 10.0 ** (float(_mag_off) / -2.5)
+                        if str(convd).strip().upper() == "SCI":
+                            _phot_fscal = 1.0 / _phot_fscal
+                except Exception:
+                    pass
+                with fits.open(FITS_DIFF, mode="update", memmap=False) as _hd:
+                    _fhdr = _hd[0].header
+                    if np.isfinite(_fscal_conv):
+                        _fhdr["FSCAL_CONV"] = (
+                            _fscal_conv, "SFFT convolution flux scaling (mean)"
+                        )
+                    if np.isfinite(_fscal_sig):
+                        _fhdr["FSCAL_SIG"] = (
+                            _fscal_sig, "SFFT convolution flux scaling (std)"
+                        )
+                    if np.isfinite(_phot_fscal):
+                        _fhdr["FSCAL_PHOT"] = (
+                            _phot_fscal, "SFFT photometric flux scaling"
+                        )
+                    if np.isfinite(_fscal_conv) and np.isfinite(_phot_fscal):
+                        _fhdr["FSCAL_DISC"] = (
+                            abs(_fscal_conv - _phot_fscal)
+                            / max(abs(_fscal_conv), abs(_phot_fscal), 1e-10)
+                            * 100.0,
+                            "FSCAL conv-vs-phot discrepancy (percent)",
+                        )
+                    _hd.flush()
+                if np.isfinite(_fscal_conv) and np.isfinite(_phot_fscal):
+                    log_info(
+                        f"Flux scaling: convolution={_fscal_conv:.4f}, "
+                        f"photometric={_phot_fscal:.4f}"
+                    )
+        except Exception as e:
+            log_warning(f"Could not write FSCAL headers: {e}")
 
         # ------------------------------------------------------------------
         # Post-subtraction image quality improvements (LSST-inspired + SFFT v1.5.0+)
@@ -1706,16 +1792,18 @@ def run_sfft() -> Optional[int]:
         #    Warping and co-adding introduce pixel covariance that causes the
         #    variance plane to underestimate the true noise.  LSST rescales the
         #    variance by a factor that brings IQR(D/sqrt(V)) to unity.
-        #    Here we propagate the expected Gaussian variance of the difference
-        #    image ( sigma_diff^2 = sigma_sci^2 + sigma_ref^2 ) from the sigma-clipped image
-        #    statistics, then rescale the difference image so its measured noise
-        #    matches that expectation.  This is equivalent to the LSST
-        #    pixel-based ScaleVarianceTask estimator.
+        #    Here we measure the actual difference-image noise (IQR sigma) and
+        #    record VSCALE = sigma_diff / sigma_sci in the header; main.py then
+        #    rescales the science-derived background_rms so the error model
+        #    matches the difference image.  The image pixels are NOT rescaled:
+        #    their flux scale is set by SFFT's kernel integral, and rescaling
+        #    would bias all measured fluxes.  This is the LSST semantics —
+        #    ScaleVarianceTask rescales the VARIANCE model, not the image.
         # ------------------------------------------------------------------
         log_info(border_msg("Post-subtraction quality improvements", metadata="LSST-inspired + SFFT v1.5.0+", use_ansi=False))
-        log_info("  SFFT noise decorrelation (v1.5.0+) - whitens correlated noise")
-        log_info("  Decorrelation kernel (DMTN-021) - whitens A&L convolution noise")
-        log_info("  Variance scaling (ScaleVarianceTask) - IQR-based noise calibration")
+        if decorrelate_noise or save_decorrelated:
+            log_info("  Decorrelation kernel (DMTN-021) - whitens A&L convolution noise (detection side product)")
+        log_info("  Variance calibration (ScaleVarianceTask) - VSCALE noise-model factor")
 
         # Apply noise decorrelation if requested
         # Note: SFFT's DeCorrelation_Calculator requires kernel information from the SFFT solution
@@ -1827,61 +1915,44 @@ def run_sfft() -> Optional[int]:
                 log_warning(f"Decorrelation kernel failed ({_e}); skipping.")
                 return diff
 
-        def _scale_diffim_variance(
+        def _measure_diff_noise_sigma(
             diff: np.ndarray,
-            var_expected: float,
             nan_mask: np.ndarray,
-        ) -> tuple:
-            """Rescale the difference image so its measured noise matches expectation.
+        ) -> float:
+            """Robust (IQR) noise sigma of the difference image.
 
-            Implements the LSST ScaleVarianceTask pixel-based estimator:
-            compute SNR = D / sqrt(var_expected) for background pixels, measure
-            its spread via IQR, and rescale so IQR/1.349 (the Gaussian sigma
-            equivalent) equals 1.0.  The IQR is robust to bright sources and
-            artifacts.
+            The IQR is robust to bright sources and artifacts.  Returns NaN
+            when too few valid pixels are available.
 
-            Parameters
-            ----------
-            diff : (H, W) float array - the difference image.
-            var_expected : expected Gaussian variance sigma_diff^2 = sigma_sci^2 + sigma_ref^2.
-            nan_mask : bool array, True where pixels are invalid.
-
-            Returns
-            -------
-            (scaled_diff, scale_factor) : scaled image and the factor applied.
-            A scale_factor of 1.0 means no change was applied.
+            Note: this deliberately does NOT rescale the difference image.
+            SFFT's kernel integral already sets the photometric flux scale of
+            the difference image; rescaling the pixels to hit a predicted
+            noise target would silently corrupt that calibration.  Following
+            LSST ScaleVarianceTask semantics, the *noise model* is corrected
+            instead (via the VSCALE header keyword consumed by main.py).
             """
             try:
                 valid = ~nan_mask & np.isfinite(diff)
                 if valid.sum() < 1000:
-                    return diff, 1.0
-
-                sigma_expected = float(np.sqrt(max(var_expected, 1e-30)))
-                snr_vals = diff[valid] / sigma_expected
-
-                # IQR-based robust standard-deviation estimate (LSST convention)
-                q25, q75 = np.percentile(snr_vals, [25.0, 75.0])
-                iqr_sigma = (q75 - q25) / 1.3489795003921634   # 1/Phi-^1(0.75)
-
-                if iqr_sigma < 0.1 or not np.isfinite(iqr_sigma):
-                    return diff, 1.0   # pathological image, skip
-
-                # Safety: only rescale if the discrepancy is non-trivial (>5%)
-                # but not extreme (>3x, which suggests a bug rather than covariance).
-                if 0.95 <= iqr_sigma <= 3.0:
-                    if abs(iqr_sigma - 1.0) < 0.05:
-                        return diff, 1.0   # already consistent, nothing to do
-                    scale = 1.0 / iqr_sigma
-                    return (diff * scale), scale
-                return diff, 1.0
-
+                    return float("nan")
+                q25, q75 = np.percentile(diff[valid], [25.0, 75.0])
+                iqr_sigma = (q75 - q25) / 1.3489795003921634   # 1/Phi^-1(0.75)
+                if iqr_sigma < 1e-10 or not np.isfinite(iqr_sigma):
+                    return float("nan")
+                return float(iqr_sigma)
             except Exception as _e:
-                log_warning(f"Variance scaling failed ({_e}); skipping.")
-                return diff, 1.0
+                log_warning(f"Noise sigma measurement failed ({_e}); skipping.")
+                return float("nan")
 
-        # Apply decorrelation + variance scaling to the SFFT output.
-        # Both steps operate on the FITS file in-place to keep downstream code
-        # (which reads the file from disk) consistent.
+        # Apply optional decorrelation + variance calibration to the SFFT output.
+        #
+        # IMPORTANT: the main FITS_DIFF always keeps the original SFFT pixels.
+        # Decorrelation (DMTN-021) whitens the noise but changes the
+        # difference-image PSF (P -> P x psi); it is a detection-only product,
+        # written to a *_decorr.fits side file.  Likewise the measured noise
+        # level is propagated through the VSCALE header keyword (consumed by
+        # main.py to rescale background_rms) rather than by rescaling pixels,
+        # which would corrupt the photometric flux calibration.
         try:
             with fits.open(FITS_DIFF, mode="update", memmap=False) as hdul:
                 diff_arr = np.asarray(hdul[0].data, dtype=np.float64)
@@ -1890,16 +1961,10 @@ def run_sfft() -> Optional[int]:
                 # Build an invalid-pixel mask for this stage (NaN or +/-Inf).
                 _nan_mask = ~np.isfinite(diff_arr)
 
-                # Retrieve image variances from SFFT header (sigma-clipped means)
-                _sci_var = None
-                _ref_var = None
-                try:
-                    _fwhm_ref = float(diff_hdr.get("FWHM_REF", 0))
-                    _fwhm_sci = float(diff_hdr.get("FWHM_SCI", 0))
-                except Exception:
-                    _fwhm_ref = _fwhm_sci = 0.0
                 # Estimate per-image variances from sigma-clipped noise of each
                 # input image (use the data already loaded).
+                _sci_var = None
+                _ref_var = None
                 try:
                     _sci_vals = data_sci[np.isfinite(data_sci)].ravel()
                     _ref_vals = data_ref[np.isfinite(data_ref)].ravel()
@@ -1911,12 +1976,12 @@ def run_sfft() -> Optional[int]:
                 except Exception:
                     pass
 
-                # --- Step 1: Decorrelation kernel ---
-                # Retrieve the A&L kernel from the SFFT solution (result index 2).
-                _applied_decorr = False
-                _diff_arr_original = diff_arr.copy()  # Save original before decorrelation
+                # --- Realize the SFFT matching kernel at the image centre ---
+                # Shared by the decorrelation step and by the expected-variance
+                # diagnostic below.  Result[2] is the SFFT solution array.
+                _ker_2d = None
                 try:
-                    if len(result) >= 3 and _sci_var is not None and _ref_var is not None:
+                    if len(result) >= 3:
                         from sfft.utils.SFFTSolutionReader import Realize_MatchingKernel
                         _solution = result[2]
                         _kerhw = int(diff_hdr.get("KERHW", 0))
@@ -1945,67 +2010,121 @@ def run_sfft() -> Optional[int]:
                             # SFFT stores the kernel in transposed (X, Y) = (col, row)
                             # order.  Transpose to numpy (Y, X) = (row, col) for
                             # fftconvolve with non-transposed images.
-                            _ker_2d = np.asarray(_ker_stack[0]).squeeze().T
-                            if _ker_2d.ndim == 2 and _ker_2d.shape[0] == _L:
-                                diff_arr = _decorrelate_diffim(
-                                    diff_arr, _ker_2d,
-                                    float(_sci_var), float(_ref_var), _nan_mask
-                                )
-                                _applied_decorr = True
-                                log_info(
-                                    f"Decorrelation kernel applied: KerHW={_kerhw} px, "
-                                    f"sigma_sci={np.sqrt(_sci_var):.2f}, sigma_ref={np.sqrt(_ref_var):.2f}"
-                                )
+                            _cand = np.asarray(_ker_stack[0]).squeeze().T
+                            if _cand.ndim == 2 and _cand.shape[0] == _L:
+                                _ker_2d = _cand
                 except Exception as _e:
-                    log_warning(f"Could not apply decorrelation kernel: {_e}")
+                    log_warning(f"Could not realize SFFT matching kernel: {_e}")
 
-                # --- Step 2: Variance scaling ---
-                _var_expected = (_sci_var or 0.0) + (_ref_var or 0.0)
-                _applied_vscale = False
-                if _var_expected > 0:
-                    diff_arr, _vscale = _scale_diffim_variance(
-                        diff_arr, _var_expected, _nan_mask
-                    )
-                    _applied_vscale = True
-                    if abs(_vscale - 1.0) > 0.005:
-                        log_info(
-                            f"Variance scaling applied: IQR-sigma factor={1.0/_vscale:.4f} -> rescaled by {_vscale:.4f}"
-                        )
-                        diff_hdr["VSCALE"] = (round(float(_vscale), 6),
-                                              "Variance rescale factor (LSST-style IQR)")
-                    else:
-                        log_info(
-                            f"Variance scaling: noise consistent (IQR-sigma factor={1.0/_vscale:.4f}); no rescale"
-                        )
+                _ker_l2 = None
+                if _ker_2d is not None:
+                    _ker_l2 = float(np.sqrt(np.nansum(_ker_2d ** 2)))
+                    if not np.isfinite(_ker_l2) or _ker_l2 <= 0:
+                        _ker_l2 = None
 
-                # Summary of which improvements were applied
-                if _applied_decorr:
-                    # Save decorrelated image separately with _decorr suffix
-                    if save_decorrelated and FITS_DIFF:
-                        _decorr_diff_path = FITS_DIFF.replace(".fits", "_decorr.fits")
+                # Which image was convolved?  CONVD records the actual
+                # direction (also resolves AUTO); fall back to ForceConv.
+                _convd_side = str(diff_hdr.get("CONVD", "")).strip().upper()
+                if _convd_side not in ("REF", "SCI"):
+                    _convd_side = ForceConv if ForceConv in ("REF", "SCI") else "REF"
+
+                # --- Step 1: Noise decorrelation (detection-only product) ---
+                # Runs only when explicitly requested (decorrelate_noise /
+                # save_decorrelated).  The decorrelated image is written to
+                # *_decorr.fits; diff_arr for photometry is left untouched.
+                _applied_decorr = False
+                if decorrelate_noise or save_decorrelated:
+                    if _ker_2d is not None and _sci_var is not None and _ref_var is not None:
                         try:
+                            # _decorrelate_diffim(diff, kernel, var_unconv, var_conv, mask):
+                            # the convolved side's variance is multiplied by |kappa|^2.
+                            if _convd_side == "SCI":
+                                _decorr = _decorrelate_diffim(
+                                    diff_arr, _ker_2d,
+                                    float(_ref_var), float(_sci_var), _nan_mask,
+                                )
+                            else:
+                                _decorr = _decorrelate_diffim(
+                                    diff_arr, _ker_2d,
+                                    float(_sci_var), float(_ref_var), _nan_mask,
+                                )
+                            _decorr_diff_path = FITS_DIFF.replace(".fits", "_decorr.fits")
                             _decorr_hdr = diff_hdr.copy()
                             _decorr_hdr["DECORR"] = (True, "DMTN-021 A&L decorrelation applied")
-                            _decorr_hdr["COMMENT"] = "Decorated difference image for improved detection quality"
                             _decorr_hdr["PURPOSE"] = "DETECTION"
-                            safe_fits_write(_decorr_diff_path, diff_arr.astype(np.float32), _decorr_hdr, overwrite=True)
-                            log_info(f"Saved decorrelated difference image: {_decorr_diff_path}")
-                            
-                            # The main FITS_DIFF should be the non-decorrelated version for photometry
-                            # Restore the original (non-decorrelated) difference image
-                            diff_arr = _diff_arr_original
-                            diff_hdr["DECORR"] = (False, "Original (non-decorrelated) difference image for photometry")
-                            diff_hdr["COMMENT"] = "Use this image for photometry to preserve noise characteristics"
-                            diff_hdr["PURPOSE"] = "PHOTOMETRY"
-                            log_info(
-                                "Main difference image is non-decorrelated (for photometry). "
-                                "Decorrelated version saved as *_decorr.fits (for detection)."
+                            safe_fits_write(
+                                _decorr_diff_path,
+                                _decorr.astype(np.float32),
+                                _decorr_hdr,
+                                overwrite=True,
                             )
-                        except Exception as _save_e:
-                            log_warning(f"Could not save decorrelated difference image: {_save_e}")
-                    
-                decorr_status = "ON" if _applied_decorr else "OFF (kernel unavailable)"
-                vscale_status = "ON" if _applied_vscale else "OFF (insufficient data)"
+                            _applied_decorr = True
+                            log_info(
+                                f"Decorrelation kernel applied: KerHW={int(diff_hdr.get('KERHW', 0))} px, "
+                                f"sigma_sci={np.sqrt(_sci_var):.2f}, sigma_ref={np.sqrt(_ref_var):.2f}. "
+                                f"Saved decorrelated image for detection: {_decorr_diff_path}"
+                            )
+                        except Exception as _de:
+                            log_warning(f"Decorrelation failed ({_de}); skipping.")
+                    else:
+                        log_warning(
+                            "Noise decorrelation requested but the matching "
+                            "kernel or input variances are unavailable; skipped."
+                        )
+                diff_hdr["DECORR"] = (False, "Non-decorrelated difference image (photometry)")
+
+                # --- Step 2: Variance calibration of the noise MODEL ---
+                # Measure the actual difference-image noise (IQR sigma) and
+                # record VSCALE = sigma_diff / sigma_sci.  main.py multiplies
+                # the science-derived background_rms by VSCALE so the error
+                # model matches the difference image.  The image pixels are
+                # NOT rescaled: their flux scale is set by SFFT's kernel
+                # integral and rescaling would bias all measured fluxes.
+                _applied_vscale = False
+                if _sci_var is not None and _sci_var > 0:
+                    _sigma_diff = _measure_diff_noise_sigma(diff_arr, _nan_mask)
+                    if np.isfinite(_sigma_diff) and _sigma_diff > 0:
+                        _vscale = _sigma_diff / float(np.sqrt(_sci_var))
+                        # Diagnostic decomposition: how much of the excess is
+                        # explained by the kernel L2 norm on the convolved side.
+                        if _ker_l2 is not None and _ref_var is not None:
+                            _k2 = _ker_l2 ** 2
+                            _var_exp = (
+                                _sci_var * _k2 + _ref_var
+                                if _convd_side == "SCI"
+                                else _sci_var + _ref_var * _k2
+                            )
+                            _explained = float(np.sqrt(_var_exp / _sci_var))
+                            log_info(
+                                f"Noise check: measured sigma_diff={_sigma_diff:.4g}, "
+                                f"kernel-L2 expectation vs sigma_sci={_explained:.3f}x "
+                                f"(VSCALE={_vscale:.4f})."
+                            )
+                        if 1.05 < _vscale <= 5.0:
+                            diff_hdr["VSCALE"] = (
+                                round(float(_vscale), 6),
+                                "Noise-model factor sigma_diff/sigma_sci (IQR)",
+                            )
+                            _applied_vscale = True
+                            log_info(
+                                f"Variance calibration: VSCALE={_vscale:.4f} written "
+                                "to header; background_rms will be rescaled to "
+                                "match the measured difference-image noise."
+                            )
+                        elif _vscale > 5.0:
+                            log_warning(
+                                f"Difference-image noise is {_vscale:.1f}x the science "
+                                "noise model - suspiciously large; leaving VSCALE=1.0 "
+                                "(check subtraction quality)."
+                            )
+                        else:
+                            log_info(
+                                f"Variance calibration: noise consistent "
+                                f"(sigma_diff/sigma_sci={_vscale:.3f}); VSCALE=1."
+                            )
+
+                decorr_status = "ON (side file)" if _applied_decorr else "OFF"
+                vscale_status = "ON" if _applied_vscale else "OFF"
                 log_info(f"Post-subtraction summary: decorrelation={decorr_status}, variance scaling={vscale_status}")
 
                 hdul[0].data = diff_arr.astype(np.float32)
@@ -2042,26 +2161,25 @@ def run_sfft() -> Optional[int]:
                             f"!= diff shape {diff.shape}; cannot reapply invalid mask."
                         )
                 
-                # Also apply mask to decorrelated image if it exists
-                if save_decorrelated and decorrelate_noise:
-                    _decorr_diff_path = FITS_DIFF.replace(".fits", "_decorr.fits")
-                    if os.path.isfile(_decorr_diff_path):
-                        with fits.open(_decorr_diff_path, mode="update", memmap=False) as hdul:
-                            diff = np.asarray(hdul[0].data, dtype=float)
-                            if diff.shape == combined_invalid_mask.shape:
-                                n_before = int(np.count_nonzero(~np.isfinite(diff)))
-                                diff[combined_invalid_mask] = np.nan
-                                hdul[0].data = diff
-                                hdul.flush()
-                                n_after = int(np.count_nonzero(~np.isfinite(diff)))
-                                log_info(
-                                    f"Invalid mask applied to decorrelated diff: {n_before} -> {n_after} finite pixels"
-                                )
-                            else:
-                                log_warning(
-                                    f"combined_invalid_mask shape {combined_invalid_mask.shape} "
-                                    f"!= decorrelated diff shape {diff.shape}; cannot reapply invalid mask."
-                                )
+                # Also apply mask to the decorrelated side file if it exists
+                _decorr_diff_path = FITS_DIFF.replace(".fits", "_decorr.fits")
+                if os.path.isfile(_decorr_diff_path):
+                    with fits.open(_decorr_diff_path, mode="update", memmap=False) as hdul:
+                        diff = np.asarray(hdul[0].data, dtype=float)
+                        if diff.shape == combined_invalid_mask.shape:
+                            n_before = int(np.count_nonzero(~np.isfinite(diff)))
+                            diff[combined_invalid_mask] = np.nan
+                            hdul[0].data = diff
+                            hdul.flush()
+                            n_after = int(np.count_nonzero(~np.isfinite(diff)))
+                            log_info(
+                                f"Invalid mask applied to decorrelated diff: {n_before} -> {n_after} finite pixels"
+                            )
+                        else:
+                            log_warning(
+                                f"combined_invalid_mask shape {combined_invalid_mask.shape} "
+                                f"!= decorrelated diff shape {diff.shape}; cannot reapply invalid mask."
+                            )
                 
                 n_mask = int(np.count_nonzero(combined_invalid_mask))
                 log_info(
@@ -2152,6 +2270,8 @@ def run_sfft() -> Optional[int]:
                         median - CVREJ_MAGD_THRESH,
                         median + CVREJ_MAGD_THRESH,
                     )
+                    from plotting_utils import apply_autophot_mplstyle
+                    apply_autophot_mplstyle()
                     fig, ax = plt.subplots(
                         figsize=set_size(540, aspect=1.01), dpi=150
                     )
@@ -2163,7 +2283,7 @@ def run_sfft() -> Optional[int]:
                         fmt="o",
                         markersize=3.5,
                         mfc="none",
-                        capsize=2.5,
+                        capsize=3.5,
                         elinewidth=0.9,
                         markeredgewidth=0.9,
                         alpha=0.85,
@@ -2181,7 +2301,7 @@ def run_sfft() -> Optional[int]:
                     ax.set_xlabel("MAG_REF (REF)")
                     ax.set_ylabel("MAG_REF (SCI) - MAG_REF (REF)")
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
-                    ax.legend(loc="best", frameon=True, fontsize=9,
+                    ax.legend(loc="best", frameon=True, fontsize=8,
                               facecolor="white", framealpha=1.0, edgecolor="black")
                     ax.set_title(f"SFFT source matching: {n_input} input -> {n_final} final sources", fontsize=10)
                     png_path = os.path.join(out_dir, f"Var_Check_{out_base}.png")
@@ -2210,8 +2330,8 @@ def run_sfft() -> Optional[int]:
         log_info(
             f"SFFT per-image summary: matched_sources={_n_matched_final} | "
             f"kernel_hw={kernel_half_width} px | ForceConv={ForceConv} | "
-            f"diff_finite_frac={_diff_finite_frac*100:.1f}%% | "
-            f"invalid_input_frac={_frac_invalid_max*100:.1f}%%"
+            f"diff_finite_frac={_diff_finite_frac*100:.1f}% | "
+            f"invalid_input_frac={_frac_invalid_max*100:.1f}%"
         )
 
     except Exception as e:

@@ -360,6 +360,12 @@ class AlignmentVerifier:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
+        try:
+            from plotting_utils import apply_autophot_mplstyle
+            apply_autophot_mplstyle()
+        except Exception:
+            pass
+
         # 1. Difference image
         diff_data = sci_data - ref_data
         
@@ -375,7 +381,7 @@ class AlignmentVerifier:
         plt.colorbar()
 
         plt.subplot(2, 2, 3)
-        plt.imshow(diff_data, cmap='RdBu_r', origin='lower', vmin=-np.percentile(np.abs(diff_data), 99),
+        plt.imshow(diff_data, cmap='gray', origin='lower', vmin=-np.percentile(np.abs(diff_data), 99),
                    vmax=np.percentile(np.abs(diff_data), 99))
         plt.title('Difference (Science - Reference)')
         plt.colorbar()

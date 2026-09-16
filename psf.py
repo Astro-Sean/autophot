@@ -43,7 +43,7 @@ from matplotlib.patches import Circle, Ellipse, Rectangle
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (needed for 3D projection)
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, map_coordinates, maximum_filter
 from scipy.spatial import cKDTree
 from scipy.fft import fft2, fftshift
 from scipy.optimize import least_squares
@@ -118,7 +118,7 @@ def _call_build_epsf(builder, epsfstars, init_epsf):
 # Local
 # ---------------------------------------------------------------------------
 from functions import log_step, set_size, log_warning_from_exception
-from plotting_utils import get_marker_size, PLOT_COLORS
+from plotting_utils import apply_autophot_mplstyle, get_marker_size, PLOT_COLORS
 from aperture import (
     gain_e_per_adu_from_header,
     resolve_exposure_time_seconds,
@@ -308,6 +308,138 @@ def get_smoothing_kernel(
 
     # Default: quartic
     return get_quartic_kernel(osamp, kernel_size)
+
+
+def convolve_psf_stamp(
+    psf_data: np.ndarray,
+    kernel_2d: np.ndarray,
+    oversampling: int = 1,
+    return_stages: bool = False,
+):
+    """Convolve a (possibly oversampled) PSF stamp with a native-pixel kernel.
+
+    The ePSF array samples the continuous PSF on a grid ``oversampling``
+    times finer than the detector pixels.  A native-pixel kernel (e.g. the
+    SFFT matching kernel or a Gaussian difference kernel) must therefore be
+    applied in native pixel space: the ePSF is resampled onto the native
+    grid, convolved, then resampled back onto the original oversampled grid.
+
+    Resampling uses `scipy.ndimage.map_coordinates` with the exact grid
+    mapping ``over = c_over + k * (native - c_native)`` rather than
+    `scipy.ndimage.zoom`, whose ``(n_in - 1)/(n_out - 1)`` index mapping
+    introduces a fractional stretch (e.g. ~1.7% for a 101 px stamp at 4x)
+    and a half-pixel class of centre offsets for even oversampling factors.
+    At integer sample coordinates (odd cutouts under the photutils ePSF
+    convention) the cubic interpolant returns the exact grid values, so the
+    downsampling is a lossless strided extraction in the common case.
+
+    Parameters
+    ----------
+    psf_data : np.ndarray
+        PSF image on the (possibly oversampled) ePSF grid.
+    kernel_2d : np.ndarray
+        Convolution kernel defined in *native* detector pixels.
+    oversampling : int
+        ePSF oversampling factor k (1 = already native resolution).
+    return_stages : bool
+        If True, also return the intermediate native-resolution arrays
+        (pre- and post-convolution) for diagnostics/plotting.
+
+    Returns
+    -------
+    conv : np.ndarray
+        Convolved PSF on the original grid, renormalized to unit sum in
+        native space (when the convolved flux is positive and finite).
+    (native_in, native_out) : tuple of np.ndarray, only if return_stages
+    """
+    from scipy.signal import fftconvolve
+
+    data = np.asarray(psf_data, dtype=float)
+    kernel = np.asarray(kernel_2d, dtype=float)
+    try:
+        k = int(np.atleast_1d(oversampling)[0])
+    except (TypeError, ValueError, IndexError):
+        k = 1
+    k = max(1, k)
+
+    sy, sx = data.shape
+    cy_over, cx_over = (sy - 1) / 2.0, (sx - 1) / 2.0
+
+    # Native grid size.  photutils ePSF grids satisfy S = k*n + 1 (even k)
+    # or S = k*n (odd k); n = round((S - 1)/k) recovers n in both cases.
+    ny = max(1, int(round((sy - 1) / k)))
+    nx = max(1, int(round((sx - 1) / k)))
+    cy_nat, cx_nat = (ny - 1) / 2.0, (nx - 1) / 2.0
+
+    if k > 1:
+        # Native pixel j samples the oversampled grid at
+        # c_over + k * (j - c_nat).
+        jy = cy_over + k * (np.arange(ny) - cy_nat)
+        jx = cx_over + k * (np.arange(nx) - cx_nat)
+        gy, gx = np.meshgrid(jy, jx, indexing="ij")
+        native = map_coordinates(
+            data, [gy, gx], order=3, mode="constant", cval=0.0
+        )
+    else:
+        native = data
+
+    conv_native = fftconvolve(native, kernel, mode="same")
+    total = float(np.nansum(conv_native))
+    if np.isfinite(total) and total > 0:
+        conv_native = conv_native / total
+
+    if k > 1:
+        # Oversampled index p maps back to native coordinate
+        # c_nat + (p - c_over)/k.
+        py = cy_nat + (np.arange(sy) - cy_over) / k
+        px = cx_nat + (np.arange(sx) - cx_over) / k
+        gy2, gx2 = np.meshgrid(py, px, indexing="ij")
+        conv = map_coordinates(
+            conv_native, [gy2, gx2], order=3, mode="constant", cval=0.0
+        )
+    else:
+        conv = conv_native
+
+    if return_stages:
+        return conv, native, conv_native
+    return conv
+
+
+def convolve_epsf_with_kernel(epsf_model, kernel_2d):
+    """Convolve an ImagePSF/ePSF model with a native-pixel kernel.
+
+    Returns
+    -------
+    (model, native_in, native_out) : tuple
+        *model* is a new `~photutils.psf.ImagePSF` on the same oversampled
+        grid as the input (same flux, origin, oversampling); *native_in*
+        and *native_out* are the native-resolution PSF before and after
+        convolution (for diagnostics).
+    """
+    data = np.asarray(epsf_model.data, dtype=float)
+    oversamp = getattr(epsf_model, "oversampling", 1)
+    try:
+        k = int(np.atleast_1d(oversamp)[0])
+    except (TypeError, ValueError, IndexError):
+        k = 1
+    k = max(1, k)
+
+    conv, native, conv_native = convolve_psf_stamp(
+        data, kernel_2d, k, return_stages=True
+    )
+
+    flux = getattr(epsf_model, "flux", 1.0)
+    x_0 = getattr(epsf_model, "x_0", 0.0)
+    y_0 = getattr(epsf_model, "y_0", 0.0)
+    model = ImagePSF(
+        data=conv,
+        flux=float(getattr(flux, "value", flux)),
+        x_0=float(getattr(x_0, "value", x_0)),
+        y_0=float(getattr(y_0, "value", y_0)),
+        origin=getattr(epsf_model, "origin", None),
+        oversampling=k,
+    )
+    return model, native, conv_native
 
 
 def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None):
@@ -1693,6 +1825,11 @@ class PSF:
             if weightmap is None:
                 if ndimage.uncertainty is not None and ndimage.uncertainty.array is not None:
                     weightmap = 1.0 / ndimage.uncertainty.array**2  # 1/variance for chi^2 fitting
+                    # Zero/NaN/negative variance -> weight 0 (pixel ignored)
+                    # rather than inf, which would poison the ePSF fit.
+                    weightmap = np.where(
+                        np.isfinite(weightmap) & (weightmap > 0), weightmap, 0.0
+                    )
                 else:
                     weightmap = np.ones_like(ndimage.data, dtype=float)
 
@@ -2031,218 +2168,316 @@ class PSF:
             for star in epsfstars
         ]
 
+        # --- Batched per-star statistics (vectorized over the cutout stack) ---
+        # finite_stack[i] = unmasked finite pixels of star i.
+        finite_stack = np.isfinite(all_data)
+        for i, m in enumerate(all_masks):
+            if m is not None:
+                finite_stack[i] &= ~m
+        data_clean = np.where(finite_stack, all_data, np.nan)
+        # -inf fill for the extrema filter so masked/non-finite pixels can
+        # never register as local maxima.
+        data_ninf = np.where(finite_stack, all_data, -np.inf)
+
         reject_flags = np.zeros(n_stars, dtype=bool)
-        reject_reasons = []
+        reasons_by_star = [[] for _ in range(n_stars)]
 
-        for i in range(n_stars):
-            data = all_data[i]
-            finite = np.isfinite(data)
-            star_mask = all_masks[i]
-            if star_mask is not None:
-                finite &= ~star_mask
-            data_clean = np.where(finite, data, np.nan)
+        ann_pix = data_clean[:, annulus]  # (N, n_annulus)
+        n_ann = np.sum(np.isfinite(ann_pix), axis=1)
+        # Original gate: stars with <10 finite annulus pixels skip all tests.
+        gate = n_ann >= 10
 
-            ann_pix = data_clean[annulus & finite]
-            if np.sum(np.isfinite(ann_pix)) < 10:
-                continue
+        _secondary_peak_sigma = float(
+            phot_cfg.get("psf_contam_secondary_peak_sigma", 5.0)
+        )
+        _secondary_peak_dist_thresh = max(2.0, 1.0 * fwhm_eff)
+        streak_sigma = float(phot_cfg.get("psf_contam_streak_sigma", 5.0))
+        _annulus_peak_sigma = float(
+            phot_cfg.get("psf_contam_annulus_peak_sigma", 5.0)
+        )
+        _flux_excess_sigma = float(
+            phot_cfg.get("psf_contam_flux_excess_sigma", 10.0)
+        )
+        _core_ellip_max = float(
+            phot_cfg.get("psf_contam_core_ellipticity_max", 0.15)
+        )
+        _border_max_thresh = float(
+            phot_cfg.get("psf_contam_border_max_sigma", 8.0)
+        )
 
-            ann_median = np.nanmedian(ann_pix)
-            # Use MAD-based robust sigma instead of nanstd — nanstd is inflated
-            # by the contaminating pixels we're trying to detect, making all
-            # sigma thresholds harder to trigger.
-            ann_mad = np.nanmedian(np.abs(ann_pix - ann_median))
-            ann_std = 1.4826 * ann_mad if ann_mad > 0 else 1e-10
-            if ann_std < 1e-10:
-                ann_std = 1e-10
+        core_mask = _rr < ann_inner
+        near_center = _rr < max(1.0, 0.5 * fwhm_eff)
+        ann_total = int(np.sum(annulus))
 
-            # Robust background estimate: use the median of the inner ring
-            # (closest to sky, least affected by PSF wings or edge contamination)
-            inner_pix_bg = data_clean[inner_ring & finite]
-            bg_level = float(np.nanmedian(inner_pix_bg)) if np.sum(np.isfinite(inner_pix_bg)) > 0 else ann_median
+        with warnings.catch_warnings():
+            # All-NaN reductions warn; a NaN result is treated as "no
+            # evidence" below and never flags a star.
+            warnings.simplefilter("ignore", category=RuntimeWarning)
 
-            reasons = []
-
-            # Test 0: Masked-pixel fraction in annulus
-            # If a significant fraction of annulus pixels are masked by hardware
-            # defects (trail/streak/saturation), the cutout is contaminated
-            # regardless of flux statistics.  This catches trails that the
-            # flux-based tests below might miss.
-            if star_mask is not None:
-                ann_masked = np.sum(star_mask[annulus])
-                ann_total = np.sum(annulus)
-                if ann_total > 0:
-                    mask_frac = ann_masked / ann_total
-                    if mask_frac > 0.10:
-                        reasons.append(f"masked_frac={mask_frac:.2f}")
-
-            # Test 1: Azimuthal asymmetry
-            # Denominator is ann_std only (not abs(ann_median) + ann_std)
-            # so the test is not suppressed when the entire annulus is elevated.
-            q_meds = []
-            for qm in q_masks:
-                qp = data_clean[qm & finite]
-                if np.sum(np.isfinite(qp)) > 0:
-                    q_meds.append(float(np.nanmedian(qp)))
-                else:
-                    q_meds.append(ann_median)
-            q_meds = np.array(q_meds)
-            q_mean = np.mean(q_meds)
-            q_max_dev = np.max(np.abs(q_meds - q_mean))
-            q_frac = q_max_dev / (ann_std + 1e-10)
-            if q_frac > asym_thresh:
-                reasons.append(f"asymmetry={q_frac:.2f}")
-
-            # Test 2: Edge flux elevation relative to background
-            # Compare edge ring median to the local background (inner ring),
-            # not to the annulus median.  This catches cases where the entire
-            # annulus is elevated (galaxy halo) but the edge is even higher.
-            edge_pix = data_clean[edge_ring & finite]
-            inner_pix = data_clean[inner_ring & finite]
-            if np.sum(np.isfinite(edge_pix)) > 0 and np.sum(np.isfinite(inner_pix)) > 0:
-                edge_med = float(np.nanmedian(edge_pix))
-                inner_med = float(np.nanmedian(inner_pix))
-                edge_excess = (edge_med - inner_med) / ann_std
-                if edge_excess > edge_sigma:
-                    reasons.append(f"edge_excess={edge_excess:.1f}sigma")
-
-            # Test 2b: Direct border pixel test
-            # Check the actual cutout boundary pixels (outermost 2 rows/cols).
-            # These are at larger radius than the annulus (especially corners)
-            # and are the most sensitive to neighbour flux spilling in.
-            border_pix = data_clean[border_mask & finite]
-            if np.sum(np.isfinite(border_pix)) > 4:
-                border_med = float(np.nanmedian(border_pix))
-                border_excess = (border_med - bg_level) / ann_std
-                if border_excess > border_sigma:
-                    reasons.append(f"border_excess={border_excess:.1f}sigma")
-                # Also check for any single bright border pixel (trail/streak crossing)
-                border_max = float(np.nanmax(border_pix))
-                border_max_excess = (border_max - bg_level) / ann_std
-                border_max_thresh = float(
-                    phot_cfg.get("psf_contam_border_max_sigma", 8.0)
-                )
-                if border_max_excess > border_max_thresh:
-                    reasons.append(f"border_bright_pixel={border_max_excess:.1f}sigma")
-
-            # Test 3: Radial non-monotonicity
-            ring_meds = []
-            for rm in ring_masks:
-                rp = data_clean[rm & finite]
-                if np.sum(np.isfinite(rp)) > 0:
-                    ring_meds.append(float(np.nanmedian(rp)))
-                else:
-                    ring_meds.append(np.nan)
-            ring_meds = np.array(ring_meds)
-            # Check for reversals: outer ring brighter than inner ring
-            for ir in range(1, len(ring_meds)):
-                if np.isfinite(ring_meds[ir]) and np.isfinite(ring_meds[ir - 1]):
-                    # Allow outer ring to be brighter by up to radial_reversal_frac
-                    # of the dynamic range (ann_std).  A real PSF should decrease.
-                    increase = ring_meds[ir] - ring_meds[ir - 1]
-                    if increase > radial_reversal_frac * ann_std:
-                        reasons.append(
-                            f"radial_reversal_ring{ir}={increase / ann_std:.1f}sigma"
-                        )
-                        break  # one reversal is enough
-
-            # Test 4: Secondary-peak detection in core region
-            # The annulus tests above only check beyond 2*FWHM.  A secondary
-            # source within 2*FWHM of the center (in the core region) would
-            # not be caught.  Detect by finding the brightest pixel in the
-            # core that is far from the cutout center — a real PSF has its
-            # peak at the center; a secondary peak off-center indicates a
-            # blended neighbour.
-            core_mask = _rr < ann_inner
-            core_pix = data_clean[core_mask & finite]
-            if np.sum(np.isfinite(core_pix)) > 10:
-                core_data = np.where(finite & core_mask, data, np.nan)
-                # Find the brightest pixel in the core
-                _core_finite = np.isfinite(core_data)
-                if np.any(_core_finite):
-                    _peak_idx = np.unravel_index(
-                        np.nanargmax(np.where(_core_finite, core_data, -np.inf)),
-                        core_data.shape,
-                    )
-                    _peak_val = core_data[_peak_idx]
-                    _peak_dist = np.sqrt(
-                        (_peak_idx[1] - cx_c) ** 2 + (_peak_idx[0] - cy_c) ** 2
-                    )
-                    # Secondary peak: bright pixel far from center
-                    # A real PSF peak should be within ~1 FWHM of the center.
-                    # Use the cutout's own peak as the reference flux.
-                    _secondary_peak_dist_thresh = max(
-                        2.0, 1.0 * fwhm_eff
-                    )
-                    _secondary_peak_sigma = float(
-                        phot_cfg.get("psf_contam_secondary_peak_sigma", 5.0)
-                    )
-                    if (
-                        _peak_dist > _secondary_peak_dist_thresh
-                        and (_peak_val - bg_level) > _secondary_peak_sigma * ann_std
-                    ):
-                        reasons.append(
-                            f"secondary_peak={(_peak_val - bg_level) / ann_std:.1f}sigma"
-                            f"@{_peak_dist:.1f}px"
-                        )
-
-            # Test 5: Streak/trail detection
-            # Satellite trails and cosmic-ray trails produce linear features
-            # that may not trigger the azimuthal asymmetry test if they pass
-            # through the center.  Detect by checking for any row or column
-            # in the annulus whose median is significantly elevated — a
-            # horizontal/vertical streak produces a bright row/column.
-            # Also check diagonals for angled trails.
-            streak_sigma = float(
-                phot_cfg.get("psf_contam_streak_sigma", 5.0)
+            # MAD-based robust annulus sigma (nanstd is inflated by the
+            # contaminating pixels we are trying to detect).
+            ann_median = np.nanmedian(ann_pix, axis=1)
+            ann_mad = np.nanmedian(
+                np.abs(ann_pix - ann_median[:, None]), axis=1
             )
-            ann_data = np.where(finite & annulus, data, np.nan)
-            # Row medians (horizontal streak)
-            _row_meds = np.nanmedian(ann_data, axis=1)
-            _row_meds = _row_meds[np.isfinite(_row_meds)]
-            if len(_row_meds) > 3:
-                _row_med = np.nanmedian(_row_meds)
-                _row_max_dev = np.nanmax(_row_meds) - _row_med
-                if _row_max_dev > streak_sigma * ann_std:
-                    reasons.append(
-                        f"streak_row={_row_max_dev / ann_std:.1f}sigma"
-                    )
-            # Column medians (vertical streak)
-            _col_meds = np.nanmedian(ann_data, axis=0)
-            _col_meds = _col_meds[np.isfinite(_col_meds)]
-            if len(_col_meds) > 3:
-                _col_med = np.nanmedian(_col_meds)
-                _col_max_dev = np.nanmax(_col_meds) - _col_med
-                if _col_max_dev > streak_sigma * ann_std:
-                    reasons.append(
-                        f"streak_col={_col_max_dev / ann_std:.1f}sigma"
-                    )
-            # Diagonal streaks: check the two main diagonals through the cutout
-            _diag_data = np.where(finite, data, np.nan)
-            _diag1 = np.diagonal(_diag_data)
-            _diag2 = np.diagonal(np.fliplr(_diag_data))
-            # Only check the annulus portion of each diagonal
-            _diag_mask1 = np.diagonal(annulus & finite)
-            _diag_mask2 = np.diagonal((annulus & finite)[:, ::-1])
-            for _diag_label, _diag_vals, _diag_msk in [
-                ("streak_diag1", _diag1, _diag_mask1),
-                ("streak_diag2", _diag2, _diag_mask2),
-            ]:
-                _diag_ann = _diag_vals[_diag_msk]
-                _diag_ann = _diag_ann[np.isfinite(_diag_ann)]
-                if len(_diag_ann) > 3:
-                    _diag_med = np.nanmedian(_diag_ann)
-                    _diag_max = np.nanmax(_diag_ann)
-                    if (_diag_max - _diag_med) > streak_sigma * ann_std:
-                        reasons.append(
-                            f"{_diag_label}={(_diag_max - _diag_med) / ann_std:.1f}sigma"
-                        )
-                        break  # one diagonal streak is enough
+            ann_std = np.where(
+                np.isfinite(ann_mad) & (ann_mad > 0), 1.4826 * ann_mad, 1e-10
+            )
+            ann_std = np.maximum(ann_std, 1e-10)
 
-            if reasons:
-                reject_flags[i] = True
-                reject_reasons.append(
-                    f"  star {i}: {', '.join(reasons)}"
+            # Robust background: median of the inner ring (closest to sky,
+            # least affected by PSF wings or edge contamination).
+            inner_pix = data_clean[:, inner_ring]
+            n_inner = np.sum(np.isfinite(inner_pix), axis=1)
+            inner_med = np.nanmedian(inner_pix, axis=1)
+            bg_level = np.where(n_inner > 0, inner_med, ann_median)
+
+            # Test 1: Azimuthal asymmetry.  Denominator is ann_std only so
+            # the test is not suppressed when the entire annulus is elevated.
+            # Quadrants have different pixel counts, so reduce each to (N,)
+            # before stacking to (N, 4).  A quadrant with no finite pixels
+            # falls back to the annulus median.
+            q_meds = np.stack(
+                [
+                    np.where(
+                        np.sum(np.isfinite(data_clean[:, qm]), axis=1) > 0,
+                        np.nanmedian(data_clean[:, qm], axis=1),
+                        np.nan,
+                    )
+                    for qm in q_masks
+                ],
+                axis=1,
+            )
+            q_meds = np.where(np.isfinite(q_meds), q_meds, ann_median[:, None])
+            q_mean = np.mean(q_meds, axis=1)
+            q_frac = np.max(np.abs(q_meds - q_mean[:, None]), axis=1) / (
+                ann_std + 1e-10
+            )
+            flag_asym = gate & (q_frac > asym_thresh)
+
+            # Test 2: Edge-ring elevation relative to the inner-ring level
+            # (catches cases where the whole annulus is elevated but the
+            # edge is even higher).
+            edge_pix = data_clean[:, edge_ring]
+            n_edge = np.sum(np.isfinite(edge_pix), axis=1)
+            edge_med = np.nanmedian(edge_pix, axis=1)
+            edge_excess = (edge_med - inner_med) / ann_std
+            flag_edge = (
+                gate & (n_edge > 0) & (n_inner > 0) & (edge_excess > edge_sigma)
+            )
+
+            # Test 2b: Outermost 2 rows/cols — most sensitive to neighbour
+            # flux spilling in from beyond the cutout.
+            border_pix = data_clean[:, border_mask]
+            n_border = np.sum(np.isfinite(border_pix), axis=1)
+            border_excess = (
+                np.nanmedian(border_pix, axis=1) - bg_level
+            ) / ann_std
+            border_max_excess = (
+                np.nanmax(border_pix, axis=1) - bg_level
+            ) / ann_std
+            flag_border = gate & (n_border > 4) & (border_excess > border_sigma)
+            flag_border_max = (
+                gate & (n_border > 4) & (border_max_excess > _border_max_thresh)
+            )
+
+            # Test 3: Radial non-monotonicity — an outer ring brighter than
+            # the previous ring indicates a contaminant in the outer region.
+            ring_meds = np.stack(
+                [
+                    np.where(
+                        np.sum(np.isfinite(data_clean[:, rm]), axis=1) > 0,
+                        np.nanmedian(data_clean[:, rm], axis=1),
+                        np.nan,
+                    )
+                    for rm in ring_masks
+                ],
+                axis=1,
+            )
+            increase = ring_meds[:, 1:] - ring_meds[:, :-1]
+            rev = np.isfinite(increase) & (
+                increase > radial_reversal_frac * ann_std[:, None]
+            )
+            flag_reversal = gate & np.any(rev, axis=1)
+            first_rev = np.argmax(rev, axis=1)  # valid only where flag_reversal
+
+            # Tests 4 & 6: local maxima — one batched filter call for the
+            # whole stack (vs two per-star calls previously).  The filter
+            # runs on the full cutout (not the core-restricted fill), which
+            # is marginally more conservative at the core/annulus boundary.
+            max_filt = maximum_filter(data_ninf, size=(1, 3, 3))
+            local_max = (data_ninf == max_filt) & finite_stack
+            peak_excess = data_ninf - bg_level[:, None, None]
+
+            # Test 4: off-centre secondary peak in the core (blended
+            # neighbour within 2*FWHM that the annulus tests miss).
+            core_pix = data_clean[:, core_mask]
+            n_core = np.sum(np.isfinite(core_pix), axis=1)
+            lm_core = local_max & core_mask[None] & ~near_center[None]
+            lm_core[:, int(cy_c), int(cx_c)] = False
+            cond_core = (
+                lm_core
+                & (_rr[None] > _secondary_peak_dist_thresh)
+                & (peak_excess > _secondary_peak_sigma * ann_std[:, None, None])
+            )
+            flag_second = gate & (n_core > 10) & np.any(cond_core, axis=(1, 2))
+            # For the log message: the strongest qualifying peak per star.
+            core_sig = np.where(
+                cond_core, peak_excess / ann_std[:, None, None], -np.inf
+            ).reshape(n_stars, -1)
+            core_best = np.argmax(core_sig, axis=1)
+            second_sig = core_sig[np.arange(n_stars), core_best]
+            _biy, _bix = np.unravel_index(core_best, data_ninf.shape[1:])
+            second_dist = np.hypot(_bix - cx_c, _biy - cy_c)
+
+            # Test 6: any local maximum in the annulus above sigma — a direct
+            # detection of a faint contaminating star that the median-based
+            # tests can miss.
+            cond_ann = (local_max & annulus[None]) & (
+                peak_excess > _annulus_peak_sigma * ann_std[:, None, None]
+            )
+            flag_ann_peak = gate & np.any(cond_ann, axis=(1, 2))
+            ann_sig = np.where(
+                cond_ann, peak_excess / ann_std[:, None, None], -np.inf
+            ).reshape(n_stars, -1)
+            ann_best = np.argmax(ann_sig, axis=1)
+            ann_peak_sig = ann_sig[np.arange(n_stars), ann_best]
+            _aiy, _aix = np.unravel_index(ann_best, data_ninf.shape[1:])
+            ann_peak_dist = np.hypot(_aix - cx_c, _aiy - cy_c)
+
+            # Test 5: streaks — any row, column, or main diagonal whose
+            # annulus median is significantly elevated.
+            ann_data = np.where(annulus[None] & finite_stack, all_data, np.nan)
+            row_meds = np.nanmedian(ann_data, axis=2)  # per-row medians
+            n_row = np.sum(np.isfinite(row_meds), axis=1)
+            row_dev = np.nanmax(row_meds, axis=1) - np.nanmedian(row_meds, axis=1)
+            flag_row = gate & (n_row > 3) & (row_dev > streak_sigma * ann_std)
+
+            col_meds = np.nanmedian(ann_data, axis=1)  # per-column medians
+            n_col = np.sum(np.isfinite(col_meds), axis=1)
+            col_dev = np.nanmax(col_meds, axis=1) - np.nanmedian(col_meds, axis=1)
+            flag_col = gate & (n_col > 3) & (col_dev > streak_sigma * ann_std)
+
+            diag_hits = np.zeros(n_stars, dtype=bool)
+            diag_dev = np.full(n_stars, np.nan)
+            diag_label = np.empty(n_stars, dtype=object)
+            for _lbl, _dg in (
+                ("streak_diag1", np.diagonal(ann_data, axis1=1, axis2=2)),
+                (
+                    "streak_diag2",
+                    np.diagonal(ann_data[:, :, ::-1], axis1=1, axis2=2),
+                ),
+            ):
+                n_d = np.sum(np.isfinite(_dg), axis=1)
+                dev = np.nanmax(_dg, axis=1) - np.nanmedian(_dg, axis=1)
+                hit = (n_d > 3) & (dev > streak_sigma * ann_std)
+                upd = hit & ~diag_hits  # first flagged diagonal wins the label
+                diag_dev = np.where(upd, dev, diag_dev)
+                for _i in np.flatnonzero(upd):
+                    diag_label[_i] = _lbl
+                diag_hits |= hit
+            flag_diag = gate & diag_hits
+
+            # Test 7: total positive flux excess in the annulus vs the
+            # expected noise-only (half-Gaussian) excess.
+            pos_excess = np.nansum(
+                np.clip(ann_pix - bg_level[:, None], 0, None), axis=1
+            )
+            expected_excess = 0.5 * n_ann * ann_std
+            excess_ratio = pos_excess / np.maximum(expected_excess, 1e-10)
+            flag_flux = gate & (n_ann > 10) & (excess_ratio > _flux_excess_sigma)
+
+            # Test 8: core ellipticity (close blends inside ~1-2 FWHM that
+            # don't form a separate local maximum).
+            ellip = np.full(n_stars, np.nan)
+            core_tot = np.zeros(n_stars)
+            if _core_ellip_max > 0:
+                core_e = np.where(
+                    core_mask[None] & finite_stack,
+                    all_data - bg_level[:, None, None],
+                    0.0,
                 )
+                core_tot = np.sum(core_e, axis=(1, 2))
+                safe_tot = np.where(core_tot > 0, core_tot, np.nan)
+                dx = _xx - cx_c
+                dy = _yy - cy_c
+                cx2 = np.sum(core_e * dx * dx, axis=(1, 2)) / safe_tot
+                cy2 = np.sum(core_e * dy * dy, axis=(1, 2)) / safe_tot
+                cxy = np.sum(core_e * dx * dy, axis=(1, 2)) / safe_tot
+                ellip = np.sqrt(
+                    (cx2 - cy2) ** 2 + 4 * cxy ** 2
+                ) / np.maximum(cx2 + cy2, 1e-10)
+            flag_ellip = (
+                gate & (core_tot > 0) & np.isfinite(ellip)
+                & (ellip > _core_ellip_max)
+            )
+
+        # Test 0: masked-pixel fraction in annulus (per-star hardware masks).
+        # Unlike the flux tests this does not require the >=10-pixel gate:
+        # a heavily masked cutout is bad regardless of flux statistics.
+        for i, m in enumerate(all_masks):
+            if m is None or ann_total == 0:
+                continue
+            mask_frac = float(np.sum(m[annulus])) / ann_total
+            if mask_frac > 0.10:
+                reasons_by_star[i].append(f"masked_frac={mask_frac:.2f}")
+                reject_flags[i] = True
+
+        # Assemble per-star reject reasons (same ordering as the original
+        # per-star loop: asym, edge, border, radial, secondary, streaks,
+        # annulus peak, flux excess, ellipticity).
+        for i in np.flatnonzero(flag_asym):
+            reasons_by_star[i].append(f"asymmetry={q_frac[i]:.2f}")
+        for i in np.flatnonzero(flag_edge):
+            reasons_by_star[i].append(f"edge_excess={edge_excess[i]:.1f}sigma")
+        for i in np.flatnonzero(flag_border):
+            reasons_by_star[i].append(f"border_excess={border_excess[i]:.1f}sigma")
+        for i in np.flatnonzero(flag_border_max):
+            reasons_by_star[i].append(
+                f"border_bright_pixel={border_max_excess[i]:.1f}sigma"
+            )
+        for i in np.flatnonzero(flag_reversal):
+            j = int(first_rev[i])
+            reasons_by_star[i].append(
+                f"radial_reversal_ring{j + 1}={increase[i, j] / ann_std[i]:.1f}sigma"
+            )
+        for i in np.flatnonzero(flag_second):
+            reasons_by_star[i].append(
+                f"secondary_peak={second_sig[i]:.1f}sigma@{second_dist[i]:.1f}px"
+            )
+        for i in np.flatnonzero(flag_row):
+            reasons_by_star[i].append(
+                f"streak_row={row_dev[i] / ann_std[i]:.1f}sigma"
+            )
+        for i in np.flatnonzero(flag_col):
+            reasons_by_star[i].append(
+                f"streak_col={col_dev[i] / ann_std[i]:.1f}sigma"
+            )
+        for i in np.flatnonzero(flag_diag):
+            reasons_by_star[i].append(
+                f"{diag_label[i]}={diag_dev[i] / ann_std[i]:.1f}sigma"
+            )
+        for i in np.flatnonzero(flag_ann_peak):
+            reasons_by_star[i].append(
+                f"annulus_peak={ann_peak_sig[i]:.1f}sigma@{ann_peak_dist[i]:.1f}px"
+            )
+        for i in np.flatnonzero(flag_flux):
+            reasons_by_star[i].append(
+                f"flux_excess={excess_ratio[i]:.1f}x_expected"
+            )
+        for i in np.flatnonzero(flag_ellip):
+            reasons_by_star[i].append(f"core_ellipticity={ellip[i]:.3f}")
+
+        reject_flags |= (
+            flag_asym | flag_edge | flag_border | flag_border_max
+            | flag_reversal | flag_second | flag_row | flag_col | flag_diag
+            | flag_ann_peak | flag_flux | flag_ellip
+        )
+        reject_reasons = [
+            f"  star {i}: {', '.join(reasons_by_star[i])}"
+            for i in range(n_stars)
+            if reasons_by_star[i]
+        ]
 
         n_rejected = int(reject_flags.sum())
         if n_rejected == 0:
@@ -2479,42 +2714,36 @@ class PSF:
             rng = np.random.default_rng(42)
             cell_order = np.arange(side * side)
             rng.shuffle(cell_order)
-            
-            # Build cell->indices mapping using argsort for efficiency
-            selected_indices = []
-            cells_to_process = list(cell_order)
-            
+
+            # Sort by (cell_id, rank desc) so each cell's members are
+            # contiguous and best-first: pass k then simply takes the k-th
+            # member of each cell.  This is O(N log N) instead of rescanning
+            # all N candidates for every cell on every pass.
+            order = np.lexsort((-rank_vals, cell_ids))
+            cells_sorted = cell_ids[order]
+            uniq_cells, starts = np.unique(cells_sorted, return_index=True)
+            sizes = np.diff(np.append(starts, cells_sorted.size))
+            cell_span = {
+                int(c): (int(s), int(n))
+                for c, s, n in zip(uniq_cells, starts, sizes)
+            }
+
             # Process cells in multiple passes until we have enough stars
-            for pass_num in range(1, 10):  # Max 10 passes
-                if len(selected_indices) >= num_keep or not cells_to_process:
+            # (9 passes: member indices 0-8, matching the original 1..9 loop)
+            selected_indices = []
+            for pass_num in range(9):
+                if len(selected_indices) >= num_keep:
                     break
-                
-                next_cells = []
-                for cell_id in cells_to_process:
-                    in_cell = (cell_ids == cell_id)
-                    if not in_cell.any():
-                        continue
-                    
-                    # Get indices in this cell not yet selected
-                    cell_indices = np.where(in_cell)[0]
-                    already_selected_mask = np.isin(cell_indices, selected_indices, assume_unique=True)
-                    available = cell_indices[~already_selected_mask]
-                    
-                    if len(available) == 0:
-                        continue  # Cell exhausted, don't add to next_cells
-                    
-                    # Select best available from this cell
-                    available_ranks = rank_vals[available]
-                    best_local_idx = available[np.argmax(available_ranks)]
-                    selected_indices.append(best_local_idx)
-                    
-                    if len(available) > 1:
-                        next_cells.append(cell_id)  # More stars available, process again
-                    
-                    if len(selected_indices) >= num_keep:
-                        break
-                
-                cells_to_process = next_cells
+                added = False
+                for cell_id in cell_order:
+                    span = cell_span.get(int(cell_id))
+                    if span is not None and span[1] > pass_num:
+                        selected_indices.append(order[span[0] + pass_num])
+                        added = True
+                        if len(selected_indices) >= num_keep:
+                            break
+                if not added:
+                    break
             
             # If still need more, take from global ranking
             if len(selected_indices) < num_keep:
@@ -2716,13 +2945,24 @@ class PSF:
                 fwhm_hi = fwhm_max_frac * _fwhm_ref
                 src_fwhm = pd.to_numeric(df[_fwhm_col_psf], errors="coerce")
                 ok_fwhm = src_fwhm.between(fwhm_lo, fwhm_hi, inclusive="both")
-                # Also keep rows with NaN FWHM (can't reject what we can't measure)
-                ok_fwhm = ok_fwhm | src_fwhm.isna()
-                n_keep_fwhm = int(ok_fwhm.sum())
+                # Reject NaN FWHM sources: a source with unmeasurable FWHM is
+                # more likely a cosmic ray or defect than a real star.  Only
+                # keep NaN FWHM sources if rejecting them would leave too few
+                # candidates (safety bypass).
+                ok_fwhm_nan = src_fwhm.isna()
+                ok_fwhm_with_nan = ok_fwhm | ok_fwhm_nan
+                n_keep_with_nan = int(ok_fwhm_with_nan.sum())
+                n_keep_no_nan = int(ok_fwhm.sum())
                 min_keep_fwhm = max(
                     min_psf_candidates,
                     int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
                 )
+                # Prefer rejecting NaN FWHM sources, but keep them if needed
+                if n_keep_no_nan >= min_keep_fwhm:
+                    ok_fwhm = ok_fwhm  # reject NaN FWHM
+                else:
+                    ok_fwhm = ok_fwhm_with_nan  # keep NaN FWHM (safety)
+                n_keep_fwhm = int(ok_fwhm.sum())
                 if n_keep_fwhm >= min_keep_fwhm:
                     n_drop_fwhm = int((~ok_fwhm).sum())
                     if n_drop_fwhm > 0:
@@ -2766,6 +3006,153 @@ class PSF:
                             "median FWHM=%.2f px)",
                             n_drop_clip, int(ok_fwhm_clip.sum()),
                             float(np.nanmedian(finite_fwhm[~clipped.mask])),
+                        )
+
+            # ---- FLUX_RADIUS cut (cosmic ray rejection) ----
+            # SExtractor's FLUX_RADIUS is the half-light radius.  Real stars
+            # have FLUX_RADIUS ≈ 0.5 * FWHM / 2.355 ≈ 0.21 * FWHM.  Cosmic
+            # rays are sharp spikes with FLUX_RADIUS typically < 1 px,
+            # regardless of the image FWHM.  This is one of the most robust
+            # SExtractor-based CR discriminators because it directly measures
+            # the concentration of flux, unlike FWHM which can be unreliable
+            # for CR-like sources.
+            _fr_col = next(
+                (c for c in ("flux_radius", "FLUX_RADIUS") if c in df.columns), None
+            )
+            if _fr_col is not None:
+                _fr_ref = float(self.input_yaml.get("fwhm", 3.0))
+                if not (np.isfinite(_fr_ref) and _fr_ref > 0):
+                    _fr_ref = 3.0
+                _fr_min_frac = float(phot_cfg.get("psf_flux_radius_min_frac", 0.3))
+                _fr_lo = _fr_min_frac * _fr_ref
+                fr_vals = pd.to_numeric(df[_fr_col], errors="coerce")
+                ok_fr = fr_vals >= _fr_lo
+                ok_fr = ok_fr | fr_vals.isna()  # keep NaN (can't judge)
+                n_keep_fr = int(ok_fr.sum())
+                min_keep_fr = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                )
+                if n_keep_fr >= min_keep_fr:
+                    n_drop_fr = int((~ok_fr).sum())
+                    if n_drop_fr > 0:
+                        df = df[ok_fr].copy()
+                        log.info(
+                            "PSF FLUX_RADIUS cut (>= %.2f px = %.1f x FWHM): "
+                            "removed %d CR-like candidates (%d kept)",
+                            _fr_lo, _fr_min_frac, n_drop_fr, n_keep_fr,
+                        )
+                else:
+                    log.info(
+                        "Skipping FLUX_RADIUS cut (>= %.2f px): would leave only "
+                        "%d candidates (< %d).",
+                        _fr_lo, n_keep_fr, min_keep_fr,
+                    )
+
+            # ---- Peak-to-aperture flux ratio cut (cosmic ray rejection) ----
+            # Cosmic rays are sharp spikes: most flux is in 1-2 pixels, so
+            # peak_flux / flux_AP is very high (→ 1.0 for a single-pixel CR).
+            # Real stars have extended PSF profiles: for a Gaussian with FWHM=F,
+            # peak/flux_AP ≈ 1/(2π(F/2.355)²).  For F=8.66 px this is ~0.014;
+            # for F=3 px it's ~0.10.  A CR with peak/flux_AP > 0.5 is
+            # unmistakable.  The threshold is adaptive: max(configured value,
+            # 5x the expected ratio for the image FWHM).
+            _pk_col = next(
+                (c for c in ("peak_flux", "FLUX_MAX", "peak") if c in df.columns), None
+            )
+            _ap_col = next(
+                (c for c in ("flux_AP", "flux_ap", "FLUX_AUTO", "flux_auto")
+                 if c in df.columns), None
+            )
+            if _pk_col is not None and _ap_col is not None:
+                _pk_ref = float(self.input_yaml.get("fwhm", 3.0))
+                if not (np.isfinite(_pk_ref) and _pk_ref > 0):
+                    _pk_ref = 3.0
+                _expected_ratio = 1.0 / (2.0 * np.pi * (_pk_ref / 2.355) ** 2)
+                _pk_ratio_cfg = float(
+                    phot_cfg.get("psf_peak_to_aperture_ratio_max", 0.0)
+                )
+                # Default: 5x the expected ratio, capped at 0.5
+                _pk_ratio_max = max(_pk_ratio_cfg, min(0.5, 5.0 * _expected_ratio))
+                if _pk_ratio_max > 0:
+                    pk_vals = pd.to_numeric(df[_pk_col], errors="coerce")
+                    ap_vals = pd.to_numeric(df[_ap_col], errors="coerce")
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        ratio = np.where(
+                            (ap_vals > 0) & np.isfinite(pk_vals) & np.isfinite(ap_vals),
+                            pk_vals / ap_vals, np.nan,
+                        )
+                    ok_pk = pd.Series(ratio, index=df.index)
+                    ok_pk = (ok_pk <= _pk_ratio_max) | ok_pk.isna()
+                    n_keep_pk = int(ok_pk.sum())
+                    min_keep_pk = max(
+                        min_psf_candidates,
+                        int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    )
+                    if n_keep_pk >= min_keep_pk:
+                        n_drop_pk = int((~ok_pk).sum())
+                        if n_drop_pk > 0:
+                            df = df[ok_pk].copy()
+                            log.info(
+                                "PSF peak/aperture ratio cut (<= %.3f, expected "
+                                "%.3f for FWHM=%.1f): removed %d CR-like "
+                                "candidates (%d kept)",
+                                _pk_ratio_max, _expected_ratio, _pk_ref,
+                                n_drop_pk, n_keep_pk,
+                            )
+                    else:
+                        log.info(
+                            "Skipping peak/aperture ratio cut (<= %.3f): would "
+                            "leave only %d candidates (< %d).",
+                            _pk_ratio_max, n_keep_pk, min_keep_pk,
+                        )
+
+            # ---- Minimum A/B size cut (cosmic ray rejection) ----
+            # SExtractor's A_IMAGE and B_IMAGE are the semi-major and semi-minor
+            # axes of the source profile.  Real stars have A ≈ B ≈ FWHM/2.355.
+            # Cosmic rays have A, B < 1-2 px regardless of image FWHM.  Reject
+            # sources where the smaller axis is below a threshold that scales
+            # with the image FWHM (so it works for both undersampled and
+            # well-sampled images).
+            _ab_cols = [c for c in ("a", "b", "A_IMAGE", "B_IMAGE") if c in df.columns]
+            if len(_ab_cols) >= 2:
+                _ab_ref = float(self.input_yaml.get("fwhm", 3.0))
+                if not (np.isfinite(_ab_ref) and _ab_ref > 0):
+                    _ab_ref = 3.0
+                # Threshold = max(fixed floor, fraction of FWHM)
+                _ab_min_floor = float(phot_cfg.get("psf_min_ab_pixels", 0.0))
+                _ab_min_frac = float(phot_cfg.get("psf_min_ab_frac", 0.3))
+                _ab_min = max(_ab_min_floor, _ab_min_frac * _ab_ref)
+                if _ab_min > 0:
+                    _a_col = next(
+                        (c for c in ("a", "A_IMAGE") if c in df.columns), None
+                    )
+                    _b_col = next(
+                        (c for c in ("b", "B_IMAGE") if c in df.columns), None
+                    )
+                    a_vals = pd.to_numeric(df[_a_col], errors="coerce")
+                    b_vals = pd.to_numeric(df[_b_col], errors="coerce")
+                    ok_ab = (a_vals >= _ab_min) & (b_vals >= _ab_min)
+                    ok_ab = ok_ab | a_vals.isna() | b_vals.isna()
+                    n_keep_ab = int(ok_ab.sum())
+                    min_keep_ab = max(
+                        min_psf_candidates,
+                        int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    )
+                    if n_keep_ab >= min_keep_ab:
+                        n_drop_ab = int((~ok_ab).sum())
+                        if n_drop_ab > 0:
+                            df = df[ok_ab].copy()
+                            log.info(
+                                "PSF A/B size cut (>= %.1f px): removed %d "
+                                "CR-like candidates (%d kept)",
+                                _ab_min, n_drop_ab, n_keep_ab,
+                            )
+                    else:
+                        log.info(
+                            "Skipping A/B size cut (>= %.1f px): would leave "
+                            "only %d candidates (< %d).",
+                            _ab_min, n_keep_ab, min_keep_ab,
                         )
 
             # ---- Sharpness cut ----
@@ -3734,7 +4121,32 @@ class PSF:
 
             save_path = os.path.join(write_dir, f"{filename_prefix}_{base}.fits")
             from functions import safe_fits_write
-            safe_fits_write(save_path, np.asarray(epsf.data, float), fits.Header())
+            # Record the ePSF grid convention so downstream consumers (ZOGY
+            # PSF stamps, ImagePSF reloads) can recover the native-pixel
+            # sampling.  Without OVERSAMP a 4x-oversampled stamp is read back
+            # as if it were a native-resolution PSF (4x too wide).
+            _psf_hdr = fits.Header()
+            try:
+                _osamp = int(np.atleast_1d(getattr(epsf, "oversampling", 1))[0])
+            except Exception:
+                _osamp = int(oversample)
+            _psf_hdr["OVERSAMP"] = (
+                _osamp, "ePSF oversampling factor (grid px per native px)"
+            )
+            _psf_hdr["PSFNPIX"] = (int(cutout_n), "ePSF native-pixel cutout size")
+            _psf_hdr["FWHM_PIX"] = (float(fwhm), "Image FWHM in native pixels")
+            _psf_hdr["NPSFSTAR"] = (int(n_epsf_stars), "Stars used in ePSF build")
+            _orig = getattr(epsf, "origin", None)
+            if _orig is not None:
+                _psf_hdr["PSFX0"] = (
+                    float(np.atleast_1d(_orig)[0]),
+                    "ePSF x origin (oversampled array coord)",
+                )
+                _psf_hdr["PSFY0"] = (
+                    float(np.atleast_1d(_orig)[-1]),
+                    "ePSF y origin (oversampled array coord)",
+                )
+            safe_fits_write(save_path, np.asarray(epsf.data, float), _psf_hdr)
             self._create_psf_visualization(
                 fitted_stars,
                 epsf,
@@ -3798,11 +4210,7 @@ class PSF:
             else:
                 vmin, vmax = np.nanmin(data), np.nanmax(data)
 
-            _style = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-            )
-            if os.path.exists(_style):
-                plt.style.use(_style)
+            apply_autophot_mplstyle()
             fig, ax = plt.subplots(figsize=set_size(540, 1))
             divider = make_axes_locatable(ax)
             ax_R = divider.append_axes("right", size="25%", pad=0.25, sharey=ax)
@@ -3917,11 +4325,7 @@ class PSF:
         block_height = span_2d + span_3d
         total_rows = max(nrows, block_height)
 
-        _style = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-        )
-        if os.path.exists(_style):
-            plt.style.use(_style)
+        apply_autophot_mplstyle()
         plt.ioff()
         fig = plt.figure(figsize=set_size(540, 1.3))
         # Centre the right-hand block: equal empty rows above and below
@@ -4822,8 +5226,11 @@ class PSF:
             # the most conservative (smallest) annulus that works for all sources.
             if is_target_fit:
                 _n_in_mask = int(np.count_nonzero(mask))
-                _xs = np.asarray(x_all[mask], float)
-                _ys = np.asarray(y_all[mask], float)
+                # `mask` indexes init_params (valid rows only), so use the
+                # already-filtered x/y arrays — x_all includes dropped rows
+                # and would misalign/IndexError the boolean index.
+                _xs = np.asarray(x[mask], float)
+                _ys = np.asarray(y[mask], float)
                 # Try primary annulus first
                 _inner_r, _outer_r = float(inner_r), float(outer_r)
                 _max_shrink = 3  # Number of shrink attempts
@@ -5183,8 +5590,16 @@ class PSF:
         results = []
         psfphot_last = None
 
-        if is_target_fit and len(init_params) > 1:
-            # ---- Single-call fit for all targets ---------------------------
+        if (is_target_fit and len(init_params) > 1) or not any_emcee_used:
+            # ---- Single-call fit ------------------------------------------
+            # When no tier uses MCMC (always the case for catalog fits —
+            # MCMC is restricted to target fits), a single PSFPhotometry call
+            # over all sources is both cheaper (one SourceGrouper pass, one
+            # background-model setup) and more correct: neighbours that fall
+            # in different SNR tiers are grouped and deblended jointly
+            # instead of being fit independently.  Multi-target fits must
+            # stay single-call because photutils only assigns group_id when
+            # multiple sources are passed together.
             all_mask = np.ones(len(init_params), dtype=bool)
             # Decide fitter: use MCMC if any target has SNR below threshold,
             # otherwise LSQ.  This keeps simultaneous fitting while still
@@ -6054,11 +6469,7 @@ class PSF:
             ncols = (
                 _n_target_cols + (1 if psfphot is not None else 0) + (1 if epsf is not None else 0)
             )
-            _style = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-            )
-            if os.path.exists(_style):
-                plt.style.use(_style)
+            apply_autophot_mplstyle()
             golden_ratio = (5**0.5 + 1) / 2
             width_in = 5.5 * ncols
             aspect = 5.0 * golden_ratio / width_in
@@ -6261,12 +6672,12 @@ class PSF:
                     _ax.plot(
                         np.column_stack([xf - r, xf + r]).T,
                         np.column_stack([yf, yf]).T,
-                        color="red", lw=1.2, alpha=0.9, zorder=11,
+                        color="#D94F4F", lw=1.2, alpha=0.9, zorder=11,
                     )
                     _ax.plot(
                         np.column_stack([xf, xf]).T,
                         np.column_stack([yf - r, yf + r]).T,
-                        color="red", lw=1.2, alpha=0.9, zorder=11,
+                        color="#D94F4F", lw=1.2, alpha=0.9, zorder=11,
                         label="Fitted position" if _tcol == 0 else None,
                     )
                     _ap_circles = [Circle((x, y), aperture_radius) for x, y in zip(xf, yf)]
@@ -6285,7 +6696,7 @@ class PSF:
                         ):
                             _ellipses.append(Ellipse((x, y), 2 * xe, 2 * ye, angle=0))
                     if _ellipses:
-                        ec = _PC(_ellipses, edgecolors="red", facecolors="none",
+                        ec = _PC(_ellipses, edgecolors="#D94F4F", facecolors="none",
                                   linewidths=0.5, alpha=0.6, zorder=9)
                         _ax.add_collection(ec)
 
@@ -6320,7 +6731,10 @@ class PSF:
                     _finite &= ~_mask_cut
                 _hx = np.nanmean(_cutout, axis=0)
                 _hy = np.nanmean(_cutout, axis=1)
-                _unc2 = np.asarray(_unc_cut, dtype=float) ** 2
+                _unc2 = np.nan_to_num(
+                    np.asarray(_unc_cut, dtype=float),
+                    nan=0.0, posinf=0.0, neginf=0.0,
+                ) ** 2
                 _unc2 = np.where(_finite, _unc2, 0.0)
                 _nc = np.sum(_finite, axis=0).astype(float)
                 _nr = np.sum(_finite, axis=1).astype(float)
@@ -6371,6 +6785,10 @@ class PSF:
                     norm=norm2,
                     interpolation=None,
                 )
+                # Same cutout window as the science panels so the residual
+                # stamp and its projections cover an identical x/y region.
+                ax2.set_xlim(x0, x1)
+                ax2.set_ylim(y0, y1)
                 _proj(ax2, ax2_R, ax2_B, second_image, draw_right=False)
 
                 # y-values for residual panel error shading (primary target zoom)
@@ -6384,7 +6802,14 @@ class PSF:
                 hy2 = np.nanmean(cutout2, axis=1)
                 # Recompute SE-of-mean using the same uncertainty map but the
                 # residual panel's finite mask (NaN patterns can differ).
-                unc2_2 = np.where(finite2, _primary_unc_cut, 0.0)
+                unc2_2 = np.where(
+                    finite2,
+                    np.nan_to_num(
+                        np.asarray(_primary_unc_cut, dtype=float),
+                        nan=0.0, posinf=0.0, neginf=0.0,
+                    ) ** 2,
+                    0.0,
+                )
                 n_col2 = np.sum(finite2, axis=0).astype(float)
                 n_row2 = np.sum(finite2, axis=1).astype(float)
                 with np.errstate(divide="ignore", invalid="ignore"):
@@ -6421,7 +6846,7 @@ class PSF:
                 # xlim/ylim from each panel's main axes to extract the
                 # correct zoom region from the full-image fitted_model.
                 for _sci_ax, _sci_ax_R, _sci_ax_B in _all_science_axes:
-                    _proj(_sci_ax, _sci_ax_R, _sci_ax_B, fitted_model, color="#FF0000")
+                    _proj(_sci_ax, _sci_ax_R, _sci_ax_B, fitted_model, color="#D94F4F")
                 idx += 1
 
             # ---- Panel 3: ePSF ---------------------------------------------
@@ -6472,7 +6897,7 @@ class PSF:
 
             for _ax, _ax_R, _ax_B in ax_list:
                 _ax_B.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
-                _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
+                _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=False))
             # Axis labels on profile panels (consistent with Aperture plot)
             ax1_B.set_xlabel("X position (pixels)")
             ax1_B.set_ylabel("Flux (e-)")
@@ -6662,6 +7087,7 @@ class PSF:
             )
             return None
 
+        apply_autophot_mplstyle()
         fig = corner.corner(
             samples,
             labels=labels,

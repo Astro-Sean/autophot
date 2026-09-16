@@ -2403,7 +2403,7 @@ class Catalog:
             from plotting_utils import (
                 apply_autophot_mplstyle, get_ransac_color, get_marker_size,
                 get_alpha, get_line_width, ransac_grid, ransac_savefig,
-                ransac_legend_top_outside, set_mag_axes_inverted_xy,
+                set_mag_axes_inverted_xy,
             )
 
             apply_autophot_mplstyle()
@@ -2426,7 +2426,7 @@ class Catalog:
                     ecolor="lightgrey",
                     markersize=get_marker_size('medium'),
                     alpha=get_alpha('medium'),
-                    capsize=0,
+                    capsize=get_marker_size('medium'),
                     elinewidth=0.4,
                     linestyle="None",
                     label=f"Outliers [{np.sum(ransac_outliers)}]",
@@ -2441,7 +2441,7 @@ class Catalog:
                     color=get_ransac_color('zeropoint_ap'),
                     ecolor="lightgrey",
                     alpha=get_alpha('dark'),
-                    capsize=0,
+                    capsize=get_marker_size('medium'),
                     elinewidth=0.4,
                     linestyle="None",
                     label=f"Inliers [{np.sum(ransac_inliers)}]",
@@ -2479,7 +2479,6 @@ class Catalog:
                         linestyle=":",
                         lw=get_line_width('thin'),
                         alpha=0.7,
-                        label=f"Linearity range: {min_flux:.1f}-{max_flux:.1f} flux",
                     )
                     ax1.axvline(
                         x=max_inst_mag,
@@ -2492,7 +2491,11 @@ class Catalog:
             ax1.set_xlabel(r"Instrumental $m_\mathrm{inst}$ [mag]")
             ax1.set_ylabel(rf"Catalog $m_\mathrm{{cal,{use_filter}}}$ [mag]")
             set_mag_axes_inverted_xy(ax1)
-            ransac_legend_top_outside(ax1, ncol=2)
+            ax1.legend(
+                loc="upper left", ncol=1, fontsize=8,
+                frameon=True, facecolor="white", framealpha=1.0,
+                edgecolor="black",
+            )
             ransac_grid(ax1)
             save_path = os.path.join(write_dir, f"Saturation_{base_name}.png")
             ransac_savefig(fig, save_path)
@@ -3092,11 +3095,8 @@ class Catalog:
             side_length = int(np.ceil(np.sqrt(num_stars)))
             ncols = side_length
             nrows = ceil(num_stars / ncols)
-            _style = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-            )
-            if os.path.exists(_style):
-                plt.style.use(_style)
+            from plotting_utils import apply_autophot_mplstyle
+            apply_autophot_mplstyle()
             plt.ioff()
             fpath = self.input_yaml["fpath"]
             base = os.path.basename(fpath)
@@ -3148,15 +3148,14 @@ class Catalog:
             ax_right.step(
                 radii,
                 median_profile,
-                color="#FF0000",
+                color="#D94F4F",
                 linewidth=0.5,
                 label="Median\nRadial\nProfile",
             )
             ax_right.set_xlabel("Radius [pixels]")
             ax_right.set_ylabel("Normalized Flux")
             ax_right.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
-                            frameon=True, facecolor="white", framealpha=1.0,
-                            edgecolor="black", fontsize=8)
+                            frameon=False, fontsize=8)
             ax_right.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
             ax_right.ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
             pos = ax_right.get_position()
