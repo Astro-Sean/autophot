@@ -7,15 +7,13 @@
 
 # AutoPhOT: Automated Photometry Of Transients
 
-AutoPhOT is a photometric pipeline for transient and variable source follow-up. Built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/), it provides automated aperture and PSF photometry, catalogue calibration, WCS solving, and optional template subtraction.
+AutoPhOT is a photometry pipeline for following up transients and variable sources. It is built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/), and provides aperture and PSF photometry, catalogue calibration, WCS solving, and optional template subtraction.
 
-Unlike general-purpose reduction pipelines that stack data from a single instrument, AutoPhOT is **target-centric**: it ingests FITS frames from any telescopes, filters, and pixel scales, locates the target in each, and produces a single calibrated light curve.
+Most reduction pipelines stack data from a single instrument. AutoPhOT does the opposite: it takes FITS frames from any telescope, filter, and pixel scale, finds the target in each frame, and produces a single calibrated light curve.
 
-## Quick Links
-
-- **Conda Package**: [anaconda.org/astro-sean/autophot](https://anaconda.org/astro-sean/autophot)
-- **Paper**: [A&A 667, A62 (2022)](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
-- **Issues**: [GitHub Issues](https://github.com/Astro-Sean/autophot/issues)
+- Conda package: [anaconda.org/astro-sean/autophot](https://anaconda.org/astro-sean/autophot)
+- Paper: [A&A 667, A62 (2022)](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
+- Issues: [GitHub Issues](https://github.com/Astro-Sean/autophot/issues)
 
 > [!NOTE]
 > I am the sole developer and maintainer of AutoPhOT and also a [full-time researcher](https://astro-sean.github.io/index.html) at [MPE](https://www.mpe.mpg.de/person/144270/1302618).
@@ -42,33 +40,32 @@ Unlike general-purpose reduction pipelines that stack data from a single instrum
 
 ---
 
-## Pipeline Stages
+## What the pipeline does
 
-1. **Ingestion & WCS** — Sort frames by telescope/instrument/filter. Verify or re-solve WCS using `astrometry.net` with Gaia DR3 cross-matching. Handles SIP/TPV distortion.
-2. **Image preparation** — Cosmic-ray rejection, satellite-streak detection, background estimation, and FWHM measurement per frame. Adaptive thresholds for sparse and crowded fields.
-3. **Photometry** — Aperture and PSF photometry at the target position. PSF models built from in-frame stars via `photutils` ePSFBuilder. Three fitters: least-squares (default), Poisson likelihood, and MCMC (`emcee`).
-4. **Calibration** — Zero points from user-selectable catalogs (Gaia DR3, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and more). Per-filter catalog routing and Gaia XP synthetic photometry.
-5. **Template subtraction** (optional) — Align science and template images, then subtract using SFFT, HOTPANTS, or ZOGY with automatic fallback.
-6. **Limiting magnitudes** — Source injection and recovery at multiple S/N thresholds (default 3σ and 5σ) for robust upper limits.
+1. Sorts frames by telescope, instrument, and filter, then checks or re-solves the WCS using `astrometry.net` with Gaia DR3 cross-matching. SIP and TPV distortion are handled.
+2. Prepares each image: cosmic-ray rejection, satellite-streak detection, background estimation, and FWHM measurement. Thresholds adapt for sparse and crowded fields.
+3. Runs aperture and PSF photometry at the target position. The PSF model is built from in-frame stars using `photutils` ePSFBuilder. Three fitters are available: least-squares (default), Poisson likelihood, and MCMC (`emcee`).
+4. Calibrates against a catalogue (Gaia DR3, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and others). Different catalogues can be assigned to different filter groups in a single run, and Gaia XP synthetic photometry is supported.
+5. Optionally subtracts a template using SFFT, HOTPANTS, or ZOGY, with automatic fallback between methods.
+6. Measures limiting magnitudes by injecting and recovering artificial sources at 3σ and 5σ.
 
-### Key features
+Other things worth knowing:
 
-- **Multi-instrument** — Combine data from many facilities into one light curve.
-- **Cascaded alignment** — Six methods (spalipy, SWarp, reproject, AstroAlign, tweakwcs, chi2_shift) with automatic fallback and FWHM-scaled quality gates.
-- **Inverted-fit detection** — Detects fading sources as negative PSF dips in difference images.
-- **Poisson likelihood fitting** — Statistically superior to χ² for low-count photometry (Fermilab TM-2543-AE).
-- **Adaptive MCMC** — emcee with adaptive chain length, principled burn-in, and full covariance extraction.
-- **Gaia XP synthetic photometry** — Calibrate directly against Gaia DR3 XP spectra with custom transmission curves.
-- **TNS integration** — Automatic coordinate and redshift lookup from the Transient Name Server.
-- **Per-filter catalog routing** — Assign different catalogs to different filter groups in a single run.
+- Data from many facilities can be combined into one light curve.
+- Up to six alignment methods (spalipy, SWarp, reproject, AstroAlign, tweakwcs, chi2_shift) are tried in turn, with quality gates scaled to the image FWHM.
+- On difference images, a fading source can be picked up as a negative PSF dip (inverted-fit detection).
+- A Poisson-likelihood fitter is available for low-count photometry, where it behaves better than χ² (Fermilab TM-2543-AE).
+- The emcee fitter adapts its chain length on the fly and extracts the full parameter covariance.
+- Calibration can be done directly against Gaia DR3 XP spectra with custom transmission curves.
+- Target coordinates and redshifts can be looked up automatically from the Transient Name Server.
 
 ---
 
 ## Installation
 
-### Conda (Recommended)
+### Conda (recommended)
 
-AutoPhOT requires the `conda-forge` channel and has 20+ conda dependencies. Install the fast libmamba solver first to avoid slow dependency resolution:
+AutoPhOT needs the `conda-forge` channel and has 20+ conda dependencies. Install the fast libmamba solver first to avoid slow dependency resolution:
 
 ```bash
 # One-time: install the fast solver
@@ -77,10 +74,10 @@ conda config --set solver libmamba
 ```
 
 ```bash
-# Method 1: Install into an existing env
+# Method 1: install into an existing env
 conda install -c conda-forge -c astro-sean autophot
 
-# Method 2: Create a dedicated environment
+# Method 2: create a dedicated environment
 conda create -n autophot -c conda-forge -c astro-sean python=3.11 autophot
 conda activate autophot
 ```
@@ -99,7 +96,7 @@ mamba create -n autophot -c conda-forge -c astro-sean python=3.11 autophot
 conda activate autophot
 ```
 
-Verify:
+Check the install worked:
 
 ```bash
 python -c "from autophot import AutomatedPhotometry; print('AutoPhOT import OK')"
@@ -108,7 +105,7 @@ autophot-main -h
 
 ### From source (developer)
 
-**Option A: Editable pip install**
+**Option A: editable pip install**
 
 ```bash
 git clone https://github.com/Astro-Sean/autophot.git
@@ -117,9 +114,9 @@ pip install -e .
 pip install sfft==1.7.3 sip_tpv==1.1  # not on conda
 ```
 
-**Option B: Full conda environment (reproducible)**
+**Option B: full conda environment (reproducible)**
 
-The `environment.yml` pins all dependency versions:
+`environment.yml` pins all dependency versions:
 
 ```bash
 git clone https://github.com/Astro-Sean/autophot.git
@@ -137,7 +134,7 @@ pip install -e .
 
 ## Testing
 
-The repository includes 186 tests covering core functions, data validation, PSF validation, uncertainty calibration, MCMC diagnostics, injection/recovery, quality flags, and regression. Tests use synthetic data (no external data required).
+There are 186 tests covering the core functions, data validation, PSF validation, uncertainty calibration, MCMC diagnostics, injection/recovery, quality flags, and regressions. Everything runs on synthetic data, so no external images are needed.
 
 ```bash
 pip install -e ".[test]"    # install test dependencies
@@ -162,7 +159,7 @@ output_file = AutomatedPhotometry.run_photometry(default_input=config)
 print(f"Results saved to: {output_file}")
 ```
 
-List all configurable parameters:
+To list every configurable parameter:
 
 ```python
 from autophot import list_parameters
@@ -186,14 +183,14 @@ list_parameters()
 
 ### Astrometry.net (`solve-field`)
 
-For WCS solving when FITS headers lack astrometry:
+Needed for WCS solving when the FITS headers have no astrometry:
 
 ```bash
 conda install conda-forge::astrometry
 # or: sudo apt install astrometry.net
 ```
 
-Download index files from the [astrometry.net website](https://astrometry.net/data.html).
+Index files can be downloaded from the [astrometry.net website](https://astrometry.net/data.html).
 
 ### Astromatic Suite (SExtractor, SCAMP, SWarp)
 
@@ -219,7 +216,7 @@ cd hotpants && make
 
 ## Alignment Methods
 
-AutoPhOT aligns the template to the science image before subtraction. Six methods are available. The default is `spalipy` (best sub-pixel accuracy). Setting `alignment_method` to a specific method uses only that method, with fallback to the cascade on failure.
+Before subtraction the template has to be aligned to the science image. Six methods are available; `spalipy` is the default and usually gives the best sub-pixel accuracy. If you set `alignment_method` to a specific method it is tried first, and the pipeline falls back to the rest of the cascade if it fails.
 
 | Method | `alignment_method` | Install | Typical RMS | Speed |
 |--------|---------------------|---------|-------------|-------|
@@ -241,7 +238,7 @@ Install all optional alignment methods at once:
 pip install -e ".[spalipy,tweakwcs,chi2-shift]"
 ```
 
-Configurable alignment quality gates (reject and fall back to next method if exceeded):
+There are also quality gates on the alignment: if a method exceeds any of these, it is rejected and the next method is tried.
 
 ```yaml
 template_subtraction:
@@ -256,19 +253,19 @@ template_subtraction:
 
 ## PSF Photometry
 
-AutoPhOT builds an empirical ePSF model from in-frame stars using `photutils` ePSFBuilder, with adaptive oversampling for undersampled images (FWHM < 2.5 px).
+AutoPhOT builds an empirical ePSF model from in-frame stars using `photutils` ePSFBuilder. For undersampled images (FWHM < 2.5 px) the oversampling factor is increased automatically.
 
 ### Fitters
 
 | Fitter | Config key | Use case |
 |--------|-----------|----------|
 | **Least-squares** (default) | — | Fast, general-purpose |
-| **Poisson likelihood** | `use_poisson_likelihood_fitter: True` | Low-count regime; superior to χ² (Fermilab TM-2543-AE) |
-| **MCMC (emcee)** | `perform_emcee_fitting_s2n: 10` | Bayesian uncertainties; triggered when target S/N < threshold |
+| **Poisson likelihood** | `use_poisson_likelihood_fitter: True` | Low-count regime; behaves better than χ² (Fermilab TM-2543-AE) |
+| **MCMC (emcee)** | `perform_emcee_fitting_s2n: 10` | Bayesian uncertainties; runs when the target S/N drops below the threshold |
 
 ### MCMC configuration
 
-The emcee fitter runs adaptively — it extends the chain until autocorrelation time stabilises (up to 50,000 steps), then applies principled burn-in (10×τ discard) and thinning.
+The emcee fitter is adaptive: the chain is extended until the autocorrelation time stabilises (up to 50,000 steps), then 10×τ is discarded as burn-in and the chain is thinned.
 
 ```yaml
 photometry:
@@ -283,22 +280,22 @@ photometry:
   emcee_threads: 1
 ```
 
-When `emcee_store_samples` is enabled, a corner plot is saved as `PSF_MCMC_corner_*.png`.
+With `emcee_store_samples` enabled, a corner plot is saved as `PSF_MCMC_corner_*.png`.
 
 ### Inverted-fit detection
 
-For difference images where the transient appears as a negative residual (fading source), AutoPhOT can fit the target on a sign-flipped image:
+On difference images a fading transient shows up as a negative residual. AutoPhOT can fit the target on a sign-flipped copy of the image:
 
 ```yaml
 photometry:
   check_inverted_image: True
 ```
 
-Results are flagged with an `_inverted_fit` column.
+These results are flagged with an `_inverted_fit` column.
 
 ### PSF star selection
 
-PSF stars are selected via SExtractor detection with quality cuts on saturation, elongation, isolation, FWHM fraction, and CLASS_STAR. FFT-based rejection removes stars with close companions.
+PSF stars come from a SExtractor detection run, followed by quality cuts on saturation, elongation, isolation, FWHM fraction, and CLASS_STAR. An FFT-based check removes stars with close companions.
 
 ```yaml
 photometry:
@@ -322,7 +319,7 @@ photometry:
 
 | Method | `method` value | Install | Notes |
 |--------|---------------|---------|-------|
-| **SFFT** | `sfft` | `pip install sfft==1.7.3` | Default; noise decorrelation, B-spline kernel, variable-star rejection |
+| **SFFT** | `sfft` | `pip install sfft==1.7.3` | Default; supports noise decorrelation, B-spline kernel, variable-star rejection |
 | **HOTPANTS** | `hotpants` | Build from source | Classic kernel-matching algorithm |
 | **ZOGY** | `zogy` | Auto-downloaded from [pmvreeswijk/ZOGY](https://github.com/pmvreeswijk/ZOGY) | PSF-matched subtraction; propagates noise correctly |
 
@@ -344,7 +341,7 @@ template_subtraction:
 
 ### Template inpainting
 
-Saturated star cores in the template can be inpainted before subtraction to prevent artifacts:
+Saturated star cores in the template can be inpainted before subtraction to stop them leaving artifacts in the difference image:
 
 ```yaml
 template_subtraction:
@@ -358,7 +355,7 @@ template_subtraction:
 
 ## Limiting Magnitudes
 
-AutoPhOT computes limiting magnitudes via source injection and recovery at multiple S/N thresholds. The default produces `Limit_3p0S2N` and `Limit_5p0S2N` columns.
+Limiting magnitudes are measured by injecting artificial sources into the image and checking which ones are recovered, at one or more S/N thresholds. The defaults produce `Limit_3p0S2N` and `Limit_5p0S2N` columns.
 
 ```yaml
 limiting_magnitude:
@@ -442,25 +439,19 @@ generate_photometry_table(output_file, snr_limit=3, method="PSF")
 check_detection_plots(detections_loc, method="PSF")
 ```
 
-Output notes:
-- The default CSV (`lightcurve_output.csv`) is **long-form**: one row per image with a `filter` column.
-- Multi-S/N limit columns (e.g., `Limit_3p0S2N`, `Limit_5p0S2N`) are generated automatically.
+A few notes on the outputs:
+
+- The default CSV (`lightcurve_output.csv`) is long-form: one row per image with a `filter` column.
+- Multi-S/N limit columns (e.g. `Limit_3p0S2N`, `Limit_5p0S2N`) are generated automatically.
 - Inverted-fit results are flagged with an `_inverted_fit` boolean column.
-- Lightcurve x-axes are MJD by default; for data spanning < 1 day the axis
-  automatically switches to minutes or hours since the first observation
-  (e.g. `Time since 9th August 9:00pm UTC [hr]`).
-- `plot_variability_check` writes `VariabilityCheck_<method>.png` next to the
-  photometry CSV. It reads the per-image `Calib_*.csv` catalogs, subtracts
-  each epoch's reference-ensemble mean instrumental magnitude (common-mode
-  instrumental/atmospheric drift) from the target and reference stars, and
-  plots the residuals — flat target residuals within the reference scatter
-  mean the apparent variability was instrumental.
+- Lightcurve x-axes are in MJD by default. For data spanning less than a day the axis switches to minutes or hours since the first observation (e.g. `Time since 9th August 9:00pm UTC [hr]`).
+- `plot_variability_check` writes `VariabilityCheck_<method>.png` next to the photometry CSV. It reads the per-image `Calib_*.csv` catalogs, subtracts each epoch's reference-ensemble mean instrumental magnitude (common-mode instrumental/atmospheric drift) from the target and the reference stars, and plots the residuals. If the target residuals sit inside the reference scatter, the apparent variability was instrumental rather than real.
 
 ---
 
 ## Environment Variables
 
-For TNS lookups and RefCAT2 access (do not hard-code in scripts):
+Needed for TNS lookups and RefCAT2 access. Don't hard-code these in scripts:
 
 ```bash
 export MASTCASJOBS_WSID="..."
@@ -539,9 +530,9 @@ generate_photometry_table(output, snr_limit=3, method="PSF")
 
 ### Preparing template-subtracted photometry
 
-1. Set `do_subtraction = True`, choose `method` (`sfft`, `hotpants`, `zogy`) and `alignment_method` (`spalipy` default).
+1. Set `do_subtraction = True` and choose a `method` (`sfft`, `hotpants`, `zogy`) and `alignment_method` (`spalipy` by default).
 2. Call `prepare_template_directory(...)` to create the folder structure.
-3. Place one template FITS per filter in `fits_dir/templates/<filter>_template/`.
+3. Put one template FITS per filter in `fits_dir/templates/<filter>_template/`.
 4. Run photometry.
 
 ---
