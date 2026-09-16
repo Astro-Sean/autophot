@@ -295,6 +295,93 @@ def _resolve_n_jobs(n_jobs, half_cpus=False):
 # Module-level worker functions  (MUST be at module scope for pickle)
 # ===========================================================================
 
+# Shared per-worker state: the full image, error map, phot table, masks, and
+# all aperture/annulus masks are broadcast ONCE via Pool(initializer=...)
+# instead of being pickled into every per-source task.
+_AP_CTX: dict = {}
+
+
+def _measure_init_shared(
+    aperture_masks, annulus_masks, image_e, error, read_noise_sq,
+    inv_exposure_time, area, phot, gain, enforce_nonnegative_local_bkg,
+    verbose, defects_mask,
+):
+    _AP_CTX.update(
+        aperture_masks=aperture_masks,
+        annulus_masks=annulus_masks,
+        image_e=image_e,
+        error=error,
+        read_noise_sq=read_noise_sq,
+        inv_exposure_time=inv_exposure_time,
+        area=area,
+        phot=phot,
+        gain=gain,
+        enforce_nonnegative_local_bkg=enforce_nonnegative_local_bkg,
+        verbose=verbose,
+        defects_mask=defects_mask,
+    )
+
+
+def _measure_worker_shared(i):
+    """Pool entry point: only the source index is pickled per task."""
+    c = _AP_CTX
+    return _measure_worker(
+        (
+            i,
+            c["aperture_masks"],
+            c["annulus_masks"],
+            c["image_e"],
+            c["error"],
+            c["read_noise_sq"],
+            c["inv_exposure_time"],
+            c["area"],
+            c["phot"],
+            c["gain"],
+            c["enforce_nonnegative_local_bkg"],
+            c["verbose"],
+            c["defects_mask"],
+        )
+    )
+
+
+def _optimum_radius_init_shared(
+    fwhm, radii, image, error, norm_factor, stability_threshold,
+    use_moffat_cog, moffat_beta, mask,
+):
+    _AP_CTX.update(
+        opt_fwhm=fwhm,
+        opt_radii=radii,
+        opt_image=image,
+        opt_error=error,
+        opt_norm_factor=norm_factor,
+        opt_stability_threshold=stability_threshold,
+        opt_use_moffat_cog=use_moffat_cog,
+        opt_moffat_beta=moffat_beta,
+        opt_mask=mask,
+    )
+
+
+def _optimum_radius_worker_shared(args):
+    """Pool entry point: only (idx, x_pix, y_pix) is pickled per task."""
+    idx, x_pix, y_pix = args
+    c = _AP_CTX
+    return _optimum_radius_worker(
+        (
+            idx,
+            x_pix,
+            y_pix,
+            c["opt_fwhm"],
+            c["opt_radii"],
+            c["opt_image"],
+            c["opt_error"],
+            c["opt_norm_factor"],
+            c["opt_stability_threshold"],
+            c["opt_use_moffat_cog"],
+            c["opt_moffat_beta"],
+            c["opt_mask"],
+        )
+    )
+
 
 def _measure_worker(args):
     """
@@ -387,11 +474,17 @@ def _measure_worker(args):
         # On science images with real sky background, exact 0.0 ADU is unphysical;
         # on difference images the sky is already subtracted to ~0 but has noise,
         # so zero-variance zeros are still SWarp padding, not real pixels.
+        n_annulus_total = bkg_pix.size  # before NaN/zero filtering
         bkg_pix = bkg_pix[np.isfinite(bkg_pix)]
         bkg_pix = bkg_pix[bkg_pix != 0.0]
-        # Require at least 50% of annulus pixels to be valid for background estimation
+        # Require at least 50% of *annulus* pixels to be valid for background
+        # estimation, with an absolute floor of 10 pixels (a heavily clipped
+        # edge annulus could otherwise pass with a handful of pixels).
+        # NOTE: the denominator must be the annulus pixel count, not the
+        # aperture count — the annulus is typically ~4-6x larger, so using
+        # len(ap_pix) here would accept sites with only ~10% valid annulus.
         annulus_valid_fraction = 0.5
-        if bkg_pix.size < (len(ap_pix) * annulus_valid_fraction):
+        if bkg_pix.size < max(10.0, annulus_valid_fraction * n_annulus_total):
             return {"idx": i, "fail_reason": "annulus_too_many_nans"}
 
         if ap_pix.size == 0:
@@ -434,7 +527,15 @@ def _measure_worker(args):
         # when available; otherwise fall back to a simple Poisson+sky+read-noise
         # approximation based on the empirical background standard deviation.
         sqrt_var = np.nan
-        if ap_err_pix is not None:
+        # Preferred path: photutils' aperture_sum_err, which uses the same
+        # fractional-pixel (exact) aperture geometry as raw_aperture_sum.
+        # The center-mask error sum below drops edge pixels entirely and
+        # undercounts the aperture noise by ~perimeter/area.
+        if error is not None and "aperture_sum_err" in phot.columns:
+            _ase = row.get("aperture_sum_err", np.nan)
+            if np.isfinite(_ase) and _ase > 0:
+                sqrt_var = float(_ase)
+        if not np.isfinite(sqrt_var) and ap_err_pix is not None:
             # error array is in electrons; propagate by summing variances.
             # Use only finite values to avoid contamination from bad pixels
             ap_err_finite = ap_err_pix[np.isfinite(ap_err_pix)]
@@ -491,11 +592,13 @@ def _measure_worker(args):
 
         # maxPixel_err is the uncertainty of a SINGLE pixel (the brightest
         # pixel in the aperture), not the aperture sum.  The variance of a
-        # single pixel is Poisson(|raw_max|) + sky_var (which already
-        # includes read noise via empirical_std).
+        # single pixel is source_e + sky_e + read^2 ~ |max_val| + std^2
+        # (max_val = raw_max - bkg is the sky-subtracted peak; empirical_std^2
+        # already contains sky+read noise).  Using |raw_max| here would
+        # double-count the sky term (raw_max ~ source + sky).
         # Do NOT scale sky by aperture area (that would overestimate by
         # sqrt(area) and bias the m_peak_err weights in FWHM fitting).
-        max_flux_err = np.sqrt(np.abs(raw_max) + empirical_std**2) * inv_exposure_time
+        max_flux_err = np.sqrt(np.abs(max_val) + empirical_std**2) * inv_exposure_time
 
         return {
             "idx": i,
@@ -991,31 +1094,49 @@ class Aperture:
 
         n_jobs = _resolve_n_jobs(n_jobs, half_cpus=True)
 
-        # ---- Build argument list -------------------------------------------
-        args_list = [
-            (
-                i,
-                aperture_masks,
-                annulus_masks,
-                image_e,
-                error,
-                read_noise_sq,
-                inv_exp_time,
-                area,
-                phot,
-                gain,
-                enforce_nonnegative_local_bkg,
-                verbose,
-                mask,
-            )
-            for i in range(len(sources))
-        ]
-
         # ---- Dispatch (parallel for large catalogs) ------------------------
+        # Pooled path: broadcast shared state once per worker via initializer;
+        # only the source index is pickled per task (image/masks/phot can be
+        # tens of MB — pickling them per task dominates runtime otherwise).
         if len(sources) >= NSOURCES:
-            with Pool(processes=n_jobs) as pool:
-                results = pool.map(_measure_worker, args_list)
+            with Pool(
+                processes=n_jobs,
+                initializer=_measure_init_shared,
+                initargs=(
+                    aperture_masks,
+                    annulus_masks,
+                    image_e,
+                    error,
+                    read_noise_sq,
+                    inv_exp_time,
+                    area,
+                    phot,
+                    gain,
+                    enforce_nonnegative_local_bkg,
+                    verbose,
+                    mask,
+                ),
+            ) as pool:
+                results = pool.map(_measure_worker_shared, range(len(sources)))
         else:
+            args_list = [
+                (
+                    i,
+                    aperture_masks,
+                    annulus_masks,
+                    image_e,
+                    error,
+                    read_noise_sq,
+                    inv_exp_time,
+                    area,
+                    phot,
+                    gain,
+                    enforce_nonnegative_local_bkg,
+                    verbose,
+                    mask,
+                )
+                for i in range(len(sources))
+            ]
             results = [_measure_worker(a) for a in args_list]
 
         # ---- Batch update DataFrame (one dict -> update is much faster) -----
@@ -1197,10 +1318,8 @@ class Aperture:
         """
         logger = logging.getLogger(__name__)
         plt.ioff()
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        style = os.path.join(dir_path, "autophot.mplstyle")
-        if os.path.exists(style):
-            plt.style.use(style)
+        from plotting_utils import apply_autophot_mplstyle
+        apply_autophot_mplstyle()
 
         fpath = self.input_yaml["fpath"]
         write_dir = os.path.dirname(fpath)
@@ -1297,8 +1416,8 @@ class Aperture:
                 cy_local = cy - y_min
                 for radius, color, ls in [
                     (ap_size, "#00AA00", "-"),
-                    (annulusIN, "#FF0000", "--"),
-                    (annulusOUT, "#FF0000", "--"),
+                    (annulusIN, "#D94F4F", "--"),
+                    (annulusOUT, "#D94F4F", "--"),
                 ]:
                     ax_main.add_patch(
                         Circle((cx_local, cy_local), radius, ec=color, fc="none", lw=0.5, ls=ls)
@@ -1323,8 +1442,8 @@ class Aperture:
             cy_local = cy - y_min
             for radius, color, ls in [
                 (ap_size, "#00AA00", "-"),
-                (annulusIN, "#FF0000", "--"),
-                (annulusOUT, "#FF0000", "--"),
+                (annulusIN, "#D94F4F", "--"),
+                (annulusOUT, "#D94F4F", "--"),
             ]:
                 ax_main.add_patch(
                     Circle(
@@ -1332,7 +1451,7 @@ class Aperture:
                         radius,
                         ec=color,
                         fc="none",
-                        lw=0.6 if color == "#FF0000" else 0.5,
+                        lw=0.6 if color == "#D94F4F" else 0.5,
                         ls=ls,
                         zorder=5,
                     )
@@ -1376,7 +1495,10 @@ class Aperture:
                 finite &= ~np.asarray(zoom_mask, dtype=bool)
             hx = np.nanmean(zoom_image, axis=0)
             hy = np.nanmean(zoom_image, axis=1)
-            err2 = np.asarray(zoom_error, dtype=float) ** 2
+            err2 = np.nan_to_num(
+                np.asarray(zoom_error, dtype=float),
+                nan=0.0, posinf=0.0, neginf=0.0,
+            ) ** 2
             err2 = np.where(finite, err2, 0.0)
             n_col = np.sum(finite, axis=0).astype(float)
             n_row = np.sum(finite, axis=1).astype(float)
@@ -1431,7 +1553,7 @@ class Aperture:
             ax_right.set_xlabel("Flux (e-)")
             ax_right.yaxis.set_label_position("right")
             ax_bottom.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
-            ax_right.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
+            ax_right.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=False))
 
             # Add legend to the first panel only
             if col_idx == 0:
@@ -1439,7 +1561,7 @@ class Aperture:
                 from matplotlib.patches import Patch as _Patch
                 _legend_handles = [
                     _Patch(facecolor="none", edgecolor="#00AA00", lw=0.5, label="Aperture"),
-                    _Patch(facecolor="none", edgecolor="#FF0000", lw=0.5, ls="--", label="Annulus"),
+                    _Patch(facecolor="none", edgecolor="#D94F4F", lw=0.5, ls="--", label="Annulus"),
                 ]
                 # Add target name entries
                 for _ti, _tname in enumerate(target_names):
@@ -1488,10 +1610,8 @@ class Aperture:
         """
         logger = logging.getLogger(__name__)
         plt.ioff()
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        style = os.path.join(dir_path, "autophot.mplstyle")
-        if os.path.exists(style):
-            plt.style.use(style)
+        from plotting_utils import apply_autophot_mplstyle
+        apply_autophot_mplstyle()
 
         fpath = self.input_yaml["fpath"]
         write_dir = os.path.dirname(fpath)
@@ -1562,8 +1682,8 @@ class Aperture:
 
             for radius, color, ls in [
                 (ap_size, "#00AA00", "-"),
-                (annulusIN, "#FF0000", "--"),
-                (annulusOUT, "#FF0000", "--"),
+                (annulusIN, "#D94F4F", "--"),
+                (annulusOUT, "#D94F4F", "--"),
             ]:
                 ax_main.add_patch(
                     Circle((cx_local, cy_local), radius, ec=color, fc="none", lw=0.5, ls=ls)
@@ -1606,8 +1726,8 @@ class Aperture:
 
         for radius, color, ls in [
             (ap_size, "#00AA00", "-"),
-            (annulusIN, "#FF0000", "--"),
-            (annulusOUT, "#FF0000", "--"),
+            (annulusIN, "#D94F4F", "--"),
+            (annulusOUT, "#D94F4F", "--"),
         ]:
             ax_main.add_patch(
                 Circle(
@@ -1615,7 +1735,7 @@ class Aperture:
                     radius,
                     ec=color,
                     fc="none",
-                    lw=0.6 if color == "#FF0000" else 0.5,
+                    lw=0.6 if color == "#D94F4F" else 0.5,
                     ls=ls,
                     zorder=5,
                 )
@@ -1638,7 +1758,10 @@ class Aperture:
 
         # Variance of the mean profile: Var(mean) = sum(sigma_i^2) / N^2 for finite pixels.
         # Use the image finite mask so masked/no-data pixels do not dilute uncertainties.
-        err2 = np.asarray(zoom_error, dtype=float) ** 2
+        err2 = np.nan_to_num(
+            np.asarray(zoom_error, dtype=float),
+            nan=0.0, posinf=0.0, neginf=0.0,
+        ) ** 2
         err2 = np.where(finite, err2, 0.0)
         n_col = np.sum(finite, axis=0).astype(float)
         n_row = np.sum(finite, axis=1).astype(float)
@@ -1716,7 +1839,7 @@ class Aperture:
         ax_right.set_xlabel(ylabel)
         ax_right.yaxis.set_label_position("right")
         ax_bottom.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
-        ax_right.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
+        ax_right.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=False))
 
         label = base if saveTarget else index
         save_name = (
@@ -1751,6 +1874,9 @@ class Aperture:
         # *length* of the boolean array (always == len(y)), never the count
         # of True entries.  Fixed to `.any()`.
         if not nan_mask.any():
+            return y
+        # interp1d(kind="linear") requires at least two valid points.
+        if int(np.count_nonzero(~nan_mask)) < 2:
             return y
 
         interp = interp1d(
@@ -1900,29 +2026,50 @@ class Aperture:
         )
 
         # ---- Parallel CoG analysis -----------------------------------------
-        args_list = [
-            (
-                idx,
-                row["x_pix"],
-                row["y_pix"],
-                fwhm,
-                radii,
-                self.image,
-                error,
-                norm_factor,
-                stability_threshold,
-                use_moffat_cog,
-                moffat_beta,
-                mask,
-            )
-            for idx, row in sources.iterrows()
-        ]
-
         if n_sources < NSOURCES:
+            args_list = [
+                (
+                    idx,
+                    row["x_pix"],
+                    row["y_pix"],
+                    fwhm,
+                    radii,
+                    self.image,
+                    error,
+                    norm_factor,
+                    stability_threshold,
+                    use_moffat_cog,
+                    moffat_beta,
+                    mask,
+                )
+                for idx, row in sources.iterrows()
+            ]
             results = [_optimum_radius_worker(a) for a in args_list]
         else:
-            with Pool(processes=n_jobs) as pool:
-                results = pool.map(_optimum_radius_worker, args_list)
+            # Broadcast image/error/radii once per worker; only (idx, x, y) is
+            # pickled per task.
+            with Pool(
+                processes=n_jobs,
+                initializer=_optimum_radius_init_shared,
+                initargs=(
+                    fwhm,
+                    radii,
+                    self.image,
+                    error,
+                    norm_factor,
+                    stability_threshold,
+                    use_moffat_cog,
+                    moffat_beta,
+                    mask,
+                ),
+            ) as pool:
+                results = pool.map(
+                    _optimum_radius_worker_shared,
+                    [
+                        (idx, row["x_pix"], row["y_pix"])
+                        for idx, row in sources.iterrows()
+                    ],
+                )
 
         # ---- Collect results -----------------------------------------------
         # KEY OPTIMISATION: profiles are already in `results`; no second Pool
@@ -2302,8 +2449,21 @@ class Aperture:
                         fine_profile = np.clip(fine_profile, 0.0, 1.0)
                         fine_profile = np.maximum.accumulate(fine_profile)
                     
-                    # Refine optimum radius from smoothed profile
+                    # Refine optimum radius from smoothed profile.  np.interp
+                    # silently returns fine_r[-1] if the profile never reaches
+                    # aperture_norm_factor — detect that and warn.
                     r_target_pix = np.interp(aperture_norm_factor, fine_profile, fine_r)
+                    if (
+                        float(np.nanmax(fine_profile)) < aperture_norm_factor
+                    ):
+                        logger.warning(
+                            "Median CoG never reaches %.0f%% encircled flux "
+                            "(max=%.3f); optimum radius saturated at the search "
+                            "limit (%.2f FWHM).",
+                            100.0 * aperture_norm_factor,
+                            float(np.nanmax(fine_profile)),
+                            float(radii[-1] / fwhm),
+                        )
                     if np.isfinite(r_target_pix) and r_target_pix > 0:
                         optimum_radius = float(r_target_pix / fwhm)
             except Exception as exc:
@@ -2319,9 +2479,9 @@ class Aperture:
         # ---- Plotting (reuses profiles already in profiles_map) ------------
         if plot:
             # No second Pool - profiles were computed in the analysis pass.
-            dir_path = os.path.dirname(os.path.realpath(__file__))
+            from plotting_utils import apply_autophot_mplstyle
             try:
-                plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+                apply_autophot_mplstyle()
             except Exception:
                 pass
 
@@ -2344,8 +2504,7 @@ class Aperture:
                     ax1.plot(radii / fwhm, prof, color="grey", alpha=0.3, lw=0.5)
 
             if fine_r is not None:
-                ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black",
-                         label="Median profile")
+                ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black")
 
             ax1.axvline(
                 global_optimum_pre, color="black", ls=":",
@@ -2367,12 +2526,6 @@ class Aperture:
             )
             ax1.set_ylabel("Normalized Flux")
             plt.setp(ax1.get_xticklabels(), visible=False)
-            # Legend below the plot, no title overlap
-            ax1.legend(
-                loc="lower center", bbox_to_anchor=(0.5, 1.0),
-                frameon=True, facecolor="white", framealpha=1.0,
-                edgecolor="black", fontsize=8, ncol=3,
-            )
 
             per_source = (
                 sources.loc[list(kept_set), "optimum_radius"].values
@@ -2434,12 +2587,7 @@ class Aperture:
             ax1.set_ylim(-0.05, 1.05)
             ax1.set_xlim(-0.05, max_radius + 0.05)
 
-            fig.suptitle(
-                "Optimum Aperture Radius",
-                fontsize=9,
-                y=0.98,
-            )
-            fig.tight_layout(rect=[0, 0, 1, 0.93])
+            fig.tight_layout()
 
             fig.savefig(save_loc, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
@@ -2527,6 +2675,11 @@ class Aperture:
                     image, xycen, radii, error=error, mask=mask, method="subpixel"
                 )
                 cog.normalize()
+                # np.interp silently clamps to the profile endpoints when
+                # ap_size falls outside the measured radii (e.g. ap_size >
+                # max_radius*fwhm -> frac=1 -> correction=0).  Guard instead.
+                if not (cog.radii[0] <= ap_size <= cog.radii[-1]):
+                    continue
                 frac = np.interp(ap_size, cog.radii, cog.profile)
                 if 0 < frac <= 1:
                     corrections.append(-2.5 * np.log10(1.0 / frac))
@@ -2564,6 +2717,8 @@ class Aperture:
 
         if plot:
             plt.ioff()
+            from plotting_utils import apply_autophot_mplstyle
+            apply_autophot_mplstyle()
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.2))
             try:
                 be = np.histogram_bin_edges(corrections, bins="fd")
@@ -2576,8 +2731,7 @@ class Aperture:
             ax.set_xlabel("Aperture Correction [mag]")
             ax.set_ylabel("Frequency")
             ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
-                      frameon=True, facecolor="white", framealpha=1.0,
-                      edgecolor="black", fontsize=8)
+                      frameon=False, fontsize=8)
             fig.tight_layout()
             png_path = os.path.join(
                 write_dir, f"Aperture_Correction_{base_name}.png"

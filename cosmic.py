@@ -14,7 +14,6 @@ import warnings
 # --- Third-Party Imports ---
 import numpy as np
 import astroscrappy
-from ccdproc import cosmicray_lacosmic
 from typing import Optional, Tuple
 from scipy.ndimage import binary_dilation, binary_fill_holes
 import matplotlib.pyplot as plt
@@ -215,11 +214,9 @@ class RemoveCosmicRays:
         write_dir = os.path.dirname(fpath)
 
         from functions import set_size
+        from plotting_utils import apply_autophot_mplstyle
 
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        _style = os.path.join(dir_path, "autophot.mplstyle")
-        if os.path.exists(_style):
-            plt.style.use(_style)
+        apply_autophot_mplstyle()
 
         fig, axes = plt.subplots(
             1, 2, figsize=set_size(540, aspect=0.65)
@@ -233,7 +230,7 @@ class RemoveCosmicRays:
         # Mask CR pixels so they show as the "bad" colour (red) in the colormap
         original_masked = np.ma.array(original, mask=cr_mask)
         cmap_orig = plt.get_cmap("gray").copy()
-        cmap_orig.set_bad(color="red")
+        cmap_orig.set_bad(color="#D94F4F")
         im0 = axes[0].imshow(
             original_masked,
             cmap=cmap_orig,
@@ -379,7 +376,24 @@ class RemoveCosmicRays:
                     if not np.isfinite(_finite_median) or _finite_median <= 0:
                         _finite_median = 1.0
                     bkg_rms = np.where(np.isfinite(bkg_rms), bkg_rms, _finite_median)
-            sigma = calc_total_error(self.image, bkg_rms, effective_gain=gain)
+            # calc_total_error expects *background-subtracted* data for the
+            # Poisson term (source_variance = max(data, 0) / gain).  self.image
+            # still contains the sky level here (global background subtraction
+            # happens later in main.py), and bkg_rms already includes the sky
+            # Poisson + read noise.  Passing the raw image would therefore
+            # double-count the sky variance — inflating sigma by up to ~sqrt(2)
+            # in the sky-dominated regime and desensitising CR detection.
+            # Subtract the supplied background surface (or a robust scalar sky
+            # estimate) so only source photons enter the Poisson term.
+            if bkg is not None:
+                _poisson_data = self.image - bkg
+            else:
+                _finite_img = self.image[np.isfinite(self.image)]
+                _sky_est = (
+                    float(np.median(_finite_img)) if _finite_img.size else 0.0
+                )
+                _poisson_data = self.image - _sky_est
+            sigma = calc_total_error(_poisson_data, bkg_rms, effective_gain=gain)
             invar = np.asarray(sigma, dtype=np.float32) ** 2
             self.logger.info("Computed variance map from total error.")
 
@@ -390,8 +404,24 @@ class RemoveCosmicRays:
         self.logger.info("Using PSF size: %s (FWHM: %.1f pixels)", psf_size, psf_fwhm)
 
         # --- Run cosmic ray removal ---
+        # ccdproc is only needed for the lacosmic path; keep the import lazy
+        # so the (default) astroscrappy path works without it installed.
+        _use_lacosmic = self.use_lacosmic
+        if _use_lacosmic:
+            try:
+                # Optional runtime dependency (declared in requirements.txt /
+                # environment.yml); only needed on the lacosmic path.
+                from ccdproc import (  # type: ignore  # pyrefly: ignore[missing-import]
+                    cosmicray_lacosmic,
+                )
+            except ImportError as exc:
+                self.logger.warning(
+                    "ccdproc not available (%s); falling back to astroscrappy.",
+                    exc,
+                )
+                _use_lacosmic = False
         try:
-            if self.use_lacosmic:
+            if _use_lacosmic:
                 self.logger.info(
                     "Using ccdproc.cosmicray_lacosmic for cosmic ray removal"
                 )
@@ -476,7 +506,7 @@ class RemoveCosmicRays:
 
             # --- Update Header ---
             method = (
-                "ccdproc.cosmicray_lacosmic" if self.use_lacosmic else "astroscrappy"
+                "ccdproc.cosmicray_lacosmic" if _use_lacosmic else "astroscrappy"
             )
             self.header["CRAY_RMD"] = (True, "Cosmic rays removed; skip CR step on rerun")
             self.header.add_history(f"Cosmic ray removal: {n_cr_raw} pixels cleaned (dilated mask: {n_cr})")
