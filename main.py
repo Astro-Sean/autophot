@@ -2465,6 +2465,26 @@ def run_photometry():
         hardware_defects_mask = np.asarray(result["hardware_defects_mask"], dtype=bool)
         del result
 
+        # OR cosmic ray mask into hardware defects mask so that all downstream
+        # photometry (aperture, PSF fitting, ePSF build) automatically masks
+        # CR-contaminated pixels.  Without this, residual CR pixels inside
+        # apertures or PSF stamps contaminate flux measurements.
+        if cosmic_rays_mask is not None and np.any(cosmic_rays_mask):
+            if hardware_defects_mask.shape == cosmic_rays_mask.shape:
+                hardware_defects_mask = hardware_defects_mask | cosmic_rays_mask
+                logging.info(
+                    "Combined cosmic ray mask (%d px) into hardware defects mask "
+                    "(%d px total masked).",
+                    int(np.sum(cosmic_rays_mask)),
+                    int(np.sum(hardware_defects_mask)),
+                )
+            else:
+                logging.warning(
+                    "Cosmic ray mask shape %s != hardware defects mask shape %s; "
+                    "skipping CR mask propagation to photometry.",
+                    cosmic_rays_mask.shape, hardware_defects_mask.shape,
+                )
+
         # Cache background results for potential reuse after template subtraction
         fpath_before_subtraction = fpath
         # These arrays can be full-frame (many MB). Keep a single shared copy
@@ -2719,6 +2739,10 @@ def run_photometry():
                                 "alignment_method"
                             ],
                         )
+                        if not fpath or not templateFpath:
+                            raise RuntimeError(
+                                "Template alignment returned no output paths"
+                            )
                         template_available = True
 
                         # Diagnostic plot: source alignment after template alignment
@@ -2786,7 +2810,18 @@ def run_photometry():
                                     "alignment_method", ""
                                 )
                             ).lower()
-                            _was_swarp = _am in ("swarp", "scamp_swarp")
+                            # Re-measure whenever the template was actually
+                            # resampled.  ALIGMETH records the method that
+                            # really ran (the configured method may differ
+                            # after a cascade fallback); any resampling can
+                            # broaden or distort the PSF, not only SWarp.
+                            _am_used = str(
+                                _tmpl_hdr.get("ALIGMETH", "")
+                            ).strip().lower()
+                            _was_swarp = (
+                                (_am_used not in ("", "none"))
+                                or _am in ("swarp", "scamp_swarp")
+                            )
                             if _fwhm_stale or _was_swarp:
                                 _tmpl_img = get_image(templateFpath)
                                 _tmpl_fwhm_measured, _, _ = Find_FWHM(
@@ -2807,7 +2842,7 @@ def run_photometry():
                                         float(_tmpl_fwhm_measured),
                                         float(_old_fwhm),
                                         "stale default" if _fwhm_stale
-                                        else "pre-SWarp (resampling broadened PSF)",
+                                        else "post-%s resampling" % (_am_used or _am),
                                     )
                                     del _tmpl_img
                         except Exception as e:
@@ -2890,6 +2925,11 @@ def run_photometry():
             defects_mask = np.asarray(result["defects_mask"], dtype=bool)
             hardware_defects_mask = np.asarray(result["hardware_defects_mask"], dtype=bool)
             del result
+
+            # Re-apply cosmic ray mask to the new hardware defects mask.
+            if cosmic_rays_mask is not None and np.any(cosmic_rays_mask):
+                if hardware_defects_mask.shape == cosmic_rays_mask.shape:
+                    hardware_defects_mask = hardware_defects_mask | cosmic_rays_mask
 
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)
@@ -3284,8 +3324,18 @@ def run_photometry():
             excluded_sources = pd.DataFrame()
             IsolatedSources = pd.DataFrame(columns=["x_pix", "y_pix"])
         else:
-            # Constants
-            DISTANCE_THRESHOLD_FACTOR = 1
+            # Distance threshold for source exclusion near defects.
+            # Default 2*FWHM: the dilated CR mask already covers ~2*FWHM around
+            # each CR, and this threshold adds another 2*FWHM buffer so that
+            # sources whose PSF stamps (extending to ~5*FWHM) are less likely
+            # to overlap CR pixels.  Configurable via psf_defect_exclusion_fwhm.
+            DISTANCE_THRESHOLD_FACTOR = float(
+                input_yaml.get("photometry", {}).get(
+                    "psf_defect_exclusion_fwhm", 2.0
+                )
+            )
+            if not np.isfinite(DISTANCE_THRESHOLD_FACTOR) or DISTANCE_THRESHOLD_FACTOR <= 0:
+                DISTANCE_THRESHOLD_FACTOR = 2.0
             distance_threshold = DISTANCE_THRESHOLD_FACTOR * ImageFWHM
 
             # Avoid building a huge list of masked-pixel coordinates (np.argwhere can
@@ -3729,12 +3779,8 @@ def run_photometry():
                                     | (_fwhm_plot > _fwhm_hi)
                                 )
 
-                        _style_path = os.path.join(
-                            os.path.dirname(os.path.abspath(__file__)),
-                            "autophot.mplstyle",
-                        )
-                        if os.path.exists(_style_path):
-                            plt.style.use(_style_path)
+                        from plotting_utils import apply_autophot_mplstyle
+                        apply_autophot_mplstyle()
                         plt.ioff()
                         _fig, _ax = plt.subplots(figsize=set_size(540, 1))
 
@@ -3796,11 +3842,7 @@ def run_photometry():
                         _ax.set_xlabel(r"Instrumental magnitude $[-2.5\,\log_{10}(\mathrm{Flux})]$")
                         _ax.set_ylabel("FWHM [pixels]")
                         _ax.invert_xaxis()
-                        _ax.legend(loc="best", frameon=True, facecolor="white",
-                                   framealpha=1.0, edgecolor="black", fontsize=8)
-                        _ax.set_title(
-                            f"FWHM vs Instrumental Magnitude ({input_yaml.get('imageFilter', '')})"
-                        )
+                        _ax.legend(loc="best", frameon=False, fontsize=8)
                         # Ensure y-axis spans at least 1 pixel and has >= 1px buffer
                         # beyond the 3sigma boundary edges
                         _ymin_auto, _ymax_auto = _ax.get_ylim()
@@ -3899,12 +3941,8 @@ def run_photometry():
                             _phi = _pmed + _fwhm_sigma * _pmad
                             _prej = (_pfwhm_plot < _plo) | (_pfwhm_plot > _phi)
 
-                    _style_path = os.path.join(
-                        os.path.dirname(os.path.abspath(__file__)),
-                        "autophot.mplstyle",
-                    )
-                    if os.path.exists(_style_path):
-                        plt.style.use(_style_path)
+                    from plotting_utils import apply_autophot_mplstyle
+                    apply_autophot_mplstyle()
                     plt.ioff()
                     _pfig, _pax = plt.subplots(figsize=set_size(540, 1))
 
@@ -3935,11 +3973,7 @@ def run_photometry():
                     _pax.set_xlabel(r"Instrumental magnitude $[-2.5\,\log_{10}(\mathrm{Flux})]$")
                     _pax.set_ylabel("FWHM [pixels]")
                     _pax.invert_xaxis()
-                    _pax.legend(loc="best", frameon=True, facecolor="white",
-                                framealpha=1.0, edgecolor="black", fontsize=8)
-                    _pax.set_title(
-                        f"PSF Source Pool: FWHM vs Inst Mag ({input_yaml.get('imageFilter', '')})"
-                    )
+                    _pax.legend(loc="best", frameon=False, fontsize=8)
                     # Ensure y-axis spans at least 1 pixel and has >= 1px buffer
                     # beyond the 3sigma boundary edges
                     _pymin_auto, _pymax_auto = _pax.get_ylim()
@@ -4215,7 +4249,7 @@ def run_photometry():
 
         # Log PSF roundness and run PSF fit on catalog when we have an ePSF (from original or current image).
         if not do_aperture_ONLY or prepare_template:
-            if PSFSources is not None:
+            if PSFSources is not None and "roundness" in PSFSources.columns:
                 roundness = PSFSources["roundness"]
                 from astropy.stats import mad_std
                 mean_roundness, median_roundness, std_roundness = sigma_clipped_stats(
@@ -5650,6 +5684,51 @@ def run_photometry():
                     # ------------------------------------------------------------------
                     ms = MatchingSources.copy()
                     n_before_refine = len(ms)
+
+                    # --- CR mask proximity check ---
+                    # Exclude sources whose centroids fall on or near cosmic
+                    # ray pixels.  Even with the CR mask OR'd into
+                    # hardware_defects_mask (for pixel-level masking), a source
+                    # that IS a cosmic ray would still be in the pool and
+                    # corrupt the SFFT kernel fit.  This check removes sources
+                    # within 1*FWHM of any CR pixel.
+                    if (
+                        cosmic_rays_mask is not None
+                        and np.any(cosmic_rays_mask)
+                        and "x_pix" in ms.columns
+                        and "y_pix" in ms.columns
+                    ):
+                        _cr_fwhm_factor = float(
+                            input_yaml.get("template_subtraction", {}).get(
+                                "sfft_cr_exclusion_fwhm", 1.0
+                            )
+                        )
+                        _cr_thresh = max(1.0, _cr_fwhm_factor * float(ImageFWHM))
+                        try:
+                            from scipy.ndimage import distance_transform_edt as _dte
+                            _cr_dist = _dte(~cosmic_rays_mask)
+                            _xy = ms[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                            _xi = np.clip(np.rint(_xy[:, 0]).astype(int), 0, _cr_dist.shape[1] - 1)
+                            _yi = np.clip(np.rint(_xy[:, 1]).astype(int), 0, _cr_dist.shape[0] - 1)
+                            _cr_min_dist = _cr_dist[_yi, _xi]
+                            _cr_ok = _cr_min_dist > _cr_thresh
+                            _n_cr_rejected = int((~_cr_ok).sum())
+                            if _n_cr_rejected > 0 and _cr_ok.sum() >= 3:
+                                ms = ms[_cr_ok]
+                                logging.info(
+                                    "SFFT source refinement: excluded %d sources "
+                                    "within %.1f px of cosmic ray pixels (%d remain).",
+                                    _n_cr_rejected, _cr_thresh, len(ms),
+                                )
+                            elif _n_cr_rejected > 0:
+                                logging.info(
+                                    "SFFT source refinement: would exclude %d CR-adjacent "
+                                    "sources but only %d would remain (< 3); keeping all.",
+                                    _n_cr_rejected, int(_cr_ok.sum()),
+                                )
+                        except Exception as _cr_err:
+                            logging.debug("CR proximity check failed: %s", _cr_err)
+
                     _has_class_star = "class_star" in ms.columns
                     _has_roundness = "roundness" in ms.columns
                     _has_fwhm = any(c in ms.columns for c in ("fwhm", "fwhm_psf", "fwhm_model"))
@@ -5811,6 +5890,27 @@ def run_photometry():
                                         )
                                         ms = ms[ell_pass | ~ell_finite]
 
+                        # --- FLUX_RADIUS cut (cosmic ray rejection) ---
+                        # Cosmic rays have very small FLUX_RADIUS (half-light
+                        # radius < 1 px) regardless of image FWHM.  This cut
+                        # removes CR-like sources before they can bias the FWHM
+                        # MAD statistics in the size outlier rejection below.
+                        if "flux_radius" in ms.columns and len(ms) > 0:
+                            _fr_sfft = pd.to_numeric(ms["flux_radius"], errors="coerce")
+                            _fr_finite = _fr_sfft.notna() & (_fr_sfft > 0)
+                            if _fr_finite.any() and _fr_finite.sum() >= 5:
+                                _fr_med_sfft = float(np.nanmedian(_fr_sfft[_fr_finite]))
+                                _fr_min_sfft = max(0.5, 0.3 * _fr_med_sfft)
+                                _fr_bad_sfft = _fr_finite & (_fr_sfft < _fr_min_sfft)
+                                _n_fr_sfft = int(_fr_bad_sfft.sum())
+                                if _n_fr_sfft > 0 and (~_fr_bad_sfft).sum() >= 3:
+                                    ms = ms[~_fr_bad_sfft]
+                                    logging.info(
+                                        f"SFFT FLUX_RADIUS cut: removed {_n_fr_sfft} "
+                                        f"CR-like sources (FLUX_RADIUS < {_fr_min_sfft:.2f} px, "
+                                        f"median={_fr_med_sfft:.2f}). {len(ms)} remain."
+                                    )
+
                         # Size-based outlier rejection (robust sigma-clipping on FWHM)
                         size_col = None
                         for c in ("fwhm", "fwhm_psf", "fwhm_model"):
@@ -5943,8 +6043,14 @@ def run_photometry():
                             # always >= the actual SFFT kernel half-width.
                             _ker_hw = max(_hw_broad_sfft, _hw_conv_sfft, _hw_floor_capped)
                             _ker_hw = max(
-                                int(_ts_cfg_k.get("kernel_hw_min", 3)),
-                                min(int(_ts_cfg_k.get("kernel_hw_max", 50)), _ker_hw),
+                                int(_ts_cfg_k.get(
+                                    "sfft_kernel_hw_min",
+                                    _ts_cfg_k.get("kernel_hw_min", 3),
+                                )),
+                                min(int(_ts_cfg_k.get(
+                                    "sfft_kernel_hw_max",
+                                    _ts_cfg_k.get("kernel_hw_max", 50),
+                                )), _ker_hw),
                             )
 
                             # Isolation radius = kernel stamp half-width.
@@ -7108,19 +7214,22 @@ def run_photometry():
         # -----------------------------------------------------------------------
         # VSCALE error propagation (LSST-style variance rescaling)
         #
-        # run_sfft.py may have rescaled the difference image by a factor of
-        # 1/VSCALE (IQR-based noise calibration).  The background_rms array
-        # that was computed from the science image is therefore stale: it
-        # reflects the pre-subtraction noise level rather than the noise of the
-        # written difference image.
+        # run_sfft.py measures the difference-image noise (IQR sigma) and
+        # writes VSCALE = sigma_diff / sigma_sci to the header.  The
+        # background_rms array was computed from the science image, so it
+        # reflects the pre-subtraction noise level; the difference image is
+        # noisier (reference noise + kernel L2 amplification + any unmodeled
+        # covariance).
         #
-        # Applying the same scale factor to background_rms here ensures that all
-        # downstream error models (aperture, PSF, limiting magnitude injection)
-        # see a noise floor consistent with the difference image pixels.
+        # Multiplying background_rms by VSCALE ensures that all downstream
+        # error models (aperture, PSF, limiting magnitude injection) see a
+        # noise floor consistent with the measured difference-image noise.
+        # The difference-image PIXELS are not rescaled: their flux scale is
+        # set by SFFT's kernel integral, and rescaling would bias photometry.
         #
         # Note: if remove_local_surface runs below, it recomputes background_rms
         # from the diff image directly, which is already consistent with the
-        # rescaled pixels - so the correction below is safe in both cases (it is
+        # measured noise - so the correction below is safe in both cases (it is
         # overwritten by the recomputed value when remove_local_surface is active).
         # -----------------------------------------------------------------------
         if PreformSubtraction:
@@ -7445,15 +7554,43 @@ def run_photometry():
                     if os.path.isfile(_sci_psf_file):
                         try:
                             from photutils.psf import ImagePSF
-                            _psf_stamp = np.asarray(fits.getdata(_sci_psf_file), dtype=float)
+                            with fits.open(_sci_psf_file) as _phdul:
+                                _psf_stamp = np.asarray(_phdul[0].data, dtype=float)
+                                _psf_hdr = _phdul[0].header
                             _psf_h, _psf_w = _psf_stamp.shape
-                            epsf_model = ImagePSF(
-                                data=_psf_stamp,
-                                flux=1.0,
-                                x_0=float(_psf_w // 2),
-                                y_0=float(_psf_h // 2),
-                                oversampling=1,
-                            )
+                            # The saved stamp may live on an oversampled ePSF
+                            # grid; honour the recorded OVERSAMP so the model
+                            # maps correctly to native pixels (x_0/y_0 are in
+                            # *native* output-grid units).
+                            _psf_os = int(_psf_hdr.get("OVERSAMP", 1) or 1)
+                            if _psf_os > 1:
+                                _n_native = int(
+                                    _psf_hdr.get(
+                                        "PSFNPIX",
+                                        int(round((_psf_w - 1) / _psf_os)),
+                                    )
+                                )
+                                _x0 = (_n_native - 1) / 2.0
+                                _origin = (
+                                    float(_psf_hdr.get("PSFX0", (_psf_w - 1) / 2.0)),
+                                    float(_psf_hdr.get("PSFY0", (_psf_h - 1) / 2.0)),
+                                )
+                                epsf_model = ImagePSF(
+                                    data=_psf_stamp,
+                                    flux=1.0,
+                                    x_0=_x0,
+                                    y_0=_x0,
+                                    origin=_origin,
+                                    oversampling=_psf_os,
+                                )
+                            else:
+                                epsf_model = ImagePSF(
+                                    data=_psf_stamp,
+                                    flux=1.0,
+                                    x_0=float(_psf_w // 2),
+                                    y_0=float(_psf_h // 2),
+                                    oversampling=1,
+                                )
                             do_aperture_ONLY = False
                             logging.info(
                                 "ZOGY CONVD=REF: loaded science PSF model from %s "
@@ -7554,7 +7691,6 @@ def run_photometry():
                     if epsf_model is not None and _solpath and os.path.isfile(_solpath):
                         try:
                             from sfft.utils.SFFTSolutionReader import Realize_MatchingKernel
-                            from scipy.signal import fftconvolve
 
                             _kerhw = int(header.get("KERHW", 0))
                             _kerorder = int(header.get("KERORDER", header.get("KERPOLY", 0)))
@@ -7576,81 +7712,19 @@ def run_photometry():
                             _ker_2d = np.asarray(_ker_stack[0]).squeeze().T
 
                             if _ker_2d.ndim == 2 and _ker_2d.shape[0] == _L:
-                                # Get the ePSF data (oversampled PSF image)
-                                _epsf_data = np.asarray(epsf_model.data, dtype=float)
-                                _epsf_oversamp = getattr(epsf_model, "oversampling", 1)
-                                if _epsf_oversamp is None:
-                                    _epsf_oversamp = 1
-                                # oversampling can be a scalar or array (e.g. [4, 4])
-                                try:
-                                    _epsf_oversamp = int(np.atleast_1d(_epsf_oversamp)[0])
-                                except (TypeError, ValueError, IndexError):
-                                    _epsf_oversamp = 1
-                                if _epsf_oversamp < 1:
-                                    _epsf_oversamp = 1
+                                # The SFFT kernel operates in native
+                                # (un-oversampled) pixel space while the ePSF
+                                # may be oversampled.  convolve_epsf_with_kernel
+                                # resamples to the native grid via the exact
+                                # ePSF grid mapping (no zoom stretch), convolves,
+                                # and maps back to the original oversampled grid.
+                                from psf import convolve_epsf_with_kernel
 
-                                # The SFFT kernel operates in native (un-oversampled)
-                                # pixel space. The ePSF is oversampled by
-                                # _epsf_oversamp. We need to convolve the ePSF
-                                # with the kernel, but they're on different grids.
-                                # Approach: downsample ePSF to native resolution,
-                                # convolve with kernel, then upsample back.
-                                from scipy.ndimage import zoom
-
-                                # Downsample ePSF to native pixels
-                                _epsf_native = zoom(
-                                    _epsf_data, 1.0 / _epsf_oversamp, order=1, mode="reflect"
-                                )
-                                # Convolve with SFFT kernel
-                                _epsf_conv_native = fftconvolve(
-                                    _epsf_native, _ker_2d, mode="same"
-                                )
-                                # Renormalize so total flux = 1
-                                _total = np.nansum(_epsf_conv_native)
-                                if _total > 0:
-                                    _epsf_conv_native /= _total
-                                # Upsample back to oversampled grid
-                                _epsf_conv = zoom(
-                                    _epsf_conv_native, _epsf_oversamp, order=1, mode="reflect"
-                                )
-                                # Match shape to original ePSF data
-                                if _epsf_conv.shape != _epsf_data.shape:
-                                    _ts = _epsf_data.shape
-                                    _cy_off = _epsf_conv.shape[0] // 2
-                                    _cx_off = _epsf_conv.shape[1] // 2
-                                    _ty_off = _ts[0] // 2
-                                    _tx_off = _ts[1] // 2
-                                    _y0 = _cy_off - _ty_off
-                                    _x0 = _cx_off - _tx_off
-                                    _y1 = _y0 + _ts[0]
-                                    _x1 = _x0 + _ts[1]
-                                    if _y0 < 0 or _x0 < 0 or _y1 > _epsf_conv.shape[0] or _x1 > _epsf_conv.shape[1]:
-                                        _epsf_conv = np.pad(
-                                            _epsf_conv,
-                                            (
-                                                (max(0, -_y0), max(0, _y1 - _epsf_conv.shape[0])),
-                                                (max(0, -_x0), max(0, _x1 - _epsf_conv.shape[1])),
-                                            ),
-                                            mode="constant",
-                                        )
-                                        _y0 = max(0, _y0)
-                                        _x0 = max(0, _x0)
-                                        _y1 = _y0 + _ts[0]
-                                        _x1 = _x0 + _ts[1]
-                                    _epsf_conv = _epsf_conv[_y0:_y1, _x0:_x1]
-                                    if _epsf_conv.shape != _ts:
-                                        _epsf_conv = _epsf_conv[:_ts[0], :_ts[1]]
-
-                                # Create a new ImagePSF from the convolved data
-                                from photutils.psf import ImagePSF
-                                _epsf_conv_model = ImagePSF(
-                                    data=_epsf_conv,
-                                    flux=epsf_model.flux.value,
-                                    x_0=epsf_model.x_0.value,
-                                    y_0=epsf_model.y_0.value,
-                                    origin=epsf_model.origin,
-                                    oversampling=_epsf_oversamp,
-                                )
+                                (
+                                    _epsf_conv_model,
+                                    _epsf_native,
+                                    _epsf_conv_native,
+                                ) = convolve_epsf_with_kernel(epsf_model, _ker_2d)
                                 epsf_model = _epsf_conv_model
                                 logging.info(
                                     "ePSF convolved with SFFT kernel (KerHW=%d px, order=%d): "
@@ -7739,6 +7813,8 @@ def run_photometry():
                                     import matplotlib.pyplot as plt
 
                                     from astropy.visualization import ZScaleInterval
+                                    from plotting_utils import apply_autophot_mplstyle
+                                    apply_autophot_mplstyle()
                                     _zs = ZScaleInterval()
 
                                     _fig, _axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -7756,7 +7832,7 @@ def run_photometry():
                                     _fig.colorbar(_im0, ax=_axes[0], fraction=0.046, pad=0.04)
                                     # SFFT kernel
                                     _v1 = _zs.get_limits(_ker_2d)
-                                    _im1 = _axes[1].imshow(_ker_2d, origin="lower", cmap="magma", vmin=_v1[0], vmax=_v1[1])
+                                    _im1 = _axes[1].imshow(_ker_2d, origin="lower", cmap="viridis", vmin=_v1[0], vmax=_v1[1])
                                     _axes[1].set_title(f"SFFT Matching Kernel\n({_ker_2d.shape[0]}x{_ker_2d.shape[1]} px)")
                                     _axes[1].set_xlabel("X (px)")
                                     _axes[1].set_ylabel("Y (px)")
@@ -7797,68 +7873,24 @@ def run_photometry():
                         # broader reference PSF in the diff image.
                         try:
                             from astropy.convolution import Gaussian2DKernel
-                            from scipy.signal import fftconvolve
-                            from scipy.ndimage import zoom
-                            from photutils.psf import ImagePSF
+                            from psf import convolve_epsf_with_kernel
 
                             _fwhm_diff = np.sqrt(
                                 max(_ref_fwhm_hdr, 0) ** 2
                                 - max(_sci_fwhm_hdr, 0) ** 2
                             )
                             if _fwhm_diff > 0.1:
-                                _epsf_data = np.asarray(epsf_model.data, dtype=float)
-                                _epsf_oversamp = getattr(epsf_model, "oversampling", 1)
-                                if _epsf_oversamp is None:
-                                    _epsf_oversamp = 1
-                                try:
-                                    _epsf_oversamp = int(np.atleast_1d(_epsf_oversamp)[0])
-                                except (TypeError, ValueError, IndexError):
-                                    _epsf_oversamp = 1
-                                if _epsf_oversamp < 1:
-                                    _epsf_oversamp = 1
-
-                                _epsf_native = zoom(
-                                    _epsf_data, 1.0 / _epsf_oversamp, order=1, mode="reflect"
-                                )
                                 _gauss_sigma = _fwhm_diff / 2.3548
                                 _gauss_kernel = Gaussian2DKernel(
                                     _gauss_sigma, x_size=int(2 * int(np.ceil(_gauss_sigma * 3)) + 1),
                                     y_size=int(2 * int(np.ceil(_gauss_sigma * 3)) + 1),
                                 )
-                                _epsf_conv_native = fftconvolve(
-                                    _epsf_native, _gauss_kernel.array, mode="same"
-                                )
-                                _total = np.nansum(_epsf_conv_native)
-                                if _total > 0:
-                                    _epsf_conv_native /= _total
-                                _epsf_conv = zoom(
-                                    _epsf_conv_native, _epsf_oversamp, order=1, mode="reflect"
-                                )
-                                if _epsf_conv.shape != _epsf_data.shape:
-                                    _ts = _epsf_data.shape
-                                    _cy_off = _epsf_conv.shape[0] // 2
-                                    _cx_off = _epsf_conv.shape[1] // 2
-                                    _ty_off = _ts[0] // 2
-                                    _tx_off = _ts[1] // 2
-                                    _y0 = _cy_off - _ty_off
-                                    _x0 = _cx_off - _tx_off
-                                    _y1 = _y0 + _ts[0]
-                                    _x1 = _x0 + _ts[1]
-                                    _y0 = max(0, _y0)
-                                    _x0 = max(0, _x0)
-                                    _y1 = _y0 + _ts[0]
-                                    _x1 = _x0 + _ts[1]
-                                    _epsf_conv = _epsf_conv[_y0:_y1, _x0:_x1]
-                                    if _epsf_conv.shape != _ts:
-                                        _epsf_conv = _epsf_conv[:_ts[0], :_ts[1]]
-
-                                _epsf_conv_model = ImagePSF(
-                                    data=_epsf_conv,
-                                    flux=epsf_model.flux.value,
-                                    x_0=epsf_model.x_0.value,
-                                    y_0=epsf_model.y_0.value,
-                                    origin=epsf_model.origin,
-                                    oversampling=_epsf_oversamp,
+                                (
+                                    _epsf_conv_model,
+                                    _epsf_native,
+                                    _epsf_conv_native,
+                                ) = convolve_epsf_with_kernel(
+                                    epsf_model, _gauss_kernel.array
                                 )
                                 epsf_model = _epsf_conv_model
                                 logging.info(
@@ -7946,9 +7978,7 @@ def run_photometry():
             if _kerorder_re > 0 and _solpath and os.path.isfile(_solpath):
                 try:
                     from sfft.utils.SFFTSolutionReader import Realize_MatchingKernel
-                    from scipy.signal import fftconvolve
-                    from scipy.ndimage import zoom
-                    from photutils.psf import ImagePSF
+                    from psf import convolve_epsf_with_kernel
 
                     _kerhw_re = int(header.get("KERHW", 0))
                     _L_re = 2 * _kerhw_re + 1
@@ -7960,64 +7990,11 @@ def run_photometry():
                     _ker_2d_re = np.asarray(_ker_stack_re[0]).squeeze().T
 
                     if _ker_2d_re.ndim == 2 and _ker_2d_re.shape[0] == _L_re:
-                        _epsf_data_re = np.asarray(_epsf_original.data, dtype=float)
-                        _epsf_oversamp_re = getattr(_epsf_original, "oversampling", 1)
-                        if _epsf_oversamp_re is None:
-                            _epsf_oversamp_re = 1
-                        try:
-                            _epsf_oversamp_re = int(np.atleast_1d(_epsf_oversamp_re)[0])
-                        except (TypeError, ValueError, IndexError):
-                            _epsf_oversamp_re = 1
-                        if _epsf_oversamp_re < 1:
-                            _epsf_oversamp_re = 1
-
-                        _epsf_native_re = zoom(
-                            _epsf_data_re, 1.0 / _epsf_oversamp_re, order=1, mode="reflect"
-                        )
-                        _epsf_conv_native_re = fftconvolve(
-                            _epsf_native_re, _ker_2d_re, mode="same"
-                        )
-                        _total_re = np.nansum(_epsf_conv_native_re)
-                        if _total_re > 0:
-                            _epsf_conv_native_re /= _total_re
-                        _epsf_conv_re = zoom(
-                            _epsf_conv_native_re, _epsf_oversamp_re, order=1, mode="reflect"
-                        )
-                        if _epsf_conv_re.shape != _epsf_data_re.shape:
-                            _ts = _epsf_data_re.shape
-                            _cy_off = _epsf_conv_re.shape[0] // 2
-                            _cx_off = _epsf_conv_re.shape[1] // 2
-                            _ty_off = _ts[0] // 2
-                            _tx_off = _ts[1] // 2
-                            _y0 = _cy_off - _ty_off
-                            _x0 = _cx_off - _tx_off
-                            _y1 = _y0 + _ts[0]
-                            _x1 = _x0 + _ts[1]
-                            if _y0 < 0 or _x0 < 0 or _y1 > _epsf_conv_re.shape[0] or _x1 > _epsf_conv_re.shape[1]:
-                                _epsf_conv_re = np.pad(
-                                    _epsf_conv_re,
-                                    (
-                                        (max(0, -_y0), max(0, _y1 - _epsf_conv_re.shape[0])),
-                                        (max(0, -_x0), max(0, _x1 - _epsf_conv_re.shape[1])),
-                                    ),
-                                    mode="constant",
-                                )
-                                _y0 = max(0, _y0)
-                                _x0 = max(0, _x0)
-                                _y1 = _y0 + _ts[0]
-                                _x1 = _x0 + _ts[1]
-                            _epsf_conv_re = _epsf_conv_re[_y0:_y1, _x0:_x1]
-                            if _epsf_conv_re.shape != _ts:
-                                _epsf_conv_re = _epsf_conv_re[:_ts[0], :_ts[1]]
-
-                        epsf_model = ImagePSF(
-                            data=_epsf_conv_re,
-                            flux=_epsf_original.flux.value,
-                            x_0=_epsf_original.x_0.value,
-                            y_0=_epsf_original.y_0.value,
-                            origin=_epsf_original.origin,
-                            oversampling=_epsf_oversamp_re,
-                        )
+                        (
+                            epsf_model,
+                            _epsf_native_re,
+                            _epsf_conv_native_re,
+                        ) = convolve_epsf_with_kernel(_epsf_original, _ker_2d_re)
                         logging.info(
                             "ePSF re-convolved with SFFT kernel at target position "
                             "(%.1f, %.1f) for spatially-varying kernel (order=%d).",
@@ -8031,6 +8008,8 @@ def run_photometry():
                             import matplotlib.pyplot as plt
 
                             from astropy.visualization import ZScaleInterval
+                            from plotting_utils import apply_autophot_mplstyle
+                            apply_autophot_mplstyle()
                             _zs_r = ZScaleInterval()
 
                             _fig_r, _axes_r = plt.subplots(1, 3, figsize=(15, 5))
@@ -8046,7 +8025,7 @@ def run_photometry():
                             _axes_r[0].set_ylabel("Y (px)")
                             _fig_r.colorbar(_im0r, ax=_axes_r[0], fraction=0.046, pad=0.04)
                             _v1r = _zs_r.get_limits(_ker_2d_re)
-                            _im1r = _axes_r[1].imshow(_ker_2d_re, origin="lower", cmap="magma", vmin=_v1r[0], vmax=_v1r[1])
+                            _im1r = _axes_r[1].imshow(_ker_2d_re, origin="lower", cmap="viridis", vmin=_v1r[0], vmax=_v1r[1])
                             _axes_r[1].set_title(f"Kernel at target pos\n({_ker_2d_re.shape[0]}x{_ker_2d_re.shape[1]} px)")
                             _axes_r[1].set_xlabel("X (px)")
                             _axes_r[1].set_ylabel("Y (px)")
@@ -8087,7 +8066,10 @@ def run_photometry():
         lpi_extra_flux_err = np.nan
         if bool(phot_cfg.get("lpi_background_for_target", False)):
             try:
-                from lpi_background import (
+                # Optional external module (Saydjari & Finkbeiner 2022 LPI
+                # background prediction); not shipped with the repo.  The
+                # block below exits gracefully when it is unavailable.
+                from lpi_background import (  # type: ignore  # pyrefly: ignore[missing-import]
                     predict_background_under_source,
                     save_lpi_diagnostic_plot,
                 )
@@ -8199,6 +8181,9 @@ def run_photometry():
                 # into an additional flux uncertainty term inside the transient
                 # aperture. This is a conservative proxy for correlated-background
                 # uncertainty (Saydjari & Finkbeiner 2022).
+                # NOTE: bg_sig is in image units (ADU) while flux_AP_err is in
+                # e-/s, so the aperture-integrated scatter must be multiplied
+                # by the gain before the exposure-time conversion.
                 try:
                     phot_ap_rad = (input_yaml.get("photometry") or {}).get(
                         "aperture_radius", None
@@ -8216,8 +8201,18 @@ def run_photometry():
                     if sig_ap.size > 0:
                         extra_counts_err = float(np.sqrt(np.sum(sig_ap**2)))
                         exptime = float(input_yaml["exposure_time"])
-                        if np.isfinite(exptime) and exptime > 0:
-                            lpi_extra_flux_err = extra_counts_err / exptime
+                        _lpi_gain = float(
+                            resolve_gain_e_per_adu(None, input_yaml)
+                        )
+                        if (
+                            np.isfinite(exptime)
+                            and exptime > 0
+                            and np.isfinite(_lpi_gain)
+                            and _lpi_gain > 0
+                        ):
+                            lpi_extra_flux_err = (
+                                extra_counts_err * _lpi_gain / exptime
+                            )
                 except Exception:
                     lpi_extra_flux_err = np.nan
 
@@ -8568,6 +8563,17 @@ def run_photometry():
                     ferr = float(TargetPosition["flux_AP_err"].iloc[0])
                     if np.isfinite(f) and np.isfinite(ferr) and ferr > 0:
                         TargetPosition.loc[TargetPosition.index[0], "SNR"] = f / ferr
+                        # Propagate the inflated flux error to the instrumental
+                        # magnitude error column (dm = 1.0857/SNR) so the extra
+                        # LPI term reaches the calibrated magnitude error budget
+                        # assembled in errorTerms below.
+                        _lpi_inst_err_col = f"inst_{input_yaml['imageFilter']}_AP_err"
+                        if _lpi_inst_err_col in TargetPosition.columns:
+                            _lpi_snr = f / ferr
+                            if _lpi_snr > 0:
+                                TargetPosition.loc[
+                                    TargetPosition.index[0], _lpi_inst_err_col
+                                ] = float(2.5 / np.log(10.0) / _lpi_snr)
             except Exception:
                 pass
         prelim_threshold = TargetPosition["threshold"].iloc[0]
@@ -9400,12 +9406,21 @@ def run_photometry():
                         # Target has catalog colors: apply actual correction
                         _color_corr = _color_slope * _target_color_diff
                         cal_mag += _color_corr
-                        # Error: slope_err * |color_diff| + |slope| * sigma_color
-                        _color_corr_err = 0.0
+                        # Error: independent terms added in quadrature,
+                        # consistent with zeropoint._apply_color_correction:
+                        # sqrt((slope_err * |color_diff|)^2 + (|slope| * sigma_color)^2)
+                        _color_corr_terms = []
                         if _color_slope_err is not None and np.isfinite(_color_slope_err):
-                            _color_corr_err += abs(_color_slope_err) * abs(_target_color_diff)
+                            _color_corr_terms.append(
+                                abs(_color_slope_err) * abs(_target_color_diff)
+                            )
                         if _target_color_err is not None and np.isfinite(_target_color_err):
-                            _color_corr_err += abs(_color_slope) * _target_color_err
+                            _color_corr_terms.append(
+                                abs(_color_slope) * _target_color_err
+                            )
+                        _color_corr_err = float(
+                            np.sqrt(np.sum(np.square(_color_corr_terms)))
+                        ) if _color_corr_terms else 0.0
                         if _color_corr_err > 0:
                             errorTerms.append(_color_corr_err)
                     elif _color_scatter > 0:

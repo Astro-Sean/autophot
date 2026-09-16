@@ -44,6 +44,7 @@ from astropy.stats import (
     mad_std,
     gaussian_fwhm_to_sigma,
 )
+from plotting_utils import apply_autophot_mplstyle
 from astropy.convolution import Gaussian2DKernel
 from astropy.convolution import convolve
 from astropy.visualization import ZScaleInterval
@@ -124,9 +125,7 @@ class BackgroundSubtractor:
         """
         self.config = config
 
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        style_path = os.path.join(dir_path, "autophot.mplstyle")
-        plt.style.use(style_path if os.path.exists(style_path) else "default")
+        apply_autophot_mplstyle()
 
         self.logger = logging.getLogger(__name__)
         self._box_size_cache: dict = {}
@@ -1248,7 +1247,10 @@ class BackgroundSubtractor:
         # All attempts failed - flat fallback.
         self.logger.warning("All Background2D attempts failed - using global stats")
         gmean, gmed, _ = sigma_clipped_stats(image, sigma=3.0, mask=mask)
-        gstd = float(mad_std(image, mask=mask, ignore_nan=True))
+        # mad_std has no `mask` kwarg: NaN-out masked (bad) pixels instead,
+        # preserving sigma_clipped_stats' mask=True -> exclude semantics.
+        _mad_in = np.where(mask, np.nan, image) if mask is not None else image
+        gstd = float(mad_std(_mad_in, ignore_nan=True))
         if not np.isfinite(gstd) or gstd <= 0:
             gstd = float(_)
         bkg_surface = np.full_like(image, gmed, dtype=np.float32)
@@ -2072,6 +2074,8 @@ class BackgroundSubtractor:
         mask=None,
     ) -> None:
         """Save a 4-panel diagnostic plot (image, background, noise RMS, residual)."""
+        apply_autophot_mplstyle()
+
         arrays = [image, background, rms, subtracted]
         titles = ["Science", "Background", "Noise RMS", "Subtracted"]
         interval = ZScaleInterval()
@@ -2137,6 +2141,8 @@ class BackgroundSubtractor:
         mask=None,
     ) -> None:
         """Save a 3-panel local background diagnostic plot (cutout, background, subtracted)."""
+        apply_autophot_mplstyle()
+
         arrays = [cutout, background, subtracted]
         titles = ["Science", "Background", "Subtracted"]
         interval = ZScaleInterval()

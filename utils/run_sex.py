@@ -668,6 +668,44 @@ class SExtractorWrapper:
                     "Rejected %d sources with FLAGS > %d", n_flagged, flags
                 )
 
+        # --- Step 3c: SHARPNESS cut (before FWHM estimation) ---
+        # Apply sharpness cut BEFORE FWHM estimation so that cosmic rays
+        # (which have anomalous sharpness) don't bias the FWHM median.
+        # Previously this was Step 7 (after FWHM estimation), allowing CRs
+        # to inflate/deflate the FWHM estimate even though they would later
+        # be rejected.
+        if "sharpness" in sources.columns:
+            sharp_lo, sharp_hi = (0.1, 1.2) if relaxed_cuts else (0.2, 1.0)
+            sharp_vals = pd.to_numeric(sources["sharpness"], errors="coerce")
+            sharp_bad = (sharp_vals <= sharp_lo) | (sharp_vals >= sharp_hi)
+            sharp_bad = sharp_bad.fillna(False)
+            n_sharp = int(sharp_bad.sum())
+            if n_sharp > 0:
+                sources = sources[~sharp_bad].copy()
+                logger.info(
+                    f"Pre-FWHM sharpness cut: rejected {n_sharp} sources "
+                    f"(SHARPNESS outside [{sharp_lo}, {sharp_hi}])"
+                )
+
+        # --- Step 3d: FLUX_RADIUS cut (cosmic ray rejection before FWHM) ---
+        # Cosmic rays have very small FLUX_RADIUS (half-light radius < 1 px)
+        # regardless of image FWHM.  Rejecting them before FWHM estimation
+        # prevents CRs from biasing the FWHM median low.
+        if "flux_radius" in sources.columns and len(sources) > 0:
+            _fr_vals = pd.to_numeric(sources["flux_radius"], errors="coerce")
+            _fr_finite = _fr_vals.notna() & (_fr_vals > 0)
+            if _fr_finite.any() and _fr_finite.sum() >= 5:
+                _fr_med = float(np.nanmedian(_fr_vals[_fr_finite]))
+                _fr_min = max(0.5, 0.3 * _fr_med)  # at least 30% of median
+                _fr_bad = _fr_finite & (_fr_vals < _fr_min)
+                n_fr = int(_fr_bad.sum())
+                if n_fr > 0 and (~_fr_bad).sum() >= 5:
+                    sources = sources[~_fr_bad].copy()
+                    logger.info(
+                        f"Pre-FWHM FLUX_RADIUS cut: rejected {n_fr} CR-like "
+                        f"sources (FLUX_RADIUS < {_fr_min:.2f} px, median={_fr_med:.2f})"
+                    )
+
         # --- Step 4: Estimate FWHM if needed ---
         if fwhm_est is None and len(sources) > 0:
             # Use only high-S/N sources for FWHM estimation to avoid bias

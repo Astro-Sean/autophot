@@ -2147,7 +2147,7 @@ class Zeropoint:
                     color=colors[flux_type],
                     ecolor="lightgrey",
                     alpha=get_alpha("dark"),
-                    capsize=1.5,
+                    capsize=get_marker_size("medium"),
                     elinewidth=0.4,
                     label=f"{labels[flux_type]} inliers [{inlier_short.sum()}]",
                 )
@@ -2163,7 +2163,7 @@ class Zeropoint:
                         color=get_ransac_color('outliers'),
                         ecolor="lightgrey",
                         alpha=get_alpha("medium"),
-                        capsize=0,
+                        capsize=get_marker_size("medium"),
                         elinewidth=0.4,
                         label=f"{labels[flux_type]} outliers [{out_mask.sum()}]",
                     )
@@ -2290,7 +2290,35 @@ class Zeropoint:
             ax.set_xlabel(rf"Instrumental $m_{{\mathrm{{inst,{use_filter}}}}}$ [mag]")
             ax.set_ylabel(y_label)
             ransac_grid(ax)
-            ransac_legend_top_outside(ax, ncol=2)
+            # Declutter: scatter (inlier/outlier) entries stay in the legend
+            # above the axes; fit/diagnostic line entries move to a second
+            # legend at the top-left of the plot.
+            from matplotlib.container import ErrorbarContainer as _EBC
+            from matplotlib.lines import Line2D as _L2D
+            _handles, _labels = ax.get_legend_handles_labels()
+            _data_h, _data_l, _fit_h, _fit_l = [], [], [], []
+            for _h, _l in zip(_handles, _labels):
+                if isinstance(_h, _EBC):
+                    _data_h.append(_h)
+                    _data_l.append(_l)
+                else:
+                    _fit_h.append(_h)
+                    _fit_l.append(_l)
+            if _data_h and _fit_h:
+                _leg_top = ax.legend(
+                    _data_h, _data_l,
+                    loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                    frameon=False, ncol=2, fontsize=8,
+                )
+                ax.add_artist(_leg_top)
+                ax.legend(
+                    _fit_h, _fit_l,
+                    loc="upper left", ncol=1, fontsize=8,
+                    frameon=True, facecolor="white", framealpha=1.0,
+                    edgecolor="black",
+                )
+            else:
+                ransac_legend_top_outside(ax, ncol=2)
             set_mag_axes_inverted_xy(ax)
 
             ransac_savefig(fig, os.path.join(write_dir, f"Zeropoint_{base_name}.png"))
@@ -2709,7 +2737,7 @@ class Zeropoint:
                                 markersize=3,
                                 color=colors[flux_type],
                                 elinewidth=1.0,
-                                capsize=2,
+                                capsize=3,
                                 alpha=0.95,
                                 zorder=20,
                                 transform=ax_hist.get_xaxis_transform(),
@@ -2784,7 +2812,7 @@ class Zeropoint:
                                         markersize=3,
                                         color=colors["AP"],
                                         elinewidth=1.0,
-                                        capsize=2,
+                                        capsize=3,
                                         alpha=0.95,
                                         zorder=20,
                                         transform=ax_hist.get_xaxis_transform(),
@@ -2879,8 +2907,9 @@ class Zeropoint:
                 for patch in ax_hist.patches:
                     patch.set_zorder(3)
 
-                # Build a two-column legend: left col = description, right col = ZP value.
-                # Labels are encoded as "left_text||right_text"; split and reassemble.
+                # Split the "left_text||right_text" labels into two legends:
+                # descriptions above the axes (as before) and the ZP values in
+                # the top-left of the plot.
                 _handles, _labels = ax_hist.get_legend_handles_labels()
                 _left_labels, _right_labels = [], []
                 for _lbl in _labels:
@@ -2890,27 +2919,35 @@ class Zeropoint:
                         _l, _r = _lbl, ""
                     _left_labels.append(_l.strip())
                     _right_labels.append(_r.strip())
-                # Right-column handles: invisible patches carrying only the ZP text.
-                _blank_handles = [
-                    mpatches.Patch(color="none", label=_r) for _r in _right_labels
-                ]
-                _combined_handles = _handles + _blank_handles
-                _combined_labels  = _left_labels + _right_labels
-                ax_hist.legend(
-                    _combined_handles,
-                    _combined_labels,
+                _leg_top = ax_hist.legend(
+                    _handles,
+                    _left_labels,
                     loc="lower center",
                     bbox_to_anchor=(0.5, 1.01),
                     borderaxespad=0.0,
-                    frameon=True,
-                    facecolor="white",
-                    framealpha=1.0,
-                    edgecolor="black",
+                    frameon=False,
                     fontsize="small",
                     ncol=2,
                     handlelength=1.2,
                     handletextpad=0.4,
                     columnspacing=0.8,
+                )
+                ax_hist.add_artist(_leg_top)
+                # ZP-value legend: invisible handles so only the text shows.
+                _zp_handles = [
+                    mpatches.Patch(color="none") for _r in _right_labels
+                ]
+                ax_hist.legend(
+                    _zp_handles,
+                    _right_labels,
+                    loc="upper left",
+                    frameon=True,
+                    facecolor="white",
+                    framealpha=1.0,
+                    edgecolor="black",
+                    fontsize="small",
+                    handlelength=0,
+                    handletextpad=0,
                 )
                 fig_hist.tight_layout()
                 os.makedirs(write_dir, exist_ok=True)
@@ -2983,7 +3020,7 @@ class Zeropoint:
                     color=outlier_color,
                     ecolor="lightgrey",
                     alpha=get_alpha('medium'),
-                    capsize=0,
+                    capsize=get_marker_size("medium"),
                     elinewidth=0.4,
                     label=f"Outliers [{_out_mask_p.sum()}]",
                 )
@@ -2997,7 +3034,7 @@ class Zeropoint:
                 color=inlier_color,
                 ecolor="lightgrey",
                 alpha=get_alpha('dark'),
-                capsize=1,
+                capsize=get_marker_size('medium'),
                 elinewidth=0.4,
                 label=f"Inliers [{inlier_mask.sum()}]",
             )
@@ -3012,7 +3049,7 @@ class Zeropoint:
                 color=inlier_color,
                 ecolor="lightgrey",
                 alpha=get_alpha('dark'),
-                capsize=1,
+                capsize=get_marker_size('medium'),
                 elinewidth=0.4,
                 label="Data",
             )
@@ -3147,7 +3184,7 @@ class Zeropoint:
                     color=outlier_color,
                     ecolor="lightgrey",
                     alpha=get_alpha('medium'),
-                    capsize=0,
+                    capsize=get_marker_size("medium"),
                     elinewidth=0.4,
                     label=f"Outliers corrected [{_out_mask_p2.sum()}]",
                 )
@@ -3161,7 +3198,7 @@ class Zeropoint:
                 color=inlier_color,
                 ecolor="lightgrey",
                 alpha=get_alpha('dark'),
-                capsize=1,
+                capsize=get_marker_size('medium'),
                 elinewidth=0.4,
                 label=f"Corrected inliers [{np.sum(inlier_mask)}]",
             )
@@ -3176,7 +3213,7 @@ class Zeropoint:
                 color=inlier_color,
                 ecolor="lightgrey",
                 alpha=get_alpha('dark'),
-                capsize=1,
+                capsize=get_marker_size('medium'),
                 elinewidth=0.4,
                 label="Corrected data",
             )
@@ -3851,7 +3888,7 @@ class Zeropoint:
                     color=outlier_color,
                     ecolor="lightgrey",
                     alpha=get_alpha('medium'),
-                    capsize=0,
+                    capsize=get_marker_size("medium"),
                     elinewidth=0.4,
                     label=f"Outliers [{_out_mask.sum()}]",
                 )
@@ -3865,7 +3902,7 @@ class Zeropoint:
                 color=inlier_color,
                 ecolor="lightgrey",
                 alpha=get_alpha('dark'),
-                capsize=1,
+                capsize=get_marker_size('medium'),
                 elinewidth=0.4,
                 label=f"Inliers [{np.sum(inlier_mask)}]",
             )
@@ -3923,7 +3960,7 @@ class Zeropoint:
                 color=inlier_color,
                 ecolor="lightgrey",
                 alpha=get_alpha('dark'),
-                capsize=1,
+                capsize=get_marker_size('medium'),
                 elinewidth=0.4,
                 label=f"Corrected inliers [{np.sum(inlier_mask)}]",
             )

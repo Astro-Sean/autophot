@@ -4,6 +4,8 @@ Provides functions to:
 
 * Plot publication-ready light curves with detections and upper limits
   (:func:`plot_lightcurve`).
+* Plot a reference-star differential variability check
+  (:func:`plot_variability_check`).
 * Generate structured photometry tables with MJD, magnitudes, errors, and
   optional colour terms (:func:`generate_photometry_table`).
 * Sort detection plots into detection/non-detection folders
@@ -26,6 +28,7 @@ from plotting_utils import get_marker_size, apply_autophot_mplstyle
 from astropy.time import Time
 from collections import Counter
 from pathlib import Path
+from matplotlib.ticker import MaxNLocator
 
 # =============================================================================
 # =============================================================================
@@ -514,6 +517,64 @@ def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: l
     return result
 
 
+def _format_reference_datetime(mjd) -> str:
+    """Format an MJD as e.g. ``'9th August 9:00pm'`` (UTC, ordinal day)."""
+    dt = Time(float(mjd), format="mjd", scale="utc").to_datetime()
+    day = dt.day
+    if 11 <= day % 100 <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    hour12 = dt.hour % 12 or 12
+    ampm = "am" if dt.hour < 12 else "pm"
+    return f"{day}{suffix} {dt.strftime('%B')} {hour12}:{dt.minute:02d}{ampm}"
+
+
+def _time_axis_transform(mjd_values, reference_epoch=0):
+    """Decide the lightcurve x-axis transform for the given MJD values.
+
+    Returns ``(transform, xlabel, unit)`` where ``transform`` maps an array of
+    MJDs to x-axis coordinates.  When the data span less than one day the axis
+    is switched to minutes (span < 3 hours) or hours since the first
+    observation, labelled ``'Time since <date> UTC [<unit>]'``; otherwise the
+    axis is phase (days since ``reference_epoch``) or raw MJD.  ``unit`` is
+    ``'min'``, ``'hr'`` or ``None``.
+    """
+    mjd_arr = np.asarray(
+        pd.to_numeric(pd.Series(np.ravel(np.asarray(mjd_values))), errors="coerce"),
+        dtype=float,
+    )
+    mjd_arr = mjd_arr[np.isfinite(mjd_arr)]
+
+    def _delta(ref):
+        return lambda m: np.asarray(m, dtype=float) - ref
+
+    if mjd_arr.size > 1:
+        t0 = float(mjd_arr.min())
+        span_days = float(mjd_arr.max() - t0)
+        if 0.0 < span_days < 1.0:
+            if span_days * 24.0 < 3.0:
+                factor, unit = 1440.0, "min"
+            else:
+                factor, unit = 24.0, "hr"
+            xlabel = (
+                f"Time since {_format_reference_datetime(t0)} UTC [{unit}]"
+            )
+            return (
+                lambda m: (np.asarray(m, dtype=float) - t0) * factor,
+                xlabel,
+                unit,
+            )
+
+    if reference_epoch:
+        return (
+            _delta(reference_epoch),
+            f"Phase (days since {reference_epoch})",
+            None,
+        )
+    return _delta(0.0), "Time [MJD]", None
+
+
 def _compute_detection_mask(
     df: pd.DataFrame,
     mag_col: str,
@@ -679,6 +740,7 @@ def plot_lightcurve(
     color_match_days=0.5,
     ls="",
     max_plot_err=0.5,
+    chi2_marginal_threshold=1000.0,
 ):
     """Plot a publication-ready lightcurve with detections and limits.
 
@@ -696,7 +758,10 @@ def plot_lightcurve(
     method : str
         Photometry method (e.g. 'PSF', 'AP').
     reference_epoch : float
-        MJD reference for phase; 0 means x-axis is MJD.
+        MJD reference for phase; 0 means x-axis is MJD.  When the plotted
+        data span less than one day the axis instead switches to minutes
+        (span < 3 h) or hours since the first observation, labelled
+        'Time since <date> UTC [<unit>]'.
     offset : float
         Magnitude offset per band for stacking (visual).
     redshift : float
@@ -737,6 +802,12 @@ def plot_lightcurve(
         Detections with errors exceeding this threshold are excluded from the
         plot and a warning is logged. This prevents poorly constrained
         measurements from dominating the plot scale or obscuring real trends.
+    chi2_marginal_threshold : float
+        Reduced chi-squared threshold above which a detection is plotted as
+        "marginal" (default 5.0).  Detections with ``reduced_chi2`` exceeding
+        this value are drawn with a white face and faded edge colour to
+        visually flag poor PSF-fit quality (e.g. non-Gaussian PSF, sparse
+        field).  Set to ``0`` or ``None`` to disable.
 
     Returns
     -------
@@ -801,6 +872,14 @@ def plot_lightcurve(
         data = data.loc[:, ~data.columns.duplicated()].copy()
     save_path = os.path.dirname(output_file)
     base = os.path.splitext(os.path.basename(output_file))[0]
+
+    # Decide the x-axis mapping up front. For intra-night data (< 1 day span)
+    # this switches the axis to minutes/hours since the first observation with
+    # a 'Time since <date>' label instead of raw MJD.
+    x_transform, xlabel, subday_unit = _time_axis_transform(
+        data["mjd"].values if "mjd" in data.columns else np.array([]),
+        reference_epoch,
+    )
 
     def _resolve_band_triplet(cols, band: str, method: str):
         """
@@ -917,6 +996,7 @@ def plot_lightcurve(
     has_limits_plotted = False
     plotted_inverted_hatch = False
     plotted_positive_flux_marker = False
+    plotted_marginal_chi2_marker = False
     mid_idx = (
         len(bands_in_data) - 1
     ) // 2  # reference band (offset 0) is the middle one
@@ -1114,12 +1194,12 @@ def plot_lightcurve(
         # ------------------------------------------------------------------
         if not all_detects.empty:
             ax.errorbar(
-                all_detects.mjd - reference_epoch,
+                x_transform(all_detects.mjd),
                 all_detects["plot_mag"],
                 yerr=all_detects["plot_err"],
                 fmt='none',
                 ecolor=c,
-                capsize=2,
+                capsize=2.5,
                 capthick=0.8,
                 elinewidth=1,
                 zorder=2,
@@ -1128,7 +1208,7 @@ def plot_lightcurve(
             if ls:
                 sorted_detects = all_detects.sort_values("mjd")
                 ax.plot(
-                    sorted_detects.mjd - reference_epoch,
+                    x_transform(sorted_detects.mjd),
                     sorted_detects["plot_mag"],
                     color=c,
                     linestyle=ls,
@@ -1151,27 +1231,67 @@ def plot_lightcurve(
             inv_fit_mask = inv_fit_mask | inv_row_mask
 
             # Normal detections: filled circles with black edge.
+            # Detections with reduced_chi2 > chi2_marginal_threshold are
+            # plotted as marginal (white face, faded edge) to flag poor
+            # PSF-fit quality visually.
             normal_detects = all_detects[~inv_fit_mask]
             if not normal_detects.empty:
-                plotted_positive_flux_marker = True
-                ax.scatter(
-                    normal_detects.mjd - reference_epoch,
-                    normal_detects["plot_mag"],
-                    s=get_marker_size('medium'),
-                    c=c,
-                    marker='o',
-                    edgecolors='black',
-                    linewidth=0.8,
-                    zorder=3,
-                    label=leg_label if leg_label else "",
+                # Split by chi2 quality if the column is available
+                chi2_marginal_enabled = (
+                    chi2_marginal_threshold is not None
+                    and float(chi2_marginal_threshold) > 0
+                    and "reduced_chi2" in normal_detects.columns
                 )
+                if chi2_marginal_enabled:
+                    _chi2_vals = pd.to_numeric(
+                        normal_detects["reduced_chi2"], errors="coerce"
+                    )
+                    marginal_mask = _chi2_vals > float(chi2_marginal_threshold)
+                else:
+                    marginal_mask = pd.Series(
+                        False, index=normal_detects.index
+                    )
+
+                good_detects = normal_detects[~marginal_mask]
+                marginal_detects = normal_detects[marginal_mask]
+
+                if not good_detects.empty:
+                    plotted_positive_flux_marker = True
+                    ax.scatter(
+                        x_transform(good_detects.mjd),
+                        good_detects["plot_mag"],
+                        s=get_marker_size('medium'),
+                        c=c,
+                        marker='o',
+                        edgecolors='black',
+                        linewidth=0.8,
+                        zorder=3,
+                        label=leg_label if leg_label else "",
+                    )
+
+                if not marginal_detects.empty:
+                    plotted_marginal_chi2_marker = True
+                    ax.scatter(
+                        x_transform(marginal_detects.mjd),
+                        marginal_detects["plot_mag"],
+                        s=get_marker_size('medium'),
+                        facecolors='white',
+                        edgecolors=c,
+                        linewidth=0.8,
+                        alpha=0.5,
+                        marker='o',
+                        zorder=3,
+                        # Only add the band label if no good detections
+                        # claimed it already.
+                        label=leg_label if good_detects.empty and leg_label else "",
+                    )
 
             # Inverted detections: hatched squares with white diagonal stripes.
             inv_detects = all_detects[inv_fit_mask]
             if not inv_detects.empty:
                 plotted_inverted_hatch = True
                 sc = ax.scatter(
-                    inv_detects.mjd - reference_epoch,
+                    x_transform(inv_detects.mjd),
                     inv_detects["plot_mag"],
                     s=get_marker_size('medium'),
                     c=c,
@@ -1193,7 +1313,7 @@ def plot_lightcurve(
             # Use ZTF-style SNU (5sigma) upper limit for non-detections where available
             limit_col = "lmag_upper" if "lmag_upper" in nondetects.columns else "lmag"
             ax.errorbar(
-                nondetects.mjd - reference_epoch,
+                x_transform(nondetects.mjd),
                 nondetects[limit_col] + band_offset,
                 color=c,
                 ecolor=c,
@@ -1203,6 +1323,7 @@ def plot_lightcurve(
                 ls="",
                 marker="v",
                 markersize=get_marker_size('medium'),
+                capsize=get_marker_size('medium'),
                 alpha=0.85,
                 zorder=1,
             )
@@ -1225,11 +1346,12 @@ def plot_lightcurve(
             ax.grid(True, which="major", alpha=0.35, linestyle="-", linewidth=0.5)
             ax.minorticks_on()
 
-    xlabel = (
-        f"Phase (days since {reference_epoch})" if reference_epoch else "Time [MJD]"
-    )
     curve_axes[0].set_ylabel("Apparent brightness [mag]")
     (color_ax if plot_color else curve_axes[-1]).set_xlabel(xlabel)
+    if subday_unit == "min":
+        # Integer minute ticks for intra-night axes
+        for _ax in list(curve_axes) + ([color_ax] if color_ax is not None else []):
+            _ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=8))
     if plot_color:
         for ax in curve_axes:
             ax.tick_params(axis="x", labelbottom=False, length=0)
@@ -1239,11 +1361,11 @@ def plot_lightcurve(
         ax.minorticks_on()
 
     if mark_today and today_mjd is not None:
-        today_rel = today_mjd - reference_epoch
+        today_rel = float(np.asarray(x_transform(today_mjd)))
         for ax in curve_axes:
             ax.axvline(
                 x=today_rel,
-                color="#FF0000",
+                color="#C97B74",
                 linestyle="--",
                 alpha=0.7,
                 linewidth=1.2,
@@ -1306,6 +1428,22 @@ def plot_lightcurve(
         )
         handles.append(limit_handle)
         labels.append("Upper limit")
+    if plotted_marginal_chi2_marker and "Marginal (high χ²)" not in labels:
+        marginal_handle = Line2D(
+            [0],
+            [0],
+            color="black",
+            marker="o",
+            markersize=get_marker_size('medium'),
+            markerfacecolor="white",
+            markeredgecolor="black",
+            markeredgewidth=0.8,
+            alpha=0.5,
+            ls="",
+            label=f"Marginal (high χ², >{chi2_marginal_threshold:g})",
+        )
+        handles.append(marginal_handle)
+        labels.append(f"Marginal (high χ², >{chi2_marginal_threshold:g})")
 
     # Choose number of legend columns so that the legend is taller than wide.
     n_labels = len(labels)
@@ -1530,13 +1668,17 @@ def plot_lightcurve(
             det1_arr = d1["det"].values
             # Vectorised nearest-epoch match via searchsorted on sorted mjd2
             ins = np.searchsorted(mjd2, mjd1_arr)
+            # searchsorted can return len(mjd2) when all mjd1 values are after
+            # all mjd2 values. np.where evaluates all arguments eagerly, so we
+            # need a clipped version for safe indexing into mjd2.
+            ins_safe = np.clip(ins, 0, len(mjd2) - 1)
             j_arr = np.where(
                 ins >= len(mjd2), len(mjd2) - 1,
                 np.where(
                     ins == 0, 0,
                     np.where(
-                        np.abs(mjd2[ins] - mjd1_arr) <= np.abs(mjd2[ins - 1] - mjd1_arr),
-                        ins, ins - 1
+                        np.abs(mjd2[ins_safe] - mjd1_arr) <= np.abs(mjd2[ins_safe - 1] - mjd1_arr),
+                        ins_safe, ins_safe - 1
                     )
                 )
             )
@@ -1545,7 +1687,7 @@ def plot_lightcurve(
                 if dt_arr[i] > color_match_days:
                     continue
                 j = j_arr[i]
-                phase = (mjd1_arr[i] + mjd2[j]) / 2 - reference_epoch
+                phase = float(np.asarray(x_transform((mjd1_arr[i] + mjd2[j]) / 2)))
                 det1 = det1_arr[i]
                 if det1 and det2[j]:
                     phase_pts.append(phase)
@@ -1572,7 +1714,7 @@ def plot_lightcurve(
                     marker="s",
                     markersize=get_marker_size('medium'),
                     ls="",
-                    capsize=1.5,
+                    capsize=get_marker_size('medium'),
                     markeredgecolor="black",
                     markeredgewidth=0.5,
                     label=label,
@@ -1588,6 +1730,7 @@ def plot_lightcurve(
                     markeredgewidth=0.5,
                     marker="v",
                     markersize=get_marker_size('medium'),
+                    capsize=get_marker_size('medium'),
                     ls="",
                     zorder=2,
                 )
@@ -1601,12 +1744,12 @@ def plot_lightcurve(
                     markeredgewidth=0.5,
                     marker="^",
                     markersize=get_marker_size('medium'),
+                    capsize=get_marker_size('medium'),
                     ls="",
                     zorder=2,
                 )
         color_ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
-                        frameon=True, facecolor="white", framealpha=1.0,
-                        edgecolor="black")
+                        frameon=False)
         color_ax.invert_yaxis()
     # fig.tight_layout()
 
@@ -2186,6 +2329,681 @@ def generate_photometry_table(
             )
 
     return out_phot
+
+
+# =============================================================================
+# =============================================================================
+# #
+# =============================================================================
+# =============================================================================
+
+
+def _parse_calib_header(filepath) -> dict:
+    """Parse the ``# key: value`` comment header of a per-image ``Calib_*.csv``."""
+    info = {}
+    try:
+        with open(filepath, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#") and ":" in line:
+                    parts = line[1:].split(":", 1)
+                    if len(parts) == 2:
+                        info[parts[0].strip()] = parts[1].strip()
+                elif line and not line.startswith("#"):
+                    break
+    except OSError:
+        pass
+    return info
+
+
+def _parse_calib_catalog(filepath) -> pd.DataFrame:
+    """Read the sequence-star catalog table from a ``Calib_*.csv`` file.
+
+    The catalog is the CSV block following the ``#`` comment header (the first
+    non-comment line is the column header, e.g. ``RA,DEC,...``).
+    """
+    try:
+        with open(filepath, "r") as f:
+            lines = f.readlines()
+        header_line = None
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if s and not s.startswith("#"):
+                header_line = i
+                break
+        if header_line is None:
+            return pd.DataFrame()
+        return pd.read_csv(filepath, skiprows=header_line)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _nearest_epoch(query, epochs, tol):
+    """Map each query MJD to the nearest catalog epoch within ``tol`` days.
+
+    Returns a float array aligned to ``query`` holding the matched epoch value
+    (or NaN when no epoch is within tolerance).  Used because target MJD and
+    ``Calib_*.csv`` header MJD can differ at the float-rounding level.
+    """
+    epochs = np.sort(np.asarray(epochs, dtype=float))
+    q = np.asarray(query, dtype=float)
+    out = np.full(len(q), np.nan)
+    if epochs.size == 0:
+        return out
+    ins = np.searchsorted(epochs, q)
+    ins_c = np.clip(ins, 0, epochs.size - 1)
+    cand = np.where(
+        ins >= epochs.size,
+        epochs.size - 1,
+        np.where(
+            ins == 0,
+            0,
+            np.where(
+                np.abs(epochs[ins_c] - q) <= np.abs(epochs[ins_c - 1] - q),
+                ins_c,
+                ins_c - 1,
+            ),
+        ),
+    )
+    dt = np.abs(epochs[cand] - q)
+    ok = np.isfinite(q) & (dt <= tol)
+    out[ok] = epochs[cand[ok]]
+    return out
+
+
+def plot_variability_check(
+    output_file,
+    method="PSF",
+    snr_min=25.0,
+    flux_min=100.0,
+    flux_max=None,
+    min_epoch_frac=0.8,
+    n_ensemble=20,
+    n_ref_plot=25,
+    max_plot_err=0.5,
+    show_drift_panel=True,
+    calib_dir=None,
+    format="png",
+    dpi=150,
+    show=False,
+    target_name=None,
+):
+    """Plot a differential variability check: target vs reference-star ensemble.
+
+    For each band present in the lightcurve output, this reads the per-image
+    ``Calib_*.csv`` sequence-star catalogs (searched recursively under the
+    directory containing ``output_file``), builds the per-epoch mean
+    instrumental magnitude of a bright reference-star ensemble, and subtracts
+    that common-mode signal from every reference star and from the target.
+
+    The figure has, per band:
+
+    * a top panel (when ``show_drift_panel``) showing the ensemble-mean
+      instrumental magnitude and the raw target instrumental magnitude, each
+      mean-centred -- curves that track each other indicate the variability is
+      instrumental/atmospheric;
+    * a bottom panel with per-star differential residuals
+      ``inst - <ensemble mean> - <star mean>`` for reference stars (grey cloud
+      plus per-epoch mean +/- std), and the same quantity for the target.
+
+    If the target's residuals are flat and comparable to the reference-star
+    scatter, the observed variability was instrumental; excess structure
+    indicates intrinsic variability.  No model is fit to the transient light
+    curve.  For data spanning < 1 day the time axis switches to
+    minutes/hours since the first observation (as in :func:`plot_lightcurve`).
+
+    Parameters
+    ----------
+    output_file : str
+        Path to the concatenated photometry CSV (e.g. ``LightCurve_Output.csv``).
+    method : str
+        Photometry method whose instrumental columns are used ('PSF' or 'AP').
+    snr_min, flux_min : float
+        Minimum mean S/N and mean flux for a catalog star to join the
+        reference ensemble (relaxed automatically if too few stars qualify).
+    flux_max : float or None
+        Optional maximum flux cut (saturation guard); None disables it.
+    min_epoch_frac : float
+        Fraction of epochs a star must be present in to qualify (default 0.8;
+        progressively relaxed if fewer than 3 stars qualify).
+    n_ensemble : int
+        Number of brightest qualifying stars used for the ensemble mean.
+    n_ref_plot : int
+        Number of additional (non-ensemble) stars drawn as the grey cloud.
+    max_plot_err : float
+        Maximum target residual error plotted (mag).
+    show_drift_panel : bool
+        Show the per-band instrumental-drift comparison panel.
+    calib_dir : str or None
+        Directory searched recursively for ``Calib_*.csv`` catalogs.
+        Defaults to the directory containing ``output_file``; point this at
+        the main reduced directory when ``output_file`` lives elsewhere
+        (e.g. additional-target CSVs in ``sub_targets/``).
+    format, dpi, show : plotting controls
+        Same conventions as :func:`plot_lightcurve`.
+    target_name : str or None
+        Optional label; appended to the output filename.
+
+    Returns
+    -------
+    str or None
+        Path to the saved figure, or None when insufficient data.
+    """
+    log = logging.getLogger(__name__)
+    apply_autophot_mplstyle()
+    if show:
+        import matplotlib
+
+        current_backend = str(plt.get_backend()).lower()
+        if "agg" in current_backend:
+            for backend in ("QtAgg", "TkAgg"):
+                try:
+                    matplotlib.use(backend, force=True)
+                    break
+                except Exception:
+                    continue
+
+    try:
+        data = pd.read_csv(output_file)
+    except Exception as exc:
+        log.error("plot_variability_check: cannot read '%s': %s", output_file, exc)
+        return None
+    data = _normalize_photometry_columns(data)
+    if data.columns.duplicated().any():
+        data = data.loc[:, ~data.columns.duplicated()].copy()
+    if "mjd" not in data.columns:
+        log.warning("plot_variability_check: no 'mjd' column in '%s'", output_file)
+        return None
+
+    save_path = os.path.dirname(os.path.abspath(output_file))
+    m_low = str(method).strip().lower()
+    method_u = str(method).strip().upper()
+
+    # Discover bands, mirroring plot_lightcurve (long-form via `filter`
+    # column, else wide-format per-band triplets).
+    long_form = (
+        f"mag_{m_low}" in data.columns and f"mag_{m_low}_err" in data.columns
+    )
+    fser = photometry_filter_series(data)
+    bands = []
+    if long_form and fser is not None and fser.notna().any():
+        bands = canonical_bands_from_filter_series(fser)
+    if not bands:
+        used_triplets = set()
+        for b in "FSDNAuUBgcVwrRoEiIzyYJHKWQ":
+            trip = _resolve_band_triplet(set(data.columns), b, method)
+            if trip is not None and trip not in used_triplets:
+                bands.append(b)
+                used_triplets.add(trip)
+    if not bands:
+        log.info(
+            "plot_variability_check: no photometric bands found in '%s'.",
+            output_file,
+        )
+        return None
+
+    # Locate per-image Calib catalogs under the reduced output tree.
+    search_dir = os.path.abspath(calib_dir) if calib_dir else save_path
+    calib_files = sorted(
+        glob.glob(os.path.join(search_dir, "**", "Calib_*.csv"), recursive=True)
+    )
+    if not calib_files:
+        log.info(
+            "plot_variability_check: no Calib_*.csv files found under '%s'.",
+            search_dir,
+        )
+        return None
+
+    calib_meta = []
+    for fpath in calib_files:
+        info = _parse_calib_header(fpath)
+        try:
+            mjd = float(info.get("mjd", "nan"))
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(mjd):
+            continue
+        calib_meta.append(
+            {"path": fpath, "mjd": mjd, "filter": str(info.get("filter", "")).strip()}
+        )
+    if not calib_meta:
+        log.info("plot_variability_check: no usable Calib headers found.")
+        return None
+
+    band_payloads = []
+    all_mjds = []
+
+    for band in bands:
+        band_files = [
+            m for m in calib_meta if filter_value_matches_band(band, m["filter"])
+        ]
+        if len(band_files) < 2:
+            continue
+
+        frames = []
+        for meta in band_files:
+            cat = _parse_calib_catalog(meta["path"])
+            if cat.empty or "RA" not in cat.columns or "DEC" not in cat.columns:
+                continue
+            raw_filt = meta["filter"]
+            cmap = {str(c).lower(): c for c in cat.columns}
+            inst_col = cmap.get(f"inst_{raw_filt}_{method_u}".lower())
+            if inst_col is None:
+                continue
+            inst_err_col = cmap.get(f"{inst_col}_err".lower())
+            snr_col = cmap.get(f"snr_{m_low}", cmap.get("snr"))
+            flux_col = cmap.get(f"flux_{m_low}")
+            sub = pd.DataFrame(
+                {
+                    "ra": pd.to_numeric(cat["RA"], errors="coerce"),
+                    "dec": pd.to_numeric(cat["DEC"], errors="coerce"),
+                    "mjd": float(meta["mjd"]),
+                    "inst": pd.to_numeric(cat[inst_col], errors="coerce"),
+                    "inst_err": (
+                        pd.to_numeric(cat[inst_err_col], errors="coerce")
+                        if inst_err_col
+                        else np.nan
+                    ),
+                    "snr": (
+                        pd.to_numeric(cat[snr_col], errors="coerce")
+                        if snr_col
+                        else np.nan
+                    ),
+                    "flux": (
+                        pd.to_numeric(cat[flux_col], errors="coerce")
+                        if flux_col
+                        else np.nan
+                    ),
+                }
+            )
+            sub = sub[
+                np.isfinite(sub["inst"])
+                & np.isfinite(sub["ra"])
+                & np.isfinite(sub["dec"])
+            ]
+            if not sub.empty:
+                frames.append(sub)
+        if not frames:
+            continue
+
+        cat_all = pd.concat(frames, ignore_index=True)
+        # Star identity key: sequence stars share catalog coordinates, so a
+        # rounded (ra, dec) pair is a stable identifier across epochs.
+        cat_all["star_id"] = list(
+            zip(cat_all["ra"].round(4), cat_all["dec"].round(4))
+        )
+        n_epochs = int(cat_all["mjd"].nunique())
+        if n_epochs < 2:
+            continue
+
+        # Reference-ensemble selection with progressive relaxation so that
+        # sparse/noisy fields still produce a diagnostic.
+        sel = None
+        for frac in (min_epoch_frac, 0.6, 0.4, 0.0):
+            for snr_cut in (snr_min, snr_min / 2.0, 0.0):
+                stats = (
+                    cat_all.groupby("star_id")
+                    .agg(
+                        n_mjd=("mjd", "nunique"),
+                        mean_snr=("snr", "mean"),
+                        mean_flux=("flux", "mean"),
+                        max_flux=("flux", "max"),
+                    )
+                    .reset_index()
+                )
+                need = max(2, int(np.ceil(frac * n_epochs)))
+                good = stats[
+                    (stats["n_mjd"] >= need)
+                    & (stats["mean_snr"].fillna(np.inf) > snr_cut)
+                    & (stats["mean_flux"].fillna(np.inf) > flux_min)
+                ]
+                if flux_max is not None:
+                    good = good[good["max_flux"] < flux_max]
+                if len(good) >= 3:
+                    sel = good.sort_values("mean_flux", ascending=False)
+                    break
+            if sel is not None:
+                break
+        if sel is None or sel.empty:
+            log.info(
+                "plot_variability_check: band %s - fewer than 3 usable "
+                "reference stars; skipping.",
+                band,
+            )
+            continue
+
+        ensemble_ids = set(sel.head(n_ensemble)["star_id"])
+        plot_ids = set(
+            sel.iloc[n_ensemble : n_ensemble + n_ref_plot]["star_id"]
+        )
+        if not plot_ids:
+            plot_ids = set(sel["star_id"]) - ensemble_ids
+        if not plot_ids:
+            # Fall back to plotting ensemble members themselves.
+            plot_ids = set(ensemble_ids)
+
+        ens = cat_all[cat_all["star_id"].isin(ensemble_ids)]
+        ens_epoch = (
+            ens.groupby("mjd")["inst"]
+            .agg(["mean", "std", "count"])
+            .rename(
+                columns={"mean": "ens_mean", "std": "ens_std", "count": "ens_n"}
+            )
+            .reset_index()
+        )
+        ens_mean_map = dict(zip(ens_epoch["mjd"], ens_epoch["ens_mean"]))
+        ens_std_map = dict(zip(ens_epoch["mjd"], ens_epoch["ens_std"]))
+        ens_n_map = dict(zip(ens_epoch["mjd"], ens_epoch["ens_n"]))
+
+        # Per-star differential residuals: inst - ensemble_mean - <star mean>.
+        ref = cat_all[cat_all["star_id"].isin(plot_ids)].copy()
+        ref["ens_mean"] = ref["mjd"].map(ens_mean_map)
+        ref = ref[np.isfinite(ref["ens_mean"])]
+        if ref.empty:
+            continue
+        ref["diff"] = ref["inst"] - ref["ens_mean"]
+        ref["delta"] = ref["diff"] - ref.groupby("star_id")["diff"].transform(
+            "mean"
+        )
+        ref_epoch = (
+            ref.groupby("mjd")["delta"].agg(["mean", "std"]).reset_index()
+        )
+
+        # Target instrumental magnitudes for this band.
+        if long_form and fser is not None and fser.notna().any():
+            tmask = _filter_series_matches_band(band, fser)
+            tgt = data[tmask.fillna(False)].copy()
+        else:
+            tgt = data.copy()
+        cmap_t = {str(c).lower(): c for c in tgt.columns}
+        inst_t_col = None
+        for cand in (
+            f"inst_mag_{m_low}",
+            f"inst_{band}_{method_u}",
+            f"inst_{band}_{m_low}",
+        ):
+            if cand in tgt.columns:
+                inst_t_col = cand
+                break
+            if cand.lower() in cmap_t:
+                inst_t_col = cmap_t[cand.lower()]
+                break
+        if inst_t_col is not None:
+            tgt["inst"] = pd.to_numeric(tgt[inst_t_col], errors="coerce")
+            err_cand = f"{inst_t_col}_err"
+            tgt["inst_err"] = (
+                pd.to_numeric(tgt[err_cand], errors="coerce")
+                if err_cand in tgt.columns
+                else np.nan
+            )
+        else:
+            # Derive instrumental mag = calibrated mag - zeropoint.
+            trip = _resolve_band_triplet(set(tgt.columns), band, method)
+            if trip is None:
+                continue
+            mcol, ecol, zcol = trip
+            tgt["inst"] = pd.to_numeric(tgt[mcol], errors="coerce") - pd.to_numeric(
+                tgt[zcol], errors="coerce"
+            )
+            tgt["inst_err"] = pd.to_numeric(tgt[ecol], errors="coerce")
+        tgt = tgt[
+            np.isfinite(tgt["inst"]) & np.isfinite(pd.to_numeric(tgt["mjd"], errors="coerce"))
+        ]
+        if tgt.empty:
+            continue
+        tgt["mjd"] = pd.to_numeric(tgt["mjd"], errors="coerce")
+        # Map target rows to catalog epochs by nearest MJD (headers and the
+        # lightcurve CSV may differ at the float-rounding level). Tolerance is
+        # half the minimum epoch gap, capped at ~86 s.
+        epoch_vals = np.sort(ens_epoch["mjd"].to_numpy(dtype=float))
+        if epoch_vals.size > 1:
+            min_gap = float(np.min(np.diff(epoch_vals)))
+            epoch_tol = min(1e-3, min_gap / 2.0)
+        else:
+            epoch_tol = 1e-3
+        tgt["epoch"] = _nearest_epoch(tgt["mjd"], epoch_vals, epoch_tol)
+        tgt = tgt[np.isfinite(tgt["epoch"])]
+        tgt["ens_mean"] = tgt["epoch"].map(ens_mean_map)
+        tgt = tgt[np.isfinite(tgt["ens_mean"])]
+        if tgt.empty:
+            continue
+        tgt["ens_std"] = tgt["epoch"].map(ens_std_map)
+        tgt["ens_n"] = tgt["epoch"].map(ens_n_map)
+        tgt["diff"] = tgt["inst"] - tgt["ens_mean"]
+        tgt["delta"] = tgt["diff"] - tgt["diff"].mean()
+        tgt["delta_err"] = np.sqrt(
+            tgt["inst_err"].fillna(0.0) ** 2
+            + (
+                tgt["ens_std"].fillna(0.0)
+                / np.sqrt(tgt["ens_n"].clip(lower=1))
+            )
+            ** 2
+        )
+        if max_plot_err is not None and max_plot_err > 0:
+            n_before = len(tgt)
+            tgt = tgt[tgt["delta_err"].fillna(0.0) <= max_plot_err]
+            if len(tgt) < n_before:
+                log.info(
+                    "plot_variability_check: band %s - %d target point(s) "
+                    "excluded (delta_err > %.2f mag).",
+                    band,
+                    n_before - len(tgt),
+                    max_plot_err,
+                )
+        if tgt.empty:
+            continue
+
+        ref_rms = float(np.nanstd(ref["delta"])) if len(ref) else np.nan
+        tgt_rms = float(np.nanstd(tgt["delta"]))
+        var_ratio = (
+            tgt_rms / ref_rms
+            if np.isfinite(ref_rms) and ref_rms > 0
+            else np.nan
+        )
+        log.info(
+            "plot_variability_check: band %s - %d ensemble stars, %d plotted "
+            "refs, %d epochs; target RMS %.4f mag, ref RMS %.4f mag, "
+            "ratio %.2f.",
+            band,
+            len(ensemble_ids),
+            len(plot_ids),
+            n_epochs,
+            tgt_rms,
+            ref_rms,
+            var_ratio,
+        )
+
+        band_payloads.append(
+            {
+                "band": band,
+                "ens_epoch": ens_epoch,
+                "ref": ref,
+                "ref_epoch": ref_epoch,
+                "tgt": tgt.sort_values("mjd"),
+                "n_ensemble": len(ensemble_ids),
+                "n_ref": len(plot_ids),
+                "var_ratio": var_ratio,
+            }
+        )
+        all_mjds.extend(tgt["mjd"].tolist())
+        all_mjds.extend(ens_epoch["mjd"].tolist())
+
+    if not band_payloads:
+        log.info(
+            "plot_variability_check: insufficient catalog/target overlap; "
+            "no figure produced."
+        )
+        return None
+
+    x_transform, xlabel, subday_unit = _time_axis_transform(all_mjds, 0)
+
+    panels_per_band = 2 if show_drift_panel else 1
+    n_rows = len(band_payloads) * panels_per_band
+    width_in = set_size(540, aspect=1)[0]
+    height_in = set_size(505, aspect=1)[1] * 0.62 * n_rows
+    from matplotlib.gridspec import GridSpec
+
+    fig = plt.figure(figsize=(width_in, height_in))
+    gs = GridSpec(n_rows, 1, figure=fig, height_ratios=[1.0] * n_rows, hspace=0.12)
+    axes = [fig.add_subplot(gs[i]) for i in range(n_rows)]
+    for a in axes[1:]:
+        a.sharex(axes[0])
+
+    for i, payload in enumerate(band_payloads):
+        band = payload["band"]
+        c = BAND_COLORS.get(band, BAND_COLORS.get(str(band).lower(), "k"))
+        tgt = payload["tgt"]
+        ens_epoch = payload["ens_epoch"]
+        ref = payload["ref"]
+        ref_epoch = payload["ref_epoch"]
+
+        row = i * panels_per_band
+        if show_drift_panel:
+            ax_drift = axes[row]
+            row += 1
+            ens_c = ens_epoch["ens_mean"] - ens_epoch["ens_mean"].mean()
+            ax_drift.plot(
+                x_transform(ens_epoch["mjd"]),
+                ens_c,
+                "D-",
+                color="dimgrey",
+                markersize=3,
+                lw=0.8,
+                label=(
+                    f"Ensemble mean ({payload['n_ensemble']} stars)"
+                ),
+                zorder=2,
+            )
+            tgt_c = tgt["inst"] - tgt["inst"].mean()
+            ax_drift.errorbar(
+                x_transform(tgt["mjd"]),
+                tgt_c,
+                yerr=tgt["inst_err"],
+                fmt="o",
+                color=c,
+                ecolor=c,
+                markeredgecolor="black",
+                markeredgewidth=0.5,
+                markersize=get_marker_size("medium"),
+                capsize=get_marker_size('medium'),
+                lw=0.5,
+                label=f"{band} target",
+                zorder=3,
+            )
+            ax_drift.set_ylabel("Δ instrumental mag")
+            ax_drift.invert_yaxis()
+            ax_drift.grid(True, which="major", alpha=0.35, linestyle="-", linewidth=0.5)
+            ax_drift.minorticks_on()
+            ax_drift.legend(loc="best", frameon=True, facecolor="white",
+                            framealpha=1.0, edgecolor="black", fontsize=7)
+
+        ax = axes[row]
+        ax.axhline(0, color="black", lw=0.5, ls="--", zorder=1)
+        if not ref.empty:
+            ax.scatter(
+                x_transform(ref["mjd"]),
+                ref["delta"],
+                s=6,
+                c="lightgrey",
+                alpha=0.4,
+                edgecolors="none",
+                label=f"Reference stars ({payload['n_ref']})",
+                zorder=0,
+            )
+        if not ref_epoch.empty:
+            ax.errorbar(
+                x_transform(ref_epoch["mjd"]),
+                ref_epoch["mean"],
+                yerr=ref_epoch["std"],
+                fmt="D",
+                color="whitesmoke",
+                ecolor="dimgrey",
+                markersize=2,
+                capsize=2,
+                lw=0.5,
+                markeredgecolor="dimgrey",
+                markeredgewidth=0.5,
+                label="Per-epoch mean ± std",
+                zorder=2,
+            )
+        ax.errorbar(
+            x_transform(tgt["mjd"]),
+            tgt["delta"],
+            yerr=tgt["delta_err"],
+            fmt="o",
+            color=c,
+            ecolor=c,
+            markeredgecolor="black",
+            markeredgewidth=0.5,
+            markersize=get_marker_size("medium"),
+            capsize=get_marker_size("medium"),
+            lw=0.5,
+            label=f"{band} target",
+            zorder=5,
+        )
+        ax.set_ylabel("Δmag vs ensemble [mag]")
+        # Fit the y-limits to the target residuals (+/- errors) with a small
+        # margin, extended to zero so the residual reference line stays in
+        # view; reference-star outliers cannot stretch the axis.
+        _tgt_d = np.asarray(tgt["delta"], dtype=float)
+        _tgt_e = np.asarray(tgt["delta_err"], dtype=float)
+        _y_lo = np.nanmin(_tgt_d - _tgt_e)
+        _y_hi = np.nanmax(_tgt_d + _tgt_e)
+        if not (np.isfinite(_y_lo) and np.isfinite(_y_hi)):
+            _y_lo, _y_hi = -0.05, 0.05
+        _y_lo = min(_y_lo, 0.0)
+        _y_hi = max(_y_hi, 0.0)
+        _pad = max(0.05 * (_y_hi - _y_lo), 0.01)
+        ax.set_ylim(_y_hi + _pad, _y_lo - _pad)
+        ax.grid(True, which="major", alpha=0.35, linestyle="-", linewidth=0.5)
+        ax.minorticks_on()
+        if np.isfinite(payload["var_ratio"]):
+            ax.text(
+                0.02,
+                0.03,
+                f"target/ref RMS = {payload['var_ratio']:.2f}",
+                transform=ax.transAxes,
+                va="bottom",
+                ha="left",
+                fontsize=7,
+                bbox=dict(
+                    facecolor="white", alpha=0.9, edgecolor="black", linewidth=0.5
+                ),
+            )
+        ax.legend(loc="best", frameon=True, facecolor="white",
+                  framealpha=1.0, edgecolor="black", fontsize=7)
+
+    axes[-1].set_xlabel(xlabel)
+    for a in axes[:-1]:
+        a.tick_params(axis="x", labelbottom=False)
+    if subday_unit == "min":
+        for a in axes:
+            a.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=8))
+
+    if target_name:
+        fig.suptitle(str(target_name), fontsize=11, y=0.995)
+
+    _tag = f"VariabilityCheck_{method_u}"
+    if target_name:
+        _safe_tn = (
+            str(target_name)
+            .strip()
+            .replace(" ", "_")
+            .replace("/", "_")
+            .replace("\\", "_")
+        )
+        _tag = f"{_tag}_{_safe_tn}"
+    outpath = os.path.join(save_path, f"{_tag}.{format}")
+    save_kw = dict(dpi=dpi) if format.lower() != "pdf" else {}
+    fig.savefig(outpath, **save_kw, bbox_inches="tight", facecolor="white")
+    log.info("plot_variability_check: saved '%s'", outpath)
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return outpath
 
 
 # =============================================================================
