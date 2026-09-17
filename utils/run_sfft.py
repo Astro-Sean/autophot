@@ -344,6 +344,12 @@ def run_sfft() -> Optional[int]:
     )
     parser.add_argument("-plot", action="store_true", help="Generate diagnostic plots.")
     parser.add_argument(
+        "-plot_format",
+        type=str,
+        default="png",
+        help="Diagnostic plot file format: png (default) or svg.",
+    )
+    parser.add_argument(
         "-forceconv",
         type=str,
         default="REF",
@@ -396,7 +402,11 @@ def run_sfft() -> Optional[int]:
         "-constphotratio",
         type=str,
         default="false",
-        help="SFFT ConstPhotRatio: 'true' restricts kernel sum (default SFFT behaviour), 'false' fits flux scaling polynomial (default, like HOTPANTS).",
+        help="SFFT ConstPhotRatio: 'true' uses a spatially-constant solved flux "
+             "scaling (SFFT default); 'false' fits a spatially-varying scaling "
+             "polynomial (like HOTPANTS). The kernel scale comes from the "
+             "least-squares fit in both modes -- it is NOT pinned to the "
+             "SExtractor photometric ratio.",
     )
     parser.add_argument(
         "-only_flags",
@@ -564,7 +574,6 @@ def run_sfft() -> Optional[int]:
 
     masked_sources = parse_xy_list(args.masked_sources)
     matching_sources = parse_xy_list(args.matching_sources)
-    # matching_sources = None
     if masked_sources is not None:
         log_info(f"Masked sources: {masked_sources.shape[0]}")
     else:
@@ -768,7 +777,7 @@ def run_sfft() -> Optional[int]:
     # Prior source validation: if fewer than MIN_PRIOR_SOURCES are available,
     # we still keep the priors (SFFT's XY_PriorSelect prefers these sources
     # over its own detections).  Our pipeline-vetted sources have been filtered
-    # for point-like morphology, isolation, and absence of defects — they are
+    # for point-like morphology, isolation, and absence of defects -- they are
     # higher quality than SFFT's own SExtractor matching, which allows blended
     # sources (ONLY_FLAGS includes 16,17) and uses a looser ellipticity cut.
     #
@@ -784,7 +793,7 @@ def run_sfft() -> Optional[int]:
         n_priors = len(matching_sources)
         log_warning(
             f"Only {n_priors} vetted prior sources (minimum {MIN_PRIOR_SOURCES}); "
-            "discarding priors — SFFT will perform its own source matching."
+            "discarding priors -- SFFT will perform its own source matching."
         )
         matching_sources = None
     elif matching_sources is not None and len(matching_sources) < 10:
@@ -890,7 +899,7 @@ def run_sfft() -> Optional[int]:
         science_fwhm = _FWHM_FALLBACK
     if not np.isfinite(template_fwhm) or template_fwhm <= 0:
         template_fwhm = _FWHM_FALLBACK
-    # Sanity: FWHM should be in a reasonable range (0.5–50 px)
+    # Sanity: FWHM should be in a reasonable range (0.5-50 px)
     if science_fwhm > 50.0:
         log_warning(
             f"Science FWHM={science_fwhm:.1f} px is unusually large; "
@@ -1057,10 +1066,6 @@ def run_sfft() -> Optional[int]:
     # - KerHWLimit: (min, max) kernel half-width; SFFT default (2, 20). We use (3, 50) for large FWHM differences.
     # - ForceConv: 'REF'|'SCI'|'AUTO'. REF => DIFF=SCI-conv(REF) (transient keeps science PSF). AUTO picks by seeing.
     # ECP (crowded) expects 'Cupy' (capital C, lowercase py); ESP accepts same.
-    # try:
-    #     import cupy  # noqa: F401
-    #     BACKEND_4SUBTRACT = 'Cupy'
-    # except Exception:
     BACKEND_4SUBTRACT = "Numpy"
 
     CUDA_DEVICE_4SUBTRACT = "0"
@@ -1342,7 +1347,7 @@ def run_sfft() -> Optional[int]:
                         safe_fits_write(FITS_DIFF, hdu.data, hdu.header)
                 except Exception as e:
                     log_warning(f"Could not write ECP diff to {FITS_DIFF}: {e}")
-            # Optional: write a minimal matching-sources CSV from ECP catalog if present
+            # ECP catalogs expose the matched list under "SExCatalog-SubSource".
             cat_key = "SExCatalog-SubSource"
             if isinstance(prep_data, dict) and cat_key in prep_data:
                 catalog = prep_data[cat_key]
@@ -1517,7 +1522,7 @@ def run_sfft() -> Optional[int]:
             _n_matched = len(matched_sources)
 
             # If the vetted priors yielded too few matched sources, SFFT's own
-            # SExtractor detection may still find enough — retry once without
+            # SExtractor detection may still find enough -- retry once without
             # priors before declaring the field too sparse.
             _min_matched = 2 if constant_phot_ratio else 3
             if (
@@ -1559,11 +1564,11 @@ def run_sfft() -> Optional[int]:
             # SFFT will produce a wildly wrong kernel (e.g., flux scaling = -24
             # vs true ~2.5).  Abort so templates.py can fall back to HOTPANTS.
             #
-            # Exception: when ConstPhotRatio=True, the flux scaling is
-            # constrained to the photometric ratio, removing one free
-            # parameter.  This allows proceeding with 2 matched sources
-            # (the kernel shape is still under-constrained, but the flux
-            # scaling is anchored, preventing the most catastrophic failures).
+            # Exception: when ConstPhotRatio=True, the flux scaling is a
+            # single constant rather than a spatial polynomial, removing
+            # free parameters.  This allows proceeding with 2 matched
+            # sources (the kernel shape is still under-constrained, but the
+            # reduced model helps prevent the most catastrophic failures).
             if _n_matched < _min_matched:
                 raise RuntimeError(
                     f"SFFT kernel fitting failed: only {_n_matched} matched sources "
@@ -1614,7 +1619,7 @@ def run_sfft() -> Optional[int]:
                         VERBOSE_LEVEL=2,
                     )
                     bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
-                    # BSP returns (Solution, PixA_DIFF) — NOTE the order differs
+                    # BSP returns (Solution, PixA_DIFF) -- NOTE the order differs
                     # from ESP/ECP, which return (PixA_DIFF, SFFTPrepDict, ...).
                     # Keep the ESP prep_data (BSP performs no source detection)
                     # and adopt the BSP Solution so downstream kernel
@@ -1649,7 +1654,6 @@ def run_sfft() -> Optional[int]:
             ):
                 prior_xy = np.asarray(matching_sources, dtype=float)  # 1-based FITS
                 sfft_xy = matched_sources[[xcol, ycol]].values.astype(float)
-                # For each SFFT source, find nearest prior source
                 from scipy.spatial import cKDTree
                 tree = cKDTree(prior_xy)
                 dists, _ = tree.query(sfft_xy, k=1)
@@ -1710,7 +1714,7 @@ def run_sfft() -> Optional[int]:
             convd = "UNKNOWN"
 
         # Record the convolution/photometric flux scalings in the diff header
-        # directly from SFFT's return values — more robust than downstream
+        # directly from SFFT's return values -- avoids fragile downstream
         # log parsing (templates.py still falls back to the log if missing).
         #   result[3]/[4] = SFFT_FSCAL_MEAN / SFFT_FSCAL_SIG (convolution-based)
         #   PHOT_FSCAL    = 10^(MAG_OFFSET / -2.5) in SFFTPrepDict, inverted
@@ -1797,7 +1801,7 @@ def run_sfft() -> Optional[int]:
         #    rescales the science-derived background_rms so the error model
         #    matches the difference image.  The image pixels are NOT rescaled:
         #    their flux scale is set by SFFT's kernel integral, and rescaling
-        #    would bias all measured fluxes.  This is the LSST semantics —
+        #    would bias all measured fluxes.  This is the LSST semantics --
         #    ScaleVarianceTask rescales the VARIANCE model, not the image.
         # ------------------------------------------------------------------
         log_info(border_msg("Post-subtraction quality improvements", metadata="LSST-inspired + SFFT v1.5.0+", use_ansi=False))
@@ -1816,7 +1820,6 @@ def run_sfft() -> Optional[int]:
             else:
                 log_info("SFFT decorrelation not available (SFFT v1.5.0+ required).")
                 log_info("Using LSST decorrelation (DMTN-021) as equivalent alternative.")
-            # LSST decorrelation will be applied below in the _decorrelate_diffim function
 
         def _decorrelate_diffim(
             diff: np.ndarray,
@@ -1907,7 +1910,6 @@ def run_sfft() -> Optional[int]:
 
                 diff_decorr = fftconvolve(diff_filled, psi_small, mode="same")
 
-                # Restore NaN regions
                 diff_decorr[nan_mask] = np.nan
                 return diff_decorr.astype(diff.dtype)
 
@@ -1919,9 +1921,9 @@ def run_sfft() -> Optional[int]:
             diff: np.ndarray,
             nan_mask: np.ndarray,
         ) -> float:
-            """Robust (IQR) noise sigma of the difference image.
+            """IQR-based noise sigma of the difference image.
 
-            The IQR is robust to bright sources and artifacts.  Returns NaN
+            The IQR resists bright sources and artifacts.  Returns NaN
             when too few valid pixels are available.
 
             Note: this deliberately does NOT rescale the difference image.
@@ -1958,7 +1960,6 @@ def run_sfft() -> Optional[int]:
                 diff_arr = np.asarray(hdul[0].data, dtype=np.float64)
                 diff_hdr = hdul[0].header
 
-                # Build an invalid-pixel mask for this stage (NaN or +/-Inf).
                 _nan_mask = ~np.isfinite(diff_arr)
 
                 # Estimate per-image variances from sigma-clipped noise of each
@@ -2143,7 +2144,7 @@ def run_sfft() -> Optional[int]:
         # ------------------------------------------------------------------
         try:
             if np.any(combined_invalid_mask) and FITS_DIFF and os.path.isfile(FITS_DIFF):
-                # Apply mask to main (decorrelated) difference image
+                # Re-apply the mask to the main difference image.
                 with fits.open(FITS_DIFF, mode="update", memmap=False) as hdul:
                     diff = np.asarray(hdul[0].data, dtype=float)
                     if diff.shape == combined_invalid_mask.shape:
@@ -2161,7 +2162,7 @@ def run_sfft() -> Optional[int]:
                             f"!= diff shape {diff.shape}; cannot reapply invalid mask."
                         )
                 
-                # Also apply mask to the decorrelated side file if it exists
+                # Same for the decorrelated side file, if present.
                 _decorr_diff_path = FITS_DIFF.replace(".fits", "_decorr.fits")
                 if os.path.isfile(_decorr_diff_path):
                     with fits.open(_decorr_diff_path, mode="update", memmap=False) as hdul:
@@ -2257,7 +2258,6 @@ def run_sfft() -> Optional[int]:
                         )
                         return
                     
-                    # Get input sources count from matching_sources
                     n_input = len(matching_sources) if matching_sources is not None else 0
                     n_final = len(ast_ss)
                     
@@ -2270,7 +2270,7 @@ def run_sfft() -> Optional[int]:
                         median - CVREJ_MAGD_THRESH,
                         median + CVREJ_MAGD_THRESH,
                     )
-                    from plotting_utils import apply_autophot_mplstyle
+                    from plotting_utils import apply_autophot_mplstyle, get_plot_color
                     apply_autophot_mplstyle()
                     fig, ax = plt.subplots(
                         figsize=set_size(540, aspect=1.01), dpi=150
@@ -2283,8 +2283,10 @@ def run_sfft() -> Optional[int]:
                         fmt="o",
                         markersize=3.5,
                         mfc="none",
-                        capsize=3.5,
-                        elinewidth=0.9,
+                        color=get_plot_color('sfft_scatter'),
+                        ecolor=get_plot_color('sfft_scatter'),
+                        capsize=3.5 / 4,
+                        elinewidth=0.5,
                         markeredgewidth=0.9,
                         alpha=0.85,
                         label=f"Final sources ({n_final})",
@@ -2295,16 +2297,18 @@ def run_sfft() -> Optional[int]:
                         xmax=np.nanmax(x_data),
                         linestyles=(0, (5, 2)),
                         linewidth=1.2,
-                        colors="C1",
+                        colors=get_plot_color('threshold_line'),
                         label="median / thresholds",
                     )
-                    ax.set_xlabel("MAG_REF (REF)")
-                    ax.set_ylabel("MAG_REF (SCI) - MAG_REF (REF)")
+                    ax.set_xlabel("Reference Instrumental Magnitude [mag]")
+                    ax.set_ylabel(r"$\Delta$ Instrumental Magnitude (Science $-$ Reference) [mag]")
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
-                    ax.legend(loc="best", frameon=True, fontsize=8,
-                              facecolor="white", framealpha=1.0, edgecolor="black")
+                    ax.legend(loc="best", frameon=False, fontsize=8)
                     ax.set_title(f"SFFT source matching: {n_input} input -> {n_final} final sources", fontsize=10)
-                    png_path = os.path.join(out_dir, f"Var_Check_{out_base}.png")
+                    _plot_fmt = str(getattr(args, "plot_format", "png") or "png").strip().lower().lstrip(".")
+                    if _plot_fmt not in ("png", "svg"):
+                        _plot_fmt = "png"
+                    png_path = os.path.join(out_dir, f"Var_Check_{out_base}.{_plot_fmt}")
                     try:
                         plt.savefig(
                             png_path, bbox_inches="tight", dpi=150, facecolor="white"

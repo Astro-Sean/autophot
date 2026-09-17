@@ -134,7 +134,6 @@ def _recover_psf_mcmc_snr(
 
     model = epsf_model.copy()
     # Model coordinates are *absolute within this stamp* (not full image).
-    # Set initial guesses.
     model.x_0.value = float(x0)
     model.y_0.value = float(y0)
     model.flux.value = max(1e-6, float(getattr(model, "flux", 1.0)))

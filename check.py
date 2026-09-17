@@ -14,7 +14,7 @@ import os
 import sys
 import re
 import yaml
-import logging  # Project-specific helpers (assumed to be in your codebase)
+import logging
 from functions import (
     log_step,
     AutophotYaml,
@@ -41,7 +41,6 @@ except ImportError:
     ASTROPY_AVAILABLE = False
 
 
-# Class constants for keyword mapping and validation
 DEFAULT_KEYS = {"TELESCOP": "TELESCOP", "INSTRUME": "INSTRUME", "FILTER": "FILTER"}
 
 
@@ -70,7 +69,7 @@ auto_accept = {
 # Common FITS keyword aliases compiled from astronomy standards
 KEYWORD_ALIASES = {
     "TELESCOP": ["TELESCOP"],
-    # Instrument must always be carried in the INSTRUME keyword .
+    # Instrument is always carried in INSTRUME; no aliases.
     "INSTRUME": ["INSTRUME"],
     "FILTER": ["FILTERS", "FLTRNAM", "FILNAM1", "FILTNAM1", "FILTER1", "FILTER"],
     "Date": ["DATE-OBS", "DATEOBS", "UTC-OBS", "OBS-DATE", "DATE", "UTSTART"],
@@ -117,8 +116,8 @@ def get_header(filename):
     """
     Extract primary HDU header from FITS file as dictionary.
 
-    Prioritizes astropy.io.fits for robust parsing.
-    Falls back to custom 'functions.get_header' if available.
+    Prefers astropy.io.fits; falls back to functions.get_header for
+    compatibility with the original codebase.
 
     Args:
         filename (str): Path to FITS file
@@ -183,7 +182,6 @@ class FitsInfo:
         self.fits_dir = Path(str(fits_dir))
         self.template_files = bool(template_files)
 
-        # Build file list
         if flist:
             self.flist = flist
         else:
@@ -192,13 +190,11 @@ class FitsInfo:
         # Only use working directory telescope.yml (wdir-specific configuration)
         self.telescope_file = self.wdir / "telescope.yml"
 
-        # Setup logging
         logging.basicConfig(
             level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
         )
         self.logger = logging.getLogger(__name__)
 
-        # Load available filters database
         filters_path = Path(__file__).parent / "databases" / "filters.yml"
         loaded_filters = list(AutophotYaml(filters_path).load().get("W_eff", {}).keys())
         self.available_filters, dropped_filters = sanitize_photometric_filters(
@@ -220,7 +216,7 @@ class FitsInfo:
     # -------------------------------------------------------------------------
     @staticmethod
     def _norm_filter_token(token: str) -> str:
-        """Normalize a FITS filter token for robust matching."""
+        """Normalize a FITS filter token for consistent matching."""
         t = str(token).strip()
         t = t.replace(" ", "").replace("-", "_")
         return t.lower()
@@ -360,7 +356,6 @@ class FitsInfo:
     def find_similar_keywords(self, keywords, search_term, cutoff=0.6):
         """
         Fuzzy keyword matching using difflib.get_close_matches.
-        re missing for template images only
 
         Args:
             keywords (list): All available header keys
@@ -416,18 +411,16 @@ class FitsInfo:
         candidates = list(set(exact + fuzzy))[:8]
 
         if candidates:
-            # Auto-select first candidate
             selected = candidates[0]
             self.logger.info("Auto-selected keyword for %s: %s", keyword, selected)
             return selected
 
-        # Fallback: search for keyword containing the target name
+        # Fallback: any header key containing the target name.
         for key in keys:
             if keyword.lower() in key.lower():
                 self.logger.info("Fallback auto-selected keyword for %s: %s", keyword, key)
                 return key
 
-        # Last resort: return None
         self.logger.warning("Could not find suitable keyword for %s", keyword)
         return None
 

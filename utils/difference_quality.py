@@ -4,26 +4,24 @@ Difference-image quality diagnostics for AutoPhOT image subtraction.
 
 Provides quantitative metrics that go beyond a simple global RMS:
 
-  * **Dipole detection** – bright-star residual dipoles are the most common
-    symptom of astrometric misalignment or PSF-matching failure.  We detect
-    them by looking for anti-symmetric positive/negative residual pairs
-    around known source positions.
+  * Dipole detection - bright-star residual dipoles are the most common
+    symptom of astrometric misalignment or PSF-matching failure.  Detected
+    as anti-symmetric positive/negative residual pairs around known source
+    positions.
 
-  * **Spatial background variation** – measures whether the difference-image
-    background varies systematically across the field (indicates sky or
-    illumination-gradient mismatch).
+  * Spatial background variation - systematic background differences across
+    the field indicate sky or illumination-gradient mismatch.
 
-  * **Residual autocorrelation** – correlated noise on small spatial scales
+  * Residual autocorrelation - correlated noise on small spatial scales
     indicates over-fitting or deconvolution artefacts.
 
-  * **Bright-star residual flux** – measures how much flux remains around
-    bright sources after subtraction (should be near zero for a good
-    subtraction).
+  * Bright-star residual flux - flux remaining around bright sources after
+    subtraction (should be near zero for a good subtraction).
 
-  * **Structured quality score** – a documented pass / downgrade / fail
+  * Structured quality score - a documented pass / downgrade / fail
     classification with component scores, not just one combined number.
 
-  * **Provenance manifest** – machine-readable JSON recording all inputs,
+  * Provenance manifest - machine-readable JSON recording all inputs,
     parameters, and quality metrics for reproducibility.
 
 All functions are designed to be called from ``templates.py.subtract()``
@@ -69,6 +67,8 @@ class QualityMetrics:
     # Dipole detection
     dipole_count: int = 0
     dipole_fraction: float = 0.0  # fraction of checked sources with dipoles
+    dipole_checked: int = 0  # number of sources actually examined
+    dipole_fraction_scored: float = 0.0  # fraction used for scoring (Wilson lower bound for small samples)
     dipole_mean_amplitude: float = 0.0  # mean |positive + negative| flux
     dipole_max_amplitude: float = 0.0
 
@@ -129,6 +129,10 @@ class QualityConfig:
     dipole_min_antisymmetry: float = 0.3  # min |pos/neg| ratio for dipole
     dipole_max_fraction_pass: float = 0.05  # >5% dipoles => downgrade/fail
     dipole_max_fraction_fail: float = 0.20  # >20% dipoles => fail
+    # Below this many checked sources the raw dipole fraction is statistically
+    # unreliable; the score uses the one-sided Wilson lower bound instead.
+    dipole_min_checked: int = 10
+    dipole_wilson_z: float = 1.645  # one-sided ~95% lower confidence bound
 
     # Bright-star residuals
     bright_star_check: bool = True
@@ -228,10 +232,12 @@ def detect_dipoles(
 
     Returns
     -------
-    (dipole_count, dipole_fraction, mean_amplitude, max_amplitude)
+    (dipole_count, dipole_fraction, mean_amplitude, max_amplitude, n_checked)
+        ``n_checked`` is the number of sources actually examined (edge-skipped
+        sources are excluded), so the fraction reflects the evaluated sample.
     """
     if not source_positions or noise_sigma <= 0 or fwhm <= 0:
-        return 0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, 0
 
     ny, nx = diff_data.shape
     radius = max(int(cfg.dipole_radius_fwhm * fwhm), 3)
@@ -240,63 +246,57 @@ def detect_dipoles(
 
     dipole_count = 0
     amplitudes = []
+    n_checked = 0
 
     for x, y in source_positions:
         xi, yi = int(round(x)), int(round(y))
-        # Skip sources too close to edges
+        # Stamp would fall off the edge.
         if xi < radius or xi >= nx - radius or yi < radius or yi >= ny - radius:
             continue
+        n_checked += 1
 
-        # Extract stamp around source
         stamp = diff_data[yi - radius:yi + radius + 1, xi - radius:xi + radius + 1]
         stamp_mask = quality_mask[yi - radius:yi + radius + 1, xi - radius:xi + radius + 1]
 
-        # Mask out invalid pixels
         stamp_clean = stamp.copy()
         stamp_clean[stamp_mask] = 0.0
         stamp_clean[~np.isfinite(stamp_clean)] = 0.0
 
-        # Find the brightest positive and negative pixels
         pos_peak = np.max(stamp_clean)
         neg_peak = np.min(stamp_clean)
 
-        # Both must exceed threshold
         if pos_peak < threshold or abs(neg_peak) < threshold:
             continue
 
-        # Check anti-symmetry: the positive and negative peaks should be
-        # on opposite sides of the source center and have similar amplitude
+        # A dipole's positive and negative peaks sit on opposite sides of
+        # the source center with comparable amplitude.
         pos_idx = np.unravel_index(np.argmax(stamp_clean), stamp_clean.shape)
         neg_idx = np.unravel_index(np.argmin(stamp_clean), stamp_clean.shape)
 
-        # Vector from center to positive peak
         cy, cx = radius, radius
         dy_pos = pos_idx[0] - cy
         dx_pos = pos_idx[1] - cx
         dy_neg = neg_idx[0] - cy
         dx_neg = neg_idx[1] - cx
 
-        # Check that they are on opposite sides (dot product < 0)
+        # Opposite sides: center-to-peak vectors point opposite ways.
         dot = dy_pos * dy_neg + dx_pos * dx_neg
         if dot >= 0:
             continue
 
-        # Check amplitude ratio (anti-symmetry)
         amp_ratio = min(abs(pos_peak), abs(neg_peak)) / max(abs(pos_peak), abs(neg_peak))
         if amp_ratio < min_antisym:
             continue
 
-        # This is a dipole
         dipole_count += 1
         amplitude = abs(pos_peak) + abs(neg_peak)
         amplitudes.append(amplitude)
 
-    n_checked = len(source_positions)
     dipole_fraction = dipole_count / n_checked if n_checked > 0 else 0.0
     mean_amp = float(np.mean(amplitudes)) if amplitudes else 0.0
     max_amp = float(np.max(amplitudes)) if amplitudes else 0.0
 
-    return dipole_count, dipole_fraction, mean_amp, max_amp
+    return dipole_count, dipole_fraction, mean_amp, max_amp, n_checked
 
 
 def measure_bright_star_residuals(
@@ -373,37 +373,33 @@ def compute_autocorrelation(
     if noise_sigma <= 0:
         return 0.0, 0.0
 
-    # Use a central region to avoid edge effects
+    # Central region only, to keep edge artifacts out of the estimate.
     ny, nx = diff_data.shape
     y0, y1 = ny // 4, 3 * ny // 4
     x0, x1 = nx // 4, 3 * nx // 4
     region = diff_data[y0:y1, x0:x1].copy()
     region_mask = quality_mask[y0:y1, x0:x1]
 
-    # Zero out masked pixels
     region[region_mask] = 0.0
     region[~np.isfinite(region)] = 0.0
-
-    # Subtract mean
     region = region - np.mean(region)
 
-    # Compute 1-D autocorrelation along rows (averaged)
+    # 1-D autocorrelation averaged over up to 50 rows.
     n_rows = region.shape[0]
     row_autocorrs = []
-    for i in range(min(n_rows, 50)):  # sample 50 rows
+    for i in range(min(n_rows, 50)):
         row = region[i]
         if np.std(row) < 1e-10:
             continue
-        # Normalized autocorrelation
         ac = np.correlate(row, row, mode="full")[len(row) - 1:]
-        ac = ac / ac[0]  # normalize
+        ac = ac / ac[0]  # lag-0 normalized to 1
         row_autocorrs.append(ac[:max_lag + 1])
 
     if not row_autocorrs:
         return 0.0, 0.0
 
     mean_ac = np.mean(row_autocorrs, axis=0)
-    # Exclude lag 0 (always 1.0)
+    # Lag 0 is always 1.0 and carries no information.
     if len(mean_ac) > 1:
         ac_vals = mean_ac[1:]
         peak_idx = np.argmax(np.abs(ac_vals))
@@ -420,6 +416,25 @@ def compute_autocorrelation(
 # Quality score computation
 # ===========================================================================
 
+def _wilson_lower_bound(k: int, n: int, z: float) -> float:
+    """One-sided Wilson lower confidence bound for a binomial fraction.
+
+    With few checked sources the observed dipole fraction is dominated by
+    counting noise (1 dipole in 5 sources reads as 20%).  The lower bound is
+    the smallest true fraction consistent with the data at the ``z``
+    confidence level, so scoring on it penalises only dipole rates the data
+    actually establish - while still catching egregious small-sample cases
+    (e.g. 3/5 has a lower bound above the fail threshold).
+    """
+    if n <= 0:
+        return 0.0
+    z2 = float(z) ** 2
+    denom = n + z2
+    centre = (k + z2 / 2.0) / denom
+    half = float(z) * np.sqrt(k * (n - k) / n + z2 / 4.0) / denom
+    return max(0.0, centre - half)
+
+
 def compute_quality_score(metrics: QualityMetrics, cfg: QualityConfig) -> None:
     """Compute component scores and overall quality classification.
 
@@ -433,14 +448,36 @@ def compute_quality_score(metrics: QualityMetrics, cfg: QualityConfig) -> None:
     else:
         metrics.score_background = 0.0
 
-    # Dipole score: penalize high dipole fraction
-    if metrics.dipole_fraction <= cfg.dipole_max_fraction_pass:
+    # Dipole score: penalize high dipole fraction.  For small checked samples
+    # score on the Wilson lower confidence bound so a single dipole in a
+    # handful of sources cannot zero out the component on weak evidence.
+    if (
+        cfg.dipole_min_checked > 0
+        and 0 < metrics.dipole_checked < cfg.dipole_min_checked
+    ):
+        frac_for_score = _wilson_lower_bound(
+            metrics.dipole_count, metrics.dipole_checked, cfg.dipole_wilson_z
+        )
+        if frac_for_score != metrics.dipole_fraction:
+            logger.info(
+                "Dipole fraction %.1f%% from only %d checked sources; scoring "
+                "on Wilson lower bound %.1f%% (z=%.3g).",
+                metrics.dipole_fraction * 100,
+                metrics.dipole_checked,
+                frac_for_score * 100,
+                cfg.dipole_wilson_z,
+            )
+    else:
+        frac_for_score = metrics.dipole_fraction
+    metrics.dipole_fraction_scored = frac_for_score
+
+    if frac_for_score <= cfg.dipole_max_fraction_pass:
         metrics.score_dipole = 1.0
-    elif metrics.dipole_fraction >= cfg.dipole_max_fraction_fail:
+    elif frac_for_score >= cfg.dipole_max_fraction_fail:
         metrics.score_dipole = 0.0
     else:
         # Linear interpolation between pass and fail thresholds
-        frac = (metrics.dipole_fraction - cfg.dipole_max_fraction_pass) / (
+        frac = (frac_for_score - cfg.dipole_max_fraction_pass) / (
             cfg.dipole_max_fraction_fail - cfg.dipole_max_fraction_pass
         )
         metrics.score_dipole = max(0.0, 1.0 - frac)
@@ -580,12 +617,13 @@ def assess_difference_image(
     # --- Dipole detection ---
     if cfg.dipole_check_sources and source_positions:
         try:
-            n_dip, frac, mean_amp, max_amp = detect_dipoles(
+            n_dip, frac, mean_amp, max_amp, n_chk = detect_dipoles(
                 diff_data, source_positions, quality_mask,
                 noise_sigma, fwhm, cfg,
             )
             metrics.dipole_count = n_dip
             metrics.dipole_fraction = frac
+            metrics.dipole_checked = n_chk
             metrics.dipole_mean_amplitude = mean_amp
             metrics.dipole_max_amplitude = max_amp
         except Exception as e:
@@ -635,16 +673,16 @@ def assess_difference_image(
     # --- Compute quality score ---
     compute_quality_score(metrics, cfg)
 
-    # Log summary
     logger.info(
         "Difference-image quality: class=%s score=%.3f | "
         "median=%.3f std=%.3f rms=%.3f | "
-        "dipoles=%d (%.1f%%) | "
+        "dipoles=%d/%d checked (%.1f%%) | "
         "bright_star_resid_rms=%.2f sigma (n=%d) | "
         "bg_spatial_std=%.3f | edge_ratio=%.2f | autocorr_peak=%.3f",
         metrics.quality_class, metrics.quality_score,
         metrics.diff_median, metrics.diff_std, metrics.diff_rms,
-        metrics.dipole_count, metrics.dipole_fraction * 100,
+        metrics.dipole_count, metrics.dipole_checked,
+        metrics.dipole_fraction * 100,
         metrics.bright_star_residual_rms, metrics.bright_star_count,
         metrics.background_spatial_std, metrics.edge_std_ratio,
         metrics.autocorr_peak,
@@ -704,6 +742,8 @@ def write_quality_to_fits_header(
             hdr["DIFFQSCR"] = float(metrics.quality_score)
             hdr["DIFFDIPO"] = int(metrics.dipole_count)
             hdr["DIFFDIPF"] = float(metrics.dipole_fraction)
+            hdr["DIPDCHK"] = int(metrics.dipole_checked)
+            hdr["DIFFDIPS"] = float(metrics.dipole_fraction_scored)
             hdr["DIFFBGST"] = float(metrics.background_spatial_std)
             hdr["DIFFEDGR"] = float(metrics.edge_std_ratio)
             hdr["DIFFACOR"] = float(metrics.autocorr_peak)

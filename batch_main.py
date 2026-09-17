@@ -120,7 +120,6 @@ def _build_file_list(args: argparse.Namespace) -> List[str]:
     if args.file_list:
         files.extend(_read_file_list(args.file_list))
 
-    # Basic normalisation and existence check
     resolved: List[str] = []
     for f in files:
         p = Path(f).expanduser()

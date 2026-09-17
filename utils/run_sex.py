@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Optimized SExtractor Wrapper for Point Source Detection and FWHM Estimation
+SExtractor wrapper for point-source detection and FWHM estimation.
 Author: Sean Brennan
 Date: October 24, 2025
 
-Features:
-    - Supports custom background and RMS maps (FITS files or 2D arrays)
-    - Robust FWHM estimation using iterative sigma clipping
-    - Advanced filtering for point sources, saturated sources, and edge effects
-    - Handles crowded and blended sources
-    - Optimized for non-uniform backgrounds
-    - Optimized convolution kernel if FWHM is provided
-    - Drops sources instead of setting FWHM to NaN
+- Accepts custom background and RMS maps (FITS files or 2D arrays)
+- FWHM from iterative sigma clipping over the detected source catalog
+- Filters non-point, saturated, and edge sources; handles crowded fields
+- Builds a matched convolution kernel when a FWHM estimate is available
+- Drops unmeasurable sources rather than reporting NaN FWHM
 """
 
 import logging
@@ -237,21 +234,19 @@ def _write_fits_array_to_file(array: np.ndarray, path: Path) -> None:
 
 class SExtractorWrapper:
     """
-    A wrapper class for running SExtractor, optimized for point source detection and FWHM estimation.
-    Supports custom background and RMS maps (FITS files or 2D arrays) for improved source detection in crowded fields.
+    Runs SExtractor for point-source detection and FWHM estimation.
+    Custom background/RMS maps improve detection in crowded fields.
     """
 
     def __init__(self, config: dict) -> None:
         """
-        Initialize the SExtractorWrapper with a configuration dictionary.
-
         Args:
             config (dict): Configuration parameters for SExtractor.
         """
         self.config = config
         # FWHM uncertainty (SE of median), set by calculate_robust_fwhm().
         self.fwhm_err = np.nan
-        # Default number of threads for SExtractor; top-level or under wcs.* in YAML.
+        # sextractor_nthreads may live top-level or under wcs.* in the YAML.
         _wcs_cfg = config.get("wcs") or {}
         try:
             cfg_threads = int(
@@ -262,7 +257,6 @@ class SExtractorWrapper:
             )
         except (TypeError, ValueError):
             cfg_threads = 4
-        # Respect user thread config with appropriate logging
         if cfg_threads < 1:
             logger.warning(
                 "sextractor_nthreads=%d is invalid; using 1.", cfg_threads
@@ -298,10 +292,9 @@ class SExtractorWrapper:
         )
 
         if fwhm_pixels > 0:
-            # Enforce realistic FWHM bounds: 1.0-15 pixels
-            # Minimum 1.0 px allows proper kernel sizing for undersampled
-            # images (e.g. ZTF FWHM ~1.8 px).  The previous 2.5 px floor
-            # made the kernel too broad, reducing detection sensitivity.
+            # FWHM bounds 1.0-15 px. The 1.0 px floor (was 2.5) keeps the
+            # kernel narrow enough for undersampled images (ZTF ~1.8 px);
+            # a broader kernel costs detection sensitivity.
             fp = float(max(1.0, min(fwhm_pixels, 15.0)))
             kernel_size = max(3, int(np.ceil(fp * 3)))
             if kernel_size % 2 == 0:
@@ -412,7 +405,7 @@ class SExtractorWrapper:
         n_iterations: Optional[int] = None,
     ) -> float:
         """
-        Calculate the robust FWHM using iterative sigma clipping.
+        Median FWHM after iterative sigma clipping.
 
         Args:
             fwhm_values (np.ndarray): Array of FWHM values.
@@ -429,8 +422,8 @@ class SExtractorWrapper:
             except (TypeError, ValueError):
                 n_iterations = 15
         n_iterations = max(1, int(n_iterations))
-        # Filter out SExtractor error values (FWHM_IMAGE = 0 or -99 for bad fits)
-        # before sigma clipping, as these contaminate the robust median.
+        # SExtractor writes error sentinels (FWHM_IMAGE = 0 or -99) for bad
+        # fits; they would contaminate the clipped median.
         fwhm_values = fwhm_values[np.isfinite(fwhm_values) & (fwhm_values > 0)]
         if len(fwhm_values) == 0:
             fallback = float(self.config.get("fwhm_fallback_pixels", 3.0))
@@ -473,7 +466,7 @@ class SExtractorWrapper:
         relaxed_cuts: bool = False,
         use_fwhm_fallback: float = 0.0,
     ) -> float:
-        """Estimate robust FWHM from a SExtractor catalog.
+        """Estimate the image FWHM from a SExtractor catalog.
 
         Shared logic for return_raw, return_full_table, and filter_sextractor_sources.
         Filters SExtractor error values, applies FWHM range cut (adaptive for
@@ -530,14 +523,6 @@ class SExtractorWrapper:
         else:
             return self.calculate_robust_fwhm(sources[fwhm_col].values)
 
-    # import numpy as np
-    #  import pandas as pd
-    #  from astropy.io import fits
-    #  import time
-    #  import logging
-
-    #  logger = logging.getLogger(__name__)
-
     def filter_sextractor_sources(
         self,
         sources: pd.DataFrame,
@@ -562,7 +547,7 @@ class SExtractorWrapper:
         Args:
             sources (pd.DataFrame): SExtractor source catalog (with renamed columns).
             header (fits.Header): FITS header for image dimensions.
-            fwhm_est (float, optional): Estimated FWHM in pixels. If None, calculated robustly.
+            fwhm_est (float, optional): Estimated FWHM in pixels. If None, estimated from the catalog.
             saturation (float, optional): Saturation limit in ADU.
             flags (int, optional): Maximum allowed SExtractor flag value. Defaults to 2.
             masked_sources (pd.DataFrame, optional): Sources to exclude by position.
@@ -696,7 +681,7 @@ class SExtractorWrapper:
             _fr_finite = _fr_vals.notna() & (_fr_vals > 0)
             if _fr_finite.any() and _fr_finite.sum() >= 5:
                 _fr_med = float(np.nanmedian(_fr_vals[_fr_finite]))
-                _fr_min = max(0.5, 0.3 * _fr_med)  # at least 30% of median
+                _fr_min = max(0.5, 0.3 * _fr_med)
                 _fr_bad = _fr_finite & (_fr_vals < _fr_min)
                 n_fr = int(_fr_bad.sum())
                 if n_fr > 0 and (~_fr_bad).sum() >= 5:
@@ -826,19 +811,16 @@ class SExtractorWrapper:
             x_pix = sources["x_pix"].values
             y_pix = sources["y_pix"].values
 
-            # Divide the image into a grid
             x_bins = np.linspace(0, x_max, n_grid + 1)
             y_bins = np.linspace(0, y_max, n_grid + 1)
 
-            # Assign each source to a grid cell
-            # Use left-inclusive bins so every source falls into exactly one cell.
+            # Left-inclusive bins so every source lands in exactly one cell.
             x_indices = np.clip(np.digitize(x_pix, x_bins[1:-1]), 0, n_grid - 1)
             y_indices = np.clip(np.digitize(y_pix, y_bins[1:-1]), 0, n_grid - 1)
 
-            # Create a unique identifier for each grid cell
             grid_ids = y_indices * n_grid + x_indices
 
-            # Group sources by grid cell and sort each cell by SNR (descending)
+            # Sort each cell by SNR descending so index 0 is the brightest.
             groups = {
                 gid: grp.sort_values(by="snr", ascending=False)
                 for gid, grp in sources.groupby(grid_ids)
@@ -885,9 +867,8 @@ class SExtractorWrapper:
                 if added == 0:
                     break
 
-            # If we still need more sources (e.g. some cells are very sparse),
-            # fill the remainder with globally highest-SNR sources that are not
-            # already selected.
+            # Sparse cells may leave slots open; fill with the globally
+            # highest-SNR sources not already selected.
             if len(selected_idx) < NMAX:
                 remaining = sources.drop(index=selected_idx).sort_values(
                     by="snr", ascending=False
@@ -896,7 +877,6 @@ class SExtractorWrapper:
                 extra = list(remaining.index[:need])
                 selected_idx.extend(extra)
 
-            # Combine and sort the selected sources
             sources = (
                 sources.loc[selected_idx]
                 .sort_values(by="snr", ascending=False)
@@ -983,7 +963,7 @@ class SExtractorWrapper:
             catalog_type (str, optional): Output catalog type. Defaults to "FITS_LDAC".
             gain_key (str, optional): FITS header key for gain. Defaults to "GAIN".
             satur_key (str, optional): FITS header key for saturation. Defaults to "SATURATE".
-            pixel_scale (float, optional): Pixel scale in arcsec/pixel. Defaults to 1.0.
+            pixel_scale (float, optional): Pixel scale in arcsec/pixel. Defaults to 0.
             seeing_fwhm (float, optional): Estimated seeing FWHM in arcsec. Defaults to 2.0.
             back_type (str, optional): Background type (AUTO or MANUAL). Defaults to "AUTO".
             back_value (float, optional): Background value. Defaults to 0.0.
@@ -999,7 +979,7 @@ class SExtractorWrapper:
             detect_minarea (int, optional): Minimum detection area. Defaults to 5.
             return_raw (bool, optional): If True, return raw astropy Table instead of pandas DataFrame. Defaults to False.
             detect_maxarea (int, optional): Maximum detection area. Defaults to 0.
-            deblend_nthresh (int, optional): Deblending threshold. Defaults to 32.
+            deblend_nthresh (int, optional): Deblending threshold. Defaults to 64.
             deblend_mincont (float, optional): Deblending minimum contrast. Defaults to 0.005.
             clean (str, optional): Cleaning option. Defaults to "Y".
             phot_apertures (float, optional): Photometric apertures. Defaults to 5.0.
@@ -1105,9 +1085,8 @@ class SExtractorWrapper:
 
             fwhm_for_kernel = float(use_FWHM)
             if not np.isfinite(fwhm_for_kernel) or fwhm_for_kernel <= 0:
-                # Use config fwhm (runtime measured value) if available, otherwise header
-                # Header FWHM can be stale from previous runs or instrument defaults
-                # Config fwhm is set by the pipeline after measurement
+                # Prefer the runtime-measured config fwhm; the header value can
+                # be stale from a previous run or an instrument default.
                 for v in (
                     self.config.get("fwhm"),
                     header.get("FWHM"),
@@ -1215,8 +1194,8 @@ class SExtractorWrapper:
                 "MAG_ZEROPOINT": "0.0",
             }
             if crowded:
-                # Crowded-field tune: force GLOBAL background photos type (per your requirement)
-                # and align thresholds/deblending with SFFT defaults to reduce biased detections.
+                # Crowded fields: GLOBAL background photo plus thresholds and
+                # deblending aligned with SFFT defaults to reduce biased detections.
                 config_dict.update(
                     {
                         "BACKPHOTO_TYPE": "GLOBAL",
@@ -1230,15 +1209,12 @@ class SExtractorWrapper:
                     }
                 )
 
-            # Add weight map configuration if provided
+            # MAP_RMS weight map; WEIGHT_GAIN/RESCALE_WEIGHTS stay at defaults.
             if weight_path is not None:
                 config_dict.update(
                     {
                         "WEIGHT_TYPE": "MAP_RMS",
                         "WEIGHT_IMAGE": str(weight_path),
-                        # "WEIGHT_GAIN": "Y",
-                        # "RESCALE_WEIGHTS": "Y",
-                        # "WEIGHT_THRESH": "0.0",
                     }
                 )
 
@@ -1249,11 +1225,9 @@ class SExtractorWrapper:
 
             config_path = self._create_config_file(temp_dir, config_dict)
 
-            # Output paths
             base_name = fits_path.stem
             catalog_path = temp_dir / f"{base_name}_PYSEx_CAT.fits"
 
-            # Run SExtractor
             cmd = [
                 sextractor_bin,
                 str(fits_path),
@@ -1275,7 +1249,6 @@ class SExtractorWrapper:
             if result.returncode != 0:
                 raise RuntimeError(f"SExtractor failed: {result.stderr}")
 
-            # Process output
             if not catalog_path.exists():
                 raise FileNotFoundError("SExtractor did not produce an output catalog.")
             tbhdu = 2 if catalog_type == "FITS_LDAC" else 1
@@ -1284,20 +1257,13 @@ class SExtractorWrapper:
                 logger.warning("No sources detected by SExtractor.")
                 return 0.0, None, default_scale
             
-            # If return_raw is True, copy the FITS-LDAC file to the mdir before temp cleanup
             if return_raw and catalog_type == "FITS_LDAC" and mdir:
-                # Copy the catalog to the specified mdir with .cat extension
+                # The .cat copy happens after filtering below so SCAMP gets
+                # the filtered table, not the raw detections.
                 dest_path = Path(mdir) / f"{base_name}_PYSEx_CAT.cat"
-                # Copy will happen after filtering to ensure filtered data is used
-                # Just save the destination path for now
-                pass
 
-            # If return_raw is True, return the raw astropy Table without conversion
             if return_raw:
-                # Still apply basic filtering for source quality
-                # Convert to pandas temporarily for filtering, then convert back
                 sources_df = sources.to_pandas()
-                # Apply the same filtering logic as below
                 initial_count = len(sources_df)
                 if use_for_matching or crowded:
                     nmax = None
@@ -1311,31 +1277,28 @@ class SExtractorWrapper:
                     relaxed_cuts = False
                 
                 # For matching/alignment catalogs, skip SNR and FLAGS filtering.
-                # SCAMP has its own SN_THRESHOLDS and quality checks; passing
-                # all detections maximizes alignment anchors (especially extended sources).
+                # SCAMP applies its own SN_THRESHOLDS; passing all detections
+                # maximizes alignment anchors (especially extended sources).
                 if not use_for_matching:
                     if "SNR_WIN" in sources_df.columns:
                         sources_df = sources_df[sources_df["SNR_WIN"] >= effective_snr_limit]
                     if "FLAGS" in sources_df.columns:
                         sources_df = sources_df[sources_df["FLAGS"] <= flags]
-                
-                # Apply nmax limit
+
                 if nmax is not None and len(sources_df) > nmax:
                     sources_df = sources_df.nlargest(nmax, "FLUX_AUTO")
-                
-                # Convert back to Table
+
                 sources = Table.from_pandas(sources_df)
                 logger.info(
                     "Filtered from %d to %d sources (raw mode)",
                     initial_count,
                     len(sources),
                 )
-                # Add missing SCAMP-required columns and write to FITS file
+                # SCAMP needs columns SExtractor did not produce; patch them in.
                 if catalog_type == "FITS_LDAC" and mdir:
                     dest_path = Path(mdir) / f"{base_name}_PYSEx_CAT.cat"
                     with fits.open(catalog_path, mode='update') as hdul:
                         table = sources
-                        # Add world coordinate columns if not present
                         if 'XWIN_WORLD' not in table.colnames and 'XWIN_IMAGE' in table.colnames:
                             try:
                                 # Use get_wcs so SIP/TPV projection codes are normalized
@@ -1357,12 +1320,10 @@ class SExtractorWrapper:
                                     table['DELTA_J2000'] = world_coords.dec.deg
                             except Exception as e:
                                 logger.warning("Could not compute world coordinates: %s", e)
-                        # Add MAG_AUTO and MAGERR_AUTO if not present
                         if 'MAG_AUTO' not in table.colnames:
                             if 'MAG_APER' in table.colnames:
                                 table['MAG_AUTO'] = table['MAG_APER']
                             else:
-                                # Compute from FLUX_AUTO if available
                                 if 'FLUX_AUTO' in table.colnames:
                                     flux_safe = np.asarray(table['FLUX_AUTO'], float)
                                     flux_safe[flux_safe <= 0] = np.nan
@@ -1374,7 +1335,7 @@ class SExtractorWrapper:
                                 table['MAGERR_AUTO'] = table['MAGERR_APER']
                             else:
                                 table['MAGERR_AUTO'] = 0.1
-                        # Add error columns if not present
+                        # Error columns: SCAMP expects ERR*WIN_IMAGE/_WORLD.
                         if 'ERRAWIN_IMAGE' not in table.colnames:
                             if 'FWHM_IMAGE' in table.colnames:
                                 table['ERRAWIN_IMAGE'] = table['FWHM_IMAGE'] * 0.1
@@ -1392,20 +1353,34 @@ class SExtractorWrapper:
                             table['ERRX2WIN_WORLD'] = table['ERRX2WIN_IMAGE']
                         if 'ERRY2WIN_WORLD' not in table.colnames:
                             table['ERRY2WIN_WORLD'] = table['ERRY2WIN_IMAGE']
-                        pixel_scale = 0.1585 / 3600.0
+                        # *_WORLD columns need deg/pixel: use the run()
+                        # pixel_scale (arcsec/pixel) when supplied, else the
+                        # image WCS, else a generic wide-field fallback.
+                        if pixel_scale and pixel_scale > 0:
+                            pixel_scale_deg = float(pixel_scale) / 3600.0
+                        else:
+                            pixel_scale_deg = 0.1585 / 3600.0
+                            try:
+                                from astropy.wcs.utils import proj_plane_pixel_scales
+
+                                _pwcs = get_wcs(fits.getheader(fits_path))
+                                if _pwcs is not None:
+                                    pixel_scale_deg = float(
+                                        np.mean(proj_plane_pixel_scales(_pwcs.celestial))
+                                    )
+                            except Exception:
+                                pass
                         if 'ERRA_WORLD' not in table.colnames:
-                            table['ERRA_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale
+                            table['ERRA_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale_deg
                         if 'ERRDEC_WORLD' not in table.colnames:
-                            table['ERRDEC_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale
+                            table['ERRDEC_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale_deg
                         if 'ERRB_WORLD' not in table.colnames:
-                            table['ERRB_WORLD'] = table['ERRBWIN_IMAGE'] * pixel_scale
+                            table['ERRB_WORLD'] = table['ERRBWIN_IMAGE'] * pixel_scale_deg
                         if 'ERRX2_WORLD' not in table.colnames:
                             table['ERRX2_WORLD'] = table['ERRX2WIN_WORLD']
                         if 'ERRY2_WORLD' not in table.colnames:
                             table['ERRY2_WORLD'] = table['ERRY2WIN_WORLD']
-                        # Update the table in the FITS file
                         hdul[2].data = table.as_array()
-                    # Copy the modified FITS file to the destination
                     shutil.copy2(catalog_path, dest_path)
                     logger.debug("Copied FITS-LDAC catalog to %s", dest_path)
                 # Calculate FWHM from point-source-quality subset before returning.
@@ -1446,10 +1421,10 @@ class SExtractorWrapper:
             ]
             sources = sources.to_pandas()
             
-            # If return_full_table is True, skip column renaming and coordinate conversion
+            # return_full_table skips renaming/coordinate conversion but still
+            # gets the light SNR/FLAGS filter and nmax cap.
             if return_full_table:
                 logger.info("Returning full SExtractor table with all columns (no renaming)")
-                # Still apply filtering
                 initial_count = len(sources)
                 if use_for_matching or crowded:
                     nmax = None
@@ -1462,15 +1437,13 @@ class SExtractorWrapper:
                     effective_snr_limit = 3.0
                     relaxed_cuts = False
                 
-                # For matching/alignment catalogs, skip SNR and FLAGS filtering.
-                # SCAMP has its own SN_THRESHOLDS and quality checks.
+                # Matching catalogs skip SNR/FLAGS; SCAMP vetoes them itself.
                 if not use_for_matching:
                     if "SNR_WIN" in sources.columns:
                         sources = sources[sources["SNR_WIN"] >= effective_snr_limit]
                     if "FLAGS" in sources.columns:
                         sources = sources[sources["FLAGS"] <= flags]
-                
-                # Apply nmax limit
+
                 if nmax is not None and len(sources) > nmax:
                     sources = sources.nlargest(nmax, "FLUX_AUTO")
                 
@@ -1529,7 +1502,7 @@ class SExtractorWrapper:
                 _fallback_fwhm = float(use_FWHM) if use_FWHM > 0 else 8.5
                 return _fallback_fwhm, sources.iloc[0:0], default_scale
 
-            # Initial filtering (keep more sources when use_for_matching or crowded)
+            # Matching/crowded catalogs keep more sources (no cap, lower SNR).
             initial_count = len(sources)
             if use_for_matching or crowded:
                 nmax = None
@@ -1539,15 +1512,16 @@ class SExtractorWrapper:
                 relaxed_cuts = use_for_matching
             else:
                 nmax = self.config.get("photometry", {}).get("sextractor_nmax", 1000)
-                effective_snr_limit = 3.0  # default SNR limit for standard mode
+                effective_snr_limit = 3.0
                 relaxed_cuts = False
-            # Optional mask for chip gaps / flat borders (can remove real stars on
-            # very smooth backgrounds - disable via photometry config if needed).
+            # Constant-region rejection can remove real stars on very smooth
+            # backgrounds; photometry.sextractor_reject_constant_regions=False
+            # disables it.
             bad_region_mask = None
             phot_cfg_run = self.config.get("photometry") or {}
             if phot_cfg_run.get("sextractor_reject_constant_regions", True):
-                # Note: _constant_region_mask function not implemented in background.py
-                # This feature is disabled until the function is implemented.
+                # NOTE: _constant_region_mask is not implemented in
+                # background.py, so this stays off until it is.
                 bad_region_mask = None
             else:
                 logger.info(
@@ -1564,22 +1538,19 @@ class SExtractorWrapper:
                 bad_region_mask=bad_region_mask,
             )
 
-            # Final count and validation
             final_count = len(sources)
             logger.info("Filtered from %s to %s point sources", initial_count, final_count)
             if final_count == 0:
                 logger.warning("[ERROR] All sources filtered out")
                 return 0.0, None, default_scale
 
-            # Calculate FWHM and scale
             fwhm_values = sources["fwhm"].values
             fwhm = self.calculate_robust_fwhm(fwhm_values)
             scale_multiplier = scale_multiplier_from_config(self.config)
-            # Legacy behavior: `default_scale` is a hard floor when the FWHM-based
-            # scale is too small.
+            # Legacy behavior: `default_scale` is a hard floor when the
+            # FWHM-based scale is too small.
             raw_scale = max(float(scale_multiplier) * float(fwhm), float(default_scale))
-            # Clamp to configured bounds (and ensure >= 1).
-            scale = clamp_scale_from_config(self.config, raw_scale)  # returns int per annotation
+            scale = clamp_scale_from_config(self.config, raw_scale)
             logger.info(
                 "Found %d point sources, robust FWHM %.2f px; scale = %.1f (FWHM x %.2f from source_detection / config)",
                 final_count,

@@ -15,7 +15,6 @@ Key optimizations over the original:
   - Replaced legacy np.random calls with np.random.default_rng().
   - Used pathlib.Path consistently for file path handling.
   - Added dataclass-based parameter containers for clarity.
-  - Added detailed docstrings and inline commentary throughout.
 
 Created on Thu Oct 27 11:27:05 2022
 @author: seanbrennan
@@ -65,8 +64,8 @@ try:
 
     _SKLEARN_AVAILABLE = True
 except ModuleNotFoundError:
-    # Template download code should be usable even when scikit-learn isn't
-    # installed; the regression/color-term sections will error at runtime.
+    # Keep template download usable without scikit-learn; the
+    # regression/color-term paths error at runtime instead.
     class _BaseEstimatorPlaceholder:
         """Stub used when scikit-learn is unavailable."""
 
@@ -125,8 +124,8 @@ try:
 
     _PHOTUTILS_AVAILABLE = True
 except ModuleNotFoundError:
-    # Allow module import for template downloading; alignment/photometry will
-    # fail at runtime if these are required but missing.
+    # Keep template download importable without photutils; the
+    # alignment/photometry paths fail at runtime instead.
     CircularAperture = None
     RectangularAperture = None
     detect_sources = None
@@ -170,7 +169,7 @@ try:
         remove_wcs_from_header,
     )
 except (ModuleNotFoundError, ImportError):
-    # Download-only use cases shouldn't require the full photometry stack.
+    # Download-only use does not require the full photometry stack.
     def log_step(message: Any, *args: Any, **kwargs: Any) -> str:
         m = str(message).strip()
         if not m:
@@ -253,8 +252,7 @@ logger = logging.getLogger(__name__)
 # Global Constants
 # =============================================================================
 
-# Random number generator (replaces legacy np.random.* calls)
-# No fixed seed to ensure independent random sequences across images
+# Unseeded so random sequences differ across images (replaces np.random.*)
 RNG = np.random.default_rng(seed=None)
 
 # Sentinel value used to represent "no data" in FITS images after alignment.
@@ -276,7 +274,7 @@ class AlignmentResult(NamedTuple):
     coverage_ok: Optional[bool] = None
 
 
-# Supported PanSTARRS filter names
+# PanSTARRS filter names
 PANSTARRS_FILTERS = frozenset({"g", "r", "i", "z",'y','w'})
 
 # Valid 2MASS band identifiers (case-insensitive input, stored upper)
@@ -340,7 +338,7 @@ def _pad_psf_to_image(psf: np.ndarray, target_shape: tuple) -> np.ndarray:
             _win_x[:_edge_w] = _ramp
             _win_x[-_edge_w:] = _ramp[::-1]
         psf = psf * np.outer(_win_y, _win_x)
-        # Renormalize after tapering
+        # Tapering changes the sum; restore unit normalization (ZOGY assumes it).
         _s = float(np.nansum(psf))
         if _s > 0:
             psf = psf / _s
@@ -371,7 +369,7 @@ def _load_psf_stamp_native(fpath: str) -> np.ndarray:
     grid convention in the header (``OVERSAMP``, ``PSFNPIX``, ``PSFX0`` /
     ``PSFY0``).  ZOGY requires a native-resolution PSF: for ``OVERSAMP > 1``
     the stamp is extracted on the native grid via the photutils ePSF
-    mapping ``over = c_over + k * (native - c_native)`` — an exact strided
+    mapping ``over = c_over + k * (native - c_native)`` -- an exact strided
     extraction when the offsets are integral (always the case for odd
     cutouts under the photutils convention), falling back to cubic
     interpolation otherwise.  Files without the keywords (older runs) are
@@ -425,7 +423,7 @@ def _zogy_subtract(N, R, Pn, Pr, sn, sr, fn=1.0, fr=None,
 
     Computes the proper difference image D, the score image S, and the
     corrected significance Scorr using Equations 1-13 from the paper.
-    Uses only numpy FFTs — no pyfftw or external dependencies.
+    Uses only numpy FFTs -- no pyfftw or external dependencies.
 
     Parameters
     ----------
@@ -510,7 +508,7 @@ def _zogy_subtract(N, R, Pn, Pr, sn, sr, fn=1.0, fr=None,
     fn2 = fn ** 2
     fr2 = fr ** 2
 
-    # FFTs (use numpy FFT — no pyfftw dependency)
+    # FFTs (use numpy FFT -- no pyfftw dependency)
     N_hat = np.fft.fft2(N)
     R_hat = np.fft.fft2(R)
     Pn_hat = np.fft.fft2(Pn)
@@ -598,11 +596,8 @@ def _zogy_subtract(N, R, Pn, Pr, sn, sr, fn=1.0, fr=None,
 # =============================================================================
 # Dataclass-Based Parameter Containers
 # =============================================================================
-# Using dataclasses gives us:
-#   - Named, documented fields instead of loose dict keys
-#   - Default values in one place
-#   - Type checking via IDE / mypy
-#   - Easy conversion to/from dicts for YAML compatibility
+# Dataclasses replace the former loose dicts: named fields, defaults in one
+# place, and easy conversion to/from dicts for YAML compatibility.
 
 
 @dataclass
@@ -645,7 +640,7 @@ class SubtractionParams:
     """Spatial kernel polynomial order for HOTPANTS / SFFT."""
 
     sfft_crowded_method: bool = True
-    """If True (default), use SFFT crowded-field (ECP). If False, use sparse (ESP). ECP is preferred; set False only to force ESP."""
+    """If True, use SFFT crowded-field (ECP); False uses sparse (ESP). The subtract() path defaults to ESP for typical fields unless crowded_field is set."""
 
     sfft_bg_order: int = 0
     """SFFT background spatial polynomial order (0=constant). SFFT's BGPolyOrder handles the constant background difference between images; BACK_TYPE=MANUAL with BACK_VALUE=0.0 tells SExtractor not to subtract background."""
@@ -661,7 +656,7 @@ class SubtractionParams:
 
 @dataclass
 class FluxMatchParams:
-    """Parameters for robust flux-consistency matching between catalogs."""
+    """Parameters for flux-consistency matching between catalogs (outlier-resistant fit)."""
 
     flux_key: str = "flux_AP"
     """Column name for aperture flux."""
@@ -670,10 +665,10 @@ class FluxMatchParams:
     """Column name for aperture flux uncertainty."""
 
     mag_residual_threshold: float = 0.3
-    """Maximum allowed magnitude residual for an inlier (stricter for robust fitting)."""
+    """Maximum allowed magnitude residual for an inlier (stricter for the outlier-resistant fit)."""
 
     min_samples_fraction: float = 0.7
-    """Minimum fraction of sources required by RANSAC (increased for robust fitting)."""
+    """Minimum fraction of sources required by RANSAC (increased for the outlier-resistant fit)."""
 
     max_trials: int = 2000
     """RANSAC maximum iteration count (increased for better sampling)."""
@@ -822,9 +817,9 @@ def _detect_sextractor_sources(data_or_path, input_yaml=None, fwhm_pix=3.0,
     """
     _n_err = 5 if return_errors else 3
     _none = (None,) * _n_err
-    # Adaptive fwhm_min: lower for undersampled images so real sources
-    # aren't rejected. SExtractor FWHM_IMAGE can be ~1.0 px for critically
-    # sampled data; the old fixed 1.5 px cut removed real sources.
+    # Lower fwhm_min for undersampled images: SExtractor FWHM_IMAGE can be
+    # ~1.0 px for critically sampled data; the old fixed 1.5 px cut removed
+    # real sources.
     if fwhm_min is None:
         fwhm_min = 0.8 if (fwhm_pix and fwhm_pix < 2.0) else 1.5
     try:
@@ -834,13 +829,11 @@ def _detect_sextractor_sources(data_or_path, input_yaml=None, fwhm_pix=3.0,
 
     _tmp_path = None
     try:
-        # Determine input path: use existing FITS or write temp file
-        # Accept str, os.PathLike (e.g. pathlib.Path), or in-memory array.
         if isinstance(data_or_path, (str, os.PathLike)):
             fits_path = str(data_or_path)
         else:
-            # Write in-memory array to temp FITS file
-            # Replace NaNs with median - SExtractor can crash on NaN pixels.
+            # SExtractor runs on files; write the array to a temp FITS.
+            # NaN pixels are filled with the median - SExtractor can crash on NaN.
             import tempfile
             data = np.asarray(data_or_path, dtype=np.float32)
             if data.ndim != 2:
@@ -859,7 +852,6 @@ def _detect_sextractor_sources(data_or_path, input_yaml=None, fwhm_pix=3.0,
             )
             fits_path = _tmp_path
 
-        # Build config if not provided
         if input_yaml is None:
             input_yaml = {"fwhm": fwhm_pix, "saturate": 65000.0}
 
@@ -875,14 +867,13 @@ def _detect_sextractor_sources(data_or_path, input_yaml=None, fwhm_pix=3.0,
         if sources is None or len(sources) == 0:
             return _none
 
-        # Extract positions (convert SExtractor 1-based to 0-based)
+        # SExtractor positions are 1-based; convert to 0-based.
         x = np.asarray(sources["XWIN_IMAGE"], float) - 1.0
         y = np.asarray(sources["YWIN_IMAGE"], float) - 1.0
         flux = np.asarray(sources["FLUX_AUTO"], float)
         fwhm = np.asarray(sources["FWHM_IMAGE"], float)
         ell = np.asarray(sources["ELLIPTICITY"], float)
 
-        # Filter by FWHM and ellipticity
         good = (fwhm >= fwhm_min) & (fwhm <= 30) & (ell < ell_max) & np.isfinite(x) & np.isfinite(y)
         if not good.any():
             return _none
@@ -936,11 +927,11 @@ def compute_alignment_rms(
     return_per_quadrant: bool = False,
 ) -> Optional[tuple]:
     """
-    Compute robust alignment quality from pre-loaded arrays.
+    Compute alignment quality from pre-loaded arrays.
 
     Uses SExtractor for source detection (consistent with the rest of the
-    pipeline).  Mutual nearest-neighbour star matching for robustness in
-    crowded fields.
+    pipeline).  Mutual nearest-neighbour star matching resists false
+    matches in crowded fields.
 
     If *sci_xy_override* is provided, science source detection is skipped
     and the supplied (N, 2) array of pixel positions is used instead.  This
@@ -987,7 +978,7 @@ def compute_alignment_rms(
             thresh=_align_thresh,
         )
 
-        # If too few sources at high threshold, retry with lower threshold
+        # Sparse-field fallback: retry at 3.0 when too few sources at thresh.
         if (sci_xy is None or len(sci_xy) < 10) and _align_thresh > 3.0 and sci_xy_override is None:
             sci_xy, _, _ = _detect_sextractor_sources(
                 sci_data, input_yaml=input_yaml, fwhm_pix=fwhm,
@@ -1058,21 +1049,20 @@ def compute_alignment_rms(
             else:
                 return None
 
-        # Per-axis offsets for matched sources (before sigma-clipping)
+        # Per-axis matched offsets (pre-clipping)
         _dx_mut = sci_xy[mutual, 0][_mut_idx] - ref_xy[i_sr[mutual], 0][_mut_idx]
         _dy_mut = sci_xy[mutual, 1][_mut_idx] - ref_xy[i_sr[mutual], 1][_mut_idx]
 
-        # Robust outlier clipping using MAD-based sigma.
-        # Standard deviation is inflated by the very outliers we're trying to
-        # remove (e.g. ghost/stacking artifacts creating false matches), making
-        # sigma_clip ineffective.  MAD is resistant to up to 50% outliers.
+        # MAD-based clipping: plain sigma_clip is self-defeating here because
+        # false matches (ghost/stacking artifacts) inflate the std.  MAD is
+        # resistant to up to 50% outliers.
         _med_d = float(np.nanmedian(d_mut))
         _mad_d = float(np.nanmedian(np.abs(d_mut - _med_d)))
         _robust_sigma = 1.4826 * _mad_d if _mad_d > 0 else float(np.nanstd(d_mut))
         if _robust_sigma < 1e-10:
             _robust_sigma = 1e-10
         _clip_mask = np.abs(d_mut - _med_d) > 3.0 * _robust_sigma
-        # Iterative clipping: recompute MAD on kept sources and clip again
+        # Iterate to convergence (recompute MAD on kept sources), max 4 rounds.
         for _ in range(4):
             _kept = ~_clip_mask
             if np.sum(_kept) < 5:
@@ -1155,12 +1145,10 @@ def _compute_per_quadrant_rms(
     _matched_sci_kept = _matched_sci[_kept]
     _matched_ref = ref_xy[i_sr[mutual]][mut_idx][_kept]
 
-    # Per-source distances for kept matches
     _dx = _matched_sci_kept[:, 0] - _matched_ref[:, 0]
     _dy = _matched_sci_kept[:, 1] - _matched_ref[:, 1]
     _d = np.sqrt(_dx**2 + _dy**2)
 
-    # Assign each source to a quadrant
     _qx = _matched_sci_kept[:, 0] < _cx
     _qy = _matched_sci_kept[:, 1] < _cy
     _q_labels = np.where(
@@ -1298,13 +1286,10 @@ def _reproject_template(
     """
     Reproject template onto the science pixel grid.
 
-    Optimizations vs the original nested closure:
-      - Projection headers prepared once, not re-derived per fallback.
-      - Adaptive kwargs built once from module-level introspection cache.
-      - import inspect called once at module level, not per call.
-      - Alignment RMS diagnostic uses the in-memory reprojected array (not a
-        second read of the output FITS).
-      - Returns structured AlignmentResult instead of bare tuple.
+    Tries ``cfg.method`` first, then the remaining reproject backends in
+    order.  The alignment-RMS diagnostic runs on the in-memory reprojected
+    array (not a second read of the output FITS) so its metrics can be
+    stored in the output header.
 
     Parameters
     ----------
@@ -1328,7 +1313,7 @@ def _reproject_template(
 
     shape_out = science_image.shape
 
-    # Convert headers to WCS objects for reproject (headers don't work with SIP distortion)
+    # reproject needs real WCS objects; raw headers drop SIP distortion terms.
     from wcs import get_wcs
     template_proj = get_wcs(template_header)
     science_proj = get_wcs(science_header)
@@ -1336,9 +1321,8 @@ def _reproject_template(
         logger.error("get_wcs failed for template or science header")
         return _FAIL
 
-    # Log WCS ranges to diagnose overlap issues
+    # Log footprints so overlap failures are diagnosable from the log.
     try:
-        # Get corner coordinates to check overlap
         h, w = science_image.shape
         sci_corners = science_proj.calc_footprint().flatten()
         ref_corners = template_proj.calc_footprint().flatten()
@@ -1358,7 +1342,6 @@ def _reproject_template(
         _distortion_summary(science_header),
     )
 
-    # Build adaptive kwargs once from module-level cache
     adaptive_kwargs = _build_adaptive_kwargs(cfg)
 
     # BUG 91: Auto-enable center_jacobian for large rotation differences.
@@ -1399,7 +1382,6 @@ def _reproject_template(
             )
             interp_order_eff = "bilinear"
 
-    # Determine fallback order from requested method
     all_methods = ("exact", "adaptive", "interp")
     if cfg.method in all_methods:
         fallbacks = [cfg.method] + [m for m in all_methods if m != cfg.method]
@@ -1572,6 +1554,122 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _select_forceconv(
+    cfg_value: Any,
+    science_fwhm: float,
+    template_fwhm: float,
+    auto_tol: float = 0.05,
+) -> Tuple[str, bool, str]:
+    """Resolve the SFFT convolution direction.
+
+    Parameters
+    ----------
+    cfg_value : str
+        Configured direction: 'REF' (DIFF = SCI - conv(REF); transient keeps
+        the science PSF), 'SCI' (DIFF = conv(SCI) - REF; diff has the
+        reference PSF), or 'AUTO'.
+    science_fwhm, template_fwhm : float
+        FWHMs measured on the aligned products (pixels) -- the values used
+        for kernel sizing, not raw FITS headers.
+    auto_tol : float
+        Fractional FWHM difference below which the images are treated as
+        equal and AUTO keeps REF (the PSF-conserving convention).
+
+    Returns
+    -------
+    (direction, deconvolves, note)
+        direction: 'REF' or 'SCI' to pass to run_sfft.py (AUTO is resolved
+        here so SFFT never decides from potentially stale header FWHMs --
+        SWarp resampling can flip apparent PSF ordering, BUG 122).
+        deconvolves: True when the chosen direction must sharpen the
+        convolved image (convolved side is broader than the target by more
+        than auto_tol), which produces an unstable kernel with negative
+        sidelobes when few matched sources constrain the fit.
+        note: short human-readable explanation for logging.
+    """
+    cfg = str(cfg_value or "REF").strip().upper()
+    fs = float(science_fwhm) if np.isfinite(science_fwhm) else 0.0
+    ft = float(template_fwhm) if np.isfinite(template_fwhm) else 0.0
+    tol = float(auto_tol) if np.isfinite(auto_tol) else 0.05
+    tol = max(0.0, min(tol, 0.5))
+
+    if cfg == "AUTO":
+        if ft > 0 and fs > 0 and ft > fs * (1.0 + tol):
+            # Template broader: convolve the sharper science up to the
+            # reference PSF (well-posed blur).  Diff gets reference PSF.
+            return "SCI", False, (
+                f"AUTO->SCI: template FWHM {ft:.2f} > science {fs:.2f} "
+                f"(>{tol:.0%}); convolve science (well-posed, diff has "
+                "reference PSF)"
+            )
+        if fs > 0 and ft > 0 and fs > ft * (1.0 + tol):
+            # Science broader: convolve the sharper reference down to the
+            # science PSF (well-posed blur).  Diff keeps science PSF.
+            return "REF", False, (
+                f"AUTO->REF: science FWHM {fs:.2f} > template {ft:.2f} "
+                f"(>{tol:.0%}); convolve template (diff keeps science PSF)"
+            )
+        return "REF", False, (
+            f"AUTO->REF: FWHMs nearly equal (sci={fs:.2f}, ref={ft:.2f}, "
+            f"tol={tol:.0%}); keep science-PSF convention"
+        )
+
+    direction = cfg if cfg in ("REF", "SCI") else "REF"
+    # Deconvolution check: the convolved side must end up *sharper* than it
+    # started (kernel removes width rather than adding it).
+    if direction == "REF":
+        deconvolves = ft > 0 and fs > 0 and ft > fs * (1.0 + tol)
+    else:
+        deconvolves = fs > 0 and ft > 0 and fs > ft * (1.0 + tol)
+    note = (
+        "configured direction requires deconvolution"
+        if deconvolves
+        else "configured direction"
+    )
+    return direction, deconvolves, note
+
+
+def _diff_resid_at_sources(
+    diff_path: Any,
+    xy_list: Any,
+    radius: float = 4.0,
+) -> Optional[float]:
+    """Median absolute aperture residual at matched-source positions.
+
+    Measures how much flux remains at calibration-source locations in a
+    difference image -- the direct observable for over/under-subtraction.
+    Returns None when the metric cannot be evaluated.
+    """
+    try:
+        if not diff_path or not os.path.isfile(str(diff_path)):
+            return None
+        if xy_list is None or len(xy_list) == 0:
+            return None
+        data = np.asarray(fits.getdata(str(diff_path)), dtype=float)
+        if data.size == 0 or not np.isfinite(data).any():
+            return None
+        ny, nx = data.shape
+        r = max(2.0, float(radius))
+        resids = []
+        for x, y in xy_list:
+            xi, yi = int(round(float(x))), int(round(float(y)))
+            x0, x1 = max(0, xi - int(np.ceil(r))), min(nx, xi + int(np.ceil(r)) + 1)
+            y0, y1 = max(0, yi - int(np.ceil(r))), min(ny, yi + int(np.ceil(r)) + 1)
+            if x1 - x0 < 3 or y1 - y0 < 3:
+                continue
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            m = np.hypot(xx - float(x), yy - float(y)) <= r
+            vals = data[y0:y1, x0:x1][m]
+            vals = vals[np.isfinite(vals)]
+            if vals.size >= 5:
+                resids.append(float(np.sum(vals)))
+        if len(resids) < 2:
+            return None
+        return float(np.median(np.abs(resids)))
+    except Exception:
+        return None
+
+
 def euclidean_distance(
     p1: Tuple[float, float],
     p2: Tuple[float, float],
@@ -1695,7 +1793,7 @@ def flux_to_mag(
     """
     with np.errstate(divide="ignore", invalid="ignore"):
         mag = -2.5 * np.log10(flux)
-        # Add conditional to handle zero flux properly
+        # Non-positive flux -> NaN error rather than inf/nan from the ratio.
         mag_err = np.where(flux > 0, (2.5 / np.log(10)) * (flux_err / flux), np.nan)
     return mag, mag_err
 
@@ -1703,17 +1801,17 @@ def flux_to_mag(
 def clean_fits_nans(fpath: str, output_dir: str = None) -> str:
     """
     Replace NaN / Inf pixels in a FITS image with NO_DATA_SENTINEL.
-    
+
     Creates a temporary file with cleaned data and returns its path.
     The original file is NOT modified to prevent cross-image contamination.
 
     This is necessary before feeding images to external tools (HOTPANTS, SFFT)
     that cannot handle IEEE special values.
-    
+
     Args:
         fpath: Path to the input FITS file.
         output_dir: Directory for the temporary file. If None, uses the parent directory of fpath.
-    
+
     Returns:
         str: Path to the cleaned temporary file.
     """
@@ -1723,9 +1821,8 @@ def clean_fits_nans(fpath: str, output_dir: str = None) -> str:
         bad = ~np.isfinite(data)
         if bad.any():
             data[bad] = NO_DATA_SENTINEL
-    
-    # Write to a temporary file instead of modifying the original
-    # Use the parent directory of the input file or specified output_dir
+
+    # Never modify the original file in place.
     if output_dir is None:
         output_dir = str(Path(fpath).parent)
     fd, tmp_path = tempfile.mkstemp(suffix=".fits", prefix="cleaned_", dir=output_dir)
@@ -1810,22 +1907,18 @@ def largest_rectangle_from_target(
     for _ in range(max_expand):
         expanded = False
 
-        # Try expanding upward
         if min_row > 0 and mask[min_row - 1, min_col : max_col + 1].all():
             min_row -= 1
             expanded = True
 
-        # Try expanding downward
         if max_row < rows - 1 and mask[max_row + 1, min_col : max_col + 1].all():
             max_row += 1
             expanded = True
 
-        # Try expanding left
         if min_col > 0 and mask[min_row : max_row + 1, min_col - 1].all():
             min_col -= 1
             expanded = True
 
-        # Try expanding right
         if max_col < cols - 1 and mask[min_row : max_row + 1, max_col + 1].all():
             max_col += 1
             expanded = True
@@ -1878,7 +1971,6 @@ def fill_masked_regions_in_fits(
     str
         Path to the written output file.
     """
-    # --- Single I/O pass per file ---
     image_data, header = read_fits(image_fpath)
     mask_data, _ = read_fits(mask_fpath)
     mask_data = mask_data.astype(bool)
@@ -1888,7 +1980,6 @@ def fill_masked_regions_in_fits(
             f"Shape mismatch: image {image_data.shape} vs mask {mask_data.shape}."
         )
 
-    # Estimate background from unmasked pixels
     bg_pixels = image_data[~mask_data]
     if bg_pixels.size == 0:
         raise ValueError("No unmasked pixels available for background estimation.")
@@ -1898,14 +1989,13 @@ def fill_masked_regions_in_fits(
     else:
         mean, std = float(np.mean(bg_pixels)), float(np.std(bg_pixels))
 
-    # Generate synthetic noise
     n_fill = int(mask_data.sum())
     if use_poisson:
         noise = RNG.poisson(lam=max(mean, 0), size=n_fill).astype(float)
     else:
         noise = RNG.normal(loc=mean, scale=max(std, 0), size=n_fill)
 
-    # Fill in-place (no copy needed - we own image_data)
+    # Fill in-place; image_data is a private copy from read_fits.
     image_data[mask_data] = noise
 
     if output_fpath is None:
@@ -1943,7 +2033,7 @@ def download_panstarrs_template(
     template_folder : str
         Root directory under which band-specific sub-folders are created.
     band : str
-        One of 'g', 'r', 'i', 'z'.
+        One of 'g', 'r', 'i', 'z', 'y', 'w'.
 
     Returns
     -------
@@ -2259,10 +2349,9 @@ def download_legacy_template(
     """
     Download a Legacy Survey image cutout for use as a template.
 
-    Builds the Legacy Survey viewer cutout URL and downloads via wget. Downloads
-    the combined multi-band FITS (gri) once, then saves g, r, and i band images
-    into their template subfolders. Size is interpreted as arcminutes. Requires
-    wget to be installed and on PATH.
+    Downloads the combined multi-band FITS (gri) from the Legacy Survey
+    viewer cutout service once, then saves g, r, and i band images into
+    their template subfolders. Size is interpreted as arcminutes.
 
     Parameters
     ----------
@@ -2291,9 +2380,9 @@ def download_legacy_template(
         logger.info("Band '%s' not available in Legacy Survey [gri]; skipping.", band)
         return None
 
-    # Path for requested band; subfolders must match find_templates (g_template, etc.)
-    # Defer mkdir of template_base until we actually need to write a file,
-    # to avoid leaving an empty templates/ folder on download failure.
+    # Subfolder names must match find_templates (g_template, etc.).
+    # Defer mkdir of template_base until a file is ready to write so a
+    # failed download does not leave an empty templates/ folder.
     template_base = Path(template_folder)
     out_path = template_base / f"{band}_template" / f"legacy_{band}_band_template.fits"
 
@@ -2316,7 +2405,7 @@ def download_legacy_template(
             dec,
             size,
         )
-        # Create template_base just before downloading (needed for combined_path)
+        # mkdir just before download; needed to write combined_path.
         template_base.mkdir(parents=True, exist_ok=True)
         last_error = None
         for attempt in range(1, LEGACY_DOWNLOAD_ATTEMPTS + 1):
@@ -2410,7 +2499,7 @@ def download_legacy_template(
         )
         return None
 
-    # Determine band order from header when possible (more robust than assuming gri).
+    # Read the band order from the header rather than assuming gri.
     # The Legacy cutout header typically provides BANDS='gri' and BAND0/BAND1/BAND2.
     header_bands = None
     try:
@@ -2420,7 +2509,7 @@ def download_legacy_template(
     except Exception:
         header_bands = None
     if not header_bands:
-        # Fallback: try BAND0/BAND1/... keywords
+        # Fall back to BAND0/BAND1/... keywords.
         band_tokens = []
         for k in ("BAND0", "BAND1", "BAND2"):
             v = header.get(k)
@@ -2523,7 +2612,7 @@ def download_2mass_template(
             f"Maximum 2MASS cutout size is {TWOMASS_MAX_SIZE_ARCMIN} arcmin."
         )
 
-    # Normalise alias
+    # 2MASS queries use 'KS'; 'K' is accepted as an alias.
     query_band = "KS" if band == "K" else band
 
     # Compute output path (defer mkdir until write succeeds to avoid
@@ -2556,7 +2645,7 @@ def download_2mass_template(
         sub_folder.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(img_resp.content)
 
-        # Stamp standard header keywords
+        # The SIA response has no instrument keywords; stamp them here.
         with fits.open(str(out_path), mode="update") as hdul:
             hdr = hdul[0].header
             hdr["TELESCOP"] = "2MASS"
@@ -2578,6 +2667,7 @@ def download_2mass_template(
 # Alias kept here so all call sites in this file continue to work unchanged.
 
 from zeropoint import PenalisedSlopeRegressor as ConstrainedSlopeRegressor  # noqa: E402
+from zeropoint import FixedSlopeRegressor  # noqa: E402
 
 
 # =============================================================================
@@ -2707,7 +2797,7 @@ class Templates:
     def _trim_nan_boundaries(image_data, header, buffer_pixels=10):
         """
         Trim image to remove NaN boundary regions.
-        
+
         Parameters
         ----------
         image_data : np.ndarray
@@ -2716,7 +2806,7 @@ class Templates:
             FITS header to update with new WCS after trimming
         buffer_pixels : int
             Minimum buffer around valid data region
-        
+
         Returns
         -------
         trimmed_data : np.ndarray
@@ -2727,54 +2817,45 @@ class Templates:
             Information about trimming performed
         """
         from astropy.wcs import WCS
-        
-        # Find valid (non-NaN) pixels
+
         valid_mask = ~np.isnan(image_data)
-        
-        # If no NaNs or all NaNs, return as-is
+
         if not np.any(valid_mask) or np.all(valid_mask):
             return image_data, header, {"trimmed": False}
-        
-        # Find valid region bounds
+
         rows_with_valid = np.any(valid_mask, axis=1)
         cols_with_valid = np.any(valid_mask, axis=0)
-        
+
         if not np.any(rows_with_valid) or not np.any(cols_with_valid):
             return image_data, header, {"trimmed": False}
-        
+
         y_min, y_max = np.where(rows_with_valid)[0][[0, -1]]
         x_min, x_max = np.where(cols_with_valid)[0][[0, -1]]
-        
-        # Add buffer
+
         y_min = max(0, y_min - buffer_pixels)
         y_max = min(image_data.shape[0] - 1, y_max + buffer_pixels)
         x_min = max(0, x_min - buffer_pixels)
         x_max = min(image_data.shape[1] - 1, x_max + buffer_pixels)
-        
-        # Perform trim
+
         trimmed_data = image_data[y_min:y_max+1, x_min:x_max+1]
-        
-        # Update header with new WCS
         trimmed_header = header.copy()
-        
+
         try:
             wcs = get_wcs(trimmed_header)
-            # Update CRPIX to account for offset
+            # Shift the WCS reference pixel by the crop offset.
             if 'CRPIX1' in trimmed_header:
                 trimmed_header['CRPIX1'] -= x_min
             if 'CRPIX2' in trimmed_header:
                 trimmed_header['CRPIX2'] -= y_min
-            
-            # Update NAXIS
+
             trimmed_header['NAXIS1'] = trimmed_data.shape[1]
             trimmed_header['NAXIS2'] = trimmed_data.shape[0]
-            
-            # CD matrix stays valid after CRPIX shift - no need to delete it
-            
-            # Store trim info in history
+
+            # The CD matrix stays valid after a CRPIX shift; leave it alone.
+
             trimmed_header.add_history(f'Trimmed: removed NaN boundaries [{x_min}:{x_max+1},{y_min}:{y_max+1}]')
         except Exception as wcs_exc:
-            # If WCS update fails, just update basic header info
+            # WCS update failed; still fix the dimensions.
             trimmed_header['NAXIS1'] = trimmed_data.shape[1]
             trimmed_header['NAXIS2'] = trimmed_data.shape[0]
             trimmed_header.add_history(f'Trimmed: removed NaN boundaries (WCS update failed)')
@@ -2922,15 +3003,12 @@ class Templates:
         mask = np.zeros(data.shape, dtype=np.int32)
 
         try:
-            # --- Input validation ---
-            # Validate image size
             if data.shape[0] < fwhm or data.shape[1] < fwhm:
                 logger.warning(
                     f"create_image_mask: image shape {data.shape} is smaller than FWHM {fwhm}; returning empty mask."
                 )
                 return mask, masked_centres
 
-            # Validate and sanitize parameters
             fwhm = int(fwhm)
             if fwhm <= 0:
                 logger.warning("create_image_mask: invalid FWHM %s; setting to default 5.", fwhm)
@@ -2943,7 +3021,7 @@ class Templates:
                 logger.warning("create_image_mask: invalid padding %s; setting to 0.", padding)
                 padding = 0
 
-            # Handle NaN values in input data
+            # Images that are mostly NaN cannot yield a useful mask.
             nan_mask = ~np.isfinite(data)
             nan_fraction = np.sum(nan_mask) / data.size
             if nan_fraction > 0.9:
@@ -2956,8 +3034,6 @@ class Templates:
                     f"create_image_mask: image has {100*nan_fraction:.1f}% NaNs; mask may be unreliable."
                 )
 
-            # --- Background statistics ---
-            # Use only finite pixels for statistics
             finite_data = data[np.isfinite(data)]
             if len(finite_data) == 0:
                 logger.warning("create_image_mask: no finite pixels in image; returning empty mask.")
@@ -2970,16 +3046,15 @@ class Templates:
                 stdfunc="mad_std",
             )
 
-            # Validate statistics
             if not np.isfinite(image_std) or image_std <= 0:
                 logger.warning(
                     f"create_image_mask: invalid image_std {image_std}; setting to robust estimate."
                 )
                 image_std = np.nanstd(finite_data)
                 if not np.isfinite(image_std) or image_std <= 0:
-                    image_std = 1.0  # Fallback to reasonable default
+                    image_std = 1.0  # last-resort default
 
-            # Ensure FWHM is even (required by kernel builder)
+            # Kernel builder requires an even FWHM.
             if fwhm % 2 != 0:
                 fwhm += 1
 
@@ -2994,12 +3069,11 @@ class Templates:
                     float(npixels_det_raw),
                 )
                 npixels_det = 5
-            # Clamp npixels to reasonable fraction of image
+            # Cap at ~1% of the image (max 100 px) to keep detections point-like.
             max_npixels = min(100, data.shape[0] * data.shape[1] // 100)
             if npixels_det > max_npixels:
                 npixels_det = max_npixels
 
-            # Adaptive threshold based on image statistics
             threshold = 3.0 * image_std + image_median
             if not np.isfinite(threshold):
                 logger.warning("create_image_mask: threshold is NaN; using percentile-based threshold.")
@@ -3008,8 +3082,7 @@ class Templates:
                 logger.warning("create_image_mask: threshold %s <= median %s; using 2*std.", threshold, image_median)
                 threshold = 2.0 * image_std + image_median
 
-            # --- Source detection via segmentation ---
-            # Handle NaN values in data for detection
+            # detect_sources cannot handle NaN; fill with the image median.
             data_for_detection = data.copy()
             data_for_detection[~np.isfinite(data_for_detection)] = image_median
 
@@ -3030,7 +3103,6 @@ class Templates:
                     )
                 seg = SegmentationImage(seg_arr)
 
-            # Check if any sources were detected
             if seg.nlabels == 0:
                 logger.warning("create_image_mask: no sources detected; returning empty mask.")
                 return mask, masked_centres
@@ -3038,12 +3110,10 @@ class Templates:
             cat = SourceCatalog(data_for_detection, seg, localbkg_width=15 * fwhm)
             tbl = cat.to_table().to_pandas()
 
-            # Check if source catalog is empty
             if len(tbl) == 0:
                 logger.warning("create_image_mask: source catalog is empty; returning empty mask.")
                 return mask, masked_centres
 
-            # Flag categories
             is_negative = tbl["max_value"] < 0
 
             # Mask negative-peak sources (likely artefacts) directly from their
@@ -3062,13 +3132,10 @@ class Templates:
                     is_large = clipped.mask
                 else:
                     is_large = np.zeros(len(tbl), dtype=bool)
-                # Keep all sources EXCEPT the bad ones (negative or large)
                 tbl = tbl[~(is_negative | is_large)]
             else:
-                # Keep all sources EXCEPT the bad ones (negative)
                 tbl = tbl[~(is_negative)]
 
-            # Check if all sources were filtered out
             if len(tbl) == 0:
                 logger.warning("create_image_mask: all sources filtered out; returning empty mask.")
                 return mask, masked_centres
@@ -3094,7 +3161,6 @@ class Templates:
             # for flux calibration and kernel fitting. Only saturated/negative
             # sources and bright catalog overlaps should be masked.
 
-            # Collapse overlapping regions
             mask = np.clip(mask, 0, 1)
 
         except Exception:
@@ -3129,8 +3195,8 @@ class Templates:
         fits_root = Path(self.input_yaml.get("fits_dir", None) or "") / "templates"
         use_filter = str(use_filter).strip()
 
-        # Prefer modern naming for ugriz, keep legacy *p_template as fallback.
-        # Also check cross-legacy: rp -> r_template and r -> rp_template for Pan-STARRS/Sloan compatibility
+        # Prefer <f>_template; also accept the legacy <f>p_template folder
+        # (Pan-STARRS/Sloan naming convention).
         dir_labels = [f"{use_filter}_template"]
         if use_filter in {"u", "g", "r", "i", "z"}:
             dir_labels.append(f"{use_filter}p_template")
@@ -3157,8 +3223,8 @@ class Templates:
                 logger.info("No template files found in %s", template_dir)
                 continue
             
-            # Prioritize templates named X_template.fits or Xp_template.fits over other files
-            # Check for both standard (X_template.fits) and legacy (Xp_template.fits) formats
+            # Prefer exact <f>_template.fits / <f>p_template.fits names over
+            # arbitrary .fits files sitting in the folder.
             preferred_names = [f"{use_filter}_template.fits"]
             if use_filter in {"u", "g", "r", "i", "z"}:
                 preferred_names.append(f"{use_filter}p_template.fits")
@@ -3171,7 +3237,6 @@ class Templates:
                     logger.debug("Template filepath: %s", result)
                     return result
             
-            # Fallback to first candidate
             result = str(candidates[0])
             if template_dir.name.endswith("_template"):
                 logger.debug("Template filepath (legacy folder): %s", result)
@@ -3226,11 +3291,11 @@ class Templates:
             scienceDir = Path(scienceFpath).parent
             new_templateFpath = str(scienceDir / Path(templateFpath).name)
 
-            # Single I/O pass per file - data reused across all strategies
+            # Load once; both images are reused across every fallback strategy.
             scienceImage, scienceHeader = read_fits(scienceFpath)
             templateImage, templateHeader = read_fits(templateFpath)
 
-            # Early shape-compatibility check before any expensive computation
+            # Fail fast on non-2D input before running any strategy.
             if scienceImage.ndim != 2 or templateImage.ndim != 2:
                 logger.error(
                     "align: expected 2D images, got science=%s template=%s",
@@ -3241,7 +3306,7 @@ class Templates:
 
             fwhm_pix = float(self.input_yaml.get("fwhm", 3.0))
 
-            # Build reproject config once - shared across reproject attempts
+            # Shared by every reproject attempt below.
             reproject_cfg = ReprojectConfig.from_yaml(self.input_yaml)
 
             # ------------------------------------------------------------------
@@ -3255,7 +3320,6 @@ class Templates:
                 logger.info("Attempting SWarp + SCAMP alignment.")
                 idc = run_IDC.ImageDistortionCorrector(input_yaml=self.input_yaml)
                 
-                # Determine resampling mode from config
                 ts_cfg = self.input_yaml.get("template_subtraction", {})
                 skip_resampling = bool(ts_cfg.get("skip_resampling", False))
                 resample_mode = str(ts_cfg.get("resample_mode", "")).strip().lower()
@@ -3285,7 +3349,7 @@ class Templates:
                     return None, None
                 sci_al = res["science_aligned"]
                 ref_al = res["reference_aligned"]
-                # Load outputs for RMS diagnostic (separate from alignment I/O)
+                # Extra read just for the RMS diagnostic (not the alignment I/O).
                 _swarp_ok = True
                 _smed = None
                 _srms = None
@@ -3497,7 +3561,8 @@ class Templates:
                 max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
                 max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
                 max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
-                # FWHM-adaptive thresholds for fallback gates
+                # Scale the gates with FWHM so the same fractional-pixel
+                # tolerance applies to sharp and broad PSFs.
                 _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
                 max_offset *= _tpl_scale
                 max_rms *= _tpl_scale
@@ -3531,8 +3596,8 @@ class Templates:
                         )
                         return None, None
 
-                # Note: reproject only modifies the template, not the science image
-                # The science image WCS is unchanged, so target coordinates don't need updating
+                # Only the template is resampled; the science WCS is
+                # unchanged, so target coordinates need no update.
                 method_used = "reproject"
                 logger.info("Alignment succeeded (method: %s).", method_used)
                 return scienceFpath, result.template_path
@@ -3606,9 +3671,9 @@ class Templates:
                     from spalipy import Spalipy
 
                     # --- Source detection with SExtractor ---
-                    # SExtractor's robust deblending means a single low-threshold
-                    # run finds plenty of sources - no need for adaptive multi-
-                    # threshold scanning like SEP required.
+                    # SExtractor's deblending is reliable enough that a single
+                    # low-threshold run finds plenty of sources - no need for
+                    # the adaptive multi-threshold scanning SEP required.
                     _sp_cfg = (
                         (self.input_yaml.get("template_subtraction") or {})
                         if isinstance(self.input_yaml, dict)
@@ -3724,26 +3789,24 @@ class Templates:
                         _sci_wcs = _WCS(scienceHeader)
                         _tpl_wcs = _WCS(templateHeader)
 
-                        # Convert science detections to RA/DEC
                         _sci_ra, _sci_dec = _sci_wcs.all_pix2world(
                             sci_det["x"], sci_det["y"], 0,
                         )
                         _sci_sky = SkyCoord(_sci_ra * u.deg, _sci_dec * u.deg)
 
-                        # Convert template detections to RA/DEC
                         _tpl_ra, _tpl_dec = _tpl_wcs.all_pix2world(
                             tpl_det["x"], tpl_det["y"], 0,
                         )
                         _tpl_sky = SkyCoord(_tpl_ra * u.deg, _tpl_dec * u.deg)
 
-                        # Match: for each science source, find nearest template source
+                        # Nearest template source for each science source.
                         _match_radius = _sp_match_radius * u.arcsec
                         _idx_tpl, _sep2d, _ = match_coordinates_sky(
                             _sci_sky, _tpl_sky, nthneighbor=1,
                         )
                         _matched = _sep2d < _match_radius
 
-                        # Also require mutual nearest neighbour to avoid one-to-many
+                        # Require mutual nearest neighbours to reject one-to-many matches.
                         _idx_sci_rev, _sep2d_rev, _ = match_coordinates_sky(
                             _tpl_sky, _sci_sky, nthneighbor=1,
                         )
@@ -3933,12 +3996,11 @@ class Templates:
 
                     # min_n_match: minimum matched sources for alignment.
                     # Lower for sparse fields so spalipy doesn't reject valid
-                    # matches.  Default floor is 6 (need >=4 for affine, +2 for
-                    # robustness), but when fewer sources than the floor are
-                    # available, lower to the source count (floored at 4, the
-                    # absolute minimum for an affine transform).  This lets
-                    # spalipy attempt alignment in very sparse fields instead of
-                    # failing immediately.
+                    # matches.  Default floor is 6 (4 for the affine minimum
+                    # plus margin), but when fewer sources than the floor are
+                    # available, lower to the source count (floored at 4).
+                    # This lets spalipy attempt alignment in very sparse fields
+                    # instead of failing immediately.
                     if _yaml_min_match is not None:
                         _min_match = int(_yaml_min_match)
                     else:
@@ -4002,14 +4064,12 @@ class Templates:
                         _quad_edge_buffer = 0
                         try:
                             _tpl_wcs_area = _tpl_w * _tpl_h
-                            # Check if template covers science frame by
-                            # comparing WCS footprints
+                            # Partial-overlap check via WCS footprints.
                             from astropy.wcs import WCS as _WCS3
                             _sw3 = _WCS3(scienceHeader)
                             _tw3 = _WCS3(templateHeader)
                             _sci_corners = _sw3.calc_footprint()
                             _tpl_corners = _tw3.calc_footprint()
-                            # Convert template corners to science pixel frame
                             _tpl_in_sci = _sw3.all_world2pix(
                                 _tpl_corners[:, 0], _tpl_corners[:, 1], 0
                             )
@@ -4173,7 +4233,6 @@ class Templates:
                         logger.info("spalipy did not produce aligned output.")
                         return None, None
 
-                    # Log transform diagnostics
                     try:
                         _n_matched = 0
                         _sdm = getattr(sp, "_source_det_matched", None)
@@ -4193,7 +4252,9 @@ class Templates:
 
                     aligned_template = np.asarray(sp.aligned_data, dtype=np.float32)
 
-                    # Restore NaN mask: apply warped source_mask + cval NaNs
+                    # Re-mask pixels that were invalid in the source: cval=nan
+                    # marks unmapped output pixels; sp.aligned_mask carries the
+                    # warped source_mask.
                     _aligned_nan = ~np.isfinite(aligned_template)
                     try:
                         _warped_mask = getattr(sp, "aligned_mask", None)
@@ -4204,24 +4265,22 @@ class Templates:
                     if _aligned_nan.any():
                         aligned_template = np.where(_aligned_nan, np.nan, aligned_template)
 
-                    # No post-alignment sub-pixel shift correction.
-                    # spalipy's spline-warp is the definitive alignment; applying
-                    # an empirical scipy.ndimage.shift afterwards is a post-
-                    # alignment pixel adjustment that can introduce dipoles in
-                    # subtraction (same reasoning as the SCAMP+SWarp shift
-                    # correction that was already removed).  The alignment
-                    # quality gate below measures the actual spalipy output.
+                    # No post-alignment sub-pixel shift correction: an
+                    # empirical shift applied after spalipy's spline-warp can
+                    # introduce subtraction dipoles (same reason the SCAMP+SWarp
+                    # shift correction was removed).  The quality gate below
+                    # measures the actual spalipy output.
 
                     # Alignment quality measurement (diagnostic only).
                     # Use the pre-matched science sources (sci_det) instead of
                     # re-detecting in the science image.  sci_det was already
                     # RA/DEC matched to the reference, so it contains only real
-                    # sources — no ghost/stacking artifacts that would create
+                    # sources -- no ghost/stacking artifacts that would create
                     # false matches and inflate the RMS.
                     #
                     # NOTE: spalipy alignments are NOT rejected on the basis of
                     # a high RMS / offset / P90.  A successful spalipy result is
-                    # accepted even when the measured quality is poor — the
+                    # accepted even when the measured quality is poor -- the
                     # metrics are still computed, logged, and written to the
                     # aligned template header (ALIGMED/ALIGRMS/ALIGP90) so that
                     # downstream SFFT kernel sizing and photometry provenance
@@ -4258,7 +4317,8 @@ class Templates:
                         max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
                         max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
                         max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
-                        # FWHM-adaptive thresholds for fallback gates
+                        # Scale the gates with FWHM so the same fractional-pixel
+                        # tolerance applies to sharp and broad PSFs.
                         _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
                         max_offset *= _tpl_scale
                         max_rms *= _tpl_scale
@@ -4284,7 +4344,7 @@ class Templates:
                     except Exception:
                         logger.debug("spalipy: quality measurement failed", exc_info=True)
 
-                    # Write aligned template with science WCS
+                    # Write aligned template under the science WCS.
                     hdr = templateHeader.copy()
                     hdr = remove_wcs_from_header(hdr)
                     from functions import copy_wcs_from_header
@@ -4356,6 +4416,7 @@ class Templates:
                                 "fwhm": float(np.median(
                                     np.concatenate([sci_det["fwhm"], _tpl_det["fwhm"]]
                                 ))),
+                                "plot_format": (self.input_yaml or {}).get("plot_format", "png"),
                             })
                             _plot_inst.plot_match_sources(
                                 sci_image=scienceImage,
@@ -4431,8 +4492,8 @@ class Templates:
                         len(sci_cat), len(tpl_cat),
                     )
 
-                    # Convert science sources to sky coordinates for reference catalog
-                    # _detect_sextractor_sources already returns 0-based coordinates
+                    # Build the reference catalog in sky coordinates.
+                    # _detect_sextractor_sources already returns 0-based coords.
                     sci_wcs = WCS(scienceHeader)
                     sci_ra, sci_dec = sci_wcs.all_pix2world(
                         np.asarray(sci_cat["x"]),
@@ -4444,7 +4505,6 @@ class Templates:
                         "DEC": np.asarray(sci_dec, float),
                     })
 
-                    # Build corrector for the template WCS
                     tpl_wcs = WCS(templateHeader)
                     tpl_corrector = FITSWCSCorrector(
                         tpl_wcs,
@@ -4477,10 +4537,9 @@ class Templates:
                         sigma=(3.0, "rmse"),
                     )
 
-                    # Get corrected template WCS and reproject
                     corrected_wcs = tpl_corrector.wcs
 
-                    # Mask NaN in template
+                    # reproject cannot propagate NaN; fill with 0.
                     tpl_data = np.where(
                         np.isfinite(templateImage), templateImage, 0.0
                     ).astype(np.float32)
@@ -4810,7 +4869,7 @@ class Templates:
                 return scienceFpath, templateFpath
 
             if method == "spalipy":
-                # spalipy: spline-warp registration for non-homogeneous distortion
+                # spalipy: spline-warp registration for non-homogeneous distortion.
                 out = _spalipy()
                 if out[0] and out[1]:
                     return out
@@ -4833,7 +4892,7 @@ class Templates:
                 return scienceFpath, templateFpath
 
             if method == "tweakwcs":
-                # tweakwcs: STScI WCS tweaking + reproject (HST/JWST-grade)
+                # tweakwcs: STScI WCS tweaking + reproject (HST/JWST approach).
                 out = _tweakwcs()
                 if out[0] and out[1]:
                     return out
@@ -4856,7 +4915,7 @@ class Templates:
                 return scienceFpath, templateFpath
 
             if method == "chi2_shift":
-                # chi2_shift: cross-correlation for extended-source-dominated fields
+                # chi2_shift: cross-correlation for extended-source-dominated fields.
                 out = _chi2_shift()
                 if out[0] and out[1]:
                     return out
@@ -4875,8 +4934,8 @@ class Templates:
                 )
                 return scienceFpath, templateFpath
 
-            # Unknown method: prefer spalipy (most robust, RA/DEC pre-matching
-            # + spline-warp for non-homogeneous distortion).
+            # Unknown method: default to spalipy (RA/DEC pre-matching +
+            # spline-warp handles non-homogeneous distortion).
             logger.warning(
                 "Unknown alignment_method=%r; defaulting to spalipy -> swarp -> reproject -> astroalign "
                 "(spalipy is the most robust alignment method).",
@@ -4930,11 +4989,10 @@ class Templates:
             True if update succeeded, False otherwise.
         """
         try:
-            # Load aligned image header to get new WCS
             aligned_data, aligned_header = read_fits(aligned_image_path)
             aligned_wcs = get_wcs(aligned_header)
 
-            # Validate WCS is valid (not NaN-producing)
+            # Reject a corrupt WCS (NaN at the pixel origin).
             test_ra, test_dec = aligned_wcs.all_pix2world([0], [0], 0)
             if not (np.isfinite(test_ra[0]) and np.isfinite(test_dec[0])):
                 logger.error(
@@ -4943,16 +5001,14 @@ class Templates:
                 )
                 return False
 
-            # Get target RA/Dec from input_yaml (world coordinates don't change)
+            # RA/Dec are invariant under regridding; only the pixel mapping changes.
             target_ra = self.input_yaml["target_ra"]
             target_dec = self.input_yaml["target_dec"]
 
-            # Convert world coordinates to pixel coordinates using new WCS
             new_target_x, new_target_y = aligned_wcs.all_world2pix(
                 target_ra, target_dec, 0
             )
 
-            # Validate that conversion succeeded
             if not (np.isfinite(new_target_x) and np.isfinite(new_target_y)):
                 logger.error(
                     "WCS validation failed after %s alignment: Target RA/Dec conversion produced NaN pixel coordinates "
@@ -4961,15 +5017,13 @@ class Templates:
                 )
                 return False
 
-            # Store old coordinates for logging
             old_target_x = self.input_yaml.get("target_x_pix", np.nan)
             old_target_y = self.input_yaml.get("target_y_pix", np.nan)
 
-            # Update input_yaml with new coordinates
             self.input_yaml["target_x_pix"] = float(new_target_x)
             self.input_yaml["target_y_pix"] = float(new_target_y)
 
-            # Validate that target is within image bounds
+            # Warn when the target lands within 50 px of an edge.
             h, w = aligned_data.shape
             margin = 50  # pixels
             if not (margin <= new_target_x < w - margin and margin <= new_target_y < h - margin):
@@ -4979,7 +5033,6 @@ class Templates:
                     method_name, new_target_x, new_target_y, w, h, margin
                 )
 
-            # Log the coordinate change and WCS parameters
             logger.info(
                 "Target coords updated after %s alignment:\t(%.1f, %.1f) -> (%.1f, %.1f) px | "
                 "WCS CRPIX=(%.1f, %.1f) CRVAL=(%.6f, %.6f)",
@@ -5070,7 +5123,6 @@ class Templates:
         -------
         (row_start, col_start, row_end, col_end)
         """
-        # Corrected: AND instead of OR
         valid = np.isfinite(image) & (image != 0)
         rows, cols = valid.shape
         height = np.zeros(cols, dtype=int)
@@ -5079,7 +5131,7 @@ class Templates:
         best_coords = (0, 0, 0, 0)
 
         for r in range(rows):
-            # Build histogram: cumulative height of consecutive valid pixels
+            # height[c] = run length of consecutive valid pixels ending at row r.
             height = np.where(valid[r], height + 1, 0)
 
             area, (left, h, right) = self.largest_histogram_rectangle(height.tolist())
@@ -5144,7 +5196,6 @@ class Templates:
         # Science-only crop (no template)
         # ------------------------------------------------------------------
         if templateFpath is None:
-            # Validate crop center coordinates
             if not (np.isfinite(cx) and np.isfinite(cy)):
                 logger.error(
                     f"Invalid crop center coordinates: cx={cx}, cy={cy}. "
@@ -5161,7 +5212,7 @@ class Templates:
                 height, width,
             )
 
-            # Try tighter crop to largest valid rectangle
+            # Second pass: tighten to the largest all-valid rectangle.
             coords = self.find_largest_available_area(scienceImage)
             scienceImage_tmp, scienceHeader_newwcs = self.process_fits_file(
                 scienceImage,
@@ -5221,7 +5272,6 @@ class Templates:
         # Pass the exact fractional centre; nan_crop rounds deterministically.
         position = (cx, cy)
         
-        # Validate crop center coordinates
         if not (np.isfinite(cx) and np.isfinite(cy)):
             logger.error(
                 f"Invalid crop center coordinates: cx={cx}, cy={cy}. "
@@ -5232,7 +5282,7 @@ class Templates:
                 f"Invalid crop center: cx={cx}, cy={cy} (must be finite)"
             )
 
-        # Check proximity to padding edges
+        # Distance from the target to the uniform padding edge, per image.
         d_uniform_template = distance_to_uniform_row_col(
             templateImage, x=target_x_pix, y=target_y_pix
         )
@@ -5241,7 +5291,7 @@ class Templates:
         )
 
         if np.isfinite(d_uniform_template) or np.isfinite(d_uniform_science):
-            # Validate WCS before creating cutout
+            # Bail out (no crop) if the WCS cannot map the crop centre.
             try:
                 test_ra, test_dec = imageWCS.all_pix2world([cx], [cy], 0)
                 if not (np.isfinite(test_ra[0]) and np.isfinite(test_dec[0])):
@@ -5249,13 +5299,13 @@ class Templates:
                         f"Invalid WCS transformation at crop center (cx={cx}, cy={cy}): RA={test_ra[0]}, Dec={test_dec[0]}. "
                         f"This will cause the crop to fail. Falling back to no crop."
                     )
-                    # Return original images without cropping
                     return scienceFpath, templateFpath
             except Exception as e:
                 logger.error("WCS validation failed: %s. Falling back to no crop.", e)
                 return scienceFpath, templateFpath
             
-            # Initial cutout using nan_crop to preserve WCS distortion keywords
+            # nan_crop preserves WCS distortion keywords that a plain
+            # slice+CRPIX update would lose.
             from functions import nan_crop
             scienceImage, scienceHeader = nan_crop(
                 scienceImage, scienceHeader,
@@ -5273,7 +5323,7 @@ class Templates:
             templateImage[mask] = np.nan
             scienceImage[mask] = np.nan
 
-            # Tight crop to largest valid rectangle
+            # Tighten to the largest all-valid rectangle.
             coords = self.find_largest_available_area(scienceImage)
             scienceImage_tmp, scienceHeader_newwcs = self.process_fits_file(
                 scienceImage,
@@ -5306,7 +5356,7 @@ class Templates:
             else:
                 logger.info("Target too close to border; keeping initial crop")
 
-            # Final NaN cleanup
+            # Safety sweep: inf pixels from the crop become NaN.
             templateImage[~np.isfinite(templateImage)] = np.nan
             scienceImage[~np.isfinite(scienceImage)] = np.nan
 
@@ -5394,7 +5444,7 @@ class Templates:
             return 1, "Sufficient sources (>=20). Linear spatial variation."
 
     # -----------------------------------------------------------------
-    # Robust outlier detection
+    # Outlier detection (rolling MAD/std)
     # -----------------------------------------------------------------
 
     @staticmethod
@@ -5406,7 +5456,7 @@ class Templates:
         min_for_window: int = 20,
     ) -> np.ndarray:
         """
-        Identify outliers using a rolling robust statistic.
+        Identify outliers against a rolling local statistic (MAD or std).
 
         **BUG FIX**: The original returned a mask in *sorted* order
         instead of the *original* order.  Now we argsort, compute the
@@ -5462,10 +5512,10 @@ class Templates:
                 s.rolling(window_size, center=True, min_periods=1).std().values
             )
 
-        # Ensure writable array before in-place modification
+        # pandas .values may be read-only; copy before in-place edits.
         rolling_scale = np.array(rolling_scale, copy=True)
 
-        # Fill NaN scale values with the global scale
+        # Edge windows can yield NaN scale; fall back to the global scale.
         global_scale = (
             median_abs_deviation(sorted_vals) if use_mad else np.std(sorted_vals)
         )
@@ -5477,7 +5527,7 @@ class Templates:
         residuals = np.abs(sorted_vals - rolling_med)
         inlier_sorted = residuals <= n_sigma * rolling_scale
 
-        # Invert the sort permutation to return mask in original order
+        # Un-sort: place the mask back in the original element order.
         inlier_original = np.empty(n, dtype=bool)
         inlier_original[sort_idx] = inlier_sorted
         return inlier_original
@@ -5486,25 +5536,202 @@ class Templates:
     # Flux-consistency matching
     # -----------------------------------------------------------------
 
+    @staticmethod
+    def _catalog_xy(
+        df: pd.DataFrame,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Best available pixel positions for a matched catalog.
+
+        ``x_pix``/``y_pix`` are centroid-refined by the caller; ``x``/``y``
+        and ``x_centroid``/``y_centroid`` are fallbacks.
+        """
+        for xc, yc in (
+            ("x_pix", "y_pix"),
+            ("x", "y"),
+            ("x_centroid", "y_centroid"),
+        ):
+            if xc in df.columns and yc in df.columns:
+                x = pd.to_numeric(df[xc], errors="coerce").to_numpy(dtype=float)
+                y = pd.to_numeric(df[yc], errors="coerce").to_numpy(dtype=float)
+                return x, y
+        return None, None
+
+    @staticmethod
+    def _psf_stamp_chi2(
+        image: Optional[np.ndarray],
+        x_pos: Optional[np.ndarray],
+        y_pos: Optional[np.ndarray],
+        psf_model,
+        fwhm: float,
+        gain: float = 1.0,
+        mask: Optional[np.ndarray] = None,
+        model_floor_frac: float = 0.05,
+    ) -> np.ndarray:
+        """
+        Reduced chi^2 of a PSF-model fit on a small stamp per position.
+
+        For each ``(x, y)`` the PSF model is re-centred on the stamp's own
+        2D-Gaussian centroid -- so the metric measures *shape* mismatch
+        (blends, extended sources, artifacts) rather than centroid error --
+        then amplitude and a constant sky offset are fit by weighted least
+        squares.  Pixel weights use the local sky MAD plus a Poisson term
+        (``gain`` converts the model amplitude to electrons) and a
+        fractional model-mismatch floor, so bright, well-fit stars are not
+        rejected for sub-percent ePSF inaccuracies.
+
+        Returns ``NaN`` where the fit cannot be made (off-frame, fully
+        masked, too few valid pixels) and ``+inf`` where the fitted
+        amplitude is non-positive.  ``NaN`` means "unverifiable" -- the
+        caller decides whether such sources are kept.
+        """
+        from astropy.stats import mad_std
+        from limits import _render_epsf_on_cutout
+        from photutils.centroids import centroid_2dg
+
+        n = 0 if x_pos is None else len(x_pos)
+        chi2 = np.full(n, np.nan)
+        if (
+            image is None
+            or psf_model is None
+            or x_pos is None
+            or y_pos is None
+            or n == 0
+            or not np.isfinite(fwhm)
+            or fwhm <= 0
+        ):
+            return chi2
+
+        img = np.asarray(image, dtype=float)
+        _os = getattr(psf_model, "oversampling", 1)
+        osamp = max(1, int(np.max(np.atleast_1d(_os)))) if _os is not None else 1
+        h = max(4, int(np.ceil(1.5 * fwhm)))  # ~3xFWHM fit box
+        h2 = h + 3  # outer ring supplies the local sky MAD
+        yy, xx = np.indices((2 * h + 1, 2 * h + 1))
+        ring_r2 = (xx - h) ** 2 + (yy - h) ** 2
+        gain = float(gain) if np.isfinite(gain) and gain > 0 else 1.0
+        ny, nx = img.shape
+
+        for i in range(n):
+            x, y = float(x_pos[i]), float(y_pos[i])
+            if not (np.isfinite(x) and np.isfinite(y)):
+                continue
+            xi, yi = int(round(x)), int(round(y))
+            if yi - h < 0 or yi + h >= ny or xi - h < 0 or xi + h >= nx:
+                continue
+            stamp = img[yi - h : yi + h + 1, xi - h : xi + h + 1]
+            valid = np.isfinite(stamp)
+            if mask is not None:
+                m = mask[yi - h : yi + h + 1, xi - h : xi + h + 1]
+                valid &= ~np.asarray(m, dtype=bool)
+            if int(valid.sum()) < 12:
+                continue
+
+            # Local sky scatter from a ring outside the fit box.
+            sig0 = np.nan
+            if yi - h2 >= 0 and yi + h2 < ny and xi - h2 >= 0 and xi + h2 < nx:
+                wide = img[yi - h2 : yi + h2 + 1, xi - h2 : xi + h2 + 1]
+                yw, xw = np.indices(wide.shape)
+                ring = (xw - h2) ** 2 + (yw - h2) ** 2 > h ** 2
+                ring_pix = wide[ring & np.isfinite(wide)]
+                if ring_pix.size >= 8:
+                    sig0 = float(mad_std(ring_pix, ignore_nan=True))
+            if not np.isfinite(sig0) or sig0 <= 0:
+                edge_pix = stamp[valid & (ring_r2 > (0.6 * h) ** 2)]
+                if edge_pix.size >= 6:
+                    sig0 = float(mad_std(edge_pix, ignore_nan=True))
+            if not np.isfinite(sig0) or sig0 <= 0:
+                continue
+
+            # Re-centre the model on the stamp centroid so a small catalog
+            # position error is not mistaken for a PSF-shape mismatch.
+            lx, ly = x - (xi - h), y - (yi - h)
+            try:
+                _cen = centroid_2dg(np.where(valid, stamp, np.nan))
+                if (
+                    _cen is not None
+                    and np.isfinite(_cen[0])
+                    and np.isfinite(_cen[1])
+                    and 0 <= _cen[0] <= 2 * h
+                    and 0 <= _cen[1] <= 2 * h
+                ):
+                    lx, ly = float(_cen[0]), float(_cen[1])
+            except Exception:
+                pass
+
+            try:
+                P = np.asarray(
+                    _render_epsf_on_cutout(
+                        psf_model, 2 * h + 1, 2 * h + 1, lx, ly, 1.0, osamp
+                    ),
+                    dtype=float,
+                )
+            except Exception:
+                continue
+            valid &= np.isfinite(P)
+            if int(valid.sum()) < 12:
+                continue
+
+            # WLS fit of stamp = A*P + c.  Two passes: the first uses the
+            # data for the Poisson term, the second the fitted model.
+            d = np.where(valid, stamp, 0.0)
+            Pv = np.where(valid, P, 0.0)
+            A = 0.0
+            chi2_red = np.nan
+            for _pass in range(2):
+                var = sig0 ** 2 + np.clip(A * Pv, 0.0, None) / gain
+                if model_floor_frac > 0:
+                    var = var + (model_floor_frac * np.abs(A) * Pv) ** 2
+                w = np.where(valid, 1.0 / np.maximum(var, 1e-12), 0.0)
+                Spp = float(np.sum(w * Pv * Pv))
+                Sp = float(np.sum(w * Pv))
+                S = float(np.sum(w))
+                Spd = float(np.sum(w * Pv * d))
+                Sd = float(np.sum(w * d))
+                det = Spp * S - Sp * Sp
+                if not np.isfinite(det) or abs(det) < 1e-20:
+                    break
+                A = (S * Spd - Sp * Sd) / det
+                c = (Spp * Sd - Sp * Spd) / det
+                dof = int(valid.sum()) - 2
+                chi2_red = (
+                    float(np.sum(w * (d - A * Pv - c) ** 2)) / dof
+                    if dof > 0
+                    else np.nan
+                )
+            if not np.isfinite(A) or A <= 0:
+                chi2[i] = np.inf
+                continue
+            chi2[i] = chi2_red
+
+        return chi2
+
     def find_flux_consistent_sources(
         self,
         catalog_img: pd.DataFrame,
         catalog_tpl: pd.DataFrame,
         params: Optional[FluxMatchParams] = None,
         make_plot: bool = True,
+        psf_vetting: Optional[Dict[str, Any]] = None,
     ) -> Tuple[pd.DataFrame, Tuple[float, float]]:
         """
         Cross-match science and template photometric catalogs, rejecting
-        outliers via RANSAC and robust statistics.
+        outliers via RANSAC and MAD-based statistics.
 
         The procedure:
           1. Convert aperture fluxes to instrumental magnitudes.
           2. Apply error and positivity cuts.
           3. Remove rolling-window outliers.
-          4. Fit a constrained linear relation (slope ~ 1) with RANSAC.
+          4. Fit a linear relation with the slope fixed to 1 (intercept
+             only) using RANSAC.
           5. Optionally trim to a central percentile range and re-fit.
-          6. Return inlier catalog rows and a compact fit tuple
-             ``(mag_slope, flux_scale)`` where:
+          6. Within the flux-consistent inliers, fit a straight line in
+             log space ``log10(S/N_ref) = a*log10(S/N_sci) + b``
+             (least squares + MAD clip + unweighted refit) and flag the
+             S/N-consistent subset.
+          7. Return inlier catalog rows (flux- AND S/N-consistent, and
+             PSF-well-fit when ``psf_vetting`` is supplied) and a compact
+             fit tuple ``(mag_slope, flux_scale)`` where:
              - ``mag_slope`` is the fitted slope in magnitude space
              - ``flux_scale`` is ``10**(-0.4 * intercept)``, i.e. the multiplicative
                flux ratio corresponding to zero-point offset.
@@ -5517,6 +5744,25 @@ class Templates:
             Structured parameters.  Uses defaults if None.
         make_plot : bool
             Save a diagnostic PDF alongside the science image.
+        psf_vetting : dict or None
+            Optional PSF-fit-quality veto.  Recognised keys:
+            ``image_sci``/``image_tpl`` (pixel arrays),
+            ``psf_sci``/``psf_tpl`` (PSF models, e.g. photutils ImagePSF),
+            ``fwhm_sci``/``fwhm_tpl`` (pixels), ``gain_sci``/``gain_tpl``
+            (e-/ADU, default 1), ``mask_sci``/``mask_tpl`` (optional,
+            True = bad pixel), ``chi2_max`` (reduced-chi2 rejection
+            threshold, default ``sfft_psf_chi2_max`` = 5.0),
+            ``model_floor_frac`` (fractional model-mismatch noise floor,
+            default ``sfft_psf_model_floor_frac`` = 0.05) and ``min_keep``
+            (minimum surviving inlier sources, default
+            ``sfft_psf_min_keep`` = 8).  A source is vetoed when its
+            PSF-stamp reduced chi2 exceeds ``chi2_max`` in either image;
+            sources that cannot be measured (edge/masked stamps) are kept.
+            The veto is adaptive: if it would leave fewer than
+            ``min_keep`` inlier sources, the best-fitting vetoed sources
+            (lowest worst-image chi2) are restored until the floor is met
+            and the relaxed effective threshold is logged.  When omitted
+            the selection is unchanged.
 
         Returns
         -------
@@ -5571,10 +5817,9 @@ class Templates:
                 return empty, nan_fit
 
             # --- Saturation filter (exclude non-linear sources) ---
-            # Use more aggressive threshold to ensure only fully linear sources
-            # Similar to zeropoint nonlinear_peak_frac (0.85) to exclude sources
-            # entering the non-linear regime, not just fully saturated ones
-            # Use consistent fallback with main.py
+            # Reject sources entering the non-linear regime (peak >=
+            # nonlinear_peak_frac * saturate, same convention as
+            # zeropoint/main.py), not just fully saturated ones.
             try:
                 from main import SATURATE_INTERNAL_FALLBACK
             except ImportError:
@@ -5602,7 +5847,6 @@ class Templates:
                     )
                 ok = ok & sat_ok
 
-            # Extract matched arrays
             f_img = catalog_img[params.flux_key].values[ok]
             f_tpl = catalog_tpl[params.flux_key].values[ok]
             fe_img = catalog_img[params.flux_key_err].values[ok]
@@ -5611,27 +5855,163 @@ class Templates:
             mag_img, me_img = flux_to_mag(f_img, fe_img)
             mag_tpl, me_tpl = flux_to_mag(f_tpl, fe_tpl)
 
-            # Magnitude-error cut
             good = (me_img < 1) & (me_tpl < 1)
             if not good.any():
                 logger.info("No sources pass error threshold")
                 return empty, nan_fit
 
             mag_img, mag_tpl = mag_img[good], mag_tpl[good]
-            mag_err = np.sqrt(me_img[good] ** 2 + me_tpl[good] ** 2)
+            me_img, me_tpl = me_img[good], me_tpl[good]
+            mag_err = np.sqrt(me_img ** 2 + me_tpl ** 2)
             indices = catalog_img.index[ok][good]
 
-            # --- Robust outlier removal in magnitude space ---
+            # Per-source S/N in each image, aligned with the post-'good'
+            # arrays and tracked through the outlier/spatial masks below.
+            with np.errstate(divide="ignore", invalid="ignore"):
+                snr_img = np.abs(f_img[good]) / np.maximum(np.abs(fe_img[good]), 1e-30)
+                snr_tpl = np.abs(f_tpl[good]) / np.maximum(np.abs(fe_tpl[good]), 1e-30)
+
+            # --- PSF-fit quality veto ---
+            # A source can be flux-consistent yet poorly fit by the PSF model
+            # in one image (blend, extended morphology, cosmic ray, masked-
+            # neighbour contamination); SFFT kernel priors must be clean
+            # point sources in BOTH images.  When the caller supplies the
+            # images + PSF models via ``psf_vetting``, require a converged
+            # low-chi2 model stamp fit on each side.  Sources whose stamp
+            # cannot be measured (edge, fully masked) are kept -- consistent
+            # with the pipeline's "cannot verify -> keep" convention -- and
+            # reported in the log so the reason for rejection stays visible.
+            psf_ok = np.ones(len(mag_img), dtype=bool)
+            psf_chi2_sci = np.full(len(mag_img), np.nan)
+            psf_chi2_tpl = np.full(len(mag_img), np.nan)
+            psf_q = np.full(len(mag_img), np.nan)
+            _pv_chi2_max = 0.0
+            _pv_min_keep = 0
+            if psf_vetting:
+                _pv_chi2_max = float(
+                    psf_vetting.get(
+                        "chi2_max",
+                        _ts_cfg_fc.get("sfft_psf_chi2_max", 5.0),
+                    )
+                )
+                _pv_floor = float(
+                    psf_vetting.get(
+                        "model_floor_frac",
+                        _ts_cfg_fc.get("sfft_psf_model_floor_frac", 0.05),
+                    )
+                )
+                _pv_min_keep = int(
+                    psf_vetting.get(
+                        "min_keep",
+                        _ts_cfg_fc.get("sfft_psf_min_keep", 8),
+                    )
+                )
+                if _pv_chi2_max > 0:
+                    _pv_x, _pv_y = self._catalog_xy(catalog_img.loc[indices])
+                    _pv_x_t, _pv_y_t = self._catalog_xy(catalog_tpl.loc[indices])
+                    try:
+                        psf_chi2_sci = self._psf_stamp_chi2(
+                            psf_vetting.get("image_sci"),
+                            _pv_x,
+                            _pv_y,
+                            psf_vetting.get("psf_sci"),
+                            psf_vetting.get("fwhm_sci", np.nan),
+                            gain=psf_vetting.get("gain_sci", 1.0),
+                            mask=psf_vetting.get("mask_sci"),
+                            model_floor_frac=_pv_floor,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Science-side PSF quality fit failed; skipping.",
+                            exc_info=True,
+                        )
+                    try:
+                        psf_chi2_tpl = self._psf_stamp_chi2(
+                            psf_vetting.get("image_tpl"),
+                            _pv_x_t,
+                            _pv_y_t,
+                            psf_vetting.get("psf_tpl"),
+                            psf_vetting.get("fwhm_tpl", np.nan),
+                            gain=psf_vetting.get("gain_tpl", 1.0),
+                            mask=psf_vetting.get("mask_tpl"),
+                            model_floor_frac=_pv_floor,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Reference-side PSF quality fit failed; skipping.",
+                            exc_info=True,
+                        )
+                    bad_sci = ~np.isnan(psf_chi2_sci) & (
+                        psf_chi2_sci > _pv_chi2_max
+                    )
+                    bad_tpl = ~np.isnan(psf_chi2_tpl) & (
+                        psf_chi2_tpl > _pv_chi2_max
+                    )
+                    psf_ok = ~(bad_sci | bad_tpl)
+                    # Worst-image chi2 per source, used to rank vetoed
+                    # sources if the keep floor forces a partial restore.
+                    # fmax ignores NaN (unmeasurable) so an unverifiable
+                    # side does not punish an otherwise-good source.
+                    psf_q = np.fmax(psf_chi2_sci, psf_chi2_tpl)
+                    n_bad_s = int(bad_sci.sum())
+                    n_bad_t = int(bad_tpl.sum())
+                    n_unmeas = int(
+                        (np.isnan(psf_chi2_sci) | np.isnan(psf_chi2_tpl)).sum()
+                    )
+                    logger.info(
+                        "PSF-fit quality (chi2_red <= %.2f): %d rejected in "
+                        "science, %d in reference, %d unmeasurable (kept)",
+                        _pv_chi2_max, n_bad_s, n_bad_t, n_unmeas,
+                    )
+
+            # --- MAD-based outlier removal in magnitude space ---
             robust_mask = self.robust_outlier_mask(
                 mag_img,
                 window_size=50,
                 n_sigma=5,
                 use_mad=True,
             )
-            mag_img_r = mag_img[robust_mask]
-            mag_tpl_r = mag_tpl[robust_mask]
-            mag_err_r = mag_err[robust_mask]
-            idx_r = indices[robust_mask]
+            keep_mask = robust_mask & psf_ok
+
+            # Adaptive relaxation: the veto must never starve the source
+            # pool.  If fewer than min_keep inlier sources survive, restore
+            # just enough vetoed sources -- best (lowest) worst-image chi2
+            # first -- so exactly n_want inliers remain.  This keeps
+            # the veto for genuinely bad fits while guaranteeing a usable
+            # prior set; the relaxation is logged with the effective
+            # threshold so it stays diagnosable.
+            _n_want = min(
+                max(_pv_min_keep, params.min_absolute_samples),
+                int(robust_mask.sum()),
+            )
+            if int(keep_mask.sum()) < _n_want:
+                cand = np.where(robust_mask & ~psf_ok)[0]
+                if cand.size:
+                    q_rank = np.where(np.isnan(psf_q), -np.inf, psf_q)
+                    order = cand[np.argsort(q_rank[cand], kind="stable")]
+                    n_restore = min(_n_want - int(keep_mask.sum()), order.size)
+                    restore = order[:n_restore]
+                    psf_ok[restore] = True
+                    keep_mask = robust_mask & psf_ok
+                    _chi2_eff = (
+                        float(q_rank[restore].max())
+                        if n_restore > 0
+                        else _pv_chi2_max
+                    )
+                    logger.warning(
+                        "PSF-quality veto relaxed to keep %d sources: "
+                        "effective chi2_red threshold %.2f -> %.2f "
+                        "(%d best-fitting vetoed sources restored)",
+                        _n_want, _pv_chi2_max, _chi2_eff, int(n_restore),
+                    )
+            mag_img_r = mag_img[keep_mask]
+            mag_tpl_r = mag_tpl[keep_mask]
+            mag_err_r = mag_err[keep_mask]
+            me_img_r = me_img[keep_mask]
+            me_tpl_r = me_tpl[keep_mask]
+            snr_img_r = snr_img[keep_mask]
+            snr_tpl_r = snr_tpl[keep_mask]
+            idx_r = indices[keep_mask]
 
             # --- Optional spatial thinning to avoid over-clustered regions ---
             # Skip for sparse fields - thinning can remove valid sources when
@@ -5655,6 +6035,10 @@ class Templates:
                     mag_img_r = mag_img_r[spatial_mask]
                     mag_tpl_r = mag_tpl_r[spatial_mask]
                     mag_err_r = mag_err_r[spatial_mask]
+                    me_img_r = me_img_r[spatial_mask]
+                    me_tpl_r = me_tpl_r[spatial_mask]
+                    snr_img_r = snr_img_r[spatial_mask]
+                    snr_tpl_r = snr_tpl_r[spatial_mask]
                     idx_r = idx_r[spatial_mask]
                     x_pos = x_pos[spatial_mask]
                     y_pos = y_pos[spatial_mask]
@@ -5671,20 +6055,30 @@ class Templates:
             inliers = np.zeros(len(y), dtype=bool)
             method_used = "None"
 
-            # NOTE: use module-level ConstrainedSlopeRegressor, not self.*
+            # NOTE: use module-level regressors, not self.*
+            # FixedSlopeRegressor pins the slope to exactly 1.0 (intercept-
+            # only fit).  PenalisedSlopeRegressor takes (slope_constraint,
+            # slope_tolerance): tolerance 0.5 softly constrains the slope,
+            # inf leaves it free.
+            if params.fix_slope_to_one:
+                _slope_tol = 0.0
+            elif params.enforce_slope_constraint:
+                _slope_tol = 0.5
+            else:
+                _slope_tol = np.inf
+
             if len(y) >= 4:
                 try:
-                    base_est = ConstrainedSlopeRegressor(
-                        enforce=True,
-                        fixed_slope=1.0,
-                    )
+                    if params.fix_slope_to_one:
+                        base_est = FixedSlopeRegressor(slope=1.0)
+                    else:
+                        base_est = ConstrainedSlopeRegressor(
+                            slope_constraint=1.0,
+                            slope_tolerance=_slope_tol,
+                        )
 
-                    # Prioritize high S/N sources (S/N > 5) to avoid fitting to low-quality measurements
-                    # Calculate S/N from flux and flux_err (using the arrays extracted earlier)
-                    # We need to re-extract the original flux values for the filtered subset
-                    # For simplicity, use magnitude error as a proxy: S/N ~ 1/me
-                    # me < 0.2 mag corresponds to S/N > 5 (since me = 2.5/ln(10) * fe/f ~ 1.086 * 1/SNR)
-                    # So me < 0.2 corresponds to SNR > 5.4
+                    # Fit RANSAC on the high-S/N subset only: mag err < 0.2
+                    # corresponds to S/N > ~5.4 (me ~ 1.086/SNR).
                     snr_mask = mag_err_r < 0.2
                     if snr_mask.sum() >= 4:
                         X_snr = X[snr_mask]
@@ -5709,7 +6103,7 @@ class Templates:
                         inliers = np.abs(residuals_all) < thresh
                         method_used = "RANSAC (S/N > 5 fit, all-source inliers)"
                     else:
-                        # Fallback to all sources if not enough high S/N sources
+                        # Too few high-S/N sources: fit all sources instead.
                         ransac = RANSACRegressor(
                             estimator=base_est,
                             residual_threshold=thresh,
@@ -5728,9 +6122,8 @@ class Templates:
                             intercept = ransac.estimator_.intercept_
                             method_used = "RANSAC (all sources)"
 
-                    # Check if inliers are overly clustered in parameter space
-                    # If inliers are concentrated in a small range of magnitudes,
-                    # the fit may be biased. Fall back to median offset if so.
+                    # Inliers clustered in a narrow magnitude range make the
+                    # RANSAC fit unreliable; fall back to the median offset.
                     if inliers.sum() >= 10:
                         mag_range = np.nanpercentile(mag_img_r[inliers], [5, 95])
                         mag_span = mag_range[1] - mag_range[0]
@@ -5746,8 +6139,8 @@ class Templates:
                             slope, intercept = 1.0, median_diff
                             method_used = "Median offset (RANSAC clustered)"
                         else:
-                            # Post-RANSAC sigma-clipping for additional robustness
-                            # Remove any remaining outliers beyond 3 sigma from the fit
+                            # 3-sigma clip on inlier residuals; catches
+                            # outliers RANSAC admitted.
                             residuals = y[inliers] - (slope * X[inliers].ravel() + intercept)
                             residual_std = np.std(residuals)
                             if residual_std > 0:
@@ -5758,7 +6151,6 @@ class Templates:
                                         "Post-RANSAC sigma-clipping removed %d additional outliers (3 sigma)",
                                         n_clipped,
                                     )
-                                    # Update inliers mask
                                     inlier_indices = np.where(inliers)[0]
                                     inliers[inlier_indices[~inlier_residuals]] = False
                 except Exception as exc:
@@ -5778,12 +6170,13 @@ class Templates:
                 central = inliers & (mag_img_r >= lo) & (mag_img_r <= hi)
                 if central.sum() >= params.min_absolute_samples:
                     if _SKLEARN_AVAILABLE:
-                        est = ConstrainedSlopeRegressor(
-                            enforce=params.enforce_slope_constraint,
-                            fixed_slope=(
-                                1.0 if params.fix_slope_to_one else None
-                            ),
-                        )
+                        if params.fix_slope_to_one:
+                            est = FixedSlopeRegressor(slope=1.0)
+                        else:
+                            est = ConstrainedSlopeRegressor(
+                                slope_constraint=1.0,
+                                slope_tolerance=_slope_tol,
+                            )
                         est.fit(
                             mag_img_r[central].reshape(-1, 1), mag_tpl_r[central]
                         )
@@ -5858,7 +6251,7 @@ class Templates:
 
                 # Residual-magnitude correlation: if residuals correlate
                 # with magnitude, the relationship is non-linear (curved).
-                # Use Spearman rank correlation for robustness.
+                # Spearman is used because it is insensitive to outlier magnitude.
                 from scipy.stats import spearmanr
                 _corr_resid, _ = spearmanr(_mi, _resid)
                 _corr_resid = float(_corr_resid) if np.isfinite(_corr_resid) else 0.0
@@ -5879,7 +6272,7 @@ class Templates:
                 if _corr_pearson < _min_corr:
                     logger.warning(
                         "Flux linearity check FAILED: Pearson r=%.3f < %.3f. "
-                        "Magnitude relationship is not linear — sources may "
+                        "Magnitude relationship is not linear -- sources may "
                         "include variables, mismatches, or flux-dependent bias. "
                         "Proceeding with inliers but SFFT may reject many sources.",
                         _corr_pearson, _min_corr,
@@ -5888,7 +6281,7 @@ class Templates:
                 if abs(_corr_resid) > _max_resid_corr:
                     logger.warning(
                         "Flux linearity check FAILED: residual-mag Spearman rho=%.3f "
-                        "> %.3f. Residuals correlate with magnitude — the flux "
+                        "> %.3f. Residuals correlate with magnitude -- the flux "
                         "relationship is non-linear (curved). This indicates "
                         "systematic flux-dependent bias (e.g., different aperture "
                         "sizes for different FWHM) or a large fraction of "
@@ -5899,18 +6292,52 @@ class Templates:
                     # follow the trend (keep only those that don't follow it).
                     # This removes sources in the magnitude range where the
                     # non-linearity is strongest.
-                    if abs(_corr_resid) > _max_resid_corr and final_inliers.sum() > 10:
-                        # Fit a low-order polynomial to the residuals and
-                        # reject sources that deviate from the linear fit
-                        # in the direction predicted by the trend.
-                        _poly_coef = np.polyfit(_mi, _resid, 2)
+                    #
+                    # Two safeguards for sparse fields:
+                    #  * a minimum inlier count -- with only a handful of
+                    #    sources, a rank correlation is easily inflated by a
+                    #    few faint, high-error points and removing priors
+                    #    costs SFFT more than a marginal non-linearity does.
+                    #  * error-normalised rejection -- the quadratic trend is
+                    #    fit with 1/sigma_mag weights and a source is removed
+                    #    only where the trend amplitude is significant both
+                    #    against the detrended scatter AND relative to that
+                    #    source's own magnitude error (heteroscedastic-safe).
+                    _min_trend_src = int(
+                        _ts_cfg_fc.get("sfft_flux_linearity_min_trend_sources", 20)
+                    )
+                    if final_inliers.sum() < _min_trend_src:
+                        logger.info(
+                            "Non-linearity correction skipped: only %d inliers "
+                            "(< %d) -- too few sources to trust a residual-mag "
+                            "trend; keeping all priors.",
+                            final_inliers.sum(), _min_trend_src,
+                        )
+                    else:
+                        _sig_res = np.asarray(
+                            mag_err_r[final_inliers], dtype=float
+                        )
+                        _sig_fin = _sig_res[np.isfinite(_sig_res) & (_sig_res > 0)]
+                        _sig_floor = (
+                            float(np.median(_sig_fin)) if _sig_fin.size else 0.1
+                        )
+                        _sig_res = np.where(
+                            np.isfinite(_sig_res) & (_sig_res > 0),
+                            _sig_res, _sig_floor,
+                        )
+                        # Weighted quadratic fit (polyfit w multiplies the
+                        # residuals, so w = 1/sigma gives chi-square weighting).
+                        _poly_coef = np.polyfit(_mi, _resid, 2, w=1.0 / _sig_res)
                         _poly_pred = np.polyval(_poly_coef, _mi)
                         _poly_resid = _resid - _poly_pred
                         _poly_std = np.std(_poly_resid)
                         if _poly_std > 0:
                             # Reject sources where the quadratic trend explains
-                            # most of the residual (|poly_pred| > 2*poly_std)
-                            _trend_bad = np.abs(_poly_pred) > 2.0 * _poly_std
+                            # most of the residual AND is significant relative
+                            # to the source's own photometric error.
+                            _trend_bad = (np.abs(_poly_pred) > 2.0 * _poly_std) & (
+                                np.abs(_poly_pred) > 2.0 * _sig_res
+                            )
                             _n_trend_bad = int(_trend_bad.sum())
                             if _n_trend_bad > 0 and (_final_inliers_count := final_inliers.sum()) - _n_trend_bad >= 5:
                                 _trend_bad_indices = np.where(final_inliers)[0][_trend_bad]
@@ -5921,21 +6348,152 @@ class Templates:
                                     _n_trend_bad, final_inliers.sum(),
                                 )
 
+            # --- S/N-consistency check (second stage) ---
+            # The comparison runs in two stages: the magnitude (flux)
+            # inliers are found first, then the S/N-consistent subset is
+            # identified *within* them.  A source can be flux-consistent
+            # yet S/N-inconsistent when its noise estimate is anomalous in
+            # one image (blending, chip-edge, masked-neighbour
+            # contamination); such sources are poor SFFT kernel priors.
+            #
+            # sigma_SNR: propagating the flux measurement error alone
+            # gives sigma_SNR = sigma_F/sigma_F = 1 (S/N is a
+            # noise-normalised flux).  The dominant term at high S/N is
+            # the uncertainty of the noise model itself: sigma_SNR ~
+            # SNR * rho, with rho the fractional uncertainty of the
+            # flux-error estimate (~10% for aperture photometry,
+            # background-estimation dominated).
+            _snr_rel = float(_ts_cfg_fc.get("sfft_snr_model_relerr", 0.10))
+            snr_slope_fit, snr_intercept_fit = np.nan, np.nan
+            snr_resid_all = np.full(len(mag_img_r), np.nan)
+            is_snr_inlier = final_inliers.copy()
+
+            _ok_snr = (
+                final_inliers
+                & np.isfinite(snr_img_r)
+                & np.isfinite(snr_tpl_r)
+                & (snr_img_r > 0)
+                & (snr_tpl_r > 0)
+            )
+            if int(_ok_snr.sum()) >= 4:
+                try:
+                    _lx = np.log10(snr_img_r[_ok_snr])
+                    _ly = np.log10(snr_tpl_r[_ok_snr])
+
+                    # Straight-line fit in log space
+                    # log10(S/N_ref) = a*log10(S/N_sci) + b via least
+                    # squares.  Degenerate x (S/N_sci nearly constant)
+                    # leaves the slope unidentifiable: fall back to the
+                    # proportional (slope=1) median offset so outlier
+                    # clipping still works.
+                    _degen = float(np.ptp(_lx)) < 1e-6
+                    if _degen:
+                        _a, _b = 1.0, float(np.nanmedian(_ly - _lx))
+                    else:
+                        _coef = np.polyfit(_lx, _ly, 1)
+                        _a, _b = float(_coef[0]), float(_coef[1])
+                        if not (np.isfinite(_a) and np.isfinite(_b)):
+                            _a, _b = 1.0, float(np.nanmedian(_ly - _lx))
+                            _degen = True
+
+                    _resid = _ly - (_a * _lx + _b)
+                    _mad = float(
+                        np.nanmedian(np.abs(_resid - np.nanmedian(_resid)))
+                    )
+                    _tol = (
+                        max(3.0 * 1.4826 * _mad, 0.1)
+                        if np.isfinite(_mad)
+                        else 0.1
+                    )
+                    _keep = np.abs(_resid - np.nanmedian(_resid)) < _tol
+
+                    # Unweighted least-squares refit on the clipped
+                    # subset; skipped for degenerate x where the slope is
+                    # unidentifiable.
+                    if int(_keep.sum()) >= 4 and not _degen:
+                        _coef = np.polyfit(_lx[_keep], _ly[_keep], 1)
+                        if np.isfinite(_coef).all():
+                            _a, _b = float(_coef[0]), float(_coef[1])
+                            _resid = _ly - (_a * _lx + _b)
+                            _keep = (
+                                np.abs(_resid - np.nanmedian(_resid)) < _tol
+                            )
+
+                    if (
+                        int(_keep.sum()) >= 4
+                        and np.isfinite(_a)
+                        and np.isfinite(_b)
+                    ):
+                        snr_slope_fit, snr_intercept_fit = _a, _b
+                        is_snr_inlier = np.zeros(len(mag_img_r), dtype=bool)
+                        is_snr_inlier[np.where(_ok_snr)[0][_keep]] = True
+                        snr_resid_all[_ok_snr] = _resid
+                        logger.info(
+                            "S/N consistency: slope=%.3f, offset=%.3f dex, "
+                            "inliers=%d/%d flux-consistent sources",
+                            snr_slope_fit,
+                            snr_intercept_fit,
+                            int(is_snr_inlier.sum()),
+                            int(final_inliers.sum()),
+                        )
+                    else:
+                        logger.info(
+                            "S/N-consistency: too few inliers after "
+                            "clipping; keeping flux inliers."
+                        )
+                except Exception:
+                    logger.debug(
+                        "S/N-consistency fit failed; keeping flux inliers.",
+                        exc_info=True,
+                    )
+
             # --- Build result DataFrame ---
             result = catalog_img.loc[idx_r].copy()
             result["mag_img"] = mag_img_r
             result["mag_tpl"] = mag_tpl_r
+            result["snr_img"] = snr_img_r
+            result["snr_tpl"] = snr_tpl_r
+            result["mag_err_img"] = me_img_r
+            result["mag_err_tpl"] = me_tpl_r
+            result["snr_img_err"] = np.sqrt(
+                1.0 + (_snr_rel * snr_img_r) ** 2
+            )
+            result["snr_tpl_err"] = np.sqrt(
+                1.0 + (_snr_rel * snr_tpl_r) ** 2
+            )
+            result["snr_residual"] = snr_resid_all
             result["mag_residual"] = y - (slope * mag_img_r + intercept)
+            result["is_snr_inlier"] = is_snr_inlier
             result["is_inlier"] = final_inliers
             result["is_robust"] = True
+            result["psf_chi2_sci"] = psf_chi2_sci[keep_mask]
+            result["psf_chi2_tpl"] = psf_chi2_tpl[keep_mask]
+            result["is_psf_inlier"] = psf_ok[keep_mask]
 
-            non_robust_idx = indices[~robust_mask]
+            non_robust_idx = indices[~keep_mask]
             nr = catalog_img.loc[non_robust_idx].copy()
-            nr["mag_img"] = mag_img[~robust_mask]
-            nr["mag_tpl"] = mag_tpl[~robust_mask]
+            nr["mag_img"] = mag_img[~keep_mask]
+            nr["mag_tpl"] = mag_tpl[~keep_mask]
+            nr["snr_img"] = snr_img[~keep_mask]
+            nr["snr_tpl"] = snr_tpl[~keep_mask]
+            nr["mag_err_img"] = me_img[~keep_mask]
+            nr["mag_err_tpl"] = me_tpl[~keep_mask]
+            nr["snr_img_err"] = np.sqrt(
+                1.0 + (_snr_rel * nr["snr_img"].to_numpy(dtype=float)) ** 2
+            )
+            nr["snr_tpl_err"] = np.sqrt(
+                1.0 + (_snr_rel * nr["snr_tpl"].to_numpy(dtype=float)) ** 2
+            )
+            nr["snr_residual"] = np.nan
             nr["mag_residual"] = np.nan
+            nr["is_snr_inlier"] = False
             nr["is_inlier"] = False
-            nr["is_robust"] = False
+            # A PSF-vetoed source can still be a flux inlier; keep the two
+            # flags separate so the diagnostic plot can distinguish them.
+            nr["is_robust"] = robust_mask[~keep_mask]
+            nr["psf_chi2_sci"] = psf_chi2_sci[~keep_mask]
+            nr["psf_chi2_tpl"] = psf_chi2_tpl[~keep_mask]
+            nr["is_psf_inlier"] = psf_ok[~keep_mask]
 
             full = pd.concat([result, nr])
 
@@ -5946,7 +6504,8 @@ class Templates:
             flux_scale = 10 ** (-0.4 * intercept) if np.isfinite(intercept) else np.nan
 
             logger.info(
-                "Fit [%s]: slope=%.3f, intercept=%.3f, inliers=%d/%d, robust=%d/%d",
+                "Fit [%s]: slope=%.3f, intercept=%.3f, inliers=%d/%d, "
+                "kept=%d/%d (PSF-vetoed=%d)",
                 method_used,
                 slope,
                 intercept,
@@ -5954,6 +6513,7 @@ class Templates:
                 len(y),
                 len(mag_img_r),
                 len(mag_img),
+                int((~psf_ok).sum()),
             )
             if np.isfinite(intercept) and abs(intercept) > 0.5:
                 logger.debug(
@@ -5973,10 +6533,27 @@ class Templates:
                     slope,
                     intercept,
                     final_inliers,
+                    (snr_slope_fit, snr_intercept_fit),
                 )
 
+            # Final selection: flux-consistent AND S/N-consistent.  Guard
+            # against starving the pipeline when the S/N stage rejects too
+            # many sources.
+            _sel = (
+                full["is_inlier"].to_numpy(bool)
+                & full["is_snr_inlier"].to_numpy(bool)
+            )
+            if int(_sel.sum()) < params.min_absolute_samples:
+                logger.warning(
+                    "S/N-consistency stage left %d sources (< %d); "
+                    "returning flux-consistent inliers only.",
+                    int(_sel.sum()),
+                    params.min_absolute_samples,
+                )
+                _sel = full["is_inlier"].to_numpy(bool)
+
             return (
-                full[full["is_inlier"]],
+                full[_sel],
                 (mag_slope, flux_scale),
             )
 
@@ -5994,19 +6571,48 @@ class Templates:
         slope: float,
         intercept: float,
         inliers: np.ndarray,
+        snr_fit: Tuple[float, float] = (np.nan, np.nan),
     ) -> None:
-        """Save a diagnostic magnitude-comparison plot to disk."""
+        """Save a diagnostic magnitude/S/N-comparison plot to disk.
+
+        The top panel shows the instrumental-magnitude relation with the
+        fitted line; the bottom panel shows the S/N relation restricted to
+        the flux-consistent sources, with S/N error bars and a fitted
+        power-law slope.
+        """
         from matplotlib import pyplot as plt
         from functions import set_size
         from plotting_utils import (
             apply_autophot_mplstyle, get_ransac_color, get_marker_size,
             get_alpha, get_line_width, ransac_grid, ransac_savefig,
-            set_mag_axes_inverted_xy,
+            set_mag_axes_inverted_xy, get_plot_ext,
         )
 
         plt.ioff()
         apply_autophot_mplstyle()
-        fig, ax = plt.subplots(figsize=set_size(540, 1))
+
+        has_snr = (
+            {"snr_img", "snr_tpl"}.issubset(robust.columns)
+            and np.isfinite(robust["snr_img"].to_numpy(dtype=float)).any()
+            and np.isfinite(robust["snr_tpl"].to_numpy(dtype=float)).any()
+        )
+        if has_snr:
+            fig, (ax, ax_snr) = plt.subplots(
+                2, 1,
+                figsize=set_size(540, 1.7),
+                gridspec_kw={"height_ratios": [3, 2]},
+            )
+        else:
+            fig, ax = plt.subplots(figsize=set_size(540, 1))
+
+        # Per-axis magnitude errors: science error on x, reference on y.
+        # Fall back to the combined error for older result frames.
+        if {"mag_err_img", "mag_err_tpl"}.issubset(robust.columns):
+            xerr_all = robust["mag_err_img"].to_numpy(dtype=float)
+            yerr_all = robust["mag_err_tpl"].to_numpy(dtype=float)
+        else:
+            xerr_all = np.asarray(mag_err_robust, dtype=float)
+            yerr_all = xerr_all
 
         # Outliers first so inliers sit on top
         rej = ~robust["is_inlier"].to_numpy(bool)
@@ -6014,38 +6620,60 @@ class Templates:
             ax.errorbar(
                 robust.loc[rej, "mag_img"],
                 robust.loc[rej, "mag_tpl"],
-                xerr=mag_err_robust[rej],
-                yerr=mag_err_robust[rej],
+                xerr=xerr_all[rej],
+                yerr=yerr_all[rej],
                 fmt="x",
                 color=get_ransac_color('outliers'),
                 ecolor="lightgrey",
                 alpha=get_alpha('medium'),
                 markersize=get_marker_size('medium'),
-                capsize=get_marker_size('medium'),
-                elinewidth=0.4,
+                capsize=get_marker_size('medium') / 4,
+                elinewidth=0.5,
                 label=f"Outliers [{np.sum(rej)}]",
             )
         sel = ~rej
         ax.errorbar(
             robust.loc[sel, "mag_img"],
             robust.loc[sel, "mag_tpl"],
-            xerr=mag_err_robust[sel],
-            yerr=mag_err_robust[sel],
+            xerr=xerr_all[sel],
+            yerr=yerr_all[sel],
             fmt="o",
             markersize=get_marker_size('medium'),
             color=get_ransac_color('flux_comparison'),
             ecolor="lightgrey",
-            elinewidth=0.4,
-            capsize=get_marker_size('medium'),
+            elinewidth=0.5,
+            capsize=get_marker_size('medium') / 4,
             alpha=get_alpha('dark'),
             label=f"Inliers [{np.sum(sel)}]",
         )
+        # Sources vetoed by the PSF-fit quality stage land in the
+        # non-kept partition of `full`; show them distinctly so a poor
+        # model fit is not mistaken for a flux outlier.
+        if "is_psf_inlier" in full.columns:
+            psf_bad = ~full["is_psf_inlier"].to_numpy(bool)
+            if "mag_img" in full.columns and "mag_tpl" in full.columns:
+                _pm = full["mag_img"].to_numpy(dtype=float)
+                _pt = full["mag_tpl"].to_numpy(dtype=float)
+                psf_bad &= np.isfinite(_pm) & np.isfinite(_pt)
+            if psf_bad.any():
+                ax.plot(
+                    full.loc[psf_bad, "mag_img"],
+                    full.loc[psf_bad, "mag_tpl"],
+                    linestyle="none",
+                    marker="D",
+                    markersize=get_marker_size('medium') + 1,
+                    markerfacecolor="none",
+                    markeredgecolor=get_ransac_color('color_term'),
+                    markeredgewidth=1.2,
+                    alpha=get_alpha('medium'),
+                    label=f"PSF-rejected [{int(psf_bad.sum())}]",
+                )
         xx = np.linspace(mag_img_robust.min(), mag_img_robust.max(), 100)
         yy = slope * xx + intercept
         if np.isfinite(slope) and abs(float(slope) - 1.0) < 0.02:
-            fit_lbl = rf"Fit: $m_{{\rm ref}} = m_{{\rm sci}} + {intercept:.3f}$ (slope$\approx$1)"
+            fit_lbl = rf"Fit: $m_{{\rm ref}} = m_{{\rm sci}} {intercept:+.3f}$ (slope$\approx$1)"
         else:
-            fit_lbl = rf"Fit: $m_{{\rm ref}} = {slope:.3f}\,m_{{\rm sci}} + {intercept:.3f}$"
+            fit_lbl = rf"Fit: $m_{{\rm ref}} = {slope:.3f}\,m_{{\rm sci}} {intercept:+.3f}$"
         if sel.sum() > 0:
             residuals = robust.loc[sel, "mag_tpl"].values - (slope * robust.loc[sel, "mag_img"].values + intercept)
             intercept_error = np.std(residuals) / np.sqrt(sel.sum())
@@ -6060,17 +6688,123 @@ class Templates:
             lw=get_line_width("medium"),
             label=fit_lbl,
         )
-        ax.set(xlabel="Science m [mag]", ylabel="Reference m [mag]")
+        ax.set(
+            xlabel="Science Instrumental Magnitude [mag]",
+            ylabel="Reference Instrumental Magnitude [mag]",
+        )
         ax.legend(
-            loc="upper left", ncol=1, fontsize=8,
-            frameon=True, facecolor="white", framealpha=1.0,
-            edgecolor="black",
+            loc="upper left", ncol=1, fontsize=8, frameon=False,
         )
         ransac_grid(ax)
         set_mag_axes_inverted_xy(ax)
 
+        if has_snr:
+            s_i = robust["snr_img"].to_numpy(dtype=float)
+            s_t = robust["snr_tpl"].to_numpy(dtype=float)
+            ok_s = np.isfinite(s_i) & np.isfinite(s_t) & (s_i > 0) & (s_t > 0)
+
+            if {"snr_img_err", "snr_tpl_err"}.issubset(robust.columns):
+                se_i = robust["snr_img_err"].to_numpy(dtype=float)
+                se_t = robust["snr_tpl_err"].to_numpy(dtype=float)
+            else:
+                se_i = se_t = np.ones(len(s_i))
+
+            # Cascade: flux-consistent sources first, then the
+            # S/N-consistent subset within them (both from
+            # find_flux_consistent_sources).
+            flux_in = robust["is_inlier"].to_numpy(bool) & ok_s
+            if "is_snr_inlier" in robust.columns:
+                snr_in = robust["is_snr_inlier"].to_numpy(bool) & ok_s
+            else:
+                snr_in = flux_in.copy()
+            snr_slope_f, snr_intercept_f = snr_fit
+
+            # Flux outliers (faint), then flux-consistent but
+            # S/N-inconsistent sources, then consistent sources on top.
+            flux_out = ok_s & ~flux_in
+            snr_out = flux_in & ~snr_in
+            if flux_out.any():
+                ax_snr.errorbar(
+                    s_i[flux_out], s_t[flux_out],
+                    xerr=se_i[flux_out], yerr=se_t[flux_out],
+                    fmt="x", ms=get_marker_size('medium'),
+                    color=get_ransac_color('outliers'),
+                    ecolor="lightgrey", elinewidth=0.5,
+                    capsize=get_marker_size('medium') / 4,
+                    alpha=get_alpha('very_light'),
+                    label=f"Flux outliers [{int(flux_out.sum())}]",
+                )
+            if snr_out.any():
+                ax_snr.errorbar(
+                    s_i[snr_out], s_t[snr_out],
+                    xerr=se_i[snr_out], yerr=se_t[snr_out],
+                    fmt="x", ms=get_marker_size('medium'),
+                    color=get_ransac_color('color_term'),
+                    ecolor="lightgrey", elinewidth=0.5,
+                    capsize=get_marker_size('medium') / 4,
+                    alpha=get_alpha('medium'),
+                    label=f"S/N outliers [{int(snr_out.sum())}]",
+                )
+            ax_snr.errorbar(
+                s_i[snr_in], s_t[snr_in],
+                xerr=se_i[snr_in], yerr=se_t[snr_in],
+                fmt="o", ms=get_marker_size('medium'),
+                color=get_ransac_color('flux_comparison'),
+                ecolor="lightgrey", elinewidth=0.5,
+                capsize=get_marker_size('medium') / 4,
+                alpha=get_alpha('dark'),
+                label=f"Consistent [{int(snr_in.sum())}]",
+            )
+
+            # Fitted power law S/N_ref = 10^b * (S/N_sci)^a -- a straight
+            # line on the log-log axes.
+            if np.isfinite(snr_slope_f) and np.isfinite(snr_intercept_f):
+                _xs_src = s_i[flux_in] if flux_in.any() else s_i[ok_s]
+                lo = float(np.nanmin(_xs_src))
+                hi = float(np.nanmax(_xs_src))
+                if hi > lo > 0:
+                    xs = np.logspace(np.log10(lo), np.log10(hi), 100)
+                    ys = (10.0 ** snr_intercept_f) * xs ** snr_slope_f
+                    if snr_in.sum() >= 2:
+                        _res = (
+                            np.log10(s_t[snr_in])
+                            - (
+                                snr_slope_f * np.log10(s_i[snr_in])
+                                + snr_intercept_f
+                            )
+                        )
+                        _band = float(
+                            np.std(_res) / np.sqrt(snr_in.sum())
+                        )
+                        if np.isfinite(_band) and _band > 0:
+                            ax_snr.fill_between(
+                                xs,
+                                ys * 10.0 ** (-_band),
+                                ys * 10.0 ** (_band),
+                                color=get_ransac_color('error_band'),
+                                alpha=get_alpha('very_light'),
+                            )
+                    ax_snr.plot(
+                        xs, ys,
+                        color=get_ransac_color('fit'), linestyle="-",
+                        lw=get_line_width('medium'),
+                        label=(
+                            rf"Fit: $\log\,(S/N)_{{\rm ref}} = "
+                            rf"{snr_slope_f:.2f}\,\log\,(S/N)_{{\rm sci}} "
+                            rf"{snr_intercept_f:+.2f}$"
+                        ),
+                    )
+            ax_snr.set_xscale("log")
+            ax_snr.set_yscale("log")
+            ax_snr.set_xlabel("Science Image S/N")
+            ax_snr.set_ylabel("Reference Image S/N")
+            ax_snr.legend(
+                loc="upper left", ncol=1, fontsize=8, frameon=False,
+            )
+            ransac_grid(ax_snr)
+
         base = Path(self.input_yaml["fpath"]).stem
-        out = Path(self.input_yaml["fpath"]).parent / f"Flux_Comparison_{base}.png"
+        out = Path(self.input_yaml["fpath"]).parent / f"Flux_Comparison_{base}{get_plot_ext(self.input_yaml)}"
         ransac_savefig(fig, str(out))
         plt.close(fig)
 
@@ -6102,7 +6836,7 @@ class Templates:
 
         keep = np.ones(len(cat), dtype=bool)
         for i, nbrs in enumerate(neighbours):
-            # Exclude self
+            # query_ball_point includes the query point itself.
             nbrs = [j for j in nbrs if j != i]
             if not nbrs:
                 continue
@@ -6421,9 +7155,9 @@ class Templates:
                             continue
                 return float(default)
 
-            # Get FWHM values - these should be in pixels for the resampled images
-            # Since images are resampled to a common pixel scale by SWarp, we need to
-            # account for any pixel scale differences between original and resampled images
+            # FWHMs must be in resampled-image pixels; SWarp resampling to a
+            # common pixel scale can shift the pixel FWHM, so the template
+            # FWHM is rescaled below.
             #
             # Prefer the header FWHM over input_yaml["fwhm"] for the science image.
             # The input_yaml FWHM comes from SExtractor and can be inflated by galaxy
@@ -6502,19 +7236,21 @@ class Templates:
             science_saturate = _safe_saturate(scienceHeader)
             template_saturate = _safe_saturate(templateHeader)
 
-            # Note: template background subtraction is disabled (template_bg_median commented out)
-            # so no saturation adjustment is needed
+            # NOTE: template background subtraction is disabled
+            # (template_bg_median commented out), so no saturation
+            # adjustment is needed here.
 
-            # Optional: inpaint broken/saturated template cores (cosmetic/robustness).
-            # This can reduce subtraction artefacts around very bright stars, but does not
-            # recover lost flux. Controlled by YAML to keep default behaviour unchanged.
+            # Optional: inpaint broken/saturated template cores (cosmetic).
+            # Can reduce subtraction artefacts around very bright stars, but
+            # does not recover lost flux.  Off by default; YAML-controlled.
             ts_cfg_inp = (
                 (self.input_yaml.get("template_subtraction") or {})
                 if isinstance(self.input_yaml, dict)
                 else {}
             )
-            # Get saturation fraction for source filtering (consistent with PSF building)
-            # Use higher threshold (0.98) for template subtraction to avoid masking point sources
+            # Saturation fraction for source filtering (same convention as PSF
+            # building).  0.98 is higher than the photometry cut so that only
+            # truly saturated cores are masked, not bright point sources.
             subtraction_saturate_frac = float(
                 ts_cfg_inp.get("subtraction_saturate_fraction", 0.98)
             )
@@ -6632,12 +7368,12 @@ class Templates:
                     _ker_hw_override = None
 
             if _ker_hw_override is None:
-                # Read user multiplier with robust defaults
+                # User multiplier; fall back to 2.5 on missing/bad input.
                 try:
                     _mult = float(ts_cfg_ker.get("kernel_hw_fwhm_multiplier") or 2.5)
                     if not np.isfinite(_mult) or _mult <= 0:
                         _mult = 2.5
-                    # Clamp to reasonable range to prevent extreme values
+                    # Clamp to [1, 5] so a config typo cannot explode the kernel.
                     _mult = max(1.0, min(_mult, 5.0))
                 except (TypeError, ValueError):
                     _mult = 2.5
@@ -6664,7 +7400,7 @@ class Templates:
                         fwhm_broad, _us_thr_ker, _mult, _mult_effective,
                     )
 
-                # Warn for very large FWHM differences (potential quality issues)
+                # A very large PSF difference usually means bad PSF measurement.
                 if fwhm_conv > 10.0:
                     logger.warning(
                         "Large PSF FWHM difference detected (%.1f px). "
@@ -6688,8 +7424,8 @@ class Templates:
                 #   but FWHM_conv=10.4, so 2*FWHM_conv=21px would suffice.
                 #
                 # New strategy:
-                #   1. Primary: hw = ceil(mult * FWHM_conv)  — contains the kernel
-                #   2. Floor: hw >= ceil(floor_mult * FWHM_broad) — captures PSF wings
+                #   1. Primary: hw = ceil(mult * FWHM_conv)  -- contains the kernel
+                #   2. Floor: hw >= ceil(floor_mult * FWHM_broad) -- captures PSF wings
                 #      but floor_mult is adaptive: 1.5 for sparse, 2.0 for dense
                 #   3. Source-count cap: hw <= max_hw_for_sources(n_eff)
                 #      ensures the kernel is not under-constrained
@@ -6742,7 +7478,7 @@ class Templates:
                 # for 8 sources = 378 params/source) fits noise rather than
                 # the PSF, producing worse residuals than a smaller kernel
                 # that under-fits the PSF but is better constrained.
-                # The physical minimum is a hard constraint — never go below
+                # The physical minimum is a hard constraint -- never go below
                 # it regardless of source count.
                 _sparse_cap_thresh = int(
                     ts_cfg_ker.get("sfft_sparse_field_threshold", 10) or 10
@@ -6755,7 +7491,7 @@ class Templates:
                     )
                     if ker_hw != _ker_hw_before_sparse_cap:
                         logger.info(
-                            "Kernel sizing: sparse field (%d sources < %d) — "
+                            "Kernel sizing: sparse field (%d sources < %d) -- "
                             "capping kernel_hw at %d px (was %d, max_hw_sources=%d) "
                             "to prevent under-constrained kernel fit.",
                             n_eff, _sparse_cap_thresh,
@@ -6840,7 +7576,7 @@ class Templates:
 
             # Both SFFT and HOTPANTS use the same physics-based kernel half-width
             # (ker_hw). The caller's `scale` (pipeline source-detection cutout
-            # size, typically 4*FWHM) is NOT used for kernel sizing — it was
+            # size, typically 4*FWHM) is NOT used for kernel sizing -- it was
             # incorrectly used for HOTPANTS in the past (BUG 136), causing
             # oversized kernels and under-constrained fits in sparse fields.
             sfft_kernel_hw = max(ker_hw, 5)
@@ -6906,8 +7642,9 @@ class Templates:
                 | (~np.isfinite(scienceImage))
             ).astype(np.int32)
 
-            # Segmentation-based source masks
-            # Template: less aggressive masking (no large source removal, no bright catalog overlaps, smaller padding)
+            # Template mask is deliberately shallow: large sources, catalog
+            # overlaps, and generous padding would remove pixels needed to
+            # calibrate the kernel.
             template_seg_mask, template_seg_centers = self.create_image_mask(
                 templateImage,
                 sat_lvl=template_saturate,
@@ -6915,11 +7652,12 @@ class Templates:
                 fwhm=template_fwhm,
                 create_source_mask=False,
                 ignore_position=target_location,
-                remove_large_sources=False,  # Don't remove large sources in template
-                mask_bright_catalog_overlaps=False,  # Don't mask bright catalog overlaps to preserve point sources
-                padding=int(2 * template_fwhm),  # Smaller padding for template
+                remove_large_sources=False,
+                mask_bright_catalog_overlaps=False,
+                padding=int(2 * template_fwhm),  # smaller than science padding
             )
-            # Science: less aggressive masking (only saturated/negative, not large sources, not bright catalog overlaps)
+            # Science mask: saturated/negative sources only; large sources and
+            # catalog overlaps are left alone so point sources stay available.
             science_seg_mask, science_seg_centers = self.create_image_mask(
                 scienceImage,
                 sat_lvl=science_saturate,
@@ -6927,8 +7665,8 @@ class Templates:
                 fwhm=science_fwhm,
                 create_source_mask=False,
                 ignore_position=target_location,
-                remove_large_sources=False,  # Don't remove large sources to avoid masking too many
-                mask_bright_catalog_overlaps=False,  # Don't mask bright catalog overlaps to preserve point sources
+                remove_large_sources=False,
+                mask_bright_catalog_overlaps=False,
                 padding=int(DEFAULT_FWHM_PADDING_MULTIPLIER * science_fwhm),
             )
 
@@ -6985,7 +7723,6 @@ class Templates:
                 np.mean(mask_sources) * 100.0,
             )
 
-            # For visualization use the same mask
             visualization_mask = universal_mask.copy()
 
             # Save mask to scienceDir (not templateDir) to prevent crosstalk
@@ -6993,7 +7730,6 @@ class Templates:
             mask_loc = os.path.join(scienceDir, f"universal_mask_{base_name}")
             save_to_fits(universal_mask.astype(int), mask_loc)
 
-            # Deduplicate masked centres
             masked_centers = deduplicate_points(
                 science_seg_centers + template_seg_centers,
                 min_sep=5.0,
@@ -7051,8 +7787,9 @@ class Templates:
                 min_sources = ts_cfg.get("sfft_crowded_min_sources", 300)
                 min_density = ts_cfg.get("sfft_crowded_min_density", 1.5)
                 is_crowded = n_src >= min_sources or density >= min_density
-                # Default to sparse (ESP) for better performance on typical fields.
-            # User can explicitly set sfft_crowded_method: true for dense fields.
+                # Default to sparse (ESP): it performs better on typical
+                # fields.  Users can set sfft_crowded_method: true for dense
+                # fields.
                 if "sfft_crowded_method" not in ts_cfg:
                     ts_cfg["sfft_crowded_method"] = False
                 if is_crowded:
@@ -7107,7 +7844,7 @@ class Templates:
             _sfft_self_match = n_matched < _min_prior
 
             if user_kernel is not None and user_kernel >= 0:
-                # User override: respect it but warn if likely under-constrained
+                # User override: keep it, but warn when under-constrained.
                 kernel_order = min(int(user_kernel), 3)
                 min_src_for_order = {0: 5, 1: 20, 2: 50, 3: 80}
                 needed = min_src_for_order.get(kernel_order, 0)
@@ -7251,7 +7988,7 @@ class Templates:
                         "Background polynomial order %d is unusually high (recommended 0-2). High orders may cause overfitting and instability.",
                         bg_order
                     )
-                    bg_order = min(bg_order, 2)  # Clamp to 2
+                    bg_order = min(bg_order, 2)
                 ts_cfg["sfft_bg_order"] = bg_order
 
             # Validate StarExt_iter
@@ -7263,7 +8000,7 @@ class Templates:
                         "StarExt_iter %d is unusually high (recommended 1-6). High values may cause over-deblending and slow performance.",
                         star_ext_iter
                     )
-                    star_ext_iter = min(star_ext_iter, 6)  # Clamp to 6
+                    star_ext_iter = min(star_ext_iter, 6)
                 ts_cfg["sfft_star_ext_iter"] = star_ext_iter
 
             # 4b. SFFT: default is sparse (ESP) for better performance; crowded (ECP) only if explicitly enabled.
@@ -7522,6 +8259,8 @@ class Templates:
                     dipole_radius_fwhm=float(_ts_cfg_q.get("diffqual_dipole_radius_fwhm", 1.5)),
                     dipole_max_fraction_pass=float(_ts_cfg_q.get("diffqual_dipole_max_frac_pass", 0.05)),
                     dipole_max_fraction_fail=float(_ts_cfg_q.get("diffqual_dipole_max_frac_fail", 0.20)),
+                    dipole_min_checked=int(_ts_cfg_q.get("diffqual_dipole_min_checked", 10)),
+                    dipole_wilson_z=float(_ts_cfg_q.get("diffqual_dipole_wilson_z", 1.645)),
                     bright_star_n_sigma=float(_ts_cfg_q.get("diffqual_bright_star_n_sigma", 50.0)),
                     bright_star_max_residual_sigma=float(_ts_cfg_q.get("diffqual_bright_star_max_resid_sigma", 3.0)),
                     edge_max_std_ratio=float(_ts_cfg_q.get("diffqual_edge_max_std_ratio", 2.0)),
@@ -7599,11 +8338,12 @@ class Templates:
                 if diff_quality_metrics.quality_class == "fail":
                     logger.error(
                         "Subtraction quality FAILED (score=%.3f): "
-                        "dipoles=%d (%.1f%%), bright_star_resid=%.1f sigma, "
+                        "dipoles=%d/%d checked (%.1f%%), bright_star_resid=%.1f sigma, "
                         "bg_spatial_std=%.3f, edge_ratio=%.2f. "
                         "Downstream photometry should be treated with caution.",
                         diff_quality_metrics.quality_score,
                         diff_quality_metrics.dipole_count,
+                        diff_quality_metrics.dipole_checked,
                         diff_quality_metrics.dipole_fraction * 100,
                         diff_quality_metrics.bright_star_residual_rms,
                         diff_quality_metrics.background_spatial_std,
@@ -7612,10 +8352,11 @@ class Templates:
                 elif diff_quality_metrics.quality_class == "downgrade":
                     logger.warning(
                         "Subtraction quality DOWNGRADED (score=%.3f): "
-                        "dipoles=%d (%.1f%%), bright_star_resid=%.1f sigma, "
+                        "dipoles=%d/%d checked (%.1f%%), bright_star_resid=%.1f sigma, "
                         "bg_spatial_std=%.3f, edge_ratio=%.2f.",
                         diff_quality_metrics.quality_score,
                         diff_quality_metrics.dipole_count,
+                        diff_quality_metrics.dipole_checked,
                         diff_quality_metrics.dipole_fraction * 100,
                         diff_quality_metrics.bright_star_residual_rms,
                         diff_quality_metrics.background_spatial_std,
@@ -7650,7 +8391,7 @@ class Templates:
             except Exception as e:
                 logger.warning("Subtraction quality validation failed (non-fatal): %s", e)
 
-            # Write the NaN-masked difference image back (no background zeroing —
+            # Write the NaN-masked difference image back (no background zeroing --
             # the subtraction backend's native output is preserved so photometry
             # sees the true pixel values including any DC offset from the sky).
             try:
@@ -7774,7 +8515,8 @@ class Templates:
                                 _label, float(_sky),
                             )
 
-            # Robust noise estimation using sigma-clipped stats
+            # Noise RMS via sigma-clipped stats: a plain std is inflated by
+            # sources, which would bias ZOGY's sn/sr noise terms.
             _sci_finite = science_data[np.isfinite(science_data)]
             _ref_finite = reference_data[np.isfinite(reference_data)]
             _, _, _sn = _scs(_sci_finite, sigma=3, maxiters=5) if _sci_finite.size > 100 else (0, 0, float(np.std(_sci_finite)) if _sci_finite.size > 0 else 1.0)
@@ -8200,7 +8942,7 @@ class Templates:
         # Use finite saturation for SFFT (FITS/MeLOn cannot use inf)
         _saturate_fallback = 1e30
 
-        # Mutable retry state — initialised before the try block so the
+        # Mutable retry state -- initialised before the try block so the
         # exception handler can reference them without NameError.
         ts_sub = (self.input_yaml or {}).get("template_subtraction") or {}
         current_excluded: list = list(masked_sources or [])
@@ -8301,27 +9043,40 @@ class Templates:
             # SCI => DIFF = conv(SCI) - REF: difference has reference PSF.
             #
             # Default is REF (standard convention, Bramich 2008, Hu et al. 2022).
-            # AUTO is NOT recommended: it selects based on pre-SWarp header FWHMs,
-            # but SWarp LANCZOS3 resampling can flip PSF ordering (e.g., science
-            # was sharper pre-SWarp but broader post-SWarp), causing AUTO to
-            # deconvolve the wrong image (BUG 122).
+            # AUTO is resolved HERE from the measured post-alignment FWHMs --
+            # we do NOT pass AUTO through to SFFT, whose internal AUTO selects
+            # on header FWHMs that SWarp LANCZOS3 resampling can flip relative
+            # to the true PSF ordering (BUG 122).  Pipeline AUTO convolves the
+            # sharper image up to the broader PSF whenever the FWHM difference
+            # exceeds sfft_forceconv_auto_tol, avoiding a deconvolving kernel;
+            # within the tolerance it keeps REF (science-PSF convention).
             #
             # Users can override with forceconv in YAML (REF/SCI/AUTO).
             # Backward compat: fall back to sfft_forceconv if forceconv is absent.
             _fc_cfg = str(
                 ts_sub.get("forceconv", ts_sub.get("sfft_forceconv", "REF"))
             ).strip().upper()
-            if _fc_cfg in ("REF", "SCI", "AUTO"):
-                forceconv = _fc_cfg
-                logger.info(
-                    "SFFT ForceConv=%s (header FWHM: sci=%.2f ref=%.2f).",
-                    forceconv, science_fwhm, template_fwhm,
-                )
-            else:
-                forceconv = "REF"
+            _fc_tol = float(ts_sub.get("sfft_forceconv_auto_tol", 0.05) or 0.05)
+            forceconv, _fc_deconvolves, _fc_note = _select_forceconv(
+                _fc_cfg, science_fwhm, template_fwhm, auto_tol=_fc_tol
+            )
+            logger.info(
+                "SFFT ForceConv=%s (cfg=%s, FWHM: sci=%.2f ref=%.2f; %s).",
+                forceconv, _fc_cfg, science_fwhm, template_fwhm, _fc_note,
+            )
+            if _fc_cfg not in ("REF", "SCI", "AUTO"):
+                logger.warning("Unknown forceconv=%r; defaulting to REF.", _fc_cfg)
+            if _fc_deconvolves:
                 logger.warning(
-                    "Unknown forceconv=%r; defaulting to REF.",
-                    _fc_cfg,
+                    "SFFT ForceConv=%s requires deconvolution: the convolved "
+                    "image (FWHM=%.2f) is broader than the target (%.2f). "
+                    "The kernel must remove width, producing negative "
+                    "sidelobes that are unstable with few matched sources. "
+                    "Consider forceconv=SCI or AUTO (note: SCI direction "
+                    "gives the difference image the *reference* PSF).",
+                    forceconv,
+                    template_fwhm if forceconv == "REF" else science_fwhm,
+                    science_fwhm if forceconv == "REF" else template_fwhm,
                 )
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
@@ -8332,22 +9087,25 @@ class Templates:
             # Star extension iterations: None = use SFFT defaults (4 for sparse, 2 for crowded)
             star_ext_iter = ts_sub.get("sfft_star_ext_iter", None)
             # Allow user to control photometric scaling behavior.
-            # ConstPhotRatio=False fits flux scaling polynomial (spatially-varying, like HOTPANTS).
-            # ConstPhotRatio=True forces a single global flux scale, which can cause oversubtraction
-            # when flux varies across the image.
+            # In SFFT, ConstPhotRatio controls whether the *solved* flux
+            # scaling is spatially constant: True fits a single global flux
+            # scale; False fits a spatially-varying scaling polynomial (like
+            # HOTPANTS).  It does NOT pin the kernel sum to the SExtractor-
+            # measured photometric ratio (FSCAL_PHOT) -- the realised kernel
+            # scaling (FSCAL_CONV) comes from the least-squares kernel fit in
+            # both modes.  FSCAL_PHOT is only a diagnostic, and is biased when
+            # the two images have different PSFs (a fixed aperture on the
+            # broader image loses more wing flux) or when matched sources sit
+            # on structured background (BACKPHOTO_TYPE=LOCAL).
             const_phot_ratio = _as_bool(
                 ts_sub.get("sfft_const_phot_ratio", False), False
             )
-            # Auto-enable ConstPhotRatio=True for very sparse fields where the
-            # convolution-based flux scaling is unconstrained.
-            #
-            # When the field has very few matching sources (< threshold), the
-            # kernel solution is under-constrained and the convolution-based
-            # flux scaling (ConstPhotRatio=False) can diverge wildly from the
-            # true photometric ratio (e.g. 2.65 vs 5.53, a 52% discrepancy).
-            # ConstPhotRatio=True constrains the kernel sum to the photometric
-            # flux ratio, which at least ensures flux conservation even if the
-            # kernel shape is imperfect.
+            # Auto-enable ConstPhotRatio=True for very sparse fields.
+            # With very few matched sources the spatially-varying scaling
+            # polynomial (ConstPhotRatio=False) is under-constrained and can
+            # absorb source noise as fake spatial structure; the constant
+            # model removes those degrees of freedom.  This is a variance-
+            # reduction choice -- it does not correct a wrong kernel scale.
             #
             # The user can disable this auto-behaviour by setting
             # sfft_const_phot_ratio_sparse_threshold to 0, or by explicitly
@@ -8442,9 +9200,9 @@ class Templates:
             # Decide whether to pass our computed kernel_half_width to
             # run_sfft.py or let run_sfft.py auto-size it.
             #
-            # run_sfft.py has a robust auto-sizing path that uses:
-            #   hw_broad = ceil(mult * fwhm_broad)       — full PSF support (SFFT/LSST)
-            #   hw_conv  = ceil(3 * fwhm_conv / 2.355)   — 3-sigma PSF-difference lobe
+            # run_sfft.py auto-sizes conservatively, taking the max of:
+            #   hw_broad = ceil(mult * fwhm_broad)       -- full PSF support (SFFT/LSST)
+            #   hw_conv  = ceil(3 * fwhm_conv / 2.355)   -- 3-sigma PSF-difference lobe
             #   kernel_hw = max(hw_broad, hw_conv)
             #
             # This is the SFFT (Hu et al. 2022) and LSST ip_diffim convention:
@@ -8481,20 +9239,17 @@ class Templates:
             _sparse_threshold = int(ts_sub.get("sfft_sparse_field_threshold", 10) or 10)
             _sparse_field = _n_matching_sfft < _sparse_threshold
 
-            # Auto-enable ConstPhotRatio=True for very sparse fields where
-            # the convolution-based flux scaling is unconstrained.  With very
-            # few sources (< sfft_const_phot_ratio_sparse_threshold), the
-            # kernel integral can diverge from the true photometric ratio by
-            # >50%, causing severe flux calibration errors.  ConstPhotRatio=True
-            # constrains the kernel sum to the photometric flux ratio.
+            # Auto-enable ConstPhotRatio=True for very sparse fields.  With
+            # very few matched sources (< sfft_const_phot_ratio_sparse_threshold)
+            # the spatially-varying scaling polynomial is under-constrained;
+            # a constant flux scale removes those degrees of freedom.
             if _cpr_auto_eligible and _n_matching_sfft < _cpr_sparse_thresh:
                 const_phot_ratio = True
                 logger.info(
                     "SFFT: auto-enabling ConstPhotRatio=True for very sparse "
-                    "field (%d matching sources < %d threshold). The convolution-"
-                    "based flux scaling is unconstrained with so few sources; "
-                    "ConstPhotRatio=True constrains the kernel sum to the "
-                    "photometric flux ratio for robust flux calibration.",
+                    "field (%d matching sources < %d threshold): constant "
+                    "flux-scaling model instead of a spatial polynomial the "
+                    "source count cannot constrain.",
                     _n_matching_sfft,
                     _cpr_sparse_thresh,
                 )
@@ -8519,7 +9274,7 @@ class Templates:
                 # auto-size (which uses FWHM_broad as primary term).
                 _sfft_pass_kernel_hw = kernel_half_width
                 logger.info(
-                    "SFFT: sparse field (%d vetted sources < %d threshold) — "
+                    "SFFT: sparse field (%d vetted sources < %d threshold) -- "
                     "passing templates.py kernel_hw=%d px instead of auto-sizing "
                     "(run_sfft.py would use ~%d px = ceil(%.1f*FWHM_broad), "
                     "under-constrained for %d sources).",
@@ -8617,7 +9372,7 @@ class Templates:
                 if detect_thresh is not None:
                     cmd_local += ["-detect_thresh", str(float(detect_thresh))]
 
-                # Robust SFFT source rejection controls.
+                # SFFT source-rejection controls.
                 # Default: exclude blended sources (FLAGS & 2) which bias flux scaling.
                 # Fallback to permissive flags is handled by the retry logic below.
                 only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1, 16, 17])
@@ -8697,6 +9452,13 @@ class Templates:
                 # Point-source ellipticity threshold for SFFT's own source vetting.
                 _ps_min_ellip = ts_sub.get("sfft_point_source_min_ellip", 0.3)
                 cmd_local += ["-point_source_min_ellip", str(float(_ps_min_ellip))]
+
+                # Diagnostic-plot format (Var_Check output) follows the
+                # top-level plot_format config.
+                cmd_local += [
+                    "-plot_format",
+                    str((self.input_yaml or {}).get("plot_format", "png")),
+                ]
 
                 if sfft_crowded:
                     cmd_local.append("-crowded")
@@ -8828,7 +9590,7 @@ class Templates:
                     # actually used for the kernel fit to
                     # SFFT_Matching_Sources_<base>.csv.  These are vetted by
                     # SFFT's own SExtractor + cross-match + quality checks
-                    # (PostAnomaly, CVREJ, EVREJ), so they are more robust
+                    # (PostAnomaly, CVREJ, EVREJ), so they are better vetted
                     # than the pipeline's original priors.  Use them as the
                     # matching sources for the retry, minus any near
                     # post-anomaly sources.
@@ -8993,7 +9755,7 @@ class Templates:
                                 _restore_sfft_outputs(_bak_pa)
                         except Exception:
                             # A failed retry may leave a truncated/corrupt diff
-                            # on disk — restore the first-pass output before the
+                            # on disk -- restore the first-pass output before the
                             # outer handler logs "keeping first-pass result".
                             _restore_sfft_outputs(_bak_pa)
                             raise
@@ -9110,10 +9872,15 @@ class Templates:
                             )
                         logger.warning(
                             "SFFT flux scaling discrepancy: convolution=%.4f vs photometric=%.4f "
-                            "(%.1f%% mismatch). Kernel integral does not match true flux ratio - "
-                            "dipole residuals likely at source positions. "
-                            "This can be caused by nearly-identical PSFs with few sources, "
-                            "poor astrometric alignment, or deconvolution from wrong ForceConv.%s",
+                            "(%.1f%% mismatch). NOTE: FSCAL_PHOT comes from SExtractor photometry "
+                            "on the *unconvolved* images (BACKPHOTO_TYPE=LOCAL) and is biased low "
+                            "when the reference PSF is broader (fixed apertures lose more wing "
+                            "flux) or matched sources sit on structured background -- FSCAL_CONV "
+                            "is measured through the actual convolved product and is usually the "
+                            "more trustworthy scale. Treat moderate discrepancies (<15%%) as a "
+                            "kernel-quality flag, not proof of wrong normalisation. Genuine kernel "
+                            "error produces dipole residuals at source positions; poor astrometric "
+                            "alignment or a deconvolving ForceConv direction are other causes.%s",
                             _conv_scale, _phot_scale, _discrep_pct, _fc_msg,
                         )
                     else:
@@ -9137,7 +9904,7 @@ class Templates:
             # Compute n_eff from the ORIGINAL matching sources (before
             # post-anomaly feedback may have emptied the list).  The flux
             # scaling discrepancy was computed from the original SFFT run
-            # which used the original sources — the retry decision should
+            # which used the original sources -- the retry decision should
             # be based on that count, not the post-anomaly-emptied list.
             _n_matched_local = _orig_n_matching
             _min_prior_local = int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
@@ -9268,22 +10035,24 @@ class Templates:
                     _discard_sfft_backups(_bak_dr)
 
             # --- ConstPhotRatio retry for sparse fields ---
-            # When the field is sparse (< ~10 sources), the convolution-based
-            # flux scaling is unreliable because the kernel is under-constrained.
-            # The kernel integral (FSCAL_CONV) can differ from the true
-            # photometric flux ratio (FSCAL_PHOT) by >10%, leaving systematic
-            # over/under-subtraction residuals at source positions.
+            # When the field is sparse (< ~10 sources), a spatially-varying
+            # flux-scaling polynomial (ConstPhotRatio=False) is under-
+            # constrained and can absorb source noise as fake spatial
+            # structure.  Retrying with ConstPhotRatio=True reduces the
+            # scaling model to a single constant -- a variance-reduction
+            # measure.
+            #
+            # NOTE: ConstPhotRatio does NOT pin the kernel sum to the
+            # SExtractor photometric ratio (FSCAL_PHOT) -- the realised kernel
+            # scaling (FSCAL_CONV) comes from the least-squares fit in both
+            # modes, so the retry is not expected to reduce FSCAL_DISC.  The
+            # adoption decision therefore compares the actual difference
+            # images at the matched-source positions rather than the FSCAL
+            # metric: the retry is kept only when it does not increase the
+            # median absolute aperture residual there.
             #
             # The standard discrepancy retry (kernel_order+1) requires >= 20
-            # sources and is skipped for sparse fields.  Instead, retry with
-            # ConstPhotRatio=True which constrains the kernel sum to the
-            # photometric flux ratio, eliminating the discrepancy.
-            #
-            # Trade-off: ConstPhotRatio uses the photometric scaling which can
-            # be biased by bright outliers.  But for a sparse field where the
-            # convolution scaling is clearly wrong (>10% off), the photometric
-            # constraint is the lesser evil — it at least ensures flux
-            # conservation.
+            # sources and is skipped for sparse fields.
             _const_phot_retry_thresh = float(
                 ts_sub.get("sfft_const_phot_retry_pct", 10.0)
             )
@@ -9299,16 +10068,23 @@ class Templates:
             if _do_const_phot_retry:
                 logger.warning(
                     "SFFT flux scaling discrepancy=%.1f%% > %.1f%% with only %d "
-                    "vetted sources. Retrying with ConstPhotRatio=True to "
-                    "constrain kernel sum to photometric flux ratio "
-                    "(phot=%.4f vs conv=%.4f).",
+                    "vetted sources. Retrying with ConstPhotRatio=True "
+                    "(constant flux-scaling model -- reduces spatial-polynomial "
+                    "overfit; does not repin the kernel sum).",
                     _discrep_pct, _const_phot_retry_thresh, _n_matched_local,
-                    _phot_scale, _conv_scale,
                 )
                 _saved_cpr = const_phot_ratio
                 const_phot_ratio = True
                 _bak_cpr = _backup_sfft_outputs()
                 try:
+                    # Residual at the vetted positions in the first-pass diff
+                    # (0-based science coords; the diff is in science frame).
+                    _resid_r = max(3.0, 1.5 * float(science_fwhm))
+                    _resid_first = _diff_resid_at_sources(
+                        _bak_cpr.get(str(outputFpath)),
+                        _orig_matching_sources,
+                        radius=_resid_r,
+                    )
                     cmd_cpr_retry = _build_sfft_cmd(
                         current_excluded,
                         _orig_matching_sources,
@@ -9333,6 +10109,28 @@ class Templates:
                         )
                         _restore_sfft_outputs(_bak_cpr)
                     else:
+                        # Adopt the retry only if it does not increase the
+                        # residual at the matched-source positions -- the
+                        # FSCAL metric cannot judge it (ConstPhotRatio does
+                        # not repin the kernel sum).
+                        _resid_retry = _diff_resid_at_sources(
+                            str(outputFpath), _orig_matching_sources,
+                            radius=_resid_r,
+                        )
+                        if (
+                            _resid_first is not None
+                            and _resid_retry is not None
+                            and _resid_retry > 1.10 * _resid_first
+                        ):
+                            logger.warning(
+                                "SFFT ConstPhotRatio retry increased matched-"
+                                "source residuals (%.2f -> %.2f); restoring "
+                                "first-pass result.",
+                                _resid_first, _resid_retry,
+                            )
+                            _restore_sfft_outputs(_bak_cpr)
+                            logger.info("SFFT subtraction succeeded (first pass kept)")
+                            return "done"
                         # Read flux scaling from header (preferred) or retry log.
                         _conv_scale3 = _phot_scale3 = _discrep_pct3 = None
                         try:
@@ -9369,9 +10167,12 @@ class Templates:
                                 pass
                             logger.info(
                                 "SFFT ConstPhotRatio retry: flux scaling discrepancy "
-                                "%.1f%% -> %.1f%% (conv=%.4f phot=%.4f).",
+                                "%.1f%% -> %.1f%% (conv=%.4f phot=%.4f; "
+                                "matched-source resid %s -> %s).",
                                 _discrep_pct, _discrep_pct3,
                                 _conv_scale3, _phot_scale3,
+                                f"{_resid_first:.2f}" if _resid_first is not None else "n/a",
+                                f"{_resid_retry:.2f}" if _resid_retry is not None else "n/a",
                             )
                     logger.info("SFFT subtraction succeeded (ConstPhotRatio retry)")
                     return "done"
@@ -9458,7 +10259,6 @@ class Templates:
                         exc2,
                     )
                 finally:
-                    # Restore original flags
                     if _saved_flags is not None:
                         ts_sub["sfft_only_flags"] = _saved_flags
                     else:
@@ -9603,7 +10403,6 @@ class Templates:
                     return False
                 resolved_exe = which
 
-            # Sanitise inputs
             original_sci_path = scienceFpath
             original_ref_path = templateFpath
             scienceFpath = clean_fits_nans(scienceFpath, str(scienceDir))

@@ -147,7 +147,6 @@ def compute_split_rhat(chain: np.ndarray) -> float:
     if n_steps < 8:
         return np.nan
 
-    # Split each chain in half
     half = n_steps // 2
     chain1 = chain[:, :half]
     chain2 = chain[:, half:2 * half]
@@ -244,9 +243,8 @@ def compute_ess(chain: np.ndarray) -> float:
         c = chain[w] - chain[w].mean()
         if np.all(c == 0):
             continue
-        # Use FFT for autocorrelation
         n = len(c)
-        # Pad to next power of 2 for efficiency
+        # Pad to next power of 2 for efficient FFT autocorrelation
         nfft = 1
         while nfft < 2 * n:
             nfft *= 2
