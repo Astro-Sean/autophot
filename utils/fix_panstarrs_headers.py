@@ -7,6 +7,8 @@ TELESCOP, INSTRUME, FILTER, EXPTIME, GAIN, RDNOISE, OBSMJD from existing keyword
 
 import sys
 from pathlib import Path
+
+import numpy as np
 from astropy.io import fits
 
 

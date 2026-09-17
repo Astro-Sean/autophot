@@ -69,7 +69,6 @@ from functions import (
 )
 from aperture import Aperture
 
-# Initialize logger
 logger = logging.getLogger(__name__)
 
 
@@ -106,8 +105,8 @@ def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
     x_var = variable_catalog["x_pix"].values
     y_var = variable_catalog["y_pix"].values
 
-    # Build a KDTree on the variable sources for O(N log M) matching instead
-    # of the previous O(N*M) per-source distance loop.
+    # KDTree for O(N log M) matching; replaces the O(N*M) per-source
+    # distance loop.
     from scipy.spatial import cKDTree as _cKDTree
     var_tree = _cKDTree(np.column_stack([x_var, y_var]))
     given_xy = np.column_stack([x_given, y_given])
@@ -184,7 +183,7 @@ class Catalog:
     """Catalog query and cross-matching for photometric calibration.
 
     Wraps online catalog services (Pan-STARRS, SDSS, Skymapper, Gaia, 2MASS,
-   WISE) and provides local catalog operations: source cross-matching,
+    WISE) and provides local catalog operations: source cross-matching,
     saturation/linearity filtering, and zeropoint fitting preparation.
     """
 
@@ -234,7 +233,7 @@ class Catalog:
             band_for_group = (
                 use_filter_norm if use_filter_norm is not None else use_filter
             )
-            # Warn when the current filter matches multiple mapping keys.
+            # Warn on ambiguous mappings (multiple keys match this filter).
             membership_matches = []
             if use_filter:
                 for key, value in catalog_choice.items():
@@ -326,7 +325,6 @@ class Catalog:
         if not catalog_name:
             return catalog_name
         name = str(catalog_name).strip().lower()
-        # Map common aliases to canonical names
         aliases = {
             "panstarrs": "pan_starrs",
             "pan-starrs": "pan_starrs",
@@ -446,10 +444,9 @@ class Catalog:
 
             source_ids = results["source_id"].astype(str).tolist()
             # Resolve requested GaiaXPy photometric systems.
-            #
-            # If `photometric_systems` is None: keep prior behaviour (both).
-            # If it is an empty list/[]/None: skip GaiaXPy synthetic photometry and
-            # fall back to base DR3 photometry only (much faster).
+            # photometric_systems=None keeps prior behaviour (both systems);
+            # an empty list skips GaiaXPy and returns base DR3 photometry
+            # only (much faster).
             if photometric_systems is None:
                 phot_systems = [
                     PhotometricSystem.SDSS_Std,
@@ -473,7 +470,7 @@ class Catalog:
                         sys_name = sys_name.strip()
                         phot_systems.append(getattr(PhotometricSystem, sys_name))
                     else:
-                        # Allow passing enum values directly.
+                        # Enum values are accepted directly.
                         phot_systems.append(sys_name)
 
             logger.info(
@@ -518,13 +515,11 @@ class Catalog:
                 )
                 merged = results
 
-            # Compute magnitude errors from flux and flux_error where available:
-            # sigma_m = 2.5 / ln(10) * (sigma_F / F).
+            # Magnitude errors from flux: sigma_m = 2.5/ln(10) * (sigma_F/F).
             factor = 2.5 / np.log(10)
 
-            # Avoid division by zero or missing columns; skip bands that are not
-            # present in the merged table (e.g. when XP failed and only base DR3
-            # photometry is available).
+            # Skip bands absent from the merged table (e.g. when XP failed and
+            # only base DR3 photometry is available); also guards F<=0.
             for band in ["u", "g", "r", "i", "z"]:
                 f_col = f"SdssStd_flux_{band}"
                 e_col = f"SdssStd_flux_error_{band}"
@@ -585,13 +580,10 @@ class Catalog:
         str
             Path to the downloaded file, or None if an error occurred.
         """
-        # TAP service URL for NOIRLab Data Lab
         tap_service_url = "https://datalab.noirlab.edu/tap"
-        # radius_deg = radius / 60
 
-        # SQL query to search the Legacy Survey catalog using ADQL
-        # Select `type` to filter point sources (PSF) from extended objects
-        # (REX, EXP, DEV, SER) which are galaxies or resolved sources.
+        # `type` is selected so point sources (PSF) can be separated from
+        # extended objects (REX, EXP, DEV, SER = galaxies/resolved sources).
         query = f"""
             SELECT TOP 1000 ra, dec, type, mag_g, mag_r, mag_i, mag_z,
                 sqrt(power(ra - {ra}, 2) + power(dec - {dec}, 2)) AS angular_distance
@@ -608,17 +600,11 @@ class Catalog:
 
             from astroquery.utils.tap import TapPlus
 
-            # Initialize the TAP service using TapPlus from astroquery
             tap = TapPlus(url=tap_service_url)
-
-            # Perform the query using TAP+ (synchronous execution)
             result = tap.launch_job(query)
-
-            # Convert the result to an Astropy Table
             table = result.get_results().to_pandas()
 
-            # Filter to point sources only (type = 'PSF').
-            # Other types (REX, EXP, DEV, SER) are extended/galaxies.
+            # Point sources only; non-PSF types are extended/galaxies.
             if "type" in table.columns:
                 n_before = len(table)
                 table = table[table["type"].astype(str).str.upper() == "PSF"].copy()
@@ -679,20 +665,18 @@ class Catalog:
         last_error = None
         for attempt in range(1, max_retries + 1):
             try:
-                # Generate a unique name for the catalog
+                # Random suffix gives each attempt a unique MAST table name.
                 name = f"autophot_{''.join(random.choices(string.ascii_uppercase, k=5))}"
                 logger.info(
                     f"Fetching ATLAS-RefCat2 catalog from MAST over {sr:.3f} deg field-of-view centered at ra = {ra:.1f} dec = {dec:.1f}"
                     + (f" (attempt {attempt}/{max_retries})" if attempt > 1 else "")
                 )
 
-                # Define the columns to be retrieved from the database
                 table = [
                     "RA", "Dec", "g", "dg", "r", "dr",
                     "i", "di", "z", "dz", "J", "dJ", "H", "dH", "K", "dK",
                 ]
 
-                # Create the SQL query to fetch data from the database
                 q = """
                 SELECT TOP {max} {columns}
                 INTO MyDB.{name}
@@ -711,7 +695,6 @@ class Catalog:
 
                 logger.debug("SQL Query: %s", q)
 
-                # Create a job to execute the SQL query
                 job = MastCasJobs(context="HLSP_ATLAS_REFCAT2", **credentials)
 
                 # drop_table_if_exists can fail with transient MAST SQL errors;
@@ -726,24 +709,21 @@ class Catalog:
 
                 jobid = job.submit(q, task_name=f"refcat catalog search {ra:.5f} {dec:.5f}")
 
-                # Monitor the status of the job
                 status = job.monitor(jobid)
 
-                # Check if the job status indicates an error
+                # CasJobs status 3/4 means the job failed.
                 if status[0] in (3, 4):
                     raise Exception(f"Job failed with status {status[0]}: {status[1]}")
 
-                # Retrieve the result table and drop the temporary table
                 tab = job.get_table(name, format="CSV")
                 try:
                     job.drop_table_if_exists(name)
                 except Exception as drop_err:
                     logger.debug("Post-query drop_table failed (non-fatal): %s", drop_err)
 
-                # Convert the result table to a pandas DataFrame
                 tab = tab.to_pandas()
 
-                # Remove any row where any value is zero
+                # Drop rows containing a 0 (missing photometry sentinel).
                 tab = tab[~(tab == 0).any(axis=1)]
                 tab.reset_index(drop=True, inplace=True)
 
@@ -810,11 +790,9 @@ class Catalog:
         try:
             catalogName = self._require_catalog_selected(catalogName)
 
-            # If target or its RA/DEC is set, set target name
             target_ra = target_coords.ra.degree
             target_dec = target_coords.dec.degree
 
-            # Set default target name if not provided
             if target_name is None:
                 if target_ra is not None and target_dec is not None:
                     target_name = f"target_ra_{target_ra:.6f}_dec_{target_dec:.6f}"
@@ -824,18 +802,15 @@ class Catalog:
                 if "Unknown" not in target_name:
                     target_name = self.input_yaml.get("target_name", "Transient")
 
-            # Set default custom catalog path if not provided
             if not catalog_custom_fpath:
                 catalog_custom_fpath = self.input_yaml["catalog"].get(
                     "catalog_custom_fpath", None
                 )
 
-            # Working directory
             wdir = self.input_yaml.get("wdir")
             if not wdir:
                 raise ValueError("Working directory (wdir) is not set in input YAML.")
 
-            # Create directories for storing catalog data
             dirname = os.path.join(wdir, "catalog_queries")
             pathlib.Path(dirname).mkdir(parents=True, exist_ok=True)
             catalog_dir = os.path.join(dirname, catalogName)
@@ -845,13 +820,11 @@ class Catalog:
             )
             pathlib.Path(target_dir).mkdir(parents=True, exist_ok=True)
 
-            # Generate file name for the catalog
             fname = f"{target_name}_r_{radius:.1f}arcmins_{catalogName}_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}"
 
-            # Convert from arcmins to degrees
+            # radius is arcmin; catalog queries take degrees.
             radius_deg = radius / 60
 
-            # Handle different catalog sources
             if catalogName == "custom":
                 if not catalog_custom_fpath:
                     logger.critical(
@@ -867,7 +840,7 @@ class Catalog:
                     .to_pandas()
                     .fillna(np.nan)
                 )
-                # Deduplicate cached catalog to prevent duplicates from previous runs
+                # Dedup cached catalog: earlier runs may have written duplicates.
                 if not selectedCatalog.empty and {"RA", "DEC"}.issubset(selectedCatalog.columns):
                     n_before = len(selectedCatalog)
                     selectedCatalog = _skycoord_dedup_keep_one(selectedCatalog, sep_threshold_arcsec=0.1)
@@ -899,8 +872,8 @@ class Catalog:
                             selectedCatalog, catalogName, target_coords, radius
                         )
                     else:
-                        # Columns to extract (RA/DEC, r-band + error, others optional)
-                        # Include objType to filter point sources (stars) from galaxies.
+                        # objType is kept so point sources can be separated
+                        # from galaxies below.
                         selected_cols = [
                             "ID",
                             "ra",
@@ -932,19 +905,17 @@ class Catalog:
                             "e_Tmag",
                         ]
 
-                        # Ensure all selected columns exist in the result table
+                        # Keep only columns the result table actually has.
                         available_cols = [
                             col for col in selected_cols if col in result.colnames
                         ]
 
-                        # Build final catalog table
                         selectedCatalog = result[available_cols].to_pandas()
 
-                        # Filter to point sources: TIC objType 'STAR' = 0x300000.
-                        # Galaxies and other extended objects are excluded.
+                        # Point sources only: TIC objType bitmask STAR = 0x300000;
+                        # galaxies and extended objects are excluded.
                         if "objType" in selectedCatalog.columns:
                             n_before = len(selectedCatalog)
-                            # objType is a bitmask; STAR = 0x300000 in TIC
                             _obj_type = pd.to_numeric(selectedCatalog["objType"], errors="coerce")
                             _is_star = _obj_type == 0x300000
                             if _is_star.sum() > 0:
@@ -957,14 +928,14 @@ class Catalog:
                                     )
                             selectedCatalog = selectedCatalog.drop(columns=["objType"], errors="ignore")
 
-                        # Write directly to target directory instead of cwd to avoid wrong directory writes
+                        # Write to target_dir (not cwd) to avoid misplaced files.
                         csv_path = os.path.join(target_dir, f"{fname}.csv")
                         selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "gaia":
-                    # For Gaia DR3+XP, use a smaller radius than the full catalog
-                    # search radius to reduce load on the archive. Hard-limit to
-                    # at most 10 arcmin (10/60 deg), and optionally smaller if
+                    # Gaia DR3+XP uses a smaller radius than the full catalog
+                    # search radius to reduce archive load. Hard limit of
+                    # 10 arcmin (10/60 deg), optionally smaller if
                     # catalog.gaia_xp_radius_deg is set.
                     max_gaia_deg = 10.0 / 60.0  # 10 arcmin
                     cfg_radius = float(
@@ -991,12 +962,11 @@ class Catalog:
                         photometric_systems=gaia_xp_photometric_systems,
                     )
 
-                    # Build final catalog table
                     selectedCatalog = result
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
-                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    # Write to target_dir (not cwd) to avoid misplaced files.
                     csv_path = os.path.join(target_dir, f"{fname}.csv")
                     selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
@@ -1008,8 +978,7 @@ class Catalog:
                     logger.warning(
                         "REFCAT requires MAST CasJobs credentials. Set `default_input.catalog.MASTcasjobs_wsid` and `default_input.catalog.MASTcasjobs_pwd` (or provide them via environment/local overrides)."
                     )
-                    # Normalise types: many auth backends are strict about
-                    # receiving strings, so cast to str (and strip) here.
+                    # Some auth backends reject non-str; cast and strip here.
                     userid = self.input_yaml["catalog"].get("MASTcasjobs_wsid")
                     password = self.input_yaml["catalog"].get("MASTcasjobs_pwd")
                     if userid is not None:
@@ -1044,7 +1013,7 @@ class Catalog:
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
-                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    # Write to target_dir (not cwd) to avoid misplaced files.
                     csv_path = os.path.join(target_dir, f"{fname}.csv")
                     selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
@@ -1061,7 +1030,7 @@ class Catalog:
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
-                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    # Write to target_dir (not cwd) to avoid misplaced files.
                     csv_path = os.path.join(target_dir, f"{fname}.csv")
                     selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
@@ -1090,8 +1059,8 @@ class Catalog:
                                     selectedCatalog["cl"] == 6
                                 ]
                     if catalogName == "apass":
-                            # APASS has a `cls` column: 'A' = stellar, 'G' = galaxy.
-                            # Filter to stars only for zeropoint calibration.
+                            # APASS `cls` column: 'A' = stellar, 'G' = galaxy.
+                            # Stars only for zeropoint calibration.
                             if "cls" in selectedCatalog.columns:
                                 n_before = len(selectedCatalog)
                                 selectedCatalog = selectedCatalog[
@@ -1103,11 +1072,11 @@ class Catalog:
                                         "APASS: removed %d non-stellar sources (cls != 'A'); %d stars remain.",
                                         n_gal, len(selectedCatalog),
                                     )
-                    # Validate before writing (covers both empty-query and post-filter empty)
+                    # Validate before writing (covers empty query and post-filter empty).
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
-                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    # Write to target_dir (not cwd) to avoid misplaced files.
                     csv_path = os.path.join(target_dir, f"{fname}.csv")
                     selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
@@ -1122,7 +1091,7 @@ class Catalog:
                         "SR": radius_deg,
                         "RESPONSEFORMAT": "VOTABLE",
                     }
-                    # Write temp file to target_dir instead of cwd to avoid wrong directory writes
+                    # Write temp file to target_dir (not cwd) to avoid misplaced files.
                     temp_vot_path = os.path.join(target_dir, "temp.vot")
                     try:
                         logger.info("Downloading Sequence Stars from SkyMapper")
@@ -1138,7 +1107,7 @@ class Catalog:
                     finally:
                         if os.path.exists(temp_vot_path):
                             os.remove(temp_vot_path)
-                    # Guard column existence before filtering
+                    # Guard column existence before filtering.
                     if "class_star" in selectedCatalog.columns:
                         selectedCatalog = selectedCatalog[
                             selectedCatalog["class_star"] > 0.8
@@ -1148,7 +1117,7 @@ class Catalog:
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
-                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    # Write to target_dir (not cwd) to avoid misplaced files.
                     csv_path = os.path.join(target_dir, f"{fname}.csv")
                     selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
@@ -1156,13 +1125,12 @@ class Catalog:
                     logger.info(
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
-                    # Use direct API request to handle string "None" values properly
+                    # Direct API request: the MAST JSON endpoint returns
+                    # string "None" values that need explicit handling below.
                     try:
                         ra = float(target_coords.ra.degree)
                         dec = float(target_coords.dec.degree)
-                        # radius_deg is already computed from the caller's radius (arcmin)
-                        
-                        # Direct MAST API call for Pan-STARRS
+
                         url = "https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/ps1/search"
                         params = {
                             "ra": ra,
@@ -1179,13 +1147,12 @@ class Catalog:
                         if not data:
                             selectedCatalog = pd.DataFrame()
                         else:
-                            # Convert to DataFrame, handling None strings
                             selectedCatalog = pd.DataFrame(data)
-                            # Replace all forms of None/null with np.nan in one vectorized pass
+                            # Normalize null-like strings to NaN.
                             selectedCatalog = selectedCatalog.replace(
                                 ['None', 'none', 'NONE', 'null', 'NULL', 'nan', 'NaN'], np.nan
                             )
-                            # Convert numeric columns
+                            # Coerce numeric columns; name columns stay strings.
                             for col in selectedCatalog.columns:
                                 if col not in ['objName', 'objAltName1', 'objAltName2', 'objAltName3']:
                                     try:
@@ -1199,7 +1166,7 @@ class Catalog:
                         logger.warning("Direct Pan-STARRS API failed (%s), using empty catalog", api_exc)
                         selectedCatalog = pd.DataFrame()
                     
-                    # Replace all common null representations
+                    # Catch remaining null sentinels (numeric -999 included).
                     selectedCatalog = selectedCatalog.replace([-999, -999.0, "None", "none", "NONE", "null", "NULL"], np.nan)
                     columns = [
                         "raMean",
@@ -1217,11 +1184,11 @@ class Catalog:
                         "yMeanPSFMag",
                         "yMeanPSFMagErr",
                         # Kron magnitudes for star-galaxy separation:
-                        # stars have PSF ≈ Kron; galaxies have Kron > PSF.
+                        # stars have PSF ~ Kron; galaxies have Kron > PSF.
                         "rMeanKronMag",
                         "rMeanKronMagErr",
                     ]
-                    # Only keep columns that are present in the API response
+                    # Keep only columns present in the API response.
                     missing_cols = [c for c in columns if c not in selectedCatalog.columns]
                     if missing_cols:
                         logger.warning(
@@ -1239,7 +1206,7 @@ class Catalog:
                         _kron = pd.to_numeric(selectedCatalog["rMeanKronMag"], errors="coerce")
                         _both_finite = np.isfinite(_psf) & np.isfinite(_kron)
                         _is_star = _both_finite & (np.abs(_psf - _kron) < 0.1)
-                        # Keep sources where both are finite and star-like, OR where Kron is missing (conservative keep)
+                        # Conservative keep: star-like, or Kron mag missing.
                         _keep = _is_star | ~np.isfinite(_kron)
                         n_before = len(selectedCatalog)
                         selectedCatalog = selectedCatalog[_keep].copy()
@@ -1249,7 +1216,7 @@ class Catalog:
                                 "Pan-STARRS: removed %d extended sources (|PSF-Kron| >= 0.1 mag); %d point sources remain.",
                                 n_gal, len(selectedCatalog),
                             )
-                        # Drop Kron columns - not needed downstream
+                        # Kron columns were only needed for the star cut.
                         selectedCatalog = selectedCatalog.drop(
                             columns=[c for c in ["rMeanKronMag", "rMeanKronMagErr"] if c in selectedCatalog.columns],
                             errors="ignore",
@@ -1265,7 +1232,7 @@ class Catalog:
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
-                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    # Write to target_dir (not cwd) to avoid misplaced files.
                     csv_path = os.path.join(target_dir, f"{fname}.csv")
                     selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
@@ -1288,13 +1255,12 @@ class Catalog:
             # should not proceed without a valid catalog.
             raise
 
-        # Limit catalog size if max_sources is specified
         if max_sources is not None and selectedCatalog is not None and len(selectedCatalog) > max_sources:
             logger.info(
                 "Limiting catalog from %s to %s sources",
                 len(selectedCatalog), max_sources,
             )
-            # Sort by distance to target if RA and DEC columns are available
+            # Prefer the sources nearest the target when RA/DEC exist.
             if "RA" in selectedCatalog.columns and "DEC" in selectedCatalog.columns:
                 from astropy.coordinates import SkyCoord
                 from astropy import units as u
@@ -1308,7 +1274,6 @@ class Catalog:
                 selectedCatalog = selectedCatalog.nsmallest(max_sources, "distance")
                 selectedCatalog = selectedCatalog.drop(columns=["distance"])
             else:
-                # If RA/DEC not available, just take the first max_sources rows
                 selectedCatalog = selectedCatalog.head(max_sources)
             logger.info("Catalog limited to %s sources", len(selectedCatalog))
 
@@ -1377,7 +1342,7 @@ class Catalog:
             logger.info("Cleaning %s sources", len(selectedCatalog))
 
         try:
-            # Early exit if catalog is None or empty (e.g. Gaia service failure)
+            # Catalog can be empty after a service failure (e.g. Gaia).
             if selectedCatalog is None or len(selectedCatalog) == 0:
                 logger.warning("Selected catalog is empty; skipping catalog cleaning.")
                 return None
@@ -1387,7 +1352,6 @@ class Catalog:
             catalog_autophot_input_yml = "catalog.yml"
             catalogName = catalogName or self.input_yaml["catalog"]["use_catalog"]
 
-            # Load catalog keyword mappings
             catalog_keywords = AutophotYaml(
                 os.path.join(filepath, "databases", catalog_autophot_input_yml),
                 catalogName,
@@ -1432,11 +1396,11 @@ class Catalog:
                         selectedCatalog[catalog_keywords["DEC"]].values, dtype=float
                     )
 
-                    # Angular pre-filter: must match how the catalog was queried (usually
-                    # within max_distance arcmin of the science target). Using CRVAL + a
-                    # fixed 1 deg cap wrongly drops on-chip sources on wide stacks / coadds
-                    # where CRVAL sits far from the field geometric center (common after
-                    # astrometry.net SIP updates on template images).
+                    # Angular pre-filter must match how the catalog was queried
+                    # (usually within max_distance arcmin of the target). A
+                    # CRVAL + fixed 1 deg cap wrongly drops on-chip sources on
+                    # wide stacks/coadds where CRVAL sits far from the field
+                    # center (common after astrometry.net SIP updates).
                     cfg_cat = self.input_yaml.get("catalog", {}) or {}
                     max_dist_arcmin = float(cfg_cat.get("max_distance", 10.0))
                     t_ra = self.input_yaml.get("target_ra")
@@ -1449,7 +1413,7 @@ class Catalog:
                     ):
                         cen_ra = float(t_ra)
                         cen_dec = float(t_dec)
-                        # Query radius plus a generous margin (arcsec)
+                        # Query radius plus a generous margin, in arcsec.
                         max_distance_threshold = (max_dist_arcmin + 5.0) * 60.0
                     else:
                         shape = getattr(image_wcs, "array_shape", None)
@@ -1500,8 +1464,9 @@ class Catalog:
                     ra_values = ra_values[valid_indices]
                     dec_values = dec_values[valid_indices]
 
-                    # Full distortion (SIP, etc.): avoid wcs_world2pix, which can disagree
-                    # with all_pix2world / solve-field SIP headers used elsewhere.
+                    # world_to_pixel applies full distortion (SIP etc.);
+                    # wcs_world2pix can disagree with all_pix2world /
+                    # solve-field SIP headers used elsewhere.
                     coords = SkyCoord(
                         ra=ra_values * u.deg, dec=dec_values * u.deg, frame="icrs"
                     )
@@ -1527,11 +1492,10 @@ class Catalog:
             image_filter = self.input_yaml["imageFilter"]
             logger.debug("Populating filter columns for %s; input catalog columns: %s", image_filter, list(selectedCatalog.columns))
 
-            # For custom catalogs, auto-detect all filter columns (pattern: <filter> and <filter>_err)
-            # This handles arbitrary filter names without requiring catalog.yml entries
+            # Custom catalogs: auto-detect filter columns as <band>/<band>_err
+            # pairs so arbitrary filter names work without catalog.yml entries.
             if catalogName == "custom":
                 import re
-                # Find all columns that look like filter magnitudes (have corresponding _err column)
                 filter_cols = []
                 for col in selectedCatalog.columns:
                     if str(col).endswith('_err'):
@@ -1541,23 +1505,21 @@ class Catalog:
                         filter_cols.append(col)
                         logger.debug("Auto-detected filter column pair: %s / %s", col, err_col)
 
-                # Copy all detected filter columns to output
                 for col in filter_cols:
                     err_col = f"{col}_err"
                     outputCatalog[col] = selectedCatalog[col].values
                     outputCatalog[err_col] = selectedCatalog[err_col].values
                     logger.debug("Auto-copied custom filter %s from catalog", col)
 
-            # Always ensure the current image filter is populated (primary logic)
+            # The current image filter must always be populated.
             for col in [image_filter, f"{image_filter}_err"]:
                 if col in outputCatalog.columns:
                     logger.debug("Column %s already present in output catalog", col)
                     continue
-                # First try catalog.yml mapping
+                # catalog.yml mapping first, then exact-name fallback.
                 if col in catalog_keywords and catalog_keywords[col] in selectedCatalog:
                     outputCatalog[col] = selectedCatalog[catalog_keywords[col]].values
                     logger.debug("Mapped %s from catalog_keywords", col)
-                # Fallback: copy directly if column exists with exact name match
                 elif col in selectedCatalog.columns:
                     outputCatalog[col] = selectedCatalog[col].values
                     logger.debug("Copied %s directly from catalog", col)
@@ -1575,7 +1537,7 @@ class Catalog:
 
             for filter_x in availableFilters["default_dmag"].keys():
                 for col in [filter_x, f"{filter_x}_err"]:
-                    # First try catalog.yml mapping
+                    # catalog.yml mapping first, then exact-name fallback.
                     if (
                         filter_x in catalog_keywords
                         and catalog_keywords.get(col) in selectedCatalog
@@ -1583,10 +1545,9 @@ class Catalog:
                         outputCatalog[col] = selectedCatalog[
                             catalog_keywords[col]
                         ].values
-                    # Fallback: copy directly if column exists with exact name match
                     elif col in selectedCatalog.columns:
                         outputCatalog[col] = selectedCatalog[col].values
-                    # Note: case-insensitive fallback removed to prevent conflating
+                    # NOTE: no case-insensitive fallback - it would conflate
                     # different photometric systems (e.g. SDSS r vs Cousins R).
 
             # --- Early return if only updating names ---
@@ -1618,7 +1579,7 @@ class Catalog:
 
             # --- Full cleaning procedures ---
             if full_clean:
-                # Remove sources with missing filter information
+                # Drop sources missing the image-filter magnitude.
                 image_filter = self.input_yaml["imageFilter"]
                 if image_filter in outputCatalog.columns:
                     hasFilterinfo = np.isfinite(outputCatalog[image_filter].values)
@@ -1633,7 +1594,7 @@ class Catalog:
                         f"available columns: {list(outputCatalog.columns)}"
                     )
 
-            # Final deduplication before returning
+            # Final deduplication before returning.
             if not outputCatalog.empty and {"RA", "DEC"}.issubset(outputCatalog.columns):
                 n_before = len(outputCatalog)
                 outputCatalog = _skycoord_dedup_keep_one(outputCatalog, sep_threshold_arcsec=0.1)
@@ -1662,8 +1623,8 @@ class Catalog:
         """
         Recenter sources in an image, selecting centroiding method from FWHM.
         Undersampled (FWHM <= undersampled_fwhm_threshold, default 2.5 px): 2D Gaussian fit for subpixel accuracy.
-        Well-sampled (FWHM > threshold): center-of-mass. Robust against fully masked cutouts.
-        Error-weighted centroiding has been removed; this routine always uses
+        Well-sampled (FWHM > threshold): center-of-mass. Tolerates fully masked cutouts.
+        Error-weighted centroiding was removed; this routine always uses
         unweighted centroiding for stability across diverse background/error maps.
         """
         try:
@@ -1691,7 +1652,8 @@ class Catalog:
                 self.input_yaml.get("undersampled_mode", fwhm <= undersampled_thr)
             )
 
-            # Box size: default ~3xFWHM, odd, at least 3; for undersampled use at least 7 for 2DG
+            # Box size ~3xFWHM (odd, >=3); undersampled needs >=7 for the
+            # 2D Gaussian fit to constrain the core.
             if boxsize is None:
                 boxsize = max(3, int(np.ceil(fwhm) * 3))
             boxsize = int(boxsize)
@@ -1699,8 +1661,8 @@ class Catalog:
                 boxsize = 7
             boxsize = boxsize if boxsize % 2 != 0 else boxsize + 1
             boxsize = max(boxsize, 3)
-            # Border must account for aperture photometry annulus (aperture + gap + width)
-            # Use configurable annulus parameters consistent with aperture.py
+            # Border must clear the aperture annulus (aperture + gap + width);
+            # annulus parameters match aperture.py conventions.
             phot_cfg = self.input_yaml.get("photometry", {}) or {}
             _ap_radius = phot_cfg.get("aperture_radius")
             ap_radius = float(_ap_radius if _ap_radius is not None else fwhm * 1.7)
@@ -1712,7 +1674,7 @@ class Catalog:
             border = max(boxsize, int(np.ceil(annulus_outer)))
             logger.info("Boxsize: %s px, Border: %s px (annulus outer=%.1f, undersampled=%s)", boxsize, border, annulus_outer, undersampled)
 
-            # Filter sources near image borders
+            # Drop sources whose cutout would cross the image border.
             height, width = image.shape
             mask_x = (selectedCatalog["x_pix"] > border) & (
                 selectedCatalog["x_pix"] < width - border
@@ -1726,12 +1688,11 @@ class Catalog:
                 logger.info("Recentering %s sources within border", sum(mask))
                 selectedCatalog = selectedCatalog.loc[mask].copy()
 
-            # Extract initial coordinates
             old_x = selectedCatalog["x_pix"].values
             old_y = selectedCatalog["y_pix"].values
             nan_mask = ~np.isfinite(image)
 
-            # Pre-check cutouts to avoid fully masked regions
+            # Skip sources whose cutout is fully masked.
             valid_sources = self._check_valid_cutouts(
                 image, old_x, old_y, boxsize, nan_mask
             )
@@ -1744,7 +1705,7 @@ class Catalog:
             old_x_valid = old_x[valid_sources]
             old_y_valid = old_y[valid_sources]
 
-            # Undersampled (FWHM <= threshold): 2D Gaussian; well-sampled: COM
+            # Undersampled: 2D Gaussian for subpixel accuracy; else COM.
             if undersampled:
                 logger.info("Using 2D Gaussian centroiding (FWHM <= %.1f px, undersampled)", undersampled_thr)
                 centroid_func = centroid_2dg
@@ -1771,7 +1732,7 @@ class Catalog:
             x_err_valid = np.full(len(x_valid), np.nan)
             y_err_valid = np.full(len(y_valid), np.nan)
 
-            # Create full arrays with NaNs for invalid sources
+            # NaN-fill invalid sources so indices stay aligned.
             x = np.full(len(old_x), np.nan)
             y = np.full(len(old_y), np.nan)
             x[valid_sources] = x_valid
@@ -1782,7 +1743,6 @@ class Catalog:
             x_err[valid_sources] = x_err_valid
             y_err[valid_sources] = y_err_valid
 
-            # Update coordinates
             selectedCatalog.loc[:, "x_pix"] = x
             selectedCatalog.loc[:, "y_pix"] = y
             if "x_pix_err" not in selectedCatalog.columns:
@@ -1792,7 +1752,7 @@ class Catalog:
             selectedCatalog.loc[:, "x_pix_err"] = x_err
             selectedCatalog.loc[:, "y_pix_err"] = y_err
 
-            # Filter sources that moved outside the border
+            # Drop sources recentered outside the border.
             mask_x = (selectedCatalog["x_pix"] >= border) & (
                 selectedCatalog["x_pix"] < width - border
             )
@@ -1805,7 +1765,6 @@ class Catalog:
                 logger.warning("Failed to recenter %s sources - ignoring", sum(~mask))
                 selectedCatalog = selectedCatalog.loc[mask].copy()
 
-            # Compute median offset
             valid = (
                 np.isfinite(x)
                 & np.isfinite(y)
@@ -1820,7 +1779,6 @@ class Catalog:
             else:
                 logger.warning("No valid sources to compute median offset.")
 
-            # Remove NaNs
             selectedCatalog = selectedCatalog.loc[
                 selectedCatalog[["x_pix", "y_pix"]].notna().all(axis=1)
             ]
@@ -1869,18 +1827,15 @@ class Catalog:
         valid_mask = np.ones(len(x_coords), dtype=bool)
 
         for i, (x, y) in enumerate(zip(x_coords, y_coords)):
-            # Define cutout bounds
             x_min = int(x - half_box)
             x_max = int(x + half_box + 1)
             y_min = int(y - half_box)
             y_max = int(y + half_box + 1)
 
-            # Check bounds
             if x_min < 0 or x_max > width or y_min < 0 or y_max > height:
                 valid_mask[i] = False
                 continue
 
-            # Check if cutout has enough unmasked pixels
             cutout_mask = mask[y_min:y_max, x_min:x_max]
             n_pix = cutout_mask.size
             n_unmasked = int(np.sum(~cutout_mask))
@@ -1920,13 +1875,13 @@ class Catalog:
         if catalog.empty:
             return catalog
 
-        # Vectorized angular separation using small-angle approximation
-        # (valid for separations << 1 degree, which tolerance in arcsec guarantees)
+        # Small-angle approximation is fine here: tolerance is in arcsec,
+        # so separations are always << 1 degree.
         dec_rad = np.radians(dec)
         ra_vals = catalog["RA"].values
         dec_vals = catalog["DEC"].values
 
-        delta_ra = (ra_vals - ra) * np.cos(dec_rad)   # arcsec-equivalent in degrees
+        delta_ra = (ra_vals - ra) * np.cos(dec_rad)   # cos(dec) correction
         delta_dec = dec_vals - dec
         separation_deg = np.sqrt(delta_ra**2 + delta_dec**2)
         separation_arcsec = separation_deg * 3600.0
@@ -1961,17 +1916,6 @@ class Catalog:
             Search radius in arcminutes (default is 2).
         max_separation : float, optional
             Maximum separation in arcseconds for matching sources (default is 3).
-        # Backward compatibility: support legacy misspelled keyword.
-        if "max_seperation" in kwargs:
-            legacy_value = kwargs.pop("max_seperation")
-            if legacy_value is not None:
-                max_separation = legacy_value
-        if kwargs:
-            logger.warning(
-                "Ignoring unexpected keyword(s) in build_complete_catalog: %s",
-                ", ".join(sorted(kwargs.keys())),
-            )
-
 
         Returns:
         --------
@@ -1981,14 +1925,12 @@ class Catalog:
         catalog_list_str = ",".join([i.upper() for i in catalog_list])
         logger.info(log_step(f"Custom catalog: {catalog_list_str}"))
 
-        # Set default target name if not provided
         if not target_name:
             target_name = self.input_yaml.get("target_name", "Transient")
 
-        # Generate file name for the catalog
-        # Include target RA/DEC to make the cache field-specific (prevents reusing
-        # catalogs from different targets with the same name, which causes N in the
-        # ZP legend to be much larger than the actual number of sources).
+        # Target RA/DEC in the filename makes the cache field-specific;
+        # otherwise catalogs from different targets with the same name get
+        # reused (N in the ZP legend then exceeds the real source count).
         target_ra = target_coords.ra.degree
         target_dec = target_coords.dec.degree
         fname = f"{target_name}_r_{radius}arcmins_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}_CUSTOM.csv"
@@ -1999,7 +1941,6 @@ class Catalog:
         dirname = os.path.join(wdir, "catalog_queries")
         dirname = os.path.join(dirname, "custom")
 
-        # Create directories for storing catalog data
         dirname = os.path.join(wdir, "catalog_queries")
         pathlib.Path(dirname).mkdir(parents=True, exist_ok=True)
         catalog_dir = os.path.join(dirname, "custom_builds")
@@ -2023,23 +1964,22 @@ class Catalog:
             "K",
         ]
 
-        # Create a new list by appending '_err' to each element
         updated_filter_list = []
         for filter in filter_list:
             updated_filter_list.append(filter)
             updated_filter_list.append(f"{filter}_err")
 
-        # Matching tolerance in arcseconds (used by `find_source`)
+        # Matching tolerance in arcseconds (used by `find_source`).
         tolerance_arcsec = max_separation
 
         cols = ["RA", "DEC"] + updated_filter_list
-        
-        # Check if output catalog already exists and load it (with deduplication)
+
+        # A cached combined catalog is reused (after deduplication).
         if os.path.isfile(fpath):
             logger.info("Loading existing custom catalog from %s", fpath)
             existing_catalog = pd.read_csv(fpath)
             if not existing_catalog.empty and {"RA", "DEC"}.issubset(existing_catalog.columns):
-                # Deduplicate: keep one member of every close pair
+                # Keep one member of every close pair.
                 n_before = len(existing_catalog)
                 existing_catalog = _skycoord_dedup_keep_one(existing_catalog, sep_threshold_arcsec=0.1)
                 n_dups = n_before - len(existing_catalog)
@@ -2072,15 +2012,13 @@ class Catalog:
                 catalog_i, catalogName=catalogName, update_names_only=True
             )
 
-            # Vectorised cross-match: build sky coords for both tables at once,
-            # call match_to_catalog_sky once (O(N log N)), then split into new /
-            # update groups.  Falls back to per-row path when output_catalog is
-            # empty (first catalog iteration).
+            # Cross-match via a single match_to_catalog_sky call (O(N log N)),
+            # then split into new / update groups. The empty-catalog branch
+            # (first iteration) just takes every row.
             new_rows = []
             if output_catalog.empty:
-                # No existing sources yet - all entries are new.
-                # Use to_dict('records') instead of iterrows() to avoid creating
-                # a Series object per row (much faster for large catalogs).
+                # to_dict('records') avoids one Series per row (iterrows is
+                # much slower on large catalogs).
                 catalog_cols = [c for c in cols if c in catalog_i.columns]
                 missing_cols = [c for c in cols if c not in catalog_i.columns]
                 sub = catalog_i[catalog_cols].copy()
@@ -2100,7 +2038,7 @@ class Catalog:
                 tol_deg = tolerance_arcsec / 3600.0
                 matched = sep2d.deg < tol_deg
 
-                # Split new (unmatched) sources via boolean mask - no iterrows()
+                # New (unmatched) sources via boolean mask - no iterrows().
                 new_mask = ~matched
                 if new_mask.any():
                     catalog_cols = [c for c in cols if c in catalog_i.columns]
@@ -2110,7 +2048,7 @@ class Catalog:
                         sub[c] = np.nan
                     new_rows = sub[cols].to_dict("records")
 
-                # Vectorised fill-in of missing filter values for matched sources
+                # Fill in missing filter values for matched sources.
                 if matched.any():
                     matched_new_idx = np.where(matched)[0]
                     out_indices = output_catalog.index[idx_match[matched_new_idx]]
@@ -2135,7 +2073,7 @@ class Catalog:
                     len(new_rows_df), catalogName, len(output_catalog),
                 )
 
-        # Final deduplication: keep exactly one member of every close pair
+        # Final deduplication: keep exactly one member of every close pair.
         if not output_catalog.empty:
             n_before_dedup = len(output_catalog)
             output_catalog = _skycoord_dedup_keep_one(output_catalog, sep_threshold_arcsec=0.1)
@@ -2148,7 +2086,6 @@ class Catalog:
                     f"Removed {n_removed} duplicate sources from final combined catalog"
                 )
         
-        # Final output catalog is ready
         output_catalog.to_csv(fpath, index=False, float_format="%.6f")
         logger.debug("Saved clean catalog to %s", fpath)
         return output_catalog
@@ -2162,7 +2099,7 @@ class Catalog:
     def check_saturation_range(self, catalog, threshold=5):
         """
         Checks the saturation range of a given catalog by plotting catalog magnitude vs. instrumental magnitude
-        and robustly fitting a straight line with slope constrained to ~1 using RANSAC.
+        and fitting a straight line with slope fixed to ~1 using RANSAC.
         Determines the linearity range within the 0.5 to 95 flux range of the inliers.
 
         Parameters:
@@ -2178,7 +2115,6 @@ class Catalog:
             (pd.DataFrame, dict, list) Updated clean catalog containing only inliers,
             fit parameters including errors, and saturation range [min_flux, max_flux].
         """
-        # Initialize fit parameters dictionary
         fit_params = {
             "slope": None,
             "intercept": None,
@@ -2188,7 +2124,6 @@ class Catalog:
         saturation_range = [0, np.inf]
 
         try:
-            # Extract file paths
             fpath = self.input_yaml.get("fpath", "")
             if not fpath:
                 raise ValueError("File path is missing from input_yaml.")
@@ -2199,12 +2134,10 @@ class Catalog:
                 log_step(f"Linearity: saturation check ({len(catalog)} sources)")
             )
 
-            # Extract filter
             use_filter = self.input_yaml.get("imageFilter")
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
 
-            # Check for required columns
             required_columns = ["flux_AP", use_filter, f"{use_filter}_err"]
             missing_columns = [
                 col for col in required_columns if col not in catalog.columns
@@ -2227,7 +2160,6 @@ class Catalog:
                     )
                     catalog = catalog[~threshold_cut]
 
-            # Calculate instrumental magnitude
             flux = catalog["flux_AP"].values
             flux_err = catalog["flux_AP_err"].values
             # NaN for non-positive fluxes (same convention as functions.mag)
@@ -2238,7 +2170,7 @@ class Catalog:
             catalog_mag = catalog[use_filter].values
             catalog_mag_err = catalog[f"{use_filter}_err"].values
 
-            # Filter out high-error points (0.5 mag matches _prepare_catalog threshold)
+            # 0.5 mag combined-error cut matches the _prepare_catalog threshold.
             error_mask = np.sqrt(catalog_mag_err**2 + inst_mag_err**2) < 0.5
             clean_catalog = catalog[error_mask].copy()
 
@@ -2246,30 +2178,28 @@ class Catalog:
                 logger.warning("Too few points left after error cut.")
                 return clean_catalog, fit_params, saturation_range
 
-            # Calculate S/N for high-S/N subset selection.
-            # The high-S/N subset is used ONLY to fit the RANSAC linear model;
-            # the model is then applied to the FULL catalog to identify all
-            # inliers (including fainter but valid sources).
+            # The high-S/N subset is used ONLY to fit the RANSAC model; the
+            # model is then applied to the FULL catalog so faint but valid
+            # sources can still be inliers.
             flux = clean_catalog["flux_AP"].values
             flux_err = clean_catalog["flux_AP_err"].values
-            # Add protection for division by zero
-            flux_err_safe = np.maximum(flux_err, 1e-10)
+            flux_err_safe = np.maximum(flux_err, 1e-10)  # guard flux_err=0
             snr_values = np.abs(flux) / flux_err_safe
 
-            # Find a high S/N threshold that gives enough sources for RANSAC
+            # Step down the S/N floor until RANSAC has enough sources.
             min_snr_thresholds = [100, 75, 50, 30, 20, 10]
             selected_indices = None
             for min_snr in min_snr_thresholds:
                 high_snr_mask = snr_values >= min_snr
                 n_high_snr = np.sum(high_snr_mask)
-                if n_high_snr >= 10:  # Need at least 10 sources for RANSAC fit
+                if n_high_snr >= 10:  # RANSAC needs at least ~10 sources
                     selected_indices = high_snr_mask
                     logger.info(
                         f"Selected {n_high_snr} high S/N sources (SNR >= {min_snr}) for linearity fit"
                     )
                     break
 
-            # Compute instrumental magnitudes for the FULL clean catalog
+            # Instrumental magnitudes for the FULL clean catalog.
             flux_safe = flux.astype(float).copy()
             flux_safe[flux_safe <= 0] = np.nan
             inst_mag_linear = -2.5 * np.log10(flux_safe)
@@ -2277,13 +2207,12 @@ class Catalog:
             catalog_mag_linear = clean_catalog[use_filter].values
             catalog_mag_err_linear = clean_catalog[f"{use_filter}_err"].values
 
-            # Import PenalisedSlopeRegressor from zeropoint module to avoid duplication
+            # Local import: reuse zeropoint's regressor, avoid duplication.
             from zeropoint import PenalisedSlopeRegressor
             ConstrainedSlopeRegressor = PenalisedSlopeRegressor
 
-            # Fit with RANSAC
-            # Use high-S/N subset for fitting if available, then apply the
-            # fitted model to the FULL catalog to identify all inliers.
+            # Fit on the high-S/N subset if available, then apply the model
+            # to the FULL catalog to identify all inliers.
             X_full = inst_mag_linear.reshape(-1, 1)
             y_full = catalog_mag_linear
 
@@ -2300,9 +2229,9 @@ class Catalog:
 
             if len(X_fit) > 1:
                 base_estimator = ConstrainedSlopeRegressor(
-                    slope_constraint=1.0, slope_tolerance=0  # Keep slope strictly fixed to 1
+                    slope_constraint=1.0, slope_tolerance=0  # slope fixed to 1
                 )
-                # Adaptive residual threshold based on data scatter
+                # Residual threshold adapts to the scatter in this field.
                 initial_mad = np.median(np.abs(y_fit - np.median(y_fit)))
                 ransac_residual_threshold = max(3.0 * initial_mad, 0.1)
                 ransac = RANSACRegressor(
@@ -2315,12 +2244,12 @@ class Catalog:
                 slope = ransac.estimator_.slope_
                 intercept = ransac.estimator_.intercept_
 
-                # Apply the fitted model to the FULL catalog to get inliers
+                # Inliers are computed on the FULL catalog, not the fit subset.
                 residuals_full = y_full - (slope * X_full.flatten() + intercept)
                 inlier_mask = np.abs(residuals_full) < ransac_residual_threshold
 
-                # Post-RANSAC sigma clipping on the full-catalog inliers
-                # Use sigma=3.0 (was 2.5) for stability with small samples
+                # Post-RANSAC sigma clip on the full-catalog inliers;
+                # sigma=3.0 (not 2.5) is more stable for small samples.
                 if np.sum(inlier_mask) > 5:
                     inlier_residuals = residuals_full[inlier_mask]
                     clip_sigma = 3.0 if np.sum(inlier_mask) < 30 else 2.5
@@ -2334,7 +2263,7 @@ class Catalog:
                     if n_sigma_outliers > 0:
                         logger.info("Post-RANSAC sigma clipping (sigma=%s) removed %s additional outliers", clip_sigma, n_sigma_outliers)
 
-                # Recompute intercept on the final inlier set
+                # Recompute the intercept on the final inlier set.
                 if np.sum(inlier_mask) > 1 and np.isfinite(slope):
                     try:
                         intercept = float(
@@ -2349,17 +2278,15 @@ class Catalog:
                     f"RANSAC: {np.sum(inlier_mask)}/{len(X_full)} inliers "                    f"(fit on {len(X_fit)}, applied to {len(X_full)}), "                    f"ZP={intercept:.3f}"
                 )
 
-                # Calculate intercept error
+                # Intercept error: standard error of the intercept.
                 inlier_X = X_full[inlier_mask]
                 inlier_y = y_full[inlier_mask]
                 residuals = inlier_y - (slope * inlier_X.flatten() + intercept)
-                residual_std = np.std(residuals, ddof=1)  # Use sample std (unbiased)
+                residual_std = np.std(residuals, ddof=1)  # sample std (ddof=1)
                 n_points = len(inlier_X)
                 x_mean = np.mean(inlier_X)
-                x_var = np.var(inlier_X, ddof=1)  # Use sample variance (unbiased)
+                x_var = np.var(inlier_X, ddof=1)  # sample variance (ddof=1)
 
-                # Standard error of the intercept
-                # Add protection for zero variance
                 if x_var <= 0 or not np.isfinite(x_var):
                     logger.warning("Zero or invalid variance in instrumental magnitudes")
                     intercept_error = np.nan
@@ -2368,7 +2295,6 @@ class Catalog:
                         1 / n_points + x_mean**2 / ((n_points - 1) * x_var)
                     )
 
-                # Update fit parameters
                 fit_params.update(
                     {
                         "slope": slope,
@@ -2381,7 +2307,7 @@ class Catalog:
                     f"Constrained fit results:  Zeropoint = {intercept:.3f} +/- {intercept_error:.3f}"
                 )
 
-                # Calculate linearity range (0.5 to 95 flux range of inliers)
+                # Linearity range = 0.5th to 95th flux percentile of inliers.
                 inlier_flux = flux[inlier_mask]
                 if len(inlier_flux) > 0:
                     min_flux = np.percentile(inlier_flux, 0.5)
@@ -2403,7 +2329,8 @@ class Catalog:
             from plotting_utils import (
                 apply_autophot_mplstyle, get_ransac_color, get_marker_size,
                 get_alpha, get_line_width, ransac_grid, ransac_savefig,
-                set_mag_axes_inverted_xy,
+                set_mag_axes_inverted_xy, format_log_colorbar_ticks,
+                get_plot_ext,
             )
 
             apply_autophot_mplstyle()
@@ -2413,39 +2340,79 @@ class Catalog:
             if fit_line:
                 predicted = fit_line(inst_mag_linear)
                 residuals = catalog_mag_linear - predicted
-                # Use RANSAC inlier mask for plotting consistency
+                # Plot with the same RANSAC inlier mask used for the fit.
                 ransac_inliers = inlier_mask if 'inlier_mask' in locals() else np.ones(len(inst_mag_linear), dtype=bool)
                 ransac_outliers = ~ransac_inliers
+
+                # S/N-driven marker colours; the norm range covers inliers
+                # only -- outliers always get the flat outlier colour.
+                _snr_in = snr_values[ransac_inliers] if 'snr_values' in locals() else np.array([])
+                finite_snr = _snr_in[np.isfinite(_snr_in) & (_snr_in > 0)]
+                snr_norm = None
+                if finite_snr.size >= 3 and np.nanmax(finite_snr) > np.nanmin(finite_snr):
+                    from matplotlib.colors import LogNorm
+                    vmin = max(1.0, float(np.nanmin(finite_snr)))
+                    vmax = float(np.nanpercentile(finite_snr, 98))
+                    if vmax <= vmin:
+                        vmax = vmin * 10.0
+                    snr_norm = LogNorm(vmin=vmin, vmax=vmax)
+                ms_area = get_marker_size('medium') ** 2
+
                 ax1.errorbar(
                     inst_mag_linear[ransac_outliers],
                     catalog_mag_linear[ransac_outliers],
                     yerr=catalog_mag_err_linear[ransac_outliers],
                     xerr=inst_mag_err_linear[ransac_outliers],
-                    fmt="x",
-                    color=get_ransac_color('outliers'),
+                    fmt="none",
                     ecolor="lightgrey",
-                    markersize=get_marker_size('medium'),
                     alpha=get_alpha('medium'),
-                    capsize=get_marker_size('medium'),
-                    elinewidth=0.4,
+                    capsize=get_marker_size('medium') / 4,
+                    elinewidth=0.5,
                     linestyle="None",
+                    zorder=2,
+                )
+                ax1.plot(
+                    inst_mag_linear[ransac_outliers],
+                    catalog_mag_linear[ransac_outliers],
+                    "x", markersize=get_marker_size('medium'),
+                    color=get_ransac_color('outliers'),
+                    alpha=get_alpha('medium'), linestyle="None",
                     label=f"Outliers [{np.sum(ransac_outliers)}]",
+                    zorder=3,
                 )
                 ax1.errorbar(
                     inst_mag_linear[ransac_inliers],
                     catalog_mag_linear[ransac_inliers],
                     yerr=catalog_mag_err_linear[ransac_inliers],
                     xerr=inst_mag_err_linear[ransac_inliers],
-                    fmt="o",
-                    markersize=get_marker_size('medium'),
-                    color=get_ransac_color('zeropoint_ap'),
+                    fmt="none",
                     ecolor="lightgrey",
                     alpha=get_alpha('dark'),
-                    capsize=get_marker_size('medium'),
-                    elinewidth=0.4,
+                    capsize=get_marker_size('medium') / 4,
+                    elinewidth=0.5,
                     linestyle="None",
-                    label=f"Inliers [{np.sum(ransac_inliers)}]",
+                    zorder=4,
                 )
+                if snr_norm is not None:
+                    sc_in = ax1.scatter(
+                        inst_mag_linear[ransac_inliers],
+                        catalog_mag_linear[ransac_inliers],
+                        c=snr_values[ransac_inliers], cmap="viridis", norm=snr_norm,
+                        marker="o", s=ms_area, alpha=get_alpha('dark'),
+                        label=f"Inliers [{np.sum(ransac_inliers)}]",
+                        zorder=5,
+                    )
+                    cb = fig.colorbar(sc_in, ax=ax1, label="S/N", pad=0.02)
+                    format_log_colorbar_ticks(cb, snr_norm.vmin, snr_norm.vmax)
+                else:
+                    ax1.plot(
+                        inst_mag_linear[ransac_inliers],
+                        catalog_mag_linear[ransac_inliers],
+                        "o", markersize=get_marker_size('medium'),
+                        color=get_ransac_color('zeropoint_ap'),
+                        alpha=get_alpha('dark'), linestyle="None",
+                        label=f"Inliers [{np.sum(ransac_inliers)}]",
+                    )
                 x_range = np.linspace(inst_mag_linear[ransac_inliers].min(), inst_mag_linear[ransac_inliers].max(), 100)
                 y_fit = fit_line(x_range)
                 ax1.fill_between(
@@ -2467,7 +2434,7 @@ class Catalog:
                     ),
                 )
 
-                # Add vertical lines showing linearity range in instrumental magnitude
+                # Mark the linearity range in instrumental magnitude.
                 if len(inlier_flux) > 0:
                     min_inst_mag = -2.5 * np.log10(
                         max_flux
@@ -2488,22 +2455,20 @@ class Catalog:
                         alpha=0.7,
                     )
 
-            ax1.set_xlabel(r"Instrumental $m_\mathrm{inst}$ [mag]")
-            ax1.set_ylabel(rf"Catalog $m_\mathrm{{cal,{use_filter}}}$ [mag]")
+            ax1.set_xlabel(r"Instrumental Magnitude $m_\mathrm{inst}$ [mag]")
+            ax1.set_ylabel(rf"Catalog Magnitude $m_\mathrm{{cal,{use_filter}}}$ [mag]")
             set_mag_axes_inverted_xy(ax1)
             ax1.legend(
-                loc="upper left", ncol=1, fontsize=8,
-                frameon=True, facecolor="white", framealpha=1.0,
-                edgecolor="black",
+                loc="upper left", ncol=1, fontsize=8, frameon=False,
             )
             ransac_grid(ax1)
-            save_path = os.path.join(write_dir, f"Saturation_{base_name}.png")
+            save_path = os.path.join(write_dir, f"Saturation_{base_name}{get_plot_ext(self.input_yaml)}")
             ransac_savefig(fig, save_path)
             plt.close(fig)
 
-            # Robust selection: find continuous linear region with tight scatter requirement
+            # Locate the continuous linear region via residual scatter.
             if fit_line:
-                # Validate array lengths are consistent before proceeding
+                # Guard against length mismatches before indexing masks.
                 n_clean = len(clean_catalog)
                 n_flux = len(flux)
                 n_mag = len(catalog_mag_linear)
@@ -2518,7 +2483,6 @@ class Catalog:
                     clean_catalog = clean_catalog[inlier_mask] if n_clean == n_inlier_mask else clean_catalog
                     return clean_catalog, saturation_range
                 
-                # Get inlier sources from RANSAC
                 inlier_catalog = clean_catalog[inlier_mask].copy()
                 inlier_flux = flux[inlier_mask]
                 inlier_inst_mag = inst_mag_linear[inlier_mask]
@@ -2530,12 +2494,11 @@ class Catalog:
                 # for mask computation. We'll reassign after selection is complete.
 
                 if len(inlier_catalog) > 5:
-                    # Calculate residuals for all inliers.
-                    # sklearn LinearRegression.predict() can return shape (N,1) rather
-                    # than (N,) depending on the version.  Flatten immediately so that
-                    # the subtraction is always (N,)-(N,) and cannot broadcast to (N,N),
-                    # which would silently corrupt central_start/central_end and cause an
-                    # IndexError when those values are used to index sorted_flux (size N).
+                    # predict() can return shape (N,1) depending on the sklearn
+                    # version; flatten so the subtraction stays (N,)-(N,) and
+                    # cannot broadcast to (N,N), which would silently corrupt
+                    # central_start/central_end and cause an IndexError when
+                    # indexing sorted_flux (size N).
                     predicted_mag = np.asarray(
                         fit_line(inlier_inst_mag.reshape(-1, 1))
                     ).flatten()
@@ -2543,85 +2506,86 @@ class Catalog:
                         np.asarray(catalog_mag_linear[inlier_mask]).flatten() - predicted_mag
                     )
 
-                    # Sort by flux (bright to faint - smaller mag = brighter)
-                    sort_idx = np.argsort(inlier_flux)[::-1]  # Bright first
+                    # Sort by flux, bright first (smaller mag = brighter).
+                    sort_idx = np.argsort(inlier_flux)[::-1]
                     sorted_flux = inlier_flux[sort_idx]
                     sorted_residuals = residuals[sort_idx]  # already 1D
                     sorted_mag = inlier_inst_mag[sort_idx]
-                    
-                    # TIGHT residual threshold: use 2-sigma instead of 3-sigma for stricter selection
-                    # Calculate from central 50% of sources (most linear region)
+
+                    # Residual threshold comes from the central 50% of
+                    # sources, the most linear region.
                     central_start = len(sorted_residuals) // 4
                     central_end = 3 * len(sorted_residuals) // 4
                     central_residuals = sorted_residuals[central_start:central_end]
-                    
+
                     if len(central_residuals) > 3:
                         median_resid = np.median(central_residuals)
                         mad_residual = np.median(np.abs(central_residuals - median_resid))
-                        # Relaxed threshold: 3.0 * MAD or 0.1 mag to fit majority of points better
+                        # Residual floor: 3*MAD, minimum 0.1 mag.
                         residual_threshold = float(np.maximum(3.0 * mad_residual, 0.1))
                     else:
                         residual_threshold = 0.15
-                    
-                    # Find bright end: cut where residuals exceed threshold (saturation/non-linear)
+
+                    # Bright end: cut where residuals exceed the threshold
+                    # (saturation / non-linearity).
                     bright_cut_idx = 0
                     for i in range(len(sorted_residuals)):
-                        resid_val = float(sorted_residuals[i])  # Ensure scalar
+                        resid_val = float(sorted_residuals[i])  # ensure scalar
                         if np.abs(resid_val) > residual_threshold:
-                            bright_cut_idx = i + 1  # Cut this and brighter
+                            bright_cut_idx = i + 1  # cut this and brighter
                         else:
                             break
-                    
-                    # Find faint end: detect where scatter systematically increases
-                    # Use smaller window for tighter control, and require multiple consecutive windows
-                    window_size = max(3, len(sorted_residuals) // 15)  # Smaller window
+
+                    # Faint end: cut where the local scatter systematically
+                    # exceeds the central scatter. Require 2 consecutive
+                    # high-scatter windows so a single noisy window does not
+                    # trigger the cut.
+                    window_size = max(3, len(sorted_residuals) // 15)
                     faint_cut_idx = len(sorted_residuals)
-                    
-                    # Track consecutive high-scatter windows
+
                     high_scatter_count = 0
-                    required_consecutive = 2  # Require 2 consecutive windows with high scatter
-                    
+                    required_consecutive = 2
+
                     for i in range(window_size, len(sorted_residuals) - window_size):
                         window_residuals = sorted_residuals[i-window_size:i+window_size]
                         window_mad = np.median(np.abs(window_residuals - np.median(window_residuals)))
 
-                        # If local scatter exceeds 2.0x central scatter, mark as high scatter (relaxed from 1.5x)
+                        # High scatter = local MAD > 2x central MAD
+                        # (relaxed from 1.5x).
                         if window_mad > 2.0 * mad_residual:
                             high_scatter_count += 1
                             if high_scatter_count >= required_consecutive:
-                                faint_cut_idx = i - window_size  # Cut before this region
+                                faint_cut_idx = i - window_size  # cut before this region
                                 break
                         else:
-                            high_scatter_count = 0  # Reset if scatter drops
-                    
-                    # Additional faint cut: ensure we're not using sources with large individual residuals
-                    # Scan from faint end and find where residuals become acceptable
+                            high_scatter_count = 0  # reset if scatter drops
+
+                    # Second faint cut: drop sources with large individual
+                    # residuals, scanning in from the faint end.
                     for i in range(len(sorted_residuals) - 1, faint_cut_idx - 1, -1):
                         if np.abs(sorted_residuals[i]) > 1.5 * residual_threshold:
-                            faint_cut_idx = i  # Cut this and fainter
+                            faint_cut_idx = i  # cut this and fainter
                         else:
                             break
-                    
-                    # Apply flux range cuts (bright_cut_idx to faint_cut_idx)
+
+                    # Apply flux range cuts (bright_cut_idx to faint_cut_idx).
                     if bright_cut_idx > 0 or faint_cut_idx < len(sorted_flux):
                         min_linear_flux = sorted_flux[min(faint_cut_idx, len(sorted_flux)-1)]
                         max_linear_flux = sorted_flux[bright_cut_idx] if bright_cut_idx < len(sorted_flux) else sorted_flux[0]
-                        
-                        # Ensure we have a valid range
+
                         if min_linear_flux < max_linear_flux:
-                            # Create mask for continuous linear region
                             linear_flux_mask = (flux >= min_linear_flux) & (flux <= max_linear_flux)
-                            
-                            # Apply tight residual threshold to remove individual outliers
-                            # Use inlier arrays only to avoid mismatch with clean_catalog
+
+                            # Residual filter on the inlier arrays only;
+                            # mixing with clean_catalog would mismatch lengths.
                             inlier_catalog_mag_linear = catalog_mag_linear[inlier_mask]
                             inlier_inst_mag_linear = inst_mag_linear[inlier_mask]
                             preds = np.asarray(fit_line(inlier_inst_mag_linear.reshape(-1, 1))).flatten()
                             all_residuals = np.asarray(inlier_catalog_mag_linear).flatten() - preds
                             inlier_residual_mask = np.abs(all_residuals) < residual_threshold
                             
-                            # Expand inlier residual mask back to full array size
-                            # Ensure arrays have matching length to prevent indexing error
+                            # Expand the inlier residual mask back to full
+                            # size; lengths must match to avoid indexing errors.
                             n_inliers = np.sum(inlier_mask)
                             if len(inlier_residual_mask) != n_inliers:
                                 logger.warning(
@@ -2633,7 +2597,7 @@ class Catalog:
                                 linear_residual_mask = np.zeros(len(flux), dtype=bool)
                                 linear_residual_mask[inlier_mask] = inlier_residual_mask
                             
-                            # Combined mask: must be in flux range AND have good residual
+                            # Keep sources in the flux range AND with a good residual.
                             final_linear_mask = linear_flux_mask & linear_residual_mask
 
                             n_bright_cut = np.sum(flux > max_linear_flux)
@@ -2649,20 +2613,20 @@ class Catalog:
                             )
                             
                             if n_selected > 0:
-                                # Saturation range is informational only; we keep all inliers
-                                # for zeropoint fitting to avoid over-aggressive faint-end cuts.
-                                # Use inlier_catalog (which has the same size as the masks)
+                                # Saturation range is informational only; all
+                                # inliers are kept for zeropoint fitting to
+                                # avoid over-aggressive faint-end cuts.
                                 inlier_flux = inlier_catalog["flux_AP"].values
                                 inlier_linear_mask = (inlier_flux >= min_linear_flux) & (inlier_flux <= max_linear_flux)
-                                # Apply residual mask (already same size as inlier_catalog)
+                                # linear_residual_mask already matches inlier_catalog size.
                                 inlier_linear_mask = inlier_linear_mask & linear_residual_mask[inlier_mask]
                                 saturation_range = [
                                     np.percentile(inlier_catalog["flux_AP"].values[inlier_linear_mask], 0.5),
                                     np.percentile(inlier_catalog["flux_AP"].values[inlier_linear_mask], 99.5)
                                 ]
                             else:
-                                # No sources passed tight criteria, fall back to central region only
-                                # Use inlier_catalog to avoid array length mismatch
+                                # Nothing passed; fall back to the central
+                                # region (inlier_catalog avoids length mismatch).
                                 inlier_flux = inlier_catalog["flux_AP"].values
                                 inlier_sorted_flux = np.sort(inlier_flux)[::-1]
                                 central_start = max(0, len(inlier_sorted_flux) // 3)
@@ -2673,8 +2637,8 @@ class Catalog:
                                 else:
                                     logger.warning("No sources passed tight criteria, using all %s inliers", len(inlier_catalog))
                         else:
-                            # Invalid range, use central region
-                            # Use inlier_catalog to avoid array length mismatch
+                            # Invalid range; use the central region
+                            # (inlier_catalog avoids length mismatch).
                             inlier_flux = inlier_catalog["flux_AP"].values
                             inlier_sorted_flux = np.sort(inlier_flux)[::-1]
                             central_start = max(0, len(inlier_sorted_flux) // 3)
@@ -2683,16 +2647,16 @@ class Catalog:
                             if np.sum(central_flux_mask) > 0:
                                 pass
                     else:
-                        # No cuts needed but still apply tight residual filter
+                        # No cuts needed; still report the tight residual filter.
                         tight_residual_mask = np.abs(residuals) < residual_threshold
                         n_tight_outliers = (~tight_residual_mask).sum()
                         if n_tight_outliers > 0:
                             logger.info("Tight residual filter would remove %s sources (keeping all inliers)", n_tight_outliers)
                 else:
-                    # Too few sources for robust selection
+                    # Too few inliers for the linear-range selection.
                     logger.warning("Only %s inliers, skipping robust selection", len(inlier_catalog))
 
-                # Now reassign clean_catalog to inlier_catalog after all mask computations
+                # Reassign clean_catalog only after all mask computations.
                 clean_catalog = inlier_catalog
 
             logger.info("Returning %s sources for zeropoint fitting", len(clean_catalog))
@@ -2744,30 +2708,28 @@ class Catalog:
         """
         n_src = len(df)
 
-        # If dataframe is already small enough, return quickly without extra logging or work.
+        # Small enough: return early without extra logging or work.
         if n_src <= nmax:
             logger.info("Downsampling skipped: %d sources (<= %d target).", n_src, nmax)
             return df.copy()
 
-        # Only emit the full banner when we are actually going to downsample.
+        # Banner only when downsampling actually runs.
         logger.info(
             log_step(f"Downsampling: {n_src} sources -> {nmax} max")
         )
 
-        # Check if required columns exist
         if x_col not in df.columns or y_col not in df.columns:
             error_msg = f"DataFrame must contain '{x_col}' and '{y_col}' columns"
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        # Calculate number of bins (square grid)
+        # Square spatial grid.
         n_bins = int(np.sqrt(nmax))
         sources_per_bin = max(1, nmax // (n_bins**2))
         logger.info(
             f"Using {n_bins}x{n_bins} grid with ~{sources_per_bin} sources per bin"
         )
 
-        # Create spatial bins
         x_bins = np.linspace(df[x_col].min(), df[x_col].max(), n_bins + 1)
         y_bins = np.linspace(df[y_col].min(), df[y_col].max(), n_bins + 1)
         logger.debug("X bins range: %.2f to %.2f", x_bins[0], x_bins[-1])
@@ -2776,18 +2738,16 @@ class Catalog:
         selected_indices = []
         bin_stats = []  # Track bin statistics for logging
 
-        # Iterate through each spatial bin
         logger.info("Processing spatial bins...")
         for i in range(n_bins):
             for j in range(n_bins):
-                # Find sources in current bin
                 in_xbin = (df[x_col] >= x_bins[i]) & (df[x_col] < x_bins[i + 1])
                 in_ybin = (df[y_col] >= y_bins[j]) & (df[y_col] < y_bins[j + 1])
                 bin_indices = np.where(in_xbin & in_ybin)[0]
                 bin_stats.append(len(bin_indices))
 
                 if len(bin_indices) > 0:
-                    # Sort by SNR (highest first) if SNR column exists
+                    # Highest SNR first so bins keep their best sources.
                     if snr_col and snr_col in df.columns:
                         bin_indices = bin_indices[
                             np.argsort(df[snr_col].iloc[bin_indices])[::-1]
@@ -2798,17 +2758,15 @@ class Catalog:
                     else:
                         logger.debug("Bin (%s,%s): %s sources", i, j, len(bin_indices))
 
-                    # Take top sources from this bin
                     selected_indices.extend(bin_indices[:sources_per_bin])
 
-        # Log bin statistics
         logger.info(
             f"Bin statistics: min={min(bin_stats)}, max={max(bin_stats)}, "
             f"avg={np.mean(bin_stats):.1f} sources per bin"
         )
         logger.info("Selected %s sources from spatial bins", len(selected_indices))
 
-        # If we didn't get enough sources, fill with highest SNR remaining sources
+        # Under-filled bins: top up with the highest-SNR remaining sources.
         if len(selected_indices) < nmax:
             logger.warning(
                 f"Only {len(selected_indices)} sources selected from bins, "
@@ -2818,7 +2776,6 @@ class Catalog:
             remaining_indices = list(all_indices - set(selected_indices))
 
             if snr_col and snr_col in df.columns:
-                # Sort remaining sources by SNR (highest first)
                 remaining_indices = sorted(
                     remaining_indices,
                     key=lambda idx: df[snr_col].iloc[idx],
@@ -2826,21 +2783,18 @@ class Catalog:
                 )
                 logger.debug("Sorted remaining sources by SNR")
 
-            # Add top remaining sources
             additional_count = nmax - len(selected_indices)
             selected_indices.extend(remaining_indices[:additional_count])
             logger.info(
                 f"Added {additional_count} additional sources from remaining pool"
             )
 
-        # Final validation
         final_count = len(selected_indices)
         if final_count > nmax:
             logger.warning("Selected %s sources (exceeds target %s)", final_count, nmax)
         else:
             logger.info("Final selection: %s sources", final_count)
 
-        # Return the downsampled dataframe
         logger.info("Downsampling complete")
         return df.iloc[selected_indices].copy()
 
@@ -2908,25 +2862,24 @@ class Catalog:
             return tbin / np.maximum(nr, 1)
 
         def calculate_fwhm(data):
-            """Estimate FWHM from radial profile"""
+            """Estimate FWHM from the radial profile."""
             profile = radial_profile(data)
             half_max = np.max(profile) * 0.5
             above = np.where(profile >= half_max)[0]
             return 2 * (above[-1] - above[0]) if len(above) > 1 else np.nan
 
         def calculate_roundness(data):
-            """Calculate roundness (1 - b/a) from moments"""
+            """Calculate roundness (1 - b/a) from image moments."""
             y, x = np.indices(data.shape)
             xc, yc = data.shape[1] / 2, data.shape[0] / 2
             x = x - xc
             y = y - yc
 
-            # Calculate second moments
+            # Second moments -> eigenvalues give major/minor axes.
             mxx = np.sum(x**2 * data) / np.sum(data)
             myy = np.sum(y**2 * data) / np.sum(data)
             mxy = np.sum(x * y * data) / np.sum(data)
 
-            # Calculate eigenvalues (major/minor axes)
             term1 = (mxx + myy) / 2
             term2 = np.sqrt(((mxx - myy) / 2) ** 2 + mxy**2)
             a = term1 + term2
@@ -2957,7 +2910,7 @@ class Catalog:
             return (array - min_val) / (max_val - min_val)
 
         def calculate_sharpness(data):
-            """Measure central concentration using Laplacian"""
+            """Measure central concentration via the Laplacian."""
             lap = gaussian_laplace(data, sigma=1)
             center = data.shape[0] // 2, data.shape[1] // 2
             radius = min(center) // 2
@@ -2985,7 +2938,6 @@ class Catalog:
                 if np.isfinite(total_flux) and total_flux > 0:
                     normalized_cutout = norm(cutout_data / total_flux)
 
-                    # Calculate all metrics
                     fwhm = calculate_fwhm(normalized_cutout)
                     roundness = calculate_roundness(normalized_cutout)
                     sharpness = calculate_sharpness(normalized_cutout)
@@ -3006,14 +2958,12 @@ class Catalog:
                 for key in metrics:
                     metrics[key].append(np.nan)
 
-        # Convert metrics to arrays
         for key in metrics:
             metrics[key] = np.array(metrics[key])
 
-        # Create selection masks for each criterion
         fwhm_mask = np.isfinite(metrics["fwhm"])  # & (metrics['fwhm'] < fwhm_threshold)
 
-        # Apply sigma clipping to roundness and sharpness
+        # Sigma-clip roundness and sharpness to reject outliers.
         roundness_sigma_clip = sigma_clip(
             metrics["roundness"],
             sigma=threshold,
@@ -3029,11 +2979,10 @@ class Catalog:
             stdfunc=np.nanstd,
         )
 
-        # Mask for roundness and sharpness after sigma clipping
         roundness_mask = np.isfinite(metrics["roundness"]) & ~roundness_sigma_clip.mask
         sharpness_mask = np.isfinite(metrics["sharpness"]) & ~sharpness_sigma_clip.mask
 
-        # Combine with radial profile outlier rejection
+        # Reject radial-profile outliers.
         if len(radial_profiles) > 0:
             radial_profiles = np.array(radial_profiles)
             clipped = sigma_clip(
@@ -3047,16 +2996,15 @@ class Catalog:
         else:
             profile_mask = np.zeros(len(valid_indices), dtype=bool)
 
-        # Final combined mask (profile_mask only; roundness/sharpness still logged above)
+        # Only profile_mask gates rejection; roundness/sharpness are
+        # diagnostic-only (still logged above).
         combined_mask = profile_mask
 
-        # Ensure that at least a few sources remain
+        # Never let the masking empty the catalog.
         if np.sum(combined_mask) < 5:
             logger.warning("All sources have been rejected by the masking process.")
-            # Keep all sources or apply a fallback strategy
             combined_mask = np.ones_like(combined_mask, dtype=bool)
 
-        # Identify inliers and outliers
         inliers = [
             valid_indices[i] for i, is_good in enumerate(combined_mask) if is_good
         ]
@@ -3064,7 +3012,6 @@ class Catalog:
             valid_indices[i] for i, is_good in enumerate(combined_mask) if not is_good
         ]
 
-        # Log the results
         logger.info(
             f"Point sources: {len(inliers)} | Extended/rejected sources: {len(outliers)}"
         )
@@ -3075,16 +3022,15 @@ class Catalog:
             f"Profile: {sum(~profile_mask)}"
         )
 
-        # Check the cleaned catalog
         if len(inliers) > 0:
             cleaned_catalog = catalog.iloc[inliers].copy()
         else:
             logger.warning(
                 "No sources remained after cleaning. Using original catalog."
             )
-            cleaned_catalog = catalog.copy()  # Fallback to original catalog
+            cleaned_catalog = catalog.copy()  # fall back to the full catalog
 
-        # Add metrics to catalog for diagnostics
+        # Keep per-source metrics in the catalog for diagnostics.
         for key in metrics:
             cleaned_catalog[f"star_{key}"] = metrics[key][combined_mask]
 
@@ -3095,7 +3041,7 @@ class Catalog:
             side_length = int(np.ceil(np.sqrt(num_stars)))
             ncols = side_length
             nrows = ceil(num_stars / ncols)
-            from plotting_utils import apply_autophot_mplstyle
+            from plotting_utils import apply_autophot_mplstyle, get_plot_ext
             apply_autophot_mplstyle()
             plt.ioff()
             fpath = self.input_yaml["fpath"]
@@ -3117,7 +3063,7 @@ class Catalog:
                 vmin, vmax = interval.get_limits(np.asarray(stars[i]))
                 norm = ImageNormalize(vmin=vmin, vmax=vmax)
                 cmap = plt.get_cmap("viridis").copy()
-                cmap.set_bad(color="white")
+                cmap.set_bad(color="magenta")
                 ax.imshow(
                     stars[i],
                     origin="lower",
@@ -3161,7 +3107,7 @@ class Catalog:
             pos = ax_right.get_position()
             ax_right.set_position([pos.x0 + 0.05, pos.y0, pos.width, pos.height])
             output_path = os.path.join(
-                write_dir, f"Zeropoint_Sources_{base}.png"
+                write_dir, f"Zeropoint_Sources_{base}{get_plot_ext(self.input_yaml)}"
             )
             fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
@@ -3191,35 +3137,29 @@ class Catalog:
         pd.DataFrame
             Updated DataFrame with measured flux, instrumental magnitude, and SNR for each source.
         """
-        # Initialize logger
         logger = logging.getLogger(__name__)
 
-        # Log the start of the measurement process
         logger.info(
             log_step(
                 f"Aperture photometry: {len(selectedCatalog)} field sources"
             )
         )
 
-        # Initialize the aperture photometry object with the provided input YAML and image
         initialAperture = Aperture(
             input_yaml=self.input_yaml,
             image=image,
         )
 
-        # Measure the sources using aperture photometry
         selectedCatalog = initialAperture.measure(sources=selectedCatalog)
 
-        # Calculate the instrumental magnitude based on the measured flux (mag() does not mutate flux_AP)
+        # mag() does not mutate flux_AP.
         instMag = mag(selectedCatalog["flux_AP"])
         inst_col = "inst_" + self.input_yaml["imageFilter"] + "_AP"
         selectedCatalog[inst_col] = np.round(instMag, 3)
 
-        # Calculate the SNR for each source
         sourceSNR = snr(selectedCatalog["maxPixel"], selectedCatalog["noiseSky"])
         selectedCatalog["snr"] = np.round(sourceSNR, 1)
 
-        # Log the number of sources with valid instrumental magnitude (finite flux > 0)
         logger.info(
             "Instrumental magnitude of %d sources measured"
             % sum(~np.isnan(selectedCatalog[inst_col]))

@@ -18,7 +18,7 @@ Key design choices
    exclude PSF halos.
 6. **Saturation masking** -- pixels near saturation are masked before
    background estimation.
-7. **BiweightLocationBackground** -- robust to outlier-contaminated boxes.
+7. **BiweightLocationBackground** -- resistant to outlier-contaminated boxes.
 8. **Low exclude_percentile (80 %)** -- boxes with >20 % masked pixels are
    interpolated over rather than estimated.
 """
@@ -44,7 +44,7 @@ from astropy.stats import (
     mad_std,
     gaussian_fwhm_to_sigma,
 )
-from plotting_utils import apply_autophot_mplstyle
+from plotting_utils import apply_autophot_mplstyle, get_plot_ext
 from astropy.convolution import Gaussian2DKernel
 from astropy.convolution import convolve
 from astropy.visualization import ZScaleInterval
@@ -600,7 +600,7 @@ class BackgroundSubtractor:
                 # can detect fainter sources hidden under the sky gradient.
                 if iteration < n_iterations - 1:
                     if update_residual_with_background2d:
-                        # Cheap and robust: coarse mesh, minimal smoothing.
+                        # Cheap and stable: coarse mesh, minimal smoothing.
                         # This is intentionally best-effort; if it fails, fall
                         # back to a flat-median subtraction.
                         try:
@@ -879,7 +879,7 @@ class BackgroundSubtractor:
         img = np.asarray(image, dtype=float)
         ny, nx = img.shape
         med = float(np.nanmedian(img))
-        # Use mad_std for robust scatter estimation (less sensitive to bright sources)
+        # mad_std resists the bright sources this mask is trying to find.
         sig = float(mad_std(img[np.isfinite(img)])) if np.any(np.isfinite(img)) else 0.0
         if sig <= 0:
             return np.zeros_like(img, dtype=bool)
@@ -1138,7 +1138,7 @@ class BackgroundSubtractor:
         """
         Fit a smooth sky-background surface with photutils Background2D.
 
-        Uses BiweightLocation (robust to outlier boxes) and BkgZoomInterpolator
+        Uses BiweightLocation (resists outlier boxes) and BkgZoomInterpolator
         (smooth spline).  On failure, retries with progressively larger boxes
         before falling back to a flat global-median surface.
         """
@@ -1146,7 +1146,7 @@ class BackgroundSubtractor:
         attempts = [
             (box_size, filter_size, mask),
         ]
-        # Fallback 1: double the box size (fewer, larger boxes = more robust).
+        # Fallback 1: double the box size (fewer, larger boxes = less noise-sensitive).
         big = (box_size[0] * 2) | 1
         attempts.append(((big, big), max(3, filter_size), mask))
         # Fallback 2: minimal mask (NaN/saturation only) + large boxes (last resort before flat).
@@ -1195,7 +1195,7 @@ class BackgroundSubtractor:
                     rms_median = 1.0  # Fallback to reasonable default
                 # More adaptive floor: use 10% of median instead of 50%
                 # This preserves more realistic noise variations while preventing zeros
-                rms_floor = max(rms_median * 0.1, 1.0)  # Combined with absolute floor
+                rms_floor = max(rms_median * 0.1, 1e-6)
                 # Preserve NaNs for chip gaps, only clip finite values
                 bkg_rms = np.where(
                     np.isfinite(bkg_rms),
@@ -1326,7 +1326,9 @@ class BackgroundSubtractor:
 
         base = os.path.splitext(os.path.basename(fpath))[0]
         prefix_title = "_".join([p[:1].upper() + p[1:] for p in prefix.split("_")])
-        save_path_png = os.path.join(outdir, f"{prefix_title}_{base}.png")
+        save_path_png = os.path.join(
+            outdir, f"{prefix_title}_{base}{get_plot_ext(getattr(self, 'config', None))}"
+        )
 
         fig.savefig(
             save_path_png, dpi=150, bbox_inches="tight", facecolor="white"
@@ -1881,7 +1883,7 @@ class BackgroundSubtractor:
         # Even with the core masked, interpolation can overshoot near the masked
         # region and produce an artificial negative bowl/ring after subtraction.
         # To stabilize targeted photometry, flatten the background model in the
-        # central region to match a robust local ring level outside the exclusion.
+        # central region to match an outlier-resistant local ring level outside the exclusion.
         if exclude_inner_radius and exclude_inner_radius > 0:
             try:
                 cy = float(y0 - y_min)
@@ -2077,7 +2079,12 @@ class BackgroundSubtractor:
         apply_autophot_mplstyle()
 
         arrays = [image, background, rms, subtracted]
-        titles = ["Science", "Background", "Noise RMS", "Subtracted"]
+        titles = [
+            "Science [ADU]",
+            "Background [ADU]",
+            "Noise RMS [ADU]",
+            "Subtracted [ADU]",
+        ]
         interval = ZScaleInterval()
 
         fig, axes = plt.subplots(1, 4, figsize=set_size(540, 1))
@@ -2085,9 +2092,9 @@ class BackgroundSubtractor:
 
         for i, (ax, data, title) in enumerate(zip(axes, arrays, titles)):
             vmin, vmax = self._safe_zlimits(data, interval)
-            # Render NaNs as white "no data" regions.
+            # Render NaNs as magenta "no data" regions.
             cmap = plt.get_cmap("gray").copy()
-            cmap.set_bad(color="white")
+            cmap.set_bad(color="magenta")
 
             im = ax.imshow(
                 data,
@@ -2104,7 +2111,7 @@ class BackgroundSubtractor:
                 ax.set_yticklabels([])
                 ax.set_ylabel("")
             # Leftmost subplot: overlay masked pixels as a second image:
-            # an RGBA array where masked pixels are semi-transparent red and
+            # an RGBA array where masked pixels are semi-transparent magenta and
             # unmasked pixels are fully transparent.
             if (
                 i == 0
@@ -2116,6 +2123,7 @@ class BackgroundSubtractor:
                     ny, nx = mask.shape
                     overlay = np.zeros((ny, nx, 4), dtype=float)
                     overlay[..., 0] = mask.astype(float)  # red channel = 1 where masked
+                    overlay[..., 2] = mask.astype(float)  # blue channel = 1 -> magenta
                     overlay[..., 3] = (
                         mask.astype(float) * 0.6
                     )  # alpha = 0.6 where masked
@@ -2144,7 +2152,7 @@ class BackgroundSubtractor:
         apply_autophot_mplstyle()
 
         arrays = [cutout, background, subtracted]
-        titles = ["Science", "Background", "Subtracted"]
+        titles = ["Science [ADU]", "Background [ADU]", "Subtracted [ADU]"]
         interval = ZScaleInterval()
 
         fig, axes = plt.subplots(1, 3, figsize=set_size(540, 1))
@@ -2152,9 +2160,9 @@ class BackgroundSubtractor:
 
         for i, (ax, data, title) in enumerate(zip(axes, arrays, titles)):
             vmin, vmax = self._safe_zlimits(data, interval)
-            # Render NaNs as white "no data" regions.
+            # Render NaNs as magenta "no data" regions.
             cmap = plt.get_cmap("gray").copy()
-            cmap.set_bad(color="white")
+            cmap.set_bad(color="magenta")
 
             im = ax.imshow(
                 data,
@@ -2172,6 +2180,7 @@ class BackgroundSubtractor:
                     ny, nx = mask.shape
                     overlay = np.zeros((ny, nx, 4), dtype=float)
                     overlay[..., 0] = mask.astype(float)
+                    overlay[..., 2] = mask.astype(float)  # +blue -> magenta
                     overlay[..., 3] = mask.astype(float) * 0.6
 
                     ax.imshow(

@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-FWHM Measurement and Source Detection for Astronomical Images
+FWHM measurement and source detection for astronomical images.
 
-This module provides tools for detecting point-like sources in astronomical images,
-estimating the Full Width at Half Maximum (FWHM), and filtering sources based on various criteria.
-It is designed for robustness and efficiency, with support for background estimation,
-source segmentation, and outlier removal.
+Detects point-like sources, estimates the image FWHM, and filters
+detections by saturation, edge, crowding, and linearity criteria.
 
 Author: Sean Brennan
 Date: 2022-09-28 (updated 2026-02-19)
@@ -72,13 +70,13 @@ warnings.simplefilter("ignore", category=AstropyWarning)
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-SQRT2LOG2 = 2 * np.sqrt(2 * np.log(2))  # 2.354820045
+SQRT2LOG2 = 2 * np.sqrt(2 * np.log(2))  # Gaussian sigma -> FWHM
 
 
 class Find_FWHM:
     """
-    A class for detecting point-like sources in astronomical images and estimating the FWHM.
-    Supports background estimation, source segmentation, and robust outlier removal.
+    Detect point-like sources in an image and estimate the FWHM.
+    Includes background estimation, segmentation, and sigma-clip outlier removal.
     """
 
     def __init__(self, input_yaml: Dict[str, Any]):
@@ -279,13 +277,13 @@ class Find_FWHM:
         cleaned_df = coordinates_df[coordinates_df["is_isolated"]].copy()
 
         if plot:
-            from plotting_utils import apply_autophot_mplstyle, get_marker_size
+            from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext
             apply_autophot_mplstyle()
             zscale = ZScaleInterval()
             norm = ImageNormalize(image, interval=zscale)
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.3))
             cmap = plt.get_cmap("gray").copy()
-            cmap.set_bad(color="white")
+            cmap.set_bad(color="magenta")
             ax.imshow(image, cmap=cmap, origin="lower", norm=norm)
             ax.contour(
                 deblended_map.data,
@@ -313,7 +311,7 @@ class Find_FWHM:
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]
-            png_out = os.path.join(write_dir, f"Segmentation_{base}.png")
+            png_out = os.path.join(write_dir, f"Segmentation_{base}{get_plot_ext(self.input_yaml)}")
             fig.savefig(png_out, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
 
@@ -332,8 +330,9 @@ class Find_FWHM:
         write_dir: bool = True,
     ) -> Tuple[pd.DataFrame, Dict[str, Any], List[float]]:
         """
-        Fast detector linearity check using RANSAC for robust fitting.
-        Identifies sources where the relationship between max pixel value and enclosed flux is linear.
+        Detector linearity check via RANSAC on the m_peak - m_inst offset.
+        For linear (unsaturated) sources that offset is a constant; saturated
+        stars bend away from it.
 
         Args:
             catalog (pd.DataFrame): DataFrame of sources with flux and peak columns.
@@ -347,18 +346,16 @@ class Find_FWHM:
         """
 
         def _mad(x: np.ndarray) -> float:
-            """Compute robust median absolute deviation (MAD) estimator of scatter."""
+            """Median absolute deviation scaled to a standard-deviation equivalent."""
             x = np.asarray(x)
             med = np.nanmedian(x)
             return 1.4826 * np.nanmedian(np.abs(x - med))
 
         class ConstantOffsetRegressor(BaseEstimator, RegressorMixin):
             """
-            Fast robust regressor for y = intercept (fixed zero slope).
-
-            In linearity space, we fit delta_mag = m_peak - m_inst as a constant.
-            Using the median keeps this robust and avoids expensive per-trial
-            numerical optimization inside RANSAC.
+            Zero-slope regressor for RANSAC: in linearity space
+            delta_mag = m_peak - m_inst is a constant, so the median is a
+            closed-form fit and avoids per-trial numerical optimization.
             """
 
             def fit(self, X: np.ndarray, y: np.ndarray):
@@ -429,7 +426,7 @@ class Find_FWHM:
             df = df.loc[m0].copy()
             fit_params["n_after_quality_cuts"] = int(len(df))
 
-            # --- Convert fluxes -> magnitudes ---
+            # --- Fluxes -> magnitudes ---
             flux = df["flux_AP"].values.astype(float)
             peak = df["maxPixel"].values.astype(float)
             # NaN for non-positive fluxes (same convention as functions.mag)
@@ -457,7 +454,7 @@ class Find_FWHM:
             X = df["m_inst"].values.reshape(-1, 1)
             y = delta.values
             n_pts = len(df)
-            # Increased min_samples to avoid focusing on clustered points
+            # Larger min_samples keeps RANSAC from locking onto clustered points.
             min_samples = min(15, max(5, int(0.5 * n_pts)))
             # RANSAC requires min_samples <= n_samples. For very small catalogs
             # (e.g. 4 sources), clamp to avoid ValueError.
@@ -466,35 +463,65 @@ class Find_FWHM:
                 logger.warning("Too few points for linearity RANSAC (need at least 2).")
                 return df.reset_index(drop=True), fit_params, saturation_range
 
-            # Increased max_trials for better sampling
             max_trials = int(min(500, max(100, 15 * n_pts)))
 
-            # Prioritize high S/N sources (S/N > 5) to avoid fitting to low-quality measurements
-            # Use combined magnitude error as proxy: combined_err = sqrt(m_inst_err^2 + m_peak_err^2)
-            # combined_err < 0.3 mag corresponds to S/N > 3.6 (conservative threshold)
+            # Fit on high-S/N sources only: low-S/N points add scatter, not
+            # signal. combined_err < 0.3 mag ~ S/N > 3.6 (conservative).
             combined_err = np.sqrt(np.square(df["m_inst_err"].values) + np.square(df["m_peak_err"].values))
             snr_mask = combined_err < 0.3
+
+            # Undersampled data: the m_peak - m_inst offset is dominated by
+            # subpixel-phase sampling jitter rather than detector
+            # non-linearity, so a fixed small residual threshold rejects a
+            # large fraction of genuine stars.  Scale the RANSAC residual
+            # threshold to the measured high-S/N offset scatter (capped at
+            # 0.75 mag so genuinely saturated/non-linear sources are still
+            # excluded) and skip the bin-wise majority filter below.
+            phot_cfg = self.input_yaml.get("photometry", {}) or {}
+            _us_fwhm_thr = float(phot_cfg.get("undersampled_fwhm_threshold", 2.5))
+            try:
+                _img_fwhm = float(self.input_yaml.get("fwhm", np.nan))
+            except (TypeError, ValueError):
+                _img_fwhm = np.nan
+            undersampled = np.isfinite(_img_fwhm) and _img_fwhm <= _us_fwhm_thr
+            residual_threshold_eff = float(residual_threshold)
+            if undersampled:
+                _ref = snr_mask if int(snr_mask.sum()) >= 5 else np.ones(n_pts, dtype=bool)
+                _offset_scatter = _mad(y[_ref])
+                _adaptive_thr = min(
+                    0.75, max(residual_threshold_eff, 3.0 * _offset_scatter)
+                )
+                if _adaptive_thr > residual_threshold_eff + 1e-9:
+                    residual_threshold_eff = _adaptive_thr
+                    logger.info(
+                        "Undersampled image (FWHM=%.2f px): relaxed linearity "
+                        "residual threshold to %.2f mag (high-S/N offset "
+                        "scatter %.2f mag).",
+                        _img_fwhm,
+                        residual_threshold_eff,
+                        _offset_scatter,
+                    )
             if snr_mask.sum() >= 2:
                 X_snr = X[snr_mask]
                 y_snr = y[snr_mask]
                 ransac = RANSACRegressor(
                     estimator=ConstantOffsetRegressor(),
-                    residual_threshold=residual_threshold,
+                    residual_threshold=residual_threshold_eff,
                     max_trials=max_trials,
                     min_samples=min(min(15, max(5, int(0.5 * len(y_snr)))), len(y_snr)),
                     random_state=42,
                 )
                 ransac.fit(X_snr, y_snr)
                 b = float(ransac.estimator_.intercept_)
-                # Map inliers back to full array
+                # inlier_mask_ indexes the high-S/N subset; expand to full frame.
                 inlier_mask_full = np.zeros(n_pts, dtype=bool)
                 inlier_mask_full[snr_mask] = ransac.inlier_mask_
                 inlier_mask = inlier_mask_full
             else:
-                # Fallback to all sources if not enough high S/N sources
+                # Not enough high-S/N sources: fit everything.
                 ransac = RANSACRegressor(
                     estimator=ConstantOffsetRegressor(),
-                    residual_threshold=residual_threshold,
+                    residual_threshold=residual_threshold_eff,
                     max_trials=max_trials,
                     min_samples=min_samples,
                     random_state=42,
@@ -503,8 +530,8 @@ class Find_FWHM:
                 b = float(ransac.estimator_.intercept_)
                 inlier_mask = ransac.inlier_mask_.copy()
 
-            # Check if inliers are overly clustered in magnitude space
-            # If inliers are concentrated in a small range, the fit may be biased
+            # Inliers concentrated in a narrow magnitude range indicate a
+            # biased fit; fall back to the plain median offset.
             if inlier_mask.sum() >= 10:
                 mag_range = np.nanpercentile(df["m_inst"].values[inlier_mask], [5, 95])
                 mag_span = mag_range[1] - mag_range[0]
@@ -515,13 +542,13 @@ class Find_FWHM:
                         f"RANSAC inliers are clustered in magnitude space (span={mag_span:.2f} vs total={total_mag_span:.2f}); using median offset instead"
                     )
                     b = float(np.nanmedian(y))
-                    inlier_mask = np.abs(y - b) < residual_threshold
+                    inlier_mask = np.abs(y - b) < residual_threshold_eff
 
-            # Bin-wise majority filter: in low-S/N magnitude bins, reject the bin
-            # unless the majority of sources in that bin are inliers (avoids
-            # accepting isolated points in noisy regimes).
+            # Bin-wise majority filter: reject a magnitude bin unless most of
+            # its sources are inliers, so isolated points in noisy bins do not
+            # survive.
             m_inst = df["m_inst"].values
-            if inlier_mask.sum() >= 10:
+            if inlier_mask.sum() >= 10 and not undersampled:
                 try:
                     bin_width = 0.5
                     mag_min, mag_max = float(np.nanmin(m_inst)), float(
@@ -549,8 +576,8 @@ class Find_FWHM:
                         "Linearity bin-wise refinement skipped.", exc_info=True
                     )
 
-            # After bin-wise refinement, recompute the constant offset so the reported
-            # intercept (and plotted line) matches the final inlier set.
+            # Recompute the offset so the reported intercept (and plotted
+            # line) matches the post-refinement inlier set.
             if int(np.sum(inlier_mask)) >= 3:
                 try:
                     b = float(np.nanmedian(y[inlier_mask]))
@@ -560,13 +587,33 @@ class Find_FWHM:
             df_lin = df.loc[inlier_mask].copy()
             df_out = df.loc[~inlier_mask].copy()
 
-            if len(df_lin) < 3:
+            # If the inlier test rejects most (or nearly all) sources it is
+            # not vetting stars reliably -- e.g. undersampled peak-flux
+            # scatter, heteroscedastic errors, or a genuinely broad offset
+            # distribution.  Keep all quality-cut sources for downstream
+            # selection; saturation_range still marks the fitted linear
+            # range for the catalog-level saturation check.
+            min_inlier_frac = float(
+                phot_cfg.get("linearity_min_inlier_frac", 0.35)
+            )
+            if len(df_lin) < 3 or len(df_lin) < min_inlier_frac * len(df):
                 logger.warning(
-                    "Too few linear inliers after RANSAC and bin-wise filter."
+                    "Linearity inlier set is too small to vet sources "
+                    "reliably (%d/%d kept, min fraction %.2f); keeping all "
+                    "%d quality-cut sources.",
+                    len(df_lin),
+                    len(df),
+                    min_inlier_frac,
+                    len(df),
                 )
-                return df_lin, fit_params, saturation_range
+                fit_params["intercept"] = float(b)
+                fit_params["n_linear_inliers"] = int(len(df_lin))
+                if len(df_lin) >= 2:
+                    min_flux = np.nanmin(df_lin["flux_AP"].values)
+                    max_flux = np.nanmax(df_lin["flux_AP"].values)
+                    saturation_range = [float(min_flux), float(max_flux)]
+                return df.reset_index(drop=True), fit_params, saturation_range
 
-            # Residuals around the final constant offset.
             res_sel = (y - b)[inlier_mask]
             sigma = _mad(res_sel)
             if not np.isfinite(sigma) or sigma <= 0:
@@ -585,8 +632,10 @@ class Find_FWHM:
             # --- Diagnostic plot (small markers, minimal overlap) ---
             try:
                 from plotting_utils import (
+                    get_plot_ext,
                     get_ransac_color, get_marker_size, get_alpha, get_line_width,
                     apply_autophot_mplstyle, ransac_legend_top_outside, ransac_grid, ransac_savefig,
+                    format_log_colorbar_ticks,
                 )
                 plt.ioff()
                 apply_autophot_mplstyle()
@@ -602,35 +651,82 @@ class Find_FWHM:
                 xerr = xerr_vals if xerr_vals is not None and np.any(np.isfinite(xerr_vals)) else None
                 yerr = yerr_vals if yerr_vals is not None and np.any(np.isfinite(yerr_vals)) else None
 
+                # Per-source S/N for marker colouring
+                def _frame_snr(frame):
+                    if "flux_AP_err" in frame.columns and np.any(np.isfinite(frame["flux_AP_err"])):
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            return np.abs(frame["flux_AP"].values.astype(float)) / np.maximum(
+                                np.abs(frame["flux_AP_err"].values.astype(float)), 1e-12
+                            )
+                    if "m_inst_err" in frame.columns:
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            return 1.0857 / np.abs(frame["m_inst_err"].values.astype(float))
+                    return np.full(len(frame), np.nan)
+
+                snr_lin = _frame_snr(df_lin)
+                # Norm range is over inliers only -- outliers are always drawn in
+                # the flat outlier colour, never the S/N colormap.
+                finite_snr = snr_lin[np.isfinite(snr_lin) & (snr_lin > 0)]
+                snr_norm = None
+                if finite_snr.size >= 3 and np.nanmax(finite_snr) > np.nanmin(finite_snr):
+                    from matplotlib.colors import LogNorm
+                    vmin = max(1.0, float(np.nanmin(finite_snr)))
+                    vmax = float(np.nanpercentile(finite_snr, 98))
+                    if vmax <= vmin:
+                        vmax = vmin * 10.0
+                    snr_norm = LogNorm(vmin=vmin, vmax=vmax)
+
+                ms_area = get_marker_size('medium') ** 2
                 if len(df_out) > 0:
                     ax.errorbar(
                         df_out["m_inst"],
                         df_out["m_peak"],
                         xerr=df_out["m_inst_err"].values if "m_inst_err" in df_out.columns else None,
                         yerr=df_out["m_peak_err"].values if "m_peak_err" in df_out.columns else None,
-                        fmt="x",
-                        ms=get_marker_size('medium'),
-                        color=outlier_color,
+                        fmt="none",
                         ecolor="lightgrey",
                         alpha=get_alpha('medium'),
-                        capsize=get_marker_size('medium'),
-                        elinewidth=0.4,
+                        capsize=get_marker_size('medium') / 4,
+                        elinewidth=0.5,
+                        zorder=2,
+                    )
+                    ax.plot(
+                        df_out["m_inst"], df_out["m_peak"],
+                        "x", ms=get_marker_size('medium'),
+                        color=outlier_color, alpha=get_alpha('medium'),
                         label=f"Outliers [{len(df_out)}]",
+                        zorder=3,
                     )
                 ax.errorbar(
                     df_lin["m_inst"],
                     df_lin["m_peak"],
                     xerr=xerr,
                     yerr=yerr,
-                    fmt="o",
-                    ms=get_marker_size('medium'),
-                    color=inlier_color,
+                    fmt="none",
                     ecolor="lightgrey",
                     alpha=get_alpha('dark'),
-                    capsize=get_marker_size('medium'),
-                    elinewidth=0.4,
-                    label=f"Inliers [{len(df_lin)}]",
+                    capsize=get_marker_size('medium') / 4,
+                    elinewidth=0.5,
+                    zorder=4,
                 )
+                if snr_norm is not None:
+                    sc_in = ax.scatter(
+                        df_lin["m_inst"], df_lin["m_peak"],
+                        c=snr_lin, cmap="viridis", norm=snr_norm,
+                        marker="o", s=ms_area,
+                        alpha=get_alpha('dark'),
+                        label=f"Inliers [{len(df_lin)}]",
+                        zorder=5,
+                    )
+                    cb = fig.colorbar(sc_in, ax=ax, label="S/N", pad=0.02)
+                    format_log_colorbar_ticks(cb, snr_norm.vmin, snr_norm.vmax)
+                else:
+                    ax.plot(
+                        df_lin["m_inst"], df_lin["m_peak"],
+                        "o", ms=get_marker_size('medium'),
+                        color=inlier_color, alpha=get_alpha('dark'),
+                        label=f"Inliers [{len(df_lin)}]",
+                    )
                 xx = np.linspace(np.nanmin(df["m_inst"]), np.nanmax(df["m_inst"]), 200)
                 yy = xx + b
                 intercept_error = fit_params.get("intercept_error", 0.0)
@@ -641,41 +737,50 @@ class Find_FWHM:
                 ax.plot(xx, yy, color=fit_color, linestyle="--", lw=get_line_width('medium'),
                         label=f"Fit: $m_{{\\mathrm{{peak}}}} = m_{{\\mathrm{{inst}}}} + {b:.3f}$")
                 
-                # Add saturation regime marker if SATURATE is available and data extends into saturation
-                # Use consistent fallback with main.py
+                # Saturation marker: only drawn when data reach ~90% of it.
+                # Fallback constant shared with main.py.
                 try:
                     from main import SATURATE_INTERNAL_FALLBACK
                 except ImportError:
                     SATURATE_INTERNAL_FALLBACK = np.inf
-                    
+
                 saturate = self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK)
                 if np.isfinite(saturate) and saturate > 0:
-                    # Convert SATURATE (ADU) to peak magnitude
-                    saturate_safe = max(saturate, 1e-10)
+                    # SATURATE is in ADU/pixel but maxPixel/m_peak use the
+                    # pipeline flux convention (e-/s). Convert so the marker
+                    # lands at the correct position on the m_inst axis.
+                    try:
+                        from aperture import (
+                            resolve_exposure_time_seconds,
+                            resolve_gain_e_per_adu,
+                        )
+                        _gain = resolve_gain_e_per_adu(None, self.input_yaml)
+                        _expt = resolve_exposure_time_seconds(None, self.input_yaml)
+                        saturate_rate = saturate * _gain / _expt
+                    except Exception:
+                        saturate_rate = saturate
+                    saturate_safe = max(saturate_rate, 1e-10)
                     saturate_mag = -2.5 * np.log10(saturate_safe)
-                    
-                    # Check if any data extends into saturation regime
+
                     peak_values = df["maxPixel"].values
-                    if np.any(peak_values > 0.9 * saturate):  # If data reaches 90% of saturation
-                        # Check if x-axis extends enough into saturation region
-                        # On inverted axis: brighter magnitudes are left (smaller values)
+                    if np.any(peak_values > 0.9 * saturate_rate):
                         xlim = ax.get_xlim()
-                        # Only plot if saturation level is within the x-axis range
                         if xlim[0] <= saturate_mag <= xlim[1]:
-                            # Mark saturation regime on the plot with grey color
                             ax.axvline(saturate_mag, color='gray', linestyle=':', lw=get_line_width('medium'),
                                       alpha=get_alpha('medium'), label=f'Saturation ({saturate:.0f} ADU)')
-                            
-                            # Shade the saturation region (brighter side, which is left side on inverted axis)
-                            # On inverted axis: xlim[1] is left (brighter), xlim[0] is right (fainter)
-                            ax.axvspan(saturate_mag, xlim[1], color='gray', 
+
+                            # Axes are inverted below, so xlim[1] is the
+                            # bright (saturated) side.
+                            ax.axvspan(saturate_mag, xlim[1], color='gray',
                                        alpha=get_alpha('very_light'), label='Saturation regime')
                 
                 ax.set_xlabel(
-                    r"Instrumental magnitude [$-2.5\,\log_{{10}}(\mathrm{{Flux}})$]"
+                    r"Instrumental magnitude $m_\mathrm{inst}$ "
+                    r"[$-2.5\,\log_{10}(\mathrm{Flux}_{e^-/s})$]"
                 )
                 ax.set_ylabel(
-                    r"Peak magnitude [$-2.5\,\log_{{10}}(\mathrm{{Flux}}_{{\max}})$]"
+                    r"Peak magnitude $m_\mathrm{peak}$ "
+                    r"[$-2.5\,\log_{10}(\mathrm{maxPixel}_{e^-/s})$]"
                 )
                 ax.invert_xaxis()
                 ax.invert_yaxis()
@@ -687,7 +792,7 @@ class Find_FWHM:
                     fpath = self.input_yaml["fpath"]
                     _write_dir = self.input_yaml["write_dir"]
                     base = os.path.basename(fpath).split(".")[0]
-                    png_out = os.path.join(_write_dir, f"Linear_{base}.png")
+                    png_out = os.path.join(_write_dir, f"Linear_{base}{get_plot_ext(self.input_yaml)}")
                     ransac_savefig(fig, png_out)
                 plt.close(fig)
             except Exception as _pe:
@@ -972,7 +1077,6 @@ class Find_FWHM:
                 _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
                 df["x_pix"] = df[_xcol]
                 df["y_pix"] = df[_ycol]
-                # Add safety check to prevent division by zero
                 std_safe = np.maximum(std, 1e-12)
                 df["s2n"] = df["peak"] / std_safe
                 fwhm_list = []
@@ -1010,7 +1114,7 @@ class Find_FWHM:
                 return float(fwhm_global), df.reset_index(drop=True), scale_out
 
             # --- Automatic detection and FWHM estimation ---
-            # Pre-smoothing (only needed on this path — the direct run above
+            # Pre-smoothing (only needed on this path -- the direct run above
             # operates on the unsmoothed image).
             sigma_smooth = max(0.8, 0.42466 * fwhm_initial)
             kernel = Gaussian2DKernel(
@@ -1073,19 +1177,16 @@ class Find_FWHM:
                 mask_buffer_fwhm = src_cfg.get("mask_buffer_fwhm", 2.0)
                 if mask is not None and mask_buffer_fwhm > 0 and len(df) > 0:
                     from scipy import ndimage
-                    # Dilate mask by buffer distance (in pixels)
+                    # binary_dilation iterations = buffer radius in pixels.
                     buffer_px = int(mask_buffer_fwhm * fwhm_fp)
                     dilated_mask = ndimage.binary_dilation(mask, iterations=buffer_px)
-                    
-                    # Check if sources are in dilated mask region
+
                     _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
                     _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
                     source_coords = np.round(df[[_xcol, _ycol]].values).astype(int)
-                    # Clip to image bounds
                     source_coords[:, 0] = np.clip(source_coords[:, 0], 0, dilated_mask.shape[1] - 1)
                     source_coords[:, 1] = np.clip(source_coords[:, 1], 0, dilated_mask.shape[0] - 1)
-                    
-                    # Check which sources are near masked regions
+
                     near_mask = dilated_mask[source_coords[:, 1], source_coords[:, 0]]
                     n_near_mask = near_mask.sum()
                     
@@ -1150,11 +1251,10 @@ class Find_FWHM:
 
             # --- Global FWHM and final cutout scale ---
             fwhm_global = float(np.nanmedian(df["fwhm"]))
-            # FWHM uncertainty: standard error of the median.
-            # SE_median = 1.858 * MAD / sqrt(N) (asymptotic, consistent with
-            # the zeropoint and aperture-correction error convention).
-            # This captures star-to-star scatter (PSF variation, fitting noise)
-            # and decreases with more sources.  For N < 2, use the MAD itself.
+            # FWHM uncertainty: standard error of the median,
+            # SE_median = 1.858 * MAD / sqrt(N) (same convention as the
+            # zeropoint and aperture-correction errors). Captures star-to-star
+            # scatter (PSF variation, fitting noise). N < 2 -> NaN.
             _fwhm_finite = df["fwhm"].values[np.isfinite(df["fwhm"].values)]
             _n_fwhm = len(_fwhm_finite)
             if _n_fwhm >= 2:
@@ -1430,10 +1530,7 @@ class Find_FWHM:
             return None
 
     def _crowding_filter(self, df: pd.DataFrame, min_sep_pix: float) -> pd.DataFrame:
-        """
-        Remove sources that have a neighbor closer than min_sep_pix using KDTree.
-        Keeps sources that are at least min_sep_pix from any other detection.
-        """
+        """Drop sources with a neighbor closer than min_sep_pix (KDTree)."""
         if len(df) < 2:
             return df
         _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
@@ -1450,7 +1547,7 @@ class Find_FWHM:
     ) -> pd.DataFrame:
         """
         Sigma-clip a numeric column and return a filtered DataFrame.
-        Uses robust MAD-based std for stability.
+        MAD-based std so outliers do not inflate the clip scale.
         """
         arr = df[col].to_numpy(dtype=float)
         sc = SigmaClip(sigma=sigma, maxiters=maxiters, stdfunc=mad_std)

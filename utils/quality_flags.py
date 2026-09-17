@@ -225,5 +225,4 @@ def from_mcmc_diagnostics(
     return qf
 
 
-# Need numpy for isfinite checks
 import numpy as np  # noqa: E402

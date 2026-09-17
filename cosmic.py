@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Optimized cosmic ray removal using astroscrappy or ccdproc.cosmicray_lacosmic with robust background handling,
-side-by-side visualization, and improved mask dilation logic with hole filling.
+Cosmic ray removal via astroscrappy or ccdproc.cosmicray_lacosmic.
+
+Bright, saturated and non-finite pixels are masked out before detection so
+star cores are not mistaken for CRs; the CR mask is then dilated and
+hole-filled so CR wings do not leak into photometry.
 Author: Sean Brennan
 """
 
@@ -74,9 +77,9 @@ class RemoveCosmicRays:
             Boolean mask: True = protect this pixel (skip CR detection).
         """
         sat_mask = image > satlevel
-        # Use robust MAD-based sigma instead of np.std - cosmic rays and
-        # bright stars inflate std, making the mask ineffective at catching
-        # the very pixels it should protect.
+        # MAD-based sigma instead of np.std - cosmic rays and bright stars
+        # inflate std, making the mask ineffective at catching the very
+        # pixels it should protect.
         finite = image[np.isfinite(image)]
         if finite.size == 0:
             return sat_mask
@@ -95,15 +98,15 @@ class RemoveCosmicRays:
         # (star cores) from being flagged as CRs and replaced with median
         # values, which would destroy the PSF.  A single bright pixel above
         # the threshold is equally likely to be a cosmic ray as a star
-        # core — protecting it prevents its detection.
+        # core -- protecting it prevents its detection.
         #
         # A real star core is a smooth, extended source: multiple connected
         # bright pixels.  A CR is a sharp, isolated spike: typically 1-3
         # connected pixels.  We protect only connected bright regions with
-        # >= 4 pixels — this excludes single-pixel CRs while still catching
+        # >= 4 pixels -- this excludes single-pixel CRs while still catching
         # compact star cores.  For a compact star (FWHM ~2-3 px) with only
         # 2-3 pixels above the 5*sigma threshold, the algorithm should be
-        # able to distinguish it from a CR using the PSF model — the risk
+        # able to distinguish it from a CR using the PSF model -- the risk
         # of misidentifying a compact star is lower than the risk of
         # missing real CRs.
         from scipy import ndimage as _ndi
@@ -115,7 +118,7 @@ class RemoveCosmicRays:
             )
             # Only protect bright regions with >= 4 connected pixels.
             # Single/double/triple-pixel bright spots are likely CRs or
-            # hot pixels and should NOT be protected — they need to be
+            # hot pixels and should NOT be protected -- they need to be
             # checked by the CR detection algorithm.
             _min_star_pixels = 4
             _big_labels = np.isin(
@@ -124,11 +127,11 @@ class RemoveCosmicRays:
             )
             bright_mask = _big_labels
         else:
-            # No bright regions at all — nothing to protect.
+            # No bright regions at all -- nothing to protect.
             bright_mask = np.zeros_like(bright_mask)
 
         # Also protect non-finite pixels (NaN/inf) so astroscrappy doesn't
-        # attempt to detect/clean them — they are chip gaps or bad pixels,
+        # attempt to detect/clean them -- they are chip gaps or bad pixels,
         # not cosmic rays.
         nan_mask = ~np.isfinite(image)
         return sat_mask | bright_mask | nan_mask
@@ -156,24 +159,20 @@ class RemoveCosmicRays:
             Processed boolean mask as a numpy array.
         """
         try:
-            # Calculate the dilation radius.
             # The dilation should cover the CR pixel plus a small margin to
             # catch residual wings/bleed, NOT the full PSF diameter.  Cosmic
             # rays are narrow (1-3 px); dilating by the full FWHM (especially
             # with iterations=2) masks enormous regions around each CR,
             # excluding real sources.  Cap the radius at 5 px regardless of
-            # FWHM — this covers CR wings without masking nearby sources.
+            # FWHM -- this covers CR wings without masking nearby sources.
             r = max(1, min(5, int(dilate_factor * fwhm_pixels)))
 
-            # Use skimage's optimised disk structuring element
             selem = disk(r)
 
-            # Dilate the mask
             dilated_mask = binary_dilation(
                 cr_mask, structure=selem, iterations=iterations
             )
 
-            # Fill enclosed holes if requested
             if fill_holes:
                 dilated_mask = binary_fill_holes(dilated_mask)
 
@@ -214,7 +213,7 @@ class RemoveCosmicRays:
         write_dir = os.path.dirname(fpath)
 
         from functions import set_size
-        from plotting_utils import apply_autophot_mplstyle
+        from plotting_utils import apply_autophot_mplstyle, get_plot_ext
 
         apply_autophot_mplstyle()
 
@@ -230,7 +229,7 @@ class RemoveCosmicRays:
         # Mask CR pixels so they show as the "bad" colour (red) in the colormap
         original_masked = np.ma.array(original, mask=cr_mask)
         cmap_orig = plt.get_cmap("gray").copy()
-        cmap_orig.set_bad(color="#D94F4F")
+        cmap_orig.set_bad(color="magenta")
         im0 = axes[0].imshow(
             original_masked,
             cmap=cmap_orig,
@@ -242,11 +241,12 @@ class RemoveCosmicRays:
         axes[0].set_title(
             f"Original ({n_cr:,} CR pixels)", fontsize=9
         )
-        fig.colorbar(im0, ax=axes[0], orientation="vertical", fraction=0.046, pad=0.04)
+        _cb0 = fig.colorbar(im0, ax=axes[0], orientation="vertical", fraction=0.046, pad=0.04)
+        _cb0.set_label("ADU", fontsize=8)
 
         # --- Right panel: cleaned image ---
         cmap_clean = plt.get_cmap("gray").copy()
-        cmap_clean.set_bad(color="white")
+        cmap_clean.set_bad(color="magenta")
         im1 = axes[1].imshow(
             cleaned,
             cmap=cmap_clean,
@@ -255,13 +255,14 @@ class RemoveCosmicRays:
             vmax=vmax,
         )
         axes[1].set_title("Cleaned", fontsize=9)
-        fig.colorbar(im1, ax=axes[1], orientation="vertical", fraction=0.046, pad=0.04)
+        _cb1 = fig.colorbar(im1, ax=axes[1], orientation="vertical", fraction=0.046, pad=0.04)
+        _cb1.set_label("ADU", fontsize=8)
 
         # --- Finalize ---
         fig.suptitle(title, fontsize=10)
         plt.tight_layout(rect=[0, 0, 1, 0.93])
 
-        png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}.png")
+        png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}{get_plot_ext(self.input_yaml)}")
         fig.savefig(
             png_path, bbox_inches="tight", dpi=150, facecolor="white"
         )
@@ -286,7 +287,7 @@ class RemoveCosmicRays:
         plot: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Remove cosmic rays using astroscrappy or ccdproc.cosmicray_lacosmic with robust background and masking.
+        Remove cosmic rays via astroscrappy or ccdproc.cosmicray_lacosmic, protecting bright/saturated/NaN pixels through ``inmask``.
 
         Args:
             bkg: Background image to subtract (same shape as self.image).
@@ -352,7 +353,7 @@ class RemoveCosmicRays:
         )
         if _frac_protected > 0.5:
             self.logger.warning(
-                "Over 50%% of pixels are masked — CR detection will be "
+                "Over 50%% of pixels are masked -- CR detection will be "
                 "severely limited. Check satlevel and image quality."
             )
 
@@ -381,9 +382,9 @@ class RemoveCosmicRays:
             # still contains the sky level here (global background subtraction
             # happens later in main.py), and bkg_rms already includes the sky
             # Poisson + read noise.  Passing the raw image would therefore
-            # double-count the sky variance — inflating sigma by up to ~sqrt(2)
+            # double-count the sky variance -- inflating sigma by up to ~sqrt(2)
             # in the sky-dominated regime and desensitising CR detection.
-            # Subtract the supplied background surface (or a robust scalar sky
+            # Subtract the supplied background surface (or a scalar median sky
             # estimate) so only source photons enter the Poisson term.
             if bkg is not None:
                 _poisson_data = self.image - bkg

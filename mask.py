@@ -101,7 +101,7 @@ def run_maximask_with_file(filename):
     program_name = "maximask"
     if is_program_installed(program_name):
         try:
-            # Run maximask with the given filename and suppress output
+            # maximask is chatty on stdout/stderr - silence it
             subprocess.run(
                 [program_name, filename],
                 stdout=subprocess.DEVNULL,
@@ -179,7 +179,6 @@ def create_image_mask(filename, layers=None):
     }
 
     with fits.open(filename) as hdul:
-        # Iterate through each HDU (Header Data Unit)
         imgs = hdul[0].data
         # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
         if imgs.dtype.kind != 'f':

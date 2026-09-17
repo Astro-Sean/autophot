@@ -391,7 +391,8 @@ def _measure_worker(args):
     ----------
     args : tuple
         (i, aperture_masks, annulus_masks, image_e, error,
-         read_noise_sq, inv_exposure_time, area, phot, gain, verbose)
+         read_noise_sq, inv_exposure_time, area, phot, gain,
+         enforce_nonnegative_local_bkg, verbose, defects_mask)
 
     Returns
     -------
@@ -481,7 +482,7 @@ def _measure_worker(args):
         # estimation, with an absolute floor of 10 pixels (a heavily clipped
         # edge annulus could otherwise pass with a handful of pixels).
         # NOTE: the denominator must be the annulus pixel count, not the
-        # aperture count — the annulus is typically ~4-6x larger, so using
+        # aperture count -- the annulus is typically ~4-6x larger, so using
         # len(ap_pix) here would accept sites with only ~10% valid annulus.
         annulus_valid_fraction = 0.5
         if bkg_pix.size < max(10.0, annulus_valid_fraction * n_annulus_total):
@@ -490,7 +491,7 @@ def _measure_worker(args):
         if ap_pix.size == 0:
             return {"idx": i, "fail_reason": "empty_aperture"}
 
-        # Robust background via MAD (handles negatives cleanly).
+        # Median background with MAD scatter: resistant to outliers, handles negatives cleanly.
         bkg_value = np.median(bkg_pix)
         bkg_value_used = (
             max(float(bkg_value), 0.0)
@@ -520,7 +521,21 @@ def _measure_worker(args):
         aperture_bkg = bkg_value_used * effective_area
         aperture_sum = raw_aperture_sum - aperture_bkg
 
-        raw_max = np.max(ap_pix)
+        # Peak pixel within the aperture: use the raw (unweighted) pixel
+        # values covered by the mask.  mask.multiply() returns weight*value,
+        # so a brightest pixel landing on a fractional-weight edge pixel of
+        # an "exact" aperture would be biased low; cutout()+w>0 selects the
+        # raw values instead.  (ap_pix is already guaranteed all-finite and
+        # defect-free by the checks above.)
+        try:
+            _ap_raw = np.asarray(ap_mask.cutout(image_e), dtype=float)[
+                np.asarray(ap_mask.data, dtype=float) > 0
+            ]
+            raw_max = float(np.nanmax(_ap_raw)) if _ap_raw.size else np.nan
+            if not np.isfinite(raw_max):
+                raw_max = np.max(ap_pix)
+        except Exception:
+            raw_max = np.max(ap_pix)
         max_val = raw_max - bkg_value_used
 
         # Variance model: prefer fully propagated per-pixel uncertainties
@@ -548,7 +563,7 @@ def _measure_worker(args):
             # Fallback variance: |source| + area * sigma_sky^2
             # empirical_std is the MAD-based per-pixel scatter from the
             # annulus, which already includes read noise.  Do NOT add
-            # read_noise_sq again — that double-counts it.
+            # read_noise_sq again -- that double-counts it.
             source_flux = abs(aperture_sum)
             sky_var = max(empirical_std**2, 0.0)  # No artificial floor; use measured background
             total_var = source_flux + effective_area * sky_var
@@ -716,8 +731,19 @@ def _optimum_radius_worker(args):
         r_pix = opt_r_fwhm * fwhm
         idx_r = int(np.argmin(np.abs(cog.radii - r_pix)))
         enc_f = norm_profile[idx_r]
-        enc_err = norm_profile_err[idx_r] if norm_profile_err is not None else None
-        if enc_err is not None and enc_err > 0 and (enc_f / enc_err) < 3:
+        # profile_error is an empty array when no error map was supplied;
+        # guard against indexing it (returns scalar error when present).
+        enc_err = (
+            norm_profile_err[idx_r]
+            if norm_profile_err is not None and np.size(norm_profile_err) > idx_r
+            else None
+        )
+        if (
+            enc_err is not None
+            and np.isfinite(enc_err)
+            and enc_err > 0
+            and (enc_f / enc_err) < 3
+        ):
             return None
 
         # Mean slope inside the per-source optimum radius (monotonicity proxy).
@@ -743,7 +769,7 @@ def _optimum_radius_worker(args):
             else 0.0
         )
 
-        # Surrounding environment: robust scatter in an annulus just outside the star.
+        # Surrounding environment: MAD-based scatter in an annulus just outside the star.
         # Prefer low local std (clean background, no bright neighbour or gradient).
         local_env_std = float("nan")
         try:
@@ -821,8 +847,8 @@ class Aperture:
         self, bkg_pixels: np.ndarray, verbose: bool = False
     ):
         """
-        Estimate the background standard deviation with a cascade of robust
-        estimators (best -> worst).
+        Estimate the background standard deviation with a cascade of
+        outlier-resistant estimators (best -> worst).
 
         Parameters
         ----------
@@ -966,7 +992,9 @@ class Aperture:
         logger = logging.getLogger(__name__)
 
         # ---- Configuration -------------------------------------------------
-        fwhm = self.input_yaml["fwhm"]
+        fwhm = float(self.input_yaml["fwhm"])
+        if not np.isfinite(fwhm) or fwhm <= 0:
+            raise ValueError(f"Invalid FWHM={fwhm}; expected finite and >0.")
         gain = resolve_gain_e_per_adu(gain, self.input_yaml)
         exposure_time = resolve_exposure_time_seconds(exposure_time, self.input_yaml)
         # Use explicit read_noise if provided (including 0.0); fall back to
@@ -975,10 +1003,13 @@ class Aperture:
             read_noise = float(self.input_yaml.get("read_noise", 0.0))
         else:
             read_noise = float(read_noise)
-        if ap_size is None or ap_size <= 0:
+        if ap_size is None or not np.isfinite(float(ap_size)) or ap_size <= 0:
             ap_size = self.input_yaml["photometry"]["aperture_radius"]
-        else:
-            ap_size = float(ap_size)
+        ap_size = float(ap_size)
+        if not np.isfinite(ap_size) or ap_size <= 0:
+            raise ValueError(
+                f"Invalid aperture radius={ap_size}; expected finite and >0."
+            )
 
         crowded = self.input_yaml.get("photometry", {}).get("crowded_field", False)
         enforce_nonnegative_local_bkg = bool(
@@ -1049,12 +1080,11 @@ class Aperture:
                 if not np.isfinite(_finite_median) or _finite_median <= 0:
                     _finite_median = 1.0
                 _bkg_rms = np.where(np.isfinite(_bkg_rms), _bkg_rms, _finite_median)
-            else:
-                _bkg_rms = np.abs(_bkg_rms)
+            _bkg_rms = np.abs(_bkg_rms)
             # calc_total_error already drops the Poisson term for negative
             # pixels (returns only bkg_error), which is physically correct for
             # difference images: negative pixels are noise fluctuations with
-            # no source photons.  Do NOT wrap with abs() or maximum(,0) — that
+            # no source photons.  Do NOT wrap with abs() or maximum(,0) -- that
             # would add spurious Poisson noise for negative pixels.
             image_e_pois = np.where(
                 np.isfinite(image_e), image_e, np.nan
@@ -1066,10 +1096,20 @@ class Aperture:
             error = None
 
         # ---- Validate source positions -------------------------------------
+        if not {"x_pix", "y_pix"}.issubset(sources.columns):
+            raise ValueError(
+                "sources must contain 'x_pix' and 'y_pix' columns."
+            )
         x, y = sources["x_pix"].values, sources["y_pix"].values
         valid_mask = (
             (x >= 0) & (x < self.image.shape[1]) & (y >= 0) & (y < self.image.shape[0])
         )
+        n_dropped = int((~valid_mask).sum())
+        if n_dropped > 0:
+            logger.info(
+                "Dropped %d out-of-bounds/non-finite source(s) before photometry.",
+                n_dropped,
+            )
         sources = sources[valid_mask].reset_index(drop=True)
         if sources.empty:
             if verbose:
@@ -1097,7 +1137,7 @@ class Aperture:
         # ---- Dispatch (parallel for large catalogs) ------------------------
         # Pooled path: broadcast shared state once per worker via initializer;
         # only the source index is pickled per task (image/masks/phot can be
-        # tens of MB — pickling them per task dominates runtime otherwise).
+        # tens of MB -- pickling them per task dominates runtime otherwise).
         if len(sources) >= NSOURCES:
             with Pool(
                 processes=n_jobs,
@@ -1330,7 +1370,6 @@ class Aperture:
         fig = plt.figure(figsize=set_size(340 * n_targets, 1))
         gs = GridSpec(1, n_targets, wspace=0.25)
 
-        # Pre-compute zoom bounds for each target
         zoom_bounds = []
         for cx, cy in target_centers:
             zoom_size = 1.25 * (annulusOUT + fwhm)
@@ -1395,7 +1434,6 @@ class Aperture:
             ax_bottom.tick_params(axis="x", labelrotation=30)
             ax_right.tick_params(axis="x", labelrotation=30)
 
-            # Title with target name
             _title = target_names[col_idx] if col_idx < len(target_names) else f"Target {col_idx}"
             ax_main.set_title(_title, fontsize=9, pad=4)
 
@@ -1406,7 +1444,7 @@ class Aperture:
                 )
                 norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
                 cmap = plt.get_cmap("viridis").copy()
-                cmap.set_bad(color="white")
+                cmap.set_bad(color="magenta")
                 zmask = ~np.isfinite(zoom_image)
                 zoom_disp = np.ma.array(zoom_image, mask=zmask)
                 ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="auto")
@@ -1424,10 +1462,9 @@ class Aperture:
                     )
                 continue
 
-            # Use shared normalization for all columns
             norm = ImageNormalize(vmin=vmin_shared, vmax=vmax_shared)
             cmap = plt.get_cmap("viridis").copy()
-            cmap.set_bad(color="white")
+            cmap.set_bad(color="magenta")
             zmask = ~np.isfinite(zoom_image)
             if plot_zero_as_nan:
                 zmask |= (np.asarray(zoom_image, dtype=float) == 0.0)
@@ -1437,7 +1474,6 @@ class Aperture:
             ax_main.set_xlim(0, zoom_image.shape[1])
             ax_main.set_ylim(0, zoom_image.shape[0])
 
-            # This target's aperture circles
             cx_local = cx - x_min
             cy_local = cy - y_min
             for radius, color, ls in [
@@ -1482,19 +1518,20 @@ class Aperture:
                         color=_target_colors[_ti], fontsize=6, ha="center", zorder=11,
                     )
 
-            # Crosshairs on this target
             kw = dict(ls=":", color="white", lw=0.5, alpha=0.7)
             ax_main.axvline(cx_local, **kw)
             ax_main.axhline(cy_local, **kw)
             ax_bottom.axvline(cx_local, **kw)
             ax_right.axhline(cy_local, **kw)
 
-            # Profiles
             finite = np.isfinite(zoom_image)
             if zoom_mask is not None:
                 finite &= ~np.asarray(zoom_mask, dtype=bool)
-            hx = np.nanmean(zoom_image, axis=0)
-            hy = np.nanmean(zoom_image, axis=1)
+            # Exclude mask-flagged pixels from the mean (matching the
+            # finite-pixel error counts below).
+            masked_image = np.where(finite, zoom_image, np.nan)
+            hx = np.nanmean(masked_image, axis=0)
+            hy = np.nanmean(masked_image, axis=1)
             err2 = np.nan_to_num(
                 np.asarray(zoom_error, dtype=float),
                 nan=0.0, posinf=0.0, neginf=0.0,
@@ -1532,7 +1569,6 @@ class Aperture:
                 ax_right.plot(np.repeat(hy - hy_err, 2), y_edges_r, color="dodgerblue", lw=0.3, alpha=0.7)
                 ax_right.plot(np.repeat(hy + hy_err, 2), y_edges_r, color="dodgerblue", lw=0.3, alpha=0.7)
 
-            # Background level
             try:
                 ann = CircularAnnulus(
                     (cx, cy), r_in=float(annulusIN), r_out=float(annulusOUT)
@@ -1549,8 +1585,8 @@ class Aperture:
                 pass
 
             ax_bottom.set_xlabel("X position (pixels)")
-            ax_bottom.set_ylabel("Flux (e-)")
-            ax_right.set_xlabel("Flux (e-)")
+            ax_bottom.set_ylabel("Flux [e$^-$]")
+            ax_right.set_xlabel("Flux [e$^-$]")
             ax_right.yaxis.set_label_position("right")
             ax_bottom.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
             ax_right.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=False))
@@ -1563,7 +1599,6 @@ class Aperture:
                     _Patch(facecolor="none", edgecolor="#00AA00", lw=0.5, label="Aperture"),
                     _Patch(facecolor="none", edgecolor="#D94F4F", lw=0.5, ls="--", label="Annulus"),
                 ]
-                # Add target name entries
                 for _ti, _tname in enumerate(target_names):
                     _mc = _target_colors[_ti] if _ti < len(_target_colors) else "#17A2B8"
                     _legend_handles.append(
@@ -1575,11 +1610,11 @@ class Aperture:
                 _leg_ncol = 3 if _n_leg >= 8 else (2 if _n_leg >= 5 else 1)
                 ax_main.legend(
                     handles=_legend_handles, loc="upper left",
-                    frameon=True, facecolor="white", framealpha=1.0,
-                    edgecolor="black", fontsize=7, ncol=_leg_ncol,
+                    frameon=False, fontsize=7, ncol=_leg_ncol,
                 )
 
-        save_name = f"Aperture_Target_{base}.png"
+        from plotting_utils import get_plot_ext
+        save_name = f"Aperture_Target_{base}{get_plot_ext(self.input_yaml)}"
         save_name = os.path.join(write_dir, save_name)
         fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
         plt.close(fig)
@@ -1661,7 +1696,7 @@ class Aperture:
             )
             norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
             cmap = plt.get_cmap("viridis").copy()
-            cmap.set_bad(color="white")
+            cmap.set_bad(color="magenta")
             # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
             zmask = ~np.isfinite(zoom_image)
             zoom_disp = np.ma.array(zoom_image, mask=zmask)
@@ -1689,9 +1724,11 @@ class Aperture:
                     Circle((cx_local, cy_local), radius, ec=color, fc="none", lw=0.5, ls=ls)
                 )
             label = base if saveTarget else index
+            from plotting_utils import get_plot_ext
+            _ext = get_plot_ext(self.input_yaml)
             save_name = (
-                f"Aperture_Target_{base}.png" if saveTarget
-                else f"Aperture_{label}.png"
+                f"Aperture_Target_{base}{_ext}" if saveTarget
+                else f"Aperture_{label}{_ext}"
             )
             save_name = os.path.join(write_dir, save_name)
             fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
@@ -1700,7 +1737,7 @@ class Aperture:
 
         norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
         cmap = plt.get_cmap("viridis").copy()
-        cmap.set_bad(color="white")
+        cmap.set_bad(color="magenta")
         plot_zero_as_nan = bool(
             (self.input_yaml.get("plotting") or {}).get("plot_zero_as_nan", True)
         )
@@ -1753,8 +1790,11 @@ class Aperture:
         finite = np.isfinite(zoom_image)
         if zoom_mask is not None:
             finite &= ~np.asarray(zoom_mask, dtype=bool)
-        hx = np.nanmean(zoom_image, axis=0)
-        hy = np.nanmean(zoom_image, axis=1)
+        # Exclude mask-flagged pixels from the mean so they cannot bias the
+        # profile (matching the finite-pixel error counts below).
+        masked_image = np.where(finite, zoom_image, np.nan)
+        hx = np.nanmean(masked_image, axis=0)
+        hy = np.nanmean(masked_image, axis=1)
 
         # Variance of the mean profile: Var(mean) = sum(sigma_i^2) / N^2 for finite pixels.
         # Use the image finite mask so masked/no-data pixels do not dilute uncertainties.
@@ -1834,7 +1874,7 @@ class Aperture:
             pass
 
         ax_bottom.set_xlabel("X position (pixels)")
-        ylabel = "Flux (e-) +BIAS" if bias_applied else "Flux (e-)"
+        ylabel = "Flux [e$^-$] + BIAS" if bias_applied else "Flux [e$^-$]"
         ax_bottom.set_ylabel(ylabel)
         ax_right.set_xlabel(ylabel)
         ax_right.yaxis.set_label_position("right")
@@ -1842,9 +1882,11 @@ class Aperture:
         ax_right.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=False))
 
         label = base if saveTarget else index
+        from plotting_utils import get_plot_ext
+        _ext = get_plot_ext(self.input_yaml)
         save_name = (
-            f"Aperture_Target_{base}.png" if saveTarget
-            else f"Aperture_{label}.png"
+            f"Aperture_Target_{base}{_ext}" if saveTarget
+            else f"Aperture_{label}{_ext}"
         )
         save_name = os.path.join(write_dir, save_name)
         fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
@@ -1934,10 +1976,15 @@ class Aperture:
         logger = logging.getLogger(__name__)
         phot_cfg = self.input_yaml.get("photometry", {}) or {}
 
-        # Crowded fields: always use a robust fixed aperture radius of
-        # ~1.5 FWHM to avoid failures or unstable behaviour in very dense
-        # regions.  This radius is in FWHM units and can be overridden by
-        # `photometry.crowded_optimum_radius_fwhm` in the config.
+        if not {"x_pix", "y_pix"}.issubset(sources.columns):
+            raise ValueError(
+                "sources must contain 'x_pix' and 'y_pix' columns."
+            )
+
+        # Crowded fields: use a fixed aperture radius of ~1.5 FWHM; a
+        # data-driven radius search is unstable or fails outright in very
+        # dense regions.  This radius is in FWHM units and can be overridden
+        # by `photometry.crowded_optimum_radius_fwhm` in the config.
         if crowded:
             fixed_radius = float(phot_cfg.get("crowded_optimum_radius_fwhm", 1.5))
             fwhm = float(self.input_yaml["fwhm"])
@@ -1958,15 +2005,14 @@ class Aperture:
             max(7, int(np.ceil(fallback_radius * self.input_yaml["fwhm"]))) + 0.5
         )
 
-        # Relaxed stability/tail criteria for crowded fields (more neighbour contamination)
-        if crowded:
-            stability_threshold = max(stability_threshold, 0.35)
-            max_tail_excess = max(max_tail_excess, 1.0)
-            min_tail_flux = min(min_tail_flux, 0.6)
-
         # ---- SNR pre-filter (slightly relaxed for crowded) ------------------------------------------------
+        # Skip entirely when no SNR column is available (e.g. raw finder
+        # tables passed from limits.py) rather than raising KeyError.
         snr_min = 3.0 if crowded else 5.0
-        sources = sources[(sources["SNR"] > snr_min) & (sources["SNR"] < 10000)].copy()
+        if "SNR" in sources.columns:
+            sources = sources[(sources["SNR"] > snr_min) & (sources["SNR"] < 10000)].copy()
+        else:
+            logger.info("No SNR column; skipping optimum-radius SNR pre-filter.")
         sources.reset_index(inplace=True)
         n_sources = len(sources)
 
@@ -1974,7 +2020,9 @@ class Aperture:
             logger.warning("No sources passed SNR cut. Using default radius/scale.")
             return sources, optimum_radius, optimum_scale
 
-        fwhm = self.input_yaml["fwhm"]
+        fwhm = float(self.input_yaml["fwhm"])
+        if not np.isfinite(fwhm) or fwhm <= 0:
+            raise ValueError(f"Invalid FWHM={fwhm}; expected finite and >0.")
         radii_fwhm = np.arange(0.05, max_radius + 1e-9, 0.1)
         radii = radii_fwhm * fwhm
         logger.info(log_step(f"Optimum aperture: {n_sources} sources"))
@@ -2009,6 +2057,10 @@ class Aperture:
             error = calc_total_error(
                 _image_e_opt, _bkg_rms * gain, effective_gain=1
             )
+            # The CoG workers run on self.image (ADU), so convert the error
+            # map back to ADU: profile_error is normalised by a flux in ADU
+            # units and must carry matching units for the SNR guard.
+            error = error / gain
         else:
             error = None
         n_jobs = _resolve_n_jobs(n_jobs, half_cpus=False)
@@ -2287,6 +2339,13 @@ class Aperture:
             )
             return sources.iloc[[]], fallback_radius, optimum_scale
 
+        if len(final_indices) < len(kept_indices):
+            logger.info(
+                "Radius sanity + gentle sigma-clip: %d -> %d sources.",
+                len(kept_indices),
+                len(final_indices),
+            )
+
         # ---- Tail check w.r.t. final optimum radius -----------------------
         # Gentle final screen: prioritize rejecting positive-tail contamination.
         # Do not strongly penalize broad (still-rising) but otherwise smooth profiles.
@@ -2344,9 +2403,22 @@ class Aperture:
             outer_slope_abs_max = float(
                 phot_cfg.get("optimum_radius_outer_slope_abs_max", 0.03)
             )
+            # Undersampled data: the normalised CoG is derived from only a
+            # handful of pixels per radius step, so outer-tail statistics are
+            # intrinsically noisier; relax the flatness tolerances to avoid
+            # discarding genuine stars on a noise-dominated diagnostic.
+            _us_thr = float(phot_cfg.get("undersampled_fwhm_threshold", 2.5))
+            if float(fwhm) <= _us_thr:
+                _tail_relax = float(
+                    phot_cfg.get("optimum_radius_undersampled_tail_relax", 2.5)
+                )
+                outer_std_max *= max(1.0, _tail_relax)
+                outer_slope_abs_max *= max(1.0, _tail_relax)
+                tail_excess_limit_final += 0.5 * (_tail_relax - 1.0)
             outer_std_max = max(0.005, outer_std_max)
             outer_slope_abs_max = max(0.001, outer_slope_abs_max)
 
+            n_pre_tail_screen = len(final_indices)
             still_ok = []
             for i in final_indices:
                 if i not in tail_by_idx:
@@ -2368,6 +2440,17 @@ class Aperture:
                 ):
                     still_ok.append(i)
             if len(still_ok) < len(final_indices):
+                logger.info(
+                    "Final tail screen: %d -> %d sources "
+                    "(outer_std<=%.3f, |outer_slope|<=%.3f, "
+                    "tail_excess<=%.2f, min_tail_flux>=%.2f).",
+                    n_pre_tail_screen,
+                    len(still_ok),
+                    outer_std_max,
+                    outer_slope_abs_max,
+                    tail_excess_limit_final,
+                    min_tail_flux_final,
+                )
                 final_indices = np.array(still_ok, dtype=int)
                 filtered_sources = sources.iloc[final_indices].copy()
                 if len(final_indices) > 0:
@@ -2451,7 +2534,7 @@ class Aperture:
                     
                     # Refine optimum radius from smoothed profile.  np.interp
                     # silently returns fine_r[-1] if the profile never reaches
-                    # aperture_norm_factor — detect that and warn.
+                    # aperture_norm_factor -- detect that and warn.
                     r_target_pix = np.interp(aperture_norm_factor, fine_profile, fine_r)
                     if (
                         float(np.nanmax(fine_profile)) < aperture_norm_factor
@@ -2471,7 +2554,7 @@ class Aperture:
 
         # ---- Optimum scale -------------------------------------------------
         # optimum_radius is in FWHM units; convert to pixels before adding a
-        # +2*FWHM margin for robust PSF-star cutout/context sizing.
+        # +2*FWHM margin so PSF-star cutouts retain surrounding context.
         optimum_scale = max(12, int(np.ceil((optimum_radius + 2.0) * fwhm))) + 0.5
         if (2 * optimum_scale) % 2 == 0:
             optimum_scale += 0.5
@@ -2485,9 +2568,10 @@ class Aperture:
             except Exception:
                 pass
 
+            from plotting_utils import get_plot_ext
             save_loc = os.path.join(
                 self.input_yaml["write_dir"],
-                f'Optimum_Aperture_{self.input_yaml["base"]}.png',
+                f'Optimum_Aperture_{self.input_yaml["base"]}{get_plot_ext(self.input_yaml)}',
             )
             fig = plt.figure(figsize=set_size(340, 1.5))
             gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
@@ -2579,8 +2663,7 @@ class Aperture:
                         zorder=0,
                     )
                 ax2.axvline(optimum_radius, color="black", ls="--", label="Final")
-                ax2.legend(loc="upper right", frameon=True, facecolor="white",
-                           framealpha=1.0, edgecolor="black", fontsize=8)
+                ax2.legend(loc="upper right", frameon=False, fontsize=8)
 
             ax2.set_xlabel("Aperture Radius [FWHM]")
             ax2.set_ylabel("Count")
@@ -2641,8 +2724,19 @@ class Aperture:
             logger.warning("Too few sources [%s] for aperture correction.", len(sources))
             return np.nan, np.nan
 
+        if not {"x_pix", "y_pix", "flux_AP"}.issubset(sources.columns):
+            raise ValueError(
+                "sources must contain 'x_pix', 'y_pix', and 'flux_AP' columns."
+            )
+
         if fwhm is None or ap_size is None:
             raise ValueError("fwhm and ap_size are required.")
+        fwhm = float(fwhm)
+        ap_size = float(ap_size)
+        if not np.isfinite(fwhm) or fwhm <= 0:
+            raise ValueError(f"Invalid fwhm={fwhm}; expected finite and >0.")
+        if not np.isfinite(ap_size) or ap_size <= 0:
+            raise ValueError(f"Invalid ap_size={ap_size}; expected finite and >0.")
 
         gain = resolve_gain_e_per_adu(None, self.input_yaml)
         radii = np.arange(0.05, max_radius, 0.1) * fwhm
@@ -2662,6 +2756,9 @@ class Aperture:
             error = calc_total_error(
                 _image_e_ac, _bkg_rms * gain, effective_gain=1
             )
+            # CurveOfGrowth runs on `image` (ADU) below; keep the error map
+            # in matching units.
+            error = error / gain
         else:
             error = None
 
@@ -2701,6 +2798,9 @@ class Aperture:
             stdfunc=mad_std,
         )
         corrections = corrections[~clipped.mask]
+        if corrections.size == 0:
+            logger.warning("Aperture-correction sigma-clip rejected all stars.")
+            return np.nan, np.nan
         correction = float(np.nanmedian(corrections))
         # Use the standard error of the median (SE = 1.858 * MAD / sqrt(N)),
         # not the population std.  The correction is a median estimate, so its
@@ -2717,24 +2817,25 @@ class Aperture:
 
         if plot:
             plt.ioff()
-            from plotting_utils import apply_autophot_mplstyle
+            from plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext
             apply_autophot_mplstyle()
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.2))
             try:
                 be = np.histogram_bin_edges(corrections, bins="fd")
             except Exception:
                 be = 15
-            ax.hist(corrections, bins=be, alpha=0.7, color="steelblue", edgecolor="black")
+            ax.hist(corrections, bins=be, alpha=0.7, color=get_plot_color('hist_primary'), edgecolor="black")
             ax.axvline(
                 correction, color="r", ls="--", label=f"Median: {correction:.3f}"
             )
             ax.set_xlabel("Aperture Correction [mag]")
-            ax.set_ylabel("Frequency")
+            ax.set_ylabel("Number of Sources")
             ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
                       frameon=False, fontsize=8)
             fig.tight_layout()
             png_path = os.path.join(
-                write_dir, f"Aperture_Correction_{base_name}.png"
+                write_dir,
+                f"Aperture_Correction_{base_name}{get_plot_ext(self.input_yaml)}",
             )
             fig.savefig(
                 png_path,

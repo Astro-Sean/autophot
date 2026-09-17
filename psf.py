@@ -118,7 +118,7 @@ def _call_build_epsf(builder, epsfstars, init_epsf):
 # Local
 # ---------------------------------------------------------------------------
 from functions import log_step, set_size, log_warning_from_exception
-from plotting_utils import apply_autophot_mplstyle, get_marker_size, PLOT_COLORS
+from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, PLOT_COLORS
 from aperture import (
     gain_e_per_adu_from_header,
     resolve_exposure_time_seconds,
@@ -246,7 +246,7 @@ def get_smoothing_kernel(
     oversample: int = 4,
     kernel_size: int | None = None,
     kind: str = "quartic",
-    size_scale_fwhm: float = 0.8,
+    size_scale_px: float = 1.0,
     size_max: int = 9,
 ) -> np.ndarray:
     """
@@ -258,16 +258,23 @@ def get_smoothing_kernel(
     Parameters
     ----------
     fwhm : float
-        PSF FWHM in native pixels.
+        PSF FWHM in native pixels.  Retained for API compatibility; it does
+        NOT set the kernel footprint -- see ``size_scale_px``.
     oversample : int
         ePSF oversampling factor (kernel is defined on the oversampled grid).
     kernel_size : int or None
-        Explicit odd kernel size on oversampled grid. If None, auto-size from
-        fwhm*oversample with a clamp.
+        Explicit odd kernel size on oversampled grid. If None, auto-size to
+        ~``size_scale_px`` native pixels (kernel_size ~ scale*oversample).
     kind : {"quartic","gaussian"}
         Kernel family.
-    size_scale_fwhm : float
-        Auto kernel size scale, size ~= scale*(oversample*fwhm).
+    size_scale_px : float
+        Target kernel footprint in NATIVE pixels.  The Anderson & King (2000)
+        kernel is a 5x5 quartic on a 4x-oversampled grid (1.25 px footprint);
+        Godden & Blundell (2025, RAS TI) find ~1 px optimal -- larger kernels
+        erase real ePSF structure and introduce pixel-phase photometry
+        errors, while at small oversampling (1-2) smoothing should be minimal
+        or absent.  scale=1.0 reproduces the canonical behaviour
+        (osamp=4 -> 5x5, osamp=2 -> 3x3, osamp=1 -> identity).
     size_max : int
         Maximum auto kernel size (odd).
     """
@@ -278,13 +285,13 @@ def get_smoothing_kernel(
 
     if kernel_size is None:
         try:
-            fw = float(fwhm)
+            scale_px = float(size_scale_px)
         except Exception:
-            fw = np.nan
-        base = 2 * osamp + 1  # conservative fallback
-        if np.isfinite(fw) and fw > 0:
-            base = int(np.ceil(float(size_scale_fwhm) * float(osamp) * fw))
-        base = max(3, base)
+            scale_px = 1.0
+        if not np.isfinite(scale_px) or scale_px <= 0:
+            scale_px = 1.0
+        base = int(np.ceil(scale_px * osamp))
+        base = max(1, base)
         try:
             mx = int(size_max)
         except Exception:
@@ -306,7 +313,7 @@ def get_smoothing_kernel(
         ker = ker / np.sum(ker)
         return ker
 
-    # Default: quartic
+    # Any kind other than "gaussian" falls through to the quartic kernel.
     return get_quartic_kernel(osamp, kernel_size)
 
 
@@ -480,7 +487,6 @@ def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None)
     xcen = float(np.sum(flux * xx) / total)
     ycen = float(np.sum(flux * yy) / total)
 
-    # Variance about centroid under the same flux model.
     xvar = float(np.sum(flux * (xx - xcen) ** 2) / total)
     yvar = float(np.sum(flux * (yy - ycen) ** 2) / total)
 
@@ -766,9 +772,9 @@ class MCMCFitter:
         return -0.5 * np.sum(resid**2 / var + np.log(2.0 * np.pi * var))
 
     def log_posterior(self, params, model, x, y, data, weights, noise_variance):
-        # Called nwalkers * nsteps times (e.g. 50 * 5000 = 250,000 times).
-        # model.copy() is done inside log_likelihood so parameter mutations
-        # for each walker are isolated to a local instance.
+        # Called nwalkers * nsteps times.  log_likelihood saves/restores the
+        # shared model's parameters around each evaluation, so no per-walker
+        # model.copy() is needed here.
         lp = self.log_prior(params, model)
         if not np.isfinite(lp):
             return -np.inf
@@ -862,14 +868,11 @@ class MCMCFitter:
                 bkg_rms_arr = np.where(
                     np.isfinite(bkg_rms_arr), bkg_rms_arr, _finite_median
                 )
-            # Ensure bkg_rms_e has the same shape as image_e
             if bkg_rms_arr.shape == image_e.shape:
                 bkg_rms_e = bkg_rms_arr * float(gain)
             elif bkg_rms_arr.ndim == 0 or np.prod(bkg_rms_arr.shape) == 1:
-                # Scalar or single-element array: broadcast to image shape
                 bkg_rms_e = np.full_like(image_e, bkg_rms_arr.item() * float(gain))
             else:
-                # Array with different shape: try to broadcast or raise error
                 try:
                     bkg_rms_e = np.broadcast_to(bkg_rms_arr * float(gain), image_e.shape)
                 except ValueError:
@@ -877,7 +880,7 @@ class MCMCFitter:
                         f"background_rms shape {background_rms.shape} incompatible with data shape {image_e.shape}"
                     )
         # background_rms from Background2D already includes read noise.
-        # Do NOT add readnoise^2 again — that double-counts it.
+        # Do NOT add readnoise^2 again -- that double-counts it.
         if background_rms is None:
             bkg_error = np.full_like(image_e, float(readnoise))
         else:
@@ -939,7 +942,6 @@ class MCMCFitter:
             args=(model, x, y, data, weights, noise_variance),
             moves=_moves,
         )
-        # Enable multiprocessing pool when threads > 1
         pool = None
         if self.threads > 1:
             try:
@@ -1006,7 +1008,6 @@ class MCMCFitter:
                 except emcee.autocorr.AutocorrError as exc:
                     log.debug("[MCMC] tau estimation failed: %s", exc)
 
-        # Warn if max_steps reached without convergence
         if total_steps >= max_steps and adaptive:
             log.warning(
                 "[MCMC] Reached max_steps (%d) without full convergence; results may be unreliable",
@@ -1028,7 +1029,6 @@ class MCMCFitter:
         if not 0.15 <= acc <= 0.8:
             log.warning("[MCMC] Suboptimal acceptance; consider tuning delta/nwalkers")
 
-        # Clean up multiprocessing pool if used
         if pool is not None:
             try:
                 pool.close()
@@ -1198,7 +1198,7 @@ class MCMCFitter:
                 perr_sym = np.full_like(best_params, np.nan)
                 fitted_model.cov_matrix = Covariance(np.diag(np.full_like(best_params, np.nan)))
         elif chain.shape[0] > 0:
-            # Too few samples for reliable covariance — use sample std as fallback
+            # Too few samples for reliable covariance -- use sample std as fallback
             perr_sym = np.nanstd(chain, axis=0)
             fitted_model.cov_matrix = Covariance(np.diag(perr_sym ** 2))
         else:
@@ -1344,7 +1344,6 @@ class PoissonLikelihoodFitter:
         n_params = len(params)
         dmodel_dparams = []
 
-        # Evaluate model at original parameters before perturbation
         model_0 = model(x, y)
 
         try:
@@ -1359,12 +1358,11 @@ class PoissonLikelihoodFitter:
             # Always restore original parameters, even if exception occurs
             model.parameters = params
         
-        # Build gradient
         gradient = np.zeros(n_params)
         for i in range(n_params):
             gradient[i] = np.sum(dlnL_dnbar * dmodel_dparams[i])
         
-        # Build Hessian (using first term only, per Fermilab document)
+        # Gauss-Newton Hessian: first term only, per Fermilab document.
         hessian = np.zeros((n_params, n_params))
         for i in range(n_params):
             for j in range(n_params):
@@ -1438,13 +1436,11 @@ class PoissonLikelihoodFitter:
             noise_variance = 1.0 / np.clip(w, 1e-30, None) ** 2
         
         if initial_params is None:
-            # Use current model parameters as initial guess
             initial_params = np.array(model.parameters, float)
         
         params = initial_params.copy()
         param_names = model.param_names
         
-        # Store original position for position change tracking
         x_idx = param_names.index('x_0') if 'x_0' in param_names else -1
         y_idx = param_names.index('y_0') if 'y_0' in param_names else -1
         original_position = np.array([params[x_idx], params[y_idx]]) if x_idx >= 0 else None
@@ -1455,14 +1451,11 @@ class PoissonLikelihoodFitter:
         lnL = -np.inf   # Initialize to handle maxiters=0 edge case
         
         for iteration in range(self.maxiters):
-            # Evaluate model at current parameters
             model.parameters = params
             current_model = model(x, y)
-            
-            # Compute log-likelihood
+
             lnL = self._log_likelihood(data, current_model)
-            
-            # Check convergence
+
             if iteration > 0 and abs(lnL - prev_lnL) < self.lnL_tolerance:
                 converged = True
                 log.info("[PoissonFitter] Converged at iteration %s", iteration)
@@ -1470,28 +1463,23 @@ class PoissonLikelihoodFitter:
             
             prev_lnL = lnL
             
-            # Compute derivatives (pass noise_variance for Hessian background term)
+            # noise_variance feeds the Hessian's background term.
             gradient, hessian = self._compute_derivatives(data, current_model, x, y, params, param_names, noise_variance=noise_variance)
-            
-            # Solve for parameter update
+
             delta = self._solve_linear_system(gradient, hessian)
-            
-            # Apply step with reduction if needed
+
             step_reduction = 1.0
             n_cuts = 0
-            
+
             while n_cuts < self.max_step_cuts:
-                # Apply reduced step
                 trial_params = params + delta * step_reduction
-                
-                # Check position constraints
+
                 if original_position is not None:
                     trial_position = np.array([trial_params[x_idx], trial_params[y_idx]])
                     position_change = np.linalg.norm(trial_position - original_position)
-                    
-                    # Enforce maximum position change per step
+
                     if position_change > self.max_position_step:
-                        # Scale down the position part of delta (work on a copy)
+                        # Clip the position part of delta on a copy.
                         clipped_delta = delta.copy()
                         scale = self.max_position_step / position_change
                         clipped_delta[x_idx] *= scale
@@ -1499,19 +1487,17 @@ class PoissonLikelihoodFitter:
                         trial_params = params + clipped_delta * step_reduction
                         position_change = np.linalg.norm(trial_params[x_idx:x_idx+2] - original_position)
                 
-                # Ensure n_bar > 0
+                # Poisson likelihood requires a positive model.
                 model.parameters = trial_params
                 trial_model = model(x, y)
                 if np.all(trial_model > 0):
-                    # Check if likelihood increased
                     trial_lnL = self._log_likelihood(data, trial_model)
-                    
+
                     if trial_lnL > lnL:
                         params = trial_params
                         lnL = trial_lnL
                         break
                     else:
-                        # Reduce step size
                         step_reduction *= 0.5
                         n_cuts += 1
                 else:
@@ -1521,14 +1507,12 @@ class PoissonLikelihoodFitter:
             if n_cuts >= self.max_step_cuts:
                 log.warning("[PoissonFitter] Max step cuts reached at iteration %s", iteration)
         
-        # Check total position change
         if original_position is not None:
             final_position = np.array([params[x_idx], params[y_idx]])
             total_position_change = np.linalg.norm(final_position - original_position)
             if total_position_change > self.max_total_position_change:
                 log.warning("[PoissonFitter] Total position change %.2f exceeds limit %s", total_position_change, self.max_total_position_change)
         
-        # Update model with final parameters
         model.parameters = params
 
         self.fit_info["iterations"] = iteration + 1
@@ -1540,21 +1524,18 @@ class PoissonLikelihoodFitter:
 
         log.info("[PoissonFitter] Final lnL: %.3f, iterations: %s", lnL, iteration + 1)
 
-        # Compute parameter errors from Hessian (inverse of Hessian = covariance matrix)
+        # Parameter errors from the inverse Hessian (covariance).
         try:
             # Re-compute Hessian at final parameters with background noise
             final_model = model(x, y)
             _, final_hessian = self._compute_derivatives(data, final_model, x, y, params, param_names, noise_variance=noise_variance)
 
-            # Invert Hessian to get covariance matrix
             cov_matrix = np.linalg.inv(final_hessian)
 
-            # Check for valid covariance matrix
             if np.all(np.isfinite(cov_matrix)) and np.all(np.diag(cov_matrix) > 0):
-                # Parameter errors are sqrt of diagonal elements
                 param_errors = np.sqrt(np.diag(cov_matrix))
 
-                # Store errors in model (if supported)
+                # Store errors on the model when it exposes the attributes.
                 if hasattr(model, 'stds'):
                     model.stds = param_errors
                 if hasattr(model, 'cov_matrix'):
@@ -1698,14 +1679,11 @@ class PSF:
                 bkg_rms_arr = np.where(
                     np.isfinite(bkg_rms_arr), bkg_rms_arr, _finite_median
                 )
-            # Ensure bkg_rms_e has the same shape as image_e
             if bkg_rms_arr.shape == image_e.shape:
                 bkg_rms_e = bkg_rms_arr * float(gain)
             elif bkg_rms_arr.ndim == 0 or np.prod(bkg_rms_arr.shape) == 1:
-                # Scalar or single-element array: broadcast to image shape
                 bkg_rms_e = np.full_like(image_e, bkg_rms_arr.item() * float(gain))
             else:
-                # Array with different shape: try to broadcast or raise error
                 try:
                     bkg_rms_e = np.broadcast_to(bkg_rms_arr * float(gain), image_e.shape)
                 except ValueError:
@@ -1714,7 +1692,7 @@ class PSF:
                     )
         # background_rms from Background2D (MADStdBackgroundRMS) measures the
         # actual per-pixel scatter, which already includes read noise.  Do NOT
-        # add read_noise^2 again — that double-counts it and inflates PSF flux
+        # add read_noise^2 again -- that double-counts it and inflates PSF flux
         # errors, especially for faint sources where RN dominates.
         if background_rms is None:
             bkg_error = np.full_like(image_e, float(read_noise))
@@ -1891,7 +1869,6 @@ class PSF:
                 peak_offsets = np.full(len(x_cen), np.nan)
                 for i in np.where(good)[0]:
                     xc, yc = x_cen[i], y_cen[i]
-                    # Search a small window around the centroid for the peak pixel
                     px = int(round(xc))
                     py = int(round(yc))
                     r = max(1, int(fwhm_eff))
@@ -1928,7 +1905,6 @@ class PSF:
                     n_bad,
                 )
 
-            # Log centroid quality statistics for surviving sources
             if np.any(good):
                 surv_offsets = offset[good]
                 log.info(
@@ -1958,27 +1934,21 @@ class PSF:
             cy_core = slice(ny_cut // 4, 3 * ny_cut // 4)
             cx_core = slice(nx_cut // 4, 3 * nx_cut // 4)
             
-            # Vectorized batch processing: extract all core regions at once
-            # Stack cutout data for vectorized operations
             all_data = np.stack([star.data for star in epsfstars])
-            # Extract core regions using broadcasting
             core_regions = all_data[:, cy_core, cx_core]
-            
-            # Vectorized NaN checking: compute bad fraction per star
+
             core_bad = ~np.isfinite(core_regions)
-            
-            # Check masks if present (per-star, not all-or-nothing)
+
+            # Merge per-star masks; stars without one contribute no masked pixels.
             star_masks = [getattr(star, 'mask', None) for star in epsfstars]
             has_any_mask = any(m is not None for m in star_masks)
             if has_any_mask:
-                # Build a uniform mask stack: use zeros for stars without masks
                 mask_stack = np.zeros_like(all_data, dtype=bool)
                 for i, m in enumerate(star_masks):
                     if m is not None:
                         mask_stack[i] = m
                 core_bad |= mask_stack[:, cy_core, cx_core]
             
-            # Compute bad fraction per star (vectorized)
             core_bad_frac = np.sum(core_bad, axis=(1, 2)) / core_regions[0].size
             
             # Accept stars with <5% bad pixels in core
@@ -2033,7 +2003,6 @@ class PSF:
                             uniform_weight
                         )
                     else:
-                        # Non-uniform weights: extract per-star weight maps
                         weight_nddata = NDData(weightmap)
                         weight_cutouts = extract_stars(weight_nddata, stars_tbl, size=cutout_shape)
                         
@@ -2094,7 +2063,6 @@ class PSF:
         if not do_check or len(epsfstars) == 0:
             return epsfstars, stars_tbl
 
-        # Thresholds
         asym_thresh = float(phot_cfg.get("psf_contam_asymmetry_frac", 0.3))
         edge_sigma = float(phot_cfg.get("psf_contam_edge_excess_sigma", 3.0))
         radial_reversal_frac = float(
@@ -2126,7 +2094,6 @@ class PSF:
         _rr = np.sqrt((_xx - cx_c) ** 2 + (_yy - cy_c) ** 2)
         annulus = (_rr >= ann_inner) & (_rr < ann_outer)
 
-        # Quadrant masks within annulus
         q_masks = [
             annulus & (_xx > cx_c) & (_yy < cy_c),
             annulus & (_xx > cx_c) & (_yy >= cy_c),
@@ -2214,8 +2181,8 @@ class PSF:
             # evidence" below and never flags a star.
             warnings.simplefilter("ignore", category=RuntimeWarning)
 
-            # MAD-based robust annulus sigma (nanstd is inflated by the
-            # contaminating pixels we are trying to detect).
+            # MAD-based annulus sigma (nanstd would be inflated by the
+            # contaminating pixels being detected).
             ann_median = np.nanmedian(ann_pix, axis=1)
             ann_mad = np.nanmedian(
                 np.abs(ann_pix - ann_median[:, None]), axis=1
@@ -2225,7 +2192,7 @@ class PSF:
             )
             ann_std = np.maximum(ann_std, 1e-10)
 
-            # Robust background: median of the inner ring (closest to sky,
+            # Background level: median of the inner ring (closest to sky,
             # least affected by PSF wings or edge contamination).
             inner_pix = data_clean[:, inner_ring]
             n_inner = np.sum(np.isfinite(inner_pix), axis=1)
@@ -2266,7 +2233,7 @@ class PSF:
                 gate & (n_edge > 0) & (n_inner > 0) & (edge_excess > edge_sigma)
             )
 
-            # Test 2b: Outermost 2 rows/cols — most sensitive to neighbour
+            # Test 2b: Outermost 2 rows/cols -- most sensitive to neighbour
             # flux spilling in from beyond the cutout.
             border_pix = data_clean[:, border_mask]
             n_border = np.sum(np.isfinite(border_pix), axis=1)
@@ -2281,7 +2248,7 @@ class PSF:
                 gate & (n_border > 4) & (border_max_excess > _border_max_thresh)
             )
 
-            # Test 3: Radial non-monotonicity — an outer ring brighter than
+            # Test 3: Radial non-monotonicity -- an outer ring brighter than
             # the previous ring indicates a contaminant in the outer region.
             ring_meds = np.stack(
                 [
@@ -2301,7 +2268,7 @@ class PSF:
             flag_reversal = gate & np.any(rev, axis=1)
             first_rev = np.argmax(rev, axis=1)  # valid only where flag_reversal
 
-            # Tests 4 & 6: local maxima — one batched filter call for the
+            # Tests 4 & 6: local maxima -- one batched filter call for the
             # whole stack (vs two per-star calls previously).  The filter
             # runs on the full cutout (not the core-restricted fill), which
             # is marginally more conservative at the core/annulus boundary.
@@ -2330,7 +2297,7 @@ class PSF:
             _biy, _bix = np.unravel_index(core_best, data_ninf.shape[1:])
             second_dist = np.hypot(_bix - cx_c, _biy - cy_c)
 
-            # Test 6: any local maximum in the annulus above sigma — a direct
+            # Test 6: any local maximum in the annulus above sigma -- a direct
             # detection of a faint contaminating star that the median-based
             # tests can miss.
             cond_ann = (local_max & annulus[None]) & (
@@ -2345,7 +2312,7 @@ class PSF:
             _aiy, _aix = np.unravel_index(ann_best, data_ninf.shape[1:])
             ann_peak_dist = np.hypot(_aix - cx_c, _aiy - cy_c)
 
-            # Test 5: streaks — any row, column, or main diagonal whose
+            # Test 5: streaks -- any row, column, or main diagonal whose
             # annulus median is significantly elevated.
             ann_data = np.where(annulus[None] & finite_stack, all_data, np.nan)
             row_meds = np.nanmedian(ann_data, axis=2)  # per-row medians
@@ -2488,7 +2455,7 @@ class PSF:
 
         # Separate hardware-defect rejections (masked pixels from trails/streaks/
         # saturation) from flux-based contamination rejections.  Hardware-defect
-        # rejections are ALWAYS applied — a trail-contaminated cutout should never
+        # rejections are ALWAYS applied -- a trail-contaminated cutout should never
         # enter the ePSF build, regardless of how few clean stars remain.
         hw_reject = np.zeros(n_stars, dtype=bool)
         for i in range(n_stars):
@@ -2558,7 +2525,6 @@ class PSF:
         np.ndarray
             Power spectra with shape (N, ny, nx)
         """
-        # Vectorized FFT along last two axes
         return np.abs(fftshift(fft2(cutouts, axes=(1, 2)), axes=(1, 2))) ** 2
 
     def detect_fft_outliers(
@@ -2571,18 +2537,16 @@ class PSF:
         """
         Remove ePSF cutouts whose power spectrum deviates from the typical (median) spectrum.
 
-        Uses a robust per-star scalar: either median or mean of per-pixel normalized
-        deviations. Scale (dispersion) is MAD or std per pixel across stars. This avoids
-        rejecting good stars when a few contaminants inflate the variance.
+        Uses a per-star scalar (median or mean of per-pixel normalized
+        deviations) with a per-pixel MAD or std scale across stars, so a few
+        contaminants cannot inflate the variance and reject good stars.
         """
-        # Batch preprocessing: stack all cutouts and normalize
         cutouts = np.stack([st.data for st in epsfstars])
         # Subtract minimum per cutout, preserve NaNs for negative values
         cutouts_min = np.nanmin(cutouts, axis=(1, 2), keepdims=True)
         cutouts_norm = cutouts - cutouts_min
         cutouts_norm = np.where(cutouts_norm < 0, np.nan, cutouts_norm)
         
-        # Batch FFT computation (vectorized, no Python loop)
         spectra = self.compute_power_spectrum_batch(cutouts_norm)
         
         med = np.nanmedian(spectra, axis=0)
@@ -2626,7 +2590,7 @@ class PSF:
         make_template_psf: bool = False,
     ):
         """
-        Build an ePSF model from robustly selected, spatially uniform stars.
+        Build an ePSF model from vetted, spatially uniform stars.
 
         Returns
         -------
@@ -2697,7 +2661,6 @@ class PSF:
                 )
                 rank_vals = df[fluxcol].values[mask_finite] if fluxcol else np.ones(mask_finite.sum())
             
-            # Get coordinates
             x_vals = df[xcol].values[mask_finite]
             y_vals = df[ycol].values[mask_finite]
             idx_vals = df.index[mask_finite]
@@ -2705,12 +2668,11 @@ class PSF:
             # Grid size: aim for ~num_keep cells but at least 2x2
             side = int(np.ceil(np.sqrt(max(4, num_keep))))
             
-            # Compute cell indices using vectorized operations
             xi = np.clip((x_vals / nx * side).astype(int), 0, side - 1)
             yi = np.clip((y_vals / ny * side).astype(int), 0, side - 1)
             cell_ids = yi * side + xi
             
-            # Create random shuffle for cell processing order
+            # Shuffle cell order so filling is not biased toward one corner.
             rng = np.random.default_rng(42)
             cell_order = np.arange(side * side)
             rng.shuffle(cell_order)
@@ -2745,19 +2707,17 @@ class PSF:
                 if not added:
                     break
             
-            # If still need more, take from global ranking
+            # Shortfall: top up from the global ranking.
             if len(selected_indices) < num_keep:
                 n_needed = num_keep - len(selected_indices)
-                # Get remaining indices sorted by rank
                 all_indices = np.arange(len(idx_vals))
                 remaining_mask = ~np.isin(all_indices, selected_indices, assume_unique=True)
                 remaining_indices = all_indices[remaining_mask]
                 remaining_ranks = rank_vals[remaining_indices]
-                # Sort by rank descending and take top n_needed
                 best_remaining = remaining_indices[np.argsort(-remaining_ranks)[:n_needed]]
                 selected_indices.extend(best_remaining)
-            
-            # Convert back to original DataFrame indices
+
+            # Map back to original DataFrame indices.
             final_idx = idx_vals[selected_indices[:num_keep]]
             return df.loc[final_idx].reset_index(drop=True)
 
@@ -2980,7 +2940,7 @@ class PSF:
                         fwhm_lo, fwhm_hi, n_keep_fwhm, min_keep_fwhm,
                     )
 
-            # ---- Robust FWHM sigma-clipping (always applied) ----
+            # ---- FWHM sigma-clipping (always applied) ----
             # Ensure all PSF sources have roughly the same FWHM by rejecting
             # outliers relative to the candidate distribution itself. This
             # removes extended galaxies (large FWHM) and cosmic rays (small
@@ -2990,8 +2950,31 @@ class PSF:
                 finite_fwhm = src_fwhm[np.isfinite(src_fwhm)]
                 if len(finite_fwhm) >= 5:
                     from astropy.stats import sigma_clip as _sigma_clip
+                    # Per-source FWHM measurements are intrinsically noisier
+                    # on undersampled images (centroid jitter on a few bright
+                    # pixels inflates the scatter), so use a looser clip there
+                    # to avoid discarding genuine stars.
+                    _us_thr_clip = float(
+                        phot_cfg.get("undersampled_fwhm_threshold", 2.5)
+                    )
+                    try:
+                        _fwhm_img_clip = float(self.input_yaml.get("fwhm", np.nan))
+                    except (TypeError, ValueError):
+                        _fwhm_img_clip = np.nan
+                    _undersampled_clip = (
+                        np.isfinite(_fwhm_img_clip)
+                        and _fwhm_img_clip <= _us_thr_clip
+                    )
+                    _clip_sigma = float(
+                        phot_cfg.get(
+                            "psf_fwhm_clip_sigma_undersampled"
+                            if _undersampled_clip
+                            else "psf_fwhm_clip_sigma",
+                            3.5 if _undersampled_clip else 2.5,
+                        )
+                    )
                     clipped = _sigma_clip(
-                        finite_fwhm.values, sigma=2.5, maxiters=3, cenfunc="median",
+                        finite_fwhm.values, sigma=_clip_sigma, maxiters=3, cenfunc="median",
                     )
                     ok_clip = ~clipped.mask
                     # Build mask aligned to original df
@@ -2999,23 +2982,37 @@ class PSF:
                     finite_idx = np.where(np.isfinite(src_fwhm.values))[0]
                     ok_fwhm_clip[finite_idx] = ok_clip
                     n_drop_clip = int((~ok_fwhm_clip).sum())
+                    n_keep_clip = int(ok_fwhm_clip.sum())
+                    min_keep_clip = max(
+                        min_psf_candidates,
+                        int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    )
                     if n_drop_clip > 0:
-                        df = df[ok_fwhm_clip].copy()
-                        log.info(
-                            "PSF FWHM sigma-clip (2.5 sigma): removed %d FWHM outliers (%d kept, "
-                            "median FWHM=%.2f px)",
-                            n_drop_clip, int(ok_fwhm_clip.sum()),
-                            float(np.nanmedian(finite_fwhm[~clipped.mask])),
-                        )
+                        if n_keep_clip >= min_keep_clip:
+                            df = df[ok_fwhm_clip].copy()
+                            log.info(
+                                "PSF FWHM sigma-clip (%.1f sigma%s): removed %d FWHM outliers (%d kept, "
+                                "median FWHM=%.2f px)",
+                                _clip_sigma,
+                                ", undersampled" if _undersampled_clip else "",
+                                n_drop_clip, n_keep_clip,
+                                float(np.nanmedian(finite_fwhm[~clipped.mask])),
+                            )
+                        else:
+                            log.info(
+                                "Skipping FWHM sigma-clip (%.1f sigma): would leave only "
+                                "%d candidates (< %d).",
+                                _clip_sigma, n_keep_clip, min_keep_clip,
+                            )
 
             # ---- FLUX_RADIUS cut (cosmic ray rejection) ----
             # SExtractor's FLUX_RADIUS is the half-light radius.  Real stars
-            # have FLUX_RADIUS ≈ 0.5 * FWHM / 2.355 ≈ 0.21 * FWHM.  Cosmic
+            # have FLUX_RADIUS ~ 0.5 * FWHM / 2.355 ~ 0.21 * FWHM.  Cosmic
             # rays are sharp spikes with FLUX_RADIUS typically < 1 px,
-            # regardless of the image FWHM.  This is one of the most robust
-            # SExtractor-based CR discriminators because it directly measures
-            # the concentration of flux, unlike FWHM which can be unreliable
-            # for CR-like sources.
+            # regardless of the image FWHM.  This is one of the most reliable
+            # SExtractor-based CR discriminators: it measures flux
+            # concentration directly, unlike FWHM, which is unreliable for
+            # CR-like sources.
             _fr_col = next(
                 (c for c in ("flux_radius", "FLUX_RADIUS") if c in df.columns), None
             )
@@ -3051,9 +3048,9 @@ class PSF:
 
             # ---- Peak-to-aperture flux ratio cut (cosmic ray rejection) ----
             # Cosmic rays are sharp spikes: most flux is in 1-2 pixels, so
-            # peak_flux / flux_AP is very high (→ 1.0 for a single-pixel CR).
+            # peak_flux / flux_AP is very high (-> 1.0 for a single-pixel CR).
             # Real stars have extended PSF profiles: for a Gaussian with FWHM=F,
-            # peak/flux_AP ≈ 1/(2π(F/2.355)²).  For F=8.66 px this is ~0.014;
+            # peak/flux_AP ~ 1/(2pi(F/2.355)^2).  For F=8.66 px this is ~0.014;
             # for F=3 px it's ~0.10.  A CR with peak/flux_AP > 0.5 is
             # unmistakable.  The threshold is adaptive: max(configured value,
             # 5x the expected ratio for the image FWHM).
@@ -3109,7 +3106,7 @@ class PSF:
 
             # ---- Minimum A/B size cut (cosmic ray rejection) ----
             # SExtractor's A_IMAGE and B_IMAGE are the semi-major and semi-minor
-            # axes of the source profile.  Real stars have A ≈ B ≈ FWHM/2.355.
+            # axes of the source profile.  Real stars have A ~ B ~ FWHM/2.355.
             # Cosmic rays have A, B < 1-2 px regardless of image FWHM.  Reject
             # sources where the smaller axis is below a threshold that scales
             # with the image FWHM (so it works for both undersampled and
@@ -3420,7 +3417,7 @@ class PSF:
             fwhm_arcsec = float(fwhm * pixel_scale) if has_pixel_scale else np.nan
 
             # Adaptive geometric boost for coarse/undersampled data.
-            # Coarser sampling generally needs larger windows to capture wings robustly.
+            # Coarser sampling needs larger windows to capture the wings.
             # Read undersampled_fwhm_threshold early so it's available for all boost/checks.
             undersampled_fwhm_threshold = float(
                 phot_cfg.get("undersampled_fwhm_threshold", 2.5)
@@ -3442,7 +3439,14 @@ class PSF:
             # FWHM ~2 px were classified as well-sampled, disabling all
             # undersampled protections (relaxed cuts, Gaussian kernel, build
             # boost, and 4x oversampling itself).
-            undersampled = fwhm <= undersampled_fwhm_threshold
+            #
+            # Classify on fwhm_input (the global image FWHM), not the
+            # re-estimated PSF-star FWHM: the re-estimation is clamped to
+            # [0.8, 1.3]x the input value but can still drift across the 2.5-px
+            # boundary (e.g. 2.46 -> 2.56 px) and silently disable every
+            # undersampled protection on borderline images.  The re-estimated
+            # fwhm is still used for build geometry (fit box, cutout, kernel).
+            undersampled = fwhm_input <= undersampled_fwhm_threshold
             
             if undersampled:
                 build_boost_cap_u = float(
@@ -3469,7 +3473,6 @@ class PSF:
                     undersampled_fwhm_threshold,
                 )
 
-            # Image preprocessing.
             img = np.array(self.image, float)
             # Preserve NaNs (chip gaps) instead of replacing with median
             if mask is not None and mask.shape == img.shape:
@@ -3498,7 +3501,7 @@ class PSF:
             # beyond the build box are poorly constrained, and sigma clipping
             # during stacking can bias them toward the faint-star profile.
             # This creates magnitude-dependent flux bias (bright sources
-            # underestimated) → slope > 1 in zeropoint plots.
+            # underestimated) -> slope > 1 in zeropoint plots.
             phot_fit_shape_scale = float(
                 phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0)
             )
@@ -3532,7 +3535,7 @@ class PSF:
                     int(np.ceil(fit_box_min_px)) if np.isfinite(fit_box_min_px) else 0,
                 )
             )
-            if fwhm <= undersampled_fwhm_threshold:  # undersampled minimum
+            if undersampled:
                 _phot_fit_shape_min = _odd(max(_phot_fit_shape_min, 9))
             _build_box_min = _odd(int(np.ceil(_phot_fit_shape_min * 1.3)))
             if fit_boxsize < _build_box_min:
@@ -3708,13 +3711,27 @@ class PSF:
                 log.error("All PSF-star candidates rejected by cutout validation.")
                 return None, df
 
-            # Optional: remove pathological PSF-star cutouts (blends, cosmic rays) via
-            # power-spectrum comparison. Configurable; uses robust MAD + median deviation.
+            # Optional: remove pathological PSF-star cutouts (blends, cosmic
+            # rays) via power-spectrum comparison; uses MAD + median deviation.
             fft_cfg = phot_cfg if phot_cfg is not None else {}
             do_fft = fft_cfg.get("psf_fft_rejection", True)
             fft_n_sigma = float(fft_cfg.get("psf_fft_n_sigma", 4.0))
-            fft_min_frac = float(fft_cfg.get("psf_fft_min_frac_keep", 0.25))
+            fft_min_frac = float(fft_cfg.get("psf_fft_min_frac_keep", 0.5))
             fft_min_abs = max(5, int(fft_cfg.get("psf_fft_min_stars", 10)))
+
+            # For undersampled data, high-frequency cutout power is dominated
+            # by subpixel-phase sampling jitter rather than by artifacts, so
+            # the FFT outlier metric is unreliable and tends to reject genuine
+            # stars.  The saturation/FWHM/peak-ratio/contamination cuts above
+            # already cover the pathological cases; skip FFT rejection here.
+            if do_fft and undersampled and bool(
+                fft_cfg.get("psf_fft_disable_undersampled", True)
+            ):
+                log.info(
+                    "Undersampled regime: skipping FFT outlier rejection "
+                    "(subpixel-phase jitter dominates cutout power spectra)."
+                )
+                do_fft = False
 
             if do_fft and len(epsfstars) >= 8:
                 epsfstars_clean = self.detect_fft_outliers(
@@ -3806,27 +3823,62 @@ class PSF:
 
             smooth_kind = str(phot_cfg.get("psf_smoothing_kernel", "quartic")).strip().lower()
             smooth_size = phot_cfg.get("psf_smoothing_kernel_size", None)
-            smooth_scale = float(phot_cfg.get("psf_smoothing_kernel_size_scale_fwhm", 0.8))
+            # Kernel footprint in NATIVE pixels: ~1 px is the Anderson & King
+            # (2000) canonical choice (5x5 quartic on a 4x-oversampled grid)
+            # and matches Godden & Blundell (2025, RAS TI): larger footprints
+            # erase real ePSF structure and inflate pixel-phase errors.
+            smooth_scale = float(
+                phot_cfg.get("psf_smoothing_kernel_size_scale_px", 1.0)
+            )
             smooth_max = int(phot_cfg.get("psf_smoothing_kernel_size_max", 9))
-            
-            # Adaptive smoothing kernel selection based on sampling
-            # Gaussian kernel is better for undersampled data, quartic for well-sampled
-            auto_kernel = bool(phot_cfg.get("psf_adaptive_smoothing_kernel", True))
-            if auto_kernel and undersampled:
-                original_kind = smooth_kind
-                smooth_kind = "gaussian"
-                log.info(
-                    "Adaptive smoothing kernel: using 'gaussian' instead of '%s' for undersampled data (FWHM=%.2f pix)",
-                    original_kind, fwhm
+
+            # Thin-sampling boost.  Each oversampled gridpoint is constrained
+            # by ~n_stars/oversample^2 samples; when that effective sample
+            # count is low the ePSF is noise-dominated and the "minimum
+            # kernel that removes the noise" (Godden & Blundell 2025) is
+            # wider than 1 px.  A footprint-f kernel averages ~(f*os)^2
+            # gridpoint cells, so residual noise ~ 1/(f*sqrt(n_eff)) and the
+            # variance-equalising footprint is ~ sqrt(n_target/n_eff) px.
+            n_final = len(epsfstars)
+            _samp_target = float(
+                phot_cfg.get("psf_smoothing_kernel_target_samples", 10.0)
+            )
+            _boost_max = float(
+                phot_cfg.get("psf_smoothing_kernel_boost_max", 2.5)
+            )
+            n_eff = n_final / max(1, oversample) ** 2
+            if _samp_target > 0 and n_eff > 0:
+                boost = float(
+                    np.clip(np.sqrt(_samp_target / n_eff), 1.0,
+                            max(1.0, _boost_max))
                 )
-            
+            else:
+                boost = 1.0
+            if boost > 1.0:
+                smooth_scale *= boost
+                log.info(
+                    "Smoothing kernel footprint boosted x%.2f for thin "
+                    "sampling (n=%d stars, %.1f samples/gridpoint at x%d): "
+                    "footprint %.2f native px",
+                    boost, int(n_final), n_eff, oversample, smooth_scale,
+                )
+
             smooth_kernel = get_smoothing_kernel(
                 fwhm,
                 oversample=oversample,
                 kernel_size=(int(smooth_size) if smooth_size is not None else None),
                 kind=smooth_kind,
-                size_scale_fwhm=smooth_scale,
+                size_scale_px=smooth_scale,
                 size_max=smooth_max,
+            )
+            log.info(
+                "ePSF smoothing kernel: %s %dx%d (footprint %.2f native px, "
+                "oversample=x%d)",
+                smooth_kind,
+                int(smooth_kernel.shape[0]),
+                int(smooth_kernel.shape[1]),
+                float(smooth_kernel.shape[0]) / max(1, oversample),
+                int(oversample),
             )
 
             # Use aperture_radius for PSF normalization to ensure consistent flux scale with aperture photometry.
@@ -3981,26 +4033,38 @@ class PSF:
                 oversampling=oversample,
             )
 
-            build_result = _call_build_epsf(epsf_builder, epsfstars, init_epsf)
+            try:
+                build_result = _call_build_epsf(epsf_builder, epsfstars, init_epsf)
+            except Exception as _build_exc:
+                log.warning(
+                    "ePSF build raised %s: %s",
+                    type(_build_exc).__name__, _build_exc,
+                )
+                build_result = None
+            _final_acc = float("nan")
             # photutils >=3.0 returns EPSFBuildResult; <3.0 returns (epsf, fitted_stars)
-            if hasattr(build_result, 'epsf'):
+            if build_result is not None and hasattr(build_result, 'epsf'):
                 epsf = build_result.epsf
                 fitted_stars = build_result.fitted_stars
+                _final_acc = (
+                    float(build_result.final_center_accuracy)
+                    if build_result.final_center_accuracy is not None
+                    else float("nan")
+                )
                 log.info(
                     "ePSF build: converged=%s, iterations=%d, final_center_accuracy=%.4g px",
                     build_result.converged,
                     build_result.iterations,
-                    build_result.final_center_accuracy if build_result.final_center_accuracy is not None else float('nan'),
+                    _final_acc,
                 )
-                
+
                 # Adaptive retry: if not converged and we have headroom, retry with more iterations
                 if adaptive_iters and not build_result.converged and base_maxiters < max_maxiters:
                     log.info(
                         "ePSF did not converge in %d iterations; retrying with %d iterations",
                         base_maxiters, max_maxiters
                     )
-                    # Create new builder with higher iteration limit
-                    # Note: accuracy_threshold not used here to maintain compatibility
+                    # accuracy_threshold not used here, for compatibility.
                     epsf_builder_retry = EPSFBuilder(
                         oversampling=oversample,
                         recentering_func=recenter_func,
@@ -4012,21 +4076,76 @@ class PSF:
                         smoothing_kernel=smooth_kernel,
                         progress_bar=False,
                     )
-                    build_result_retry = _call_build_epsf(epsf_builder_retry, epsfstars, init_epsf)
-                    if hasattr(build_result_retry, 'epsf'):
+                    try:
+                        build_result_retry = _call_build_epsf(epsf_builder_retry, epsfstars, init_epsf)
+                    except Exception as _retry_exc:
+                        # A crashed retry (e.g. the recentering function chokes
+                        # on a degenerate intermediate ePSF) must not discard the
+                        # usable first-pass model.
+                        log.warning(
+                            "ePSF retry raised %s: %s; keeping first-pass model.",
+                            type(_retry_exc).__name__, _retry_exc,
+                        )
+                        build_result_retry = None
+                    if build_result_retry is not None and hasattr(build_result_retry, 'epsf'):
                         if build_result_retry.converged:
                             log.info("ePSF converged on retry with %d iterations", max_maxiters)
                             epsf = build_result_retry.epsf
                             fitted_stars = build_result_retry.fitted_stars
                             build_result = build_result_retry  # Update for later checks
+                            _final_acc = (
+                                float(build_result_retry.final_center_accuracy)
+                                if build_result_retry.final_center_accuracy is not None
+                                else float("nan")
+                            )
                         else:
                             log.warning("ePSF did NOT converge even with %d iterations", max_maxiters)
-                    else:
+                    elif build_result_retry is not None:
                         epsf, fitted_stars = build_result_retry
                 elif not build_result.converged:
                     log.warning("ePSF build did NOT converge; PSF model may be unreliable.")
-            else:
+            elif build_result is not None:
                 epsf, fitted_stars = build_result
+            else:
+                epsf, fitted_stars = None, None
+
+            # Last-resort analytic fallback: a diverged/absent ePSF would
+            # otherwise disable PSF photometry, the PSF zeropoint, and the
+            # limiting-magnitude injection.  The Moffat init kernel is already
+            # an ImagePSF at the measured FWHM, so it is a drop-in replacement.
+            def _epsf_usable(model):
+                try:
+                    d = np.asarray(getattr(model, "data", None), dtype=float)
+                    if d is None or d.size == 0:
+                        return False
+                    fin = np.isfinite(d)
+                    if fin.mean() < 0.5:
+                        return False
+                    vals = d[fin]
+                    return np.ptp(vals) > 0 and np.nansum(vals) > 0
+                except Exception:
+                    return False
+
+            _acc_bad = np.isfinite(_final_acc) and _final_acc > max(
+                1.0, 0.5 * float(fit_boxsize)
+            )
+            _used_analytic_psf = False
+            if epsf is None or _acc_bad or not _epsf_usable(epsf):
+                if bool(phot_cfg.get("psf_analytic_fallback", True)) and _epsf_usable(init_epsf):
+                    log.warning(
+                        "ePSF model %s (final_center_accuracy=%.3g px); falling back to "
+                        "analytic Moffat PSF (FWHM=%.2f px, beta=%.2f). PSF photometry, "
+                        "the PSF zeropoint, and limiting-magnitude injection will use "
+                        "this analytic model.",
+                        "is degenerate" if epsf is not None else "unavailable",
+                        _final_acc, fwhm, moffat_beta,
+                    )
+                    epsf = init_epsf
+                    fitted_stars = epsfstars
+                    _used_analytic_psf = True
+                elif epsf is None or not _epsf_usable(epsf):
+                    log.error("ePSF build produced no usable model.")
+                    return None, df
 
             # EPSFBuilder already normalizes to unit sum.
             # Do not apply secondary normalization as it corrupts the flux scale
@@ -4036,7 +4155,7 @@ class PSF:
             n_epsf_stars = len(epsfstars)
             if n_epsf_stars < 20:
                 log.warning(
-                    "ePSF built from only %d stars — model may be noisy, "
+                    "ePSF built from only %d stars -- model may be noisy, "
                     "especially in the wings.  Consider relaxing PSF source "
                     "selection cuts or increasing psf_min_candidates.",
                     n_epsf_stars,
@@ -4086,7 +4205,7 @@ class PSF:
                     )
                     if ee_at_fitshape < 0.95:
                         log.warning(
-                            "ePSF encircled energy at fit_shape radius is only %.1f%% — "
+                            "ePSF encircled energy at fit_shape radius is only %.1f%% -- "
                             "wings may be truncated.  This can cause magnitude-dependent "
                             "flux bias (slope != 1 in zeropoint plot).",
                             ee_at_fitshape * 100,
@@ -4102,7 +4221,7 @@ class PSF:
                     edge_frac = abs(edge_median) / max(abs(epsf_total), 1e-10)
                     if edge_frac > 1e-4:
                         log.warning(
-                            "ePSF edge pixels have median=%.3e (fraction=%.2e of total) — "
+                            "ePSF edge pixels have median=%.3e (fraction=%.2e of total) -- "
                             "possible residual background in ePSF model.  This can cause "
                             "magnitude-dependent flux bias.",
                             edge_median, edge_frac,
@@ -4115,7 +4234,7 @@ class PSF:
                     epsf,
                     oversample=oversample,
                     save_path=os.path.join(
-                        write_dir, f"PSF_Image_{base}.png"
+                        write_dir, f"PSF_Image_{base}{get_plot_ext(self.input_yaml)}"
                     ),
                 )
 
@@ -4136,6 +4255,10 @@ class PSF:
             _psf_hdr["PSFNPIX"] = (int(cutout_n), "ePSF native-pixel cutout size")
             _psf_hdr["FWHM_PIX"] = (float(fwhm), "Image FWHM in native pixels")
             _psf_hdr["NPSFSTAR"] = (int(n_epsf_stars), "Stars used in ePSF build")
+            _psf_hdr["PSFBUILD"] = (
+                "analytic-moffat" if _used_analytic_psf else "epsf",
+                "PSF model construction method",
+            )
             _orig = getattr(epsf, "origin", None)
             if _orig is not None:
                 _psf_hdr["PSFX0"] = (
@@ -4196,7 +4319,6 @@ class PSF:
                 # Preserve NaNs instead of replacing with 0
                 data[~np.isfinite(data)] = np.nan
 
-            # Display limits.
             if use_zscale:
                 try:
                     vmin, vmax = ZScaleInterval(contrast=zscale_contrast).get_limits(
@@ -4219,20 +4341,19 @@ class PSF:
             ny, nx = data.shape
             extent = [0, nx, 0, ny]
 
-            # Use log scale if requested (ensuring positive values for LogNorm)
+            # LogNorm requires strictly positive values.
             if use_log_scale:
-                # Shift data to be positive for log scale
                 data_for_plot = data - np.nanmin(data) + 1e-10
                 norm = LogNorm(vmin=vmin - np.nanmin(data) + 1e-10, vmax=vmax - np.nanmin(data) + 1e-10)
             else:
                 data_for_plot = data
                 norm = None
 
-            # Render NaNs as white "no data" regions.
+            # Render NaNs as magenta "no data" regions.
             try:
                 _cmap = plt.get_cmap(cmap).copy() if isinstance(cmap, str) else cmap
                 _cmap = _cmap.copy() if hasattr(_cmap, "copy") else _cmap
-                _cmap.set_bad(color="white")
+                _cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
             except Exception:
                 _cmap = cmap
 
@@ -4254,13 +4375,13 @@ class PSF:
             ax.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
             ax.axhline(cy, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
             ax.set_title(f"Oversample={oversample}x", fontsize=8, pad=2)
-            ax.set_xlabel("Pixels")
-            ax.set_ylabel("Pixels")
+            ax.set_xlabel("X [pixels]")
+            ax.set_ylabel("Y [pixels]")
             ax.set_xticks([])
 
             x_phys = np.arange(nx)
             y_phys = np.arange(ny)
-            # Projections should be robust to NaNs in the PSF array.
+            # Projections must tolerate NaNs in the PSF array.
             # Convert once and reuse for both axes to avoid a second allocation.
             _data_f = np.asarray(data, dtype=float)
             hx = np.nanmean(_data_f, axis=0)
@@ -4279,8 +4400,8 @@ class PSF:
                 ax_R.plot(np.repeat(hy, 2), _y_e, color=PLOT_COLORS.get('psf', '#00AA00'), lw=0.5)
             ax_B.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
             ax_R.axhline(cy, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
-            ax_B.set_ylabel("Intensity")
-            ax_B.set_xlabel("X Pixels")
+            ax_B.set_ylabel("Mean ePSF flux [normalised]")
+            ax_B.set_xlabel("X [pixels]")
             ax_R.yaxis.tick_right()
             ax_R.tick_params(axis="x", rotation=90)
 
@@ -4357,11 +4478,10 @@ class PSF:
 
         # Individual normalization per star (not global) for better visibility
         cmap_vir = plt.get_cmap("viridis").copy()
-        cmap_vir.set_bad(color="white")
+        cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
         for i in range(num_stars):
             row, col = divmod(i, ncols)
             ax = fig.add_subplot(left_sub[row, col])
-            # Compute zscale limits for this star individually
             try:
                 vmin_i, vmax_i = ZScaleInterval().get_limits(stars[i])
                 norm_i = ImageNormalize(vmin=vmin_i, vmax=vmax_i)
@@ -4404,9 +4524,7 @@ class PSF:
 
         vmin_p, vmax_p = ZScaleInterval().get_limits(psf_model)
 
-        # Use log scale if requested for 2D PSF
         if use_log_scale:
-            # Transform to log10 scale for display
             psf_model_plot = np.log10(np.maximum(psf_model, 1e-10))
             vmin_p_plot = np.log10(np.maximum(vmin_p, 1e-10))
             vmax_p_plot = np.log10(np.maximum(vmax_p, 1e-10))
@@ -4420,7 +4538,7 @@ class PSF:
         # 2D ePSF image (right side, top of right subgrid)
         ax_right = fig.add_subplot(right_sub[0, 0])
         cmap_vir = plt.get_cmap("viridis").copy()
-        cmap_vir.set_bad(color="white")
+        cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
         im = ax_right.imshow(
             np.ma.array(psf_model_plot, mask=~np.isfinite(psf_model_plot)),
             origin="lower",
@@ -4478,8 +4596,9 @@ class PSF:
         ax_right_3d.set_zticks([])
         ax_right_3d.view_init(elev=35, azim=135)
 
-        # Standardized PNG output.
-        psf_sources_png = os.path.join(write_dir, f"PSF_Sources_{base}.png")
+        psf_sources_png = os.path.join(
+            write_dir, f"PSF_Sources_{base}{get_plot_ext(self.input_yaml)}"
+        )
         fig.savefig(
             psf_sources_png,
             bbox_inches="tight",
@@ -4499,7 +4618,6 @@ class PSF:
 
         Works with both astropy Tables (.colnames) and pandas DataFrames (.columns).
         """
-        # Unified column-name lookup for both Table and DataFrame.
         col_names = tbl.colnames if hasattr(tbl, "colnames") else list(tbl.columns)
         for nm in names:
             if nm in col_names:
@@ -4633,7 +4751,6 @@ class PSF:
         if undersampled:
             fit_shape = (_odd(max(fit_shape[0], 9)),) * 2
 
-        # Apply target_shape_boost when is_target_fit
         if is_target_fit:
             fit_shape = (_odd(int(fit_shape[0] * target_shape_boost)),) * 2
 
@@ -4691,7 +4808,7 @@ class PSF:
         def _effective_xy_bounds_for_shape(fit_shape):
             """
             Constrain search bounds to be consistent with the PSF fit cutout.
-            A source cannot be robustly re-centered beyond roughly half the
+            A source cannot be reliably re-centered beyond roughly half the
             fit box width; keep margin to avoid edge-dominated solutions.
             """
             half_box = 0.5 * (min(fit_shape) - 1)
@@ -4782,7 +4899,6 @@ class PSF:
                 annulusIN = float(np.ceil(ap_size + gap_fwhm * fwhm))
                 annulusOUT = float(np.ceil(annulusIN + width_fwhm * fwhm))
                 
-                # Get target position
                 if is_target_fit and len(sources) == 1:
                     x_target = float(sources["x_pix"].iloc[0])
                     y_target = float(sources["y_pix"].iloc[0])
@@ -4791,12 +4907,10 @@ class PSF:
                     x_target = nx / 2.0
                     y_target = ny / 2.0
                 
-                # Create annulus mask
                 yy, xx = np.ogrid[:ny, :nx]
                 r2 = (xx - x_target)**2 + (yy - y_target)**2
                 in_annulus = (r2 >= annulusIN**2) & (r2 < annulusOUT**2)
                 
-                # Extract background from annulus
                 annulus_pixels = image_data[in_annulus]
                 finite_pixels = annulus_pixels[np.isfinite(annulus_pixels)]
                 
@@ -4877,7 +4991,7 @@ class PSF:
         orig_idx = np.arange(len(sources)).astype(int)
         # For the target (single-source) fit, aperture photometry can legitimately fail
         # (e.g. NaN-heavy difference cutouts, masked annulus, etc.). In that case flux_all
-        # may be NaN even though x/y are valid; do a robust image-based flux bootstrap
+        # may be NaN even though x/y are valid; do an image-based flux bootstrap
         # so PSF fitting can still proceed and not poison downstream steps with NaNs.
         if bool(is_target_fit) and len(sources) == 1 and not np.isfinite(flux_all[0]):
             try:
@@ -4900,7 +5014,7 @@ class PSF:
                                 "(near chip gap/edge); flux estimate may be unreliable.",
                                 nan_frac * 100.0,
                             )
-                        # Use median of finite pixels as background (more robust than nanmedian)
+                        # Median of finite pixels as background level (resistant to outliers).
                         finite_vals = patch[np.isfinite(patch)]
                         if len(finite_vals) > 0:
                             bkg = float(np.median(finite_vals))
@@ -4954,7 +5068,6 @@ class PSF:
                         )
                     else:
                         log.warning("Target PSF: source %d flux still NaN after bootstrap; cannot force inclusion", _ti)
-        # Debug: log target flux status after bootstrap
         if is_target_fit and len(sources) == 1:
             log.debug(
                 "Target PSF: after bootstrap - flux_all[0]=%.3g, x_all[0]=%.3g, y_all[0]=%.3g, valid=%s",
@@ -4973,11 +5086,10 @@ class PSF:
         # Storing it here lets us trigger the inverted retry before MCMC runs.
         _bootstrap_flux_e = flux_e_frame.copy()  # unclipped, may be negative
 
-        # Sanity check: ensure initial flux guesses are reasonable
-        # For very faint sources, flux can be close to background - clip to minimum reasonable value
+        # For very faint sources the flux guess can be near background; clip to a floor.
         flux_clipped = np.clip(flux_e_frame, 1e-6, 1e12)
         
-        # Resolve gain early — needed for both flux boosting and Fisher SNR below.
+        # Resolve gain early -- needed for both flux boosting and Fisher SNR below.
         # background_rms is in ADU (from photutils Background2D on the raw image).
         # ndimage.uncertainty.array is in electrons (from create_nddata_with_fitting_weights
         # where image_e = image * gain).  Normalise to ADU so the S/N formula's
@@ -4987,7 +5099,7 @@ class PSF:
         # Additional sanity: if flux is too low relative to background RMS, boost it
         # This prevents convergence issues for extremely faint sources.
         # Use the local background_rms (passed as parameter) rather than global
-        # np.std of the entire image — on difference images with large subtraction
+        # np.std of the entire image -- on difference images with large subtraction
         # residuals, the global std is much larger than the actual per-pixel noise,
         # which would inflate the initial flux guess and bias the PSF fit.
         # Apply per-source in multi-target fits as well.
@@ -5074,7 +5186,7 @@ class PSF:
         C = max(C, 1e-6)
         # Per-pixel background variance in e-^2.
         # background_rms from MADStdBackgroundRMS already includes read noise,
-        # so do NOT add read_noise^2 again — that double-counts it.
+        # so do NOT add read_noise^2 again -- that double-counts it.
         bkg_var_e2 = (bkgrmsval * gain) ** 2  # e-^2
         # PSF photometry variance in e-^2 (background + Poisson)
         sigma_fs_sq = bkg_var_e2 / C + np.abs(flux_e_frame)
@@ -5220,25 +5332,24 @@ class PSF:
             # For the target fit, keep the PSF local background estimator aligned with
             # aperture photometry (annulus median). MMM can behave differently on
             # structured difference-image residuals and produce large AP-vs-PSF flux offsets.
-            # Using MedianBackground consistently across all tiers for robust sky estimation.
+            # MedianBackground is used across all tiers for consistent sky estimation.
             # Handle NaN-heavy regions (chip gaps) by shrinking annulus or falling back to global.
             # In multi-target fits, check the annulus quality for each source and use
             # the most conservative (smallest) annulus that works for all sources.
             if is_target_fit:
                 _n_in_mask = int(np.count_nonzero(mask))
                 # `mask` indexes init_params (valid rows only), so use the
-                # already-filtered x/y arrays — x_all includes dropped rows
+                # already-filtered x/y arrays -- x_all includes dropped rows
                 # and would misalign/IndexError the boolean index.
                 _xs = np.asarray(x[mask], float)
                 _ys = np.asarray(y[mask], float)
                 # Try primary annulus first
                 _inner_r, _outer_r = float(inner_r), float(outer_r)
-                _max_shrink = 3  # Number of shrink attempts
-                _shrink_factor = 0.7  # Reduce radii by this factor each attempt
+                _max_shrink = 3
+                _shrink_factor = 0.7
                 # Pre-allocate coordinate grids once (image shape doesn't change between attempts)
                 yy, xx = np.ogrid[:ndimage.data.shape[0], :ndimage.data.shape[1]]
                 for attempt in range(_max_shrink):
-                    # Check NaN fraction for each source's annulus
                     _all_ok = True
                     _worst_nan_frac = 0.0
                     for _si in range(_n_in_mask):
@@ -5254,7 +5365,6 @@ class PSF:
                         # Sufficient finite pixels for all sources - use this annulus
                         break
                     if attempt < _max_shrink - 1:
-                        # Shrink annulus and retry
                         _inner_r = max(3.0, _inner_r * _shrink_factor)
                         _outer_r = max(_inner_r + 2.0, _outer_r * _shrink_factor)
                         log.warning(
@@ -5291,7 +5401,7 @@ class PSF:
                     fit_shape=fit_shape,
                     aperture_radius=aperture_radius,
                     **{_LOCALBKG_KWARG: localbkg},
-                    grouper=group_maker,  # Added for overlapping source handling
+                    grouper=group_maker,
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
                 )
@@ -5404,9 +5514,8 @@ class PSF:
             except Exception:
                 pass
 
-            # LSQ robustness retry:
-            # Re-fit only pathological rows with a slightly larger fit box but
-            # tighter centroid bounds to reduce divergence/outlier solutions.
+            # LSQ retry: refit pathological rows with a slightly larger fit box
+            # and tighter centroid bounds to reduce divergence.
             if (not use_emcee_this_tier) and (not res.empty):
                 bad = (
                     ~np.isfinite(self._first_present(res, ["x_fit", "xcenter_fit", "x_0_fit"]))
@@ -5525,7 +5634,6 @@ class PSF:
                             _y_errs[i] = _get_sigma(("y", "y_0", "y_mean", "ycenter"))
                             _flux_errs[i] = _get_sigma(("flux", "amplitude", "amp"))
 
-                        # Assign entire columns at once (vectorized)
                         res["x_fit_err"] = _x_errs
                         res["y_fit_err"] = _y_errs
                         res["flux_fit_err"] = _flux_errs
@@ -5553,7 +5661,6 @@ class PSF:
                 ap_size = float(aperture_radius)
             annulusIN = float(np.ceil(ap_size + gap_fwhm * fwhm))
             annulusOUT = float(np.ceil(annulusIN + width_fwhm * fwhm))
-            # Apply to all tiers.
             bright_inner = annulusIN
             bright_outer = annulusOUT
             faint_inner = annulusIN
@@ -5592,7 +5699,7 @@ class PSF:
 
         if (is_target_fit and len(init_params) > 1) or not any_emcee_used:
             # ---- Single-call fit ------------------------------------------
-            # When no tier uses MCMC (always the case for catalog fits —
+            # When no tier uses MCMC (always the case for catalog fits --
             # MCMC is restricted to target fits), a single PSFPhotometry call
             # over all sources is both cheaper (one SourceGrouper pass, one
             # background-model setup) and more correct: neighbours that fall
@@ -5666,8 +5773,7 @@ class PSF:
         combined = pd.concat(results)
         idx_out = np.asarray(combined["idx"], int)
 
-        # Removed dead code - first extraction block was never used
-        # Values are re-extracted after inverted processing below
+        # Values are re-extracted after the inverted-fit merge below.
 
         # Check which fits have significant negative SNR and need inverted retry
         # For target-only fits with check_inverted enabled
@@ -5795,12 +5901,9 @@ class PSF:
                     len(idx_out_inv_good),
                     len(idx_out_inv)
                 )
-                # Replace the bad normal fits with inverted results
-                # Get the rows in combined_inv that succeeded
                 inv_good_mask = np.isin(idx_out_inv, idx_out_inv_good)
                 combined_inv_good = combined_inv.iloc[inv_good_mask].copy()
-                
-                # Map from idx to position in combined
+
                 idx_to_pos = {idx: i for i, idx in enumerate(idx_out)}
                 
                 # Preserve difference-image (normal) PSF parameters before they are overwritten
@@ -5847,7 +5950,6 @@ class PSF:
                 )
                 snap_flags = np.asarray(combined.get("flags", 0), dtype=int)
                 
-                # Ensure _inverted_fit column exists as boolean type
                 if "_inverted_fit" not in combined.columns:
                     combined["_inverted_fit"] = False
 
@@ -5902,7 +6004,7 @@ class PSF:
                         combined.loc[row_labels, "flags"] = inv_subset["flags"].values
                     # Copy ALL quality-of-fit columns individually from inverted to combined.
                     # Using a single gof_col/igof_col only copies the first match, leaving
-                    # qfit and reduced_chi2 from the original fit — which then causes the
+                    # qfit and reduced_chi2 from the original fit -- which then causes the
                     # error scaling below to use the wrong fit's quality metrics.
                     for _gof_name in ("cfit", "qfit", "reduced_chi2", "chi2_red"):
                         if _gof_name in combined.columns and _gof_name in inv_subset.columns:
@@ -5910,12 +6012,9 @@ class PSF:
             else:
                 log.info("Inverted PSF fit did not improve any sources.")
 
-        # Plot inverted fit results if any succeeded and plotTarget is enabled
         if plotTarget and combined_inv is not None and len(idx_out_inv_good) > 0:
             try:
-                # Create a copy of sources with inverted fit results for plotting
                 inv_plot_sources = sources.copy()
-                # Vectorised position update for plotting
                 _ix_col = _first_col(combined_inv_good, ["x_fit", "xcenter_fit", "x_0_fit"])
                 _iy_col = _first_col(combined_inv_good, ["y_fit", "ycenter_fit", "y_0_fit"])
                 valid_inv = combined_inv_good[
@@ -5934,7 +6033,6 @@ class PSF:
                         valid_inv["idx"].values, inv_plot_sources.columns.get_loc("y_fit")
                     ] = valid_inv[_iy_col].values
                 
-                # Plot with inverted image data and the fitted PSF model
                 self.plot(
                     inv_plot_sources,
                     ndimage_inverted,
@@ -5948,16 +6046,16 @@ class PSF:
                 fpath = self.input_yaml["fpath"]
                 base = os.path.splitext(os.path.basename(fpath))[0]
                 write_dir = os.path.dirname(fpath)
-                old_path = os.path.join(write_dir, f"PSF_Target_{base}.png")
-                new_path = os.path.join(write_dir, f"PSF_Target_{base}_inverted.png")
+                _ext = get_plot_ext(self.input_yaml)
+                old_path = os.path.join(write_dir, f"PSF_Target_{base}{_ext}")
+                new_path = os.path.join(write_dir, f"PSF_Target_{base}_inverted{_ext}")
                 if os.path.exists(old_path):
                     os.rename(old_path, new_path)
                     # log.info("Saved inverted PSF fit plot: %s", new_path)
             except Exception as exc:
                 log.warning("Inverted fit plotting failed: %s", exc)
 
-        # Now process the final results (potentially with inverted replacements)
-        # Extract values from combined (which may have been modified with _inverted_fit flags)
+        # Extract final values from combined (after any inverted-fit replacement).
         x_fit = self._first_present(combined, ["x_fit", "xcenter_fit", "x_0_fit"])
         y_fit = self._first_present(combined, ["y_fit", "ycenter_fit", "y_0_fit"])
         x_err = self._first_present(combined, ["x_fit_err", "x_err", "xcenter_fit_err"])
@@ -6104,7 +6202,6 @@ class PSF:
         ] = df_out[["x_fit", "y_fit", "x_fit_err", "y_fit_err"]].to_numpy()
         # Flux in e/s (same convention as aperture) so AP and PSF mags share the same zeropoint.
         # flux_fit_e is total flux in electrons from the PSF fit; divide by exposure_time for e/s.
-        # Validate exposure_time before division
         if not np.isfinite(exposure_time) or exposure_time <= 0:
             log.warning("Invalid exposure_time (%s), setting flux and errors to NaN", exposure_time)
             updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF"])] = np.nan
@@ -6152,7 +6249,6 @@ class PSF:
         
         # Copy _inverted_fit flag from combined (marks which sources used inverted fit)
         if "_inverted_fit" in combined.columns:
-            # Ensure column exists as boolean type
             if "_inverted_fit" not in updated.columns:
                 updated["_inverted_fit"] = False
             updated.iloc[row_pos, updated.columns.get_indexer(["_inverted_fit"])] = (
@@ -6178,7 +6274,7 @@ class PSF:
                 flux_err_inv = np.where(np.isfinite(flux_err_inv), flux_err_inv, np.nan)
 
             # Scale inverted-fit flux errors by sqrt(reduced_chi2), matching
-            # the normal-fit error scaling (see lines ~4800-4823).  qfit-based
+            # the normal-fit error scaling above.  qfit-based
             # scaling was removed for normal fits because qfit is inversely
             # proportional to flux, creating a magnitude-dependent bias that
             # suppresses marginal detections.  The same reasoning applies to
@@ -6224,8 +6320,7 @@ class PSF:
                     / np.abs(updated.loc[valid_inv_flux, "flux_PSF_inverted"])
                 )
                 updated["inst_inverted_err"] = mag_err_inv
-            # Add other inverted PSF parameters with _inverted suffix
-            # Get inverted fit values from combined_inv
+            # Remaining inverted-fit parameters, stored with _inverted suffix.
             x_fit_inv = self._first_present(combined_inv, ["x_fit", "xcenter_fit", "x_0_fit"])
             y_fit_inv = self._first_present(combined_inv, ["y_fit", "ycenter_fit", "y_0_fit"])
             x_err_inv = self._first_present(combined_inv, ["x_fit_err", "x_err", "xcenter_fit_err"])
@@ -6234,12 +6329,11 @@ class PSF:
             qfit_inv = self._first_present(combined_inv, ["qfit"])
             chi2_inv = self._first_present(combined_inv, ["reduced_chi2", "chi2_red"])
             flags_inv = np.asarray(combined_inv.get("flags", 0), int)
-            # Create columns if they don't exist
             for col in ["x_fit_inverted", "y_fit_inverted", "x_fit_err_inverted", "y_fit_err_inverted",
                         "cfit_inverted", "qfit_inverted", "reduced_chi2_inverted", "flags_inverted", "fwhm_psf_inverted"]:
                 if col not in updated.columns:
                     updated[col] = np.nan
-            # Store inverted values — batch all columns in a single .iloc assignment
+            # Store inverted values -- batch all columns in a single .iloc assignment
             _inv_cols = ["x_fit_inverted", "y_fit_inverted", "x_fit_err_inverted", "y_fit_err_inverted",
                          "cfit_inverted", "qfit_inverted", "reduced_chi2_inverted", "flags_inverted", "fwhm_psf_inverted"]
             _inv_vals = np.column_stack([
@@ -6416,7 +6510,7 @@ class PSF:
                 )
                 second_image = np.asarray(subtracted.data)
                 fitted_model = first_image - second_image
-                second_label = "Residual Flux"
+                second_label = "Residual Flux [e$^-$]"
             else:
                 second_image = fitted_model = None
                 second_label = None
@@ -6475,7 +6569,7 @@ class PSF:
             aspect = 5.0 * golden_ratio / width_in
             width_pt = width_in * 72.27
             fig = plt.figure(figsize=set_size(width_pt, aspect=aspect))
-            gs = GridSpec(1, ncols, width_ratios=[1] * ncols, wspace=0.05)
+            gs = GridSpec(1, ncols, width_ratios=[1] * ncols, wspace=0.15)
 
             ax_list, cax_list = [], []
             for k in range(ncols):
@@ -6594,7 +6688,6 @@ class PSF:
                     _primary_mask_cut = _mask_cut
                     _primary_unc_cut = _unc_cut
 
-                # Title with target name
                 _tname = _target_names[_tcol] if _tcol < len(_target_names) else f"Target {_tcol}"
                 _ax.set_title(_tname, fontsize=8, pad=3)
 
@@ -6614,7 +6707,7 @@ class PSF:
                         _cutout, interval=ZScaleInterval(), stretch=LinearStretch()
                     )
                 _cmap = plt.get_cmap("viridis").copy()
-                _cmap.set_bad(color="white")
+                _cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
                 _im = _ax.imshow(
                     np.ma.array(first_image, mask=~np.isfinite(first_image)),
                     origin="lower",
@@ -6672,12 +6765,12 @@ class PSF:
                     _ax.plot(
                         np.column_stack([xf - r, xf + r]).T,
                         np.column_stack([yf, yf]).T,
-                        color="#D94F4F", lw=1.2, alpha=0.9, zorder=11,
+                        color=PLOT_COLORS.get('target', '#E31B23'), lw=1.2, alpha=0.9, zorder=11,
                     )
                     _ax.plot(
                         np.column_stack([xf, xf]).T,
                         np.column_stack([yf - r, yf + r]).T,
-                        color="#D94F4F", lw=1.2, alpha=0.9, zorder=11,
+                        color=PLOT_COLORS.get('target', '#E31B23'), lw=1.2, alpha=0.9, zorder=11,
                         label="Fitted position" if _tcol == 0 else None,
                     )
                     _ap_circles = [Circle((x, y), aperture_radius) for x, y in zip(xf, yf)]
@@ -6720,7 +6813,6 @@ class PSF:
                             color=_tc_colors[_oi], fontsize=6, ha="center", zorder=11,
                         )
 
-                # Set zoom limits for this panel
                 _ax.set_xlim(_tx0, _tx1)
                 _ax.set_ylim(_ty0, _ty1)
 
@@ -6777,7 +6869,7 @@ class PSF:
                         cutout2, interval=ZScaleInterval(), stretch=LinearStretch()
                     )
                 cmap_vir = plt.get_cmap("viridis").copy()
-                cmap_vir.set_bad(color="white")
+                cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
                 im2 = ax2.imshow(
                 np.ma.array(second_image, mask=~np.isfinite(second_image)),
                 origin="lower",
@@ -6856,7 +6948,7 @@ class PSF:
                     epsf.data, interval=ZScaleInterval(), stretch=LinearStretch()
                 )
                 cmap_vir = plt.get_cmap("viridis").copy()
-                cmap_vir.set_bad(color="white")
+                cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
                 im3 = ax3.imshow(
                 np.ma.array(epsf.data, mask=~np.isfinite(epsf.data)),
                 origin="lower",
@@ -6876,7 +6968,7 @@ class PSF:
                     cax=cax_list[_ci],
                     orientation="horizontal",
                 )
-                _cbar.set_label("Inverted Science Flux" if is_inverted else "Science Flux")
+                _cbar.set_label("Inverted Science Flux [e$^-$]" if is_inverted else "Science Flux [e$^-$]")
                 cax_list[_ci].xaxis.set_ticks_position("top")
                 cax_list[_ci].xaxis.set_label_position("top")
 
@@ -6884,7 +6976,7 @@ class PSF:
                 _residual_cax = cax_list[_n_target_cols]
                 cbar2 = fig.colorbar(im2, cax=_residual_cax, orientation="horizontal")
                 cbar2.set_label(
-                    "Inverted Residual Flux" if is_inverted else second_label
+                    "Inverted Residual Flux [e$^-$]" if is_inverted else second_label
                 )
                 _residual_cax.xaxis.set_ticks_position("top")
                 _residual_cax.xaxis.set_label_position("top")
@@ -6900,13 +6992,13 @@ class PSF:
                 _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=False))
             # Axis labels on profile panels (consistent with Aperture plot)
             ax1_B.set_xlabel("X position (pixels)")
-            ax1_B.set_ylabel("Flux (e-)")
-            ax1_R.set_xlabel("Flux (e-)")
+            ax1_B.set_ylabel("Flux [e$^-$]")
+            ax1_R.set_xlabel("Flux [e$^-$]")
             ax1_R.yaxis.set_label_position("right")
             if psfphot is not None:
                 ax2_B.set_xlabel("X position (pixels)")
-                ax2_B.set_ylabel("Flux (e-)")
-                ax2_R.set_xlabel("Flux (e-)")
+                ax2_B.set_ylabel("Flux [e$^-$]")
+                ax2_R.set_xlabel("Flux [e$^-$]")
                 ax2_R.yaxis.set_label_position("right")
             # Build legend only from handle types that matplotlib can render
             # (PatchCollection / QuadMesh are not supported by legend and
@@ -6939,11 +7031,11 @@ class PSF:
                 if _valid:
                     _n_leg = len(_valid)
                     _leg_ncol = 3 if _n_leg >= 8 else (2 if _n_leg >= 5 else 1)
-                    ax1.legend(_valid, _valid_labels, loc="upper left", frameon=True,
-                               facecolor="white", framealpha=1.0, edgecolor="black",
-                               fontsize=8, ncol=_leg_ncol)
+                    ax1.legend(_valid, _valid_labels, loc="upper left",
+                               frameon=False, fontsize=8, ncol=_leg_ncol)
+            _ext = get_plot_ext(self.input_yaml)
             save_name_png = (
-                f"PSF_Target_{base}.png" if plotTarget else f"PSF_Subtractions_{base}.png"
+                f"PSF_Target_{base}{_ext}" if plotTarget else f"PSF_Subtractions_{base}{_ext}"
             )
             fig.savefig(
                 os.path.join(write_dir, save_name_png),
@@ -7003,7 +7095,6 @@ class PSF:
 
         npar_all = samples_all.shape[1]
 
-        # Recover parameter names.
         param_names_all = None
         per_src = fitinfo.get("per_source")
         if isinstance(per_src, (list, tuple)) and len(per_src) > sourceidx:
@@ -7078,7 +7169,9 @@ class PSF:
         writedir = writedir or cfg.get("write_dir", ".")
         os.makedirs(writedir, exist_ok=True)
         stem = os.path.splitext(os.path.basename(fpath))[0]
-        outpath_png = os.path.join(writedir, f"PSF_MCMC_Corner_{stem}.png")
+        outpath_png = os.path.join(
+            writedir, f"PSF_MCMC_Corner_{stem}{get_plot_ext(cfg)}"
+        )
 
         if corner is None:
             log.warning(
@@ -7115,7 +7208,7 @@ class PSF:
                 if hi is not None:
                     ax1d.axvline(hi, color="0.25", lw=0.5, ls="--")
             if orig_arr is not None and np.isfinite(orig_arr[i]):
-                ax1d.axvline(orig_arr[i], color="C1", lw=0.5, ls=":")
+                ax1d.axvline(orig_arr[i], color=PLOT_COLORS.get('threshold_line', '#D9A05B'), lw=0.5, ls=":")
 
             for j in range(i):
                 ax2d = axgrid[i, j]
@@ -7131,9 +7224,9 @@ class PSF:
 
                 if orig_arr is not None:
                     if np.isfinite(orig_arr[j]):
-                        ax2d.axvline(orig_arr[j], color="C1", lw=0.5, ls=":")
+                        ax2d.axvline(orig_arr[j], color=PLOT_COLORS.get('threshold_line', '#D9A05B'), lw=0.5, ls=":")
                     if np.isfinite(orig_arr[i]):
-                        ax2d.axhline(orig_arr[i], color="C1", lw=0.5, ls=":")
+                        ax2d.axhline(orig_arr[i], color=PLOT_COLORS.get('threshold_line', '#D9A05B'), lw=0.5, ls=":")
 
         fig.suptitle("PSF MCMC posterior", y=0.98, fontsize=10)
         fig.savefig(
