@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Alignment verification utilities for SCAMP/SWarp precise alignment validation.
-Provides comprehensive diagnostics to ensure science and reference images are precisely aligned.
+Alignment verification utilities for SCAMP/SWarp-processed image pairs.
 """
 
 import logging
@@ -18,22 +17,25 @@ logger = logging.getLogger(__name__)
 
 
 class AlignmentVerifier:
-    """Comprehensive alignment verification for SCAMP/SWarp processed images.
+    """Alignment verification for SCAMP/SWarp processed images.
 
     Verifies WCS consistency, pixel-grid alignment, coordinate transformation
     accuracy, and resampling quality between science and reference images
     after astrometric alignment.
     """
 
-    def __init__(self, verbose_level: int = 1):
+    def __init__(self, verbose_level: int = 1, plot_format: str = "png"):
         """Initialise the verifier.
 
         Parameters
         ----------
         verbose_level : int
             Logging verbosity (0 = quiet, 1 = info, 2 = debug).
+        plot_format : str
+            Diagnostic plot file format: 'png' (default) or 'svg'.
         """
         self.verbose_level = verbose_level
+        self.plot_format = plot_format
         self.logger = logging.getLogger(__name__)
 
     def verify_precise_alignment(
@@ -132,8 +134,7 @@ class AlignmentVerifier:
             'issues': []
         }
         
-        # Check key WCS parameters
-        wcs_params = ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2', 'CTYPE1', 'CTYPE2', 
+        wcs_params = ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2', 'CTYPE1', 'CTYPE2',
                      'CDELT1', 'CDELT2', 'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2']
         
         for param in wcs_params:
@@ -165,7 +166,6 @@ class AlignmentVerifier:
                         results['issues'].append(f"{param} differs by {diff:.8f} deg/px")
                     results['differences'][param] = diff
         
-        # Check projection types
         sci_ctype1 = str(sci_header.get('CTYPE1', '')).upper()
         ref_ctype1 = str(ref_header.get('CTYPE1', '')).upper()
         if sci_ctype1 != ref_ctype1:
@@ -187,7 +187,6 @@ class AlignmentVerifier:
             results['consistent'] = False
             results['issues'].append(f"Shape mismatch: sci {sci_data.shape} vs ref {ref_data.shape}")
         
-        # Check NAXIS keywords
         sci_naxis1 = sci_header.get('NAXIS1', sci_data.shape[1])
         sci_naxis2 = sci_header.get('NAXIS2', sci_data.shape[0])
         ref_naxis1 = ref_header.get('NAXIS1', ref_data.shape[1])
@@ -209,10 +208,8 @@ class AlignmentVerifier:
             'test_points': []
         }
         
-        # Test coordinate transformation at various points across the image
         ny, nx = image_shape
-        
-        # Create a grid of test points
+
         test_points = []
         for y in np.linspace(0, ny-1, 10):
             for x in np.linspace(0, nx-1, 10):
@@ -221,16 +218,15 @@ class AlignmentVerifier:
         offsets = []
         
         for x, y in test_points:
-            # Transform pixel coordinates to world coordinates using both WCS
             try:
                 sci_world = sci_wcs.all_pix2world([[x]], [[y]], 0)
                 ref_world = ref_wcs.all_pix2world([[x]], [[y]], 0)
-                
-                # Transform back to pixels using opposite WCS
+
+                # Map back through the *opposite* WCS, so the residual
+                # measures inter-WCS disagreement rather than round-trip error.
                 sci_back_to_ref = ref_wcs.all_world2pix(sci_world[0, 0], sci_world[1, 0], 0)
                 ref_back_to_sci = sci_wcs.all_world2pix(ref_world[0, 0], ref_world[1, 0], 0)
-                
-                # Calculate offsets
+
                 offset_x = abs(sci_back_to_ref[0] - x)
                 offset_y = abs(sci_back_to_ref[1] - y)
                 offset_total = np.sqrt(offset_x**2 + offset_y**2)
@@ -279,7 +275,6 @@ class AlignmentVerifier:
             'statistics': {}
         }
         
-        # Basic statistics
         sci_mean, sci_median, sci_std = sigma_clipped_stats(sci_data)
         ref_mean, ref_median, ref_std = sigma_clipped_stats(ref_data)
         
@@ -288,26 +283,25 @@ class AlignmentVerifier:
             'reference': {'mean': ref_mean, 'median': ref_median, 'std': ref_std}
         }
         
-        # Check for resampling artifacts
-        # 1. NaN values
+        # Resampling artifacts: NaN patches mark pixels with no coverage.
         sci_nan_frac = np.isnan(sci_data).sum() / sci_data.size
         ref_nan_frac = np.isnan(ref_data).sum() / ref_data.size
         
         if sci_nan_frac > 0.01 or ref_nan_frac > 0.01:
             results['issues'].append(f"High NaN fraction: sci {sci_nan_frac:.3f}, ref {ref_nan_frac:.3f}")
         
-        # 2. Extreme values (possible resampling artifacts)
+        # Large outliers can indicate resampling spikes.
         sci_extreme_frac = (np.abs(sci_data - sci_median) > 5 * sci_std).sum() / sci_data.size
         ref_extreme_frac = (np.abs(ref_data - ref_median) > 5 * ref_std).sum() / ref_data.size
         
         if sci_extreme_frac > 0.001 or ref_extreme_frac > 0.001:
             results['issues'].append(f"High extreme value fraction: sci {sci_extreme_frac:.4f}, ref {ref_extreme_frac:.4f}")
         
-        # Calculate quality score
+        # Penalties are capped so no single artifact type dominates the score.
         quality_score = 1.0
-        quality_score -= min(sci_nan_frac * 10, 0.3)  # Penalize NaN values
+        quality_score -= min(sci_nan_frac * 10, 0.3)
         quality_score -= min(ref_nan_frac * 10, 0.3)
-        quality_score -= min(sci_extreme_frac * 50, 0.2)  # Penalize extreme values
+        quality_score -= min(sci_extreme_frac * 50, 0.2)
         quality_score -= min(ref_extreme_frac * 50, 0.2)
         
         results['quality_score'] = max(0, quality_score)
@@ -361,27 +355,30 @@ class AlignmentVerifier:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         try:
-            from plotting_utils import apply_autophot_mplstyle
+            from plotting_utils import apply_autophot_mplstyle, get_plot_ext
             apply_autophot_mplstyle()
         except Exception:
             pass
 
         # 1. Difference image
         diff_data = sci_data - ref_data
-        
+
+        _cmap = plt.get_cmap('gray').copy()
+        _cmap.set_bad(color='magenta')
+
         plt.figure(figsize=(12, 8))
         plt.subplot(2, 2, 1)
-        plt.imshow(sci_data, cmap='gray', origin='lower')
+        plt.imshow(sci_data, cmap=_cmap, origin='lower')
         plt.title('Science Image')
         plt.colorbar()
 
         plt.subplot(2, 2, 2)
-        plt.imshow(ref_data, cmap='gray', origin='lower')
+        plt.imshow(ref_data, cmap=_cmap, origin='lower')
         plt.title('Reference Image')
         plt.colorbar()
 
         plt.subplot(2, 2, 3)
-        plt.imshow(diff_data, cmap='gray', origin='lower', vmin=-np.percentile(np.abs(diff_data), 99),
+        plt.imshow(diff_data, cmap=_cmap, origin='lower', vmin=-np.percentile(np.abs(diff_data), 99),
                    vmax=np.percentile(np.abs(diff_data), 99))
         plt.title('Difference (Science - Reference)')
         plt.colorbar()
@@ -402,7 +399,10 @@ class AlignmentVerifier:
                 plt.ylabel('Y (pixels)')
         
         plt.tight_layout()
-        plt.savefig(output_dir / f'Alignment_Verification_{base}.png', dpi=150, bbox_inches='tight', facecolor='white')
+        plt.savefig(
+            output_dir / f'Alignment_Verification_{base}{get_plot_ext({"plot_format": self.plot_format})}',
+            dpi=150, bbox_inches='tight', facecolor='white',
+        )
         plt.close(plt.gcf())
         
         self.logger.info("Alignment verification plots saved to %s", output_dir)

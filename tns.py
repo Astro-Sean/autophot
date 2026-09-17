@@ -161,7 +161,6 @@ def get_coords_simbad(target_name):
         from astropy.coordinates import SkyCoord
         import astropy.units as u
 
-        # Configure Simbad to return coordinates and object type
         Simbad.reset_votable_fields()
         Simbad.add_votable_fields("ra", "dec", "otype")
 

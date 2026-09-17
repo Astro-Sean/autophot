@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Quality flags (bitmask) — kept in sync with utils/quality_flags.py
+# Quality flags (bitmask) - kept in sync with utils/quality_flags.py
 # ---------------------------------------------------------------------------
 
 # Data-validation flags (bits 0-15)
@@ -255,7 +255,6 @@ def validate_image(
         )
     else:
         report.info["saturate"] = saturate
-        # Check for saturated pixels
         finite_data = image[finite_mask]
         if saturate > 0:
             sat_frac = float(np.sum(finite_data >= 0.9 * saturate) / finite_data.size)
@@ -282,7 +281,6 @@ def validate_image(
         )
     else:
         report.info["has_wcs"] = True
-        # Check pixel scale
         if pixel_scale is None:
             try:
                 cdelt = np.sqrt(np.abs(wcs.wcs.cdelt[0] * wcs.wcs.cdelt[1])) * 3600

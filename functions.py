@@ -19,7 +19,6 @@ This module provides:
   ``moffat_2d``, ``quadrature_add``).
 """
 
-# Import all required modules at the top
 import numpy as np
 
 import os
@@ -54,14 +53,13 @@ from photutils.background import Background2D, MedianBackground
 from photutils.segmentation import detect_sources, SourceCatalog, make_2dgaussian_kernel
 from photutils.aperture import RectangularAperture
 
-# Module-level logger
 logger = logging.getLogger(__name__)
 
 # --- FITS I/O cache ---------------------------------------------------------
-# Simple mtime+size keyed cache so repeated get_header / get_image_and_header
-# calls on the same (unmodified) file avoid re-opening and re-parsing the
-# FITS file.  Entries are invalidated automatically when the file changes on
-# disk (mtime/size mismatch) or explicitly via invalidate_fits_cache().
+# mtime+size keyed cache so repeated get_header / get_image_and_header calls
+# on the same (unmodified) file avoid re-opening and re-parsing the FITS file.
+# Entries are invalidated when the file changes on disk (mtime/size mismatch)
+# or explicitly via invalidate_fits_cache().
 import threading as _threading
 
 _FITS_CACHE_LOCK = _threading.Lock()
@@ -117,13 +115,10 @@ class PlainFormatter(logging.Formatter):
     ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     
     def format(self, record: logging.LogRecord) -> str:
-        # Get base formatted message
         msg = super().format(record)
-        # Strip all ANSI escape codes
         msg = self.ANSI_ESCAPE.sub('', msg)
-        # Indent continuation lines of multi-line messages so border
-        # banners and other multi-line output aligns under the first
-        # line's timestamp/level prefix in the log file.
+        # Indent continuation lines so border banners and other multi-line
+        # output align under the first line's timestamp/level prefix.
         if '\n' in msg:
             lines = msg.split('\n')
             dummy = copy.copy(record)
@@ -227,8 +222,7 @@ class ColoredLevelFormatter(logging.Formatter):
             return f"{self.RED}{base}{self.RESET}"
         if record.levelno >= logging.WARNING:
             return f"{self.YELLOW}{base}{self.RESET}"
-        
-        # INFO/DEBUG: plain black (no color)
+
         return base
 
 
@@ -383,7 +377,7 @@ def parse_supported_filter_group_key(group_key):
     if key == "":
         return None
 
-    # Fast path for canonical full-group keys.
+    # Canonical full-group keys take the fast path.
     if key in SUPPORTED_FILTER_GROUPS:
         return tuple(SUPPORTED_FILTER_GROUPS[key])
 
@@ -391,7 +385,7 @@ def parse_supported_filter_group_key(group_key):
     if comp is not None:
         return comp
 
-    # Support subsets of exactly one canonical family.
+    # Accept subsets of exactly one canonical family.
     for family_bands in SUPPORTED_FILTER_GROUPS.values():
         fam_set = set(family_bands)
         if all(ch in fam_set for ch in key):
@@ -442,21 +436,17 @@ def normalize_photometric_filter_name(filter_name, available_filters=None):
     # If available_filters is provided, accept any filter present there
     if available_filters is not None:
         available_set = set(str(f).strip() for f in available_filters)
-        # Exact match first
         if token in available_set:
             return token
-        # Case-insensitive match
+        # Case-insensitive match returns the catalog's own casing.
         if token.lower() in {f.lower() for f in available_set}:
-            # Return the exact case from available_filters
             for f in available_set:
                 if f.lower() == token.lower():
                     return f
     
-    # Standard photometric filters
     if token in SUPPORTED_PHOTOMETRIC_FILTERS:
         return token
 
-    # Common aliases for standard filters
     token_l = token.lower()
     aliases = {
         "up": "u",
@@ -470,7 +460,7 @@ def normalize_photometric_filter_name(filter_name, available_filters=None):
         "j": "J",
         "h": "H",
         "k": "K",
-        # Additional common variations
+        # Non-photometric header values map to None.
         "clear": None,
         "open": None,
         "luminance": None,
@@ -481,15 +471,15 @@ def normalize_photometric_filter_name(filter_name, available_filters=None):
     if result is not None:
         return result
     
-    # If available_filters is provided, try to find close matches
+    # available_filters also enables fuzzy matching, then a final exact
+    # check - the exact check is what lets custom catalogs use arbitrary
+    # filter names.
     if available_filters is not None:
         import difflib
         close_matches = difflib.get_close_matches(token, list(available_set), n=1, cutoff=0.8)
         if close_matches:
             return close_matches[0]
-        
-        # For custom catalogs, accept the original token if it's in the available filters
-        # This is the key change that allows arbitrary filter names
+
         if token in available_set:
             return token
     
@@ -655,10 +645,10 @@ def pad_ones(mask, padding):
     if padding <= 0:
         return mask
 
-    # Compute the distance transform from the zero regions
+    # Distance is measured from the zero regions, so masked pixels within
+    # `padding` px of an existing 1 get set.
     distance = distance_transform_edt(1 - mask)
 
-    # Expand the mask where the distance is within the padding radius
     expanded_mask = (distance <= padding).astype(np.uint8)
 
     return expanded_mask
@@ -686,18 +676,15 @@ def set_size(width, aspect=1, fraction=1):
 
     """
 
-    # Width of figure
     fig_width_pt = width * fraction
 
-    # Convert from pt to inches
+    # pt -> inches (1 pt = 1/72.27 in)
     inches_per_pt = 1 / 72.27
 
-    # Golden ratio to set aesthetic figure height
+    # Golden ratio for aesthetic figure height.
     golden_ratio = (5**0.5 + 1) / 2
 
-    # Figure width in inches
     fig_width_in = fig_width_pt * inches_per_pt
-    # Figure height in inches
     fig_height_in = fig_width_in / golden_ratio
 
     fig_dim = (fig_width_in, fig_height_in * aspect)
@@ -708,13 +695,12 @@ def set_size(width, aspect=1, fraction=1):
 def convert_to_mjd_astropy(date_string):
     """Parse a date string (ISOT or FITS format) and return MJD."""
     try:
-        # Try parsing with 'T' separator
+        # ISOT has a 'T' separator.
         t = Time(date_string, format="isot", scale="utc")
     except ValueError:
-        # If parsing fails, try without 'T' separator
+        # FITS format has no 'T'.
         t = Time(date_string, format="fits", scale="utc")
 
-    # Access the Modified Julian Date (MJD)
     mjd = t.mjd
 
     return mjd
@@ -722,14 +708,13 @@ def convert_to_mjd_astropy(date_string):
 
 def get_image_stats(image, sigma=3, maxiters=None):
     """Return sigma-clipped mean, median, and std for *image*."""
-    # Perform sigma clipping and calculate mean, median, and MAD in one step
     mean_value, median_value, std_value = sigma_clipped_stats(
         image,
         sigma=sigma,
         maxiters=maxiters,
         # background=sigma,
-        cenfunc=np.nanmedian,  # Use nanmedian for the center function
-        stdfunc=mad_std,  # Use mad_std for the standard deviation function
+        cenfunc=np.nanmedian,
+        stdfunc=mad_std,
     )
 
     return mean_value, median_value, std_value
@@ -740,30 +725,14 @@ def calculate_bins(x, percentiles=[25, 75]):
     try:
 
         if not np.any(np.isfinite(x)):
-            return "auto"  # Return default bins if no finite data
-        # Your normal bin calculation here
-        """
-        Calculate the number of bins for a histogram using the Freedman-Diaconis rule.
-    
-        Parameters:
-        x (array-like): Input data array or list of data values.
-    
-        Returns:
-        int: Number of bins to use for the histogram.
-        
-        The Freedman-Diaconis rule is used to determine an optimal number of bins
-        by considering the interquartile range (IQR) and the number of data points.
-        """
-        # Compute the 25th and 75th percentiles of the data
+            return "auto"  # default bins when there is no finite data
         q25, q75 = np.nanpercentile(x, percentiles)
 
-        # Calculate the interquartile range (IQR)
         iqr = q75 - q25
 
-        # Calculate the bin width using the Freedman-Diaconis rule
+        # Freedman-Diaconis bin width.
         bin_width = 2 * iqr * len(x) ** (-1 / 3)
 
-        # Determine the number of bins
         data_range = np.nanmax(x) - np.nanmin(x)
         bins = round(data_range / bin_width)
 
@@ -776,15 +745,12 @@ def calculate_bins(x, percentiles=[25, 75]):
 def save_to_fits(data, output_filename):
     """Write *data* to a FITS file as float32 (preserves NaNs)."""
     try:
-        # Use float32 to preserve NaNs (chip gaps) - integer dtypes cannot represent NaN
+        # float32 preserves NaNs (chip gaps); integer dtypes cannot.
         data_to_write = data.astype(np.float32) if data.dtype.kind != 'f' else data
-        # Create a PrimaryHDU object with the data
         hdu = fits.PrimaryHDU(data_to_write)
 
-        # Create an HDU list and append the PrimaryHDU
         hdulist = fits.HDUList([hdu])
 
-        # Write the HDU list to a FITS file
         hdulist.writeto(
             output_filename, overwrite=True, output_verify="silentfix+ignore"
         )
@@ -867,24 +833,20 @@ def beta_aperture(n, flux_aperture, npix, sigma, noise=0):
         Detection confidence in [0, 1]. Higher values indicate a more
         confident detection above the threshold.
     """
-    # Compute background-subtracted source flux.
-    # Use abs() for the significance calculation so that detection
-    # confidence is symmetric — a -5 sigma dip on a difference image is
-    # as significant as a +5 sigma peak.  This is consistent with the
-    # beta_psf fix (BUG-5).  The sign of the flux is checked separately
-    # in the detection logic (main.py is_detection), so this only
-    # affects the confidence value, not the detection decision.
+    # abs() keeps detection confidence symmetric: a -5 sigma dip on a
+    # difference image is as significant as a +5 sigma peak (consistent
+    # with the beta_psf fix, BUG-5).  The sign is checked separately in
+    # the detection logic (main.py is_detection), so this only affects
+    # the confidence value, not the detection decision.
     source_flux = np.abs(flux_aperture - noise * npix)
 
-    # Total noise in the aperture
     sigma_aperture = sigma * np.sqrt(npix)
-    # Avoid division by zero
+    # Guard against division by zero.
     sigma_aperture = np.maximum(sigma_aperture, np.finfo(float).tiny)
 
     # z-score: how far the measured flux is above the n-sigma threshold
     z = ((n * sigma_aperture) - source_flux) / (np.sqrt(2) * sigma_aperture)
 
-    # Detection confidence; clip to [0, 1] for a proper probability
     beta = np.clip(0.5 * (1 - erf(z)), 0.0, 1.0)
     return beta
 
@@ -913,9 +875,9 @@ def beta_psf(n, flux_psf, flux_psf_err):
         Detection confidence in [0, 1]. Higher values indicate a more
         confident detection above the threshold.
     """
-    # Use |flux| for significance — detection confidence is symmetric
-    # (a -5 sigma dip is as significant as a +5 sigma peak).
-    # This is important for inverted fits where flux_PSF is negative.
+    # |flux| keeps detection confidence symmetric (a -5 sigma dip is as
+    # significant as a +5 sigma peak); needed for inverted fits where
+    # flux_PSF is negative.
     flux_abs = np.abs(np.asarray(flux_psf, dtype=float))
     err = np.maximum(np.asarray(flux_psf_err, dtype=float), np.finfo(float).tiny)
     # Threshold flux = n * (1-sigma error); z-score for "flux above threshold"
@@ -970,7 +932,7 @@ def border_msg(msg: str, body: str = "-", corner: str = "+",
     except Exception:
         use_unicode = False
 
-    # Detect if output is a TTY (terminal) for ANSI codes
+    # ANSI codes only when output is a TTY.
     if use_ansi is None:
         try:
             use_ansi = sys.stdout.isatty()
@@ -996,21 +958,18 @@ def border_msg(msg: str, body: str = "-", corner: str = "+",
         bottom_right = "+"
         side = "|"
 
-    # Truncate or pad title to fit (account for corners and padding)
     max_title = width - 2  # space for left and right corner chars
-    # Visible text length (bold codes don't count toward display width)
+    # ANSI bold codes do not count toward the visible width.
     visible_text = text
     if len(visible_text) > max_title:
         visible_text = visible_text[:max_title-3] + "..."
 
-    # Center the title
     padding = max_title - len(visible_text)
     left_pad = padding // 2
     right_pad = padding - left_pad
-    # Apply bold to the title text only (not the padding)
+    # Bold the title text only, not the padding.
     centered = f"{' ' * left_pad}{BOLD}{visible_text}{RESET}{' ' * right_pad}"
 
-    # Build lines: top border with corners, title line, optional metadata, bottom border with corners
     top_border = f"{left_corner}{body * (width - 2)}{right_corner}"
     bottom_border = f"{bottom_left}{body * (width - 2)}{bottom_right}"
     title_line = f"{side}{centered}{side}"
@@ -1489,7 +1448,7 @@ def compute_target_crowding(
     if not np.any(np.isfinite(cut)):
         return {"ok": False, "reason": "cutout all non-finite"}
 
-    # Background / noise estimate for thresholding (robust to outliers)
+    # MAD-based background / noise estimate (resistant to outliers).
     finite = cut[np.isfinite(cut)]
     med = np.median(finite)
     mad = np.median(np.abs(finite - med))
@@ -1542,7 +1501,6 @@ def compute_target_crowding(
     seg_data = np.asarray(segm.data, dtype=int)
     n_sources_total = int(np.nanmax(seg_data))
 
-    # Catalog for centroids
     try:
         cat = SourceCatalog(cut, segm)
         xcen = np.asarray(cat.x_centroid if hasattr(cat, 'x_centroid') else cat.xcentroid)
@@ -1687,7 +1645,7 @@ class AutophotYaml:
 
 
 def get_header(fpath):
-    """Robustly read a FITS header, combining extensions if necessary.
+    """Read a FITS header, tolerating missing extensions.
 
     Looks for the ``TELESCOP`` keyword across HDUs and returns the first
     matching header, merging with the primary header if needed.
@@ -1705,9 +1663,9 @@ def get_header(fpath):
     from astropy.io.fits import getheader
     from astropy.io import fits
     try:
-        # Attempt to open FITS file with 'ignore_missing_end' to handle incomplete files
+        # 'ignore_missing_end' tolerates truncated files.
         with fits.open(fpath, ignore_missing_end=True) as hdul:
-            hdul.verify("silentfix+ignore")  # Try to fix any issues with the file
+            hdul.verify("silentfix+ignore")
 
             # FITS keywords are typically uppercase; check case-insensitively for TELESCOP
             def has_telescop(header):
@@ -1716,7 +1674,7 @@ def get_header(fpath):
             if has_telescop(hdul[0].header):
                 headinfo = hdul[0].header.copy()
             else:
-                # If not in primary, use first HDU that has TELESCOP (e.g. extension with image)
+                # TELESCOP may live in an extension HDU (e.g. the image ext).
                 for i in range(1, len(hdul)):
                     if has_telescop(hdul[i].header):
                         headinfo = hdul[i].header.copy()
@@ -1724,14 +1682,13 @@ def get_header(fpath):
                 else:
                     headinfo = hdul[0].header.copy()
     except KeyError as e:
-        # Handle missing or incorrect header keys (e.g., 'Telescop')
+        # Missing or mis-cased header keys (e.g., 'Telescop').
         raise Exception(f"KeyError: The required header keyword was not found: {e}")
 
     except Exception as e:
-        # General exception handling, including file issues or unexpected errors
         raise Exception(f"An error occurred while reading the FITS file: {e}")
 
-    # If the header is a list (indicating multiple HDUs), combine them
+    # A list header means multiple HDUs; combine them.
     if isinstance(headinfo, list):
         combined_header = headinfo[0].header
 
@@ -1773,7 +1730,7 @@ def get_image_and_header(fpath):
     try:
         with fits.open(fpath, ignore_missing_end=True) as hdul:
             hdul.verify("silentfix+ignore")
-            # Enhanced HDU selection for better FITS file support
+            # Pick the best image HDU across FITS layout conventions.
             image = None
             best_hdu_idx = None
             
@@ -1836,16 +1793,15 @@ def get_image_and_header(fpath):
                     except Exception as e:
                         logger.debug("Error with primary HDU: %s", e)
             
-            # Final validation and error handling
             if image is None:
-                # Print detailed HDU information for debugging
+                # Dump HDU structure to help debug exotic FITS layouts.
                 logger.debug("HDU structure analysis:")
                 for i, hdu in enumerate(hdul):
                     data_info = f"shape={getattr(hdu.data, 'shape', 'None')}" if hdu.data is not None else "None"
                     logger.debug("  HDU %s: %s, name='%s', data=%s", i, hdu.__class__.__name__, hdu.name, data_info)
                 raise Exception(f"No valid 2D+ image data found in FITS file: {os.path.basename(fpath)}")
             
-            # Handle multi-dimensional data by taking first 2D slice
+            # Cube data (e.g. data+error planes) collapses to its first 2D slice.
             if hasattr(image, 'shape') and len(image.shape) > 2:
                 base = os.path.basename(fpath)
                 logger.warning("%s has %sD data, taking first 2D slice", base, len(image.shape))
@@ -1858,15 +1814,14 @@ def get_image_and_header(fpath):
                 base = os.path.basename(fpath)
                 raise Exception(f"Warning: {base} is not a 2D array (found {getattr(image, 'shape', 'no shape')} data).")
 
-            # Header: use the header from the same HDU that contains the image data
-            # to ensure WCS keywords are preserved. Merge with TELESCOP header if different.
+            # Use the header from the same HDU as the image data so WCS
+            # keywords stay paired with the pixels they describe; merge
+            # TELESCOP metadata in from another HDU if needed.
             def has_telescop(header):
                 return any(k.upper() == "TELESCOP" for k in header.keys())
-            
-            # Start with header from the HDU containing the image data
+
             headinfo = hdul[best_hdu_idx].header.copy()
-            
-            # If the image HDU doesn't have TELESCOP, try to find it in other HDUs
+
             if not has_telescop(headinfo):
                 for i in range(len(hdul)):
                     if has_telescop(hdul[i].header):
@@ -1901,19 +1856,15 @@ def get_image(fpath):
     import os
     from astropy.io import fits
     try:
-        # Try to get 2D image from 'sci' extension
         image = fits.getdata(fpath, extname="sci")
 
     except Exception:
-        # If 'sci' extension fails, try getting image from the primary HDU
         image = fits.getdata(fpath)
 
-    # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
-    # Integer dtypes cannot represent NaN values, so we convert to float32
+    # float32 preserves NaNs (chip gaps); integer dtypes cannot.
     if image.dtype.kind != 'f':
         image = image.astype(np.float32)
 
-    # Check if the image data is a 2D array
     if len(image.shape) != 2:
         base = os.path.basename(fpath)
         raise Exception(f"Warning: {base} is not a 2D array.")
@@ -1935,27 +1886,25 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
         Name of the CSV files to look for in subdirectories (default: 'output.csv')
     """
 
-    # Initialize an empty list to hold DataFrames
     concatenated_data = []
 
     from fnmatch import fnmatch
 
-    # Traverse the folder using os.walk
     for root, dirs, files in os.walk(folder_path):
         for file in files:
             # Support wildcard patterns, e.g. loc_file="Output_*.csv"
             if ("*" in loc_file) and fnmatch(file, loc_file):
                 file_path = os.path.join(root, file)
 
-                # Read CSV with empty cells treated as NaN
+                # dtype=str preserves blank cells so they can be mapped
+                # to NaN below rather than parsed as 0 or ''.
                 df = pd.read_csv(
                     file_path,
                     keep_default_na=True,
                     na_values=["", " ", "NA", "N/A", "NaN", "null"],
-                    dtype=str,  # Read all columns as string to preserve blanks before NaN replacement
+                    dtype=str,
                 )
 
-                # Replace all empty strings or whitespace-only strings with np.nan
                 df = df.map(
                     lambda x: np.nan if isinstance(x, str) and x.strip() == "" else x
                 )
@@ -1964,15 +1913,13 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
             elif file == loc_file:
                 file_path = os.path.join(root, file)
 
-                # Read CSV with empty cells treated as NaN
                 df = pd.read_csv(
                     file_path,
                     keep_default_na=True,
                     na_values=["", " ", "NA", "N/A", "NaN", "null"],
-                    dtype=str,  # Read all columns as string to preserve blanks before NaN replacement
+                    dtype=str,
                 )
 
-                # Replace all empty strings or whitespace-only strings with np.nan
                 df = df.map(
                     lambda x: np.nan if isinstance(x, str) and x.strip() == "" else x
                 )
@@ -1985,7 +1932,6 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
         )
         return None
 
-    # Concatenate all DataFrames
     concatenated_data = pd.concat(concatenated_data, ignore_index=True)
 
     # If concatenation produced duplicate column names (common when mixing legacy
@@ -1995,10 +1941,9 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
             :, ~concatenated_data.columns.duplicated()
         ].copy()
 
-    # Write the concatenated data to the output file
     concatenated_data.to_csv(
         output_filename, index=False, na_rep="NaN"
-    )  # Explicit NaN representation
+    )  # write NaN explicitly
 
     logging.getLogger(__name__).info(
         "Concatenated %d rows of tabular data into '%s'.",
@@ -2082,7 +2027,7 @@ def snr(maxPixel, noiseBkg):
 
 def snr_err(snr_value):
     """
-     Error associated with signal to noise ratio (S/N). Equation  taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.png>`_. Whe can associate the error on the instrumental magnitude of a source as:
+     Error associated with signal to noise ratio (S/N). Equation taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.png>`_. The error on the instrumental magnitude of a source is:
 
 
     .. math ::
@@ -2129,16 +2074,16 @@ def quadrature_add(values):
 # Sampling regime classification (Howell 1989 sampling parameter)
 # ---------------------------------------------------------------------------
 # FWHM in pixels determines how well the PSF is sampled:
-#   < 2 px : undersampled  — PSF core spans < 2 pixels, flux concentrated
+#   < 2 px : undersampled  - PSF core spans < 2 pixels, flux concentrated
 #            in 1-2 pixels.  Need supersampled PSF, broader detection cuts,
 #            larger fixed apertures.
-#   2-3 px : critically sampled — PSF core barely resolved.  Moffat PSF
+#   2-3 px : critically sampled - PSF core barely resolved.  Moffat PSF
 #            with free beta, moderate apertures.
-#   3-5 px : well-sampled — standard PSF fitting, curve-of-growth apertures.
-#   > 5 px : oversampled — SNR inefficient, warn user, larger apertures.
+#   3-5 px : well-sampled - standard PSF fitting, curve-of-growth apertures.
+#   > 5 px : oversampled - SNR inefficient, warn user, larger apertures.
 #
 # These thresholds are configurable via input_yaml["photometry"]:
-#   undersampled_fwhm_threshold (default 2.5) — already used by psf.py
+#   undersampled_fwhm_threshold (default 2.5) - already used by psf.py
 #   critical_fwhm_threshold (default 3.0)
 #   oversampled_fwhm_threshold (default 5.0)
 
@@ -2614,9 +2559,7 @@ def nan_crop(data, header, cx, cy, ny, nx):
 
 
 def convert_ra_dec_to_hms_dms(ra_deg, dec_deg):
-    # Create a SkyCoord object using RA and DEC in degrees
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
-    # Convert to the required format
     ra_str = coord.ra.to_string(unit=u.hour, sep=":", precision=1)
     dec_str = coord.dec.to_string(sep=":", precision=1, alwayssign=True)
     return f"{ra_str}, {dec_str}"
@@ -2809,31 +2752,25 @@ def trim_zeros_slices(arr):
 
 def distance_to_uniform_row_col(image, x, y):
 
-    # Ensure the input is a numpy array for easier manipulation
     image = np.array(image)
     rows, cols = image.shape
 
-    # Find rows with all same values
+    # Uniform (constant-value) rows/columns mark padded edges.
     uniform_rows = [i for i in range(rows) if np.all(image[i] == image[i, 0])]
-
-    # Find columns with all same values
     uniform_cols = [j for j in range(cols) if np.all(image[:, j] == image[0, j])]
 
-    # Calculate the Manhattan distance to the nearest uniform row
     if uniform_rows:
         row_distances = [abs(x - row) for row in uniform_rows]
         min_row_distance = min(row_distances)
     else:
-        min_row_distance = float("inf")  # If no uniform rows are found
+        min_row_distance = float("inf")  # no uniform rows found
 
-    # Calculate the Manhattan distance to the nearest uniform column
     if uniform_cols:
         col_distances = [abs(y - col) for col in uniform_cols]
         min_col_distance = min(col_distances)
     else:
-        min_col_distance = float("inf")  # If no uniform columns are found
+        min_col_distance = float("inf")  # no uniform columns found
 
-    # Return the minimum distance to a uniform row or column
     return min(min_row_distance, min_col_distance)
 
 
@@ -2931,19 +2868,16 @@ def write_position_2_ascii(dataframe, output_file):
     - None
     """
 
-    # Extract x_pix and y_pix columns
     if "x_pix" not in dataframe.columns or "y_pix" not in dataframe.columns:
         raise ValueError("DataFrame must have 'x_pix' and 'y_pix' columns.")
 
     x_pix_column = dataframe["x_pix"].values
     y_pix_column = dataframe["y_pix"].values
 
-    # Combine columns into a new DataFrame
     output_dataframe = pd.DataFrame({"x_pix": x_pix_column, "y_pix": y_pix_column})
 
-    # Write DataFrame to ASCII file with "X Y" header
     with open(output_file, "w") as file:
-        file.write("x y\n")  # Header line
+        file.write("x y\n")
         output_dataframe.to_csv(
             file, sep=" ", header=None, index=False, float_format="%.3f"
         )
@@ -3006,16 +2940,13 @@ def print_progress_bar(
 
 def get_normalized_histogram(data, bins="auto"):
 
-    # Create the histogram
     data = data[~np.isnan(data)]
     if bins == "auto":
         bins = calculate_bins(data)
     hist, bin_edges = np.histogram(data, bins=bins, density=True)
 
-    # Calculate the normalization factor
     normalization_factor = np.nanmax(hist)
 
-    # Normalize the histogram
     normalized_hist = hist / normalization_factor
 
     return normalized_hist, bin_edges

@@ -51,11 +51,11 @@ class PSFValidationResult:
     flux_bias_frac_err : float
         Standard error of the flux bias fraction.
     flux_scatter_frac : float
-        Robust scatter (MAD-based) of (F_fit - F_true) / F_true.
+        MAD-based scatter of (F_fit - F_true) / F_true.
     centroid_bias_px : float
         Median centroid offset (pixels).
     centroid_scatter_px : float
-        Robust scatter of centroid offsets.
+        MAD-based scatter of centroid offsets.
     median_reduced_chi2 : float
         Median reduced chi-squared across held-out fits.
     fraction_chi2_ok : float
@@ -63,7 +63,7 @@ class PSFValidationResult:
     residual_correlation : float
         Median lag-1 autocorrelation of residuals (0 = uncorrelated).
     flux_bias_vs_brightness_slope : float
-        Slope of flux bias vs. log10(flux) — should be ~0.
+        Slope of flux bias vs. log10(flux) - should be ~0.
     position_dependence : float
         Correlation coefficient of flux bias with radial position.
     passed : bool
@@ -163,7 +163,7 @@ def _fit_gaussian_stamp(
     reduced_chi2, residuals, and converged flag.
 
     This is a simple weighted least-squares fit used for validation.
-    It does NOT need to match the pipeline's ePSF fitting exactly —
+    It does NOT need to match the pipeline's ePSF fitting exactly -
     the point is to measure how well the PSF model (passed externally)
     predicts the held-out star.
     """
@@ -180,12 +180,11 @@ def _fit_gaussian_stamp(
     if error is None:
         error = np.ones_like(stamp)
 
-    # Mask non-finite
     good = np.isfinite(stamp) & np.isfinite(error) & (error > 0)
     if good.sum() < 6:
         return {"converged": False, "reduced_chi2": np.nan}
 
-    # Estimate background from edge pixels (robust median)
+    # Edge-pixel median: the stamp border is least contaminated by the star.
     edge_pixels = np.concatenate([
         stamp[0, :].ravel(), stamp[-1, :].ravel(),
         stamp[:, 0].ravel(), stamp[:, -1].ravel(),
@@ -199,7 +198,6 @@ def _fit_gaussian_stamp(
     if init_background is not None:
         bkg_init = float(init_background)
 
-    # Estimate initial flux from background-subtracted stamp
     stamp_bkgsub = stamp - bkg_init
     if init_flux is None:
         init_flux = float(np.nansum(stamp_bkgsub[good]))
@@ -246,12 +244,10 @@ def _fit_gaussian_stamp(
         except Exception:
             perr = [np.nan] * 5
 
-        # Reduced chi2
         dof = max(1, good.sum() - 5)
         chi2 = float(np.sum(residuals(result.x) ** 2))
         reduced_chi2 = chi2 / dof
 
-        # Residuals
         resid = stamp - model(result.x)
 
         # Lag-1 autocorrelation of residuals
@@ -355,7 +351,6 @@ def validate_psf_loo(
         result.passed = False
         return result
 
-    # Determine flux column
     flux_col = None
     for c in ("flux_true", "flux_psf", "flux_ap", "flux"):
         if c in star_table.columns:
@@ -408,7 +403,6 @@ def validate_psf_loo(
             y_true = float(row["y_pix"])
             flux_true = float(row[flux_col])
 
-            # Extract cutout
             half = cutout_size // 2
             y0 = int(y_true) - half
             y1 = int(y_true) + half + 1
@@ -420,7 +414,6 @@ def validate_psf_loo(
 
             stamp = image[y0:y1, x0:x1].astype(float).copy()
 
-            # Error map
             if background_rms is not None:
                 err_stamp = background_rms[y0:y1, x0:x1].astype(float).copy()
             else:
@@ -430,7 +423,6 @@ def validate_psf_loo(
             poisson = np.sqrt(np.clip(stamp, 0, None) * gain) / gain
             err_stamp = np.sqrt(err_stamp**2 + poisson**2)
 
-            # Fit
             init_x = x_true - x0
             init_y = y_true - y0
             fit_result = _fit_gaussian_stamp(
@@ -458,7 +450,6 @@ def validate_psf_loo(
                 })
                 continue
 
-            # Compute biases
             flux_fit = fit_result["flux"]
             flux_err = fit_result["flux_err"]
             x_fit = fit_result["x"] + x0  # Back to image coords
@@ -510,7 +501,7 @@ def validate_psf_loo(
     chi2s = df.loc[valid, "reduced_chi2"]
     correlations = df.loc[valid, "residual_correlation"]
 
-    # Robust statistics (MAD-based)
+    # MAD-based scatter: a few bad fits should not dominate the summary.
     def mad_std(x):
         med = np.nanmedian(x)
         return 1.4826 * np.nanmedian(np.abs(x - med))

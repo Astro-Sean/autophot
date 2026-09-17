@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Optimized and human-readable version of the automated photometry pipeline.
-Features:
-- Clear, descriptive comments and docstrings.
-- Progress print statements for user feedback.
-- Modular, reusable functions and classes.
-- Consistent logging and error handling.
-- British English spelling and style.
-"""
+"""High-level AutoPHOT driver: orchestrates per-image photometry runs."""
 
 # Force BLAS/OpenMP to 1 thread before any scientific imports (avoids exhausting
 # process/thread limits on HPC when using multiprocessing; OpenBLAS defaults to 128).
@@ -122,7 +114,6 @@ def list_parameters(
     with open(yml_path, "r") as f:
         lines = f.read().splitlines()
 
-    # Parse the YAML for defaults.
     parsed = yaml.safe_load("\n".join(lines)) or {}
     root = parsed.get("default_input", parsed)
 
@@ -184,12 +175,11 @@ def list_parameters(
         }
         return str(path or "") in required
 
-    # Walk text lines to map key-path -> line number and extract inline docs.
     entries: list[dict] = []
     stack: list[tuple[int, str]] = []  # (indent_spaces, key)
 
-    # YAML keys in our config are simple tokens (letters/digits/_). Avoid fancy
-    # regex character classes here; we only need a robust mapping of key->line.
+    # YAML keys in this config are simple tokens ([A-Za-z0-9_]); the regex
+    # stays minimal on purpose.
     key_re = re.compile(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_]+)\s*:\s*(?P<rest>.*)$")
     for idx0, raw in enumerate(lines):
         m = key_re.match(raw)
@@ -198,7 +188,6 @@ def list_parameters(
         indent = len(m.group("indent").replace("\\t", "    "))
         key = str(m.group("key")).strip()
         rest = str(m.group("rest")).strip()
-        # Split "value # comment" while preserving the value part.
         value_part, comment_part = rest, ""
         if "#" in rest:
             value_part, comment_part = rest.split("#", 1)
@@ -218,7 +207,6 @@ def list_parameters(
                 type_hint = comment_part.strip()
                 desc = ""
 
-        # Maintain indentation stack.
         while stack and indent <= stack[-1][0]:
             stack.pop()
         stack.append((indent, key))
@@ -230,13 +218,11 @@ def list_parameters(
             # No explicit value present (comment-only line).
             continue
 
-        # Build path, stripping the top-level "default_input" if present.
         path_parts = [k for _, k in stack]
         if path_parts and path_parts[0] == "default_input":
             path_parts = path_parts[1:]
         path = ".".join(path_parts)
 
-        # Look up parsed default value by traversing the YAML object.
         cur = root
         for p in path_parts:
             if isinstance(cur, dict) and p in cur:
@@ -270,7 +256,6 @@ def list_parameters(
             }
         )
 
-    # Filter.
     if contains:
         needle = str(contains).strip().lower()
         entries = [e for e in entries if needle in e["path"].lower()]
@@ -284,7 +269,6 @@ def list_parameters(
         sec = p.split(".", 1)[0] if "." in p else "top"
         runtime_or_top = bool(e.get("set_internally")) or sec == "top"
         runtime_bucket = 0 if runtime_or_top else 1
-        # Keep runtime/top items together and first.
         sec_sort = "runtime/top" if runtime_or_top else sec
         # Within each section, list required keys first for readability.
         req_rank = 0 if bool(e.get("required")) else 1
@@ -294,7 +278,6 @@ def list_parameters(
     if max_rows is not None:
         entries = entries[: max(0, int(max_rows))]
 
-    # Print.
     fmt = str(format or "cli").strip().lower()
     if fmt in {"md", "markdown"}:
         print("AutoPhOT accepted parameters (from default_input.yml)")
@@ -314,7 +297,6 @@ def list_parameters(
             )
         return entries
 
-    # Default: CLI-style aligned output for terminal use.
     import shutil
     import textwrap
 
@@ -393,10 +375,8 @@ def list_parameters(
             if last_section is not None:
                 print("-" * len(header))
             # Make section headings visually obvious in plain terminals.
-            # Use asterisk "box" with blank lines around it.
             section_title = str(section).replace("_", " ").upper()
             title_line = f"*** {section_title} ***"
-            # Match the banner width to the title exactly.
             star_line = "*" * len(title_line)
             print("")
             print(star_line)
@@ -518,8 +498,6 @@ def _find_unknown_config_paths(
 
     return unknown
 
-# Project-specific helpers (assumed to be in your codebase).
-#
 # These imports pull in the full scientific stack (e.g. scikit-image). Keep them
 # optional so lightweight utilities (like list_parameters) can be imported in
 # minimal environments.
@@ -586,7 +564,6 @@ def _log(message: str) -> None:
         logger.info(message)
     else:
         # Fallback for environments without configured logging handlers.
-        # In QUIET_MODE we still suppress output entirely.
         if not QUIET_MODE:
             print(message)
 
@@ -663,7 +640,7 @@ def find_variable_sources(
     """
     t0 = time.perf_counter()
 
-    # SIMBAD CONFIGURATION - TIMEOUT PROTECTION
+    # SIMBAD query config (timeout-protected)
     Simbad.reset_votable_fields()
     Simbad.add_votable_fields(
         "otype",
@@ -675,7 +652,6 @@ def find_variable_sources(
         "galdim_angle",
     )
 
-    # Store and override settings
     original_timeout = getattr(Simbad, "TIMEOUT", 10)
     original_row_limit = getattr(Simbad, "ROW_LIMIT", 1000)
 
@@ -690,7 +666,6 @@ def find_variable_sources(
         f"{centre_coord.to_string('hmsdms')}."
     )
 
-    # SOURCE TYPE DEFINITIONS
     object_types = {
         "V*": "Variable Star",
         "Pu*": "Pulsating",
@@ -730,7 +705,6 @@ def find_variable_sources(
         "HII": "HII Region",
     }
 
-    # TIMED SIMBAD QUERY WITH FAILSAFE
     query_start = time.perf_counter()
     result = None
 
@@ -750,7 +724,6 @@ def find_variable_sources(
         )
         result = None
 
-    # Restore SIMBAD settings
     Simbad.TIMEOUT = original_timeout
     Simbad.ROW_LIMIT = original_row_limit
 
@@ -770,10 +743,8 @@ def find_variable_sources(
             ]
         )
 
-    # DATA PROCESSING AND CLEANUP
     df = result.to_pandas()
 
-    # Standardize coordinate columns
     ra_col = next((col for col in ["RA_d", "ra"] if col in df.columns), None)
     dec_col = next((col for col in ["DEC_d", "dec"] if col in df.columns), None)
 
@@ -861,7 +832,7 @@ def find_variable_sources(
     _generic_types = {"G", "AGN", "QSO", "BLL", "SyG", "LIN", "GiG", "SBG",
                       "X", "HII", "PN", "Em*", "Be*"}
     def _iau_name(ra_deg, dec_deg):
-        """Build an IAU-style designation JHHMMSS±DDMMSS from coordinates."""
+        """Build an IAU-style designation JHHMMSS+/-DDMMSS from coordinates."""
         from astropy.coordinates import SkyCoord as _SC
         import astropy.units as _u
         _c = _SC(ra=ra_deg * _u.deg, dec=dec_deg * _u.deg, frame="icrs")
@@ -881,8 +852,6 @@ def find_variable_sources(
                     )
                 except Exception:
                     pass
-
-    # result_df = df[available_cols].sort_values("separation_arcmin").reset_index(drop=True)
 
     result_df = df[available_cols].reset_index(drop=True)
 
@@ -1427,7 +1396,7 @@ class AutomatedPhotometry:
         default_input = copy.deepcopy(default_input)
         
         t0 = time.perf_counter()
-        gc.collect()  # Clean up memory early
+        gc.collect()
 
         # Determine how many CPU workers to use for *image-level* parallelism.
         # Priority: explicit config key, then environment override, then 1.

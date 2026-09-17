@@ -1,7 +1,7 @@
 """
 Inpainting utilities for repairing small masked regions (e.g. broken/saturated cores).
 
-This is intended as a pragmatic cosmetic/robustness tool for template subtraction:
+This is intended as a pragmatic cosmetic aid for template subtraction:
 it does NOT recover lost information in saturated cores, but it can reduce strong
 discontinuities that otherwise propagate into convolution / subtraction artifacts.
 """
@@ -92,8 +92,8 @@ def inpaint_image(
 
     from skimage.restoration import inpaint as sk_inpaint
 
-    # biharmonic expects NaNs are allowed but we give the mask explicitly.
-    # channel_axis=None for 2D images.
+    # Mask is passed explicitly (no need to pre-set NaNs);
+    # channel_axis=None for 2-D images.
     return sk_inpaint.inpaint_biharmonic(img, m, channel_axis=None)
 
 

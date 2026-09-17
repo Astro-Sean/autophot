@@ -445,7 +445,7 @@ A few notes on the outputs:
 - Multi-S/N limit columns (e.g. `Limit_3p0S2N`, `Limit_5p0S2N`) are generated automatically.
 - Inverted-fit results are flagged with an `_inverted_fit` boolean column.
 - Lightcurve x-axes are in MJD by default. For data spanning less than a day the axis switches to minutes or hours since the first observation (e.g. `Time since 9th August 9:00pm UTC [hr]`).
-- `plot_variability_check` writes `VariabilityCheck_<method>.png` next to the photometry CSV. It reads the per-image `Calib_*.csv` catalogs, subtracts each epoch's reference-ensemble mean instrumental magnitude (common-mode instrumental/atmospheric drift) from the target and the reference stars, and plots the residuals. If the target residuals sit inside the reference scatter, the apparent variability was instrumental rather than real.
+- `plot_variability_check` writes `VariabilityCheck_<method>[_<target_name>].png` next to the photometry CSV. It reads the per-image `Calib_*.csv` catalogs, subtracts each epoch's reference-ensemble mean instrumental magnitude (common-mode instrumental/atmospheric drift) from the target and the reference stars, and plots the residuals. If the target residuals sit inside the reference scatter, the apparent variability was instrumental rather than real.
 
 ---
 

@@ -49,7 +49,7 @@ class UncertaintyCalibrationResult:
         Standard deviation of normalized residuals.
         Should be ~1 for well-calibrated uncertainties.
     z_median : float
-        Median of normalized residuals (robust to outliers).
+        Median of normalized residuals (resistant to outliers).
     z_mad_std : float
         MAD-based standard deviation of normalized residuals.
     calibration_factor : float
@@ -164,7 +164,6 @@ def calibrate_uncertainties(
     fm = np.asarray(flux_measured, float)
     fe = np.asarray(flux_error, float)
 
-    # Filter to valid entries
     valid = (
         np.isfinite(ft) & np.isfinite(fm) & np.isfinite(fe)
         & (ft != 0) & (fe > 0)
@@ -193,10 +192,8 @@ def calibrate_uncertainties(
     result.z_mad_std = float(1.4826 * np.median(np.abs(z - np.median(z))))
     result.calibration_factor = float(result.z_mad_std) if result.z_mad_std > 0 else 1.0
 
-    # Bias
     result.bias_frac = float(np.median((fm_v - ft_v) / ft_v))
 
-    # Coverage
     result.fraction_within_1sigma = float(np.mean(np.abs(z) < 1.0))
     result.fraction_within_2sigma = float(np.mean(np.abs(z) < 2.0))
 
@@ -207,11 +204,9 @@ def calibrate_uncertainties(
         coverage_2sigma_range[0] <= result.fraction_within_2sigma <= coverage_2sigma_range[1]
     )
 
-    # Error assessment
     result.errors_underestimated = result.z_mad_std > (1.0 + error_ratio_threshold)
     result.errors_overestimated = result.z_mad_std < (1.0 - error_ratio_threshold)
 
-    # Overall pass: coverage OK and no severe bias
     result.passed = (
         result.coverage_1sigma_ok
         and result.coverage_2sigma_ok

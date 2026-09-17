@@ -10,16 +10,15 @@ import sys
 
 logger = logging.getLogger(__name__)
 
-# Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Import plotting utilities with fallback
 try:
     from plotting_utils import (
         apply_autophot_mplstyle,
         get_divergent_color,
         get_marker_size,
         get_plot_color,
+        get_plot_ext,
         PLOT_COLORS,
     )
 except ImportError:
@@ -28,6 +27,7 @@ except ImportError:
     get_divergent_color = None
     get_marker_size = None
     get_plot_color = None
+    get_plot_ext = lambda _iy=None: ".png"
     PLOT_COLORS = {}
 
 try:
@@ -132,28 +132,23 @@ class Plot:
         from astropy.visualization import ZScaleInterval
 
         try:
-            # Setup
             apply_autophot_mplstyle()
 
             base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
             save_path = os.path.join(
-                write_dir, f"Subtraction_Check_{base}.png"
+                write_dir, f"Subtraction_Check_{base}{get_plot_ext(self.input_yaml)}"
             )
 
-            # Create zscale interval object
             zscale = ZScaleInterval()
 
             images = {"Image": image, "Reference": ref, "Difference": diff}
-            
-            # Add decorrelated difference image if provided
+
             if diff_decorrelated is not None:
                 images["Decorrelated (Detection)"] = diff_decorrelated
-            
-            # Store dimensions for each image
+
             image_dims = {}
-            
-            # Debug: Log image shapes and data quality
+
             for key, img_data in images.items():
                 finite_frac = np.sum(np.isfinite(img_data)) / img_data.size * 100
                 img_h, img_w = img_data.shape
@@ -164,11 +159,10 @@ class Plot:
                     f"range=[{np.nanmin(img_data):.2e}, {np.nanmax(img_data):.2e}]"
                 )
 
-            # Compute vmin, vmax per image using zscale with percentile cleaning
             vmins = {}
             vmaxs = {}
             for key, img_data in images.items():
-                # First apply percentile cleaning to remove extreme values
+                # Clip extremes so zscale limits are not driven by a few bad pixels.
                 valid_data = img_data[np.isfinite(img_data)]
                 if len(valid_data) == 0:
                     logger.warning("subtraction_check: %s has no valid data, using fallback vmin/vmax", key)
@@ -178,7 +172,6 @@ class Plot:
                 try:
                     lower, upper = np.percentile(valid_data, [0.5, 99.5])
                     cleaned_data = np.clip(img_data, lower, upper)
-                    # Then apply zscale to get optimal display range
                     vmin, vmax = zscale.get_limits(cleaned_data)
                     vmins[key] = vmin
                     vmaxs[key] = vmax
@@ -187,22 +180,22 @@ class Plot:
                     vmins[key] = np.nanmin(img_data)
                     vmaxs[key] = np.nanmax(img_data)
 
-            # Set up figure layout based on number of images
             n_images = len(images)
             if n_images == 4:  # With decorrelated image
                 fig = plt.figure(figsize=(20, 5), constrained_layout=False)
-                gs = GridSpec(1, 4, figure=fig, width_ratios=[1, 1, 1, 1], wspace=0.08)
+                gs = GridSpec(1, 4, figure=fig, width_ratios=[1, 1, 1, 1], wspace=0.12)
                 axes = [fig.add_subplot(gs[0, i]) for i in range(4)]
-                plt.subplots_adjust(left=0.03, right=0.98, top=0.93, bottom=0.08)
+                plt.subplots_adjust(left=0.03, right=0.98, top=0.92, bottom=0.11)
             else:  # Standard 3-panel layout
                 fig = plt.figure(figsize=(15, 5), constrained_layout=False)
-                gs = GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 1], wspace=0.08)
+                gs = GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 1], wspace=0.12)
                 axes = [fig.add_subplot(gs[0, i]) for i in range(3)]
-                plt.subplots_adjust(left=0.05, right=0.97, top=0.93, bottom=0.08)
+                plt.subplots_adjust(left=0.05, right=0.97, top=0.92, bottom=0.11)
 
             img_height, img_width = image.shape
             margin = 0.05
             inset_axes_list = []
+            panel_to_inset = {}
 
             def get_inset_side(inset_anchor, size, axis_len):
                 if inset_anchor > axis_len * (1 - margin):
@@ -217,22 +210,20 @@ class Plot:
                     inset = 1.0 if side == "high" else 0.0
                     return side, main, inset
 
-            # Plot images with zscale scaling
             image_titles = list(images.keys())
-            # Use first image's shape for all panels to ensure identical display
+            # All panels share the first image's shape so display axes are identical.
             if "Image" not in images:
                 logger.error("subtraction_check: 'Image' key not found in images dictionary")
                 return 0
             ref_width = images["Image"].shape[1]
             ref_height = images["Image"].shape[0]
-            # Log image shapes for debugging
             for title in image_titles:
                 logger.debug("subtraction_check: %s shape=%s", title, images[title].shape)
             for i, (ax, title) in enumerate(zip(axes, image_titles)):
                 img_data = images[title]
-                # Use grayscale for full images to improve contrast with colored markers
+                # Grayscale keeps colored markers readable.
                 cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
+                cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
                 ax.imshow(
                     img_data,
                     origin="lower",
@@ -241,18 +232,17 @@ class Plot:
                     vmin=vmins[title],
                     vmax=vmaxs[title],
                 )
-                # Set identical axis limits for all panels based on first image
                 ax.set_xlim(0, ref_width)
                 ax.set_ylim(0, ref_height)
                 ax.set_title(title, fontsize=10, pad=5)
                 ax.set_xlabel("X [Pixel]", fontsize=9)
                 ax.set_ylabel("Y [Pixel]", fontsize=9)
 
-            # Use kernel_half_width for square size if provided, otherwise fall back to inset_size
+            # Marker box shows the full kernel when known, else the inset extent.
             if kernel_half_width is not None and kernel_half_width > 0:
-                square_size = int(kernel_half_width * 2)  # Full kernel diameter
+                square_size = int(kernel_half_width * 2)
             else:
-                square_size = int(inset_size * 2)  # Width/height of the square in pixels
+                square_size = int(inset_size * 2)
             if matching_sources is not None and len(matching_sources) > 0:
                 x_col = y_col = None
                 for xc, yc in (
@@ -273,8 +263,7 @@ class Plot:
                     half_size = square_size / 2
                     valid_markers_total = 0
                     skipped_markers_total = 0
-                    
-                    # Debug: Log coordinate and image info
+
                     x_vals = matching_sources[x_col].values
                     y_vals = matching_sources[y_col].values
                     logger.debug(
@@ -286,10 +275,10 @@ class Plot:
                         f"Y=[{np.nanmin(y_vals):.1f}, {np.nanmax(y_vals):.1f}]"
                     )
                     
-                    # Map axes to panel names for correct dimension lookup
+                    # Panel dims differ per image; look up by name.
                     panel_names = list(images.keys())
-                    
-                    for panel_idx, ax in enumerate(axes):  # Both panels
+
+                    for panel_idx, ax in enumerate(axes):
                         panel_name = panel_names[panel_idx]
                         panel_width, panel_height = image_dims[panel_name]
                         valid_markers = 0
@@ -299,7 +288,6 @@ class Plot:
                         for idx, (x_pix, y_pix) in enumerate(zip(
                             matching_sources[x_col], matching_sources[y_col]
                         )):
-                            # Skip invalid coordinates
                             if not (np.isfinite(x_pix) and np.isfinite(y_pix)):
                                 non_finite += 1
                                 skipped_markers += 1
@@ -309,7 +297,8 @@ class Plot:
                             x_plot = float(x_pix)
                             y_plot = float(y_pix)
 
-                            # Plot all sources regardless of bounds to show full matching
+                            # Draw all matched sources, even out-of-bounds, so the
+                            # full matching result stays visible.
                             rect = patches.Rectangle(
                                 (x_plot - half_size, y_plot - half_size),
                                 square_size,
@@ -338,11 +327,9 @@ class Plot:
                             f"skipped {skipped_markers_total} across all panels"
                         )
 
-            # Plot variable sources as red "x" and annotate with otype
             if masked_sources is not None and len(masked_sources) > 0:
-                cross_len = square_size / 4  # Length of each arm of the cross
+                cross_len = square_size / 4
                 skipped_masked = 0
-                # Check if required columns exist
                 required_cols = ["x_pix", "y_pix", "OTYPE_opt", "MAIN_ID"]
                 missing_cols = [col for col in required_cols if col not in masked_sources.columns]
                 if missing_cols:
@@ -354,16 +341,14 @@ class Plot:
                         masked_sources["OTYPE_opt"],
                         masked_sources["MAIN_ID"],
                     ):
-                        # Skip invalid coordinates
                         if not (np.isfinite(x) and np.isfinite(y)):
                             skipped_masked += 1
                             continue
 
-                        # Convert to 0-indexed if needed
+                        # masked_sources x_pix arrive 1-based; subtract 1 when positive.
                         x_plot = float(x) - 1 if x > 0 else float(x)
                         y_plot = float(y) - 1 if y > 0 else float(y)
 
-                        # Check if coordinates are within image bounds
                         if not (0 <= x_plot < img_width and 0 <= y_plot < img_height):
                             skipped_masked += 1
                             continue
@@ -410,28 +395,25 @@ class Plot:
                                 zorder=3,
                             )
 
-            # Plot variable sources (masked from flux calibration) as red "x" markers
+            # masked_sources are sources excluded from flux calibration.
             if masked_sources is not None and len(masked_sources) > 0:
-                cross_len = square_size / 4  # Length of each arm of the cross
+                cross_len = square_size / 4
                 masked_count = 0
                 if "x_pix" in masked_sources.columns and "y_pix" in masked_sources.columns:
                     for x, y in zip(masked_sources["x_pix"], masked_sources["y_pix"]):
-                        # Skip invalid coordinates
                         if not (np.isfinite(x) and np.isfinite(y)):
                             continue
 
-                        # Convert to 0-indexed if needed
+                        # masked_sources x_pix arrive 1-based; subtract 1 when positive.
                         x_plot = float(x) - 1 if x > 0 else float(x)
                         y_plot = float(y) - 1 if y > 0 else float(y)
 
-                        # Check if coordinates are within image bounds
                         if not (0 <= x_plot < img_width and 0 <= y_plot < img_height):
                             continue
 
                         x = x_plot
                         y = y_plot
 
-                        # Plot red "x" on all three panels
                         for ax in axes:
                             ax.plot(
                                 [x - cross_len, x + cross_len],
@@ -450,7 +432,6 @@ class Plot:
                         masked_count += 1
                 logger.debug("Plotted %s variable sources (masked from flux calibration) as red 'x' markers", masked_count)
 
-            # Add insets and other features
             for i, (title, img_data) in enumerate(images.items()):
                 ax = axes[i]
 
@@ -471,10 +452,9 @@ class Plot:
                     )
                     inset_loc = f'{"upper" if y_side == "high" else "lower"} {"right" if x_side == "high" else "left"}'
 
-                    # Inset
                     ax_inset = inset_axes(ax, width="30%", height="30%", loc=inset_loc)
                     cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                    cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
+                    cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
                     ax_inset.imshow(
                         img_data,
                         origin="lower",
@@ -491,8 +471,8 @@ class Plot:
                         spine.set_color(PLOT_COLORS.get('spine_color', '#000000'))
                         spine.set_linewidth(0.5)
                     inset_axes_list.append(ax_inset)
+                    panel_to_inset[i] = ax_inset
 
-                    # Rectangle on main image
                     rect = Rectangle(
                         (x - inset_size, y - inset_size),
                         2 * inset_size,
@@ -503,7 +483,7 @@ class Plot:
                     )
                     ax.add_patch(rect)
 
-                    # Connection lines
+                    # Connect matching rectangle/inset corners for each inset location.
                     if inset_loc == "upper left":
                         corners = [
                             ((x - inset_size, y - inset_size), (0, 0)),
@@ -548,14 +528,15 @@ class Plot:
                         if i == 2 or (n_images == 4 and i == 3):
                             continue
                         ax.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
+                        ax_inset = panel_to_inset.get(i)
+                        if ax_inset is not None:
+                            ax_inset.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
 
-            # Add markers for expected and fitted locations
             if fitted_location and len(fitted_location) == 2:
-                radius = aperture_size  # Circle radius in pixels (diameter = inset_size // 4)
+                radius = aperture_size
 
                 if len(inset_axes_list) >= 3:
                     for ax in inset_axes_list[2:]:
-                        # Red hollow circle at fitted location
                         circle = mpatches.Circle(
                             fitted_location,
                             edgecolor=PLOT_COLORS.get('target', '#FF0000'),
@@ -565,10 +546,11 @@ class Plot:
                         )
                         ax.add_patch(circle)
 
-                        # Green cross at expected location (2 lines)
+                        # Green cross at expected location is disabled (see
+                        # commented block below); cross_len kept for it.
                         if expected_location and len(expected_location) == 2:
                             x, y = expected_location
-                            cross_len = aperture_size / 2  # half-length of each arm
+                            cross_len = aperture_size / 2
 
                             # hline = mlines.Line2D(
                             #     [x - cross_len, x + cross_len],
@@ -588,7 +570,6 @@ class Plot:
                             # ax.add_line(vline)
 
 
-            # Save figure (PNG only)
             fig.savefig(
                 save_path, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white')
             )
@@ -676,12 +657,13 @@ class Plot:
             )
             return
 
-        # Plot setup
         apply_autophot_mplstyle()
 
         base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
         write_dir = os.path.dirname(self.input_yaml["fpath"])
-        save_path = os.path.join(write_dir, f"Crowding_Target_{base}.png")
+        save_path = os.path.join(
+            write_dir, f"Crowding_Target_{base}{get_plot_ext(self.input_yaml)}"
+        )
 
         zscale = ZScaleInterval()
         finite = cut[np.isfinite(cut)]
@@ -704,9 +686,8 @@ class Plot:
         tx = cx - x0
         ty = cy - y0
 
-        # Panel 1
         cmap_vir = plt.get_cmap(PLOT_COLORS.get('image_cmap_alt', 'viridis')).copy()
-        cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
+        cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
         axes[0].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
@@ -727,7 +708,6 @@ class Plot:
                 )
             )
 
-        # Panel 2
         axes[1].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
@@ -744,7 +724,6 @@ class Plot:
         axes[1].axvline(tx, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
         axes[1].axhline(ty, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
 
-        # Panel 3
         axes[2].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
@@ -797,26 +776,21 @@ class Plot:
             from matplotlib.lines import Line2D
             from scipy.spatial import cKDTree
 
-            # Set up matplotlib style
             apply_autophot_mplstyle()
 
-            # Extract file path and base name
             fpath = self.input_yaml["fpath"]
             base = os.path.basename(fpath)
             write_dir = os.path.dirname(fpath)
             base = os.path.splitext(base)[0]
 
-            # Get photometry radius and scale from input YAML
             phot_cfg = self.input_yaml.get("photometry") or {}
             ap_size_fwhm = phot_cfg.get("aperture_size", 1.7)
             radius = float(ap_size_fwhm) * float(self.input_yaml["fwhm"])
             scale = self.input_yaml["scale"]
 
-            # Create the figure with WCS axes if available
-            plt.ioff()  # Turn interactive mode off
+            plt.ioff()
             fig = plt.figure(figsize=set_size(540, 1))
-            
-            # Try to use WCSAxes for RA/Dec display
+
             wcs = None
             skip_tight_layout = False
             try:
@@ -865,8 +839,6 @@ class Plot:
                         raise ValueError(
                             f"WCSAxes has insufficient coords (n={n_coords})"
                         )
-                    # Configure coordinate axes with minimal overlap
-                    # Main coordinates: RA/Dec on bottom/left
                     ax1.coords[0].set_ticklabel_position('b')
                     ax1.coords[0].set_axislabel_position('b')
                     ax1.coords[0].set_axislabel("RA", fontsize=6, minpad=0.3)
@@ -877,20 +849,17 @@ class Plot:
                     ax1.coords[1].set_axislabel("Dec", fontsize=6, minpad=0.3)
                     ax1.coords[1].set_major_formatter('dd:mm')
                     
-                    # Hide default frame labels
                     ax1.set_xlabel("")
                     ax1.set_ylabel("")
-                    
-                    # Add pixel coordinates on top/right without labels
+
                     ax1.coords[0].set_ticks_position('bt')
                     ax1.coords[1].set_ticks_position('lr')
                     ax1.coords[0].set_ticklabel_position('b')
                     ax1.coords[1].set_ticklabel_position('l')
-                    
-                    # Disable coordinate grid
+
                     ax1.coords.grid(False)
-                    
-                    # Skip tight_layout for WCS axes (it can fail)
+
+                    # tight_layout can fail on WCSAxes.
                     skip_tight_layout = True
                     
                     logger.info("Source check plot: using RA/Dec WCS axes")
@@ -898,22 +867,19 @@ class Plot:
                     logger.debug("Source check plot: WCS has no celestial component, using pixel axes")
                     raise ValueError("WCS has no celestial component")
             except Exception as e:
-                # Fallback to regular axes with pixel coordinates only
                 logger.debug("Source check plot: WCS axes failed (%s), using pixel coordinates only", e)
-                # Clear the figure to remove any partially-created WCS axes
+                # Drop any partially-created WCS axes before re-adding a plain one.
                 fig.clf()
                 ax1 = fig.add_subplot(111)
                 ax1.set_xlabel("X (pixels)", fontsize=6)
                 ax1.set_ylabel("Y (pixels)", fontsize=6)
                 skip_tight_layout = False
 
-            # Normalize and plot the image
             norm = ImageNormalize(
                 image, interval=ZScaleInterval(), stretch=LinearStretch()
             )
-            # Set NaN values to display as white
             cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray'))
-            cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
+            cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
             im = ax1.imshow(
                 image,
                 origin="lower",
@@ -973,7 +939,6 @@ class Plot:
                 except Exception:
                     pass
 
-            # Plot the target source as a circle
             edge_color = PLOT_COLORS.get('target', '#FF0000')
             circle = Circle(
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"]),
@@ -986,11 +951,10 @@ class Plot:
             ax1.add_patch(circle)
             # Target name text removed to avoid overlapping with other annotations
 
-            # Plot PSF sources as hexagons with 4*FWHM width
             if psfSources is not None and len(psfSources) > 0:
                 from matplotlib.patches import RegularPolygon
                 fwhm = float(self.input_yaml.get("fwhm", 5.0))
-                hex_radius = 2.0 * fwhm  # Radius of hexagon = 2*FWHM (width = 4*FWHM)
+                hex_radius = 2.0 * fwhm  # hexagon width across flats = 4*FWHM
                 for x, y in zip(psfSources["x_pix"], psfSources["y_pix"]):
                     if not (np.isfinite(x) and np.isfinite(y)):
                         continue
@@ -1007,10 +971,9 @@ class Plot:
                     )
                     ax1.add_patch(hexagon)
 
-            # Plot reference (catalog) sources as squares
             if catalogSources is not None:
                 fwhm = float(self.input_yaml.get("fwhm", 5.0))
-                square_size = 4.0 * fwhm  # Size of the square = 4 * FWHM
+                square_size = 4.0 * fwhm
                 for x, y in zip(catalogSources["x_pix"], catalogSources["y_pix"]):
                     x = float(x) + marker_dx
                     y = float(y) + marker_dy
@@ -1029,12 +992,9 @@ class Plot:
                     )
                     ax1.add_patch(square)
 
-            # Plot FWHM sources as colored circles with gradient
-            # print(FWHMSources.columns)
             if FWHMSources is not None and "fwhm" in FWHMSources:
 
                 if len(FWHMSources) > 0:
-                    # Get FWHM values and normalize for colormap
                     fwhm_values = np.array(FWHMSources["fwhm"])
                     norm_fwhm = Normalize(
                         vmin=np.nanmin(fwhm_values), vmax=np.nanmax(fwhm_values)
@@ -1042,11 +1002,9 @@ class Plot:
                     # Orange colormap for FWHM scaling (distinct from red target and blue catalog).
                     cmap = plt.get_cmap(PLOT_COLORS.get('fwhm_sources', 'Oranges'))
 
-                    # Create a ScalarMappable for the colorbar
                     sm = ScalarMappable(norm=norm_fwhm, cmap=cmap)
                     sm.set_array([])
 
-                    # Plot each FWHM source with color corresponding to its FWHM value
                     for x, y, fwhm in zip(
                         FWHMSources["x_pix"], FWHMSources["y_pix"], fwhm_values
                     ):
@@ -1065,19 +1023,15 @@ class Plot:
                         )
                         ax1.add_patch(circle)
 
-                    # Add colorbar
                     cbar = fig.colorbar(sm, ax=ax1, pad=0.02, aspect=40)
                     cbar.set_label("FWHM (pixels)", fontsize=7)
                     cbar.ax.tick_params(labelsize=6)
 
-            # from matplotlib.patches import Rectangle
-
-            # Plot variable sources as gold "x" and annotate with name/otype
             if variable_sources is not None:
 
                 if len(variable_sources) > 0:
 
-                    cross_len = scale / 4  # Length of each arm of the cross
+                    cross_len = scale / 4
                     _gold = PLOT_COLORS.get('variable', '#FFD700')
 
                     for x, y, otype, name in zip(
@@ -1096,7 +1050,6 @@ class Plot:
                             if np.isnan(image[iy, ix]):
                                 continue
 
-                        # Draw "x" as two lines rotated 45 degrees (gold for contrast)
                         ax1.plot(
                             [x - cross_len, x + cross_len],
                             [y - cross_len, y + cross_len],
@@ -1112,8 +1065,8 @@ class Plot:
                             zorder=3,
                         )
 
-                        # Build the label: prefer the source name, fall back to otype.
-                        # Skip NaN / non-string labels entirely (blank = no annotation).
+                        # Prefer the source name, fall back to otype. NaN or
+                        # non-string labels get no annotation.
                         _label = None
                         if name is not None and isinstance(name, str) and name.strip() and name.strip().lower() != "nan":
                             _label = name.strip()
@@ -1123,9 +1076,7 @@ class Plot:
                             else:
                                 _label = otype.strip()
 
-                        # Smart shortening: if label is long, truncate intelligently
                         if _label is not None and len(_label) > 20:
-                            # Keep first 8 chars + "..." + last 8 chars
                             _label = f"{_label[:8]}...{_label[-8:]}"
 
                         if _label:
@@ -1143,8 +1094,8 @@ class Plot:
                                 zorder=4,
                             )
 
-            # Optional: distortion/residual vectors (catalog -> detected/FWHM sources).
-            # This helps visualize non-uniform astrometric residuals across the field.
+            # Residual vectors (catalog -> detected) show non-uniform
+            # astrometric residuals across the field.
             distortion_rms_text = None
             distortion_grid_artist = None
             try:
@@ -1181,8 +1132,8 @@ class Plot:
                         det_m = det_xy[idx[keep]]
                         u = det_m[:, 0] - cat_m[:, 0]
                         v = det_m[:, 1] - cat_m[:, 1]
-                        # Note: distortion contour overlays have been removed. We only
-                        # show per-source residual vectors (optionally) and the RMS text.
+                        # NOTE: distortion contour overlays were removed; only
+                        # per-source residual vectors and the RMS text remain.
                         if len(cat_m) > max_vec:
                             sel = np.linspace(0, len(cat_m) - 1, max_vec, dtype=int)
                             cat_m = cat_m[sel]
@@ -1207,15 +1158,12 @@ class Plot:
             except Exception as e:
                 logger.debug("Distortion vector overlay skipped: %s", e)
 
-            # Overlay the mask if provided
             if mask is not None:
                 from matplotlib import colors
 
-                # White overlay for masked regions
                 mask_cmap = colors.ListedColormap(["none", PLOT_COLORS.get('mask_overlay_alt', 'white')])
                 ax1.imshow(mask, cmap=mask_cmap, alpha=1.0, origin="lower")
 
-            # Optional colorbar for distortion grid-map magnitude.
             if distortion_grid_artist is not None:
                 try:
                     align_cfg = self.input_yaml.get("alignment", {})
@@ -1240,13 +1188,11 @@ class Plot:
                 except Exception as e:
                     logger.debug("Distortion grid colorbar skipped: %s", e)
 
-            # Set axis labels and limits
             ax1.set_xlabel("X [Pixel]")
             ax1.set_ylabel("Y [Pixel]")
             ax1.set_xlim(0, image.shape[1])
             ax1.set_ylim(0, image.shape[0])
     
-            # Create and add legend
             handles, labels = ax1.get_legend_handles_labels()
             by_label = dict(zip(labels, handles))
             leg = ax1.legend(
@@ -1261,19 +1207,19 @@ class Plot:
                 ncol=3,
             )
 
-            # Finalize figure layout - leave room at top for the legend
+            # Leave headroom at top for the legend.
             if not skip_tight_layout:
                 fig.tight_layout(rect=[0, 0, 1, 0.92])
             ax1.set_aspect("equal", adjustable="box")
 
-            # Save figure
+            _ext = get_plot_ext(self.input_yaml)
             if not subtracted:
                 save_loc = os.path.join(
-                    write_dir, f"Source_Check_{base}.png"
+                    write_dir, f"Source_Check_{base}{_ext}"
                 )
             else:
                 save_loc = os.path.join(
-                    write_dir, f"Subtracted_Source_Check_{base}.png"
+                    write_dir, f"Subtracted_Source_Check_{base}{_ext}"
                 )
 
             fig.savefig(
@@ -1376,12 +1322,10 @@ class Plot:
         if _normalize_photometry_columns is not None:
             data = _normalize_photometry_columns(data)
         
-        # Adaptive S/N selection logic
         adaptive_limit_col = None
         if adaptive_snr_selection and input_yaml:
             lim_cfg = input_yaml.get("limiting_magnitude") or {}
             if lim_cfg.get("adaptive_snr_selection", False):
-                # Calculate median S/N of all detected sources
                 all_snr_values = []
                 for col in data.columns:
                     if 'snr' in col.lower():
@@ -1393,24 +1337,21 @@ class Plot:
                 
                 if all_snr_values:
                     median_snr = np.median(all_snr_values)
-                    # Get configured S/N thresholds for adaptive selection
                     lim_cfg = input_yaml.get("limiting_magnitude") or {}
                     snr_thresholds = lim_cfg.get("snr_thresholds", [3.0, 5.0])
-                    
-                    # Use 5sigma limit if median S/N < 3, otherwise use 3sigma
+
+                    # Median S/N < 3 -> show the 5sigma limit, else 3sigma.
                     if median_snr < 3.0 and len(snr_thresholds) >= 2:
-                        # Use the second (higher) threshold
                         higher_threshold = sorted(snr_thresholds)[1]
                         adaptive_limit_col = f'Limit_{higher_threshold:.1f}S2N'.replace('.', 'p')
                         if adaptive_limit_col not in data.columns:
-                            adaptive_limit_col = "Limit_5p0S2N"  # Fallback
+                            adaptive_limit_col = "Limit_5p0S2N"
                         logger.info("Adaptive S/N selection: median S/N=%.2f < 3, using %ssigma limiting magnitude", median_snr, higher_threshold)
                     else:
-                        # Use the first (lower) threshold
                         lower_threshold = sorted(snr_thresholds)[0]
                         adaptive_limit_col = f'Limit_{lower_threshold:.1f}S2N'.replace('.', 'p')
                         if adaptive_limit_col not in data.columns:
-                            adaptive_limit_col = "Limit_3p0S2N"  # Fallback
+                            adaptive_limit_col = "Limit_3p0S2N"
                         logger.info("Adaptive S/N selection: median S/N=%.2f >= 3, using %ssigma limiting magnitude", median_snr, lower_threshold)
         if data.columns.duplicated().any():
             data = data.loc[:, ~data.columns.duplicated()].copy()
@@ -1600,7 +1541,6 @@ class Plot:
             marker = next(marker_iterator)
 
             if not detects.empty:
-                # Filter out poorly constrained detections (large error bars)
                 if max_plot_err is not None and max_plot_err > 0:
                     err_vals = pd.to_numeric(detects[err_col], errors="coerce")
                     good_err = err_vals.notna() & (err_vals <= max_plot_err)
@@ -1648,7 +1588,8 @@ class Plot:
                         yerr=good_detects[err_col],
                         c=_band_c,
                         ls="",
-                        capsize=3,
+                        capsize=1.5,
+                        elinewidth=0.5,
                         marker=marker,
                         label=leg_label,
                     )
@@ -1660,14 +1601,14 @@ class Plot:
                         yerr=marginal_detects[err_col],
                         c=_band_c,
                         ls="",
-                        capsize=3,
+                        capsize=1.5,
+                        elinewidth=0.5,
                         marker=marker,
                         markerfacecolor="white",
                         markeredgewidth=0.8,
                         alpha=0.5,
                         label=leg_label if good_detects.empty else "",
                     )
-                # Optional: draw line connecting detection points
                 if ls:
                     sorted_detects = detects.sort_values("mjd")
                     x_line = x_transform(sorted_detects["mjd"])
@@ -1681,16 +1622,15 @@ class Plot:
                         zorder=0,
                     )
             if show_limits and not nondetects.empty:
-                # Upper limits: plot at limiting magnitude (fainter than this = non-detection)
-                # Use adaptive S/N selection column if available
+                # Upper limits sit at the limiting magnitude (fainter = non-detection).
+                # Column priority: adaptive S/N selection, then per-threshold
+                # limiting_mag_<n>s2n, then the standard columns.
                 if adaptive_limit_col and adaptive_limit_col in nondetects.columns:
                     y_lim = nondetects[adaptive_limit_col]
-                # Try new individual limiting magnitude columns first (e.g., limiting_mag_3s2n)
                 elif f"limiting_mag_{snr_limit:.0f}s2n" in nondetects.columns and np.any(
                     np.isfinite(nondetects[f"limiting_mag_{snr_limit:.0f}s2n"])
                 ):
                     y_lim = nondetects[f"limiting_mag_{snr_limit:.0f}s2n"]
-                # Fall back to standard limiting magnitude columns
                 elif "limiting_inst_mag" in nondetects.columns and np.any(
                     np.isfinite(nondetects["limiting_inst_mag"])
                 ):
@@ -1708,7 +1648,8 @@ class Plot:
                     ls="",
                     marker="v",
                     markersize=5,
-                    capsize=5,
+                    capsize=5 / 4,
+                    elinewidth=0.5,
                     markerfacecolor="none",
                     markeredgewidth=0.5,
                     alpha=0.85,
@@ -1720,12 +1661,11 @@ class Plot:
 
             ax11 = ax1.twinx()
             ax11.set_xlim(ax1.get_xlim())
-            # autophot_input['target_ra'], autophot_input['target_dec'] = 122.920076, -54.651908
 
             ax11.set_ylim(ax1.get_ylim() - dm)
-            ax11.set_ylabel("Abs. Magnitude")
+            ax11.set_ylabel("Absolute Magnitude [mag]")
 
-        ax1.set_ylabel("App. Magnitude")
+        ax1.set_ylabel("Apparent Magnitude [mag]")
 
         if lc_xlabel is not None:
             ax1.set_xlabel(lc_xlabel)
@@ -1752,10 +1692,9 @@ class Plot:
             )
 
         handles, labels = ax1.get_legend_handles_labels()
-        # Add marginal-chi2 legend entry if any were plotted
         if plotted_marginal_chi2:
             from matplotlib.lines import Line2D as _L2
-            _marg_label = f"Marginal (high χ², >{chi2_marginal_threshold:g})"
+            _marg_label = f"Marginal (high chi^2, >{chi2_marginal_threshold:g})"
             if _marg_label not in labels:
                 _marg_handle = _L2(
                     [0], [0],
@@ -1818,9 +1757,10 @@ class Plot:
 
             base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
-            save_path = os.path.join(write_dir, f"WCS_vs_PSF_Offset_{base}.png")
+            save_path = os.path.join(
+                write_dir, f"WCS_vs_PSF_Offset_{base}{get_plot_ext(self.input_yaml)}"
+            )
 
-            # Filter to sources with valid PSF fits
             valid = (
                 sources["x_pix"].notna()
                 & sources["y_pix"].notna()
@@ -1833,23 +1773,20 @@ class Plot:
                 logger.warning("No valid PSF fits for WCS vs PSF offset plot")
                 return
 
-            # Compute offsets
             df["dx"] = df["x_fit"] - df["x_pix"]
             df["dy"] = df["y_fit"] - df["y_pix"]
 
-            # Get errors (use catalog position error if available, otherwise PSF fit error)
-            # For dx error: sqrt(x_fit_err^2 + x_pix_err^2). If x_pix_err not available, use x_fit_err only.
+            # Only PSF fit errors are used; catalog position errors are not
+            # propagated into the error bars.
             dx_err = df.get("x_fit_err", np.nan).copy()
             dy_err = df.get("y_fit_err", np.nan).copy()
 
-            # Filter to sources with finite errors if available
             finite_err = dx_err.notna() & dy_err.notna()
             has_errors = finite_err.any()
             
             if has_errors:
                 df_plot = df[finite_err].copy()
-                # Exclude sources with very large position errors (> FWHM)
-                # These indicate problematic fits and should not dominate the plot
+                # Position errors > FWHM flag bad fits; they would dominate the plot.
                 fwhm = float(self.input_yaml.get("fwhm", 3.0))
                 reasonable_err = (
                     (df_plot["x_fit_err"] <= fwhm) & (df_plot["y_fit_err"] <= fwhm)
@@ -1864,17 +1801,14 @@ class Plot:
                         n_excluded, n_before, fwhm,
                     )
             else:
-                # No error columns available, plot without error bars
                 df_plot = df.copy()
                 logger.info("WCS vs PSF offset plot: no error columns available, plotting without error bars")
 
-            # Create plot
             width_pt = 5.5 * 72.27
             aspect = 1.0
             fig, ax = plt.subplots(figsize=set_size(width_pt, aspect=aspect))
-            fig.subplots_adjust(left=0.12, right=0.78, top=0.92, bottom=0.12)
 
-            # --- Compute distance from target for coloring ----------------
+            # Color points by distance from target.
             _target_x = self.input_yaml.get("target_x_pix")
             _target_y = self.input_yaml.get("target_y_pix")
             if _target_x is not None and _target_y is not None and np.isfinite(_target_x) and np.isfinite(_target_y):
@@ -1885,7 +1819,7 @@ class Plot:
             else:
                 _dist_from_target = None
 
-            # Draw error bars first (gray, behind colored points)
+            # Error bars drawn first so they sit behind the points.
             if has_errors:
                 ax.errorbar(
                     df_plot["dx"],
@@ -1895,12 +1829,11 @@ class Plot:
                     fmt="none",
                     ecolor=PLOT_COLORS.get('error_bar', '#999999'),
                     elinewidth=0.5,
-                    capsize=3.5,
+                    capsize=1.5,
                     alpha=0.5,
                     zorder=1,
                 )
 
-            # Scatter plot colored by distance from target
             _sc_obj = None
             if _dist_from_target is not None:
                 _cmap = plt.get_cmap(PLOT_COLORS.get('scatter_cmap', 'viridis'))
@@ -1927,17 +1860,9 @@ class Plot:
                     zorder=3,
                 )
 
-            # Zero lines
-            # ax.axhline(0, color="red", lw=1.0, ls="--", alpha=0.5, zorder=1)
-            # ax.axvline(0, color="red", lw=1.0, ls="--", alpha=0.5, zorder=1)
-
-            # Median offset lines
             med_dx = np.nanmedian(df_plot["dx"])
             med_dy = np.nanmedian(df_plot["dy"])
-            # ax.axhline(med_dy, color="orange", lw=1.2, ls="-", alpha=0.6, zorder=1, label=f"Median dy = {med_dy:.3f}")
-            # ax.axvline(med_dx, color="orange", lw=1.2, ls="-", alpha=0.6, zorder=1, label=f"Median dx = {med_dx:.3f}")
 
-            # RMS
             rms_dx = np.sqrt(np.nanmean(df_plot["dx"]**2))
             rms_dy = np.sqrt(np.nanmean(df_plot["dy"]**2))
 
@@ -1979,24 +1904,19 @@ class Plot:
             ax.set_xlabel(r"$\Delta x = x_{\mathrm{PSF}} - x_{\mathrm{WCS}}$ [px]")
             ax.set_ylabel(r"$\Delta y = y_{\mathrm{PSF}} - y_{\mathrm{WCS}}$ [px]")
 
-            # Add upper and right axes for arcsecond offsets
-
             if pixel_scale is not None and pixel_scale > 0:
-                # Create twin axes for arcsecond display
+                # Twin axes show the same offsets in arcsec.
                 ax_top = ax.twiny()
                 ax_right = ax.twinx()
                 # set_aspect is incompatible with shared/twin axes; the symmetric
                 # +/-_lim xlim/ylim already enforces a square data region.
 
-                # Set the limits for twin axes to match the main axes
                 ax_top.set_xlim(ax.get_xlim())
                 ax_right.set_ylim(ax.get_ylim())
 
-                # Convert pixel limits to arcseconds
                 x_lim_arcsec = np.array(ax.get_xlim()) * pixel_scale
                 y_lim_arcsec = np.array(ax.get_ylim()) * pixel_scale
 
-                # Set tick locations and labels for arcseconds
                 ax_top.set_xticks(ax.get_xticks())
                 ax_top.set_xticklabels([f"{x*pixel_scale:.2f}" for x in ax.get_xticks()])
                 ax_top.set_xlabel(r"$\Delta$RA [arcsec]", fontsize="small")
@@ -2005,11 +1925,10 @@ class Plot:
                 ax_right.set_yticklabels([f"{y*pixel_scale:.2f}" for y in ax.get_yticks()])
                 ax_right.set_ylabel(r"$\Delta$Dec [arcsec]", fontsize="small")
 
-                # Hide the tick labels on the opposite sides of twin axes
                 ax_top.tick_params(axis="x", which="both", labeltop=True, labelbottom=False)
                 ax_right.tick_params(axis="y", which="both", labelright=True, labelleft=False)
             else:
-                # No twin axes - safe to enforce equal aspect
+                # No twin axes - safe to enforce equal aspect.
                 ax.set_aspect("equal", adjustable="box")
 
             # --- Colorbar (manually positioned to avoid twin axis overlap) ---
@@ -2023,7 +1942,6 @@ class Plot:
             # ax.legend(loc="upper right", fontsize="small", framealpha=0.9)
             ax.grid(True, ls="-", alpha=0.25, zorder=0)
 
-            # Add text with statistics
             stats_text = (
                 f"Median: ({med_dx:.3f}, {med_dy:.3f}) px\n"
                 f"RMS: ({rms_dx:.3f}, {rms_dy:.3f}) px"
@@ -2039,7 +1957,6 @@ class Plot:
                 fontsize="small",
             )
 
-            # Add source count in bottom left
             ax.text(
                 0.05,
                 0.05,
@@ -2050,6 +1967,12 @@ class Plot:
                 bbox=dict(facecolor=PLOT_COLORS.get('stats_bbox', 'white'), alpha=0.75, edgecolor="none"),
                 fontsize="small",
             )
+
+            # Right margin: only reserve space when a colorbar or the
+            # arcsec twin-axis labels actually need it.
+            _has_twin = pixel_scale is not None and pixel_scale > 0
+            _right = 0.78 if _sc_obj is not None else (0.86 if _has_twin else 0.95)
+            fig.subplots_adjust(left=0.12, right=_right, top=0.92, bottom=0.12)
 
             fig.savefig(save_path, dpi=150, facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
@@ -2099,7 +2022,7 @@ class Plot:
             base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
             save_path = os.path.join(
-                write_dir, f"Alignment_Offset_{base}.png"
+                write_dir, f"Alignment_Offset_{base}{get_plot_ext(self.input_yaml)}"
             )
 
             # --- Detect sources in both aligned images using SExtractor -----
@@ -2134,16 +2057,15 @@ class Plot:
                 )
                 return
 
-            # --- Read WCS from both headers -------------------------------
             sci_header = fits.getheader(sci_fpath)
             ref_header = fits.getheader(template_fpath)
             sci_wcs = WCS(sci_header, naxis=2)
             ref_wcs = WCS(ref_header, naxis=2)
 
-            # --- Extract pixel positions (SExtractor centroids, 0-based) --
+            # SExtractor centroids are 0-based; errors come from its error
+            # ellipse decomposition.
             sci_x, sci_y = sci_xy[:, 0], sci_xy[:, 1]
             ref_x, ref_y = ref_xy[:, 0], ref_xy[:, 1]
-            # Position errors from SExtractor's error ellipse decomposition
             sci_errx = np.asarray(sci_errx, float)
             sci_erry = np.asarray(sci_erry, float)
             ref_errx = np.asarray(ref_errx, float)
@@ -2188,9 +2110,8 @@ class Plot:
                 n_matched, max_pixel_separation,
             )
 
-            # --- Filter sources with large position errors ----------------
-            # Errors > FWHM indicate problematic detections (blends, edges)
-            # that should not dominate the plot.
+            # Position errors > FWHM flag blends/edge detections; they would
+            # dominate the plot.
             fwhm = float(self.input_yaml.get("fwhm", 3.0))
             reasonable_err = (dx_err_all <= fwhm) & (dy_err_all <= fwhm)
             n_before = len(dx_all)
@@ -2213,7 +2134,6 @@ class Plot:
                 )
                 return
 
-            # --- Sigma-clip outliers for statistics -----------------------
             from astropy.stats import sigma_clip as _sc
 
             n_matched = len(dx_all)
@@ -2248,16 +2168,14 @@ class Plot:
             rms_dx = float(np.sqrt(np.nanmean(dx_plot**2)))
             rms_dy = float(np.sqrt(np.nanmean(dy_plot**2)))
 
-            # --- Create plot (same format as WCS_vs_PSF_Offset) -----------
+            # Same layout as WCS_vs_PSF_Offset.
             width_pt = 5.5 * 72.27
             aspect = 1.0
             fig, ax = plt.subplots(figsize=set_size(width_pt, aspect=aspect))
-            fig.subplots_adjust(left=0.12, right=0.78, top=0.92, bottom=0.12)
 
-            # Check if we have finite errors for error bars
             has_errors = np.all(np.isfinite(dx_err_plot)) and np.all(np.isfinite(dy_err_plot))
 
-            # --- Compute distance from target for coloring ----------------
+            # Color points by distance from target.
             _target_x = self.input_yaml.get("target_x_pix")
             _target_y = self.input_yaml.get("target_y_pix")
             if _target_x is not None and _target_y is not None and np.isfinite(_target_x) and np.isfinite(_target_y):
@@ -2268,7 +2186,7 @@ class Plot:
             else:
                 _dist_from_target = None
 
-            # Draw error bars first (gray, behind colored points)
+            # Error bars drawn first so they sit behind the points.
             if has_errors:
                 ax.errorbar(
                     dx_plot,
@@ -2278,12 +2196,11 @@ class Plot:
                     fmt="none",
                     ecolor=PLOT_COLORS.get('error_bar', '#999999'),
                     elinewidth=0.5,
-                    capsize=3.5,
+                    capsize=1.5,
                     alpha=0.5,
                     zorder=1,
                 )
 
-            # Scatter plot colored by distance from target
             _sc_obj = None
             if _dist_from_target is not None:
                 _cmap = plt.get_cmap(PLOT_COLORS.get('scatter_cmap', 'viridis'))
@@ -2354,8 +2271,6 @@ class Plot:
                 r"$\Delta y = y_{\mathrm{sci}} - y_{\mathrm{ref}}$ [px]"
             )
 
-            # Add upper and right axes for arcsecond offsets
-
             if pixel_scale is not None and pixel_scale > 0:
                 ax_top = ax.twiny()
                 ax_right = ax.twinx()
@@ -2418,6 +2333,12 @@ class Plot:
                 bbox=dict(facecolor=PLOT_COLORS.get('stats_bbox', 'white'), alpha=0.75, edgecolor="none"),
                 fontsize="small",
             )
+
+            # Right margin: only reserve space when a colorbar or the
+            # arcsec twin-axis labels actually need it.
+            _has_twin = pixel_scale is not None and pixel_scale > 0
+            _right = 0.78 if _sc_obj is not None else (0.86 if _has_twin else 0.95)
+            fig.subplots_adjust(left=0.12, right=_right, top=0.92, bottom=0.12)
 
             fig.savefig(save_path, dpi=150, facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
@@ -2492,7 +2413,7 @@ class Plot:
             )[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
             save_path = os.path.join(
-                write_dir, f"Match_Sources_{base}.png"
+                write_dir, f"Match_Sources_{base}{get_plot_ext(self.input_yaml)}"
             )
 
             sci_matched_xy = np.asarray(sci_matched_xy, float)
@@ -2506,7 +2427,7 @@ class Plot:
             )
 
             cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-            cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
+            cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
 
             for ax, img, title in [
                 (ax1, sci_image, "Science"),
@@ -2530,8 +2451,6 @@ class Plot:
             _r_sci = 3.0 * (float(sci_fwhm) if sci_fwhm is not None else _fwhm_default)
             _r_tpl = 3.0 * (float(tpl_fwhm) if tpl_fwhm is not None else _fwhm_default)
 
-            # Determine unmatched sources (in all_xy but not in matched_xy)
-            # by checking which all_xy entries are close to a matched source.
             def _find_unmatched(all_xy, matched_xy):
                 """Return indices of all_xy entries not near any matched source."""
                 if all_xy is None or len(all_xy) == 0:
@@ -2540,14 +2459,12 @@ class Plot:
                 if matched_xy is None or len(matched_xy) == 0:
                     return np.arange(len(all_xy))
                 matched_xy = np.asarray(matched_xy, float)
-                # For each all_xy source, find nearest matched source
                 from scipy.spatial import cKDTree
                 tree = cKDTree(matched_xy)
                 d, _ = tree.query(all_xy, k=1)
-                # Unmatched = distance > 1px (not coincident with a matched source)
+                # >1 px from any matched source = unmatched.
                 return np.where(d > 1.0)[0]
 
-            # Plot unmatched sources as red crosses
             if sci_all_xy is not None:
                 sci_all = np.asarray(sci_all_xy, float)
                 _sci_unmatched = _find_unmatched(sci_all, sci_matched_xy)
@@ -2569,7 +2486,6 @@ class Plot:
                         linewidths=0.5, zorder=3,
                     )
 
-            # Plot matched sources as blue circles (radius = 3*FWHM)
             _first_match_label = "Matched" if n_matched > 0 else None
             for (sx, sy) in sci_matched_xy:
                 ax1.add_patch(Circle(
@@ -2584,7 +2500,6 @@ class Plot:
                     linewidth=0.5, zorder=5,
                 ))
 
-            # Add text annotations with match index for a subset
             _max_label = min(n_matched, 50)
             _step = max(1, n_matched // _max_label)
             for i in range(0, n_matched, _step):
@@ -2595,7 +2510,6 @@ class Plot:
                 ax2.text(tx, ty + _r_tpl + 1, str(i),
                          color=PLOT_COLORS.get('matched', '#0072B2'), fontsize=4, ha="center", va="bottom")
 
-            # Mark transient position as a yellow box on both images
             from matplotlib.patches import Rectangle as _Rect
             from matplotlib.lines import Line2D as _L2
             _target_x = self.input_yaml.get("target_x_pix")
@@ -2610,9 +2524,7 @@ class Plot:
             _box_size = 4.0 * _fwhm_default
             _box_half = _box_size / 2.0
             _target_xy_tpl = None
-            # Try to compute template pixel coords from WCS
             if _target_x is not None and _target_y is not None and np.isfinite(_target_x) and np.isfinite(_target_y):
-                # Science image: use pixel coords directly
                 ax1.add_patch(_Rect(
                     (_target_x - _box_half, _target_y - _box_half),
                     _box_size, _box_size,
@@ -2626,7 +2538,7 @@ class Plot:
                         color=PLOT_COLORS.get('variable_label', '#B8860B'), fontsize=5, fontweight="bold",
                         ha="center", va="bottom", zorder=11,
                     )
-                # Template image: convert via WCS if available
+                # Template image needs WCS conversion from the science frame.
                 try:
                     from astropy.wcs import WCS
                     from astropy.io import fits as _fits
@@ -2657,7 +2569,6 @@ class Plot:
                 except Exception:
                     pass
 
-            # Build legend with opaque background
             _legend_handles = []
             if n_matched > 0:
                 _legend_handles.append(_L2([0], [0], marker="o", color=PLOT_COLORS.get('matched', '#0072B2'),
@@ -2672,13 +2583,17 @@ class Plot:
                                            markerfacecolor="none", markersize=5,
                                            linestyle="None", label="Transient"))
             if _legend_handles:
-                ax1.legend(
+                _leg = ax1.legend(
                     handles=_legend_handles, loc="upper right",
-                    frameon=True, facecolor="white", framealpha=1.0,
-                    edgecolor="black", fontsize=8,
+                    frameon=True, fontsize=8,
+                    facecolor=PLOT_COLORS.get('legend_facecolor', 'white'),
+                    edgecolor=PLOT_COLORS.get('legend_edgecolor', '#999999'),
+                    framealpha=0.9,
                 )
+                # Source overlays use zorder up to 11; the legend must sit
+                # above them so markers cannot cover its text.
+                _leg.set_zorder(20)
 
-            # Stats text
             _n_sci_unmatched = len(_find_unmatched(
                 np.asarray(sci_all_xy, float) if sci_all_xy is not None else np.empty((0, 2)),
                 sci_matched_xy,
@@ -2708,5 +2623,4 @@ class Plot:
                 save_path, n_matched,
             )
         except Exception as e:
-            logger.warning("Match sources plot failed: %s", e)
             logger.warning("Match sources plot failed: %s", e)

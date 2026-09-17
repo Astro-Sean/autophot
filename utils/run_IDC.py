@@ -1,7 +1,7 @@
 """
 Drop-in module: ImageDistortionCorrector
 Purpose:
-  - Build robust SExtractor catalogs (optional PSFEx)
+  - Build SExtractor catalogs tuned for alignment (optional PSFEx)
   - Cross-match science/reference sources into 1<->1 tables, using extended sources as alignment anchors
   - Align via SCAMP+SWarp, or Reproject (WCS), then AstroAlign on failure
   - Refine WCS with SCAMP (.head handling fixed)
@@ -33,11 +33,11 @@ from astropy.io import fits
 from astropy.stats import sigma_clip
 from astropy.table import Table
 
-# Check if reproject is available for fallback alignment
+# reproject is optional - used for the WCS-based fallback alignment path
 try:
     from reproject import reproject_interp, reproject_adaptive
     HAS_REPROJECT = True
-    # Introspect reproject_adaptive for optional kwargs
+    # Optional kwargs (e.g. despike_jacobian) vary by reproject version
     import inspect as _inspect
     _ADAPTIVE_PARAMS = set(_inspect.signature(reproject_adaptive).parameters.keys())
 except ImportError:
@@ -150,7 +150,6 @@ class ImageDistortionCorrector:
         "BACK_FILTERSIZE": 3,
         "MEMORY_PIXSTACK": 300000,  # Increase pixel stack to avoid overflow warnings
         "CLEAN": "N",  # Disable cleaning to avoid removing faint sources
-        "FILTER": "Y",  # Keep convolution filter enabled
     }
 
     # Maximum FWHM (pixels) for sources used in alignment; sources with FWHM > this are excluded
@@ -240,7 +239,6 @@ class ImageDistortionCorrector:
         iy = getattr(self, "input_yaml", None) or {}
         ts = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
         self.preserve_scamp_logs = bool(ts.get("preserve_scamp_logs", False))
-        # Initialize SExtractorWrapper for alignment (same as main pipeline)
         self.sextractor = SExtractorWrapper(input_yaml)
 
     # ---------------------------- GAIA cache helpers ----------------------------
@@ -475,7 +473,8 @@ class ImageDistortionCorrector:
 
     @staticmethod
     def _ascii_safe(line: str) -> str:
-        """Replace non-ASCII chars in a line with '?' safely (fixes ord() bug)."""
+        """Return ``line`` as ASCII: each non-ASCII char becomes '?' so tool
+        output stays safe for ASCII-only log handling."""
         return "".join((ch if ord(ch) < 128 else "?") for ch in line)
 
     def _create_conv_file(
@@ -555,7 +554,8 @@ class ImageDistortionCorrector:
 
     @staticmethod
     def _create_nnw_file(path: str) -> None:
-        """Default SExtractor stellarity network."""
+        """Write SExtractor's stock V1.3 stellarity network; CLASS_STAR needs
+        a local NNW file referenced by STARNNW_NAME."""
         import re
 
         nnw_text = r"""
@@ -580,7 +580,8 @@ NNW
  0.00000e+00
  1.00000e+00
 """
-        # Remove indentation introduced by quoting
+        # Strip the indent added by source formatting; SExtractor expects the
+        # NNW file flush-left.
         nindent = len(re.split("NNW", nnw_text.split("\n", 1)[1])[0])
         nnw_text = "\n".join([line[nindent:] for line in nnw_text.split("\n")[1:]])
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -629,11 +630,9 @@ NNW
                 golden_ratio = (5**0.5 + 1) / 2
                 figsize = set_size(340, aspect=golden_ratio)  # square-ish
 
-            # Load image
             with fits.open(image_path) as hdul:
                 data = hdul[0].data.astype(np.float32)
 
-            # Load catalog
             with fits.open(catalog_path) as hdul:
                 catalog = Table(hdul[2].data)
 
@@ -644,16 +643,15 @@ NNW
             from plotting_utils import apply_autophot_mplstyle
             apply_autophot_mplstyle()
 
-            # Plot image
             fig, ax = plt.subplots(figsize=figsize)
-            # Render NaNs as white "no data" regions.
+            # Render NaNs as magenta "no data" regions.
             cmap = plt.get_cmap(cmap).copy() if isinstance(cmap, str) else cmap
             try:
                 cmap = cmap.copy()
             except Exception:
                 pass
             try:
-                cmap.set_bad(color="white")
+                cmap.set_bad(color="magenta")
             except Exception:
                 pass
             im = ax.imshow(
@@ -661,7 +659,6 @@ NNW
             )
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-            # Plot circles for each source
             for i, row in enumerate(catalog[:max_sources]):
                 if (
                     "XWIN_IMAGE" in row.colnames
@@ -670,7 +667,7 @@ NNW
                 ):
                     x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
                     fwhm = row["FWHM_IMAGE"]
-                    # Convert to 0-based if needed
+                    # SExtractor pixel coords are 1-based; matplotlib wants 0-based
                     x_0based, y_0based = x - 1, y - 1
                     circle = Circle(
                         (x_0based, y_0based),
@@ -824,8 +821,8 @@ NNW
         Best-effort MAP_WEIGHT companion for SExtractor alignment.
 
         The photometry pipeline commonly writes ``<stem>.weight<ext>`` next to the
-        science image. If present, using it in SExtractor improves robustness on
-        mosaics with NaNs / no-coverage bands encoded as zeros.
+        science image. If present, it lets SExtractor down-weight the NaN /
+        no-coverage bands encoded as zeros on mosaics.
         """
         try:
             p = Path(str(fits_image))
@@ -881,7 +878,7 @@ NNW
                 with fits.open(fits_image) as hdul:
                     header = hdul[0].header
                     fwhm_pixels = header.get("FWHM", 2.0)
-            
+
             pixel_scale_header = None
             with fits.open(fits_image) as hdul:
                 header = hdul[0].header
@@ -900,8 +897,7 @@ NNW
             if aperture_radius is not None and float(aperture_radius) > 0:
                 _eff_aperture = float(aperture_radius)
             _scale_hw: Optional[int] = int(scale) if scale is not None and int(scale) > 0 else None
-            
-            # Always create convolution file for filtering
+
             self._create_conv_file(
                 conv_path,
                 fwhm_pixels=fwhm_pixels,
@@ -946,7 +942,7 @@ NNW
                             fwhm_pixels, _us_thresh_idc,
                             _orig_minarea, final_config["DETECT_MINAREA"],
                         )
-            
+
             final_config.update(
                 {
                     # 'CHECKIMAGE_NAME': 'check_seg.fits,check_aper.fits',
@@ -961,7 +957,7 @@ NNW
                 }
             )
 
-            # Optional MAP_WEIGHT (0/1 or continuous) for robust detection on masked mosaics.
+            # Optional MAP_WEIGHT (0/1 or continuous) down-weights masked mosaic pixels.
             wpath = str(weight_path) if weight_path else ""
             if wpath and os.path.isfile(wpath):
                 final_config["WEIGHT_TYPE"] = "MAP_WEIGHT"
@@ -1018,11 +1014,9 @@ NNW
                 for k, v in final_config.items():
                     f.write(f"{k}\t{v}\n")
 
-            # Use the input filename (without extension) for the catalog
             catalog_name = Path(fits_image).stem + ".cat"
             catalog_path = str(Path(output_dir) / catalog_name)
 
-            # Build SExtractor command
             cmd1 = [
                 sex_cmd,
                 fits_image,
@@ -1126,7 +1120,7 @@ NNW
                             cleaned['DELTA_J2000'] = world_coords.dec.deg
                     except Exception as e:
                         self.logger.warning("Could not compute world coordinates: %s", e)
-                    # Add MAG_AUTO and MAGERR_AUTO if not present
+                    # SCAMP ASTREFMAG_KEY expects MAG_AUTO/MAGERR_AUTO
                     if 'MAG_AUTO' not in cleaned.colnames:
                         if 'MAG_APER' in cleaned.colnames:
                             cleaned['MAG_AUTO'] = cleaned['MAG_APER']
@@ -1139,7 +1133,7 @@ NNW
                             cleaned['MAGERR_AUTO'] = cleaned['MAGERR_APER']
                         else:
                             cleaned['MAGERR_AUTO'] = 0.1
-                    # Add error columns if not present
+                    # SCAMP CENTROIDERR_KEYS/ASTREFERR_KEYS expect these error columns
                     if 'ERRAWIN_IMAGE' not in cleaned.colnames:
                         if 'FWHM_IMAGE' in cleaned.colnames:
                             cleaned['ERRAWIN_IMAGE'] = cleaned['FWHM_IMAGE'] * 0.1
@@ -1242,18 +1236,15 @@ NNW
         from astropy.io import fits
         import os
 
-        # Ensure the reference directory exists
         os.makedirs(reference_dir, exist_ok=True)
 
-        # Open the science image and extract its header
         with fits.open(science_image) as hdul:
             header = hdul[0].header
 
-        # Save the header as an `.ahead` file in the reference directory
         ahead_path = os.path.join(reference_dir, ahead_filename)
         with open(ahead_path, "w") as f:
             for card in header.cards:
-                # Use str(card) to get the full card as a string
+                # str(card) preserves the full 80-char FITS card image
                 f.write(f"{str(card)}\n")
 
         self.logger.debug("Science header written as .ahead file: %s", ahead_path)
@@ -1379,7 +1370,7 @@ NNW
             Dictionary with paths to aligned images and alignment metadata.
         """
         try:
-            # --- Check that SCAMP and SWarp are installed ---
+            # --- SCAMP/SWarp availability ---
             scamp_available = self._is_executable_available("scamp")
             swarp_available = self._is_executable_available("swarp")
 
@@ -1425,21 +1416,18 @@ NNW
             science_aligned_dir = output_dir / f"aligned_sci_{science_base_name}"
             reference_aligned_dir = output_dir / f"aligned_ref_{science_base_name}"
 
-            # Delete existing directories if they exist
             if science_aligned_dir.exists():
                 shutil.rmtree(science_aligned_dir)
             if reference_aligned_dir.exists():
                 shutil.rmtree(reference_aligned_dir)
 
-            # Create new, empty directories
             science_aligned_dir.mkdir(parents=True, exist_ok=True)
             reference_aligned_dir.mkdir(parents=True, exist_ok=True)
 
-            # Copy and clean images
             sci_image_copy = science_aligned_dir / "science_image.fits"
             ref_image_copy = reference_aligned_dir / "reference_image.fits"
 
-            # Copy science and reference images (weight maps not used for alignment)
+            # Weight maps are not used for alignment - they would mask faint sources
             shutil.copy2(science_image, sci_image_copy)
             shutil.copy2(reference_image, ref_image_copy)
 
@@ -1467,21 +1455,19 @@ NNW
                     if (_ref_shape[0] > _sci_shape[0] * 1.5 or _ref_shape[1] > _sci_shape[1] * 1.5) \
                             and not (_ref_has_sip or _ref_has_pv):
                         from functions import nan_crop
-                        
-                        # Get science center in world coords.
-                        # Use correct numpy 0-based center: (nx-1)/2, (ny-1)/2.
+
+                        # numpy 0-based image center: (nx-1)/2, (ny-1)/2
                         _scx = (_sci_shape[1] - 1) / 2.0
                         _scy = (_sci_shape[0] - 1) / 2.0
                         _sci_cra, _sci_cdec = _sci_w.all_pix2world([_scx], [_scy], 0)
-                        
-                        # Project science center into reference pixel coords
+
                         _rcx_arr, _rcy_arr = _safe_world2pix(_ref_w, _sci_cra[0], _sci_cdec[0], 0)
                         _rcx, _rcy = float(np.atleast_1d(_rcx_arr)[0]), float(np.atleast_1d(_rcy_arr)[0])
-                        
+
                         # Cutout size: science size + 20% margin for alignment shifts
                         _cut_h = int(_sci_shape[0] * 1.2)
                         _cut_w = int(_sci_shape[1] * 1.2)
-                        
+
                         if np.isfinite(_rcx) and np.isfinite(_rcy):
                             _ref_header_out = _ref_h.copy()
                             _ref_data_cropped, _ref_header_out = nan_crop(
@@ -1507,19 +1493,15 @@ NNW
             except Exception as _e:
                 self.logger.debug("Reference pre-cutout skipped: %s", _e)
 
-            # Check if science image has SIP or TPV distortion parameters from solve-field/SCAMP
-            # solve-field returns WCS with SIP parameters, SCAMP may convert to TPV/PV
-            # Neither corrects the image data itself
-            # We need to run SWarp on the science image to remove distortions using the distortion WCS
+            # Check for SIP/TPV distortion from solve-field/SCAMP.  Neither tool
+            # corrects the pixel data - SWarp must apply the distortion WCS
+            # during resampling below.
             with fits.open(sci_image_copy) as hdul:
                 sci_head_initial = hdul[0].header
 
-            # Check for SIP distortion keywords (A_ORDER, B_ORDER, etc.)
             has_sip = any(key in sci_head_initial for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"])
-            # Check for TPV/PV distortion keywords (PV1_1, PV2_1, etc.)
             has_pv = any(str(key).startswith("PV") and len(str(key)) > 2 and str(key)[2:3].isdigit()
                         for key in sci_head_initial)
-            # Check CTYPE for distortion projection
             ctype1 = str(sci_head_initial.get("CTYPE1", "")).upper()
             ctype2 = str(sci_head_initial.get("CTYPE2", "")).upper()
             has_distortion_ctype = "TAN-SIP" in ctype1 or "TAN-SIP" in ctype2 or "TPV" in ctype1 or "TPV" in ctype2
@@ -1618,7 +1600,6 @@ NNW
                             "Failed to convert science SIP to PV (%s). "
                             "SWarp will ignore the distortion.", _e
                         )
-            # Use weight map if available
             sci_w = self._guess_map_weight_path(str(sci_image_copy))
             if sci_w:
                 self.logger.info("Alignment SExtractor: using science MAP_WEIGHT %s", sci_w)
@@ -1641,7 +1622,7 @@ NNW
                 # Use science image shape directly for output grid.
                 # Both images are resampled to match science dimensions and pixel scale.
                 output_width, output_height = sci_shape[1], sci_shape[0]
-                
+
                 # Compute world coordinates of image center for SWarp CENTER.
                 # SWarp uses FITS 1-based convention; the center of an nx x ny image
                 # is at ((nx+1)/2, (ny+1)/2) in FITS coordinates.
@@ -1657,13 +1638,13 @@ NNW
                 # introduces a small systematic offset. COMBINE=Y already guarantees
                 # full-size output at the requested IMAGE_SIZE.
                 sci_image_for_swarp = sci_image_copy
-                
+
                 self.logger.info(
                     "Output grid: %dx%d  CENTER=(%.6f,%.6f)  PIXEL_SCALE=%.4f (science was %dx%d, reference was %dx%d)",
                     output_width, output_height, center_ra, center_dec, sci_pix_scale,
                     sci_shape[1], sci_shape[0], ref_shape[1], ref_shape[0]
                 )
-                
+
                 # Verify reference covers the science region (diagnostic only -
                 # never abort alignment if this check fails or WCS doesn't converge).
                 try:
@@ -1699,10 +1680,9 @@ NNW
                         self.logger.debug("Reference image fully covers science region")
                 except Exception as _cov_exc:
                     self.logger.debug("Coverage check skipped: %s", _cov_exc)
-                
+
                 reference_already_scamp = self._header_indicates_scamp(ref_head)
 
-            # Extract sources
             sci_aperture_radius = sci_head.get("APER", 7)
             ref_aperture_radius = ref_head.get("APER", 7)
             self.logger.info(
@@ -1721,12 +1701,12 @@ NNW
             sextractor_crowded = ts.get(
                 "sextractor_crowded", templates_cfg.get("crowded_field", phot_crowded)
             )
-            # For alignment, disable weight maps to avoid masking sources
-            # Weight maps can mask faint sources that are needed for alignment
+            # Weight maps disabled for alignment - they can mask the faint
+            # sources needed as alignment anchors
             sci_w = None
             ref_w = None
             self.logger.info("Alignment SExtractor: weight maps disabled to avoid masking sources")
-            
+
             # Log science image statistics to debug detection issues
             with fits.open(sci_image_copy) as hdul:
                 sci_data = hdul[0].data
@@ -1783,7 +1763,7 @@ NNW
             ref_catalog_path = str(reference_aligned_dir / "reference_image_PYSEx_CAT.cat")
 
             # Single SExtractor run with FWHM-based kernel sizing.
-            # Sci and ref runs are independent — parallelize for ~2x speedup.
+            # Sci and ref runs are independent -- parallelize for ~2x speedup.
             sci_scale = int(max(5, 1.5 * fwhm_sci_pix))
             ref_scale = int(max(5, 1.5 * fwhm_ref_pix))
             combined_scale = max(sci_scale, ref_scale)
@@ -1835,7 +1815,6 @@ NNW
                 sci_fwhm2, sci_catalog2_raw, sci_scale2 = _sci_future.result()
                 ref_fwhm2, ref_catalog2_raw, ref_scale2 = _ref_future.result()
 
-            # Update FWHM from SExtractor measurement, then apply inflation cap.
             fwhm_sci_pix = float(sci_fwhm2) if sci_fwhm2 and sci_fwhm2 > 0 else fwhm_sci_pix
             fwhm_ref_pix = float(ref_fwhm2) if ref_fwhm2 and ref_fwhm2 > 0 else fwhm_ref_pix
 
@@ -1898,19 +1877,16 @@ NNW
                     fwhm_ref_pix, MAX_REASONABLE_FWHM,
                 )
                 fwhm_ref_pix = ref_hdr_fwhm if (ref_hdr_fwhm and ref_hdr_fwhm > 0) else 8.5
-            
-            # SExtractorWrapper with return_raw=True copies the FITS-LDAC catalog to the mdir
-            # The catalogs are now at the expected paths with full SExtractor metadata
-            # No need to manually write FITS-LDAC files
-            
-            # Use the raw Tables for downstream processing
+
+            # return_raw=True already wrote the FITS-LDAC catalogs to the mdir
+            # at the expected paths - no manual write needed.
+
             sci_catalog2 = sci_catalog2_raw
             ref_catalog2 = ref_catalog2_raw
-            
-            # Convert to expected format - use the FITS_LDAC catalog path
+
             sci_sex = {"fwhm": sci_fwhm2, "catalog": sci_catalog2, "catalog_path": sci_catalog_path}
             ref_sex = {"fwhm": ref_fwhm2, "catalog": ref_catalog2, "catalog_path": ref_catalog_path}
-            
+
             self.logger.info("SExtractor alignment: %d sci / %d ref sources", len(sci_catalog2) if sci_catalog2 is not None else 0, len(ref_catalog2) if ref_catalog2 is not None else 0)
 
             # --- Sparse-field retry: if very few sources, re-run with maximum sensitivity ---
@@ -1987,7 +1963,6 @@ NNW
                         ref_catalog2 = ref_catalog3_raw
                         fwhm_ref_pix = float(ref_fwhm3) if ref_fwhm3 and ref_fwhm3 > 0 else fwhm_ref_pix
 
-                # Update sex dicts with retry results
                 sci_sex = {"fwhm": sci_fwhm2, "catalog": sci_catalog2, "catalog_path": sci_catalog_path}
                 ref_sex = {"fwhm": ref_fwhm2, "catalog": ref_catalog2, "catalog_path": ref_catalog_path}
 
@@ -2054,7 +2029,6 @@ NNW
                         "Invalid FWHM (%s), defaulting to LANCZOS3", fwhm_pix
                     )
                     return "LANCZOS3"
-                # Three-tier selection based on FWHM
                 if fwhm_pix < 1.5:
                     method = "BILINEAR"
                     reason = "FWHM < 1.5 px (very undersampled)"
@@ -2224,11 +2198,9 @@ NNW
                                 str(science_corrected_fits),
                             )
 
-                            # Update science image paths for downstream
                             sci_image_copy = science_corrected_fits
                             sci_image_for_swarp = science_corrected_fits
 
-                            # Re-read WCS and grid from corrected science
                             with fits.open(sci_image_copy) as hdul:
                                 sci_head = hdul[0].header
                                 sci_data = hdul[0].data
@@ -2292,7 +2264,6 @@ NNW
                                 / "science_corrected_PYSEx_CAT.cat"
                             )
 
-                            # Update the sci_sex dict for downstream
                             sci_sex = {
                                 "fwhm": sci_fwhm_gaia,
                                 "catalog": sci_catalog_gaia_raw,
@@ -2378,7 +2349,7 @@ NNW
 
             # Configurable minimum matched sources for a reliable SCAMP solution.
             # SCAMP needs at least ~6 matched sources for a linear WCS fit
-            # (shift, scale, rotation = 4 params, plus 2 for robustness).
+            # (shift, scale, rotation = 4 params, plus a few extra for a stable fit).
             align_cfg = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
             min_matched = int(align_cfg.get("alignment_min_matched_sources", 6))
             max_match_radius = float(align_cfg.get("alignment_max_match_radius_arcsec", 30.0))
@@ -2555,7 +2526,6 @@ NNW
             # sources with any WCS imprecision.  Too loose -> contamination.
             # Floor at 1.0" to handle typical plate-solve uncertainties.
             is_sparse_field = _num_matched < 50
-            # Check if extended sources are enabled for alignment
             _iy_align = getattr(self, "input_yaml", None) or {}
             _ts_align = _iy_align.get("template_subtraction", {}) if isinstance(_iy_align, dict) else {}
             _use_extended = bool(isinstance(_ts_align, dict) and _ts_align.get("alignment_use_extended_sources", False))
@@ -2566,8 +2536,8 @@ NNW
             )
             # SN_THRESHOLDS: 2nd value controls the high-SN sample used for
             # quad formation.  For sparse fields, lower it so more sources
-            # participate in pattern matching.  SCAMP's robust fitting still
-            # rejects bad sources; the quad sample just needs enough points.
+            # participate in pattern matching.  SCAMP's own outlier rejection
+            # still discards bad sources; the quad sample just needs enough points.
             _sn_lo, _sn_hi = 1.5, 100000.0
             _iy_wcs = getattr(self, "input_yaml", None) or {}
             _wcs_cfg = _iy_wcs.get("wcs", {}) if isinstance(_iy_wcs, dict) else {}
@@ -2632,7 +2602,6 @@ NNW
             # (1.3x) was validated on J2344 field (38 sources, RMS=1.89px).
             _min_sources_for_degree = {0: 3, 1: 5, 2: 16, 3: 26, 4: 35}
 
-            # Start with the reference's detected distortion order
             required_degree = ref_distort_order
 
             # Find the highest degree we can actually fit with available sources
@@ -2723,7 +2692,7 @@ NNW
             distort_label = max(1, distort_degrees)
             self.logger.info(
                 'SCAMP:\t\tcrossid=%.1f" maxerr=%.1f" distort=%d%s%s '
-                'SN=[%s] nmax=%d pixscale=%.2f posangle=%.1f° '
+                'SN=[%s] nmax=%d pixscale=%.2f posangle=%.1f deg '
                 '(ref SIP/PV order=%d, %d matched)',
                 crossid_arcsec, position_maxerr_arcsec, distort_label, sparse_note, ext_note,
                 sn_thresholds, _match_nmax, _pixscale_maxerr, _posangle_maxerr,
@@ -2787,10 +2756,9 @@ NNW
                 )
                 scamp_result = {}
             else:
-                # Run SCAMP on reference catalog only, using science catalog as reference.
-                # The reference .head corrects the reference WCS to match the science WCS.
-                # Only the reference .head is placed next to the reference image before SWarp.
-                # Use the backup paths (full catalogs) for SCAMP
+                # SCAMP uses the backup (full) catalogs, not the matched subsets.
+                # The reference .head corrects the reference WCS to match the
+                # science WCS; only it is placed next to the image before SWarp.
                 ref_cat_path = Path(ref_catalog_scamp_backup)
                 sci_cat_path = Path(sci_catalog_scamp_backup)
                 ref_cat_tmp = reference_aligned_dir / f"{ref_cat_path.stem}_ref.cat"
@@ -2879,7 +2847,6 @@ NNW
                         science_image, reference_image, output_dir
                     )
 
-                # Clean up temporary reference catalog now that SCAMP is done
                 try:
                     ref_cat_tmp.unlink(missing_ok=True)
                 except Exception:
@@ -2926,7 +2893,6 @@ NNW
                 "SCAMP produced .head files for stems: %s", list(head_by_stem.keys())
             )
 
-            # Only copy reference .head file
             label = "reference"
             cat_tmp_stem = ref_cat_tmp_stem
             orig_cat_path = ref_sex["catalog_path"]
@@ -2985,12 +2951,13 @@ NNW
                     match_radius_arcsec=max(float(crossid_arcsec), 2.0),
                 )
             try:
+                from plotting_utils import get_plot_ext
                 self.plot_matched_sources_side_by_side(
                     sci_image_path=str(sci_image_copy),
                     ref_image_path=str(ref_image_copy),
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
-                    output_plot_path=output_dir / f"Matched_Sources_{Path(sci_image_copy).stem}.png",
+                    output_plot_path=output_dir / f"Matched_Sources_{Path(sci_image_copy).stem}{get_plot_ext(self.input_yaml)}",
                     label_color="#D94F4F",
                     label_fontsize=7,
                     circle_radius_sci=fwhm_sci_pix,
@@ -3021,12 +2988,11 @@ NNW
                         _ps_ratio, sci_pix_scale, ref_pix_scale,
                     )
 
-            # Run SWarp with COMBINE=Y (one image per call) to guarantee full IMAGE_SIZE output.
-            # With COMBINE=N, SWarp clips each .resamp.fits to the image's sky footprint.
-            # Science has no .head file (it defines the output grid via its WCS + CRPIX at center).
-            # Reference has its SCAMP .head placed next to it so SWarp applies WCS correction.
-            # Determine combined resampling method for simultaneous SWarp
-            # Use the more conservative (lower quality) of the two images to preserve PSFs
+            # Science has no .head file (it defines the output grid via its WCS
+            # + CRPIX at center); the reference's SCAMP .head is placed next to
+            # it so SWarp applies the WCS correction.
+            # Combined resampling: use the more conservative (lower quality) of
+            # the two images' methods to preserve PSFs.
             sci_undersampled = (
                 sci_is_undersampled if sci_is_undersampled is not None else False
             )
@@ -3090,12 +3056,10 @@ NNW
                 # Skip SWarp resampling - apply SCAMP WCS correction to header only
                 self.logger.info("Skipping SWarp resampling (WCS-only alignment for template subtraction)")
 
-                # Copy SCAMP-corrected reference image to aligned location
                 aligned_ref = output_dir / f"aligned_ref_{Path(reference_image).stem}.fits"
                 # Science image is never modified - use the copy as-is
                 aligned_sci = Path(sci_image_for_swarp)
 
-                # Copy reference image, then apply SCAMP .head WCS to its header
                 shutil.copy2(ref_image_copy, aligned_ref)
 
                 head_file = Path(ref_image_copy).with_suffix(".head")
@@ -3141,7 +3105,7 @@ NNW
                     )
 
                 self.logger.info("WCS-only alignment complete: sci=%s, ref=%s", aligned_sci, aligned_ref)
-                
+
             elif resample_mode == "native_scale":
                 # Each image resampled independently keeping its native pixel scale,
                 # but aligned to the same sky center. Output shapes differ if pixel
@@ -3150,21 +3114,21 @@ NNW
                     "Using native-scale resampling: science=%.4f\"/px ref=%.4f\"/px",
                     sci_pix_scale, ref_pix_scale,
                 )
-                
+
                 # Compute reference IMAGE_SIZE to match science sky coverage
                 ref_output_width = int(round(sci_shape[1] * sci_pix_scale / ref_pix_scale))
                 ref_output_height = int(round(sci_shape[0] * sci_pix_scale / ref_pix_scale))
-                
+
                 self.logger.info(
                     "Native-scale shapes: science=%dx%d reference=%dx%d",
                     sci_shape[1], sci_shape[0], ref_output_width, ref_output_height,
                 )
-                
+
                 resample_dir_sci = resample_dir / "sci"
                 resample_dir_ref = resample_dir / "ref"
                 resample_dir_sci.mkdir(parents=True, exist_ok=True)
                 resample_dir_ref.mkdir(parents=True, exist_ok=True)
-                
+
                 # Science image: native pixel scale and original shape
                 swarp_config_sci = {
                     **swarp_config_combined,
@@ -3173,7 +3137,7 @@ NNW
                     "PIXEL_SCALE": sci_pix_scale,
                     "IMAGE_SIZE": f"{sci_shape[1]},{sci_shape[0]}",
                 }
-                
+
                 # Reference image: native pixel scale, shape scaled to match sky coverage
                 # Use combined_resampling_method for consistency - different kernels have
                 # different phase responses that introduce systematic sub-pixel centroid
@@ -3185,7 +3149,7 @@ NNW
                     "PIXEL_SCALE": ref_pix_scale,
                     "IMAGE_SIZE": f"{ref_output_width},{ref_output_height}",
                 }
-                
+
                 # Never resample the science image - it defines the target grid.
                 # SWarp resampling degrades the PSF and can introduce sub-pixel
                 # shifts that produce dipoles in the subtracted image.
@@ -3209,7 +3173,7 @@ NNW
                     )
 
                 aligned_ref = Path(swarp_res_ref["corrected_image"])
-                
+
                 if not aligned_sci.exists() or not aligned_ref.exists():
                     self.logger.info(
                         "Could not find SWarp output images. Falling back to AstroAlign."
@@ -3217,7 +3181,7 @@ NNW
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
-                    
+
             else:
                 # "common_grid" (default): Both images resampled by SWarp onto
                 # the same common grid (CENTER, PIXEL_SCALE, IMAGE_SIZE).
@@ -3467,8 +3431,8 @@ NNW
                     good = mutual & (d_sr < match_tol)
                     n_matched_verify = int(good.sum())
 
-                    # Sparse-field: accept 2 matches (median of 2 is
-                    # still a robust estimator for a constant offset).
+                    # Sparse-field: accept 2 matches (median of 2 still
+                    # estimates a constant offset).
                     _min_matches = 2 if _n_total < 10 else 3
 
                     if n_matched_verify >= _min_matches:
@@ -3981,7 +3945,6 @@ NNW
                                 c.get("reject_p95", float('inf')),
                             ),
                         )
-                        # Clean up backup files
                         for _tmp in [_ref_backup, _sci_backup]:
                             try:
                                 if _tmp and os.path.exists(_tmp):
@@ -4173,7 +4136,6 @@ NNW
 
                         from functions import nan_crop
 
-                        # Find the pixel position of the SWarp CENTER in the reference image
                         try:
                             ref_cx_arr, ref_cy_arr = _ref_wcs.all_world2pix(
                                 [center_ra], [center_dec], 0
@@ -4327,7 +4289,7 @@ NNW
             # SWarp resampling does not inherently correct distortion - it just applies linear transforms
             self.logger.debug("Preserving SIP/TPV distortion coefficients in aligned science image header")
 
-            # Remove the aligned working directory after copying aligned images over the originals.
+            # Working dirs removed only after the aligned copies are in place.
             if science_aligned_dir.exists():
                 shutil.rmtree(science_aligned_dir, ignore_errors=True)
                 self.logger.debug(
@@ -4428,7 +4390,6 @@ NNW
                 _reproj_refine_dir = Path(output_dir) / "reproject_wcs_refine"
                 _reproj_refine_dir.mkdir(parents=True, exist_ok=True)
 
-                # Extract sources from both images for matching
                 _refine_fwhm = max(
                     float(self.input_yaml.get("fwhm", 3.0)) if hasattr(self, "input_yaml") else 3.0,
                     2.5,
@@ -4508,7 +4469,6 @@ NNW
                         ref_cat_path=_ref_sex_refine["catalog_path"],
                         match_radius_arcsec=_reproj_filter_radius,
                     )
-                    # Match sources 1:1 using filter_matched_sources
                     _refine_crossid = max(
                         2.0 * _refine_fwhm * (
                             float(self.input_yaml.get("pixel_scale", 1.0))
@@ -4535,7 +4495,6 @@ NNW
                             output_head_path=_refine_head_path,
                         )
                         if _refine_result is not None and Path(_refine_head_path).exists():
-                            # Apply the corrected WCS to ref_header in memory
                             from wcs import _normalize_projection_codes
                             _corrected_hdr = fits.Header.fromtextfile(_refine_head_path)
                             _corrected_hdr = _normalize_projection_codes(
@@ -4559,7 +4518,6 @@ NNW
                                     _is_wcs = _stem in _wcs_stems and _key.startswith(_stem.rstrip("_"))
                                 if _is_wcs:
                                     ref_header[_key] = _corrected_hdr[_key]
-                            # Rebuild ref_wcs with the corrected header
                             ref_wcs = get_wcs(ref_header)
                             if ref_wcs is not None:
                                 self.logger.info(
@@ -4606,7 +4564,7 @@ NNW
                 except Exception:
                     pass
 
-            # Pre-mask NaN pixels in reference data
+            # reproject handles NaN poorly; zero them and rely on footprint coverage
             n_nan = int(np.sum(~np.isfinite(ref_data)))
             if n_nan > 0:
                 self.logger.info(
@@ -4626,7 +4584,8 @@ NNW
             conserve_flux = bool(align_cfg.get("reproject_adaptive_conserve_flux", False))
             center_jacobian = bool(align_cfg.get("reproject_adaptive_center_jacobian", False))
 
-            # Auto-enable center_jacobian for large rotation differences
+            # center_jacobian needed for large rotation differences (>30 deg);
+            # the default Jacobian approximation degrades there
             try:
                 sci_rot = np.degrees(np.arctan2(
                     sci_wcs.wcs.cd[0, 1], sci_wcs.wcs.cd[0, 0]
@@ -4657,7 +4616,7 @@ NNW
             }
             interp_order_norm = _interp_map.get(interp_order, "bilinear")
 
-            # Auto-downgrade interpolation for undersampled images
+            # Bicubic/biquadratic ring on undersampled PSFs - downgrade to bilinear
             _fwhm = float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
             _us_thresh_reproj = float(
                 (iy.get("photometry", {}) or {}).get(
@@ -4672,7 +4631,7 @@ NNW
                 )
                 interp_order_norm = "bilinear"
 
-            # Method fallback chain: exact-first for best geometric accuracy
+            # Fallback order: exact-first for best geometric accuracy
             all_methods = ("exact", "adaptive", "interp")
             if req_method in all_methods:
                 fallbacks = [req_method] + [m for m in all_methods if m != req_method]
@@ -4747,7 +4706,6 @@ NNW
                 )
 
             aligned_ref = np.asarray(aligned_ref, dtype=float)
-            # Mask non-footprint pixels with NaN
             aligned_ref[~fp_mask] = np.nan
 
             out_header = ref_header.copy()
@@ -4870,7 +4828,7 @@ NNW
                         np.asarray(_ref_cat_v[_y_col], float) - 1.0,
                     ])
 
-                    # Mutual nearest-neighbor matching for robust verification
+                    # Mutual nearest neighbors only - rejects false matches
                     _tree_ref = cKDTree(_ref_xy)
                     _tree_sci = cKDTree(_sci_xy)
                     _d_sr, _i_sr = _tree_ref.query(_sci_xy, k=1)
@@ -5118,10 +5076,10 @@ NNW
         target_dec: Optional[float] = None,
     ) -> Tuple[int, int, float, float]:
         """Compute optimal output shape as intersection of valid (non-NaN) regions.
-        
+
         This reduces output size when images have different coverage or significant
         masked edges, avoiding computation on regions where only one image has data.
-        
+
         Parameters
         ----------
         sci_data, ref_data : ndarray
@@ -5133,7 +5091,7 @@ NNW
         target_ra, target_dec : float, optional
             Target position in degrees. If provided, the output shape is guaranteed
             to include this position (expanded if necessary, up to science image bounds).
-            
+
         Returns
         -------
         (width, height, center_ra, center_dec) : tuple
@@ -5142,11 +5100,9 @@ NNW
             SWarp CENTER so the output grid lies within both images' footprints.
         """
         try:
-            # Find valid (finite) pixel regions in each image
             sci_valid = np.isfinite(sci_data)
             ref_valid = np.isfinite(ref_data)
-            
-            # Get bounding boxes of valid regions
+
             def _valid_bbox(valid_mask):
                 rows = np.any(valid_mask, axis=1)
                 cols = np.any(valid_mask, axis=0)
@@ -5155,17 +5111,17 @@ NNW
                 rmin, rmax = np.where(rows)[0][[0, -1]]
                 cmin, cmax = np.where(cols)[0][[0, -1]]
                 return (cmin, rmin, cmax, rmax)  # x1,y1,x2,y2 in pixel coords
-            
+
             sci_bbox = _valid_bbox(sci_valid)
             ref_bbox = _valid_bbox(ref_valid)
-            
+
             if sci_bbox is None or ref_bbox is None:
                 # Fall back to science shape if no valid data found
                 _scx = (sci_data.shape[1] - 1) / 2.0
                 _scy = (sci_data.shape[0] - 1) / 2.0
                 _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
                 return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
-            
+
             # Convert bounding box corners to world coordinates.
             # _valid_bbox gives the first/last 0-based pixel indices that contain
             # valid data.  The actual footprint extends half a pixel beyond those
@@ -5178,21 +5134,18 @@ NNW
                      [x2 + 0.5, y2 + 0.5],
                      [x1 - 0.5, y2 + 0.5]]
                 )
-            
+
             sci_corners = _bbox_corners(sci_bbox)
             ref_corners = _bbox_corners(ref_bbox)
-            
-            # Convert to RA/Dec
+
             sci_world = sci_wcs.all_pix2world(sci_corners, 0)
             ref_world = ref_wcs.all_pix2world(ref_corners, 0)
-            
-            # Find overlapping RA/Dec region
+
             ra_min = max(np.min(sci_world[:, 0]), np.min(ref_world[:, 0]))
             ra_max = min(np.max(sci_world[:, 0]), np.max(ref_world[:, 0]))
             dec_min = max(np.min(sci_world[:, 1]), np.min(ref_world[:, 1]))
             dec_max = min(np.max(sci_world[:, 1]), np.max(ref_world[:, 1]))
-            
-            # Check if there is any overlap
+
             if ra_min >= ra_max or dec_min >= dec_max:
                 self.logger.warning(
                     "No overlap in valid regions; using science image shape."
@@ -5201,7 +5154,7 @@ NNW
                 _scy = (sci_data.shape[0] - 1) / 2.0
                 _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
                 return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
-            
+
             # Convert overlap size to pixels at output pixel scale
             # cos(dec) factor for RA separation
             overlap_center_ra = (ra_min + ra_max) / 2
@@ -5209,43 +5162,35 @@ NNW
             cos_dec = np.cos(np.radians(overlap_center_dec))
             ra_sep = (ra_max - ra_min) * cos_dec * 3600  # arcsec
             dec_sep = (dec_max - dec_min) * 3600  # arcsec
-            
+
             width = int(ra_sep / pix_scale)
             height = int(dec_sep / pix_scale)
-            
-            # Ensure minimum size and add small margin
+
             width = max(width, 100)
             height = max(height, 100)
-            
-            # Ensure target is included in output (if target position provided)
+
+            # Grow the output if needed so the target stays inside the grid
             if target_ra is not None and target_dec is not None:
-                # Convert target world coords to pixel coords in output grid
-                # Output grid center is at (width/2, height/2) in pixel coords
-                # with pix_scale arcsec/pixel
+                # Output grid center is (width/2, height/2); pix_scale in arcsec/px
                 cos_dec = np.cos(np.radians(target_dec))
-                
-                # Target offset from center in arcsec
+
                 dra_arcsec = (target_ra - overlap_center_ra) * cos_dec * 3600
                 ddec_arcsec = (target_dec - overlap_center_dec) * 3600
-                
-                # Convert to pixels
+
                 dx_pix = dra_arcsec / pix_scale
                 dy_pix = ddec_arcsec / pix_scale
-                
-                # Check if target falls within current output bounds
+
                 half_w = width / 2
                 half_h = height / 2
-                
-                # Expand width if needed
+
                 if abs(dx_pix) >= half_w - 5:  # 5 pixel margin
                     new_half_w = abs(dx_pix) + 10  # Add margin
                     width = int(2 * new_half_w)
                     self.logger.debug(
-                        "Expanded output width to include target: %d -> %d", 
+                        "Expanded output width to include target: %d -> %d",
                         int(2 * half_w), width
                     )
-                
-                # Expand height if needed
+
                 if abs(dy_pix) >= half_h - 5:  # 5 pixel margin
                     new_half_h = abs(dy_pix) + 10  # Add margin
                     height = int(2 * new_half_h)
@@ -5253,20 +5198,18 @@ NNW
                         "Expanded output height to include target: %d -> %d",
                         int(2 * half_h), height
                     )
-            
+
             # Cap at original science size (don't expand beyond input)
             # But ensure target is included even if it means using full science size
             width = min(width, sci_data.shape[1])
             height = min(height, sci_data.shape[0])
-            
+
             # Final check: if target is provided, verify it's within the output bounds
             # If not, use full science image size to ensure target is included
             if target_ra is not None and target_dec is not None:
-                # Convert target to pixel coords in science image
                 sci_target_x, sci_target_y = sci_wcs.all_world2pix([target_ra], [target_dec], 0)
                 sci_target_x, sci_target_y = float(sci_target_x[0]), float(sci_target_y[0])
-                
-                # Check if target is within output bounds (with margin)
+
                 margin = 50  # pixels
                 if not (margin <= sci_target_x < width - margin and margin <= sci_target_y < height - margin):
                     self.logger.warning(
@@ -5276,9 +5219,9 @@ NNW
                     )
                     width = sci_data.shape[1]
                     height = sci_data.shape[0]
-            
+
             return width, height, overlap_center_ra, overlap_center_dec
-            
+
         except Exception as e:
             self.logger.warning(
                 "Could not compute optimal output shape: %s. Using science shape.", e
@@ -5327,7 +5270,6 @@ NNW
         try:
             from wcs import get_wcs as _get_wcs
 
-            # Load matched catalogs
             with fits.open(sci_cat_path) as hs, fits.open(ref_cat_path) as hr:
                 sci_tab = Table(hs[2].data)
                 ref_tab = Table(hr[2].data)
@@ -5354,7 +5296,6 @@ NNW
             sx, sy = _get_xy(sci_tab)
             rx, ry = _get_xy(ref_tab)
 
-            # Load WCS from both images
             with fits.open(sci_image_path, memmap=False) as h_sci:
                 sci_wcs = _get_wcs(h_sci[0].header)
             with fits.open(ref_image_path, memmap=False) as h_ref:
@@ -5375,7 +5316,6 @@ NNW
             dx = sx - x_pred
             dy = sy - y_pred
 
-            # Robust statistics
             median_dx = float(np.median(dx))
             median_dy = float(np.median(dy))
             rms_before = float(np.sqrt(np.mean(dx**2 + dy**2)))
@@ -5394,12 +5334,9 @@ NNW
             crpix_ref = ref_wcs.wcs.crpix
 
             if n_sources >= 6:
-                # Enough sources for a full affine fit (6 parameters)
-                # Design matrix: [1, rx, ry] for each source
+                # >=6 sources allow the full affine fit (6 parameters)
                 A_design = np.column_stack([np.ones(n_sources), rx, ry])
-                # Solve for dx coefficients
                 dx_coeffs, _, _, _ = np.linalg.lstsq(A_design, dx, rcond=None)
-                # Solve for dy coefficients
                 dy_coeffs, _, _, _ = np.linalg.lstsq(A_design, dy, rcond=None)
 
                 a0, a1, a2 = dx_coeffs
@@ -5442,12 +5379,10 @@ NNW
                 delta_cd = cd_sci @ M
                 delta_crval = cd_sci @ constant_pix + cd_sci @ M @ crpix_arr
 
-                # Apply corrections to reference header
                 corrected_header = ref_header.copy()
                 corrected_header["CRVAL1"] = float(ref_header["CRVAL1"]) + float(delta_crval[0])
                 corrected_header["CRVAL2"] = float(ref_header["CRVAL2"]) + float(delta_crval[1])
 
-                # Adjust CD matrix
                 cd_old = np.array([
                     [float(ref_header.get("CD1_1", cd_ref[0, 0])),
                      float(ref_header.get("CD1_2", cd_ref[0, 1]))],
@@ -5572,7 +5507,6 @@ NNW
         try:
             scamp_header = fits.Header.fromtextfile(str(head_path))
 
-            # Count existing PV keywords in SCAMP .head
             pv_count = sum(
                 1 for k in scamp_header
                 if str(k).startswith("PV") and len(str(k)) > 2 and str(k)[2:3].isdigit()
@@ -5736,7 +5670,6 @@ NNW
                     head_file,
                 )
 
-            # Build WCS from the SCAMP-corrected reference header
             ref_wcs_corrected = get_wcs(ref_header)
             if ref_wcs_corrected is None:
                 self.logger.error("Could not build WCS from SCAMP-corrected reference header.")
@@ -5950,7 +5883,6 @@ NNW
         from astropy.wcs import WCS
         from reproject import reproject_exact, reproject_adaptive, reproject_interp
 
-        # Read configured interpolation order from input_yaml
         iy = getattr(self, "input_yaml", None) or {}
         align_cfg = iy.get("alignment", {}) if isinstance(iy, dict) else {}
         interp_order = str(align_cfg.get("reproject_interp_order", "bicubic")).lower().strip()
@@ -6018,13 +5950,11 @@ NNW
             self.logger.error("_reproject_to_match: all reproject methods failed")
             return None
 
-        # Update header with target WCS
         from functions import update_header_from_wcs
         output_header = source_header.copy()
         update_header_from_wcs(output_header, target_wcs)
         output_header["REPROJ"] = (True, "Reprojected to match science grid")
 
-        # Write output
         fits.PrimaryHDU(data=reprojected_data, header=output_header).writeto(
             output_path, overwrite=True
         )
@@ -6112,7 +6042,6 @@ NNW
         Uses SExtractor catalogs and a 1<->1 filter to build control points, prioritizing extended sources.
         """
         try:
-            # Define output directories
             output_dir = (
                 Path(output_dir)
                 if output_dir is not None
@@ -6124,13 +6053,11 @@ NNW
             science_aligned_dir = output_dir / f"aligned_sci_{science_base_name}"
             reference_aligned_dir = output_dir / f"aligned_ref_{science_base_name}"
 
-            # Delete existing directories if they exist
             if science_aligned_dir.exists():
                 shutil.rmtree(science_aligned_dir)
             if reference_aligned_dir.exists():
                 shutil.rmtree(reference_aligned_dir)
 
-            # Create new, empty directories
             science_aligned_dir.mkdir(parents=True, exist_ok=True)
             reference_aligned_dir.mkdir(parents=True, exist_ok=True)
 
@@ -6238,12 +6165,13 @@ NNW
                 ref_image_path=str(ref_image_copy),
             )
             try:
+                from plotting_utils import get_plot_ext
                 self.plot_matched_sources_side_by_side(
                     sci_image_path=str(sci_image_copy),
                     ref_image_path=str(ref_image_copy),
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
-                    output_plot_path=science_aligned_dir / f"Matched_Sources_{Path(sci_image_copy).stem}.png",
+                    output_plot_path=science_aligned_dir / f"Matched_Sources_{Path(sci_image_copy).stem}{get_plot_ext(self.input_yaml)}",
                     label_color="#D94F4F",
                     label_fontsize=10,
                     circle_radius_sci=fwhm_sci_pix,
@@ -6462,8 +6390,8 @@ NNW
                 _aa_max_rms = float(ts.get("alignment_max_rms_px", 0.75))
                 _aa_max_p95 = float(ts.get("alignment_max_p95_px", 1.5))
                 _aa_min_n = int(ts.get("alignment_min_sources_for_field_gate", 20))
-                # FWHM-adaptive thresholds: use actual image FWHM (already
-                # computed at line ~5512) instead of a generic config default.
+                # FWHM-adaptive thresholds: use the measured image FWHM instead
+                # of a generic config default.
                 _aa_fwhm = max(fwhm_sci_pix, fwhm_ref_pix, 2.5)
                 _aa_scale = max(0.5, min(3.0, _aa_fwhm / 3.0))
                 _aa_max_off *= _aa_scale
@@ -6528,7 +6456,7 @@ NNW
                     "accepting as best available fallback."
                 )
 
-            # Remove aligned working directories and their contents after successful alignment.
+            # Working dirs removed only after successful alignment
             if science_aligned_dir.exists():
                 shutil.rmtree(science_aligned_dir, ignore_errors=True)
                 self.logger.debug("Removed aligned working dir: %s", science_aligned_dir)
@@ -6586,7 +6514,6 @@ NNW
                 self.logger.debug("SCAMP .head file not found: %s", head_path)
                 return None
 
-            # Read .head file as WCS header
             head_hdr = _fits.Header.fromtextfile(head_path)
             wcs_corrected = WCS(head_hdr, fix=True, relax=True)
             if not getattr(wcs_corrected, "has_celestial", False):
@@ -6594,22 +6521,18 @@ NNW
                 return None
             wcs_corrected = wcs_corrected.celestial
 
-            # Read reference catalog
             with _fits.open(ref_cat_path, memmap=False) as hdul:
                 ref_cat = Table(hdul[2].data)
-            # Read science catalog
             with _fits.open(sci_cat_path, memmap=False) as hdul:
                 sci_cat = Table(hdul[2].data)
 
             if len(ref_cat) == 0 or len(sci_cat) == 0:
                 return None
 
-            # Transform reference pixel positions through corrected WCS
             ref_x_pix = np.asarray(ref_cat["XWIN_IMAGE"], float) - 1.0
             ref_y_pix = np.asarray(ref_cat["YWIN_IMAGE"], float) - 1.0
             ref_world = wcs_corrected.pixel_to_world(ref_x_pix, ref_y_pix)
 
-            # Science catalog world coordinates
             sci_ra = np.asarray(sci_cat["XWIN_WORLD"], float)
             sci_dec = np.asarray(sci_cat["YWIN_WORLD"], float)
             finite_sci = np.isfinite(sci_ra) & np.isfinite(sci_dec)
@@ -6630,11 +6553,9 @@ NNW
                 unit=u.deg,
             )
 
-            # Cross-match: for each science source, find nearest corrected reference source
             idx, d2d, _ = sci_coords.match_to_catalog_sky(ref_coords)
             match_mask = d2d < match_radius_arcsec * u.arcsec
 
-            # Extract matched source positions (0-based pixels)
             sci_matched_idx = np.where(finite_sci)[0][match_mask]
             ref_matched_idx = np.where(finite_ref)[0][idx[match_mask]]
 
@@ -6701,13 +6622,11 @@ NNW
                 if table_id != "Fields":
                     continue
 
-                # Collect FIELD names in order
                 field_names = []
                 for field in table:
                     if _localname(field.tag) == "FIELD":
                         field_names.append(field.get("name", ""))
 
-                # Find DATA/TABLEDATA/TR
                 for tr in table.iter():
                     if _localname(tr.tag) != "TR":
                         continue
@@ -6993,7 +6912,7 @@ NNW
         # Re-impose NaNs on uncovered regions using SWarp weights.
         #
         # Some SWarp builds still emit exact 0.0 in no-data regions even when
-        # BLANK_BADPIXELS=Y and FILL_VALUE=NAN. The robust indicator of coverage
+        # BLANK_BADPIXELS=Y and FILL_VALUE=NAN. The reliable indicator of coverage
         # is the corresponding weight map: weight <= 0 (or non-finite) means the
         # output pixel has no valid contributing input data.
         # ------------------------------------------------------------------
@@ -7266,7 +7185,6 @@ NNW
             _clean_scamp_outputs()
             raise
 
-        # Check if log file exists and read it
         if not os.path.isfile(log_file):
             self.logger.warning(
                 f"SCAMP log file not created at {log_file}; catalog may be invalid"
@@ -7277,7 +7195,6 @@ NNW
         with open(log_file) as log_f:
             log_content = log_f.read()
 
-        # Log SCAMP return code and key messages for debugging
         self.logger.debug(
             f"SCAMP return code: {result.returncode}, log file: {log_file}"
         )
@@ -7292,14 +7209,13 @@ NNW
             )
             return None
 
-        # After successful SCAMP run, save downloaded GAIA catalog to cache.
+        # Successful run: cache the downloaded GAIA catalog for reuse
         if gaia_temp_dir is not None and gaia_cache_key is not None:
             saved_cats = list(gaia_temp_dir.glob("*.cat"))
             if saved_cats:
                 self._save_gaia_catalog_to_cache(str(saved_cats[0]), gaia_cache_key)
             else:
                 self.logger.debug("SCAMP did not save a reference catalog to %s", gaia_temp_dir)
-            # Clean up temp dir
             try:
                 shutil.rmtree(gaia_temp_dir)
             except OSError as e:
@@ -7407,8 +7323,6 @@ NNW
             target_ra: Optional target RA (degrees).
             target_dec: Optional target Dec (degrees).
         """
-        # Run SCAMP to compute WCS solution for image_path aligned to ref_cat_path.
-        # run_scamp signature: (catalog_path, reference_cat, output_dir, config)
         scamp_res = self.run_scamp(
             catalog_paths=cat_path,
             reference_cat=ref_cat_path,
@@ -7496,7 +7410,8 @@ NNW
         self, catalog: Table, max_position_error_arcsec: float = 3
     ) -> Table:
         """
-        Filter SExtractor catalog to keep only sources with well-defined positions.
+        Keep only sources whose world-coordinate positional error is below
+        the arcsec cut; poorly measured centroids degrade the astrometric fit.
 
         Parameters:
         - catalog: SExtractor catalog (astropy Table).
@@ -7566,7 +7481,6 @@ NNW
             ):
                 sci_data = sci_hdul[0].data.astype(np.float32)
                 ref_data = ref_hdul[0].data.astype(np.float32)
-            # Track if we rebin and the scale factor
             rebin_scale = 1.0
             if sci_data.size > 5e6:
                 from astropy.nddata import block_reduce
@@ -7575,8 +7489,8 @@ NNW
                 ref_data = block_reduce(ref_data, block_size=(4, 4), func=np.mean)
                 rebin_scale = 0.25  # Coordinates must be scaled by 1/4
                 logging.info("Rebinned images by 4x for display, coordinates will be scaled by %s", rebin_scale)
-            
-            from plotting_utils import apply_autophot_mplstyle
+
+            from plotting_utils import apply_autophot_mplstyle, get_plot_color
             apply_autophot_mplstyle()
 
             fig, (ax1, ax2) = plt.subplots(
@@ -7592,7 +7506,7 @@ NNW
             except Exception:
                 pass
             try:
-                cmap_img.set_bad(color="white")
+                cmap_img.set_bad(color="magenta")
             except Exception:
                 pass
             im1 = ax1.imshow(
@@ -7605,7 +7519,7 @@ NNW
             )
             ax1.set_title("Science Image")
             cbar1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
-            cbar1.set_label("Science counts", fontsize=7)
+            cbar1.set_label("Science [ADU]", fontsize=7)
             cbar1.ax.tick_params(labelsize=6)
             ax1.set_xlabel("X [Pixel]")
             ax1.set_ylabel("Y [Pixel]")
@@ -7618,7 +7532,7 @@ NNW
                 origin="lower",
             )
             cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
-            cbar2.set_label("Reference counts", fontsize=7)
+            cbar2.set_label("Reference [ADU]", fontsize=7)
             cbar2.ax.tick_params(labelsize=6)
             ax2.set_xlabel("X [Pixel]")
             ax2.set_ylabel("Y [Pixel]")
@@ -7630,25 +7544,25 @@ NNW
                     return f"{chr(65 + (i // 26) - 1)}{chr(65 + (i % 26))}"
 
             def select_sources_spatially(catalog, max_sources, image_shape, selection_mode="uniform", random_seed=42):
-                """Select sources across the image using specified selection mode."""
+                """Pick up to max_sources for the overlay; uniform mode keeps
+                spatial coverage so crowded fields stay readable."""
                 if len(catalog) <= max_sources:
                     return catalog
-                
+
                 # Set random seed for reproducibility
                 if random_seed is not None:
                     np.random.seed(random_seed)
-                
-                # Get valid sources with positions
+
                 valid_sources = []
                 for row in catalog:
                     if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
                         x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
                         if np.isfinite(x) and np.isfinite(y):
                             valid_sources.append(row)
-                
+
                 if len(valid_sources) <= max_sources:
                     return valid_sources
-                
+
                 if selection_mode == "first":
                     # Original behavior: take first N sources
                     return valid_sources[:max_sources]
@@ -7659,72 +7573,67 @@ NNW
                 elif selection_mode == "uniform":
                     # True uniform spatial grid sampling - ensure coverage across entire image
                     img_h, img_w = image_shape
-                    
-                    # Create a grid that covers the entire image
+
                     n_grid = int(np.ceil(np.sqrt(max_sources)))
                     grid_spacing_x = img_w / n_grid
                     grid_spacing_y = img_h / n_grid
-                    
+
                     selected_sources = []
-                    grid_cells = {}  # Dictionary to store sources per grid cell
-                    
-                    # Assign sources to grid cells
+                    grid_cells = {}
+
                     # SExtractor uses 1-based pixel coordinates; convert to 0-based
                     for source in valid_sources:
                         x, y = source["XWIN_IMAGE"] - 1.0, source["YWIN_IMAGE"] - 1.0
                         grid_x = min(int(x / grid_spacing_x), n_grid - 1)
                         grid_y = min(int(y / grid_spacing_y), n_grid - 1)
                         cell_key = (grid_x, grid_y)
-                        
+
                         if cell_key not in grid_cells:
                             grid_cells[cell_key] = []
                         grid_cells[cell_key].append(source)
-                    
+
                     # Create all possible grid cells (even empty ones)
                     all_grid_cells = [(gx, gy) for gx in range(n_grid) for gy in range(n_grid)]
-                    
-                    # First, try to select one source from each grid cell that has sources
+
+                    # One source per populated cell first - spreads coverage evenly
                     selected_count = 0
                     for cell_key in all_grid_cells:
                         if selected_count >= max_sources:
                             break
-                        
+
                         if cell_key in grid_cells and len(grid_cells[cell_key]) > 0:
-                            # Randomly select one source from this cell
                             np.random.shuffle(grid_cells[cell_key])
                             selected_sources.append(grid_cells[cell_key][0])
                             selected_count += 1
-                    
+
                     # If we still need more sources, fill remaining slots from populated cells
                     if selected_count < max_sources:
                         remaining_needed = max_sources - selected_count
-                        
-                        # Create a list of all remaining sources
+
                         remaining_sources = []
                         for cell_key in all_grid_cells:
                             if cell_key in grid_cells:
                                 cell_sources = grid_cells[cell_key]
                                 if len(cell_sources) > 1:  # Skip the one we already took
                                     remaining_sources.extend(cell_sources[1:])
-                        
-                        # Randomly select from remaining sources
+
                         if remaining_sources:
                             np.random.shuffle(remaining_sources)
                             additional_needed = min(remaining_needed, len(remaining_sources))
                             selected_sources.extend(remaining_sources[:additional_needed])
                             selected_count += additional_needed
-                    
+
                     # If still not enough (sparse catalog), add from any available sources
                     if selected_count < max_sources:
                         remaining_needed = max_sources - selected_count
                         used_sources = set(selected_sources)
                         available_sources = [s for s in valid_sources if s not in used_sources]
-                        
+
                         if available_sources:
                             np.random.shuffle(available_sources)
                             additional_needed = min(remaining_needed, len(available_sources))
                             selected_sources.extend(available_sources[:additional_needed])
-                    
+
                     return selected_sources[:max_sources]
                 else:
                     # Default to uniform if invalid mode
@@ -7732,8 +7641,7 @@ NNW
 
             sci_positions = []
             sci_h, sci_w = sci_data.shape
-            
-            # Select science sources using specified selection mode
+
             logging.info("Selecting %s science sources using '%s' mode", max_sources, selection_mode)
             sci_selected = select_sources_spatially(sci_cat, max_sources, (sci_h, sci_w), selection_mode, random_seed)
             for i, row in enumerate(sci_selected):
@@ -7743,12 +7651,11 @@ NNW
                     x_scaled = x * rebin_scale
                     y_scaled = y * rebin_scale
                     x_0based, y_0based = x_scaled - 1, y_scaled - 1
-                    
-                    # Validate coordinates are within image bounds
+
                     if not (0 <= x_0based < sci_w and 0 <= y_0based < sci_h):
                         logging.debug("Science source %s out of bounds: (%.1f, %.1f) vs image (%s, %s)", i, x_0based, y_0based, sci_w, sci_h)
                         continue
-                    
+
                     sci_positions.append((x_0based, y_0based))
                     color = (
                         matched_circle_color
@@ -7774,11 +7681,10 @@ NNW
                         va="top",
                         path_effects=[mpatheffects.withStroke(linewidth=1.2, foreground="white")],
                     )
-            
+
             ref_positions = []
             ref_h, ref_w = ref_data.shape
-            
-            # Select reference sources using specified selection mode
+
             logging.info("Selecting %s reference sources using '%s' mode", max_sources, selection_mode)
             ref_selected = select_sources_spatially(ref_cat, max_sources, (ref_h, ref_w), selection_mode, random_seed)
             for i, row in enumerate(ref_selected):
@@ -7788,12 +7694,11 @@ NNW
                     x_scaled = x * rebin_scale
                     y_scaled = y * rebin_scale
                     x_0based, y_0based = x_scaled - 1, y_scaled - 1
-                    
-                    # Validate coordinates are within image bounds
+
                     if not (0 <= x_0based < ref_w and 0 <= y_0based < ref_h):
                         logging.debug("Reference source %s out of bounds: (%.1f, %.1f) vs image (%s, %s)", i, x_0based, y_0based, ref_w, ref_h)
                         continue
-                    
+
                     ref_positions.append((x_0based, y_0based))
                     color = (
                         matched_circle_color
@@ -7819,55 +7724,50 @@ NNW
                         va="top",
                         path_effects=[mpatheffects.withStroke(linewidth=1.2, foreground="white")],
                     )
-            
-            # Handle remaining sources that exceed the limit
-            def plot_remaining_sources(ax, catalog, image_shape, rebin_scale, max_sources, 
+
+            def plot_remaining_sources(ax, catalog, image_shape, rebin_scale, max_sources,
                                      selected_count, catalog_type="sources"):
-                """Plot remaining sources as small crosses and add message."""
-                
-                # Get all valid sources
+                """Mark unselected sources as small crosses so full coverage
+                stays visible behind the labelled subset."""
+
                 all_valid_sources = []
                 for row in catalog:
                     if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
                         x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
                         if np.isfinite(x) and np.isfinite(y):
                             all_valid_sources.append(row)
-                
+
                 remaining_sources = len(all_valid_sources) - selected_count
-                
+
                 if remaining_sources > 0:
-                    # Add message in top right
-                    ax.text(0.98, 0.98, f"+{remaining_sources} more {catalog_type}", 
-                           transform=ax.transAxes, fontsize=8, 
-                           ha='right', va='top', 
+                    ax.text(0.98, 0.98, f"+{remaining_sources} more {catalog_type}",
+                           transform=ax.transAxes, fontsize=8,
+                           ha='right', va='top',
                            bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgrey', alpha=0.7),
                            zorder=20)
-                    
-                    # Plot remaining sources as small crosses
+
                     img_h, img_w = image_shape
-                    cross_size = 3 * rebin_scale  # Small cross size
-                    
+                    cross_size = 3 * rebin_scale
+
                     for row in all_valid_sources[max_sources:]:
                         x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
                         # Scale coordinates if image was rebinned, then convert to 0-based
                         x_scaled = x * rebin_scale
                         y_scaled = y * rebin_scale
                         x_0based, y_0based = x_scaled - 1, y_scaled - 1
-                        
-                        # Validate coordinates are within image bounds
+
                         if not (0 <= x_0based < img_w and 0 <= y_0based < img_h):
                             continue
-                        
-                        # Draw small cross
-                        ax.plot([x_0based - cross_size, x_0based + cross_size], 
+
+                        ax.plot([x_0based - cross_size, x_0based + cross_size],
                                [y_0based, y_0based], 'r-', linewidth=0.5, alpha=0.6, zorder=3)
-                        ax.plot([x_0based, x_0based], 
-                               [y_0based - cross_size, y_0based + cross_size], 
+                        ax.plot([x_0based, x_0based],
+                               [y_0based - cross_size, y_0based + cross_size],
                                'r-', linewidth=0.5, alpha=0.6, zorder=3)
-                
+
                 return remaining_sources
-            
-            # Plot SCAMP-matched sources as green squares on both panels
+
+            # Overlay the sources SCAMP actually used (green squares) on both panels
             if scamp_matched_sources is not None:
                 from matplotlib.patches import Rectangle as MplRect
                 _sq_size = max(circle_radius_sci, circle_radius_ref) * rebin_scale
@@ -7898,33 +7798,36 @@ NNW
                 _scamp_handle = _L2([0], [0], marker="s", color="#009E73",
                                    markerfacecolor="none", markersize=6,
                                    linestyle="None", label="SCAMP matched")
-                # Add to legend
                 handles, labels = ax1.get_legend_handles_labels()
                 handles.append(_scamp_handle)
                 labels.append("SCAMP matched")
-                ax1.legend(handles, labels, loc="lower center",
-                          bbox_to_anchor=(0.5, 1.0), frameon=False,
-                          handlelength=1.5, handletextpad=0.5, ncol=3)
+                _leg = ax1.legend(
+                    handles, labels, loc="lower center",
+                    bbox_to_anchor=(0.5, 1.0), frameon=True,
+                    facecolor=get_plot_color('legend_facecolor'),
+                    edgecolor=get_plot_color('legend_edgecolor'),
+                    framealpha=0.9,
+                    handlelength=1.5, handletextpad=0.5, ncol=3,
+                )
+                _leg.set_zorder(20)
 
-            # Plot remaining sources for science image
-            sci_remaining = plot_remaining_sources(ax1, sci_cat, (sci_h, sci_w), rebin_scale, 
+            sci_remaining = plot_remaining_sources(ax1, sci_cat, (sci_h, sci_w), rebin_scale,
                                                   max_sources, len(sci_selected), "science sources")
-            
-            # Plot remaining sources for reference image  
+
             ref_remaining = plot_remaining_sources(ax2, ref_cat, (ref_h, ref_w), rebin_scale,
                                                   max_sources, len(ref_selected), "reference sources")
-            
-            total_sources_sci = len([row for row in sci_cat 
+
+            total_sources_sci = len([row for row in sci_cat
                                     if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames
                                     and np.isfinite(row["XWIN_IMAGE"]) and np.isfinite(row["YWIN_IMAGE"])])
             total_sources_ref = len([row for row in ref_cat
-                                    if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames  
+                                    if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames
                                     and np.isfinite(row["XWIN_IMAGE"]) and np.isfinite(row["YWIN_IMAGE"])])
-            
+
             logging.debug("Science: %s plotted + %s crosses = %s total", len(sci_selected), sci_remaining, total_sources_sci)
             logging.debug("Reference: %s plotted + %s crosses = %s total", len(ref_selected), ref_remaining, total_sources_ref)
             logging.debug("Plotted %s science and %s reference sources within image bounds", len(sci_positions), len(ref_positions))
-            
+
             # `constrained_layout=True` keeps colorbars and labels from
             # overlapping, so no additional tight_layout is needed.
             plt.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
@@ -7985,7 +7888,6 @@ NNW
             if len(sci_tab) == 0 or len(ref_tab) == 0:
                 return len(sci_tab)
 
-            # Get WCS coordinates
             def _get_ra_dec(tbl):
                 for ra_col, dec_col in [
                     ("XWIN_WORLD", "YWIN_WORLD"),
@@ -8008,7 +7910,6 @@ NNW
             sci_coords = SkyCoord(sci_ra * u.deg, sci_dec * u.deg)
             ref_coords = SkyCoord(ref_ra * u.deg, ref_dec * u.deg)
 
-            # Find the nearest reference source for each science source
             idx_ref, d2d, _ = sci_coords.match_to_catalog_sky(ref_coords)
             sep_arcsec = d2d.to(u.arcsec).value
 
@@ -8068,9 +7969,15 @@ NNW
         ref_image_path: str = None,
     ) -> tuple[int, float]:
         """
-        Build 1-to-1 matched catalogs using SNR_APER >= 3, adding MAG_APER, MAGERR_APER, and SNR_APER columns.
-        Uses RANSAC for alignment matching and spatial downsampling if too many sources.
-        Prioritizes extended sources for alignment.
+        Cross-match the two catalogs into 1-to-1 tables sharing a MATCH_ID,
+        adding MAG_APER/MAGERR_APER/SNR_APER columns.
+
+        The SNR match cut adapts to field density (2.0, relaxed to 1.5 then
+        1.0 for sparse fields) so SCAMP gets as many matches as possible.
+        With >=50 matches, a slope-constrained RANSAC on the mag-mag
+        relation rejects mismatched pairs; nmax triggers spatial
+        downsampling for very large match counts.
+
         Returns the number of matched sources and the match radius used.
         """
         if not all([sci_cat_path, ref_cat_path, sci_image_path, ref_image_path]):
@@ -8082,18 +7989,23 @@ NNW
             raise ValueError("nmax must be positive.")
 
         def read_ldac(path: str) -> tuple[Table, fits.Header]:
-            """Read LDAC catalog and return table and header."""
+            """Return the catalog table and header from HDU 2 (FITS_LDAC layout)."""
             with fits.open(path) as hdul:
                 return Table(hdul[2].data), hdul[2].header
 
         def write_ldac(path: str, table: Table, header: fits.Header) -> None:
-            """Write LDAC catalog with updated table."""
+            """Replace the HDU-2 catalog table in place (FITS_LDAC layout)."""
             with fits.open(path, mode="update") as hdul:
                 hdul[2].data = table.as_array()
                 hdul.flush()
 
         class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
-            """Linear regressor that penalises deviation from a target slope."""
+            """Linear fit with a soft slope penalty.
+
+            The sci/ref mag-mag relation should stay at slope 1 modulo the
+            zeropoint offset; the penalty stops RANSAC fitting a spurious
+            slope to a contaminated match set.
+            """
 
             def __init__(
                 self, slope_constraint: float = 1.0, slope_tolerance: float = 0.0
@@ -8135,7 +8047,6 @@ NNW
             Optionally use MAG_AUTO, MAGERR_AUTO, and SNR_WIN if use_magauto is True.
             """
             if use_magauto and "MAG_AUTO" in tbl.colnames:
-                # Use MAG_AUTO, MAGERR_AUTO, and SNR_WIN if available and requested
                 mag = np.array(tbl["MAG_AUTO"], float)
                 magerr = (
                     np.array(tbl["MAGERR_AUTO"], float)
@@ -8149,7 +8060,6 @@ NNW
                 )
                 tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = mag, magerr, snr
             elif "FLUX_APER" in tbl.colnames:
-                # Fall back to FLUX_APER and FLUXERR_APER
                 flux = np.array(tbl["FLUX_APER"], float)
                 flux_err = (
                     np.array(tbl["FLUXERR_APER"], float)
@@ -8165,7 +8075,6 @@ NNW
                 snr = np.where(flux_err > 0, np.abs(flux) / flux_err, 0.0)
                 tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = mag, magerr, snr
             else:
-                # If neither is available, fill with NaN
                 tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = np.nan, np.nan, 0.0
             return tbl
 
@@ -8175,14 +8084,13 @@ NNW
         # to retain fainter sources in sparse fields. If very few sources pass,
         # fall back to 1.5 to maximize match count for SCAMP.  For extremely
         # sparse fields (< 3 sources at SNR 1.5), lower to 1.0 to use every
-        # available detection - SCAMP's robust fitting rejects spurious
-        # low-SNR matches better than a hard pre-filter.
+        # available detection - SCAMP's own outlier rejection discards
+        # spurious low-SNR matches better than a hard pre-filter.
         _snr_match_thresh = 2.0
         sci_mask = sci_cat["SNR_APER"] >= _snr_match_thresh
         ref_mask = ref_cat["SNR_APER"] >= _snr_match_thresh
         sci_cat_filtered = sci_cat[sci_mask]
         ref_cat_filtered = ref_cat[ref_mask]
-        # Sparse-field fallback: if too few sources pass SNR >= 2.0, lower to 1.5
         if len(sci_cat_filtered) < 10 or len(ref_cat_filtered) < 10:
             _snr_match_thresh = 1.5
             sci_mask = sci_cat["SNR_APER"] >= _snr_match_thresh
@@ -8196,9 +8104,6 @@ NNW
                 len(sci_cat_filtered),
                 len(ref_cat_filtered),
             )
-        # Extreme sparse-field fallback: if still < 3 sources, lower to 1.0
-        # to use every available detection.  SCAMP and AstroAlign both have
-        # robust matching that can handle noisy low-SNR sources.
         if (
             (len(sci_cat_filtered) < 3 or len(ref_cat_filtered) < 3)
             and _snr_match_thresh > 1.0
@@ -8228,7 +8133,9 @@ NNW
             input_origin: int = 1,
             output_origin: int = 1,
         ) -> tuple[np.ndarray, np.ndarray, str]:
-            """Get coordinates and convert between origin systems."""
+            """Return (x, y) arrays, preferring XWIN/YWIN windowed centroids
+            (more accurate than isophotal X/Y_IMAGE); handles the 1-based
+            FITS vs 0-based numpy origin conversion."""
             if (
                 prefer_win
                 and "XWIN_IMAGE" in tbl.colnames
@@ -8265,7 +8172,7 @@ NNW
             raise ValueError(
                 "Neither XWIN_WORLD/YWIN_WORLD nor X_WORLD/Y_WORLD found in catalog."
             )
-            
+
 
         sci_ra, sci_dec = get_ra_dec(sci_cat_filtered)
         ref_ra, ref_dec = get_ra_dec(ref_cat_filtered)
@@ -8296,8 +8203,7 @@ NNW
             ref_cat_matched = ref_cat_filtered[:0]
             sci_cat_matched["MATCH_ID"] = np.array([], dtype=int)
             ref_cat_matched["MATCH_ID"] = np.array([], dtype=int)
-        # Only apply RANSAC mag filtering if we have many initial matches (>= 50)
-        # For fewer matches, use all matched sources to avoid over-filtering
+        # RANSAC mag filter needs >= 50 matches; below that it over-filters
         if len(sci_cat_matched) >= 50:
             sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)
             ref_mag = np.array(ref_cat_matched["MAG_APER"], dtype=float)
@@ -8307,8 +8213,7 @@ NNW
                 ref_mag_clean = ref_mag[valid]
                 intercept = None
                 try:
-                    # Use RANSAC for alignment matching
-                    # residual_threshold=2.0 mag is more permissive to handle different zero points
+                    # residual_threshold=2.0 mag tolerates differing zero points
                     ransac = RANSACRegressor(
                         estimator=ConstrainedSlopeRegressor(
                             slope_constraint=1.0, slope_tolerance=0.0
@@ -8334,7 +8239,7 @@ NNW
                         )
                 except Exception as exc:
                     self.logger.warning("RANSAC regression failed: %s", exc)
-                    # Fall back to simple median filtering with more permissive threshold
+                    # Median fallback when RANSAC fails
                     median_diff = np.median(sci_mag_clean - ref_mag_clean)
                     intercept = median_diff
                     inlier_mask_clean = np.abs((sci_mag_clean - ref_mag_clean) - median_diff) < 1.0
@@ -8350,11 +8255,9 @@ NNW
                             f"Median fallback kept {len(sci_cat_matched)} sources"
                         )
         else:
-            # For fewer than 50 initial matches, skip RANSAC to avoid over-filtering
             self.logger.info(
                 f"Skipping RANSAC mag filter (only {len(sci_cat_matched)} initial matches < 50 threshold)"
             )
-            # Calculate simple intercept for plotting
             sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)
             ref_mag = np.array(ref_cat_matched["MAG_APER"], dtype=float)
             valid = np.isfinite(sci_mag) & np.isfinite(ref_mag)
@@ -8368,6 +8271,7 @@ NNW
                 apply_autophot_mplstyle, get_ransac_color, get_marker_size,
                 get_alpha, get_line_width, ransac_grid, ransac_savefig,
                 ransac_legend_top_outside, set_mag_axes_inverted_xy,
+                get_plot_ext,
             )
 
             apply_autophot_mplstyle()
@@ -8383,8 +8287,8 @@ NNW
                 markersize=get_marker_size('medium'),
                 color=get_ransac_color('alignment'),
                 ecolor="lightgrey",
-                elinewidth=0.4,
-                capsize=get_marker_size('medium'),
+                elinewidth=0.5,
+                capsize=get_marker_size('medium') / 4,
                 alpha=get_alpha('dark'),
                 label=f"Matched [{len(sci_cat_matched)}]",
             )
@@ -8403,12 +8307,13 @@ NNW
                 lw=get_line_width('medium'),
                 label=f"Fit: slope=1, intercept={intercept:.3f}",
             )
-            ax.set_xlabel(r"Reference $m$ [mag]")
-            ax.set_ylabel(r"Science $m$ [mag]")
+            ax.set_xlabel(r"Reference Instrumental Magnitude [mag]")
+            ax.set_ylabel(r"Science Instrumental Magnitude [mag]")
             ransac_legend_top_outside(ax, ncol=2)
             ransac_grid(ax)
             set_mag_axes_inverted_xy(ax)
-            ransac_savefig(fig, str(Path(sci_cat_path).with_suffix(".png")).replace(".png", "_Mag_Fit.png"))
+            _ext = get_plot_ext(self.input_yaml)
+            ransac_savefig(fig, str(Path(sci_cat_path).with_suffix(".png")).replace(".png", f"_Mag_Fit{_ext}"))
             plt.close(fig)
 
         # --- Spatial distribution diagnostic ---
@@ -8418,8 +8323,8 @@ NNW
         # (sci_catalog_scamp_backup / ref_catalog_scamp_backup), so the thinning
         # had no effect on SCAMP.  It only reduced the catalog written to disk,
         # which is used by AstroAlign control points - where MORE sources is
-        # better (aafitrans/AstroAlign have their own robust RANSAC that handles
-        # clustered inputs).
+        # better (aafitrans/AstroAlign have their own RANSAC matcher that
+        # handles clustered inputs).
         #
         # We now keep ALL matched sources in the written catalog and only log
         # the spatial distribution as a diagnostic.  The nmax downsampling below
@@ -8433,7 +8338,6 @@ NNW
             _n_bins = max(2, min(5, int(np.sqrt(_n_pre_spatial / 2.5))))
             _cells = _n_bins * _n_bins
             _avg_per_cell = _n_pre_spatial / _cells
-            # Count sources per cell to report spatial distribution
             _x_edges = np.linspace(np.min(_uni_x), np.max(_uni_x), _n_bins + 1)
             _y_edges = np.linspace(np.min(_uni_y), np.max(_uni_y), _n_bins + 1)
             _cell_counts = []
@@ -8526,7 +8430,8 @@ NNW
             if ref_wcs is None:
                 return np.nan, np.nan
 
-        # Sample at multiple positions across the science image
+        # Sample corners plus centre: a single position can hide
+        # rotation-dependent WCS disagreement.
         margin = 50
         positions = [
             (margin, margin),
@@ -8549,7 +8454,6 @@ NNW
         median_ddec = float(np.median(ddecs))
         offset_mag = float(np.sqrt(median_dra**2 + median_ddec**2))
 
-        # Check consistency
         dra_std = float(np.std(dras))
         ddec_std = float(np.std(ddecs))
 
@@ -8598,7 +8502,6 @@ NNW
         if len(sci_cat) == 0 or len(ref_cat) == 0:
             return 0.0, 0.0, 0
 
-        # Get world coordinates
         if "XWIN_WORLD" in sci_cat.colnames:
             sci_ra = np.array(sci_cat["XWIN_WORLD"], float)
             sci_dec = np.array(sci_cat["YWIN_WORLD"], float)
@@ -8616,17 +8519,14 @@ NNW
         sci_coords = _SkyCoord(sci_ra * _u.deg, sci_dec * _u.deg)
         ref_coords = _SkyCoord(ref_ra * _u.deg, ref_dec * _u.deg)
 
-        # Find nearest reference source for each science source
         idx, sep, _ = _match_sky(sci_coords, ref_coords)
         sep_arcsec = sep.arcsec
 
-        # Compute offset vectors (sci - ref) in arcsec
-        # Use the matched reference positions
+        # Offset vectors (sci - ref) in arcsec
         matched_ref = ref_coords[idx]
         dra = (sci_ra - np.array(matched_ref.ra.deg)) * 3600.0 * np.cos(np.radians(sci_dec))
         ddec = (sci_dec - np.array(matched_ref.dec.deg)) * 3600.0
 
-        # Sigma-clip to find consensus offset
         dra_clipped = _sigma_clip(dra, sigma=2.5, maxiters=3)
         ddec_clipped = _sigma_clip(ddec, sigma=2.5, maxiters=3)
 

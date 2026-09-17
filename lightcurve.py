@@ -74,7 +74,7 @@ BAND_WAVELENGTHS = {
     "W": 6579,
 }
 
-# Colours for plots (per-band). Keep these in sync with the palette user-supplied.
+# Per-band plot colours; keep in sync with the user-supplied palette.
 cols = {
     "u": "dodgerblue",
     "g": "g",
@@ -240,8 +240,8 @@ def _filter_series_matches_band(band_char: str, fser: pd.Series) -> pd.Series:
     rs_lower = fser.astype(str).str.strip().str.lower()
     direct_match = rs_lower == bc
 
-    # Slow path: only for rows that didn't match directly, compute canonical form
-    # Pre-compute for unique values only to minimize _heuristic_filter_mapping calls
+    # Slow path: canonical form only for rows that missed the direct match.
+    # Pre-compute per unique value to minimize _heuristic_filter_mapping calls.
     needs_canon = ~direct_match & fser.notna()
     if not needs_canon.any():
         return direct_match.fillna(False)
@@ -334,7 +334,7 @@ def canonical_band_label_map_from_filter_series(fser: pd.Series) -> dict[str, st
 
     tmp = pd.DataFrame({"raw": raw})
     tmp["canon"] = tmp["raw"].map(_canon)
-    # For each canonical band, choose the most common raw label; tie-break by first occurrence.
+    # Most common raw label per canonical band; ties broken by first occurrence.
     out: dict[str, str] = {}
     for canon, g in tmp.groupby("canon", sort=False):
         counts = g["raw"].value_counts()
@@ -413,14 +413,13 @@ def _lmag_to_apparent(df: pd.DataFrame, zp_col: str) -> pd.Series:
     
     li = pd.to_numeric(df[col], errors="coerce")
     zp = pd.to_numeric(df[zp_col], errors="coerce")
-    
-    # Calculate apparent limiting magnitude
+
     limiting_mag = li + zp
-    
-    # Return NaN for invalid limiting magnitudes (NaN, negative, or too small/too large)
+
+    # Mask non-finite and implausible limiting mags (<15 or >30).
     invalid_mask = (~np.isfinite(limiting_mag)) | (limiting_mag < 15) | (limiting_mag > 30)
     limiting_mag.loc[invalid_mask] = np.nan
-    
+
     return limiting_mag
 
 
@@ -447,7 +446,6 @@ def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: l
     dict
         Dictionary with keys like 'Limit_3p0S2N', 'Limit_5p0S2N' containing apparent magnitudes.
     """
-    # Get S/N thresholds from config if not explicitly provided
     if snr_thresholds is None:
         if input_yaml is not None:
             lim_cfg = input_yaml.get("limiting_magnitude") or {}
@@ -455,7 +453,6 @@ def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: l
         else:
             snr_thresholds = [3.0, 5.0]
     
-    # Ensure snr_thresholds is a list
     if not isinstance(snr_thresholds, list):
         snr_thresholds = [snr_thresholds]
 
@@ -463,14 +460,12 @@ def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: l
 
     # Multi-S/N limiting magnitudes only (no general Limit column)
     for snr in snr_thresholds:
-        # Look for S/N-specific limiting magnitude columns
-        # main.py outputs apparent magnitude columns as limiting_mag_{snr:.0f}s2n
-        # Also check for legacy instrumental column names for backward compatibility
+        # main.py writes apparent columns as limiting_mag_{snr:.0f}s2n; the
+        # instrumental/legacy names below are fallbacks for older tables.
         apparent_col = f"limiting_mag_{snr:.0f}s2n"
         inst_col = f"limiting_inst_mag_snr_{snr}"
         fallback_col = f"lmag_snr_{snr}"
 
-        # Find the appropriate column for this S/N threshold
         col = None
         if apparent_col in df.columns:
             # Already apparent magnitude (from main.py)
@@ -492,7 +487,7 @@ def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: l
             col = "lmag"
             is_apparent = True
 
-        # Create column name with 'p' instead of decimal point
+        # 'p' stands in for the decimal point in output column names
         col_name = f'Limit_{snr:.1f}S2N'.replace('.', 'p')
         
         if col is None:
@@ -502,13 +497,12 @@ def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: l
         li = pd.to_numeric(df[col], errors="coerce")
         zp = pd.to_numeric(df[zp_col], errors="coerce")
 
-        # Calculate apparent limiting magnitude for this S/N threshold
         if is_apparent:
             limiting_mag = li
         else:
             limiting_mag = li + zp
 
-        # Return NaN for invalid limiting magnitudes
+        # Mask non-finite and implausible limiting mags (<15 or >30).
         invalid_mask = (~np.isfinite(limiting_mag)) | (limiting_mag < 15) | (limiting_mag > 30)
         limiting_mag.loc[invalid_mask] = np.nan
 
@@ -636,7 +630,6 @@ def _compute_detection_mask(
 
     method_u = str(method).upper()
     snr_source = "unknown"
-    # Find columns case-insensitively
     col_map = {c.lower(): c for c in df.columns}
     snr_psf_col = col_map.get("snr_psf")
     snr_ap_col = col_map.get("snr_ap")
@@ -678,7 +671,6 @@ def _compute_detection_mask(
         else:
             snr = _snr_from_magerr(err)
             snr_source = "mag_err"
-        # Log the SNR source and values for debugging
         if len(snr) > 0 and not np.all(np.isnan(snr)):
             logging.debug("_compute_detection_mask: method=%s, snr_source=%s, snr_mean=%.3f, snr_max=%.3f", method, snr_source, np.nanmean(snr), np.nanmax(snr))
     else:
@@ -692,25 +684,22 @@ def _compute_detection_mask(
             & np.isfinite(snr)
             & (snr >= float(snr_limit))
         )
-        # Debug logging for detection decision
         if len(snr) > 0 and len(detected) > 0:
             logging.info("_compute_detection_mask: method=%s, snr_source=%s, snr=%.3f, limit=%s, detected=%s", method, snr_source, snr[0], snr_limit, detected[0])
     else:
-        # Use magnitude comparison with limiting magnitude if available and reasonable
-        # Otherwise fall back to SNR-based detection using magnitude errors
-        MIN_REASONABLE_LIMITING_MAG = 10.0  # Limiting mag should be positive and reasonable
+        # Prefer a magnitude-vs-lmag comparison when a usable limiting mag
+        # exists; otherwise fall back to SNR inferred from magnitude errors.
+        MIN_REASONABLE_LIMITING_MAG = 10.0  # lmag below 10 is implausible here
         valid_lmag = np.isfinite(lmag) & (lmag > MIN_REASONABLE_LIMITING_MAG)
         if np.any(valid_lmag):
-            # Use limiting magnitude where valid and reasonable
             detected = np.isfinite(mag) & np.isfinite(err) & (mag < lmag)
         else:
-            # Fallback: use SNR computed from magnitude errors
             snr_from_err = _snr_from_magerr(err)
             detected = (
                 np.isfinite(mag)
                 & np.isfinite(err)
                 & np.isfinite(snr_from_err)
-                & (snr_from_err >= float(snr_limit))  # Use configured threshold
+                & (snr_from_err >= float(snr_limit))
             )
 
     return np.asarray(detected, dtype=bool)
@@ -804,10 +793,10 @@ def plot_lightcurve(
         measurements from dominating the plot scale or obscuring real trends.
     chi2_marginal_threshold : float
         Reduced chi-squared threshold above which a detection is plotted as
-        "marginal" (default 5.0).  Detections with ``reduced_chi2`` exceeding
-        this value are drawn with a white face and faded edge colour to
-        visually flag poor PSF-fit quality (e.g. non-Gaussian PSF, sparse
-        field).  Set to ``0`` or ``None`` to disable.
+        "marginal".  Detections with ``reduced_chi2`` exceeding this value are
+        drawn with a white face and faded edge colour to visually flag poor
+        PSF-fit quality (e.g. non-Gaussian PSF, sparse field).  Set to ``0``
+        or ``None`` to disable.
 
     Returns
     -------
@@ -837,7 +826,6 @@ def plot_lightcurve(
         today_mjd = today.mjd
 
     dm = get_distance_modulus(redshift) if redshift else 0
-    # Use the shared per-band palette.
     base_cols = BAND_COLORS
     # Band plotting order (exclude Gaia G so it is not conflated with SDSS g).
     band_order = "FSDNAuUBgcVwrRoEiIzyYJHKWQ"
@@ -901,7 +889,7 @@ def plot_lightcurve(
                 f"zp_{band}_{method}".lower(),
             ),
         ]
-        # Also check for inverted versions
+        # Inverted-image counterparts, used only if no normal triplet matches.
         cand_inv = [
             (f"{band}_{method}_inverted", f"{band}_{method}_err_inverted", f"zp_{band}_{method}"),
             (
@@ -913,7 +901,6 @@ def plot_lightcurve(
         for trip in cand:
             if all(c in cols for c in trip):
                 return trip
-        # Check for inverted version if normal not found
         for trip in cand_inv:
             if all(c in cols for c in trip):
                 return trip
@@ -952,7 +939,7 @@ def plot_lightcurve(
     if plot_color and len(data) <= 1:
         plot_color = False
 
-    # Publication-ready figure size: single-column width (505 pt), aspect ~0.6
+    # Publication-style sizing via set_size (journal single-column width).
     if size is None:
         if single_plot:
             figsize = set_size(540, aspect=1)
@@ -984,7 +971,7 @@ def plot_lightcurve(
     curve_axes = axes[:n_curve]
     color_ax = axes[-1] if plot_color else None
 
-    # Font sizes suitable for single-column journal figure
+    # Tick styling suited to a single-column journal figure.
     for ax in curve_axes:
         ax.tick_params(axis="both", which="major")
         ax.tick_params(axis="both", which="minor", length=2.5)
@@ -1021,29 +1008,26 @@ def plot_lightcurve(
         if df.empty:
             continue
         df.sort_values(by="mjd", inplace=True)
-        # Check if col is already an apparent magnitude (has zeropoint applied)
-        # If it starts with 'inst_' it's instrumental, otherwise it's apparent
-        # Note: For uniform schema, mag_{method} columns (e.g., mag_psf) contain
-        # already-calibrated apparent magnitudes from main.py output
+        # 'inst_*' columns are instrumental and need the zeropoint added;
+        # mag_{method} columns (e.g. mag_psf) from main.py are already
+        # calibrated apparent magnitudes.
         if col.startswith('inst_'):
-            # Convert instrumental magnitude to apparent magnitude
             df["apparent_mag"] = df[col] + df[zp_col]
         else:
-            # Already apparent magnitude (calibrated), just use it
             df["apparent_mag"] = df[col]
         df["apparent_mag_err"] = df[err_col]
 
         band_offset = (idx - mid_idx) * offset
         df["apparent_mag"] = df["apparent_mag"] + band_offset
-        # limiting_inst_mag in photometry CSV is instrumental (see main.py); convert to apparent
-        # so upper-limit points match the detection magnitude scale on the plot.
-        # Note: band_offset is NOT applied to the limiting mag as it's used for detection thresholds,
-        # not for visual plot positioning.
+        # limiting_inst_mag in the photometry CSV is instrumental (see
+        # main.py); convert to apparent so upper-limit points share the
+        # detection magnitude scale. band_offset is NOT applied to lmag: it is
+        # a detection threshold, not a plotted position.
         df["lmag"] = _lmag_to_apparent(df, zp_col)
 
-        # ZTF-style SNU (upper limit): prefer 5sigma limit if available, otherwise use 50% completeness limit
-        # This matches the ZTF forced-photometry service where SNU=5 is used for upper limits.
-        upper_limit_snr = 5.0  # Default ZTF SNU
+        # ZTF-style SNU upper limit: prefer the 5sigma limit, else the 50%
+        # completeness limit (matches the ZTF forced-photometry service).
+        upper_limit_snr = 5.0  # ZTF SNU default
         upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
         if upper_limit_col in df.columns:
             # main.py outputs apparent magnitude columns directly
@@ -1054,7 +1038,6 @@ def plot_lightcurve(
         else:
             df["lmag_upper"] = df["lmag"]
 
-        # Initialize plot_mag and plot_err for this band's df
         df["plot_mag"] = df["apparent_mag"]
         df["plot_err"] = df["apparent_mag_err"]
 
@@ -1069,7 +1052,8 @@ def plot_lightcurve(
         detected_s = pd.Series(detected, index=df.index, dtype=bool)
         logging.info("plot_lightcurve: detected=%s", detected_s.iloc[0] if len(detected_s) > 0 else 'N/A')
 
-        # Check for inverted-only detections using _inverted_fit flag or inst_inverted column
+        # Inverted-only detections come from the _inverted_fit flag or a
+        # finite inst_inverted column.
         has_inverted = False
         inverted_col = None
 
@@ -1119,7 +1103,7 @@ def plot_lightcurve(
         if return_detections and not nondetects.empty:
             nondetections_list.append(nondetects)
 
-        # Resolve the band colour and legend label (includes magnitude offset)
+        # Band colour and legend label (label carries the magnitude offset).
         c = _color_for_band(band)
         if offset != 0:
             leg_label = (
@@ -1199,9 +1183,9 @@ def plot_lightcurve(
                 yerr=all_detects["plot_err"],
                 fmt='none',
                 ecolor=c,
-                capsize=2.5,
+                capsize=get_marker_size('medium') / 4,
                 capthick=0.8,
-                elinewidth=1,
+                elinewidth=0.5,
                 zorder=2,
             )
 
@@ -1323,7 +1307,8 @@ def plot_lightcurve(
                 ls="",
                 marker="v",
                 markersize=get_marker_size('medium'),
-                capsize=get_marker_size('medium'),
+                capsize=get_marker_size('medium') / 4,
+                elinewidth=0.5,
                 alpha=0.85,
                 zorder=1,
             )
@@ -1342,11 +1327,11 @@ def plot_lightcurve(
                 )
 
         if not single_plot:
-            ax.set_ylabel(f"{band} (mag)")
+            ax.set_ylabel(f"{band} magnitude [mag]")
             ax.grid(True, which="major", alpha=0.35, linestyle="-", linewidth=0.5)
             ax.minorticks_on()
 
-    curve_axes[0].set_ylabel("Apparent brightness [mag]")
+    curve_axes[0].set_ylabel("Apparent Magnitude [mag]")
     (color_ax if plot_color else curve_axes[-1]).set_xlabel(xlabel)
     if subday_unit == "min":
         # Integer minute ticks for intra-night axes
@@ -1378,7 +1363,7 @@ def plot_lightcurve(
         ax2.set_xlim(curve_axes[0].get_xlim())
         ymin, ymax = curve_axes[0].get_ylim()
         ax2.set_ylim(ymax - dm, ymin - dm)
-        ax2.set_ylabel("Absolute brightness [mag]")
+        ax2.set_ylabel("Absolute Magnitude [mag]")
         ax2.tick_params(axis="y")
 
     if show_details:
@@ -1428,7 +1413,7 @@ def plot_lightcurve(
         )
         handles.append(limit_handle)
         labels.append("Upper limit")
-    if plotted_marginal_chi2_marker and "Marginal (high χ²)" not in labels:
+    if plotted_marginal_chi2_marker and "Marginal (high chi^2)" not in labels:
         marginal_handle = Line2D(
             [0],
             [0],
@@ -1440,10 +1425,10 @@ def plot_lightcurve(
             markeredgewidth=0.8,
             alpha=0.5,
             ls="",
-            label=f"Marginal (high χ², >{chi2_marginal_threshold:g})",
+            label=f"Marginal (high chi^2, >{chi2_marginal_threshold:g})",
         )
         handles.append(marginal_handle)
-        labels.append(f"Marginal (high χ², >{chi2_marginal_threshold:g})")
+        labels.append(f"Marginal (high chi^2, >{chi2_marginal_threshold:g})")
 
     # Choose number of legend columns so that the legend is taller than wide.
     n_labels = len(labels)
@@ -1469,10 +1454,7 @@ def plot_lightcurve(
         handles,
         labels,
         loc="best",
-        frameon=True,
-        facecolor="white",
-        framealpha=1.0,
-        edgecolor="black",
+        frameon=False,
         ncol=ncol,
     )
     ax0.add_artist(leg_main)
@@ -1503,10 +1485,7 @@ def plot_lightcurve(
             [h_pos, h_neg],
             ["Positive flux", "Negative flux"],
             loc="lower right",
-            frameon=True,
-            facecolor="white",
-            framealpha=1.0,
-            edgecolor="black",
+            frameon=False,
         )
 
     # No plot titles by default; but if target_name is supplied, use it as
@@ -1714,7 +1693,8 @@ def plot_lightcurve(
                     marker="s",
                     markersize=get_marker_size('medium'),
                     ls="",
-                    capsize=get_marker_size('medium'),
+                    capsize=get_marker_size('medium') / 4,
+                    elinewidth=0.5,
                     markeredgecolor="black",
                     markeredgewidth=0.5,
                     label=label,
@@ -1730,7 +1710,8 @@ def plot_lightcurve(
                     markeredgewidth=0.5,
                     marker="v",
                     markersize=get_marker_size('medium'),
-                    capsize=get_marker_size('medium'),
+                    capsize=get_marker_size('medium') / 4,
+                    elinewidth=0.5,
                     ls="",
                     zorder=2,
                 )
@@ -1744,14 +1725,14 @@ def plot_lightcurve(
                     markeredgewidth=0.5,
                     marker="^",
                     markersize=get_marker_size('medium'),
-                    capsize=get_marker_size('medium'),
+                    capsize=get_marker_size('medium') / 4,
+                    elinewidth=0.5,
                     ls="",
                     zorder=2,
                 )
         color_ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
                         frameon=False)
         color_ax.invert_yaxis()
-    # fig.tight_layout()
 
     # Include target name in the output filename so additional-target
     # lightcurves don't overwrite the primary target's plot.
@@ -1866,7 +1847,8 @@ def generate_photometry_table(
             data = data[mask.fillna(False)].copy()
             if data.empty:
                 continue
-            # Get the filter column from the filtered data for accurate filter values
+            # Re-read the filter column on the band-filtered rows so the
+            # reported Filter value comes from this band's own rows.
             fcol_filtered = photometry_filter_series(data)
         else:
             fcol_filtered = None
@@ -1874,17 +1856,15 @@ def generate_photometry_table(
         # Use the actual filter value from the data instead of mapped label
         # This ensures the Filter column in the output matches the input data
         if fcol_filtered is not None and not fcol_filtered.empty:
-            # Get the most common filter value for this band
             filter_value = fcol_filtered.mode()[0] if len(fcol_filtered.mode()) > 0 else str(band)
             band_label = str(filter_value).strip()
         else:
             band_label = label_map.get(str(band).strip().lower(), band)
-        
-        # Debug logging to track which bands are being processed
+
         import logging
         logger = logging.getLogger(__name__)
         logger.info("Processing band: %s, band_label: %s, data rows: %s", band, band_label, len(data))
-        # Robust numeric coercion: CSV concatenation can yield strings like "nan".
+        # Coerce numerics: CSV concatenation can yield strings like "nan".
         if "beta" in data.columns:
             data["beta"] = pd.to_numeric(data["beta"], errors="coerce")
         lim_col = (
@@ -1901,8 +1881,9 @@ def generate_photometry_table(
         # Pipeline stores limiting mag in instrumental system; detection cut uses apparent mags.
         data["lmag"] = lmag_inst + zp_num
 
-        # ZTF-style SNU (upper limit): prefer 5sigma limit if available, otherwise use 50% completeness limit
-        upper_limit_snr = 5.0  # Default ZTF SNU
+        # ZTF-style SNU upper limit: prefer the 5sigma limit, else the 50%
+        # completeness limit.
+        upper_limit_snr = 5.0  # ZTF SNU default
         upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
         if upper_limit_col in data.columns:
             # main.py outputs apparent magnitude columns directly
@@ -1927,7 +1908,8 @@ def generate_photometry_table(
         )
         detected_s = pd.Series(detected, index=data.index, dtype=bool)
 
-        # Check for inverted-only detections using _inverted_fit flag or inst_inverted column
+        # Inverted-only detections come from the _inverted_fit flag or a
+        # finite inst_inverted column.
         has_inverted = False
         inverted_col = None
 
@@ -1964,19 +1946,14 @@ def generate_photometry_table(
         nondetects = data[~detected_s & ~inverted_only].copy()
 
         if not detects.empty:
-            # Check if col is already an apparent magnitude (has zeropoint applied)
-            # If it starts with 'inst_' it's instrumental, otherwise it's apparent
+            # 'inst_*' columns are instrumental; others are already apparent.
             if col.startswith('inst_'):
-                # Convert instrumental magnitude to apparent magnitude for the table
                 mag_values = detects[col] + detects[zp_col]
             else:
-                # Already apparent magnitude
                 mag_values = detects[col]
-            
-            # Calculate limiting magnitudes for multiple S/N thresholds
+
             limiting_mags = _lmag_to_apparent_multi_snr(detects, zp_col, input_yaml=input_yaml)
-            
-            # Build the row data with all limiting magnitude columns
+
             row_data = {
                 'Filter': band_label,
                 'MJD': detects["mjd"].round(3),
@@ -1984,28 +1961,27 @@ def generate_photometry_table(
                 'Mag': mag_values.round(3),
                 'Error': detects[err_col].round(3),
             }
-            
-            # Add all limiting magnitude columns
+
             for limit_key, limit_values in limiting_mags.items():
                 row_data[limit_key] = limit_values
-            
+
             detects = detects.assign(**row_data)
-            
-            # Determine column order - include all Limit columns
+
+            # Column order: base columns first, then all Limit_* columns.
             base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
             limit_cols = sorted([k for k in limiting_mags.keys() if k.startswith('Limit')])
             all_cols = base_cols + limit_cols
-            
+
             detects = detects[all_cols]
             phot_table.append(detects)
 
         if not inv_detects.empty:
             inv_err_col = err_col if err_col in inv_detects.columns else None
-            # Check for band-specific inverted apparent magnitude first
+            # Band-specific inverted apparent magnitude wins; otherwise fall
+            # back to the generic instrumental column and convert with the ZP.
             band_inv_mag_col = f"{band}_{method}_inverted" if f"{band}_{method}_inverted" in inv_detects.columns else None
             band_inv_err_col = f"{band}_{method}_err_inverted" if f"{band}_{method}_err_inverted" in inv_detects.columns else None
-            
-            # Use band-specific inverted apparent magnitude if available, otherwise convert instrumental
+
             if band_inv_mag_col and band_inv_mag_col in inv_detects.columns:
                 inv_mag_col = band_inv_mag_col
                 inv_err_col = band_inv_err_col
@@ -2019,28 +1995,23 @@ def generate_photometry_table(
                 # Use the actual filter value from the data instead of mapped label
                 fcol_inv = photometry_filter_series(inv_detects)
                 if fcol_inv is not None and not fcol_inv.empty:
-                    # Get the most common filter value for this band
                     filter_value_inv = fcol_inv.mode()[0] if len(fcol_inv.mode()) > 0 else str(band)
                     band_label = str(filter_value_inv).strip()
                 else:
                     band_label = label_map.get(str(band).strip().lower(), band)
-                
+
                 if is_apparent:
-                    # Already apparent magnitude
                     mag_value = inv_detects[inv_mag_col]
                 else:
-                    # Convert instrumental to apparent
                     mag_value = inv_detects[inv_mag_col] + inv_detects[zp_col]
-                
+
                 _err_s = (
                     pd.to_numeric(inv_detects[inv_err_col], errors="coerce").round(3)
                     if inv_err_col and inv_err_col in inv_detects.columns
                     else pd.Series(np.nan, index=inv_detects.index, dtype=float)
                 )
-                # Calculate limiting magnitudes for multiple S/N thresholds
                 limiting_mags_inv = _lmag_to_apparent_multi_snr(inv_detects, zp_col, input_yaml=input_yaml)
-                
-                # Build the row data with all limiting magnitude columns
+
                 inv_row_data = {
                     'Filter': band_label,
                     'MJD': inv_detects["mjd"].round(3),
@@ -2048,35 +2019,31 @@ def generate_photometry_table(
                     'Mag': mag_value.round(3),
                     'Error': _err_s,
                 }
-                
-                # Add all limiting magnitude columns
+
                 for limit_key, limit_values in limiting_mags_inv.items():
                     inv_row_data[limit_key] = limit_values
-                
+
                 inv_detects = inv_detects.assign(**inv_row_data)
-                
-                # Determine column order - include all Limit columns
+
+                # Column order: base columns first, then all Limit_* columns.
                 base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
                 limit_cols = sorted([k for k in limiting_mags_inv.keys() if k.startswith('Limit')])
                 all_cols = base_cols + limit_cols
-                
+
                 inv_detects = inv_detects[all_cols]
                 phot_table.append(inv_detects)
 
         if not nondetects.empty:
-            # Calculate limiting magnitudes for multiple S/N thresholds
             limiting_mags_nd = _lmag_to_apparent_multi_snr(nondetects, zp_col, input_yaml=input_yaml)
 
             # Use the actual filter value from the data instead of mapped label
             fcol_nd = photometry_filter_series(nondetects)
             if fcol_nd is not None and not fcol_nd.empty:
-                # Get the most common filter value for this band
                 filter_value_nd = fcol_nd.mode()[0] if len(fcol_nd.mode()) > 0 else str(band)
                 band_label = str(filter_value_nd).strip()
             else:
                 band_label = label_map.get(str(band).strip().lower(), band)
 
-            # Build the row data with all limiting magnitude columns
             nd_row_data = {
                 'Filter': band_label,
                 'MJD': nondetects["mjd"].round(3),
@@ -2085,29 +2052,27 @@ def generate_photometry_table(
                 'Error': pd.Series(np.nan, index=nondetects.index, dtype=float),
             }
 
-            # Add all limiting magnitude columns
             for limit_key, limit_values in limiting_mags_nd.items():
                 nd_row_data[limit_key] = limit_values
-            
+
             nondetects = nondetects.assign(**nd_row_data)
-            
-            # Determine column order - include all Limit columns
+
+            # Column order: base columns first, then all Limit_* columns.
             base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
             limit_cols = sorted([k for k in limiting_mags_nd.keys() if k.startswith('Limit')])
             all_cols = base_cols + limit_cols
-            
+
             nondetects = nondetects[all_cols]
             phot_table.append(nondetects)
 
     if not phot_table:
-        # Get S/N thresholds from config for default columns
+        # Empty table still needs the configured Limit_* columns.
         if input_yaml is not None:
             lim_cfg = input_yaml.get("limiting_magnitude") or {}
             snr_thresholds = lim_cfg.get("snr_thresholds", [3.0, 5.0])
         else:
             snr_thresholds = [3.0, 5.0]
-        
-        # Generate column names based on configured thresholds
+
         limit_cols = [f'Limit_{snr:.1f}S2N'.replace('.', 'p') for snr in snr_thresholds]
         default_cols = ["MJD", "Date", "Mag", "Error", "Filter"] + limit_cols
         out_phot = pd.DataFrame(columns=default_cols)
@@ -2363,17 +2328,7 @@ def _parse_calib_catalog(filepath) -> pd.DataFrame:
     non-comment line is the column header, e.g. ``RA,DEC,...``).
     """
     try:
-        with open(filepath, "r") as f:
-            lines = f.readlines()
-        header_line = None
-        for i, line in enumerate(lines):
-            s = line.strip()
-            if s and not s.startswith("#"):
-                header_line = i
-                break
-        if header_line is None:
-            return pd.DataFrame()
-        return pd.read_csv(filepath, skiprows=header_line)
+        return pd.read_csv(filepath, comment="#")
     except Exception:
         return pd.DataFrame()
 
@@ -2435,6 +2390,9 @@ def plot_variability_check(
     directory containing ``output_file``), builds the per-epoch mean
     instrumental magnitude of a bright reference-star ensemble, and subtracts
     that common-mode signal from every reference star and from the target.
+    Ensemble members are first vetted for intrinsic variability (median/MAD
+    outlier rejection on each member's mean-centred residual RMS) so that a
+    variable star cannot contaminate the common-mode mean.
 
     The figure has, per band:
 
@@ -2636,21 +2594,39 @@ def plot_variability_check(
         if n_epochs < 2:
             continue
 
+        # Per-star coverage/quality stats; invariant across the relaxation
+        # ladders below, so computed once.
+        stats = (
+            cat_all.groupby("star_id")
+            .agg(
+                n_mjd=("mjd", "nunique"),
+                mean_snr=("snr", "mean"),
+                mean_flux=("flux", "mean"),
+                max_flux=("flux", "max"),
+            )
+            .reset_index()
+        )
+        if not cat_all["snr"].notna().any():
+            log.debug(
+                "plot_variability_check: band %s - no snr values in Calib "
+                "catalogs; snr_min cut inactive.",
+                band,
+            )
+        if not cat_all["flux"].notna().any():
+            log.debug(
+                "plot_variability_check: band %s - no flux values in Calib "
+                "catalogs; flux_min/flux_max cuts inactive.",
+                band,
+            )
+
         # Reference-ensemble selection with progressive relaxation so that
         # sparse/noisy fields still produce a diagnostic.
         sel = None
-        for frac in (min_epoch_frac, 0.6, 0.4, 0.0):
+        frac_ladder = [min_epoch_frac] + [
+            f for f in (0.6, 0.4, 0.0) if f < min_epoch_frac
+        ]
+        for frac in frac_ladder:
             for snr_cut in (snr_min, snr_min / 2.0, 0.0):
-                stats = (
-                    cat_all.groupby("star_id")
-                    .agg(
-                        n_mjd=("mjd", "nunique"),
-                        mean_snr=("snr", "mean"),
-                        mean_flux=("flux", "mean"),
-                        max_flux=("flux", "max"),
-                    )
-                    .reset_index()
-                )
                 need = max(2, int(np.ceil(frac * n_epochs)))
                 good = stats[
                     (stats["n_mjd"] >= need)
@@ -2673,27 +2649,81 @@ def plot_variability_check(
             continue
 
         ensemble_ids = set(sel.head(n_ensemble)["star_id"])
-        plot_ids = set(
-            sel.iloc[n_ensemble : n_ensemble + n_ref_plot]["star_id"]
-        )
-        if not plot_ids:
-            plot_ids = set(sel["star_id"]) - ensemble_ids
-        if not plot_ids:
-            # Fall back to plotting ensemble members themselves.
-            plot_ids = set(ensemble_ids)
 
-        ens = cat_all[cat_all["star_id"].isin(ensemble_ids)]
-        ens_epoch = (
-            ens.groupby("mjd")["inst"]
-            .agg(["mean", "std", "count"])
-            .rename(
-                columns={"mean": "ens_mean", "std": "ens_std", "count": "ens_n"}
+        def _ens_epoch_stats(ids):
+            return (
+                cat_all[cat_all["star_id"].isin(ids)]
+                .groupby("mjd")["inst"]
+                .agg(["mean", "std", "count"])
+                .rename(
+                    columns={
+                        "mean": "ens_mean",
+                        "std": "ens_std",
+                        "count": "ens_n",
+                    }
+                )
+                .reset_index()
             )
-            .reset_index()
-        )
+
+        # Veto variable ensemble members: a genuinely variable (or
+        # saturated/blended) star in the ensemble leaks its signal into the
+        # common-mode mean and distorts every residual. Iteratively reject
+        # members whose mean-centred residual RMS is a MAD-based outlier,
+        # keeping at least 3 stars.
+        for _ in range(2):
+            ens_epoch = _ens_epoch_stats(ensemble_ids)
+            ens = cat_all[cat_all["star_id"].isin(ensemble_ids)].copy()
+            ens["ens_mean"] = ens["mjd"].map(
+                dict(zip(ens_epoch["mjd"], ens_epoch["ens_mean"]))
+            )
+            d = ens["inst"] - ens["ens_mean"]
+            d = d - d.groupby(ens["star_id"]).transform("mean")
+            rms = d.groupby(ens["star_id"]).std()
+            rms = rms[np.isfinite(rms)]
+            if len(rms) < 4:
+                break
+            rms_med = float(rms.median())
+            rms_mad = float((rms - rms_med).abs().median())
+            # 3-sigma-style cut with a floor: at least 1.5x the median RMS or
+            # 15 mmag above it, whichever is larger, so only genuinely
+            # discrepant members are rejected.
+            rms_cut = rms_med + 3.0 * max(
+                1.4826 * rms_mad, 0.5 * rms_med, 0.005
+            )
+            bad = set(rms[rms > rms_cut].index)
+            if not bad or len(ensemble_ids) - len(bad) < 3:
+                break
+            ensemble_ids -= bad
+            log.info(
+                "plot_variability_check: band %s - rejected %d variable "
+                "ensemble member(s) (residual RMS > %.4f mag).",
+                band,
+                len(bad),
+                rms_cut,
+            )
+        ens_epoch = _ens_epoch_stats(ensemble_ids)
         ens_mean_map = dict(zip(ens_epoch["mjd"], ens_epoch["ens_mean"]))
         ens_std_map = dict(zip(ens_epoch["mjd"], ens_epoch["ens_std"]))
         ens_n_map = dict(zip(ens_epoch["mjd"], ens_epoch["ens_n"]))
+
+        # Brightest qualifying stars not in the ensemble form the plotted
+        # reference cloud (independent of the common-mode correction).
+        plot_ids = set(
+            sel[~sel["star_id"].isin(ensemble_ids)]
+            .head(n_ref_plot)["star_id"]
+        )
+        if not plot_ids:
+            # Fall back to plotting ensemble members themselves: their
+            # residuals are then computed against a mean containing
+            # themselves, so the plotted scatter understates the true
+            # reference scatter (variance biased low by ~1-1/N).
+            plot_ids = set(ensemble_ids)
+            log.info(
+                "plot_variability_check: band %s - reference cloud contains "
+                "ensemble members; its scatter is not independent of the "
+                "correction.",
+                band,
+            )
 
         # Per-star differential residuals: inst - ensemble_mean - <star mean>.
         ref = cat_all[cat_all["star_id"].isin(plot_ids)].copy()
@@ -2770,7 +2800,6 @@ def plot_variability_check(
         tgt["ens_std"] = tgt["epoch"].map(ens_std_map)
         tgt["ens_n"] = tgt["epoch"].map(ens_n_map)
         tgt["diff"] = tgt["inst"] - tgt["ens_mean"]
-        tgt["delta"] = tgt["diff"] - tgt["diff"].mean()
         tgt["delta_err"] = np.sqrt(
             tgt["inst_err"].fillna(0.0) ** 2
             + (
@@ -2792,6 +2821,9 @@ def plot_variability_check(
                 )
         if tgt.empty:
             continue
+        # Centre on the plotted subset so the residual and drift panels share
+        # the same effective zero point.
+        tgt["delta"] = tgt["diff"] - tgt["diff"].mean()
 
         ref_rms = float(np.nanstd(ref["delta"])) if len(ref) else np.nan
         tgt_rms = float(np.nanstd(tgt["delta"]))
@@ -2800,13 +2832,14 @@ def plot_variability_check(
             if np.isfinite(ref_rms) and ref_rms > 0
             else np.nan
         )
+        n_ref_plotted = int(ref["star_id"].nunique())
         log.info(
             "plot_variability_check: band %s - %d ensemble stars, %d plotted "
             "refs, %d epochs; target RMS %.4f mag, ref RMS %.4f mag, "
             "ratio %.2f.",
             band,
             len(ensemble_ids),
-            len(plot_ids),
+            n_ref_plotted,
             n_epochs,
             tgt_rms,
             ref_rms,
@@ -2821,7 +2854,7 @@ def plot_variability_check(
                 "ref_epoch": ref_epoch,
                 "tgt": tgt.sort_values("mjd"),
                 "n_ensemble": len(ensemble_ids),
-                "n_ref": len(plot_ids),
+                "n_ref": n_ref_plotted,
                 "var_ratio": var_ratio,
             }
         )
@@ -2861,7 +2894,16 @@ def plot_variability_check(
         if show_drift_panel:
             ax_drift = axes[row]
             row += 1
-            ens_c = ens_epoch["ens_mean"] - ens_epoch["ens_mean"].mean()
+            # Centre the ensemble curve over the epochs the target actually
+            # covers so the two curves are directly comparable.
+            _tgt_ep = ens_epoch["mjd"].isin(set(tgt["epoch"]))
+            _ens_ref = ens_epoch.loc[_tgt_ep, "ens_mean"]
+            _ens_c0 = (
+                float(_ens_ref.mean())
+                if len(_ens_ref)
+                else float(ens_epoch["ens_mean"].mean())
+            )
+            ens_c = ens_epoch["ens_mean"] - _ens_c0
             ax_drift.plot(
                 x_transform(ens_epoch["mjd"]),
                 ens_c,
@@ -2885,17 +2927,16 @@ def plot_variability_check(
                 markeredgecolor="black",
                 markeredgewidth=0.5,
                 markersize=get_marker_size("medium"),
-                capsize=get_marker_size('medium'),
+                capsize=get_marker_size('medium') / 4,
                 lw=0.5,
                 label=f"{band} target",
                 zorder=3,
             )
-            ax_drift.set_ylabel("Δ instrumental mag")
+            ax_drift.set_ylabel("Delta Instrumental Magnitude [mag]")
             ax_drift.invert_yaxis()
             ax_drift.grid(True, which="major", alpha=0.35, linestyle="-", linewidth=0.5)
             ax_drift.minorticks_on()
-            ax_drift.legend(loc="best", frameon=True, facecolor="white",
-                            framealpha=1.0, edgecolor="black", fontsize=7)
+            ax_drift.legend(loc="best", frameon=False, fontsize=7)
 
         ax = axes[row]
         ax.axhline(0, color="black", lw=0.5, ls="--", zorder=1)
@@ -2919,11 +2960,11 @@ def plot_variability_check(
                 color="whitesmoke",
                 ecolor="dimgrey",
                 markersize=2,
-                capsize=2,
+                capsize=2 / 4,
                 lw=0.5,
                 markeredgecolor="dimgrey",
                 markeredgewidth=0.5,
-                label="Per-epoch mean ± std",
+                label="Per-epoch mean +/- std",
                 zorder=2,
             )
         ax.errorbar(
@@ -2936,12 +2977,12 @@ def plot_variability_check(
             markeredgecolor="black",
             markeredgewidth=0.5,
             markersize=get_marker_size("medium"),
-            capsize=get_marker_size("medium"),
+            capsize=get_marker_size("medium") / 4,
             lw=0.5,
             label=f"{band} target",
             zorder=5,
         )
-        ax.set_ylabel("Δmag vs ensemble [mag]")
+        ax.set_ylabel("Residual Instrumental Magnitude [mag]")
         # Fit the y-limits to the target residuals (+/- errors) with a small
         # margin, extended to zero so the residual reference line stays in
         # view; reference-star outliers cannot stretch the axis.
@@ -2970,8 +3011,7 @@ def plot_variability_check(
                     facecolor="white", alpha=0.9, edgecolor="black", linewidth=0.5
                 ),
             )
-        ax.legend(loc="best", frameon=True, facecolor="white",
-                  framealpha=1.0, edgecolor="black", fontsize=7)
+        ax.legend(loc="best", frameon=False, fontsize=7)
 
     axes[-1].set_xlabel(xlabel)
     for a in axes[:-1]:
@@ -3000,8 +3040,6 @@ def plot_variability_check(
 
     if show:
         plt.show()
-    else:
-        plt.close(fig)
 
     return outpath
 
@@ -3150,7 +3188,7 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
                 else:
                     loc = ""
 
-            # Prefer new PNG names when both PNG and PDF exist.
+            # Prefer raster/vector plot outputs over other artifacts.
             prefixes = [prefix]
             if method == "PSF":
                 # Support both legacy (`targetPSF_`) and current (`PSF_Target_`) plot prefixes.
@@ -3161,7 +3199,7 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
                 search = os.path.join(loc, f"{pfx}*")
                 candidates.extend(glob.glob(search))
 
-            pdfs = [f for f in candidates if f.lower().endswith(".png")]
+            pdfs = [f for f in candidates if f.lower().endswith((".png", ".svg"))]
             files = sorted(pdfs)
             if not files:
                 continue

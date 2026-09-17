@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Optimized and robust WCS solver and FITS header cleaner.
-Handles faint sources, cosmic rays, and edge cases gracefully.
-Uses SExtractor with a standard Gaussian convolution filter for source detection by default,
-with fallback to astrometry.net-only mode.
+WCS solver and FITS header cleaner.
+Handles faint sources, cosmic rays, and edge cases.
+Uses SExtractor with a Gaussian convolution filter for source detection by
+default, with fallback to astrometry.net-only mode.
 """
 
 # --- Standard Library Imports ---
@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # --- Suppress Astropy Warnings ---
 warnings.filterwarnings("ignore", category=AstropyWarning, append=True)
 
-# --- Compiled regex for log cleaning (reuse) ---
+# --- ANSI escape regex for log cleaning (compiled once, reused) ---
 _ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 # =============================================================================
@@ -150,8 +150,8 @@ def update_wcs_center(
     fits_path: str, ra: float, dec: float, overwrite: bool = True
 ) -> fits.Header:
     """
-    Updates the WCS header of a FITS file to center the reference pixel and set the reference sky coordinates.
-    Uses FITS 1-indexed convention: reference pixel at image center is (NAXIS+1)/2.
+    Center the WCS reference pixel and set the reference sky coordinates.
+    FITS is 1-indexed, so the centre pixel is (NAXIS+1)/2.
 
     Args:
         fits_path (str): Path to the FITS file.
@@ -211,25 +211,23 @@ def table_to_ldac(table, header=None, writeto=None) -> fits.HDUList:
     data_hdu.header["EXTNAME"] = "LDAC_OBJECTS"
     hdulist = fits.HDUList([primary_hdu, header_hdu, data_hdu])
     if writeto is not None:
-        # This is catalog data, not image data, so NaN preservation is not critical
-        # But use safe_fits_write for consistency
         from astropy.io import fits
-        # For multi-extension HDULists, we need to use hdulist.writeto directly
-        # safe_fits_write is for single image + header
+        # safe_fits_write only handles single image + header; write the
+        # multi-extension HDUList directly.
         hdulist.writeto(writeto, overwrite=True)
     return hdulist
 
 
 # --- WCS cache -------------------------------------------------------------
-# Cache WCS objects keyed by a tuple of the critical WCS keywords so that
-# repeated get_wcs() calls with the same (unchanged) header avoid re-parsing
-# SIP/TPV distortion coefficients and re-validating the WCS.  The cache is
-# invalidated automatically when any key WCS keyword changes value.
+# Keyed by the critical WCS keywords so repeated get_wcs() calls on an
+# unchanged header skip re-parsing SIP/TPV distortion coefficients and
+# re-validating the WCS. A changed keyword yields a different key, so stale
+# entries are simply never matched.
 _WCS_CACHE = {}
 _WCS_CACHE_MAX = 32
 
-# Keywords that define the WCS transformation.  If any of these change, the
-# cached WCS is stale and must be rebuilt.
+# Keywords that define the WCS transformation. If any of these change, the
+# cached WCS is stale and must not be reused.
 _WCS_KEY_KEYWORDS = (
     "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
     "CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2",
@@ -271,8 +269,8 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
         logger.warning("get_wcs: header is None")
         return None
 
-    # Check WCS cache — avoids re-parsing SIP/TPV coefficients on repeated calls
-    # with the same header.  The key is a tuple of critical WCS keyword values.
+    # Cache key = tuple of critical WCS keyword values; an unchanged header
+    # skips re-parsing SIP/TPV coefficients.
     cache_key = _wcs_cache_key(header)
     if cache_key is not None:
         cached = _WCS_CACHE.get(cache_key)
@@ -281,14 +279,12 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
 
     try:
         # Normalise CTYPE first so the WCS() constructor always receives a
-        # self-consistent header (SIP coefficients paired with TAN-SIP CTYPE,
-        # PV coefficients with TPV CTYPE). This prevents the FITSFixedWarning
-        # "SIP coefficients present but CTYPE missing -SIP suffix" that astropy
-        # emits both via warnings.warn() and via logger.info() on the
-        # astropy.wcs.wcs logger.
+        # self-consistent header (SIP coefficients with TAN-SIP CTYPE, PV with
+        # TPV). Otherwise astropy emits the FITSFixedWarning "SIP coefficients
+        # present but CTYPE missing -SIP suffix" via both warnings.warn() and
+        # logger.info() on astropy.wcs.wcs.
         header = _normalize_projection_codes(header, inplace=False)
 
-        # Check for basic WCS keywords
         required = ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2']
         missing = [k for k in required if k not in header]
         if missing:
@@ -296,23 +292,22 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
             return None
 
         # Suppress FITSFixedWarning for the entire WCS build + test:
-        # - warnings.catch_warnings / simplefilter("ignore") catches the
-        #   warnings.warn() path.
-        # - silence_astropy_wcs_info() silences the astropy.wcs.wcs INFO
-        #   logger path (astropy also emits the same message as a log record).
-        # Both suppressors must stay active through pixel_to_world() because
-        # lazy WCS evaluation can trigger the warning on first coordinate call.
+        # warnings.catch_warnings covers the warnings.warn() path;
+        # silence_astropy_wcs_info() covers the astropy.wcs.wcs INFO logger
+        # path (astropy also emits the message as a log record). Both must
+        # stay active through pixel_to_world() because lazy WCS evaluation
+        # can trigger the warning on the first coordinate call.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with silence_astropy_wcs_info():
                 wcs = WCS(header, fix=True, relax=True)
 
-                # Validate WCS has celestial component
                 if not wcs.has_celestial:
                     logger.warning("get_wcs: WCS has no celestial component")
                     return None
 
-                # Ensure 2D celestial WCS so reproject and callers get consistent pixel grid
+                # Reduce to a 2D celestial WCS so reproject and callers get a
+                # consistent pixel grid.
                 naxis = getattr(wcs.wcs, "naxis", 2)
                 if naxis > 2:
                     wcs = wcs.celestial
@@ -329,7 +324,6 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
                     logger.warning("get_wcs: WCS transformation test failed with exception: %s", e)
                     return None
 
-        # Store in cache for future calls with the same WCS keywords
         if cache_key is not None:
             if len(_WCS_CACHE) >= _WCS_CACHE_MAX:
                 _WCS_CACHE.pop(next(iter(_WCS_CACHE)))
@@ -633,7 +627,7 @@ def _extract_corr_points_from_solve_field(
     if len(x) < 10:
         return None
 
-    # Keep a manageable number of points (evenly sampled by row order).
+    # Cap the point count for the downstream fit; sample evenly by row order.
     if len(x) > max_points:
         idx = np.linspace(0, len(x) - 1, max_points, dtype=int)
         x, y, ra, dec = x[idx], y[idx], ra[idx], dec[idx]
@@ -690,7 +684,7 @@ def _wcs_match_separation_stats_arcsec(
     dec_deg: np.ndarray,
 ) -> tuple[float, float]:
     """
-    Compute robust angular-separation stats (median, p95) for matched points.
+    Angular-separation stats (median, p95) between predicted and catalog sky.
     """
     if wcs_obj is None:
         logger.debug("_wcs_match_separation_stats_arcsec: wcs_obj is None")
@@ -715,8 +709,7 @@ def _best_wcs_match_separation_stats_arcsec(
     dec_deg: np.ndarray,
 ) -> tuple[float, float, float]:
     """
-    Compute robust separation stats for both pixel-origin hypotheses and return
-    the best one.
+    Separation stats under both pixel-origin hypotheses; returns the better.
 
     Returns:
         (median_arcsec, p95_arcsec, applied_shift_px)
@@ -743,7 +736,7 @@ def wcs_world_to_pixel(
     wcs_obj: WCS, ra_deg: np.ndarray, dec_deg: np.ndarray, *, origin: int = 0
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Convert sky coordinates to pixel coordinates robustly with consistent origin.
+    Convert sky coordinates to pixel coordinates with a consistent origin.
 
     Parameters:
     -----------
@@ -765,7 +758,7 @@ def wcs_world_to_pixel(
     ------
     - If vectorized inversion fails (common for some distorted points), falls back to
       per-point conversion and returns NaN for failed coordinates.
-    - This is the unified function for all WCS world-to-pixel conversions.
+    - Shared entry point for all world-to-pixel conversions in this module.
     """
     ra_arr = np.asarray(ra_deg, dtype=float)
     dec_arr = np.asarray(dec_deg, dtype=float)
@@ -798,9 +791,9 @@ def _safe_world_to_pixel_values(
     wcs_obj: WCS, ra_deg: np.ndarray, dec_deg: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Convert sky coordinates to pixel coordinates robustly (legacy wrapper).
+    Legacy wrapper: sky -> pixel with origin=0.
 
-    Deprecated: Use wcs_world_to_pixel instead.
+    Deprecated: use wcs_world_to_pixel instead.
     """
     return wcs_world_to_pixel(wcs_obj, ra_deg, dec_deg, origin=0)
 
@@ -816,8 +809,7 @@ def _build_scamp_optimization_trials(
     best solution from matched-point residuals.
     """
     base = dict(wcs_cfg or {})
-    # Default behaviour: run SCAMP once per image.
-    # Multi-trial SCAMP optimization can be expensive and is opt-in.
+    # Multi-trial SCAMP optimization is expensive; a single call is the default.
     if bool(base.get("scamp_single_call", True)):
         return [("base", dict(base))]
     trials: list[tuple[str, dict]] = [("base", dict(base))]
@@ -985,7 +977,7 @@ def _filter_points_against_initial_wcs(
     if np.isfinite(max_sep_arcsec) and max_sep_arcsec > 0:
         good &= sep <= float(max_sep_arcsec)
 
-    # Robust clip around median to suppress residual outliers.
+    # MAD-based clip around the median to suppress residual outliers.
     if np.any(good):
         s = sep[good]
         med = float(np.nanmedian(s))
@@ -1085,9 +1077,8 @@ def _resolve_sextractor_conv_fwhm_pixels(
         except (TypeError, ValueError):
             continue
         if np.isfinite(fwhm_pix) and fwhm_pix > 0:
-            # Keep kernel practical and stable for SExtractor.
-            # Minimum 1.0 px allows proper kernel sizing for undersampled
-            # images (e.g. ZTF FWHM ~1.8 px).
+            # Clip to a workable range; the 1.0 px floor keeps the kernel
+            # valid for undersampled images (e.g. ZTF FWHM ~1.8 px).
             return float(np.clip(fwhm_pix, 1.0, 20.0))
     return 3.0
 
@@ -1131,7 +1122,7 @@ NNW
 class WCSSolver:
     """
     WCS solver and FITS header cleaner.
-    Handles faint sources, cosmic rays, and edge cases gracefully.
+    Handles faint sources, cosmic rays, and edge cases.
     """
 
     def __init__(
@@ -1356,7 +1347,7 @@ class WCSSolver:
         if not solvefield_exe:
             return None
 
-        # If ASTROMETRY_DATA is already set and points to a valid directory, use it.
+        # Honour an existing, valid ASTROMETRY_DATA first.
         _existing = os.environ.get("ASTROMETRY_DATA")
         if _existing and os.path.isdir(_existing):
             return _existing
@@ -1367,7 +1358,6 @@ class WCSSolver:
         if _candidate.is_dir() and any(_candidate.glob("index-*.fits")):
             return str(_candidate)
 
-        # Common system-wide installation paths.
         _system_paths = [
             "/usr/share/astrometry",
             "/usr/share/astrometry/data",
@@ -1405,9 +1395,8 @@ class WCSSolver:
             if os.name != "nt":
                 kwargs["preexec_fn"] = os.setsid
 
-            # Ensure solve-field can find its index files.  Linuxbrew/Homebrew
-            # installs place indexes in a Cellar data dir not on the binary's
-            # default search path.
+            # solve-field needs its index dir; Linuxbrew/Homebrew put it in a
+            # Cellar data dir the binary does not search by default.
             _env = os.environ.copy()
             _data_dir = self._resolve_astrometry_data_dir(
                 getattr(self, "_solvefield_exe", "")
@@ -1516,9 +1505,9 @@ class WCSSolver:
             ]
             Path(param_file).write_text("\n".join(params))
 
-            # SExtractor's FILTER_NAME must point to a writable convolution file.
-            # We generate a temporary Gaussian kernel at runtime so we can omit
-            # repository/distribution `.conv` files.
+            # SExtractor's FILTER_NAME must point to a writable convolution
+            # file; generating it in temp_dir lets us omit repository `.conv`
+            # files.
             conv_filter_path = os.path.join(temp_dir, "gaussian_7x7.conv")
             conv_fwhm_pix = _resolve_sextractor_conv_fwhm_pixels(
                 wcs_cfg, self.header, self.default_input
@@ -1560,8 +1549,8 @@ class WCSSolver:
                 # SExtractor rejects inf/NaN SATUR_LEVEL values
                 if not np.isfinite(satur_float) or satur_float <= 0:
                     satur_float = 1e7
-                # Cap at reasonable maximum (65535 = max for 16-bit unsigned)
-                # Header values like 1e30 cause "SATUR_LEVEL keyword out of range"
+                # Cap at 65535 (16-bit unsigned max); header values like 1e30
+                # trigger "SATUR_LEVEL keyword out of range" in SExtractor.
                 max_saturation = 65535
                 if satur_float > max_saturation:
                     satur_float = max_saturation
@@ -1666,7 +1655,6 @@ class WCSSolver:
                     timeout=timeout_sec,
                     cwd=temp_dir,
                 )
-                # Log SExtractor output for debugging
                 if result.stdout:
                     logger.debug(
                         "SExtractor stdout: %s", result.stdout.decode("utf-8", errors="replace")
@@ -1685,7 +1673,6 @@ class WCSSolver:
                     "SCAMP: SExtractor catalog not created at %s; aborting SCAMP solve.",
                     cat_path
                 )
-                # Log temp directory contents for debugging
                 try:
                     temp_files = os.listdir(temp_dir)
                     logger.warning(
@@ -1709,7 +1696,8 @@ class WCSSolver:
             if scamp_threads < 4:
                 scamp_threads = 4
             logger.info("SCAMP: using %d threads", scamp_threads)
-            # SCAMP defaults REF_TIMEOUT=10s against vizier.unistra.fr; that often fails on slow links.
+            # SCAMP's built-in REF_TIMEOUT is only 10 s; often too short for
+            # slow Vizier links.
             scamp_cfg = {
                 "SOLVE_ASTROM": "Y",
                 "SOLVE_PHOTOM": "N",
@@ -1774,7 +1762,6 @@ class WCSSolver:
 
             head_candidates = sorted(glob.glob(os.path.join(temp_dir, "*.head")))
             if not head_candidates:
-                # SCAMP did not emit any HEAD file in the working directory.
                 try:
                     with open(scamp_log, "r", encoding="utf-8", errors="ignore") as f:
                         scamp_out = f.read().strip()
@@ -1875,7 +1862,6 @@ class WCSSolver:
                 seed_header["NAXIS2"] = self.image.shape[0]
                 safe_fits_write(seed_fpath, self.image, seed_header, output_verify="ignore")
 
-                # Run SCAMP on the seeded temporary image.
                 seeded_solver = WCSSolver(
                     fpath=seed_fpath,
                     image=self.image,
@@ -1974,12 +1960,13 @@ class WCSSolver:
             try:
                 test_wcs = get_wcs(best_trial_header)
                 if test_wcs is not None:
-                    # Test transform at image center - if this fails, the distortion is too extreme
-                    # Correct numpy 0-based center is (nx-1)/2, (ny-1)/2.
+                    # Round-trip at the image centre catches non-invertible,
+                    # extreme distortions. Numpy 0-based centre is
+                    # (nx-1)/2, (ny-1)/2.
                     cx = (best_trial_header.get("NAXIS1", 1000) - 1) / 2
                     cy = (best_trial_header.get("NAXIS2", 1000) - 1) / 2
                     ra_test, dec_test = test_wcs.all_pix2world(cx, cy, 0)
-                    # Round-trip test: world->pix->world should converge
+                    # world -> pix must reproduce the centre pixel
                     x_back, y_back = test_wcs.all_world2pix(ra_test, dec_test, 0, maxiter=50)
                     if not (np.isfinite(x_back) and np.isfinite(y_back)):
                         raise ValueError("WCS round-trip failed")
@@ -2152,7 +2139,6 @@ class WCSSolver:
             or _resolve_sextractor_exe()
         )
         use_sextractor = sextractor_exe is not None
-        # use_sextractor = False
         # --- Create a temporary SExtractor config file ---
         with tempfile.TemporaryDirectory() as temp_dir:
             param_file = os.path.join(temp_dir, "default.param")
@@ -2179,7 +2165,8 @@ class WCSSolver:
             create_nnw_file(nnw_file)
             config_file = os.path.join(temp_dir, "default.sex")
 
-            # Generate a temporary Gaussian convolution filter for SExtractor.
+            # SExtractor needs a writable FILTER_NAME .conv file; generate it
+            # in temp_dir.
             conv_filter_path = os.path.join(temp_dir, "gaussian_7x7.conv")
             conv_fwhm_pix = _resolve_sextractor_conv_fwhm_pixels(
                 wcs_cfg, self.header, self.default_input
@@ -2254,8 +2241,8 @@ class WCSSolver:
             else:
                 logger.warning("SExtractor not found. Proceeding without.")
 
-            # --- Scale bounds: use range around known pixel scale when available ---
-            # A wrong pixel_scale can prevent convergence. We therefore build two sets:
+            # --- Scale bounds ---
+            # A wrong pixel_scale can prevent convergence, so build two sets:
             #   - constrained: around the hint (if present)
             #   - wide: 0.1--5.0 arcsec/pix (no hint)
             ra, dec = self.default_input.get("target_ra"), self.default_input.get(
@@ -2312,10 +2299,6 @@ class WCSSolver:
             scale_args = scale_args_constrained
             scale_only_args = scale_only_args_constrained
 
-            # # --- solve-field matching and depth ---
-            # code_tolerance = float(wcs_cfg.get("code_tolerance", 0.01))
-            # scale_args += ["--code-tolerance", str(code_tolerance)]
-
             # --- Downsample: lighten astrometry.net load for large images ---
             ny, nx = self.image.shape[0], self.image.shape[1]
             if nx * ny < 1500 * 1500:
@@ -2355,8 +2338,9 @@ class WCSSolver:
                 str(int(timeout_sec)),
                 str(self.fpath),
             ]
-            # Optional: request more detected objects for solve-field indexing/matching.
-            # Larger values can improve robustness in sparse fields at modest runtime cost.
+            # Optional: request more detected objects for solve-field
+            # indexing/matching. Larger values help sparse fields at modest
+            # runtime cost.
             objs = wcs_cfg.get("objs", 1200)
             if objs is not None:
                 try:
@@ -2413,17 +2397,16 @@ class WCSSolver:
                 logger.info(
                     "solve-field: omitting --crpix-center (solver reference pixel; often closer to instrument WCS - set wcs.solve_field_crpix_center: true for legacy)"
                 )
-            # Tweak order(s) for solve-field. Can be a single int or a list.
-            # Example YAML:
+            # Tweak order(s) for solve-field. Single int or list, e.g. YAML:
             #   solve_field_tweak_order: 5
             #   solve_field_tweak_orders: [5, 3, 2, 1, 0]
             #
-            # When n_detected_sources is provided, proactively cap the initial
-            # tweak order to avoid wasted solve-field invocations. astrometry.net
-            # minimum correspondences: order 4->15, order 3->10, order 2->6, order 1->3.
-            # We use a ~1.5x safety margin on detected sources (not all detections
-            # match index stars). A post-solve SIP magnitude check catches any
-            # overfitting (wild SIP at corners with too few constraint stars).
+            # With n_detected_sources known, cap the initial order to avoid
+            # wasted solve-field calls. astrometry.net minimum correspondences:
+            # order 4->15, 3->10, 2->6, 1->3. We add a ~1.5x margin since not
+            # all detections match index stars; a post-solve SIP magnitude
+            # check catches residual overfitting (wild SIP at corners with too
+            # few constraint stars).
             _min_sources_for_order = {0: 0, 1: 5, 2: 9, 3: 15, 4: 23}
             tweak_orders = [0]
             try:
@@ -2441,9 +2424,9 @@ class WCSSolver:
             if len(tweak_orders) == 0:
                 tweak_orders = [0]
 
-            # Proactive cap: if we know the detected source count, skip tweak
-            # orders that astrometry.net can't satisfy. This avoids the reactive
-            # retry chain (up to 6 invocations) for sparse fields.
+            # Proactive cap: skip tweak orders astrometry.net cannot satisfy
+            # with the detected source count. Avoids the reactive retry chain
+            # (up to 6 invocations) on sparse fields.
             if n_detected_sources is not None and n_detected_sources > 0:
                 _max_feasible = 0
                 for _ord, _min_src in sorted(_min_sources_for_order.items(), reverse=True):
@@ -2539,13 +2522,11 @@ class WCSSolver:
                         logger.info(
                             "WCS solved (%s) with tweak order %s", label, tweak_order
                         )
-                        # Check if solve-field produced no usable SIP despite being
-                        # asked for one. This happens when too few stars were matched
-                        # for the requested polynomial order. astrometry.net may
-                        # either write A_ORDER>0 with all-zero coefficients, or fall
-                        # back to a plain TAN (linear) WCS with no SIP keywords.
-                        # Retry with lower tweak orders (down to 0) to find a stable
-                        # distortion model.
+                        # solve-field may return no usable SIP even when asked:
+                        # too few matched stars for the requested order yields
+                        # A_ORDER>0 with all-zero coefficients, or a plain TAN
+                        # WCS with no SIP keywords. Retry with lower tweak
+                        # orders (down to 0) for a stable distortion model.
                         if tweak_order > 0:
                             try:
                                 with fits.open(wcs_file) as _wh:
@@ -2557,7 +2538,6 @@ class WCSSolver:
                                         "Retrying with lower tweak orders.",
                                         tweak_order,
                                     )
-                                    # Try lower tweak orders to get non-zero SIP
                                     for _lower in range(tweak_order - 1, -1, -1):
                                         if os.path.isfile(wcs_file):
                                             os.remove(wcs_file)
@@ -2620,7 +2600,7 @@ class WCSSolver:
                                                 "No solution with tweak order %d",
                                                 _lower,
                                             )
-                                    # If no lower order produced non-zero SIP,
+                                    # No lower order produced non-zero SIP:
                                     # restore the original solve (order 0 = TAN)
                                     if not os.path.isfile(wcs_file):
                                         logger.warning(
@@ -2632,8 +2612,8 @@ class WCSSolver:
                                             args, wcs_file, timeout_sec,
                                             astrometry_log_fpath
                                         )
-                                    # If we still have zero SIP, try one more time
-                                    # with lower nsigma to detect more sources
+                                    # Still zero SIP: retry once with lower
+                                    # nsigma to detect more sources
                                     if os.path.isfile(wcs_file):
                                         try:
                                             with fits.open(wcs_file) as _fh:
@@ -2692,10 +2672,11 @@ class WCSSolver:
                                 )
 
                         # BUG 103c: SIP magnitude validation. Even with non-zero
-                        # SIP, under-determined fits produce wild distortion at image
-                        # corners where there are no constraint stars. Measure the
-                        # max SIP correction at the 4 corners and if it exceeds
-                        # 10px, retry with a lower tweak order.
+                        # SIP, under-determined fits produce wild distortion at
+                        # image corners where there are no constraint stars.
+                        # Measure the max SIP correction at the 4 corners; if it
+                        # exceeds 5% of the image size, retry with a lower tweak
+                        # order.
                         if tweak_order > 0 and os.path.isfile(wcs_file):
                             try:
                                 from astropy.wcs import WCS as _WCS
@@ -3365,7 +3346,6 @@ class WCSSolver:
                                 logger, "CRPIX offset correction skipped", e
                             )
 
-                # Validate merged WCS before writing
                 with silence_astropy_wcs_info():
                     merged_wcs = get_wcs(self.header)
                     if merged_wcs is None:
