@@ -1115,7 +1115,7 @@ class BackgroundSubtractor:
 
         # Fast mode: lighter masking and somewhat coarser mesh for speed.
         if fast_mode:
-            self.logger.info(
+            self.logger.debug(
                 "Background: fast_mode=True - using lighter masking and coarser mesh for speed."
             )
             params["n_iterations"] = max(1, min(params["n_iterations"], 2))
@@ -1163,7 +1163,7 @@ class BackgroundSubtractor:
         global_interpolator = str(cfg_bkg.get("global_interpolator", "zoom")).strip().lower()
         if fast_mode and global_interpolator == "idw":
             global_interpolator = "zoom"
-            self.logger.info(
+            self.logger.debug(
                 "Background: fast_mode=True - using zoom interpolator (IDW is slow on large images)."
             )
         global_interp_order = int(cfg_bkg.get("global_interp_order", 3))
@@ -1207,7 +1207,7 @@ class BackgroundSubtractor:
                 # Log statistics for debugging
                 rms_mean = np.nanmean(bkg_rms)
                 rms_std = np.nanstd(bkg_rms)
-                self.logger.info(
+                self.logger.debug(
                     "Background RMS statistics: median=%.3f, mean=%.3f, std=%.3f, floor=%.3f",
                     rms_median, rms_mean, rms_std, rms_floor
                 )
@@ -1217,8 +1217,7 @@ class BackgroundSubtractor:
                 # execution time stays minimal.
                 bkg_data = np.asarray(bkg.background, dtype=np.float32)
 
-                self.logger.info(border_msg("Background estimation"))
-                self.logger.info(
+                self.logger.debug(
                     "Attempt: %d | Box: %s | Filter: %d | Exclude: %.1f%%",
                     i + 1,
                     bs,
@@ -1381,9 +1380,10 @@ class BackgroundSubtractor:
 
         total = image.size
         n_nan = int(np.count_nonzero(nan_mask))
-        self.logger.info(
-            f"NaN pixels: {n_nan} ({100.0 * n_nan / total if total > 0 else 0.0:.2f}%)"
-        )
+        if n_nan > 0:
+            self.logger.info(
+                f"NaN pixels: {n_nan} ({100.0 * n_nan / total:.2f}%)"
+            )
 
         # Derive FWHM in pixels (if provided); otherwise allow helper to estimate.
         if fwhm is not None:
@@ -1410,7 +1410,7 @@ class BackgroundSubtractor:
                 "mesh_scale": 5.0,
                 "exclude_percentile": 85.0,
             }
-            self.logger.info(
+            self.logger.debug(
                 "Config crowded_field=True; using crowded background regime."
             )
         nsigma_src = regime_params["nsigma"]
@@ -1489,7 +1489,7 @@ class BackgroundSubtractor:
                 dilate_iterations=2,
             )
         elif skip_trail:
-            self.logger.info(
+            self.logger.debug(
                 "Background: fast_mode - skipping satellite trail mask (full-image labeling). Set background.fast_mode_skip_trail_mask: false to enable."
             )
 
@@ -1529,7 +1529,7 @@ class BackgroundSubtractor:
         )
 
         masked_frac = mask.mean()
-        self.logger.info("Masked fraction (total): %s", masked_frac)
+        self.logger.info("Masked fraction (total): %.1f%%", 100.0 * masked_frac)
 
         # If essentially the entire image is saturated or masked, this frame is
         # not usable for reliable background / photometry. Bail out early with
@@ -1553,7 +1553,7 @@ class BackgroundSubtractor:
                 self.logger.info("Adjusted box_size %s -> %s", box_size, new_box)
                 box_size = new_box
 
-        self.logger.info("box_size=%s  filter_size=%s", box_size, filter_size)
+        self.logger.debug("box_size=%s  filter_size=%s", box_size, filter_size)
 
         # ---- Global fallback statistics ----
         stats_maxiters = 3 if fast_mode else 5
@@ -1565,7 +1565,7 @@ class BackgroundSubtractor:
             stdfunc=mad_std,
             maxiters=stats_maxiters,
         )
-        self.logger.info(
+        self.logger.debug(
             f"Global stats: mean={gmean:.3e} med={gmed:.3e} std={gstd:.3e}"
         )
 

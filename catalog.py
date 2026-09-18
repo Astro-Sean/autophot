@@ -121,8 +121,10 @@ def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
         )
 
     filtered_catalog = given_catalog[keep_mask].reset_index(drop=True)
-    logger.info("Number of sources removed due to matching: %s", len(removed_indices))
-    logger.info("Number of sources remaining after filtering: %s", len(filtered_catalog))
+    logger.info(
+        "Variable-source match: removed %d, %d sources remain",
+        len(removed_indices), len(filtered_catalog),
+    )
 
     return filtered_catalog
 
@@ -1672,7 +1674,7 @@ class Catalog:
             width_fwhm = float(_width if _width is not None else 2.0)
             annulus_outer = ap_radius + (gap_fwhm + width_fwhm) * fwhm
             border = max(boxsize, int(np.ceil(annulus_outer)))
-            logger.info("Boxsize: %s px, Border: %s px (annulus outer=%.1f, undersampled=%s)", boxsize, border, annulus_outer, undersampled)
+            logger.debug("Boxsize: %s px, Border: %s px (annulus outer=%.1f, undersampled=%s)", boxsize, border, annulus_outer, undersampled)
 
             # Drop sources whose cutout would cross the image border.
             height, width = image.shape
@@ -1685,7 +1687,7 @@ class Catalog:
             mask = mask_x & mask_y
 
             if num_sources > 1:
-                logger.info("Recentering %s sources within border", sum(mask))
+                logger.debug("Recentering %s sources within border", sum(mask))
                 selectedCatalog = selectedCatalog.loc[mask].copy()
 
             old_x = selectedCatalog["x_pix"].values
@@ -1700,17 +1702,17 @@ class Catalog:
                 logger.warning("No sources have valid cutouts - skipping recentering")
                 return selectedCatalog.loc[valid_sources]
 
-            logger.info("%s sources have valid cutouts", valid_sources.sum())
+            logger.debug("%s sources have valid cutouts", valid_sources.sum())
 
             old_x_valid = old_x[valid_sources]
             old_y_valid = old_y[valid_sources]
 
             # Undersampled: 2D Gaussian for subpixel accuracy; else COM.
             if undersampled:
-                logger.info("Using 2D Gaussian centroiding (FWHM <= %.1f px, undersampled)", undersampled_thr)
+                centroid_method = "2D Gaussian"
                 centroid_func = centroid_2dg
             else:
-                logger.info("Using center-of-mass centroiding (FWHM > %.1f px)", undersampled_thr)
+                centroid_method = "center-of-mass"
                 centroid_func = centroid_com
             try:
                 x_valid, y_valid = centroid_sources(
@@ -1771,19 +1773,27 @@ class Catalog:
                 & np.isfinite(old_x)
                 & np.isfinite(old_y)
             )
+            average_offset = np.nan
             if valid.any():
                 average_offset = np.nanmedian(
                     pix_dist(x[valid], old_x[valid], y[valid], old_y[valid])
                 )
-                logger.info("Median pixel correction: %.1f px", average_offset)
             else:
                 logger.warning("No valid sources to compute median offset.")
 
             selectedCatalog = selectedCatalog.loc[
                 selectedCatalog[["x_pix", "y_pix"]].notna().all(axis=1)
             ]
+            offset_txt = (
+                f", median offset {average_offset:.1f} px"
+                if np.isfinite(average_offset)
+                else ""
+            )
             logger.info(
-                f"Recentered {len(selectedCatalog)} source{'s' if len(selectedCatalog) > 1 else ''}"
+                "Recentered %d sources (%s centroiding%s)",
+                len(selectedCatalog),
+                centroid_method,
+                offset_txt,
             )
 
         except Exception as e:
@@ -2194,7 +2204,7 @@ class Catalog:
                 n_high_snr = np.sum(high_snr_mask)
                 if n_high_snr >= 10:  # RANSAC needs at least ~10 sources
                     selected_indices = high_snr_mask
-                    logger.info(
+                    logger.debug(
                         f"Selected {n_high_snr} high S/N sources (SNR >= {min_snr}) for linearity fit"
                     )
                     break
@@ -2219,10 +2229,6 @@ class Catalog:
             if selected_indices is not None and np.sum(selected_indices) >= 10:
                 X_fit = X_full[selected_indices]
                 y_fit = y_full[selected_indices]
-                logger.info(
-                    f"RANSAC fitting on {np.sum(selected_indices)} high-S/N sources, "
-                    f"then applying to {len(X_full)} full catalog sources"
-                )
             else:
                 X_fit = X_full
                 y_fit = y_full
@@ -2250,6 +2256,7 @@ class Catalog:
 
                 # Post-RANSAC sigma clip on the full-catalog inliers;
                 # sigma=3.0 (not 2.5) is more stable for small samples.
+                n_sigma_outliers = 0
                 if np.sum(inlier_mask) > 5:
                     inlier_residuals = residuals_full[inlier_mask]
                     clip_sigma = 3.0 if np.sum(inlier_mask) < 30 else 2.5
@@ -2259,9 +2266,7 @@ class Catalog:
                         inlier_mask[inlier_mask] = residual_mask
                     else:
                         logger.warning("Shape mismatch in residual masking: %s vs %s, skipping sigma clip update", residual_mask.shape[0], np.sum(inlier_mask))
-                    n_sigma_outliers = np.sum(~residual_mask)
-                    if n_sigma_outliers > 0:
-                        logger.info("Post-RANSAC sigma clipping (sigma=%s) removed %s additional outliers", clip_sigma, n_sigma_outliers)
+                    n_sigma_outliers = int(np.sum(~residual_mask))
 
                 # Recompute the intercept on the final inlier set.
                 if np.sum(inlier_mask) > 1 and np.isfinite(slope):
@@ -2274,8 +2279,10 @@ class Catalog:
                     except Exception:
                         pass
 
-                logger.info(
-                    f"RANSAC: {np.sum(inlier_mask)}/{len(X_full)} inliers "                    f"(fit on {len(X_fit)}, applied to {len(X_full)}), "                    f"ZP={intercept:.3f}"
+                logger.debug(
+                    f"RANSAC: {np.sum(inlier_mask)}/{len(X_full)} inliers "
+                    f"(fit on {len(X_fit)}, applied to {len(X_full)}), "
+                    f"ZP={intercept:.3f}"
                 )
 
                 # Intercept error: standard error of the intercept.
@@ -2303,21 +2310,28 @@ class Catalog:
                         "n_inliers": n_points,
                     }
                 )
-                logger.info(
-                    f"Constrained fit results:  Zeropoint = {intercept:.3f} +/- {intercept_error:.3f}"
-                )
 
                 # Linearity range = 0.5th to 95th flux percentile of inliers.
                 inlier_flux = flux[inlier_mask]
+                linear_range_str = ""
                 if len(inlier_flux) > 0:
                     min_flux = np.percentile(inlier_flux, 0.5)
                     max_flux = np.percentile(inlier_flux, 95)
                     saturation_range = [min_flux, max_flux]
-                    logger.info(
-                        f"Linearity range (0.5-95% flux percentiles): {min_flux:.1f} - {max_flux:.1f}"
-                    )
+                    linear_range_str = f" | flux range {min_flux:.0f}-{max_flux:.0f}"
                 else:
                     logger.warning("No inliers found for linearity range calculation")
+
+                _zp_err_str = (
+                    f" +/- {intercept_error:.3f}"
+                    if np.isfinite(intercept_error)
+                    else ""
+                )
+                logger.info(
+                    f"Linearity fit: {n_points}/{len(X_full)} inliers "
+                    f"(RANSAC on {len(X_fit)} high-S/N, -{n_sigma_outliers} clip) | "
+                    f"ZP={intercept:.3f}{_zp_err_str}{linear_range_str}"
+                )
 
                 fit_line = lambda x: slope * x + intercept
             else:
@@ -2949,7 +2963,7 @@ class Catalog:
                     radial_profiles.append(norm(radial_profile(normalized_cutout)))
                     valid_indices.append(i)
                 else:
-                    logger.info("Star %s rejected: zero or negative flux.", i)
+                    logger.debug("Star %s rejected: zero or negative flux.", i)
 
             except Exception as e:
                 logger.warning(

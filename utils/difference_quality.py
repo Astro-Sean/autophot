@@ -716,7 +716,7 @@ def write_quality_manifest(
     try:
         with open(output_path, "w") as f:
             json.dump(manifest, f, indent=2, default=str)
-        logger.info("Difference-image quality manifest written to %s", output_path)
+        logger.debug("Difference-image quality manifest written to %s", output_path)
     except Exception as e:
         logger.warning("Failed to write quality manifest to %s: %s", output_path, e)
 

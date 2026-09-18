@@ -154,21 +154,14 @@ def run_sfft() -> Optional[int]:
     if not logging.getLogger().handlers:
         logging.basicConfig(
             level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            datefmt="%H:%M:%S",
+            format="%(message)s",
         )
         # Add ANSI highlighting for WARN/ERROR/DEBUG in the console.
         root_logger = logging.getLogger()
         _normalize_filter = LogMessageNormalizeFilter(width=120)
         for h in root_logger.handlers:
             h.addFilter(_normalize_filter)
-            h.setFormatter(
-                ColoredLevelFormatter(
-                    fmt="%(asctime)s - %(levelname)s - %(message)s",
-                    datefmt="%H:%M:%S",
-                    use_color=True,
-                )
-            )
+            h.setFormatter(ColoredLevelFormatter(use_color=True))
     logger = logging.getLogger(__name__)
     warnings.filterwarnings("ignore")
     t0_total = time.time()

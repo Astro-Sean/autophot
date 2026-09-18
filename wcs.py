@@ -31,7 +31,7 @@ from astropy.table import Table
 
 # --- Local Imports (optional) ---
 try:
-    from functions import log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header  # type: ignore
+    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header  # type: ignore
 except (ModuleNotFoundError, ImportError):
     # Minimal fallback for environments missing the full photometry stack.
     def log_step(message: str, *args, **kwargs) -> str:
@@ -49,6 +49,12 @@ except (ModuleNotFoundError, ImportError):
     def remove_wcs_from_header(header):
         raise RuntimeError("remove_wcs_from_header not available: functions module not found")
 
+    def clean_subprocess_log(path):
+        return None
+
+    def strip_subprocess_noise(text):
+        return str(text)
+
 
 def _resolve_sextractor_exe():
     """Lazy resolver for SExtractor executable to avoid circular import."""
@@ -61,8 +67,7 @@ def _resolve_sextractor_exe():
 # --- Configure Logging ---
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%H:%M:%S",
+    format="%(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -598,7 +603,7 @@ def _extract_corr_points_from_solve_field(
 
     if x_col is None or y_col is None or ra_col is None or dec_col is None:
         return None
-    logger.info(
+    logger.debug(
         "solve-field .corr column mapping: x=%s y=%s ra=%s dec=%s",
         str(x_col),
         str(y_col),
@@ -1336,6 +1341,7 @@ class WCSSolver:
         output_file = output_file or input_file
         with open(output_file, "w") as f:
             f.write(clean_content)
+        clean_subprocess_log(output_file)
         return output_file
 
     def _resolve_astrometry_data_dir(self, solvefield_exe: str) -> str | None:
@@ -1660,9 +1666,11 @@ class WCSSolver:
                         "SExtractor stdout: %s", result.stdout.decode("utf-8", errors="replace")
                     )
                 if result.stderr:
-                    logger.warning(
-                        "SExtractor stderr: %s", result.stderr.decode("utf-8", errors="replace")
+                    _stderr = strip_subprocess_noise(
+                        result.stderr.decode("utf-8", errors="replace")
                     )
+                    if _stderr:
+                        logger.warning("SExtractor stderr: %s", _stderr)
             except subprocess.TimeoutExpired:
                 logger.warning(
                     "SExtractor for SCAMP exceeded timeout (%.1f s)", timeout_sec
@@ -2094,7 +2102,7 @@ class WCSSolver:
             )
             return np.nan
         else:
-            logger.info("Using solve-field executable: %s", solvefield_exe)
+            logger.debug("Using solve-field executable: %s", solvefield_exe)
             self._solvefield_exe = solvefield_exe
         if not os.path.isfile(self.fpath):
             logger.error("Image file not found: %s", self.fpath)
@@ -2172,7 +2180,7 @@ class WCSSolver:
                 wcs_cfg, self.header, self.default_input
             )
             create_conv_file(conv_filter_path, fwhm_pixels=conv_fwhm_pix)
-            logger.info(
+            logger.debug(
                 "solve-field/SExtractor convolution kernel built from FWHM=%.2f px",
                 conv_fwhm_pix,
             )
@@ -2234,7 +2242,7 @@ class WCSSolver:
             # --- Prepare SExtractor command ---
             sextractor_cmd = None
             if use_sextractor:
-                logger.info(
+                logger.debug(
                     "Using SExtractor with Gaussian convolution filter for source detection."
                 )
                 sextractor_cmd = str(sextractor_exe)
@@ -2348,7 +2356,7 @@ class WCSSolver:
                     if n_objs > 0:
                         common_args.insert(-1, "--objs")
                         common_args.insert(-1, str(n_objs))
-                        logger.info(
+                        logger.debug(
                             "solve-field object budget: --objs %d", n_objs
                         )
                 except Exception:
@@ -2394,7 +2402,7 @@ class WCSSolver:
                     "solve-field: using --crpix-center (reference pixel at image center)"
                 )
             else:
-                logger.info(
+                logger.debug(
                     "solve-field: omitting --crpix-center (solver reference pixel; often closer to instrument WCS - set wcs.solve_field_crpix_center: true for legacy)"
                 )
             # Tweak order(s) for solve-field. Single int or list, e.g. YAML:
@@ -2457,7 +2465,7 @@ class WCSSolver:
                     )
                     tweak_orders = [0]
 
-            logger.info("solve-field tweak order sequence: %s", tweak_orders)
+            logger.debug("solve-field tweak order sequence: %s", tweak_orders)
 
             # --- Step 1: Optional verify existing WCS ---
             if not skip_verify:
