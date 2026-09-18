@@ -40,7 +40,11 @@ from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.linear_model import RANSACRegressor
 
 from scipy.optimize import minimize
-from scipy.odr import ODR, Model, RealData
+# scipy.odr is deprecated since SciPy 1.17 (odrpack is the suggested
+# replacement); silence the import-time warning until the dependency moves.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+    from scipy.odr import ODR, Model, RealData
 from scipy.special import logsumexp
 
 # ---------------------------------------------------------------------------
@@ -50,7 +54,7 @@ from functions import log_step, snr_err, set_size, calculate_bins, normalize_pho
 from plotting_utils import (
     get_color, get_ransac_color, get_marker_size, get_alpha, get_line_width,
     apply_autophot_mplstyle, ransac_legend_top_outside, ransac_grid, ransac_savefig,
-    get_plot_ext,
+    get_plot_ext, safe_tight_layout,
 )
 
 # ---------------------------------------------------------------------------
@@ -634,30 +638,25 @@ class Zeropoint:
                     logger.info("%d sources remaining after magnitude-only clean", len(cleaned))
                     return cleaned
 
+            removed_parts: list[str] = []
+
             valid_mags = sources[filter_col].notna()
             n_missing = (~valid_mags).sum()
             if n_missing > 0:
-                logger.info("Removing %s sources with missing %s", n_missing, filter_col)
+                removed_parts.append(f"{n_missing} missing {filter_col}")
 
             too_bright = sources[filter_col] < upperMaglimit
             too_faint = sources[filter_col] > lowerMaglimit
             n_brightness = (too_bright | too_faint).sum()
             if n_brightness > 0:
-                logger.info(
-                    "Removing %d sources outside magnitude range %.2f-%.2f mag",
-                    n_brightness,
-                    upperMaglimit,
-                    lowerMaglimit,
+                removed_parts.append(
+                    f"{n_brightness} mag-range[{upperMaglimit:.1f}-{lowerMaglimit:.1f}]"
                 )
 
             low_snr = sources["threshold"] < threshold_limit
             n_snr = low_snr.sum()
             if n_snr > 0:
-                logger.info(
-                    "Removing %d sources with detection threshold < %.1f",
-                    n_snr,
-                    threshold_limit,
-                )
+                removed_parts.append(f"{n_snr} threshold<{threshold_limit:.0f}")
 
             # Also enforce an explicit S/N cut on photometric SNR columns.
             # Prefer aperture/PSF SNR (SNR, snr_ap, snr_psf) over peak pixel SNR (snr),
@@ -667,11 +666,7 @@ class Zeropoint:
                     _bad = sources[_snr_col] < 3.0
                     n_bad = int(_bad.sum())
                     if n_bad > 0:
-                        logger.info(
-                            "Removing %d sources with %s < 3.0",
-                            n_bad,
-                            _snr_col,
-                        )
+                        removed_parts.append(f"{n_bad} {_snr_col}<3")
                         low_snr = low_snr | _bad
                     break
 
@@ -708,17 +703,9 @@ class Zeropoint:
                 n_sat = int(np.count_nonzero(saturated_mask))
                 n_nonlin = int(np.count_nonzero(non_linear_mask & ~saturated_mask))
                 if n_sat > 0:
-                    logger.info(
-                        "Removing %d saturated zeropoint sources (peak_flux >= %.2f x saturate).",
-                        n_sat,
-                        sat_peak_frac,
-                    )
+                    removed_parts.append(f"{n_sat} saturated")
                 if n_nonlin > 0:
-                    logger.info(
-                        "Removing %d near non-linear zeropoint sources (peak_flux >= %.2f x saturate).",
-                        n_nonlin,
-                        nonlin_peak_frac,
-                    )
+                    removed_parts.append(f"{n_nonlin} non-linear")
 
             # Reject sources with bad SExtractor FLAGS (blended, truncated, etc.)
             zp_max_flags = int(zp_cfg.get("max_flags", 2))
@@ -730,10 +717,7 @@ class Zeropoint:
                     break
             n_flags = int(flags_mask.sum())
             if n_flags > 0:
-                logger.info(
-                    "Removing %d sources with FLAGS > %d from zeropoint calibration.",
-                    n_flags, zp_max_flags,
-                )
+                removed_parts.append(f"{n_flags} FLAGS>{zp_max_flags}")
 
             # Reject sources with anomalous FWHM (extended galaxies, blends,
             # cosmic rays).  The FWHM column is transferred from SExtractor
@@ -760,12 +744,11 @@ class Zeropoint:
                         )
                         n_fwhm_rej = int(fwhm_mask.sum())
                         if n_fwhm_rej > 0:
-                            logger.info(
-                                "Removing %d sources with anomalous FWHM "
-                                "(outside %.1f-sigma: [%.2f, %.2f] px, "
-                                "median=%.2f px, MAD=%.2f px).",
-                                n_fwhm_rej, fwhm_sigma,
-                                _fwhm_lo, _fwhm_hi,
+                            removed_parts.append(f"{n_fwhm_rej} FWHM-outlier")
+                            logger.debug(
+                                "FWHM rejection window: %.1f-sigma outside "
+                                "[%.2f, %.2f] px (median=%.2f px, MAD=%.2f px).",
+                                fwhm_sigma, _fwhm_lo, _fwhm_hi,
                                 _med_fwhm, _mad_fwhm,
                             )
                     else:
@@ -790,7 +773,11 @@ class Zeropoint:
                 & (~fwhm_mask)
             )
             cleaned = sources.loc[mask].copy()
-            logger.info("%d sources remaining after quality cuts", len(cleaned))
+            detail = f" (removed: {', '.join(removed_parts)})" if removed_parts else ""
+            logger.info(
+                "ZP cleaning: %d -> %d sources%s",
+                len(sources), len(cleaned), detail,
+            )
             return cleaned
 
         except Exception as exc:
@@ -1297,7 +1284,7 @@ class Zeropoint:
         _sys_floor = max(0.0, mad_delta ** 2 - _med_var_perp)
         if _sys_floor > 0:
             var_perp = var_perp + _sys_floor
-            logger.info(
+            logger.debug(
                 "MCMC: added systematic floor %.4f mag^2 (sigma=%.4f mag) "
                 "to var_perp (MAD=%.4f, median var_perp=%.6f -> %.6f)",
                 _sys_floor, np.sqrt(_sys_floor), mad_delta,
@@ -1319,9 +1306,9 @@ class Zeropoint:
             and len(delta) >= 5
         ):
             logger.info(
-                "MCMC fast-path: data is clean (MAD=%.4f < 1.5*med_err=%.4f, "
-                "max_resid=%.4f < 4*med_err=%.4f); using weighted mean instead of MCMC",
-                mad_delta, _med_err, _max_resid, _med_err,
+                "ZP fast-path: clean data (MAD=%.4f, max_resid=%.4f vs "
+                "med_err=%.4f); weighted mean used instead of MCMC",
+                mad_delta, _max_resid, _med_err,
             )
             inlier_mask_fast = np.abs(delta - _weighted_mean) < 4.0 * np.sqrt(var_perp)
             full_mask_fast = np.zeros(n_input, dtype=bool)
@@ -1501,9 +1488,9 @@ class Zeropoint:
                     warnings.simplefilter("ignore")
                     tau_arr = sampler.get_autocorr_time(quiet=True)
                 tau_est = float(np.nanmean(tau_arr))
-                logger.info("[ZP MCMC] acc=%.3f  tau~%.1f", acc, tau_est)
+                logger.debug("[ZP MCMC] acc=%.3f  tau~%.1f", acc, tau_est)
             except Exception:
-                logger.info("[ZP MCMC] acc=%.3f", acc)
+                logger.debug("[ZP MCMC] acc=%.3f", acc)
 
             if not 0.15 <= acc <= 0.8:
                 logger.warning("[ZP MCMC] Suboptimal acceptance; consider tuning n_walkers")
@@ -2375,7 +2362,7 @@ class Zeropoint:
                     "fit_zeropoint: no inliers from any flux type; returning unfiltered clean_catalog."
                 )
 
-            logger.info("[fit_zeropoint] Done in %.3fs", time.time() - t0)
+            logger.debug("[fit_zeropoint] Done in %.3fs", time.time() - t0)
             return clean_catalog, fit_params
 
         except Exception as exc:
@@ -2973,7 +2960,7 @@ class Zeropoint:
                     handlelength=0,
                     handletextpad=0,
                 )
-                fig_hist.tight_layout()
+                safe_tight_layout(fig_hist)
                 os.makedirs(write_dir, exist_ok=True)
                 ransac_savefig(fig_hist, os.path.join(write_dir, f"Zeropoint_Hist_{base_name}{get_plot_ext(self.input_yaml)}"))
                 plt.close(fig_hist)

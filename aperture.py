@@ -69,6 +69,7 @@ from functions import (
     log_warning_from_exception,
     mag,
     set_size,
+    resolve_verbose_level,
 )
 
 # ---------------------------------------------------------------------------
@@ -827,17 +828,20 @@ class Aperture:
       pixel), consistent with ``flux_AP`` in ``beta_aperture``-style S/N.
     """
 
-    def __init__(self, input_yaml: dict, image: np.ndarray, verbose: int = 1):
+    def __init__(self, input_yaml: dict, image: np.ndarray, verbose: int | None = None):
         """
         Parameters
         ----------
         input_yaml : dict   pipeline configuration
         image      : ndarray  2-D science image
-        verbose    : int      0 = quiet, 1 = normal, 2 = debug
+        verbose    : int      0 = quiet, 1 = normal, 2 = debug; None reads
+                     ``global_verbose_level`` from *input_yaml*.
         """
         self.input_yaml = input_yaml
         self.image = image
-        self.verbose = verbose
+        if verbose is None:
+            verbose = (input_yaml or {}).get("global_verbose_level", 1)
+        self.verbose = resolve_verbose_level(verbose)
 
     # -----------------------------------------------------------------------
     # Background statistics helpers
@@ -957,7 +961,7 @@ class Aperture:
         plot: bool = False,
         background_rms: np.ndarray = None,
         saveTarget: bool = False,
-        verbose: int = 1,
+        verbose: int | None = None,
         n_jobs: int = None,
         mask: np.ndarray = None,
     ) -> pd.DataFrame:
@@ -974,7 +978,8 @@ class Aperture:
         plot           : save per-source diagnostic PDF
         background_rms : 2-D RMS map for error model
         saveTarget     : use filename stem (not index) when naming plot files
-        verbose        : 0 quiet, 1 normal, 2 debug
+        verbose        : 0 quiet, 1 normal, 2 debug; None reads
+                         ``global_verbose_level`` from ``input_yaml``
         n_jobs         : worker processes; None -> 1 (serial)
 
         Returns
@@ -990,6 +995,9 @@ class Aperture:
         pd.options.mode.chained_assignment = None
 
         logger = logging.getLogger(__name__)
+        if verbose is None:
+            verbose = (self.input_yaml or {}).get("global_verbose_level", 1)
+        verbose = resolve_verbose_level(verbose)
 
         # ---- Configuration -------------------------------------------------
         fwhm = float(self.input_yaml["fwhm"])
@@ -2643,7 +2651,7 @@ class Aperture:
             except Exception:
                 pass
 
-            from plotting_utils import get_plot_ext
+            from plotting_utils import get_plot_ext, safe_tight_layout
             save_loc = os.path.join(
                 self.input_yaml["write_dir"],
                 f'Optimum_Aperture_{self.input_yaml["base"]}{get_plot_ext(self.input_yaml)}',
@@ -2745,7 +2753,7 @@ class Aperture:
             ax1.set_ylim(-0.05, 1.05)
             ax1.set_xlim(-0.05, max_radius + 0.05)
 
-            fig.tight_layout()
+            safe_tight_layout(fig)
 
             fig.savefig(save_loc, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
@@ -2892,7 +2900,7 @@ class Aperture:
 
         if plot:
             plt.ioff()
-            from plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext
+            from plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext, safe_tight_layout
             apply_autophot_mplstyle()
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.2))
             try:
@@ -2907,7 +2915,7 @@ class Aperture:
             ax.set_ylabel("Number of Sources")
             ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
                       frameon=False, fontsize=8)
-            fig.tight_layout()
+            safe_tight_layout(fig)
             png_path = os.path.join(
                 write_dir,
                 f"Aperture_Correction_{base_name}{get_plot_ext(self.input_yaml)}",

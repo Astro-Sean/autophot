@@ -219,7 +219,7 @@ from aperture import (
     resolve_exposure_time_seconds,
     resolve_gain_e_per_adu,
 )
-from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, PLOT_COLORS
+from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, safe_tight_layout, PLOT_COLORS
 
 
 def _effective_exposure_seconds(input_yaml: dict) -> float:
@@ -1708,9 +1708,15 @@ class Limits:
                         cutout_cy = _new_cy
                         H, W = cutout.shape
                         logger.info(
-                            "Re-extracted injection cutout: scale %.1f -> %.1f, "
-                            "size %dx%d -> %dx%d (target=%.1f,%.1f cutout_cx=%.1f,%.1f "
-                            "needed_half=%.1f edge_margin=%.1f r_max=%.1f excl=%.1f)",
+                            "Re-extracted injection cutout:"
+                            "\n    scale: %.1f -> %.1f"
+                            "\n    size: %dx%d -> %dx%d"
+                            "\n    target: %.1f, %.1f"
+                            "\n    cutout_cx: %.1f, %.1f"
+                            "\n    needed_half: %.1f"
+                            "\n    edge_margin: %.1f"
+                            "\n    r_max: %.1f"
+                            "\n    excl: %.1f",
                             float(base_scale), float(scale_used),
                             _old_W, _old_H, int(W), int(H),
                             float(_orig_position[0]), float(_orig_position[1]),
@@ -1774,7 +1780,7 @@ class Limits:
                         flux_guess = float(guess_k) * sigma_med * float(np.sqrt(area_med))
                         if np.isfinite(flux_guess) and flux_guess > 0:
                             initialGuess = float(mag(flux_guess))
-                            logger.info(
+                            logger.debug(
                                 "Injected limiting magnitude: initial guess from %.1f*sigma*sqrt(Npix) = %.2f (sigma=%.3g, Npix=%.1f, N=%d)",
                                 float(guess_k),
                                 float(initialGuess),
@@ -1783,7 +1789,7 @@ class Limits:
                                 int(np.count_nonzero(ok)),
                             )
                     else:
-                        logger.info(
+                        logger.debug(
                             "Injected limiting magnitude: sigma-based initial guess unavailable (N=%d); using %.2f",
                             int(np.count_nonzero(ok)),
                             float(initialGuess),
@@ -2003,10 +2009,21 @@ class Limits:
             n5 = int(len(cand_df))
 
             logger.info(
-                "Injection candidate attrition: generated=%d -> excl_target=%d -> "
-                "edge=%d -> aperture_validity=%d -> annulus_support=%d -> pixel_stats=%d "
-                "(cutout %dx%d, cx=%.1f cy=%.1f, r_min=%.1f r_max=%.1f edge_margin=%.1f "
-                "ap_r=%.1f annulus_in=%.1f annulus_out=%.1f)",
+                "Injection candidate attrition:"
+                "\n    generated: %d"
+                "\n    excl_target: %d"
+                "\n    edge: %d"
+                "\n    aperture_validity: %d"
+                "\n    annulus_support: %d"
+                "\n    pixel_stats: %d"
+                "\n    cutout: %dx%d"
+                "\n    center: %.1f, %.1f"
+                "\n    r_min: %.1f"
+                "\n    r_max: %.1f"
+                "\n    edge_margin: %.1f"
+                "\n    ap_r: %.1f"
+                "\n    annulus_in: %.1f"
+                "\n    annulus_out: %.1f",
                 n0, n1, n2, n3, n4, n5,
                 int(W), int(H), float(cutout_cx), float(cutout_cy),
                 float(r_min_with_jitter), float(r_max), float(edge_margin),
@@ -2033,7 +2050,7 @@ class Limits:
                     cutout_cx, cutout_cy, cutout,
                     float(annulus_in_local), float(annulus_out_local)
                 )
-                logger.info(
+                logger.debug(
                     "Target annulus statistics: mean=%.3f, std=%.3f",
                     target_mean, target_std
                 )
@@ -2248,7 +2265,7 @@ class Limits:
                 _rate = float(det_flags.mean()) if len(det_flags) else 0.0
                 _n_det = int(det_flags.sum())
                 _n_tot = len(det_flags)
-                logger.info(
+                logger.debug(
                     "inject m=%+7.3f | %5.1f%%  (%d/%d detected)",
                     m, 100.0 * _rate, _n_det, _n_tot,
                 )
@@ -2661,7 +2678,7 @@ class Limits:
                 )
             else:
                 logger.info(
-                    "\u26a0 Limiting magnitude search failed  [%.1fs]", elapsed
+                    "Limiting magnitude search failed  [%.1fs]", elapsed
                 )
 
             # The limiting magnitude is already exposure-time-normalized via flux_for_mag
@@ -3012,7 +3029,7 @@ class Limits:
             # x is inverted (bright on the left): the completeness curve
             # occupies the upper-left plateau, so put the legend lower-left.
             ax.legend(loc="lower left", fontsize=8, frameon=False)
-            fig.tight_layout()
+            safe_tight_layout(fig)
             fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
         except Exception:
@@ -3225,7 +3242,7 @@ class Limits:
         ax.legend(fontsize=8, frameon=False)
         ax.grid(True, alpha=0.3, linestyle="--")
         
-        fig.tight_layout()
+        safe_tight_layout(fig)
         save_loc = os.path.join(
             write_dir, f"SNR_vs_Mag_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
         )
@@ -4247,7 +4264,7 @@ class Limits:
                     )
 
         if owns_figure:
-            fig.tight_layout(pad=0.8, h_pad=0.6, w_pad=0.6)
+            safe_tight_layout(fig, pad=0.8, h_pad=0.6, w_pad=0.6)
             save_loc_png = os.path.join(
                 write_dir, f"Completeness_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
             )
@@ -4596,7 +4613,7 @@ class Limits:
                   frameon=False, ncol=2, fontsize=8)
         ax.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
 
-        fig.tight_layout()
+        safe_tight_layout(fig)
         save_path = os.path.join(
             write_dir, f"Injection_Recovery_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
         )
@@ -4710,7 +4727,7 @@ class Limits:
         # S/N row labels are drawn by _plot_completeness on the leftmost panel
         # of each inset row (axis-anchored, so they track the row).
 
-        fig.tight_layout()
+        safe_tight_layout(fig)
         fpath = str(self.input_yaml.get("fpath", "frame"))
         base = os.path.splitext(os.path.basename(fpath))[0]
         write_dir = (

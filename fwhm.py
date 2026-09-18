@@ -1446,8 +1446,10 @@ class Find_FWHM:
         keep_mask = ~dilated_mask[y_idx, x_idx]
         sources_clean = sources[keep_mask]
         sources_rejected = sources[~keep_mask]
-        self.logger.info("Sources kept: %s", len(sources_clean))
-        self.logger.info("Sources rejected: %s", len(sources_rejected))
+        self.logger.debug(
+            "Spike-mask source filter: kept %s, rejected %s",
+            len(sources_clean), len(sources_rejected),
+        )
         return sources_clean, sources_rejected
 
     # =============================================================================

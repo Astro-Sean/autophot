@@ -53,18 +53,12 @@ class Prepare:
         self.input_yaml = default_input
         logging.basicConfig(
             level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
+            format="%(message)s",
         )
         # Colored level names on console output.
         root_logger = logging.getLogger()
         for handler in root_logger.handlers:
-            handler.setFormatter(
-                ColoredLevelFormatter(
-                    fmt="%(asctime)s - %(levelname)s - %(message)s",
-                    datefmt="%H:%M:%S",
-                    use_color=True,
-                )
-            )
+            handler.setFormatter(ColoredLevelFormatter(use_color=True))
         self.logger = logging.getLogger(__name__)
 
     # --- Load Configuration ---

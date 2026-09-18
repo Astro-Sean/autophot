@@ -143,6 +143,9 @@ from functions import (
     odd,
     LogMessageNormalizeFilter,
     safe_fits_write,
+    resolve_verbose_level,
+    verbose_to_log_level,
+    VERBOSE_LEVELS,
 )
 from limits import BETA_APERTURE_SIGMA_N, Limits, _analytic_psf_for_injection
 from plot import Plot
@@ -483,6 +486,30 @@ def run_photometry():
         help="Flag to prepare a template.",
         default=False,
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="verbose",
+        action="store_true",
+        help="Debug verbosity: show detailed diagnostics (overrides global_verbose_level).",
+        default=False,
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        dest="quiet",
+        action="store_true",
+        help="Quiet mode: warnings and errors only (overrides global_verbose_level).",
+        default=False,
+    )
+    parser.add_argument(
+        "--verbose-level",
+        dest="verbose_level",
+        type=str,
+        default=None,
+        metavar="LEVEL",
+        help="Set verbosity explicitly: 0/1/2 or quiet, normal, debug (overrides global_verbose_level).",
+    )
     args = parser.parse_args()
 
     if bool(getattr(args, "config_help", False)):
@@ -510,6 +537,27 @@ def run_photometry():
             str(input_yaml_loc),
         )
         raise SystemExit(2)
+
+    # CLI verbosity flags override the YAML setting.  The resolved 0/1/2
+    # value is written back so every sub-component sees a consistent level.
+    _cli_verbose = None
+    if getattr(args, "verbose", False):
+        _cli_verbose = 2
+    elif getattr(args, "quiet", False):
+        _cli_verbose = 0
+    elif getattr(args, "verbose_level", None) is not None:
+        _cli_verbose = args.verbose_level
+    if _cli_verbose is not None:
+        input_yaml["global_verbose_level"] = _cli_verbose
+        if isinstance(_cli_verbose, str) and not _cli_verbose.strip().isdigit():
+            if _cli_verbose.strip().lower() not in VERBOSE_LEVELS:
+                logging.getLogger(__name__).warning(
+                    "Unknown --verbose-level %r; falling back to normal (1).",
+                    _cli_verbose,
+                )
+    input_yaml["global_verbose_level"] = resolve_verbose_level(
+        input_yaml.get("global_verbose_level", 1)
+    )
 
     # ap_n_jobs / lim_n_jobs are within-image parallelism (source loops,
     # injection trials); nCPU is separate and controls image-level
@@ -766,25 +814,19 @@ def run_photometry():
             logging.root.removeHandler(handler)
 
         # Global verbosity control (0=warnings/errors, 1=info, 2=debug).
-        vlevel = input_yaml.get("global_verbose_level", 1)
-        try:
-            vlevel = int(vlevel)
-        except Exception:
-            vlevel = 1
-        if vlevel <= 0:
-            log_level = logging.WARNING
-        elif vlevel == 1:
-            log_level = logging.INFO
-        else:
-            log_level = logging.DEBUG
+        # Already resolved to 0/1/2 after YAML load; resolve again for
+        # callers that build input_yaml by hand.
+        vlevel = resolve_verbose_level(input_yaml.get("global_verbose_level", 1))
+        log_level = verbose_to_log_level(vlevel)
 
         # Plain formatter for the file log (no ANSI codes).
         log_file = os.path.join(cur_dir, f"LOG_{input_yaml['base']}.log")
         file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
         file_handler.setLevel(log_level)
+        # No per-line timestamp: the run's wall-clock start/end are logged
+        # explicitly, so the level tag is the only prefix kept in the file.
         plain_formatter = PlainFormatter(
-            fmt="%(asctime)s - %(levelname)s - %(message)s",
-            datefmt="%H:%M:%S",
+            fmt="%(levelname)s - %(message)s",
         )
         file_handler.setFormatter(plain_formatter)
         
@@ -798,11 +840,7 @@ def run_photometry():
         console = logging.StreamHandler()
         console.setLevel(log_level)
 
-        formatter = ColoredLevelFormatter(
-            fmt="%(asctime)s - %(levelname)s - %(message)s",
-            datefmt="%H:%M:%S",
-            use_color=True,
-        )
+        formatter = ColoredLevelFormatter(use_color=True)
         console.setFormatter(formatter)
         console.addFilter(normalize_filter)
 
@@ -811,6 +849,13 @@ def run_photometry():
 
         # Prevents logging errors from crashing the program.
         logging.raiseExceptions = False
+
+        # Wall-clock bracket for the whole run; the console formatter prints
+        # no per-line timestamp, so the run's start/end live in the log itself.
+        logging.info(
+            "Started: %s",
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start)),
+        )
 
         # =============================================================================
         # Helper Function: Shorten Filename if Needed
@@ -3216,7 +3261,7 @@ def run_photometry():
             if hardware_defects_mask is not None and np.ndim(hardware_defects_mask) == 2:
                 _bad_pixel_mask = _bad_pixel_mask | hardware_defects_mask
             if not np.any(_bad_pixel_mask):
-                logging.info("No defect pixels found. Skipping source exclusion.")
+                logging.debug("No defect pixels found. Skipping source exclusion.")
                 excluded_sources = FWHMSources.iloc[
                     []
                 ]  # Empty DataFrame with same columns
@@ -3309,8 +3354,8 @@ def run_photometry():
 
             if initial_source_count != final_source_count:
                 logging.info(
-                    f"Using {final_source_count} sources within {min_separation} arcminutes from target"
-            )
+                    f"Using {final_source_count} sources within {min_separation.to(u.arcmin).value:.1f} arcmin of target"
+                )
 
         imageWCS = get_wcs(header)
 
@@ -3653,7 +3698,7 @@ def run_photometry():
                                     | (_fwhm_plot > _fwhm_hi)
                                 )
 
-                        from plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext
+                        from plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext, safe_tight_layout
                         apply_autophot_mplstyle()
                         plt.ioff()
                         _fig, _ax = plt.subplots(figsize=set_size(540, 1))
@@ -3727,7 +3772,7 @@ def run_photometry():
                             _ymid = (_yhi + _ylo) / 2.0
                             _ylo, _yhi = _ymid - 0.5, _ymid + 0.5
                         _ax.set_ylim(_ylo, _yhi)
-                        _fig.tight_layout()
+                        safe_tight_layout(_fig)
 
                         _plot_path = os.path.join(
                             os.path.dirname(fpath),
@@ -3735,7 +3780,7 @@ def run_photometry():
                         )
                         _fig.savefig(_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
                         plt.close(_fig)
-                        logging.info("Saved FWHM vs instrumental magnitude plot: %s", _plot_path)
+                        logging.info("Saved FWHM vs instrumental magnitude plot: %s", os.path.basename(_plot_path))
             except Exception as _e:
                 logging.debug("FWHM vs inst_mag plot failed: %s", _e)
         else:
@@ -3808,7 +3853,7 @@ def run_photometry():
                             _phi = _pmed + _fwhm_sigma * _pmad
                             _prej = (_pfwhm_plot < _plo) | (_pfwhm_plot > _phi)
 
-                    from plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext
+                    from plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext, safe_tight_layout
                     apply_autophot_mplstyle()
                     plt.ioff()
                     _pfig, _pax = plt.subplots(figsize=set_size(540, 1))
@@ -3856,14 +3901,14 @@ def run_photometry():
                         _pymid = (_pyhi + _pylo) / 2.0
                         _pylo, _pyhi = _pymid - 0.5, _pymid + 0.5
                     _pax.set_ylim(_pylo, _pyhi)
-                    _pfig.tight_layout()
+                    safe_tight_layout(_pfig)
                     _plot_path_psf = os.path.join(
                         os.path.dirname(fpath),
                         f"FWHM_vs_InstMag_PSFPool_{os.path.splitext(os.path.basename(fpath))[0]}{get_plot_ext(input_yaml)}",
                     )
                     _pfig.savefig(_plot_path_psf, dpi=150, bbox_inches="tight", facecolor="white")
                     plt.close(_pfig)
-                    logging.info("Saved PSF pool FWHM vs inst_mag plot: %s", _plot_path_psf)
+                    logging.info("Saved PSF pool FWHM vs inst_mag plot: %s", os.path.basename(_plot_path_psf))
         except Exception as _e:
             logging.debug("PSF pool FWHM vs inst_mag plot failed: %s", _e)
 
@@ -4735,9 +4780,10 @@ def run_photometry():
             }
             labels_series = pd.Series(cluster_labels, index=MatchingSources.index)
             merged_sources = MatchingSources.groupby(labels_series).agg(agg_funcs)
-            logging.info(
-                f"Collapsed {len(MatchingSources)} -> {len(merged_sources)} median sources"
-            )
+            if len(merged_sources) < len(MatchingSources):
+                logging.info(
+                    f"Collapsed {len(MatchingSources)} -> {len(merged_sources)} median sources"
+                )
 
             cluster_counts = labels_series.value_counts().to_dict()
 
@@ -5010,7 +5056,7 @@ def run_photometry():
                 # Use standard aperture radius instead of large doubled aperture
                 # Large apertures cause aperture_sum_invalid in highly masked images
                 science_aperture = aperture_radius
-                logging.info(
+                logging.debug(
                     f"Using aperture for science image: {science_aperture:.1f} pixels"
                 )
 
@@ -5029,7 +5075,7 @@ def run_photometry():
                 template_fwhm = template_header.get("FWHM", 3)
 
                 template_aperture_size = aperture_radius
-                logging.info(
+                logging.debug(
                     f"Using aperture for reference image: {template_aperture_size:.1f} pixels"
                 )
 
@@ -5047,11 +5093,6 @@ def run_photometry():
                         "Template header lacks EXPTIME; using %.3g s for aperture photometry.",
                         float(template_exposure),
                     )
-                logging.info(
-                    "Template exposure time: %.5g s (header %s)",
-                    float(template_exposure),
-                    tpl_exp_key,
-                )
                 try:
                     template_gain, tpl_gain_key = gain_e_per_adu_from_header(
                         template_header, None
@@ -5063,9 +5104,10 @@ def run_photometry():
                         "Template header lacks GAIN; using gain=1.0 e-/ADU for aperture photometry."
                     )
                 logging.info(
-                    "Template gain: %.5g e-/ADU (header %s)",
+                    "Template: exptime=%.5g s, gain=%.5g e-/ADU, aperture=%.1f px",
+                    float(template_exposure),
                     float(template_gain),
-                    tpl_gain_key,
+                    template_aperture_size,
                 )
                 template_aperture = Aperture(
                     input_yaml=input_yaml, image=template_image
@@ -5257,7 +5299,7 @@ def run_photometry():
                         if np.any(well_aligned_mask)
                         else 0.0
                     )
-                    logging.info(
+                    logging.debug(
                         f"Selected matching sources have mean centroid offset of {mean_offset:.3f} pixels"
                     )
 
@@ -5381,7 +5423,7 @@ def run_photometry():
                 # Cross-match science and template sources for subtraction
                 if len(image_sources) > 5:
                     template_obj = Templates(input_yaml=input_yaml)
-                    logging.info("Flux-consistent matching: input %s sources", len(image_sources))
+                    logging.debug("Flux-consistent matching: input %s sources", len(image_sources))
 
                     # PSF-fit-quality veto: only sources well fitted by the
                     # PSF model in BOTH images are kept (blends, extended
@@ -5612,11 +5654,9 @@ def run_photometry():
                     _has_roundness = "roundness" in ms.columns
                     _has_fwhm = any(c in ms.columns for c in ("fwhm", "fwhm_psf", "fwhm_model"))
                     _has_elong = any(c in ms.columns for c in ("ELONGATION", "elongation", "a", "b"))
-                    logging.info(
+                    logging.debug(
                         f"Source refinement input: {n_before_refine} sources, "
                         f"columns present: class_star={_has_class_star}, "
-                        f"roundness={_has_roundness}, fwhm={_has_fwhm}, "
-                        f"elongation={_has_elong}"
                         f"roundness={_has_roundness}, fwhm={_has_fwhm}, "
                         f"elongation={_has_elong}"
                     )
@@ -6983,9 +7023,11 @@ def run_photometry():
                             input_yaml["diff_quality_class"] = "downgrade"
                             input_yaml["diff_quality_score"] = _diff_qual_score
                         elif _diff_qual_class == "pass":
-                            logging.info(
+                            # The detailed quality line already reports the
+                            # score; PASS needs no extra user-facing line.
+                            logging.debug(
                                 "Difference-image quality PASSED (score=%.3f, "
-                                "dipoles=%d (%.1f%%).",
+                                "dipoles=%d (%.1f%%)).",
                                 _diff_qual_score, _diff_dipoles,
                                 _diff_dip_frac * 100,
                             )
@@ -7682,7 +7724,7 @@ def run_photometry():
                                     import matplotlib.pyplot as plt
 
                                     from astropy.visualization import ZScaleInterval
-                                    from plotting_utils import apply_autophot_mplstyle, get_plot_ext
+                                    from plotting_utils import apply_autophot_mplstyle, get_plot_ext, safe_tight_layout
                                     apply_autophot_mplstyle()
                                     _zs = ZScaleInterval()
                                     _cmap_v = plt.get_cmap("viridis").copy()
@@ -7715,14 +7757,14 @@ def run_photometry():
                                     _axes[2].set_xlabel("X (px)")
                                     _axes[2].set_ylabel("Y (px)")
                                     _fig.colorbar(_im2, ax=_axes[2], fraction=0.046, pad=0.04)
-                                    _fig.tight_layout(rect=[0, 0, 1, 0.92])
+                                    safe_tight_layout(_fig, rect=[0, 0, 1, 0.92])
                                     _plot_path = os.path.join(
                                         os.path.dirname(fpath),
                                         f"PSF_Convolution_{os.path.splitext(base_filename)[0]}{get_plot_ext(input_yaml)}",
                                     )
                                     _fig.savefig(_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
                                     plt.close(_fig)
-                                    logging.info("Saved PSF convolution diagnostic plot: %s", _plot_path)
+                                    logging.info("Saved PSF convolution diagnostic plot: %s", os.path.basename(_plot_path))
                                 except Exception as _pe:
                                     logging.debug("PSF convolution plot failed: %s", _pe)
                             else:
@@ -7876,7 +7918,7 @@ def run_photometry():
                             import matplotlib.pyplot as plt
 
                             from astropy.visualization import ZScaleInterval
-                            from plotting_utils import apply_autophot_mplstyle, get_plot_ext
+                            from plotting_utils import apply_autophot_mplstyle, get_plot_ext, safe_tight_layout
                             apply_autophot_mplstyle()
                             _zs_r = ZScaleInterval()
                             _cmap_vr = plt.get_cmap("viridis").copy()
@@ -7906,14 +7948,14 @@ def run_photometry():
                             _axes_r[2].set_xlabel("X (px)")
                             _axes_r[2].set_ylabel("Y (px)")
                             _fig_r.colorbar(_im2r, ax=_axes_r[2], fraction=0.046, pad=0.04)
-                            _fig_r.tight_layout(rect=[0, 0, 1, 0.92])
+                            safe_tight_layout(_fig_r, rect=[0, 0, 1, 0.92])
                             _plot_path_re = os.path.join(
                                 os.path.dirname(fpath),
                                 f"PSF_Reconv_Target_{os.path.splitext(base_filename)[0]}{get_plot_ext(input_yaml)}",
                             )
                             _fig_r.savefig(_plot_path_re, dpi=150, bbox_inches="tight", facecolor="white")
                             plt.close(_fig_r)
-                            logging.info("Saved PSF re-convolution diagnostic plot: %s", _plot_path_re)
+                            logging.info("Saved PSF re-convolution diagnostic plot: %s", os.path.basename(_plot_path_re))
                         except Exception as _pe_re:
                             logging.debug("PSF re-convolution plot failed: %s", _pe_re)
                 except Exception as _e:
@@ -8779,9 +8821,9 @@ def run_photometry():
                         
                         if decorr_status[0]:
                             diff_decorrelated = hdul[0].data
-                            logger.info("Adding decorrelated difference image as additional panel in subtraction check")
+                            logger.debug("Adding decorrelated difference image as additional panel in subtraction check")
                         else:
-                            logger.info("Decorrelated image exists but DECORR=False, skipping additional panel")
+                            logger.debug("Decorrelated image exists but DECORR=False, skipping additional panel")
                 
                 # Fall back to old naming convention
                 elif photometry_diff_path_old.exists():
@@ -8791,15 +8833,15 @@ def run_photometry():
                         with fits.open(diff_path) as hdul:
                             diff_header_check = hdul[0].header
                             decorr_status = diff_header_check.get("DECORR", (False, ""))
-                            logger.info("Main difference image (old naming) DECORR header: %s", decorr_status)
+                            logger.debug("Main difference image (old naming) DECORR header: %s", decorr_status)
                             
                             if decorr_status[0]:
                                 diff_decorrelated = hdul[0].data
-                                logger.info("Adding decorrelated difference image (old naming) as additional panel in subtraction check")
+                                logger.debug("Adding decorrelated difference image (old naming) as additional panel in subtraction check")
                             else:
-                                logger.info("Main difference image (old naming) has DECORR=False, skipping additional panel")
+                                logger.debug("Main difference image (old naming) has DECORR=False, skipping additional panel")
                     else:
-                        logger.info("Main difference image not found at %s", diff_path)
+                        logger.debug("Main difference image not found at %s", diff_path)
                 else:
                     logger.debug("No decorrelated difference image found (checked both naming conventions)")
             except Exception as e:
@@ -9083,7 +9125,7 @@ def run_photometry():
         #  Calibrate Magnitudes
         for method in ["AP", "PSF"]:
             if method not in image_zeropoint or "zeropoint" not in image_zeropoint[method]:
-                logging.info("%s zeropoint not available - skipping", method)
+                logging.warning("%s zeropoint not available - magnitudes stay instrumental", method)
                 continue
             idx = 0
             # Strict subtraction quality mode: block photometry on failed
@@ -10884,12 +10926,23 @@ def run_photometry():
                 file.write(output_str)
                 image_sources.to_csv(file, index=False, float_format="%.6f")
 
-        end = time.time() - start
-        logging.info(log_step(f"Photometry finished [{end:.1f}s]"))
+        end = time.time()
+        logging.info(log_step("Photometry finished"))
+        logging.info(
+            "Finished: %s  (%.1f s)",
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end)),
+            end - start,
+        )
         logging.info("")
 
     except Exception as e:
         log_exception(e)
+        end = time.time()
+        logging.info(
+            "Aborted: %s  (%.1f s)",
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end)),
+            end - start,
+        )
 
     return None
 

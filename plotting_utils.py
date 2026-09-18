@@ -237,6 +237,32 @@ def apply_autophot_mplstyle():
         plt.style.use(p)
 
 
+def safe_tight_layout(fig=None, **kwargs):
+    """
+    ``fig.tight_layout()`` without the "Axes not compatible" UserWarning.
+
+    Any GridSpec built with explicit subplot params (hspace, wspace, ...)
+    is reported as locally modified, so matplotlib marks every Axes on it
+    as incompatible: tight_layout warns and adjusts nothing. The warning
+    is expected noise for this codebase, so it is filtered here while any
+    genuinely compatible axes still get adjusted. With fig=None the call
+    applies to the current figure (``plt.tight_layout`` equivalent).
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="This figure includes Axes that are not compatible",
+            category=UserWarning,
+        )
+        if fig is None:
+            import matplotlib.pyplot as plt
+            plt.tight_layout(**kwargs)
+        else:
+            fig.tight_layout(**kwargs)
+
+
 def ransac_legend_top_outside(ax, *, ncol: int = 2, fontsize: Optional[Union[int, str]] = 8):
     """Shared legend placement for RANSAC / photometry comparison figures."""
     ax.legend(

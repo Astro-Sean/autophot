@@ -188,7 +188,7 @@ try:
 except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
-from functions import log_warning_from_exception, safe_fits_write
+from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write
 try:
     from functions import download_zogy
 except ImportError:
@@ -243,8 +243,7 @@ except ImportError:
 # =============================================================================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%H:%M:%S",
+    format="%(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -4171,30 +4170,35 @@ class Templates:
                     sp = None
                     _try_sub_tile = _sub_tile
                     _aligned_ok = False
+                    # spalipy logs per-quad progress through the root logger;
+                    # keep only warnings on normal runs.
+                    from functions import quiet_root_logger
                     while not _aligned_ok:
                         for _try_order in _spalipy_orders_to_try:
-                            sp = Spalipy(
-                                _tpl_fill,
-                                source_mask=_tpl_nan if _tpl_nan.any() else None,
-                                template_data=_sci_fill,
-                                source_det=_tpl_det,
-                                template_det=sci_det,
-                                output_shape=scienceImage.shape,
-                                min_n_match=_min_match,
-                                n_quad_det=_n_quad,
-                                max_quad_hash_dist=_hash_dist,
-                                max_match_dist=_max_match_dist,
-                                min_quad_sep=_min_quad_sep,
-                                quad_edge_buffer=_quad_edge_buffer,
-                                max_quad_cand=_max_quad_cand,
-                                min_sep=_det_sep,
-                                interp_order=_interp_order,
-                                sub_tile=_try_sub_tile,
-                                spline_order=_try_order,
-                                cval=np.nan,
-                            )
+                            with quiet_root_logger():
+                                sp = Spalipy(
+                                    _tpl_fill,
+                                    source_mask=_tpl_nan if _tpl_nan.any() else None,
+                                    template_data=_sci_fill,
+                                    source_det=_tpl_det,
+                                    template_det=sci_det,
+                                    output_shape=scienceImage.shape,
+                                    min_n_match=_min_match,
+                                    n_quad_det=_n_quad,
+                                    max_quad_hash_dist=_hash_dist,
+                                    max_match_dist=_max_match_dist,
+                                    min_quad_sep=_min_quad_sep,
+                                    quad_edge_buffer=_quad_edge_buffer,
+                                    max_quad_cand=_max_quad_cand,
+                                    min_sep=_det_sep,
+                                    interp_order=_interp_order,
+                                    sub_tile=_try_sub_tile,
+                                    spline_order=_try_order,
+                                    cval=np.nan,
+                                )
                             try:
-                                sp.align()
+                                with quiet_root_logger():
+                                    sp.align()
                                 _aligned_ok = True
                                 break  # success
                             except Exception as _spalipy_err:
@@ -7600,13 +7604,16 @@ class Templates:
                     pass
 
                 logger.info(
-                    "Kernel sizing: FWHM_sci=%.2f FWHM_ref=%.2f FWHM_conv=%.2f px | "
-                    "hw_conv=%d hw_floor=%d (floor_mult=%.2f, capped=%d) -> kernel_hw=%d px "
-                    "(clamped %d-%d, n_eff=%d, max_hw_sources=%d, align_boost=%d)",
+                    "Kernel sizing: FWHM sci=%.2f ref=%.2f conv=%.2f px -> "
+                    "kernel_hw=%d px (hw_conv=%d, floor=%d, n_eff=%d)",
                     fwhm_sci, fwhm_ref, fwhm_conv,
-                    ker_hw_from_conv, ker_hw_floor, _floor_mult, _hw_floor_capped,
-                    ker_hw, KER_HW_MIN, KER_HW_MAX, n_eff, _max_hw_from_sources,
-                    _align_rms_boost,
+                    ker_hw, ker_hw_from_conv, ker_hw_floor, n_eff,
+                )
+                logger.debug(
+                    "Kernel sizing detail: floor_mult=%.2f capped=%d clamp=[%d,%d] "
+                    "max_hw_sources=%d align_boost=%d",
+                    _floor_mult, _hw_floor_capped, KER_HW_MIN, KER_HW_MAX,
+                    _max_hw_from_sources, _align_rms_boost,
                 )
 
             # Both SFFT and HOTPANTS use the same physics-based kernel half-width
@@ -7659,7 +7666,7 @@ class Templates:
             # =============================================================
             # 3. Build masks
             # =============================================================
-            logger.info("Building science and template masks...")
+            logger.debug("Building science and template masks...")
 
             # NaN / sentinel masks
             # NOTE: the original (abs(x) < 1.1e-20) & (x != 0) condition was
@@ -7771,7 +7778,7 @@ class Templates:
             )
 
             masked_percentage = np.sum(universal_mask) / universal_mask.size * 100
-            logger.info("Masked %.3f%% of pixels before subtraction", masked_percentage)
+            logger.debug("Masked %.3f%% of pixels before subtraction", masked_percentage)
 
             # =============================================================
             # 4. Background statistics on unmasked pixels
@@ -9239,7 +9246,7 @@ class Templates:
                 sfft_method = "sparse"
 
             logger.info("Starting SFFT subtraction via %s method...", sfft_method)
-            logger.info(
+            logger.debug(
                 "SFFT photometric scaling: ConstPhotRatio=%s",
                 const_phot_ratio,
             )
@@ -9250,7 +9257,7 @@ class Templates:
             # scale was not passed into _subtract_sfft.
             KER_HW_MIN = 3
             KER_HW_MAX = 50
-            logger.info(
+            logger.debug(
                 "SFFT kernel sizing: scale=%s, science_fwhm=%.2f, template_fwhm=%.2f",
                 scale,
                 float(science_fwhm),
@@ -9260,7 +9267,7 @@ class Templates:
             # physics-based quadrature formula.  Use it directly.
             if scale is not None and int(scale) > 0:
                 kernel_half_width = min(int(scale), KER_HW_MAX)
-                logger.info(
+                logger.debug(
                     "SFFT kernel half-width: %d px (from physics-based sizing)",
                     kernel_half_width,
                 )
@@ -9594,6 +9601,7 @@ class Templates:
                     cmd, check=True, text=True, stdout=lf, stderr=lf, env=sfft_env,
                     timeout=sfft_timeout
                 )
+            clean_subprocess_log(log_path)
             _active_log_holder[0] = log_path
 
             # Optional one-pass feedback: exclude SFFT post-anomaly sources and rerun.
@@ -9833,6 +9841,7 @@ class Templates:
                                     env=sfft_env,
                                     timeout=sfft_timeout,
                                 )
+                            clean_subprocess_log(retry_log_path)
                             if _diff_is_valid(str(outputFpath)):
                                 # Adopt the retry: flux-scaling metadata must be
                                 # re-parsed from the retry log below.
@@ -10054,6 +10063,7 @@ class Templates:
                             env=sfft_env,
                             timeout=sfft_timeout,
                         )
+                    clean_subprocess_log(discrep_log_path)
                     # Prefer the header FSCAL values (written by run_sfft.py
                     # from SFFT's return values); fall back to log parsing.
                     _conv_scale2 = _phot_scale2 = _discrep_pct2 = None
@@ -10196,6 +10206,7 @@ class Templates:
                             env=sfft_env,
                             timeout=sfft_timeout,
                         )
+                    clean_subprocess_log(cpr_log_path)
                     if not _diff_is_valid(str(outputFpath)):
                         logger.warning(
                             "SFFT ConstPhotRatio retry produced an invalid "
@@ -10341,6 +10352,7 @@ class Templates:
                             env=sfft_env,
                             timeout=sfft_timeout,
                         )
+                    clean_subprocess_log(fallback_log_path)
                     logger.info(
                         "SFFT succeeded with permissive flags fallback."
                     )
@@ -10397,6 +10409,7 @@ class Templates:
                             env=sfft_env,
                             timeout=sfft_timeout,
                         )
+                    clean_subprocess_log(cpr_exc_log_path)
                     # Parse flux scaling from the retry log
                     if cpr_exc_log_path.exists():
                         import re as _re_exc
@@ -10664,6 +10677,7 @@ class Templates:
                     check=True,
                     timeout=timeout_sec,
                 )
+            clean_subprocess_log(log_path)
 
             logger.info("HOTPANTS subtraction succeeded")
 

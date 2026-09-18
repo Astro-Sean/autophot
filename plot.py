@@ -19,6 +19,7 @@ try:
         get_marker_size,
         get_plot_color,
         get_plot_ext,
+        safe_tight_layout,
         PLOT_COLORS,
     )
 except ImportError:
@@ -28,6 +29,7 @@ except ImportError:
     get_marker_size = None
     get_plot_color = None
     get_plot_ext = lambda _iy=None: ".png"
+    safe_tight_layout = lambda fig=None, **kw: fig.tight_layout(**kw) if fig is not None else None
     PLOT_COLORS = {}
 
 try:
@@ -1347,7 +1349,7 @@ class Plot:
 
             # Leave headroom at top for the legend.
             if not skip_tight_layout:
-                fig.tight_layout(rect=[0, 0, 1, 0.92])
+                safe_tight_layout(fig, rect=[0, 0, 1, 0.92])
             ax1.set_aspect("equal", adjustable="box")
 
             _ext = get_plot_ext(self.input_yaml)
@@ -1863,7 +1865,7 @@ class Plot:
             handletextpad=0.5,
             ncol=ncols,
         )
-        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        safe_tight_layout(fig, rect=[0, 0, 1, 0.94])
 
         if bool(show):
             plt.show()
@@ -2786,7 +2788,7 @@ class Plot:
             plt.close(fig)
             logger.info(
                 "Match sources plot saved: %s (%d matched sources)",
-                save_path, n_matched,
+                os.path.basename(save_path), n_matched,
             )
         except Exception as e:
             logger.warning("Match sources plot failed: %s", e)

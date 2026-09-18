@@ -32,8 +32,10 @@ import matplotlib.pyplot as plt
 import traceback
 import textwrap
 import inspect
+import unicodedata
 
 import copy
+from contextlib import contextmanager
 from astropy.io import fits
 from astropy.time import Time
 from astropy.convolution import Gaussian2DKernel, convolve, interpolate_replace_nans
@@ -137,6 +139,16 @@ class ColoredLevelFormatter(logging.Formatter):
     Principle: Only warnings and errors get color. Routine output (INFO, DEBUG)
     remains plain black for clean, professional appearance.
 
+    Layout:
+        - No timestamp column: wall-clock time is logged once as a "Started:"
+          line at the top of each run and again at the end with the elapsed
+          seconds, so per-line timestamps only add noise.
+        - A bordered banner opens a section; a blank line precedes each banner
+          and each ``[Step]`` sub-section marker. Routine messages print flush
+          left so lines stay short.
+        - Non-INFO messages carry a ``[LEVEL]`` tag; wrapped continuation
+          lines align under the message text.
+
     Color scheme:
         - INFO/DEBUG:     Plain black (no color)
         - WARNING:        Yellow (attention needed, not critical)
@@ -153,8 +165,61 @@ class ColoredLevelFormatter(logging.Formatter):
         super().__init__(*args, **kwargs)
         self._use_color = use_color
         self._compact = compact
-        self._last_time = None
         self._msg_count = 0
+        self._in_section = False   # a banner has opened a pipeline section
+        self._last_kind = None     # "banner" | "step" | "msg"
+
+    @staticmethod
+    def _kind(msg: str) -> str:
+        first = msg.lstrip().split("\n")[0] if msg else ""
+        if first[:1] in ("-", "+", "="):
+            return "banner"
+        if (
+            first.startswith("[")
+            and first.rstrip().endswith("]")
+            and "\n" not in msg.strip()
+        ):
+            return "step"
+        return "msg"
+
+    @staticmethod
+    def _align_continuation(msg: str, col: int) -> str:
+        """Indent continuation lines of a multi-line message to column *col*."""
+        if "\n" not in msg:
+            return msg
+        head, *tail = msg.split("\n")
+        pad = " " * col
+        return "\n".join([head] + [(pad + ln) if ln.strip() else ln for ln in tail])
+
+    def _format_info(self, record: logging.LogRecord, msg_clean: str) -> str:
+        self._msg_count += 1
+        first_ever = self._msg_count == 1
+        kind = self._kind(msg_clean)
+
+        if kind == "banner":
+            self._in_section = True
+            lead = "" if first_ever else "\n"
+        elif kind == "step" and self._last_kind != "banner":
+            # Sub-step markers get a blank line unless a banner just opened.
+            lead = "" if first_ever else "\n"
+        else:
+            lead = ""
+        base = f"{lead}{msg_clean}"
+
+        self._last_kind = kind
+        return base
+
+    def _format_leveled(self, record: logging.LogRecord, msg_clean: str) -> str:
+        label = f"[{record.levelname}]"
+        msg_clean = self._align_continuation(msg_clean, len(label) + 1)
+        base = f"{label} {msg_clean}"
+        self._msg_count += 1
+        # Warnings and errors get a leading blank line so they stand out from
+        # the surrounding routine output; DEBUG lines stay dense.
+        if self._msg_count > 1 and record.levelno >= logging.WARNING:
+            base = f"\n{base}"
+        self._last_kind = "msg"
+        return base
 
     def format(self, record: logging.LogRecord) -> str:
         msg_raw = record.getMessage()
@@ -163,48 +228,14 @@ class ColoredLevelFormatter(logging.Formatter):
         if msg_clean != msg_raw:
             record.msg = msg_clean
             record.args = ()
-        
-        # Compact format: group messages by timestamp
-        # - Same-second messages: no blank line, indented
-        # - New timestamp: blank line before, show timestamp
+
         if self._compact and record.levelno == logging.INFO:
-            time_str = self.formatTime(record, "%H:%M:%S")
-            self._msg_count += 1
-            
-            if self._msg_count == 1:
-                # First message ever: show timestamp (or just bordered message if bordered)
-                first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
-                if first_line[:1] in ("-", "+", "+"):
-                    base = f"\n{msg_clean}"
-                else:
-                    base = f"{time_str}  {msg_clean}"
-            elif time_str == self._last_time:
-                # Same second as previous: no blank line, indent only
-                # For bordered messages: blank line before, no indent
-                first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
-                if first_line[:1] in ("-", "+", "+"):
-                    base = f"\n{msg_clean}"
-                else:
-                    base = f"  {msg_clean}"
-            else:
-                # New timestamp: blank line before
-                # For bordered messages: blank line before, but no timestamp (they have their own header)
-                first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
-                if first_line[:1] in ("-", "+", "+"):
-                    base = f"\n{msg_clean}"
-                else:
-                    base = f"\n{time_str}  {msg_clean}"
-            
-            self._last_time = time_str
+            base = self._format_info(record, msg_clean)
         else:
-            # Non-compact or non-INFO: use standard format with blank line before
-            base = super().format(record)
-            self._msg_count += 1
-            if self._msg_count > 1:
-                base = f"\n{base}"
-        
+            base = self._format_leveled(record, msg_clean)
+
         record.msg, record.args = old_msg, old_args
-        
+
         if not self._use_color:
             return base
 
@@ -226,16 +257,68 @@ class ColoredLevelFormatter(logging.Formatter):
         return base
 
 
+# Common non-ASCII symbols mapped to plain-ASCII equivalents so log output
+# stays readable in any terminal and grep-friendly in log files.
+_ASCII_TRANSLATE = {
+    ord("\u00b1"): "+/-",   # plus-minus
+    ord("\u00d7"): "x",     # multiplication sign
+    ord("\u00b0"): "deg",   # degree sign
+    ord("\u00b5"): "u",     # micro sign
+    ord("\u03bc"): "u",     # greek mu
+    ord("\u03c3"): "sigma",
+    ord("\u0394"): "Delta",
+    ord("\u03b4"): "delta",
+    ord("\u03b1"): "alpha",
+    ord("\u03b2"): "beta",
+    ord("\u03b3"): "gamma",
+    ord("\u03bb"): "lambda",
+    ord("\u03bd"): "nu",
+    ord("\u03b8"): "theta",
+    ord("\u03c6"): "phi",
+    ord("\u03c7"): "chi",
+    ord("\u03c0"): "pi",
+    ord("\u03a3"): "Sigma",
+    ord("\u2192"): "->",    # rightwards arrow
+    ord("\u2190"): "<-",    # leftwards arrow
+    ord("\u2194"): "<->",   # left right arrow
+    ord("\u2212"): "-",     # minus sign
+    ord("\u2265"): ">=",
+    ord("\u2264"): "<=",
+    ord("\u2260"): "!=",
+    ord("\u2248"): "~=",
+    ord("\u221e"): "inf",
+    ord("\u221a"): "sqrt",
+    ord("\u2013"): "-",     # en dash
+    ord("\u2014"): "-",     # em dash
+    ord("\u2026"): "...",   # ellipsis
+    ord("\u2018"): "'",
+    ord("\u2019"): "'",
+    ord("\u201c"): '"',
+    ord("\u201d"): '"',
+    ord("\u2022"): "-",     # bullet
+    ord("\u00b7"): ".",     # middle dot
+}
+
+
+def _to_ascii(text: str) -> str:
+    """Replace known symbols with ASCII and drop anything else non-ASCII."""
+    text = text.translate(_ASCII_TRANSLATE)
+    # NFKD folds accented letters (e.g. e-acute -> e) before the strip.
+    text = unicodedata.normalize("NFKD", text)
+    return text.encode("ascii", "ignore").decode("ascii")
+
+
 def normalize_log_message(message: str, width: int = 150) -> str:
     """
     Normalize log message formatting for readability and consistency.
 
+    - Transliterates non-ASCII symbols to plain ASCII.
     - Converts tabs to spaces.
     - Trims trailing whitespace.
     - Collapses repeated blank lines.
     - Soft-wraps long lines to a fixed width with indentation preserved.
     """
-    text = str(message).replace("\t", "    ")
+    text = _to_ascii(str(message)).replace("\t", "    ")
     lines = [ln.rstrip() for ln in text.splitlines()]
     if text.endswith("\n"):
         # Preserve intentional trailing spacer lines from banner-style messages.
@@ -277,6 +360,39 @@ def normalize_log_message(message: str, width: int = 150) -> str:
     return "\n".join(wrapped)
 
 
+# Lines that external binaries print on every run but carry no actionable
+# information for this pipeline (single-threaded execution is enforced by
+# the subprocess environment anyway).
+_SUBPROCESS_LOG_NOISE = (
+    "compiled using a version of the ATLAS library without support for multithreading",
+)
+
+
+def strip_subprocess_noise(text: str) -> str:
+    """Remove known-benign noise lines from captured subprocess output."""
+    kept = [
+        ln for ln in str(text).splitlines()
+        if ln.strip() and not any(noise in ln for noise in _SUBPROCESS_LOG_NOISE)
+    ]
+    return "\n".join(kept)
+
+
+def clean_subprocess_log(path) -> None:
+    """Drop known-benign noise lines from a captured subprocess log file."""
+    try:
+        with open(path, "r", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    kept = [
+        ln for ln in lines
+        if not any(noise in ln for noise in _SUBPROCESS_LOG_NOISE)
+    ]
+    if len(kept) != len(lines):
+        with open(path, "w") as f:
+            f.write("\n".join(kept) + "\n")
+
+
 class LogMessageNormalizeFilter(logging.Filter):
     """Filter that normalizes message text before emission."""
 
@@ -309,13 +425,93 @@ def configure_console_logging(
     handler.setLevel(level)
     handler.addFilter(LogMessageNormalizeFilter(width=150))
     if formatter is None:
-        formatter = ColoredLevelFormatter(
-            fmt="%(asctime)s - %(levelname)s - %(message)s",
-            datefmt="%H:%M:%S",
-            use_color=use_color,
-        )
+        formatter = ColoredLevelFormatter(use_color=use_color)
     handler.setFormatter(formatter)
     return handler
+
+
+# Verbosity names accepted by ``global_verbose_level`` (YAML) and the
+# ``--verbose-level`` CLI option.  Numeric values pass straight through.
+VERBOSE_LEVELS = {
+    "quiet": 0,
+    "warning": 0,
+    "error": 0,
+    "normal": 1,
+    "info": 1,
+    "verbose": 2,
+    "debug": 2,
+}
+
+
+def resolve_verbose_level(value) -> int:
+    """
+    Normalize a verbosity setting to the 0/1/2 integer convention.
+
+    Accepts ints (clamped to 0-2) or names: ``quiet``/``warning``/``error``
+    -> 0, ``normal``/``info`` -> 1, ``verbose``/``debug`` -> 2.
+    Unrecognised values fall back to 1 (normal).
+    """
+    if isinstance(value, str):
+        named = VERBOSE_LEVELS.get(value.strip().lower())
+        if named is not None:
+            return named
+        try:
+            value = int(value)
+        except ValueError:
+            return 1
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return 0 if v <= 0 else (2 if v >= 2 else 1)
+
+
+def verbose_to_log_level(value) -> int:
+    """Map a verbosity value (0/1/2 or name) to a ``logging`` level."""
+    return {
+        0: logging.WARNING,
+        1: logging.INFO,
+        2: logging.DEBUG,
+    }[resolve_verbose_level(value)]
+
+
+def set_verbose_level(value) -> int:
+    """
+    Apply a verbosity setting to the root logger and its handlers.
+
+    Use for runtime changes (e.g. a ``--verbose`` CLI flag read after the
+    logging handlers are already configured).  Returns the normalized
+    0/1/2 verbosity level.
+    """
+    level = verbose_to_log_level(value)
+    root = logging.getLogger()
+    root.setLevel(level)
+    for handler in root.handlers:
+        handler.setLevel(level)
+    return resolve_verbose_level(value)
+
+
+@contextmanager
+def quiet_root_logger(level: int = logging.WARNING):
+    """
+    Temporarily raise the root logger's level.
+
+    Third-party helpers that emit per-step chatter straight through the
+    root logger (e.g. spalipy's "Processing source entry 0") can be wrapped
+    in this context so only warnings and errors reach the console.  The
+    level is left untouched on DEBUG runs (so verbose output is preserved)
+    and when it is already at or above *level*.
+    """
+    root = logging.getLogger()
+    prev = root.level
+    if prev <= logging.DEBUG or prev >= level:
+        yield
+        return
+    root.setLevel(level)
+    try:
+        yield
+    finally:
+        root.setLevel(prev)
 
 
 SUPPORTED_FILTER_GROUPS = {
@@ -880,8 +1076,11 @@ def beta_psf(n, flux_psf, flux_psf_err):
     # flux_PSF is negative.
     flux_abs = np.abs(np.asarray(flux_psf, dtype=float))
     err = np.maximum(np.asarray(flux_psf_err, dtype=float), np.finfo(float).tiny)
-    # Threshold flux = n * (1-sigma error); z-score for "flux above threshold"
-    z = (n * err - flux_abs) / (np.sqrt(2) * err)
+    # Threshold flux = n * (1-sigma error); z-score for "flux above threshold".
+    # z may overflow to +/-inf for extreme flux/error values; erf saturates
+    # there, so the result is still correct and the fp warning is noise.
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        z = (n * err - flux_abs) / (np.sqrt(2) * err)
     beta = np.clip(0.5 * (1 - erf(z)), 0.0, 1.0)
     return beta
 
