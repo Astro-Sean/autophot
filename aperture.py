@@ -1366,9 +1366,6 @@ class Aperture:
         base = os.path.splitext(os.path.basename(fpath))[0]
 
         n_targets = len(target_centers)
-        # Each column is ~340 pt wide
-        fig = plt.figure(figsize=set_size(340 * n_targets, 1))
-        gs = GridSpec(1, n_targets, wspace=0.25)
 
         zoom_bounds = []
         for cx, cy in target_centers:
@@ -1378,6 +1375,38 @@ class Aperture:
             y_min = max(0, int(np.floor(cy - zoom_size)))
             y_max = min(image.shape[0], int(np.ceil(cy + zoom_size)))
             zoom_bounds.append((x_min, x_max, y_min, y_max))
+
+        # Size the figure from the cutout aspect so the equal-aspect
+        # image panels keep square pixels; a fixed figsize would stretch
+        # or shrink them inside mismatched cells. Each gridspec cell
+        # holds the main panel plus the 20% side/bottom profiles the
+        # divider carves out of it: cell = 1.2 * main + pad.
+        ax_h = 2.8
+        pad_in = 0.15
+        main_w = [
+            ax_h * (x1 - x0) / max(y1 - y0, 1)
+            for (x0, x1, y0, y1) in zoom_bounds
+        ]
+        col_w = [1.2 * w + pad_in for w in main_w]
+        cell_h = 1.2 * ax_h + pad_in
+        gap_in = 0.60
+        left_in, right_in = 0.62, 0.72
+        bottom_in, top_in = 0.78, 0.45
+        fig_w = left_in + sum(col_w) + gap_in * (n_targets - 1) + right_in
+        fig_h = bottom_in + cell_h + top_in
+
+        fig = plt.figure(figsize=(fig_w, fig_h))
+        gs = GridSpec(
+            1,
+            n_targets,
+            figure=fig,
+            width_ratios=col_w,
+            left=left_in / fig_w,
+            right=1.0 - right_in / fig_w,
+            bottom=bottom_in / fig_h,
+            top=1.0 - top_in / fig_h,
+            wspace=gap_in / (sum(col_w) / n_targets),
+        )
 
         # Use a shared normalisation computed from ALL target zoom regions
         # so that panels remain comparable even when targets are far apart
@@ -1447,7 +1476,7 @@ class Aperture:
                 cmap.set_bad(color="magenta")
                 zmask = ~np.isfinite(zoom_image)
                 zoom_disp = np.ma.array(zoom_image, mask=zmask)
-                ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="auto")
+                ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="equal")
                 ax_main.set_xlim(0, zoom_image.shape[1])
                 ax_main.set_ylim(0, zoom_image.shape[0])
                 cx_local = cx - x_min
@@ -1470,7 +1499,7 @@ class Aperture:
                 zmask |= (np.asarray(zoom_image, dtype=float) == 0.0)
             zoom_disp = np.ma.array(zoom_image, mask=zmask)
 
-            ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="auto")
+            ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="equal")
             ax_main.set_xlim(0, zoom_image.shape[1])
             ax_main.set_ylim(0, zoom_image.shape[0])
 
@@ -1673,8 +1702,29 @@ class Aperture:
             else None
         )
 
-        fig = plt.figure(figsize=set_size(340, 1))
-        ax_main = fig.add_subplot(111)
+        # Size the figure from the cutout aspect so the equal-aspect
+        # image panel keeps square pixels; the divider carves the 20%
+        # side/bottom profiles out of the main cell (cell = 1.2 * main
+        # + pad), and the margins hold their tick labels.
+        zoom_h_px, zoom_w_px = zoom_image.shape
+        ax_h = 3.0
+        ax_w = ax_h * (zoom_w_px / max(zoom_h_px, 1))
+        pad_in = 0.15
+        cell_w = 1.2 * ax_w + pad_in
+        cell_h = 1.2 * ax_h + pad_in
+        left_in, right_in = 0.62, 0.78
+        bottom_in, top_in = 0.85, 0.55
+        fig_w = left_in + cell_w + right_in
+        fig_h = bottom_in + cell_h + top_in
+        fig = plt.figure(figsize=(fig_w, fig_h))
+        ax_main = fig.add_axes(
+            [
+                left_in / fig_w,
+                bottom_in / fig_h,
+                cell_w / fig_w,
+                cell_h / fig_h,
+            ]
+        )
         divider = make_axes_locatable(ax_main)
         ax_right = divider.append_axes("right", size="20%", pad=0.15, sharey=ax_main)
         ax_bottom = divider.append_axes("bottom", size="20%", pad=0.15, sharex=ax_main)
@@ -1706,7 +1756,7 @@ class Aperture:
                 origin="lower",
                 norm=norm,
                 cmap=cmap,
-                aspect="auto",
+                aspect="equal",
             )
             ax_main.set_xlim(0, zoom_image.shape[1])
             ax_main.set_ylim(0, zoom_image.shape[0])
@@ -1723,12 +1773,24 @@ class Aperture:
                 ax_main.add_patch(
                     Circle((cx_local, cy_local), radius, ec=color, fc="none", lw=0.5, ls=ls)
                 )
+            from matplotlib.patches import Patch
+            fig.legend(
+                handles=[
+                    Patch(facecolor="none", edgecolor="#00AA00", lw=0.8, label="Aperture"),
+                    Patch(facecolor="none", edgecolor="#D94F4F", lw=0.8, ls="--", label="Annulus"),
+                ],
+                loc="upper center",
+                bbox_to_anchor=(0.5, 1.0),
+                ncol=2,
+                fontsize=8,
+                frameon=False,
+            )
             label = base if saveTarget else index
             from plotting_utils import get_plot_ext
             _ext = get_plot_ext(self.input_yaml)
             save_name = (
                 f"Aperture_Target_{base}{_ext}" if saveTarget
-                else f"Aperture_{label}{_ext}"
+                else f"Aperture_Source_{label}{_ext}"
             )
             save_name = os.path.join(write_dir, save_name)
             fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
@@ -1752,7 +1814,7 @@ class Aperture:
             origin="lower",
             norm=norm,
             cmap=cmap,
-            aspect="auto",
+            aspect="equal",
         )
         ax_main.set_xlim(0, zoom_image.shape[1])
         ax_main.set_ylim(0, zoom_image.shape[0])
@@ -1881,12 +1943,25 @@ class Aperture:
         ax_bottom.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
         ax_right.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=False))
 
+        from matplotlib.patches import Patch
+        fig.legend(
+            handles=[
+                Patch(facecolor="none", edgecolor="#00AA00", lw=0.8, label="Aperture"),
+                Patch(facecolor="none", edgecolor="#D94F4F", lw=0.8, ls="--", label="Annulus"),
+            ],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.0),
+            ncol=2,
+            fontsize=8,
+            frameon=False,
+        )
+
         label = base if saveTarget else index
         from plotting_utils import get_plot_ext
         _ext = get_plot_ext(self.input_yaml)
         save_name = (
             f"Aperture_Target_{base}{_ext}" if saveTarget
-            else f"Aperture_{label}{_ext}"
+            else f"Aperture_Source_{label}{_ext}"
         )
         save_name = os.path.join(write_dir, save_name)
         fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")

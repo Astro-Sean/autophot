@@ -114,6 +114,7 @@ PLOT_COLORS = {
     'fwhm_sources':    'Oranges',   # Colormap name for FWHM-scaled circles
     'epsf_aperture':   '#D9A020',   # Deep yellow - ePSF aperture / input-position circles (distinct from blue 'reference' bounds in the same figure)
     'scamp_matched':   '#4E857B',   # Sage - SCAMP matched markers
+    'matched_box':     '#00CFFF',   # Cyan - matched-source boxes in subtraction_check (high contrast on gray)
 
     # --- Scatter / offset plots ---
     'scatter_primary':  '#005CAB',  # RPTH medium blue - fallback scatter when no color-coding
@@ -128,7 +129,7 @@ PLOT_COLORS = {
     #     diagnostic figure has its own recognisable accent) ---
     'fwhm_scatter':     '#5B9BD5',  # Sky blue - FWHM vs instrumental mag
     'fwhm_rejected':    '#E31B23',  # RPTH red - FWHM-rejected markers
-    'sfft_scatter':     '#4E857B',  # Sage - SFFT Var_Check scatter
+    'sfft_scatter':     '#4E857B',  # Sage - SFFT_Matching scatter
     'hist_primary':     '#005CAB',  # Medium blue - single-colour histograms
     'snr_mag_scatter':  '#4E857B',  # Sage - S/N vs magnitude scatter
     'injection_site':   '#5B9BD5',  # Sky blue - injection-site markers on images

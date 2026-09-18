@@ -43,7 +43,11 @@ from matplotlib.patches import Circle, Ellipse, Rectangle
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (needed for 3D projection)
-from scipy.ndimage import gaussian_filter, map_coordinates, maximum_filter
+from scipy.ndimage import (
+    gaussian_filter,
+    map_coordinates,
+    maximum_filter,
+)
 from scipy.spatial import cKDTree
 from scipy.fft import fft2, fftshift
 from scipy.optimize import least_squares
@@ -114,6 +118,48 @@ def _call_build_epsf(builder, epsfstars, init_epsf):
     """Call build_epsf with the version-correct init-epsf kwarg."""
     return builder.build_epsf(epsfstars, **{_EPSF_KWARG: init_epsf})
 
+
+class _BoundedShiftEPSFBuilder(EPSFBuilder):
+    """EPSFBuilder with a bound on cumulative star-centre drift.
+
+    photutils refits each star's centre against the current ePSF with no
+    bound on the fitted shift.  On undersampled data a too-narrow model
+    drags every star's peak pixel onto the core, collapsing the star
+    ensemble onto one or two pixel-phase classes -- the rest of the
+    oversampled grid is then cubic-interpolated rather than measured.
+    Clamping the cumulative drift to ``max_shift_px`` of the measured
+    cutout centre keeps the phase classes populated; legitimate
+    corrections are <0.3 px since the measured centroid is already good
+    to ~0.01 px.
+    """
+
+    def __init__(self, *args, max_shift_px=0.5, orig_centres=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._max_shift_px = float(max_shift_px)
+        # Shared across builders within one build attempt so the bound
+        # applies to the total drift, not per-phase drift.
+        self._orig_centres = orig_centres if orig_centres is not None else {}
+
+    def _fit_stars(self, epsf, stars):
+        for s in stars.all_stars:
+            key = getattr(s, "id_label", id(s))
+            if key not in self._orig_centres:
+                self._orig_centres[key] = tuple(s.cutout_center)
+        stars = super()._fit_stars(epsf, stars)
+        m = self._max_shift_px
+        for s in stars.all_stars:
+            if not hasattr(s, "cutout_center"):
+                continue
+            orig = self._orig_centres.get(getattr(s, "id_label", id(s)))
+            if orig is None:
+                continue
+            cx, cy = s.cutout_center
+            nx = min(max(cx, orig[0] - m), orig[0] + m)
+            ny = min(max(cy, orig[1] - m), orig[1] + m)
+            if (nx, ny) != (cx, cy):
+                s.cutout_center = (nx, ny)
+        return stars
+
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
@@ -170,18 +216,41 @@ def _odd(n: int) -> int:
     return n + (n % 2 == 0)
 
 
-def get_quartic_kernel(oversample: int = 4, kernel_size: int = None) -> np.ndarray:
-    """
-    Quartic 2-D smoothing kernel for ePSF construction (Anderson & King 2000).
+def _odd_nearest(x: float) -> int:
+    """Nearest odd integer to *x* (>= 1); ties and exact integers round up."""
+    k = int(round(x))
+    if k % 2 == 0:
+        k += 1 if x >= k else -1
+    return max(1, k)
 
-    Fits a 2-D quartic polynomial via least-squares to an impulse target (1
-    at centre, 0 elsewhere) and returns the normalised result.
+
+def _odd_floor(x: float) -> int:
+    """Largest odd integer <= *x* (>= 1)."""
+    k = int(np.floor(x))
+    if k % 2 == 0:
+        k -= 1
+    return max(1, k)
+
+
+def get_quartic_kernel(
+    oversample: int = 4, kernel_size: int = None, degree: int = None
+) -> np.ndarray:
+    """
+    Polynomial smoothing kernel for ePSF construction (Anderson & King 2000).
+
+    Fits a 2-D polynomial via least-squares to an impulse target (1 at
+    centre, 0 elsewhere) and returns the normalised result.
 
     Parameters
     ----------
     oversample   : int   oversampling factor; governs default kernel_size
     kernel_size  : int or None  odd kernel side length; defaults to
                    min(2*oversample + 1, 7)
+    degree       : int or None  polynomial degree; if None, quartic (4) for
+                   kernel_size >= 5 and quadratic (2) for 3x3. A 3x3 grid
+                   (9 points) cannot constrain the 14 free quartic terms --
+                   the least-squares fit then interpolates the impulse and
+                   returns an identity kernel, silently disabling smoothing.
 
     Returns
     -------
@@ -191,6 +260,11 @@ def get_quartic_kernel(oversample: int = 4, kernel_size: int = None) -> np.ndarr
         kernel_size = min(2 * oversample + 1, 7)
     if kernel_size % 2 == 0:
         kernel_size += 1
+    if kernel_size <= 1:
+        return np.ones((1, 1))
+
+    if degree is None:
+        degree = 4 if kernel_size >= 5 else 2
 
     half = kernel_size // 2
     y, x = np.mgrid[-half : half + 1, -half : half + 1]
@@ -198,46 +272,30 @@ def get_quartic_kernel(oversample: int = 4, kernel_size: int = None) -> np.ndarr
     target = np.zeros((kernel_size, kernel_size))
     target[half, half] = 1.0
 
+    if degree >= 4:
+        terms = [
+            x, y, x**2, x * y, y**2, x**3, x**2 * y, x * y**2, y**3,
+            x**4, x**3 * y, x**2 * y**2, x * y**3, y**4,
+        ]
+    else:
+        terms = [x, y, x**2, x * y, y**2]
+
     def _residuals(p):
-        model = (
-            1
-            + p[0] * x
-            + p[1] * y
-            + p[2] * x**2
-            + p[3] * x * y
-            + p[4] * y**2
-            + p[5] * x**3
-            + p[6] * x**2 * y
-            + p[7] * x * y**2
-            + p[8] * y**3
-            + p[9] * x**4
-            + p[10] * x**3 * y
-            + p[11] * x**2 * y**2
-            + p[12] * x * y**3
-            + p[13] * y**4
-        )
+        model = np.ones_like(x, dtype=float)
+        for coef, term in zip(p, terms):
+            model = model + coef * term
         return (model - target).ravel()
 
-    res = least_squares(_residuals, np.zeros(14))
-    p = res.x
-    kernel = (
-        1
-        + p[0] * x
-        + p[1] * y
-        + p[2] * x**2
-        + p[3] * x * y
-        + p[4] * y**2
-        + p[5] * x**3
-        + p[6] * x**2 * y
-        + p[7] * x * y**2
-        + p[8] * y**3
-        + p[9] * x**4
-        + p[10] * x**3 * y
-        + p[11] * x**2 * y**2
-        + p[12] * x * y**3
-        + p[13] * y**4
-    )
-    return kernel / kernel.sum()
+    res = least_squares(_residuals, np.zeros(len(terms)))
+    kernel = np.ones_like(x, dtype=float)
+    for coef, term in zip(res.x, terms):
+        kernel = kernel + coef * term
+    total = kernel.sum()
+    if not np.isfinite(total) or total == 0:
+        ident = np.zeros((kernel_size, kernel_size))
+        ident[half, half] = 1.0
+        return ident
+    return kernel / total
 
 
 def get_smoothing_kernel(
@@ -248,6 +306,8 @@ def get_smoothing_kernel(
     kind: str = "quartic",
     size_scale_px: float = 1.0,
     size_max: int = 9,
+    max_fwhm_frac: float = 1.25,
+    cap_min_px: float = 1.75,
 ) -> np.ndarray:
     """
     Return a smoothing kernel for ePSF construction.
@@ -258,15 +318,25 @@ def get_smoothing_kernel(
     Parameters
     ----------
     fwhm : float
-        PSF FWHM in native pixels.  Retained for API compatibility; it does
-        NOT set the kernel footprint -- see ``size_scale_px``.
+        PSF FWHM in native pixels.  Bounds the kernel footprint via
+        ``max_fwhm_frac``: smoothing on scales wider than the PSF core
+        broadens the ePSF measurably (synthetic undersampled builds:
+        ~1.1xFWHM footprint -> ~+3% FWHM, >=1.5xFWHM -> +10-25%), but on
+        real thin-sampled fields under-smoothing is worse -- the per-iteration
+        residual noise walks the ePSF core sharp, and ~1.25xFWHM kernels
+        recovered the true effective width where ~1xFWHM kernels collapsed
+        ~10% narrow.
     oversample : int
         ePSF oversampling factor (kernel is defined on the oversampled grid).
     kernel_size : int or None
         Explicit odd kernel size on oversampled grid. If None, auto-size to
         ~``size_scale_px`` native pixels (kernel_size ~ scale*oversample).
-    kind : {"quartic","gaussian"}
-        Kernel family.
+        Explicit sizes still respect the ``max_fwhm_frac`` footprint cap.
+    kind : {"quartic","quadratic","gaussian","none"}
+        Kernel family.  "quadratic" forces the 2-D quadratic basis (also
+        used automatically when the kernel is smaller than 5x5, where a
+        quartic fit is underdetermined).  "none" returns ``None``, which
+        disables smoothing (EPSFBuilder accepts ``smoothing_kernel=None``).
     size_scale_px : float
         Target kernel footprint in NATIVE pixels.  The Anderson & King (2000)
         kernel is a 5x5 quartic on a 4x-oversampled grid (1.25 px footprint);
@@ -277,21 +347,31 @@ def get_smoothing_kernel(
         (osamp=4 -> 5x5, osamp=2 -> 3x3, osamp=1 -> identity).
     size_max : int
         Maximum auto kernel size (odd).
+    max_fwhm_frac : float
+        Footprint cap as a fraction of ``fwhm``.  The realised kernel is the
+        largest odd size whose footprint stays within the cap.  <=0 disables
+        the cap.
+    cap_min_px : float
+        Floor on the footprint cap in native pixels.  For the most
+        undersampled PSFs (FWHM ~1.5 px) a ~1.75 px kernel is still optimal
+        on synthetic builds -- the cap would otherwise forbid any effective
+        kernel.
     """
     try:
         osamp = max(1, int(oversample))
     except Exception:
         osamp = 1
 
-    if kernel_size is None:
+    explicit_size = kernel_size is not None
+    if explicit_size:
+        kernel_size = _odd(int(kernel_size))
+    else:
         try:
             scale_px = float(size_scale_px)
         except Exception:
             scale_px = 1.0
         if not np.isfinite(scale_px) or scale_px <= 0:
             scale_px = 1.0
-        base = int(np.ceil(scale_px * osamp))
-        base = max(1, base)
         try:
             mx = int(size_max)
         except Exception:
@@ -299,11 +379,38 @@ def get_smoothing_kernel(
         mx = max(3, mx)
         if mx % 2 == 0:
             mx += 1
-        kernel_size = _odd(min(base, mx))
-    else:
-        kernel_size = _odd(int(kernel_size))
+        kernel_size = min(_odd_nearest(scale_px * osamp), mx)
+
+    try:
+        frac = float(max_fwhm_frac)
+    except Exception:
+        frac = 1.25
+    if frac > 0 and np.isfinite(fwhm) and float(fwhm) > 0:
+        try:
+            floor_px = float(cap_min_px)
+        except Exception:
+            floor_px = 1.75
+        if not np.isfinite(floor_px) or floor_px <= 0:
+            floor_px = 1.75
+        cap_px = max(floor_px, frac * float(fwhm))
+        cap_cells = _odd_floor(cap_px * osamp)
+        if kernel_size > cap_cells:
+            if explicit_size:
+                logging.getLogger(__name__).warning(
+                    "psf_smoothing_kernel_size=%d (footprint %.2f px) exceeds "
+                    "the %.2gxFWHM cap (%.2f px) -- capping to %d.",
+                    kernel_size,
+                    kernel_size / osamp,
+                    frac,
+                    cap_px,
+                    cap_cells,
+                )
+            kernel_size = cap_cells
 
     k = str(kind).strip().lower()
+    if k in ("none", "off", "false"):
+        # Explicit opt-out: EPSFBuilder accepts smoothing_kernel=None.
+        return None
     if k == "gaussian":
         # sigma in oversampled pixels; small sigma keeps the kernel local.
         sigma = max(0.6, 0.25 * float(kernel_size))
@@ -312,9 +419,314 @@ def get_smoothing_kernel(
         ker = np.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
         ker = ker / np.sum(ker)
         return ker
+    if k not in ("quartic", "quadratic"):
+        log_module = logging.getLogger(__name__)
+        log_module.warning(
+            "Unknown psf_smoothing_kernel %r; using 'quartic'.",
+            kind,
+        )
+        k = "quartic"
+    # A 3x3 grid cannot constrain a quartic; force the quadratic basis.
+    degree = 2 if (k == "quadratic" or kernel_size < 5) else 4
+    return get_quartic_kernel(osamp, kernel_size, degree=degree)
 
-    # Any kind other than "gaussian" falls through to the quartic kernel.
-    return get_quartic_kernel(osamp, kernel_size)
+
+def _select_adaptive_oversample(n_stars: int, phot_cfg: dict) -> int:
+    """Adaptive ePSF oversampling factor for undersampled images.
+
+    With N stars and oversampling k each oversampled gridpoint is
+    constrained by ~N/k^2 star residuals (each star only lands on the
+    gridpoints of its own pixel-phase class).  Below ~3 samples per
+    gridpoint the sigma-clipped median cannot function: most cells hold
+    0-1 noisy residuals (empty cells are cubic-interpolated), so
+    single-star noise and contamination enter the ePSF at full
+    amplitude.  Production undersampled fields at ~1-3 samples/cell show
+    pathological wings (negative-flux fractions >0.5); at ~5+/cell the
+    same star pools produce clean stamps.  The earlier assumption that
+    thin sampling could be handled by the smoothing kernel alone does
+    not hold on real data, so the factor is chosen to keep the median
+    functional rather than maximise grid resolution.
+    """
+    log = logging.getLogger(__name__)
+    n_final = int(n_stars)
+    hard_min = int(phot_cfg.get("psf_oversample_hard_min_stars", 5))
+    if n_final < hard_min:
+        log.warning(
+            "Adaptive oversampling: only %d PSF stars (< %d threshold); "
+            "keeping oversample=1x. Undersampled ePSF may be biased.",
+            n_final, hard_min,
+        )
+        return 1
+    min_samples = float(
+        phot_cfg.get("psf_oversample_min_samples_per_pixel", 3.0)
+    )
+    max_os = max(1, int(phot_cfg.get("psf_oversample_max", 4)))
+    min_os = max(1, int(phot_cfg.get("psf_oversample_min_undersampled", 1)))
+    if min_samples > 0:
+        os_from_samples = int(np.floor(np.sqrt(n_final / min_samples)))
+    else:
+        os_from_samples = max_os
+    oversample = max(min_os, min(os_from_samples, max_os))
+    log.info(
+        "Adaptive oversampling: %d PSF stars -> %dx oversampling "
+        "(~%.1f samples/gridpoint; undersampled floor %dx, max %dx, "
+        "threshold %.2f samples/gridpoint)",
+        n_final, oversample, n_final / float(oversample) ** 2,
+        min_os, max_os, min_samples,
+    )
+    return oversample
+
+
+def pixel_integrate_oversampled(data: np.ndarray, oversampling: int) -> np.ndarray:
+    """Apply the square pixel-response to an oversampled PSF array.
+
+    An analytic model (e.g. a Moffat) evaluated on the oversampled grid is
+    the *continuous* PSF; detector data contain the *effective* PSF, i.e.
+    the continuous PSF convolved with the 1x1 native-pixel boxcar.  On a
+    k-oversampled grid a native pixel spans k grid cells, so the pixel
+    response is a k-point uniform filter per axis -- with half-weight edge
+    taps (trapezoid) for even k so the kernel stays centred on a grid point.
+    For undersampled data this is a non-negligible correction: the effective
+    PSF has a ~10% flatter peak and fatter wings than the continuous model.
+    """
+    arr = np.asarray(data, dtype=float)
+    try:
+        k = int(np.atleast_1d(oversampling)[0])
+    except (TypeError, ValueError, IndexError):
+        k = 1
+    k = max(1, k)
+    if k == 1:
+        return arr
+
+    if k % 2 == 0:
+        taps = np.ones(k + 1)
+        taps[0] = taps[-1] = 0.5
+    else:
+        taps = np.ones(k)
+    taps = taps / taps.sum()
+    box = np.outer(taps, taps)
+
+    from scipy.signal import fftconvolve
+
+    conv = fftconvolve(arr, box, mode="same")
+    total = float(np.nansum(conv))
+    if np.isfinite(total) and total > 0:
+        conv = conv / total
+    return conv
+
+
+def _epsf_residual_mad(stars, model, fit_rad_px: float) -> float:
+    """Median per-star residual MAD, normalised by star flux.
+
+    Each star is evaluated at its own cutout centre and flux
+    (``compute_residual_image`` registers the model there), so an
+    empirical model fitted to these stars has every advantage; losing to
+    the analytic model means the empirical model is degraded regardless
+    of shape gates.
+    """
+    if stars is None or model is None:
+        return float("nan")
+    mads = []
+    for s in stars:
+        try:
+            resid = np.asarray(s.compute_residual_image(model), dtype=float)
+            flux = float(getattr(s, "flux", np.nan))
+            if not np.isfinite(flux) or flux <= 0:
+                continue
+            yy, xx = np.indices(resid.shape)
+            cc = np.asarray(s.cutout_center, dtype=float)
+            rr = np.hypot(xx - cc[0], yy - cc[1])
+            vals = resid[rr < fit_rad_px] / flux
+            vals = vals[np.isfinite(vals)]
+            if vals.size < 9:
+                continue
+            mads.append(1.4826 * np.median(np.abs(vals - np.median(vals))))
+        except Exception:
+            continue
+    return float(np.median(mads)) if mads else float("nan")
+
+
+def measure_epsf_fwhm_native(epsf_data: np.ndarray, oversampling: int) -> float:
+    """FWHM of an (oversampled) ePSF array in native pixels.
+
+    Azimuthally-averaged profile about the array centre; the FWHM is twice
+    the radius where the profile first falls below half the peak value
+    (linear interpolation between radial bins).
+    """
+    d = np.asarray(epsf_data, dtype=float)
+    if d.ndim != 2 or not np.isfinite(d).any():
+        return float("nan")
+    try:
+        osamp = max(1, int(np.atleast_1d(oversampling)[0]))
+    except (TypeError, ValueError, IndexError):
+        osamp = 1
+
+    ny, nx = d.shape
+    cy, cx = (ny - 1) / 2.0, (nx - 1) / 2.0
+    yy, xx = np.indices(d.shape)
+    r = np.hypot(xx - cx, yy - cy) / osamp
+    peak = float(np.nanmax(d))
+    if not np.isfinite(peak) or peak <= 0:
+        return float("nan")
+
+    r_max = min(nx, ny) / (2.0 * osamp)
+    edges = np.arange(0.0, r_max + 0.05, 0.05)
+    if edges.size < 3:
+        return float("nan")
+    prof = np.full(edges.size - 1, np.nan)
+    for i in range(edges.size - 1):
+        m = (r >= edges[i]) & (r < edges[i + 1])
+        if m.any():
+            prof[i] = float(np.nanmean(d[m]))
+    # Bin 0 samples the central pixel only for even-shaped arrays; the peak
+    # pixel value anchors the half-max crossing either way.
+    half = 0.5 * peak
+    r_mid = 0.5 * (edges[:-1] + edges[1:])
+    good = np.isfinite(prof)
+    if not good.any():
+        return float("nan")
+    prof, r_mid = prof[good], r_mid[good]
+    if prof[0] <= half:
+        return float("nan")
+    below = np.where(prof <= half)[0]
+    if below.size == 0:
+        return float("nan")  # never drops to half-max: unresolved/near-constant
+    i = below[0]
+    if i == 0:
+        return 2.0 * r_mid[0]
+    # Interpolate between the last bin above half-max and the first below.
+    f = (prof[i - 1] - half) / max(prof[i - 1] - prof[i], 1e-30)
+    return float(2.0 * (r_mid[i - 1] + f * (r_mid[i] - r_mid[i - 1])))
+
+
+def clean_epsf_stamp(
+    epsf_data: np.ndarray,
+    oversampling: int,
+    fwhm_native: float,
+    wing_start_fwhm: float = 1.5,
+    wing_end_fwhm: float = 3.5,
+    wing_sigma_px: float = 1.25,
+    edge_px: float = 2.0,
+    flatten_fwhm: float = 3.5,
+    flatten_width_px: float = 2.0,
+) -> np.ndarray:
+    """Post-build cleanup of unphysical ePSF stamp artifacts.
+
+    Two artifacts are suppressed while the photometric core is untouched:
+
+    * Gridpoint-scale wing speckle: with ~n_stars/osamp^2 samples per
+      gridpoint the sigma-clipped residual median is noisy, so the wings
+      carry pixel-to-pixel speckle at a few percent of peak.  The stamp
+      is blended toward a Gaussian-smoothed copy between
+      ``wing_start_fwhm`` and ``wing_end_fwhm`` (radial weight 1 -> 0).
+      The sigma is kept sub-pixel so coherent resampling ringing (real
+      signal, ~1-2 px period) survives while uncorrelated speckle is
+      suppressed.  Wing cleaning only runs at ``oversampling >= 2``: at
+      1x the native-pixel ringing and noise cannot be distinguished, so
+      smoothing there would erase real flux.  Beyond ``flatten_fwhm``
+      the wings blend to the azimuthal-median radial profile: real wing
+      flux there is below the gridpoint-noise floor, so the profile is
+      the better estimate and only residual mottle is removed.
+    * Stamp-edge artifacts: cutouts whose edge contains a neighbour or
+      unmasked feature leak a bright frame into the stacked ePSF.  A
+      ~27 px cutout edge holds no real PSF flux (>= 5xFWHM), so the
+      outer ``edge_px`` native pixels are tapered linearly to zero.
+
+    The output is rescaled to the input sum so the photutils flux
+    convention (sum == prod(oversampling)) is preserved exactly.
+    """
+    d = np.asarray(epsf_data, dtype=float)
+    if d.ndim != 2 or not np.isfinite(d).any():
+        return d
+    try:
+        osamp = max(1, int(np.atleast_1d(oversampling)[0]))
+    except (TypeError, ValueError, IndexError):
+        osamp = 1
+    total_in = float(np.nansum(d))
+
+    ny, nx = d.shape
+    cy, cx = (ny - 1) / 2.0, (nx - 1) / 2.0
+    yy, xx = np.indices(d.shape)
+    r_native = np.hypot(xx - cx, yy - cy) / osamp
+
+    # Edge taper: force the outer ~edge_px native pixels to zero
+    # linearly -- no real PSF flux lives at the cutout border.  Applied
+    # before smoothing so a leaked edge feature cannot bleed inward
+    # through the smoothed copy.
+    out = d.copy()
+    if edge_px > 0:
+        e = float(edge_px) * osamp
+        dr_edge = np.minimum.reduce([xx, yy, nx - 1 - xx, ny - 1 - yy])
+        taper = np.clip(dr_edge / e, 0.0, 1.0)
+        out = out * taper
+
+    # Wing denoise: blend tapered -> Gaussian-smoothed between r1 and r2.
+    if osamp >= 2 and np.isfinite(fwhm_native) and fwhm_native > 0:
+        r1 = float(wing_start_fwhm) * fwhm_native
+        r2 = max(r1 + 0.25, float(wing_end_fwhm) * fwhm_native)
+        sigma_grid = max(0.5, float(wing_sigma_px)) * osamp
+        # Contamination clip: a leaked neighbour blob is azimuthally
+        # localised, while real wing structure (resampling ringing, PSF
+        # ellipticity) is coherent around the radius.  Reference the
+        # azimuthal median per ~1 px radius bin: blobs stand out as
+        # positive excursions and are replaced by the local wing level.
+        # Runs BEFORE the Gaussian smooth so smeared blob light cannot
+        # re-enter through the blend.
+        wing_zone = r_native > r1
+        if wing_zone.any():
+            rb = np.floor(r_native).astype(int)
+            ref = np.zeros_like(out)
+            for k in np.unique(rb[wing_zone]):
+                m = rb == k
+                ref[m] = np.median(out[m]) if m.any() else 0.0
+            resid = out - ref
+            resid_w = resid[wing_zone]
+            mad = 1.4826 * np.median(np.abs(resid_w - np.median(resid_w)))
+            blob_lim = max(0.025 * float(np.nanmax(np.abs(d))), 8.0 * mad)
+            blob = wing_zone & (resid > blob_lim)
+            if blob.any():
+                out[blob] = ref[blob]
+        smoothed = gaussian_filter(np.nan_to_num(out, nan=0.0), sigma=sigma_grid)
+        w = np.clip((r2 - r_native) / (r2 - r1), 0.0, 1.0)
+        out = w * out + (1.0 - w) * smoothed
+        # Far-wing flattening: beyond ``flatten_fwhm`` the real wing flux
+        # is below the ePSF gridpoint-noise floor (measured: real star
+        # stacks carry ~2x less azimuthal variance there than the raw
+        # stamp), so the azimuthal-median radial profile is the better
+        # estimate of the true wing.  Blend the smoothed stamp toward it
+        # across ``flatten_width_px`` native pixels; the radial profile
+        # (and hence the photometric wings) is preserved, only the
+        # residual mottle is removed.  0 disables.
+        r3 = float(flatten_fwhm) * fwhm_native if flatten_fwhm > 0 else 0.0
+        if r3 > 0:
+            rbins = np.arange(0.0, float(np.nanmax(r_native)) + 0.5, 0.5)
+            cents, meds = [], []
+            for bi in range(len(rbins) - 1):
+                bm = (r_native >= rbins[bi]) & (r_native < rbins[bi + 1])
+                vals = out[bm]
+                vals = vals[np.isfinite(vals)]
+                if vals.size >= 8:
+                    cents.append(0.5 * (rbins[bi] + rbins[bi + 1]))
+                    meds.append(float(np.median(vals)))
+            if len(cents) >= 3:
+                prof = np.interp(
+                    r_native.ravel(), cents, meds
+                ).reshape(out.shape)
+                w2 = np.clip(
+                    (r_native - r3)
+                    / max(0.5, float(flatten_width_px)),
+                    0.0, 1.0,
+                )
+                out = (1.0 - w2) * out + w2 * prof
+
+    # A kept degraded model can carry NaN pixels; leaving them in the
+    # stamp would propagate NaNs through ImagePSF.evaluate into the
+    # photometry.  Zero them before the flux renormalisation.
+    out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+    total_out = float(np.nansum(out))
+    if total_in > 0 and np.isfinite(total_out) and total_out > 0:
+        out = out * (total_in / total_out)
+    return out
 
 
 def convolve_psf_stamp(
@@ -1994,10 +2406,15 @@ class PSF:
                     weight_variation = (weight_max - weight_min) / max(abs(weight_min), 1e-10)
                     
                     if weight_variation < 0.01:  # <1% variation = effectively uniform
-                        # Use scalar weight - no need to extract per-star weights
                         uniform_weight = float(np.nanmean(weight_arr))
                         for star in epsfstars:
-                            star.weights = uniform_weight
+                            # Scalar weights break photutils' _fit_star
+                            # (weights[large_slc] on a float), and the mask
+                            # must be re-applied so the contamination zeros
+                            # set above are not wiped by the assignment.
+                            w = np.full(star.data.shape, uniform_weight)
+                            w[star.mask] = 0.0
+                            star.weights = w
                         log.info(
                             "[robust_extract_stars] Using uniform weight %.4g (skipping per-star extraction)",
                             uniform_weight
@@ -2005,10 +2422,12 @@ class PSF:
                     else:
                         weight_nddata = NDData(weightmap)
                         weight_cutouts = extract_stars(weight_nddata, stars_tbl, size=cutout_shape)
-                        
+
                         if len(weight_cutouts) == len(epsfstars):
                             for star, wcut in zip(epsfstars, weight_cutouts):
-                                star.weights = wcut.data.astype(float)
+                                w = wcut.data.astype(float)
+                                w[star.mask] = 0.0
+                                star.weights = w
                         else:
                             log.warning(
                                 "[robust_extract_stars] Weight/star count mismatch; skipping weights"
@@ -2476,13 +2895,64 @@ class PSF:
         min_keep_flux = max(min_candidates, int(np.ceil(min_keep_frac * n_stars)))
 
         if n_after_hw - n_flux_rejected < min_keep_flux:
+            # Keep-floor binding: dropping the flagged cutouts would starve
+            # the ePSF build.  Instead, mask the contaminating pixels
+            # (weight=0/masked) so neighbour flux never enters the residual
+            # stack while each star's core still contributes samples.  A
+            # pixel is masked only if it is an outlier within its own
+            # concentric ring -- a compact blob deviates from its ring,
+            # whereas the star's radially-symmetric wing elevates the whole
+            # ring and survives.
+            _mask_sigma = float(
+                phot_cfg.get("psf_contam_mask_ring_sigma", 3.0)
+            )
+            # 1-px radial bands from 1.5*FWHM to the cutout edge.  Bands
+            # narrow enough that a wing gradient does not inflate the band
+            # MAD, and starting inside the annulus catches blobs sitting in
+            # the photometry fit region.
+            _mask_inner = max(2.0, float(np.ceil(1.5 * fwhm_eff)))
+            band_masks = [
+                (_rr >= r0) & (_rr < r0 + 1.0)
+                for r0 in np.arange(_mask_inner, ann_outer, 1.0)
+            ]
+            n_pix_masked = 0
+            n_masked_stars = 0
+            for i in np.where(remaining_reject)[0]:
+                star = epsfstars._data[i]
+                contam = np.zeros((ny_c, nx_c), dtype=bool)
+                for rm in band_masks:
+                    pix = data_clean[i][rm]
+                    pix = pix[np.isfinite(pix)]
+                    if pix.size < 5:
+                        continue
+                    med = float(np.median(pix))
+                    std = 1.4826 * float(np.median(np.abs(pix - med)))
+                    if not np.isfinite(std) or std <= 0:
+                        continue
+                    contam |= (
+                        rm
+                        & finite_stack[i]
+                        & (all_data[i] > med + _mask_sigma * std)
+                    )
+                contam &= _rr >= _mask_inner  # never mask the core
+                if contam.any():
+                    star.weights[contam] = 0.0
+                    star.mask[contam] = True
+                    # Drop cached lazyproperties so the residual stack sees
+                    # the updated mask.
+                    for attr in ("_xyidx_centered", "_data_values_normalized"):
+                        star.__dict__.pop(attr, None)
+                    n_pix_masked += int(contam.sum())
+                    n_masked_stars += 1
             log.info(
                 "[contamination] Would reject %d/%d cutouts total "
-                "(%d hardware-defect, %d flux-based). After hardware-defect "
-                "rejection (%d remain), skipping flux-based rejection "
-                "(would leave %d < %d min).",
+                "(%d hardware-defect, %d flux-based). Keep-floor bound "
+                "(%d would remain < %d min): keeping the %d flux-flagged "
+                "cutouts but masking %d contaminating annulus pixels "
+                "in %d of them (cores retained).",
                 n_rejected, n_stars, n_hw_rejected, n_flux_rejected,
-                n_after_hw, n_after_hw - n_flux_rejected, min_keep_flux,
+                n_after_hw - n_flux_rejected, min_keep_flux,
+                n_flux_rejected, n_pix_masked, n_masked_stars,
             )
         else:
             keep_idx = np.where(~reject_flags)[0]
@@ -3546,6 +4016,30 @@ class PSF:
                 )
                 fit_boxsize = _build_box_min
 
+            # Cap the build fit box in undersampled regime.  fit_shape only
+            # bounds the per-star flux+shift fit each iteration -- the
+            # residual stack always uses the whole cutout -- so an oversized
+            # box buys no extra wing constraint.  On a ~2 px PSF a 7xFWHM
+            # box makes the affine fit sky-noise dominated: fitted centers
+            # wander (final_center_accuracy ~1 px), the build never
+            # converges, and the stacked ePSF can collapse narrow or
+            # degenerate (observed on SN2022mop undersampled fields).
+            if undersampled:
+                fit_box_max_scale = float(
+                    phot_cfg.get("psf_fit_boxsize_max_scale_fwhm", 4.5)
+                )
+                _fit_box_cap = max(
+                    5, _odd_nearest(fit_box_max_scale * fwhm)
+                )
+                if fit_boxsize > _fit_box_cap:
+                    log.info(
+                        "Undersampled: capping build fit_boxsize %d -> %d px "
+                        "(%.2fxFWHM); larger boxes destabilise the per-star "
+                        "flux/shift fit without improving wing constraint.",
+                        fit_boxsize, _fit_box_cap, fit_box_max_scale,
+                    )
+                    fit_boxsize = _fit_box_cap
+
             # PSF cutout size: use both the configured angular scale and the
             # image-space FWHM to guarantee that even undersampled wings are
             # represented.  For undersampled images the FWHM constraint
@@ -3775,51 +4269,21 @@ class PSF:
                 log.info("Skipping FFT rejection (fewer than 8 PSF stars).")
 
             # ---- Adaptive oversampling based on final PSF star count ----
-            # Higher oversampling gives better sub-pixel resolution but
-            # requires more stars to avoid a noisy ePSF.  With N stars and
-            # oversampling k, each oversampled pixel receives ~N/k^2 samples.
-            # We require at least `psf_oversample_min_samples_per_pixel`
-            # samples (default 2) per oversampled pixel for a reliable build.
+            # Choose the highest factor that still leaves ~min_samples
+            # residuals per oversampled grid cell; starved high-factor
+            # builds are noise-dominated in the wings (see
+            # _select_adaptive_oversample).
             if _adaptive_oversample_enabled:
-                n_final = len(epsfstars)
-                _min_samples = float(
-                    phot_cfg.get("psf_oversample_min_samples_per_pixel", 2.0)
+                oversample = _select_adaptive_oversample(len(epsfstars), phot_cfg)
+            elif undersampled and oversample < 3:
+                log.warning(
+                    "Undersampled image (FWHM=%.2f px) built at %dx "
+                    "oversampling; the ePSF grid cannot resolve the core "
+                    "(~+4%% broad bias in synthetic tests). Enable "
+                    "psf_auto_oversample_undersampled or set "
+                    "psf_oversample >= 4.",
+                    fwhm, oversample,
                 )
-                _max_os = int(phot_cfg.get("psf_oversample_max", 4))
-                _min_os_us = int(
-                    phot_cfg.get("psf_oversample_min_undersampled", 2)
-                )
-                _hard_min_stars = int(
-                    phot_cfg.get("psf_oversample_hard_min_stars", 5)
-                )
-
-                if n_final < _hard_min_stars:
-                    oversample = 1
-                    log.warning(
-                        "Adaptive oversampling: only %d PSF stars (< %d threshold); "
-                        "keeping oversample=1x. Undersampled ePSF may be biased.",
-                        n_final, _hard_min_stars,
-                    )
-                else:
-                    if _min_samples > 0:
-                        _os_from_samples = int(
-                            np.floor(np.sqrt(n_final / _min_samples))
-                        )
-                    else:
-                        _os_from_samples = _max_os
-                    oversample = max(
-                        _min_os_us,
-                        min(_os_from_samples, _max_os),
-                    )
-                    oversample = max(1, oversample)
-                    _eff_samples = n_final / (oversample ** 2)
-                    log.info(
-                        "Adaptive oversampling: %d PSF stars -> %dx oversampling "
-                        "(~%.1f samples/pixel; min %dx for undersampled, "
-                        "max %dx, threshold %.1f samples/pixel)",
-                        n_final, oversample, _eff_samples,
-                        _min_os_us, _max_os, _min_samples,
-                    )
 
             smooth_kind = str(phot_cfg.get("psf_smoothing_kernel", "quartic")).strip().lower()
             smooth_size = phot_cfg.get("psf_smoothing_kernel_size", None)
@@ -3839,6 +4303,10 @@ class PSF:
             # wider than 1 px.  A footprint-f kernel averages ~(f*os)^2
             # gridpoint cells, so residual noise ~ 1/(f*sqrt(n_eff)) and the
             # variance-equalising footprint is ~ sqrt(n_target/n_eff) px.
+            # The footprint is capped at ~1xFWHM inside get_smoothing_kernel:
+            # past that the kernel erases the core itself (synthetic
+            # undersampled builds show ~+3% ePSF broadening at ~1.1xFWHM and
+            # +10-25% beyond ~1.5xFWHM).
             n_final = len(epsfstars)
             _samp_target = float(
                 phot_cfg.get("psf_smoothing_kernel_target_samples", 10.0)
@@ -3870,16 +4338,25 @@ class PSF:
                 kind=smooth_kind,
                 size_scale_px=smooth_scale,
                 size_max=smooth_max,
+                max_fwhm_frac=float(
+                    phot_cfg.get("psf_smoothing_kernel_max_fwhm_frac", 1.25)
+                ),
+                cap_min_px=float(
+                    phot_cfg.get("psf_smoothing_kernel_cap_min_px", 1.75)
+                ),
             )
-            log.info(
-                "ePSF smoothing kernel: %s %dx%d (footprint %.2f native px, "
-                "oversample=x%d)",
-                smooth_kind,
-                int(smooth_kernel.shape[0]),
-                int(smooth_kernel.shape[1]),
-                float(smooth_kernel.shape[0]) / max(1, oversample),
-                int(oversample),
-            )
+            if smooth_kernel is None:
+                log.info("ePSF smoothing kernel: disabled (psf_smoothing_kernel=none)")
+            else:
+                log.info(
+                    "ePSF smoothing kernel: %s %dx%d (footprint %.2f native px, "
+                    "oversample=x%d)",
+                    smooth_kind,
+                    int(smooth_kernel.shape[0]),
+                    int(smooth_kernel.shape[1]),
+                    float(smooth_kernel.shape[0]) / max(1, oversample),
+                    int(oversample),
+                )
 
             # Use aperture_radius for PSF normalization to ensure consistent flux scale with aperture photometry.
             # This ensures PSF and AP photometry measure flux over the same effective area.
@@ -3969,145 +4446,22 @@ class PSF:
             adaptive_iters = bool(phot_cfg.get("psf_adaptive_iterations", True))
             base_maxiters = int(phot_cfg.get("psf_maxiters_initial", 5)) if adaptive_iters else 10
             max_maxiters = int(phot_cfg.get("psf_maxiters_max", 10))
+            # Undersampled builds use a relaxed center_accuracy (see below);
+            # the settled point lands at ~7-9 iterations on thin-sampled
+            # fields, beyond the default 5-iter first pass.  Give the first
+            # pass enough headroom to converge directly rather than paying
+            # for a retry rebuild every time.
+            if undersampled and adaptive_iters:
+                base_maxiters = max(base_maxiters, min(max_maxiters, 10))
             
-            # Build EPSFBuilder kwargs - accuracy_threshold may not be supported in all photutils versions
-            epsf_builder_kwargs = dict(
-                oversampling=oversample,
-                recentering_func=recenter_func,
-                recentering_boxsize=cen_box,
-                recentering_maxiters=50 if adaptive_iters else 100,  # Reduced for faster early exit
-                fitter=EPSFFitter(fit_boxsize=fit_boxsize),
-                maxiters=base_maxiters,
-                sigma_clip=sigma_clip_epsf,
-                smoothing_kernel=smooth_kernel,
-                progress_bar=False,
-            )
-            # Only add accuracy_threshold if supported (photutils >= 1.9)
-            try:
-                import inspect
-                sig = inspect.signature(EPSFBuilder.__init__)
-                if 'accuracy_threshold' in sig.parameters:
-                    # Adaptive accuracy threshold based on sampling
-                    # Undersampled data needs more lenient threshold (harder to achieve high accuracy)
-                    if undersampled:
-                        accuracy_threshold = 1e-3  # More lenient for undersampled
-                        log.info(
-                            "Adaptive accuracy threshold: using %.0e for undersampled data (FWHM=%.2f pix)",
-                            accuracy_threshold, fwhm
-                        )
-                    else:
-                        accuracy_threshold = 1e-4 if adaptive_iters else 1e-6
-                    epsf_builder_kwargs['accuracy_threshold'] = accuracy_threshold
-            except Exception:
-                pass  # If inspect fails, try without accuracy_threshold
-            
-            epsf_builder = EPSFBuilder(**epsf_builder_kwargs)
-
-            # Initialise ePSF from a Moffat profile. The power-law index (beta)
-            # is configurable; larger values approach Gaussian-like cores.
-            # Note: astropy's Moffat2DKernel calls this parameter "alpha", but
-            # in astronomy it is conventionally called the Moffat beta index.
-            moffat_beta = float(phot_cfg.get("psf_init_moffat_beta", 4.765))
-            moffat_beta = max(1.1, moffat_beta)
-            moffat_gamma = (oversample * fwhm) / (
-                2.0 * np.sqrt(2.0 ** (1.0 / moffat_beta) - 1.0)
-            )
-            log.info(
-                "ePSF init kernel: moffat_beta=%g, gamma=%g px, size=%dx%d",
-                moffat_beta,
-                float(moffat_gamma),
-                int(oversample * cutout_n),
-                int(oversample * cutout_n),
-            )
-            kernel = Moffat2DKernel(
-                gamma=max(float(moffat_gamma), 1e-6),
-                alpha=float(moffat_beta),
-                x_size=oversample * cutout_n,
-                y_size=oversample * cutout_n,
-            )
-            cutout_ctr = (oversample * cutout_n - 1) / 2.0
-            init_epsf = ImagePSF(
-                data=kernel.array,
-                x_0=cutout_ctr,
-                y_0=cutout_ctr,
-                oversampling=oversample,
-            )
-
-            try:
-                build_result = _call_build_epsf(epsf_builder, epsfstars, init_epsf)
-            except Exception as _build_exc:
-                log.warning(
-                    "ePSF build raised %s: %s",
-                    type(_build_exc).__name__, _build_exc,
-                )
-                build_result = None
-            _final_acc = float("nan")
-            # photutils >=3.0 returns EPSFBuildResult; <3.0 returns (epsf, fitted_stars)
-            if build_result is not None and hasattr(build_result, 'epsf'):
-                epsf = build_result.epsf
-                fitted_stars = build_result.fitted_stars
-                _final_acc = (
-                    float(build_result.final_center_accuracy)
-                    if build_result.final_center_accuracy is not None
-                    else float("nan")
-                )
-                log.info(
-                    "ePSF build: converged=%s, iterations=%d, final_center_accuracy=%.4g px",
-                    build_result.converged,
-                    build_result.iterations,
-                    _final_acc,
-                )
-
-                # Adaptive retry: if not converged and we have headroom, retry with more iterations
-                if adaptive_iters and not build_result.converged and base_maxiters < max_maxiters:
-                    log.info(
-                        "ePSF did not converge in %d iterations; retrying with %d iterations",
-                        base_maxiters, max_maxiters
-                    )
-                    # accuracy_threshold not used here, for compatibility.
-                    epsf_builder_retry = EPSFBuilder(
-                        oversampling=oversample,
-                        recentering_func=recenter_func,
-                        recentering_boxsize=cen_box,
-                        recentering_maxiters=100,
-                        fitter=EPSFFitter(fit_boxsize=fit_boxsize),
-                        maxiters=max_maxiters,
-                        sigma_clip=sigma_clip_epsf,
-                        smoothing_kernel=smooth_kernel,
-                        progress_bar=False,
-                    )
-                    try:
-                        build_result_retry = _call_build_epsf(epsf_builder_retry, epsfstars, init_epsf)
-                    except Exception as _retry_exc:
-                        # A crashed retry (e.g. the recentering function chokes
-                        # on a degenerate intermediate ePSF) must not discard the
-                        # usable first-pass model.
-                        log.warning(
-                            "ePSF retry raised %s: %s; keeping first-pass model.",
-                            type(_retry_exc).__name__, _retry_exc,
-                        )
-                        build_result_retry = None
-                    if build_result_retry is not None and hasattr(build_result_retry, 'epsf'):
-                        if build_result_retry.converged:
-                            log.info("ePSF converged on retry with %d iterations", max_maxiters)
-                            epsf = build_result_retry.epsf
-                            fitted_stars = build_result_retry.fitted_stars
-                            build_result = build_result_retry  # Update for later checks
-                            _final_acc = (
-                                float(build_result_retry.final_center_accuracy)
-                                if build_result_retry.final_center_accuracy is not None
-                                else float("nan")
-                            )
-                        else:
-                            log.warning("ePSF did NOT converge even with %d iterations", max_maxiters)
-                    elif build_result_retry is not None:
-                        epsf, fitted_stars = build_result_retry
-                elif not build_result.converged:
-                    log.warning("ePSF build did NOT converge; PSF model may be unreliable.")
-            elif build_result is not None:
-                epsf, fitted_stars = build_result
-            else:
-                epsf, fitted_stars = None, None
+            # Build EPSFBuilder kwargs.  photutils >=3.0 takes the fit box via
+            # ``fit_shape``; older versions take an EPSFFitter(fit_boxsize=...)
+            # instance.  Note ``center_accuracy`` (not "accuracy_threshold") is
+            # the convergence parameter -- it tests *centering* stability, not
+            # shape.  On undersampled data the default is unreachable (see
+            # _attempt_epsf_build), so it is relaxed there; elsewhere the
+            # default is kept since tightening only burns iterations.
+            _bld_params = _inspect.signature(EPSFBuilder.__init__).parameters
 
             # Last-resort analytic fallback: a diverged/absent ePSF would
             # otherwise disable PSF photometry, the PSF zeropoint, and the
@@ -4126,12 +4480,553 @@ class PSF:
                 except Exception:
                     return False
 
-            _acc_bad = np.isfinite(_final_acc) and _final_acc > max(
-                1.0, 0.5 * float(fit_boxsize)
+            moffat_beta = float(phot_cfg.get("psf_init_moffat_beta", 4.765))
+            moffat_beta = max(1.1, moffat_beta)
+            _fwhm_lo = float(phot_cfg.get("psf_epsf_fwhm_min_frac", 0.85))
+            _fwhm_hi = float(phot_cfg.get("psf_epsf_fwhm_max_frac", 1.5))
+            # A real PSF is positive; only noise and resampling ringing
+            # produce negative flux.  A large negative-flux fraction on a
+            # raw build means the residual median is noise-drawn (too few
+            # samples per oversampled grid cell) -- production fields show
+            # clean builds below ~0.15 and starved ones above ~0.5.
+            _negfrac_max = float(
+                phot_cfg.get("psf_epsf_negfrac_max", 0.4)
             )
+            _res_gate = bool(
+                phot_cfg.get("psf_epsf_residual_gate", True)
+            )
+            _res_ratio_max = float(
+                phot_cfg.get("psf_epsf_residual_ratio_max", 1.3)
+            )
+
+            # Coarse-to-fine schedule for undersampled osamp>=2 builds:
+            # a wide-kernel first phase produces a smooth model so the
+            # shift refit cannot drag stars onto a shared pixel-phase
+            # class; the nominal kernel then refines the detail.  In
+            # native-pixel kernel footprint; 0 disables.
+            _c2f_px = float(
+                phot_cfg.get("psf_epsf_coarse_kernel_px", 2.0)
+            )
+            # Bound on cumulative star-centre drift in the shift refit;
+            # keeps phase classes populated on undersampled builds.
+            _max_shift = float(
+                phot_cfg.get("psf_epsf_max_star_shift_px", 0.5)
+            )
+
+            def _attempt_epsf_build(osamp_c):
+                """Run the ePSF build (plus iteration retry) at ``osamp_c``.
+
+                Returns ``(epsf, fitted_stars, final_acc, init_epsf, fwhm_meas)``
+                where ``fwhm_meas`` is the measured ePSF FWHM in native pixels
+                (NaN when the model is unusable).
+                """
+                # Smoothing kernel for this grid: the thin-sampling boost is
+                # recomputed per candidate because n_eff scales with osamp^2.
+                _n_eff_c = n_final / max(1, osamp_c) ** 2
+                if _samp_target > 0 and _n_eff_c > 0:
+                    _boost_c = float(
+                        np.clip(np.sqrt(_samp_target / _n_eff_c), 1.0,
+                                max(1.0, _boost_max))
+                    )
+                else:
+                    _boost_c = 1.0
+                kern_c = get_smoothing_kernel(
+                    fwhm,
+                    oversample=osamp_c,
+                    kernel_size=(
+                        int(smooth_size) if smooth_size is not None else None
+                    ),
+                    kind=smooth_kind,
+                    size_scale_px=smooth_scale * _boost_c / boost,
+                    size_max=smooth_max,
+                    max_fwhm_frac=float(
+                        phot_cfg.get("psf_smoothing_kernel_max_fwhm_frac", 1.25)
+                    ),
+                    cap_min_px=float(
+                        phot_cfg.get("psf_smoothing_kernel_cap_min_px", 1.75)
+                    ),
+                )
+
+                _kw = dict(
+                    oversampling=osamp_c,
+                    recentering_func=recenter_func,
+                    recentering_boxsize=cen_box,
+                    recentering_maxiters=50 if adaptive_iters else 100,
+                    maxiters=base_maxiters,
+                    sigma_clip=sigma_clip_epsf,
+                    smoothing_kernel=kern_c,
+                    progress_bar=False,
+                )
+                # On undersampled data the default 1e-3 px center-accuracy is
+                # unreachable: with ~n_stars/osamp^2 samples per gridpoint the
+                # fitted star centers jitter by ~0.03-0.1 px between iterations
+                # forever, so "converged" is never reached and the retry keeps
+                # stacking noise-drawn residuals (the ePSF core drifts sharp,
+                # measured on undersampled SN2022mop fields).  A ~0.05 px
+                # threshold (~3% of FWHM, and far below the 0.4-px centroiding
+                # accuracy the photometry needs) stops the iteration as soon
+                # as the centers settle instead of accumulating noise.
+                if undersampled:
+                    _kw["center_accuracy"] = float(
+                        phot_cfg.get("psf_center_accuracy_undersampled", 0.05)
+                    )
+                if "center_accuracy" not in _bld_params:
+                    _kw.pop("center_accuracy", None)
+                if "fit_shape" in _bld_params:
+                    _kw["fit_shape"] = fit_boxsize
+                else:
+                    _kw["fitter"] = EPSFFitter(fit_boxsize=fit_boxsize)
+                # Bound the cumulative star-centre drift when supported:
+                # an unbounded refit collapses the ensemble onto shared
+                # pixel-phase classes on undersampled data.  All builders
+                # in this attempt share one origin map so the bound is
+                # cumulative across phases and retries.
+                _BuilderCls = EPSFBuilder
+                _bld_extra = {}
+                _shift_orig = {}
+                if _max_shift > 0 and hasattr(EPSFBuilder, "_fit_stars"):
+                    _BuilderCls = _BoundedShiftEPSFBuilder
+                    _bld_extra = dict(
+                        max_shift_px=_max_shift, orig_centres=_shift_orig
+                    )
+                builder = _BuilderCls(**_kw, **_bld_extra)
+
+                # Coarse phase for undersampled osamp>=2 builds: the first
+                # iterations from the analytic seed are when the shift
+                # refit can drag stars onto shared phase classes.  A
+                # wide-kernel pass first yields a smooth model that keeps
+                # stars near their measured phases (measured: 0/9 empty
+                # classes and negfrac 0.08 at x3, vs 3/9 empty and 0.23
+                # single-pass); the nominal kernel then refines detail.
+                kern_wide = None
+                _p1_iters = 0
+                if (
+                    undersampled
+                    and osamp_c >= 2
+                    and _c2f_px > 0
+                    and kern_c is not None
+                ):
+                    kern_wide = get_smoothing_kernel(
+                        fwhm,
+                        oversample=osamp_c,
+                        kernel_size=None,
+                        kind=smooth_kind,
+                        size_scale_px=_c2f_px,
+                        size_max=smooth_max,
+                        max_fwhm_frac=float(
+                            phot_cfg.get(
+                                "psf_smoothing_kernel_max_fwhm_frac", 1.25
+                            )
+                        ),
+                        cap_min_px=float(
+                            phot_cfg.get(
+                                "psf_smoothing_kernel_cap_min_px", 1.75
+                            )
+                        ),
+                    )
+                    if kern_wide is not None:
+                        _p1_iters = min(4, max(2, base_maxiters // 3))
+
+                # Initialise ePSF from a Moffat profile.  astropy's
+                # Moffat2DKernel calls the power-law index "alpha"; in
+                # astronomy it is conventionally the Moffat beta index.
+                moffat_gamma_c = (osamp_c * fwhm) / (
+                    2.0 * np.sqrt(2.0 ** (1.0 / moffat_beta) - 1.0)
+                )
+                kernel_c = Moffat2DKernel(
+                    gamma=max(float(moffat_gamma_c), 1e-6),
+                    alpha=float(moffat_beta),
+                    x_size=osamp_c * cutout_n,
+                    y_size=osamp_c * cutout_n,
+                )
+                # Convolve the continuous Moffat with the square pixel
+                # response so the model is an effective PSF, matching both
+                # the ePSF fixed point and what PSF photometry needs on
+                # pixel-integrated data.  Without this the init (and the
+                # analytic fallback) is systematically narrower than the true
+                # effective PSF on undersampled data.
+                init_data_c = pixel_integrate_oversampled(kernel_c.array, osamp_c)
+                # photutils normalises ePSF data to sum == prod(oversampling),
+                # so that ``evaluate(flux=F)`` yields a source of total flux F.
+                # ``pixel_integrate_oversampled`` returns a unit-sum array;
+                # without this rescale the analytic fallback (and the
+                # iteration-1 seed) is osamp^2 too faint and fitted fluxes
+                # come out inflated by that factor (~3 mag at osamp=4).
+                init_data_c = init_data_c * float(osamp_c) ** 2
+                cutout_ctr_c = (osamp_c * cutout_n - 1) / 2.0
+                init_epsf_c = ImagePSF(
+                    data=init_data_c,
+                    x_0=cutout_ctr_c,
+                    y_0=cutout_ctr_c,
+                    oversampling=osamp_c,
+                )
+                if osamp_c == oversample:
+                    log.info(
+                        "ePSF init kernel: moffat_beta=%g, gamma=%g px, size=%dx%d",
+                        moffat_beta,
+                        float(moffat_gamma_c),
+                        int(osamp_c * cutout_n),
+                        int(osamp_c * cutout_n),
+                    )
+
+                epsf_c = fitted_c = None
+                acc_c = float("nan")
+                res = None
+                if _p1_iters > 0:
+                    # Coarse phase: wide kernel, settled stars carry over.
+                    _kw1 = dict(
+                        _kw,
+                        smoothing_kernel=kern_wide,
+                        maxiters=_p1_iters,
+                    )
+                    builder1 = _BuilderCls(**_kw1, **_bld_extra)
+                    try:
+                        res1 = _call_build_epsf(
+                            builder1, epsfstars, init_epsf_c
+                        )
+                    except Exception as _p1_exc:
+                        log.warning(
+                            "ePSF coarse phase raised %s: %s",
+                            type(_p1_exc).__name__, _p1_exc,
+                        )
+                        res1 = None
+                    if (
+                        res1 is not None
+                        and hasattr(res1, "epsf")
+                        and _epsf_usable(res1.epsf)
+                    ):
+                        _kw2 = dict(
+                            _kw, maxiters=max(1, base_maxiters - _p1_iters)
+                        )
+                        builder2 = _BuilderCls(**_kw2, **_bld_extra)
+                        try:
+                            res = _call_build_epsf(
+                                builder2, res1.fitted_stars, res1.epsf
+                            )
+                        except Exception as _p2_exc:
+                            log.warning(
+                                "ePSF refine phase raised %s: %s; keeping "
+                                "coarse-phase model.",
+                                type(_p2_exc).__name__, _p2_exc,
+                            )
+                        if res is None:
+                            res = res1
+                if res is None:
+                    try:
+                        res = _call_build_epsf(
+                            builder, epsfstars, init_epsf_c
+                        )
+                    except Exception as _build_exc:
+                        log.warning(
+                            "ePSF build raised %s: %s",
+                            type(_build_exc).__name__, _build_exc,
+                        )
+                        res = None
+                # photutils >=3.0 returns EPSFBuildResult; <3.0 returns
+                # (epsf, fitted_stars).
+                if res is not None and hasattr(res, "epsf"):
+                    epsf_c = res.epsf
+                    fitted_c = res.fitted_stars
+                    acc_c = (
+                        float(res.final_center_accuracy)
+                        if res.final_center_accuracy is not None
+                        else float("nan")
+                    )
+                    log.info(
+                        "ePSF build (oversample=x%d): converged=%s, "
+                        "iterations=%d, final_center_accuracy=%.4g px",
+                        osamp_c, res.converged, res.iterations, acc_c,
+                    )
+                    if (
+                        adaptive_iters
+                        and not res.converged
+                        and base_maxiters < max_maxiters
+                    ):
+                        # Continue iterating from the first-pass model for the
+                        # remaining budget rather than rebuilding from the
+                        # Moffat seed: the iteration is Markovian in the
+                        # current ePSF, so base+retry iterations land at the
+                        # same endpoint as a fresh max_maxiters run at half
+                        # the cost.  Revert to the Moffat seed when the
+                        # first-pass model is degenerate -- a bad seed would
+                        # just propagate.
+                        _retry_iters = max_maxiters - base_maxiters
+                        _seed_r = (
+                            epsf_c if _epsf_usable(epsf_c) else init_epsf_c
+                        )
+                        log.info(
+                            "ePSF did not converge in %d iterations; "
+                            "continuing for %d more",
+                            base_maxiters, _retry_iters,
+                        )
+                        _kw_retry = dict(
+                            _kw,
+                            recentering_maxiters=100,
+                            maxiters=_retry_iters,
+                        )
+                        builder_retry = _BuilderCls(
+                            **_kw_retry, **_bld_extra
+                        )
+                        try:
+                            res_r = _call_build_epsf(
+                                builder_retry, epsfstars, _seed_r
+                            )
+                        except Exception as _retry_exc:
+                            # A crashed retry (e.g. the recentering function
+                            # chokes on a degenerate intermediate ePSF) must
+                            # not discard the usable first-pass model.
+                            log.warning(
+                                "ePSF retry raised %s: %s; keeping "
+                                "first-pass model.",
+                                type(_retry_exc).__name__, _retry_exc,
+                            )
+                            res_r = None
+                        if res_r is not None and hasattr(res_r, "epsf"):
+                            if res_r.converged:
+                                log.info(
+                                    "ePSF converged after %d total "
+                                    "iterations",
+                                    base_maxiters + int(res_r.iterations),
+                                )
+                                epsf_c = res_r.epsf
+                                fitted_c = res_r.fitted_stars
+                                acc_c = (
+                                    float(res_r.final_center_accuracy)
+                                    if res_r.final_center_accuracy is not None
+                                    else float("nan")
+                                )
+                            else:
+                                log.warning(
+                                    "ePSF did NOT converge after %d total "
+                                    "iterations", max_maxiters
+                                )
+                        elif res_r is not None:
+                            epsf_c, fitted_c = res_r
+                    elif not res.converged:
+                        log.warning(
+                            "ePSF build did NOT converge; PSF model may be "
+                            "unreliable."
+                        )
+                elif res is not None:
+                    epsf_c, fitted_c = res
+
+                meas_c = (
+                    measure_epsf_fwhm_native(
+                        np.asarray(epsf_c.data, float), osamp_c
+                    )
+                    if epsf_c is not None and _epsf_usable(epsf_c)
+                    else float("nan")
+                )
+                return epsf_c, fitted_c, acc_c, init_epsf_c, meas_c
+
+            # On undersampled fields the high-oversampling build can collapse
+            # narrow: each star lands only on the gridpoints of its own
+            # pixel-phase class, so with ~n_stars/osamp^2 samples per
+            # gridpoint the sigma-clipped median residual is fragile, and the
+            # unbounded per-star shift fit lets centres migrate onto a shared
+            # phase (measured on SN2022mop undersampled fields: the ePSF
+            # converged to ~0.7x the true effective FWHM).  Descend the
+            # oversampling ladder before giving up on the empirical model --
+            # at osamp=1 every star constrains every gridpoint and the build
+            # recovered the true ~2 px effective width in 2 iterations.
+            _osamp_ladder = [oversample]
+            if undersampled and oversample > 1:
+                # Step down one factor at a time: with the coarse-to-fine
+                # schedule, osamp=3 is often viable where osamp=4 starved,
+                # and keeps finer core resolution than jumping to 1x.
+                _osamp_ladder.extend(range(oversample - 1, 0, -1))
+
+            epsf = fitted_stars = None
+            _final_acc = float("nan")
+            _epsf_fwhm_meas = float("nan")
+            init_epsf = None
+            # Analytic init on the accepted rung's grid, for the residual
+            # accuracy gate below.
+            init_kept = None
+            # Track the grid the kept model actually lives on: downstream
+            # consumers (stamp cleanup, encircled-energy diagnostic, the
+            # oversampled plot) scale by ``oversample``, which is wrong if a
+            # degraded lower-oversampling model is kept.
+            _kept_osamp = oversample
+            for _osamp_c in _osamp_ladder:
+                epsf_c, fitted_c, acc_c, init_c, meas_c = _attempt_epsf_build(
+                    _osamp_c
+                )
+                if init_epsf is None:
+                    init_epsf = init_c
+                # A star centre still wandering by more than ~half a FWHM
+                # on the final iteration is unregistered -- the stacked
+                # ePSF is built from misaligned cutouts (blocky core,
+                # leaked contamination).  Production undersampled fields
+                # show a clean break: settled builds end <0.5 px, degraded
+                # ones >1 px, independent of the fit box size.
+                _acc_bad = np.isfinite(acc_c) and acc_c > max(
+                    1.0, 0.5 * fwhm
+                )
+                # The ePSF is the effective (pixel-integrated) PSF, so a
+                # measurement well *below* the image FWHM is unphysical --
+                # pixel integration can only broaden -- and indicates a
+                # degraded build (thin sampling, phase collapse,
+                # non-convergence).
+                _fwhm_bad = np.isfinite(meas_c) and (
+                    meas_c < _fwhm_lo * fwhm or meas_c > _fwhm_hi * fwhm
+                )
+                # A NaN measurement on a "usable" model means the profile
+                # never crosses half-max -- degenerate even if finite.
+                # Wing-quality gate: at osamp>=2 a starved build (few
+                # samples per grid cell) acquires a large negative-flux
+                # fraction even when acc/FWHM look fine -- FWHM gates
+                # cannot see wing noise.  Skipped at osamp=1, where real
+                # resampling ringing legitimately rings below zero and no
+                # lower rung exists anyway.
+                _neg_bad = False
+                if _osamp_c >= 2 and epsf_c is not None and _epsf_usable(
+                    epsf_c
+                ):
+                    _d_c = np.asarray(epsf_c.data, dtype=float)
+                    _tot_c = float(np.nansum(_d_c))
+                    if _tot_c > 0:
+                        _neg_bad = (
+                            -float(np.nansum(_d_c[_d_c < 0])) / _tot_c
+                            > _negfrac_max
+                        )
+                _good = (
+                    epsf_c is not None
+                    and _epsf_usable(epsf_c)
+                    and np.isfinite(meas_c)
+                    and not _acc_bad
+                    and not _fwhm_bad
+                    and not _neg_bad
+                )
+                if _good:
+                    epsf, fitted_stars = epsf_c, fitted_c
+                    _final_acc = acc_c
+                    _epsf_fwhm_meas = meas_c
+                    _kept_osamp = _osamp_c
+                    init_kept = init_c
+                    if _osamp_c != oversample:
+                        log.info(
+                            "ePSF recovered at oversample=x%d (from x%d): "
+                            "measured FWHM %.2f px vs image FWHM %.2f px.",
+                            _osamp_c, oversample, meas_c, fwhm,
+                        )
+                    break
+                if len(_osamp_ladder) > 1 and _osamp_c != _osamp_ladder[-1]:
+                    _why = (
+                        "no usable model"
+                        if epsf_c is None or not _epsf_usable(epsf_c)
+                        else (
+                            "degenerate centre fit "
+                            f"(final_center_accuracy={acc_c:.3g} px)"
+                            if _acc_bad
+                            else (
+                                "degenerate profile (no half-max crossing)"
+                                if not np.isfinite(meas_c)
+                                else (
+                                    f"measured FWHM {meas_c:.2f} px outside "
+                                    f"[{_fwhm_lo:.2f}, {_fwhm_hi:.2f}]x image "
+                                    f"FWHM {fwhm:.2f} px"
+                                    if _fwhm_bad
+                                    else "noise-dominated wings "
+                                    f"(negative-flux fraction > "
+                                    f"{_negfrac_max:.2f})"
+                                )
+                            )
+                        )
+                    )
+                    log.warning(
+                        "ePSF at oversample=x%d degraded: %s; retrying at "
+                        "lower oversampling.",
+                        _osamp_c, _why,
+                    )
+                # Keep the latest produced attempt for diagnostics or the
+                # no-fallback path; a crashed attempt must not clobber a
+                # previously-kept model.
+                if epsf_c is not None:
+                    epsf = epsf_c
+                    fitted_stars = fitted_c
+                    _final_acc = acc_c
+                    _epsf_fwhm_meas = meas_c
+                    _kept_osamp = _osamp_c
+            oversample = _kept_osamp
+
             _used_analytic_psf = False
-            if epsf is None or _acc_bad or not _epsf_usable(epsf):
+            # Residual accuracy gate on the accepted empirical model: a
+            # build can pass every shape gate yet still represent the
+            # stars worse than the pixel-integrated analytic model (the
+            # ePSF is fitted to these stars, so it has every advantage --
+            # measured: degraded production stamps fit 3-16x worse than
+            # the Moffat while good builds sit at ~parity).  Demote to
+            # the analytic model in that case.
+            if (
+                _good
+                and _res_gate
+                and bool(phot_cfg.get("psf_analytic_fallback", True))
+                and init_kept is not None
+                and _epsf_usable(init_kept)
+            ):
+                _stars_eval = (
+                    fitted_stars if fitted_stars is not None else epsfstars
+                )
+                _fit_rad = max(3.0, 0.5 * fit_boxsize)
+                _mad_emp = _epsf_residual_mad(
+                    _stars_eval, epsf, _fit_rad
+                )
+                _mad_ana = _epsf_residual_mad(
+                    _stars_eval, init_kept, _fit_rad
+                )
+                if (
+                    np.isfinite(_mad_emp)
+                    and np.isfinite(_mad_ana)
+                    and _mad_ana > 0
+                ):
+                    log.info(
+                        "ePSF residual accuracy: empirical star-residual "
+                        "MAD %.4f vs analytic %.4f (fit radius %.1f px, "
+                        "%d stars)",
+                        _mad_emp, _mad_ana, _fit_rad, len(_stars_eval),
+                    )
+                    if _mad_emp > _res_ratio_max * _mad_ana:
+                        log.warning(
+                            "Empirical ePSF fits the PSF stars %.2fx worse "
+                            "than the analytic Moffat (residual MAD %.4f vs "
+                            "%.4f) -- the empirical model is degraded; using "
+                            "the analytic model.",
+                            _mad_emp / _mad_ana, _mad_emp, _mad_ana,
+                        )
+                        epsf = init_kept
+                        fitted_stars = epsfstars
+                        _used_analytic_psf = True
+                        oversample = int(
+                            np.atleast_1d(
+                                getattr(init_kept, "oversampling", oversample)
+                            )[0]
+                        )
+                        _epsf_fwhm_meas = measure_epsf_fwhm_native(
+                            np.asarray(epsf.data, float), oversample
+                        )
+
+            if not _good and not _used_analytic_psf:
+                # Re-evaluate the final candidate's flags for the message
+                _acc_bad = np.isfinite(_final_acc) and _final_acc > max(
+                    1.0, 0.5 * fwhm
+                )
+                _fwhm_bad = np.isfinite(_epsf_fwhm_meas) and (
+                    _epsf_fwhm_meas < _fwhm_lo * fwhm
+                    or _epsf_fwhm_meas > _fwhm_hi * fwhm
+                )
                 if bool(phot_cfg.get("psf_analytic_fallback", True)) and _epsf_usable(init_epsf):
+                    if _fwhm_bad:
+                        log.warning(
+                            "ePSF measured FWHM %.2f px is outside "
+                            "[%.2f, %.2f]x the image FWHM %.2f px -- the "
+                            "empirical model is degraded; falling back to "
+                            "analytic.",
+                            _epsf_fwhm_meas,
+                            _fwhm_lo,
+                            _fwhm_hi,
+                            fwhm,
+                        )
                     log.warning(
                         "ePSF model %s (final_center_accuracy=%.3g px); falling back to "
                         "analytic Moffat PSF (FWHM=%.2f px, beta=%.2f). PSF photometry, "
@@ -4143,13 +5038,74 @@ class PSF:
                     epsf = init_epsf
                     fitted_stars = epsfstars
                     _used_analytic_psf = True
+                    # The analytic init is defined on the primary
+                    # (first-attempt) oversampled grid.
+                    oversample = int(
+                        np.atleast_1d(getattr(init_epsf, "oversampling", oversample))[0]
+                    )
+                    _epsf_fwhm_meas = measure_epsf_fwhm_native(
+                        np.asarray(epsf.data, float), oversample
+                    )
                 elif epsf is None or not _epsf_usable(epsf):
                     log.error("ePSF build produced no usable model.")
                     return None, df
+                elif _fwhm_bad:
+                    log.warning(
+                        "ePSF measured FWHM %.2f px is outside "
+                        "[%.2f, %.2f]x the image FWHM %.2f px but "
+                        "psf_analytic_fallback is disabled -- keeping the "
+                        "degraded empirical model.",
+                        _epsf_fwhm_meas, _fwhm_lo, _fwhm_hi, fwhm,
+                    )
 
-            # EPSFBuilder already normalizes to unit sum.
-            # Do not apply secondary normalization as it corrupts the flux scale
-            # by dividing by total array sum (including wings outside norm_radius).
+            # Post-build cosmetic cleanup on the empirical model only:
+            # with ~n/osamp^2 samples per gridpoint the ePSF wings carry
+            # uncorrelated speckle noise, and contaminated-star cutouts can
+            # leak a bright frame at the stamp edge.  The cleanup preserves
+            # the core, the coarse resampling ringing, and the sum ==
+            # prod(oversampling) flux convention exactly.
+            if not _used_analytic_psf and bool(
+                phot_cfg.get("psf_epsf_wing_smooth", True)
+            ):
+                try:
+                    epsf.data[:] = clean_epsf_stamp(
+                        np.asarray(epsf.data, float),
+                        oversample,
+                        fwhm,
+                        wing_start_fwhm=float(
+                            phot_cfg.get(
+                                "psf_epsf_wing_smooth_start_fwhm", 1.5
+                            )
+                        ),
+                        wing_end_fwhm=float(
+                            phot_cfg.get("psf_epsf_wing_smooth_end_fwhm", 3.5)
+                        ),
+                        wing_sigma_px=float(
+                            phot_cfg.get("psf_epsf_wing_smooth_sigma_px", 1.25)
+                        ),
+                        edge_px=float(
+                            phot_cfg.get("psf_epsf_edge_taper_px", 2.0)
+                        ),
+                        flatten_fwhm=float(
+                            phot_cfg.get("psf_epsf_wing_flatten_fwhm", 3.5)
+                        ),
+                        flatten_width_px=float(
+                            phot_cfg.get("psf_epsf_wing_flatten_width_px", 2.0)
+                        ),
+                    )
+                    # Re-measure: wing blending can shift the half-max
+                    # crossing slightly.
+                    _epsf_fwhm_meas = measure_epsf_fwhm_native(
+                        np.asarray(epsf.data, float), oversample
+                    )
+                except Exception as _clean_err:
+                    log.debug("ePSF stamp cleanup failed: %s", _clean_err)
+
+            # EPSFBuilder already normalises the ePSF to sum ==
+            # prod(oversampling) (the photutils convention for flux=total).
+            # Do not apply secondary normalization as it corrupts the flux
+            # scale by dividing by total array sum (including wings outside
+            # norm_radius).
 
             # ---- ePSF quality diagnostics ----
             n_epsf_stars = len(epsfstars)
@@ -4162,6 +5118,16 @@ class PSF:
                 )
             else:
                 log.info("ePSF built from %d stars", n_epsf_stars)
+
+            # The effective PSF is the pixel-integrated PSF, so for
+            # undersampled data a measurement ~5-10% broader than the
+            # continuous input FWHM is expected.
+            if np.isfinite(_epsf_fwhm_meas):
+                log.info(
+                    "ePSF measured FWHM: %.2f native px (input FWHM %.2f px)",
+                    _epsf_fwhm_meas,
+                    fwhm,
+                )
 
             # Compute encircled energy at the photometry fit_shape radius.
             # If EE is significantly < 1.0 at fit_shape, the ePSF wings are
@@ -4229,14 +5195,17 @@ class PSF:
             except Exception as _diag_err:
                 log.debug("ePSF diagnostic failed: %s", _diag_err)
 
-            if oversample > 1:
-                self.plot_oversampled_psf(
-                    epsf,
-                    oversample=oversample,
-                    save_path=os.path.join(
-                        write_dir, f"PSF_Image_{base}{get_plot_ext(self.input_yaml)}"
-                    ),
-                )
+            # The stamp plot is the primary visual PSF diagnostic; produce
+            # it at every oversampling factor (osamp=1 stamps are the
+            # common robust-regime product, not an edge case).
+            self.plot_oversampled_psf(
+                epsf,
+                oversample=oversample,
+                save_path=os.path.join(
+                    write_dir, f"PSF_Image_{base}{get_plot_ext(self.input_yaml)}"
+                ),
+                fwhm_native=fwhm,
+            )
 
             save_path = os.path.join(write_dir, f"{filename_prefix}_{base}.fits")
             from functions import safe_fits_write
@@ -4254,6 +5223,11 @@ class PSF:
             )
             _psf_hdr["PSFNPIX"] = (int(cutout_n), "ePSF native-pixel cutout size")
             _psf_hdr["FWHM_PIX"] = (float(fwhm), "Image FWHM in native pixels")
+            if np.isfinite(_epsf_fwhm_meas):
+                _psf_hdr["EPSFFWHM"] = (
+                    float(_epsf_fwhm_meas),
+                    "Measured ePSF FWHM in native pixels",
+                )
             _psf_hdr["NPSFSTAR"] = (int(n_epsf_stars), "Stars used in ePSF build")
             _psf_hdr["PSFBUILD"] = (
                 "analytic-moffat" if _used_analytic_psf else "epsf",
@@ -4270,15 +5244,21 @@ class PSF:
                     "ePSF y origin (oversampled array coord)",
                 )
             safe_fits_write(save_path, np.asarray(epsf.data, float), _psf_hdr)
-            self._create_psf_visualization(
-                fitted_stars,
-                epsf,
-                cutout_shape[0],
-                norm_radius,
-                write_dir,
-                f"{filename_prefix}_{base}",
-                use_log_scale=False,  # Set to True for log color scale on 2D PSF
-            )
+            # The visualisation is diagnostic only: a failure here (e.g.
+            # fitted_stars absent after a fallback) must not discard the
+            # successfully built and written ePSF.
+            try:
+                self._create_psf_visualization(
+                    fitted_stars,
+                    epsf,
+                    cutout_shape[0],
+                    norm_radius,
+                    write_dir,
+                    f"{filename_prefix}_{base}",
+                    use_log_scale=False,  # Set to True for log color scale on 2D PSF
+                )
+            except Exception as _viz_err:
+                log.warning("PSF visualisation failed: %s", _viz_err)
 
             return epsf, df
 
@@ -4299,15 +5279,18 @@ class PSF:
         use_zscale: bool = True,
         zscale_contrast: float = 0.25,
         use_log_scale: bool = False,
+        fwhm_native: Optional[float] = None,
     ):
         """
         Three-panel figure: oversampled PSF image + X/Y projections.
+
+        Axes are in native-pixel units so the ePSF width is directly
+        comparable to the image FWHM.  When ``fwhm_native`` is given, a
+        dashed circle of radius FWHM/2 marks the expected core size on the
+        image panel (with half-FWHM guides on the projections), and the
+        measured ePSF FWHM is shown in the title.
         """
         log = logging.getLogger(__name__)
-
-        if oversample <= 1:
-            log.info("Skipping PSF plot: oversample <= 1.")
-            return None
 
         try:
             data = np.asarray(psf_model.data, float)
@@ -4339,7 +5322,9 @@ class PSF:
             ax_B = divider.append_axes("bottom", size="25%", pad=0.25, sharex=ax)
 
             ny, nx = data.shape
-            extent = [0, nx, 0, ny]
+            scale = 1.0 / max(1, int(oversample))
+            extent = [0.0, nx * scale, 0.0, ny * scale]
+            epsf_fwhm_meas = measure_epsf_fwhm_native(data, oversample)
 
             # LogNorm requires strictly positive values.
             if use_log_scale:
@@ -4371,16 +5356,33 @@ class PSF:
                 vmax=None if use_log_scale else vmax,
             )
 
-            cx, cy = nx // 2, ny // 2
+            cx, cy = nx * scale / 2.0, ny * scale / 2.0
             ax.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
             ax.axhline(cy, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
-            ax.set_title(f"Oversample={oversample}x", fontsize=8, pad=2)
-            ax.set_xlabel("X [pixels]")
-            ax.set_ylabel("Y [pixels]")
+            _has_fwhm = fwhm_native is not None and np.isfinite(fwhm_native)
+            if _has_fwhm:
+                ax.add_patch(
+                    Circle(
+                        (cx, cy),
+                        0.5 * float(fwhm_native),
+                        fill=False,
+                        color="white",
+                        ls="--",
+                        lw=0.8,
+                    )
+                )
+            _title = f"Oversample={oversample}x"
+            if np.isfinite(epsf_fwhm_meas):
+                _title += f" - ePSF FWHM={epsf_fwhm_meas:.2f} px"
+            if _has_fwhm:
+                _title += f" (image {float(fwhm_native):.2f} px)"
+            ax.set_title(_title, fontsize=8, pad=2)
+            ax.set_xlabel("X [native px]")
+            ax.set_ylabel("Y [native px]")
             ax.set_xticks([])
 
-            x_phys = np.arange(nx)
-            y_phys = np.arange(ny)
+            x_phys = (np.arange(nx) + 0.5) * scale
+            y_phys = (np.arange(ny) + 0.5) * scale
             # Projections must tolerate NaNs in the PSF array.
             # Convert once and reuse for both axes to avoid a second allocation.
             _data_f = np.asarray(data, dtype=float)
@@ -4395,13 +5397,29 @@ class PSF:
             if _n_r > 0:
                 _y_e = np.empty(2 * _n_r)
                 for i in range(_n_r):
-                    _y_e[2 * i] = i - 0.5 if i > 0 else 0
-                    _y_e[2 * i + 1] = i + 0.5 if i < _n_r - 1 else (_n_r - 1)
+                    _y_e[2 * i] = i * scale
+                    _y_e[2 * i + 1] = (i + 1) * scale
                 ax_R.plot(np.repeat(hy, 2), _y_e, color=PLOT_COLORS.get('psf', '#00AA00'), lw=0.5)
             ax_B.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
             ax_R.axhline(cy, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
+            if _has_fwhm:
+                for sgn in (-1.0, 1.0):
+                    ax_B.axvline(
+                        cx + sgn * 0.5 * float(fwhm_native),
+                        color=PLOT_COLORS.get('spine_color', '#000000'),
+                        lw=0.5,
+                        alpha=0.5,
+                        ls=":",
+                    )
+                    ax_R.axhline(
+                        cy + sgn * 0.5 * float(fwhm_native),
+                        color=PLOT_COLORS.get('spine_color', '#000000'),
+                        lw=0.5,
+                        alpha=0.5,
+                        ls=":",
+                    )
             ax_B.set_ylabel("Mean ePSF flux [normalised]")
-            ax_B.set_xlabel("X [pixels]")
+            ax_B.set_xlabel("X [native px]")
             ax_R.yaxis.tick_right()
             ax_R.tick_params(axis="x", rotation=90)
 
@@ -4448,7 +5466,20 @@ class PSF:
 
         apply_autophot_mplstyle()
         plt.ioff()
-        fig = plt.figure(figsize=set_size(540, 1.3))
+        # Star cutouts are square equal-aspect images tiled with zero
+        # spacing, so the left-grid cells must be square or the stamps
+        # shrink inside them and leave gaps hspace=0 cannot remove.  The
+        # left subgrid splits its region into nrows equal rows regardless
+        # of the parent height_ratios, so square cells need
+        # fig_h*(top-bottom)/nrows == fig_w*(right-left)/col_units.
+        fig_w = set_size(540)[0]
+        g_left, g_right, g_bottom, g_top = 0.02, 0.98, 0.03, 0.93
+        col_units = ncols + 0.12 + 2.0  # star columns + gap + right block
+        fig_h = (
+            fig_w * (g_right - g_left) * nrows
+            / ((g_top - g_bottom) * col_units)
+        )
+        fig = plt.figure(figsize=(fig_w, fig_h))
         # Centre the right-hand block: equal empty rows above and below
         start_row = (total_rows - block_height) // 2
         height_ratios = [1] * total_rows
@@ -4461,6 +5492,10 @@ class PSF:
             ncols=ncols + 3,
             width_ratios=[1] * ncols + [0.12] + [1, 1],
             height_ratios=height_ratios,
+            left=g_left,
+            right=g_right,
+            bottom=g_bottom,
+            top=g_top,
             hspace=0,
             wspace=0,
         )
@@ -4595,6 +5630,31 @@ class PSF:
         ax_right_3d.set_yticks([])
         ax_right_3d.set_zticks([])
         ax_right_3d.view_init(elev=35, azim=135)
+
+        # Overlay circles mark the normalisation radius; a single figure
+        # legend identifies them since per-stamp labels would be unreadable.
+        # The cutout circles are white for contrast but mean the same thing
+        # as the colored circle on the ePSF panel.
+        from matplotlib.lines import Line2D as _Line2D
+        fig.legend(
+            handles=[
+                _Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    linestyle="None",
+                    markersize=6,
+                    markerfacecolor="none",
+                    markeredgecolor=PLOT_COLORS.get('epsf_aperture', '#CC79A7'),
+                    label="Normalisation radius",
+                )
+            ],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.0),
+            ncol=1,
+            fontsize=8,
+            frameon=False,
+        )
 
         psf_sources_png = os.path.join(
             write_dir, f"PSF_Sources_{base}{get_plot_ext(self.input_yaml)}"
@@ -6048,7 +7108,7 @@ class PSF:
                 write_dir = os.path.dirname(fpath)
                 _ext = get_plot_ext(self.input_yaml)
                 old_path = os.path.join(write_dir, f"PSF_Target_{base}{_ext}")
-                new_path = os.path.join(write_dir, f"PSF_Target_{base}_inverted{_ext}")
+                new_path = os.path.join(write_dir, f"PSF_Target_Inverted_{base}{_ext}")
                 if os.path.exists(old_path):
                     os.rename(old_path, new_path)
                     # log.info("Saved inverted PSF fit plot: %s", new_path)
@@ -6560,16 +7620,83 @@ class PSF:
                     _target_names.append(str(_tn))
                 _n_target_cols = len(_target_centers) if _target_centers else 1
 
+            # Compute per-target zoom bounds.  When multiple targets are
+            # present, each gets its own science column zoomed around it.
+            # The primary target's zoom is also used for the residual panel.
+            if not _target_centers:
+                _tcx = (
+                    np.nanmean(sources["x_pix"])
+                    if "x_pix" in sources
+                    else ndimage.data.shape[1] / 2
+                )
+                _tcy = (
+                    np.nanmean(sources["y_pix"])
+                    if "y_pix" in sources
+                    else ndimage.data.shape[0] / 2
+                )
+                _target_centers = [(_tcx, _tcy)]
+                _target_names = ["Main target"]
+                _n_target_cols = 1
+
+            _target_zooms = []
+            for _tcx, _tcy in _target_centers:
+                _x0 = max(int(np.floor(_tcx - scale)), 0)
+                _x1 = min(int(np.ceil(_tcx + scale)), ndimage.data.shape[1])
+                _y0 = max(int(np.floor(_tcy - scale)), 0)
+                _y1 = min(int(np.ceil(_tcy + scale)), ndimage.data.shape[0])
+                _target_zooms.append((_x0, _x1, _y0, _y1))
+
+            # Primary target zoom (used by residual panel)
+            x0, x1, y0, y1 = _target_zooms[0]
+
             ncols = (
                 _n_target_cols + (1 if psfphot is not None else 0) + (1 if epsf is not None else 0)
             )
+
+            # Equal-aspect image panels shrink inside mismatched figure
+            # cells, leaving gaps no wspace can remove.  Size the figure
+            # from each column's image aspect (science columns use their
+            # zoom window, the residual shares the primary target's, the
+            # ePSF uses the model shape) and give the gridspec columns the
+            # same proportions so every panel fills its cell.
+            _col_aspects = [
+                (zx1 - zx0) / max(zy1 - zy0, 1)
+                for (zx0, zx1, zy0, zy1) in _target_zooms
+            ]
+            if psfphot is not None:
+                _col_aspects.append((x1 - x0) / max(y1 - y0, 1))
+            if epsf is not None:
+                _esh, _esw = np.shape(epsf.data)
+                _col_aspects.append(_esw / max(_esh, 1))
+
             apply_autophot_mplstyle()
-            golden_ratio = (5**0.5 + 1) / 2
-            width_in = 5.5 * ncols
-            aspect = 5.0 * golden_ratio / width_in
-            width_pt = width_in * 72.27
-            fig = plt.figure(figsize=set_size(width_pt, aspect=aspect))
-            gs = GridSpec(1, ncols, width_ratios=[1] * ncols, wspace=0.15)
+            # Each column packs the main image plus appended axes: right
+            # projection 20% + 0.15 pad, bottom projection 20% + 0.15 pad,
+            # top colorbar 5% + 0.05 pad, all fractions of the main axes.
+            ax_h = 3.4
+            _col_w_factor = 1.0 + 0.15 + 0.20
+            _col_h_factor = 1.0 + 0.15 + 0.20 + 0.05 + 0.05
+            left, right, bottom, top = 0.05, 0.98, 0.15, 0.90
+            wspace = 0.08
+            fig_w = (
+                _col_w_factor
+                * ax_h
+                * sum(_col_aspects)
+                * (1 + wspace * (ncols - 1) / ncols)
+                / (right - left)
+            )
+            fig_h = _col_h_factor * ax_h / (top - bottom)
+            fig = plt.figure(figsize=(fig_w, fig_h))
+            gs = GridSpec(
+                1,
+                ncols,
+                width_ratios=_col_aspects,
+                wspace=wspace,
+                left=left,
+                right=right,
+                bottom=bottom,
+                top=top,
+            )
 
             ax_list, cax_list = [], []
             for k in range(ncols):
@@ -6626,35 +7753,6 @@ class PSF:
                     y_edges[2 * i + 1] = (y0 + i + 0.5) if i < n - 1 else (y1 - 1)
                 x_step = np.repeat(x_vals, 2)
                 ax_R.plot(x_step, y_edges, color=color, lw=lw, alpha=alpha)
-
-            # Compute per-target zoom bounds.  When multiple targets are
-            # present, each gets its own science column zoomed around it.
-            # The primary target's zoom is also used for the residual panel.
-            if not _target_centers:
-                _tcx = (
-                    np.nanmean(sources["x_pix"])
-                    if "x_pix" in sources
-                    else ndimage.data.shape[1] / 2
-                )
-                _tcy = (
-                    np.nanmean(sources["y_pix"])
-                    if "y_pix" in sources
-                    else ndimage.data.shape[0] / 2
-                )
-                _target_centers = [(_tcx, _tcy)]
-                _target_names = ["Main target"]
-                _n_target_cols = 1
-
-            _target_zooms = []
-            for _tcx, _tcy in _target_centers:
-                _x0 = max(int(np.floor(_tcx - scale)), 0)
-                _x1 = min(int(np.ceil(_tcx + scale)), ndimage.data.shape[1])
-                _y0 = max(int(np.floor(_tcy - scale)), 0)
-                _y1 = min(int(np.ceil(_tcy + scale)), ndimage.data.shape[0])
-                _target_zooms.append((_x0, _x1, _y0, _y1))
-
-            # Primary target zoom (used by residual panel)
-            x0, x1, y0, y1 = _target_zooms[0]
 
             # Target marker colors: primary=white, others=muted teal (was neon cyan)
             _tc_colors = ["white"] + [PLOT_COLORS.get('target_secondary', '#17A2B8')] * (len(_target_centers) - 1)
@@ -7035,7 +8133,7 @@ class PSF:
                                frameon=False, fontsize=8, ncol=_leg_ncol)
             _ext = get_plot_ext(self.input_yaml)
             save_name_png = (
-                f"PSF_Target_{base}{_ext}" if plotTarget else f"PSF_Subtractions_{base}{_ext}"
+                f"PSF_Target_{base}{_ext}" if plotTarget else f"PSF_Residuals_{base}{_ext}"
             )
             fig.savefig(
                 os.path.join(write_dir, save_name_png),
@@ -7170,7 +8268,7 @@ class PSF:
         os.makedirs(writedir, exist_ok=True)
         stem = os.path.splitext(os.path.basename(fpath))[0]
         outpath_png = os.path.join(
-            writedir, f"PSF_MCMC_Corner_{stem}{get_plot_ext(cfg)}"
+            writedir, f"PSF_Corner_{stem}{get_plot_ext(cfg)}"
         )
 
         if corner is None:

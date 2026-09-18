@@ -19,6 +19,7 @@ import numpy as np
 import astroscrappy
 from typing import Optional, Tuple
 from scipy.ndimage import binary_dilation, binary_fill_holes
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 from astropy.visualization import ZScaleInterval
 from skimage.morphology import disk
@@ -212,13 +213,31 @@ class RemoveCosmicRays:
         base = os.path.splitext(os.path.basename(fpath))[0]
         write_dir = os.path.dirname(fpath)
 
-        from functions import set_size
         from plotting_utils import apply_autophot_mplstyle, get_plot_ext
 
         apply_autophot_mplstyle()
 
-        fig, axes = plt.subplots(
-            1, 2, figsize=set_size(540, aspect=0.65)
+        # Equal-aspect panels shrink inside mismatched figure cells,
+        # leaving gaps no wspace can remove. Size the figure from the
+        # image aspect; each fig.colorbar steals ~9% of its panel's cell
+        # (fraction + pad) for the vertical bar.
+        img_h, img_w = original.shape
+        aspect = img_w / img_h
+        ax_h = 3.2
+        ax_w = ax_h * aspect
+        cell_w = ax_w / (1.0 - 0.046 - 0.04)
+        gap_in = 0.35
+        left_in, right_in = 0.62, 0.15
+        bottom_in, top_in = 0.55, 0.80
+        fig_w = left_in + 2.0 * cell_w + gap_in + right_in
+        fig_h = bottom_in + ax_h + top_in
+        fig, axes = plt.subplots(1, 2, figsize=(fig_w, fig_h))
+        fig.subplots_adjust(
+            left=left_in / fig_w,
+            right=(left_in + 2.0 * cell_w + gap_in) / fig_w,
+            bottom=bottom_in / fig_h,
+            top=(bottom_in + ax_h) / fig_h,
+            wspace=gap_in / cell_w,
         )
 
         # --- Apply zscale for optimal contrast ---
@@ -255,12 +274,26 @@ class RemoveCosmicRays:
             vmax=vmax,
         )
         axes[1].set_title("Cleaned", fontsize=9)
+        # Both panels share the same y extent; repeat labels add clutter.
+        axes[1].tick_params(axis="y", labelleft=False)
         _cb1 = fig.colorbar(im1, ax=axes[1], orientation="vertical", fraction=0.046, pad=0.04)
         _cb1.set_label("ADU", fontsize=8)
 
         # --- Finalize ---
         fig.suptitle(title, fontsize=10)
-        plt.tight_layout(rect=[0, 0, 1, 0.93])
+        # The colormap "bad" color marks CR-masked and non-finite pixels.
+        fig.legend(
+            handles=[
+                mpatches.Patch(
+                    facecolor="magenta", label="Cosmic ray / NaN pixels"
+                )
+            ],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.94),
+            ncol=1,
+            fontsize=8,
+            frameon=False,
+        )
 
         png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}{get_plot_ext(self.input_yaml)}")
         fig.savefig(
