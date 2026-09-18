@@ -3023,7 +3023,7 @@ def plot_variability_check(
     if target_name:
         fig.suptitle(str(target_name), fontsize=11, y=0.995)
 
-    _tag = f"VariabilityCheck_{method_u}"
+    _tag = f"Variability_Check_{method_u}"
     if target_name:
         _safe_tn = (
             str(target_name)

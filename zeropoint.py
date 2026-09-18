@@ -2975,7 +2975,7 @@ class Zeropoint:
                 )
                 fig_hist.tight_layout()
                 os.makedirs(write_dir, exist_ok=True)
-                ransac_savefig(fig_hist, os.path.join(write_dir, f"Zeropoint_Hist_Combined_{base_name}{get_plot_ext(self.input_yaml)}"))
+                ransac_savefig(fig_hist, os.path.join(write_dir, f"Zeropoint_Hist_{base_name}{get_plot_ext(self.input_yaml)}"))
                 plt.close(fig_hist)
 
                 # Combine inliers only over flux types that actually had
@@ -3262,7 +3262,7 @@ class Zeropoint:
         else:
             write_dir = output_dir
         base_name = os.path.splitext(os.path.basename(fpath))[0] or "color_term"
-        plot_file = os.path.join(write_dir, f"Color_Term_{base_name}_Piecewise{get_plot_ext(self.input_yaml)}")
+        plot_file = os.path.join(write_dir, f"Color_Term_Piecewise_{base_name}{get_plot_ext(self.input_yaml)}")
         ransac_savefig(fig, plot_file)
         plt.close(fig)
         logger.debug("fit_color_term: saved piecewise color term plot to %s", plot_file)

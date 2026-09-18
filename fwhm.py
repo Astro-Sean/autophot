@@ -792,7 +792,7 @@ class Find_FWHM:
                     fpath = self.input_yaml["fpath"]
                     _write_dir = self.input_yaml["write_dir"]
                     base = os.path.basename(fpath).split(".")[0]
-                    png_out = os.path.join(_write_dir, f"Linear_{base}{get_plot_ext(self.input_yaml)}")
+                    png_out = os.path.join(_write_dir, f"Linearity_{base}{get_plot_ext(self.input_yaml)}")
                     ransac_savefig(fig, png_out)
                 plt.close(fig)
             except Exception as _pe:

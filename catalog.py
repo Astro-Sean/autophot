@@ -3047,14 +3047,29 @@ class Catalog:
             fpath = self.input_yaml["fpath"]
             base = os.path.basename(fpath)
             write_dir = os.path.dirname(fpath)
-            fig = plt.figure(figsize=set_size(540, 1))
+            # Size each grid cell to the cutout aspect so the equal-aspect
+            # panels fill their cells; a fixed figsize shrinks them and
+            # leaves gaps no wspace can remove. The 3 trailing columns are
+            # a 0.1 spacer plus the radial-profile panel.
+            cut_h, cut_w = np.asarray(stars[0]).shape
+            ax_h = 1.2
+            cell_w = ax_h * (cut_w / max(cut_h, 1))
+            left, right, bottom, top = 0.05, 0.985, 0.07, 0.88
+            hspace = wspace = 0.01
+            fig_w = (ncols + 2.1) * cell_w * (1 + wspace) / (right - left)
+            fig_h = nrows * ax_h * (1 + hspace) / (top - bottom)
+            fig = plt.figure(figsize=(fig_w, fig_h))
             grid = fig.add_gridspec(
                 nrows=nrows,
                 ncols=ncols + 3,
                 width_ratios=[1] * ncols + [0.1, 1, 1],
                 height_ratios=[1] * nrows,
-                hspace=0.01,
-                wspace=0.01,
+                hspace=hspace,
+                wspace=wspace,
+                left=left,
+                right=right,
+                bottom=bottom,
+                top=top,
             )
             for i in range(num_stars):
                 row, col = divmod(i, ncols)

@@ -5753,16 +5753,22 @@ class Templates:
             True = bad pixel), ``chi2_max`` (reduced-chi2 rejection
             threshold, default ``sfft_psf_chi2_max`` = 5.0),
             ``model_floor_frac`` (fractional model-mismatch noise floor,
-            default ``sfft_psf_model_floor_frac`` = 0.05) and ``min_keep``
-            (minimum surviving inlier sources, default
-            ``sfft_psf_min_keep`` = 8).  A source is vetoed when its
-            PSF-stamp reduced chi2 exceeds ``chi2_max`` in either image;
-            sources that cannot be measured (edge/masked stamps) are kept.
-            The veto is adaptive: if it would leave fewer than
-            ``min_keep`` inlier sources, the best-fitting vetoed sources
-            (lowest worst-image chi2) are restored until the floor is met
-            and the relaxed effective threshold is logged.  When omitted
-            the selection is unchanged.
+            default ``sfft_psf_model_floor_frac`` = 0.05),
+            ``model_floor_frac_sci``/``model_floor_frac_tpl`` (per-side
+            overrides - use a larger floor where the vetting model is
+            analytic and cannot capture real PSF structure, else bright
+            stars are vetoed for model error), ``min_keep`` (minimum
+            surviving inlier sources, default ``sfft_psf_min_keep`` = 8)
+            and ``min_keep_frac`` (minimum surviving fraction of the
+            robust inlier pool, default ``sfft_psf_min_keep_frac`` = 0.5).
+            A source is vetoed when its PSF-stamp reduced chi2 exceeds
+            ``chi2_max`` in either image; sources that cannot be measured
+            (edge/masked stamps) are kept.  The veto is adaptive: if it
+            would leave fewer than ``min_keep`` sources or less than
+            ``min_keep_frac`` of the robust pool, the best-fitting vetoed
+            sources (lowest worst-image chi2) are restored until the
+            floor is met and the relaxed effective threshold is logged.
+            When omitted the selection is unchanged.
 
         Returns
         -------
@@ -5887,6 +5893,7 @@ class Templates:
             psf_q = np.full(len(mag_img), np.nan)
             _pv_chi2_max = 0.0
             _pv_min_keep = 0
+            _pv_min_keep_frac = 0.0
             if psf_vetting:
                 _pv_chi2_max = float(
                     psf_vetting.get(
@@ -5900,10 +5907,29 @@ class Templates:
                         _ts_cfg_fc.get("sfft_psf_model_floor_frac", 0.05),
                     )
                 )
+                # Per-side floors: an analytic model (Moffat at the image
+                # FWHM) cannot capture real PSF structure, so its expected
+                # mismatch is much larger than an empirical ePSF's.  The
+                # caller sets model_floor_frac_<side> when that side's
+                # model is analytic; without it bright stars - the best
+                # kernel anchors - are vetoed for model error, not
+                # morphology.
+                _pv_floor_sci = float(
+                    psf_vetting.get("model_floor_frac_sci", _pv_floor)
+                )
+                _pv_floor_tpl = float(
+                    psf_vetting.get("model_floor_frac_tpl", _pv_floor)
+                )
                 _pv_min_keep = int(
                     psf_vetting.get(
                         "min_keep",
                         _ts_cfg_fc.get("sfft_psf_min_keep", 8),
+                    )
+                )
+                _pv_min_keep_frac = float(
+                    psf_vetting.get(
+                        "min_keep_frac",
+                        _ts_cfg_fc.get("sfft_psf_min_keep_frac", 0.5),
                     )
                 )
                 if _pv_chi2_max > 0:
@@ -5918,7 +5944,7 @@ class Templates:
                             psf_vetting.get("fwhm_sci", np.nan),
                             gain=psf_vetting.get("gain_sci", 1.0),
                             mask=psf_vetting.get("mask_sci"),
-                            model_floor_frac=_pv_floor,
+                            model_floor_frac=_pv_floor_sci,
                         )
                     except Exception:
                         logger.debug(
@@ -5934,7 +5960,7 @@ class Templates:
                             psf_vetting.get("fwhm_tpl", np.nan),
                             gain=psf_vetting.get("gain_tpl", 1.0),
                             mask=psf_vetting.get("mask_tpl"),
-                            model_floor_frac=_pv_floor,
+                            model_floor_frac=_pv_floor_tpl,
                         )
                     except Exception:
                         logger.debug(
@@ -5959,9 +5985,11 @@ class Templates:
                         (np.isnan(psf_chi2_sci) | np.isnan(psf_chi2_tpl)).sum()
                     )
                     logger.info(
-                        "PSF-fit quality (chi2_red <= %.2f): %d rejected in "
-                        "science, %d in reference, %d unmeasurable (kept)",
-                        _pv_chi2_max, n_bad_s, n_bad_t, n_unmeas,
+                        "PSF-fit quality (chi2_red <= %.2f, floors sci=%.2f "
+                        "tpl=%.2f): %d rejected in science, %d in reference, "
+                        "%d unmeasurable (kept)",
+                        _pv_chi2_max, _pv_floor_sci, _pv_floor_tpl,
+                        n_bad_s, n_bad_t, n_unmeas,
                     )
 
             # --- MAD-based outlier removal in magnitude space ---
@@ -5974,14 +6002,21 @@ class Templates:
             keep_mask = robust_mask & psf_ok
 
             # Adaptive relaxation: the veto must never starve the source
-            # pool.  If fewer than min_keep inlier sources survive, restore
-            # just enough vetoed sources -- best (lowest) worst-image chi2
-            # first -- so exactly n_want inliers remain.  This keeps
-            # the veto for genuinely bad fits while guaranteeing a usable
-            # prior set; the relaxation is logged with the effective
-            # threshold so it stays diagnosable.
+            # pool.  If fewer than min_keep inlier sources survive -- or
+            # the veto stripped more than (1 - min_keep_frac) of the
+            # robust pool, which signals systematic model-limited
+            # rejection rather than real pathologies -- restore just
+            # enough vetoed sources, best (lowest) worst-image chi2
+            # first, so n_want inliers remain.  This keeps the veto for
+            # genuinely bad fits while guaranteeing a usable prior set;
+            # the relaxation is logged with the effective threshold so
+            # it stays diagnosable.
             _n_want = min(
-                max(_pv_min_keep, params.min_absolute_samples),
+                max(
+                    _pv_min_keep,
+                    params.min_absolute_samples,
+                    int(np.ceil(_pv_min_keep_frac * int(robust_mask.sum()))),
+                ),
                 int(robust_mask.sum()),
             )
             if int(keep_mask.sum()) < _n_want:
@@ -8192,6 +8227,7 @@ class Templates:
             # re-impose the combined NaN mask from the original aligned inputs.
             # ------------------------------------------------------------------
             combined_nan_mask = None
+            diff_invalid_mask = None
             try:
                 # Match the sentinel test used for mask_nans above: both
                 # non-finite pixels and |x| < 1.1e-20 zero-sentinels
@@ -8202,9 +8238,42 @@ class Templates:
                     | (~np.isfinite(templateImage))
                     | (np.abs(templateImage) < 1.1e-20)
                 )
-                if np.any(combined_nan_mask) and diff_data.shape == combined_nan_mask.shape:
+                # A finite pixel inside the universal mask can keep raw
+                # input flux in the diff (e.g. a saturated star whose
+                # template footprint was blanked leaves DIFF ~= SCI) and
+                # read as a transient downstream, so the full mask - not
+                # just no-data inputs - is invalidated here.  Applies to
+                # every backend, including the HOTPANTS fallback.
+                diff_invalid_mask = combined_nan_mask.copy()
+                if (
+                    universal_mask is not None
+                    and universal_mask.shape == diff_invalid_mask.shape
+                ):
+                    diff_invalid_mask |= universal_mask.astype(bool)
+                elif universal_mask is not None:
+                    logger.warning(
+                        "universal_mask shape %s != diff shape %s; masking "
+                        "no-data inputs only.",
+                        universal_mask.shape,
+                        diff_invalid_mask.shape,
+                    )
+                if np.any(diff_invalid_mask) and diff_data.shape == diff_invalid_mask.shape:
                     diff_data = np.asarray(diff_data, dtype=float)
-                    diff_data[combined_nan_mask] = np.nan
+                    n_leak = int(
+                        np.count_nonzero(np.isfinite(diff_data) & diff_invalid_mask)
+                    )
+                    diff_data[diff_invalid_mask] = np.nan
+                    n_src_only = int(
+                        np.count_nonzero(diff_invalid_mask & ~combined_nan_mask)
+                    )
+                    logger.info(
+                        "Invalidated %d finite masked pixels in difference image "
+                        "(mask=%d px: %d no-data + %d source/defect-only).",
+                        n_leak,
+                        int(np.count_nonzero(diff_invalid_mask)),
+                        int(np.count_nonzero(combined_nan_mask)),
+                        n_src_only,
+                    )
             except Exception:
                 # Non-fatal: continue with raw backend output.
                 pass
@@ -8391,13 +8460,13 @@ class Templates:
             except Exception as e:
                 logger.warning("Subtraction quality validation failed (non-fatal): %s", e)
 
-            # Write the NaN-masked difference image back (no background zeroing --
+            # Write the masked difference image back (no background zeroing --
             # the subtraction backend's native output is preserved so photometry
             # sees the true pixel values including any DC offset from the sky).
             try:
-                if combined_nan_mask is not None and np.any(combined_nan_mask) and diff_data.shape == combined_nan_mask.shape:
+                if diff_invalid_mask is not None and np.any(diff_invalid_mask) and diff_data.shape == diff_invalid_mask.shape:
                     diff_data = np.asarray(diff_data, dtype=float)
-                    diff_data[combined_nan_mask] = np.nan
+                    diff_data[diff_invalid_mask] = np.nan
             except Exception:
                 pass
             write_fits(differenceFpath, diff_data, diff_header)
@@ -8716,6 +8785,7 @@ class Templates:
             # so the science ePSF model can be used directly for photometry
             # without any PSF mismatch correction.  This matches the SFFT
             # forceconv=REF convention (Bramich 2008, Hu et al. 2022).
+            # forceconv=AUTO picks the sharper-to-broader direction per field.
             #
             # The convolution kernel in Fourier space is:
             #   K_hat = Pn_hat / Pr_hat  (transforms Pr -> Pn)
@@ -8723,10 +8793,30 @@ class Templates:
             # (high-frequency zeros in Pr_hat), we use Wiener-like
             # regularization: K_hat = Pn_hat * conj(Pr_hat) / (|Pr_hat|^2 + eps)
             # -----------------------------------------------------------------
-            _zogy_forceconv = str(
+            _zogy_fc_cfg = str(
                 ts_cfg.get("forceconv", ts_cfg.get("zogy_forceconv", "REF"))
             ).strip().upper()
             _zogy_convolved = None  # track which image was convolved
+            if _zogy_fc_cfg in ("REF", "SCI"):
+                _zogy_forceconv = _zogy_fc_cfg
+            elif _zogy_fc_cfg == "AUTO":
+                # Resolve with the same measured-FWHM rule as SFFT so ZOGY
+                # pre-convolves the sharper image up to the broader PSF.
+                _zogy_forceconv, _, _zogy_fc_note = _select_forceconv(
+                    "AUTO",
+                    science_fwhm,
+                    template_fwhm,
+                    auto_tol=float(
+                        ts_cfg.get("sfft_forceconv_auto_tol", 0.05) or 0.05
+                    ),
+                )
+                logger.info("ZOGY forceconv %s", _zogy_fc_note)
+            else:
+                logger.warning(
+                    "Unknown forceconv=%r for ZOGY; defaulting to REF.",
+                    _zogy_fc_cfg,
+                )
+                _zogy_forceconv = "REF"
 
             if _zogy_forceconv in ("REF", "SCI") and science_fwhm and template_fwhm:
                 try:
@@ -9042,16 +9132,20 @@ class Templates:
             # REF => DIFF = SCI - conv(REF): transients keep the science PSF.
             # SCI => DIFF = conv(SCI) - REF: difference has reference PSF.
             #
-            # Default is REF (standard convention, Bramich 2008, Hu et al. 2022).
-            # AUTO is resolved HERE from the measured post-alignment FWHMs --
-            # we do NOT pass AUTO through to SFFT, whose internal AUTO selects
-            # on header FWHMs that SWarp LANCZOS3 resampling can flip relative
-            # to the true PSF ordering (BUG 122).  Pipeline AUTO convolves the
+            # Default is REF (standard convention, Bramich 2008, Hu et al.
+            # 2022): the difference image keeps the science PSF so the science
+            # ePSF model is used directly for photometry.  AUTO is resolved
+            # HERE from the measured post-alignment FWHMs -- we do NOT pass
+            # AUTO through to SFFT, whose internal AUTO selects on header
+            # FWHMs that SWarp LANCZOS3 resampling can flip relative to the
+            # true PSF ordering (BUG 122).  Pipeline AUTO convolves the
             # sharper image up to the broader PSF whenever the FWHM difference
             # exceeds sfft_forceconv_auto_tol, avoiding a deconvolving kernel;
             # within the tolerance it keeps REF (science-PSF convention).
             #
-            # Users can override with forceconv in YAML (REF/SCI/AUTO).
+            # Users can override with forceconv in YAML (REF/SCI/AUTO); an
+            # explicit REF/SCI that requires deconvolution is honoured but
+            # logged loudly below.
             # Backward compat: fall back to sfft_forceconv if forceconv is absent.
             _fc_cfg = str(
                 ts_sub.get("forceconv", ts_sub.get("sfft_forceconv", "REF"))
@@ -9453,7 +9547,7 @@ class Templates:
                 _ps_min_ellip = ts_sub.get("sfft_point_source_min_ellip", 0.3)
                 cmd_local += ["-point_source_min_ellip", str(float(_ps_min_ellip))]
 
-                # Diagnostic-plot format (Var_Check output) follows the
+                # Diagnostic-plot format (SFFT_Matching output) follows the
                 # top-level plot_format config.
                 cmd_local += [
                     "-plot_format",
@@ -10416,21 +10510,36 @@ class Templates:
             # PSF mismatch correction.
             #
             # HOTPANTS -c t = convolve template (REF), -c i = convolve science (SCI).
-            # Users can override with forceconv=SCI in YAML.
+            # AUTO is resolved pipeline-side from the measured FWHMs (same rule
+            # as SFFT) so AUTO picks the sharper-to-broader direction per field.
+            # Users can override with forceconv=SCI/AUTO in YAML.
             _hp_fc_cfg = str(
                 ts.get("forceconv", ts.get("sfft_forceconv", "REF"))
             ).strip().upper()
-            if _hp_fc_cfg == "SCI":
+            if _hp_fc_cfg == "AUTO":
+                _hp_fc_resolved, _, _hp_fc_note = _select_forceconv(
+                    "AUTO",
+                    science_fwhm,
+                    template_fwhm,
+                    auto_tol=float(
+                        ts.get("sfft_forceconv_auto_tol", 0.05) or 0.05
+                    ),
+                )
+                logger.info("HOTPANTS forceconv %s", _hp_fc_note)
+            elif _hp_fc_cfg in ("REF", "SCI"):
+                _hp_fc_resolved = _hp_fc_cfg
+            else:
+                logger.warning(
+                    "Unknown forceconv=%r for HOTPANTS; defaulting to REF.",
+                    _hp_fc_cfg,
+                )
+                _hp_fc_resolved = "REF"
+            if _hp_fc_resolved == "SCI":
                 _hp_forceconv = "i"
                 _hp_forceconv_kw = "SCI"
             else:
                 _hp_forceconv = "t"
                 _hp_forceconv_kw = "REF"
-                if _hp_fc_cfg not in ("REF", "AUTO"):
-                    logger.warning(
-                        "Unknown forceconv=%r for HOTPANTS; defaulting to REF.",
-                        _hp_fc_cfg,
-                    )
             logger.info(
                 "HOTPANTS convolution: %s (diff will have %s PSF).",
                 "convolving template (REF)" if _hp_forceconv_kw == "REF"

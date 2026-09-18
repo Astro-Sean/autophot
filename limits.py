@@ -300,8 +300,9 @@ def _analytic_psf_for_injection(fwhm: float, oversampling: int | None = None):
     Used when no empirical ePSF model is available (ePSF build failure or too
     few PSF stars): the injection still needs a PSF-shaped stamp even when the
     recovery method is aperture-only.  Mirrors the ePSF init-kernel
-    construction in ``psf.py`` (same Moffat beta and grid conventions) so the
-    model is a drop-in replacement wherever an ePSF is expected.
+    construction in ``psf.py`` (same Moffat beta and grid conventions,
+    including the square pixel-response convolution) so the model is a
+    drop-in replacement wherever an ePSF is expected.
 
     Parameters
     ----------
@@ -330,9 +331,20 @@ def _analytic_psf_for_injection(fwhm: float, oversampling: int | None = None):
         x_size=osamp * size_native,
         y_size=osamp * size_native,
     )
+    # Convolve the continuous Moffat with the square pixel response so the
+    # stamp is an effective PSF -- matching both detector data and the ePSF
+    # grid convention (injected sources rendered from a continuous model
+    # would be systematically narrower than real sources).
+    from psf import pixel_integrate_oversampled
+
+    kernel_data = pixel_integrate_oversampled(kernel.array, osamp)
+    # photutils ePSF convention: data sums to prod(oversampling) so that
+    # ``evaluate(flux=F)`` renders a source of total flux F.  A unit-sum
+    # array would inject stars osamp^2 too faint.
+    kernel_data = kernel_data * float(osamp) ** 2
     ctr = (osamp * size_native - 1) / 2.0
     return ImagePSF(
-        data=kernel.array, x_0=ctr, y_0=ctr, oversampling=osamp
+        data=kernel_data, x_0=ctr, y_0=ctr, oversampling=osamp
     )
 
 
@@ -2830,7 +2842,7 @@ class Limits:
         base = os.path.splitext(os.path.basename(str(fpath)))[0]
         outdir = os.path.dirname(str(fpath)) if os.path.dirname(str(fpath)) else "."
         save_png = os.path.join(
-            outdir, f"EMCEE_Injection_Diag_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+            outdir, f"Injection_EMCEE_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
         )
         fig.suptitle(f"EMCEE recovery diagnostic (m_inj={float(m_inj):.3f})", fontsize=10)
         fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
@@ -2953,7 +2965,7 @@ class Limits:
                 outdir = "."
             os.makedirs(outdir, exist_ok=True)
             save_png = os.path.join(
-                outdir, f"Completeness_Logistic_EMCEE_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+                outdir, f"Completeness_EMCEE_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
             )
 
             dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -3215,7 +3227,7 @@ class Limits:
         
         fig.tight_layout()
         save_loc = os.path.join(
-            write_dir, f"SNR_vs_Magnitude_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+            write_dir, f"SNR_vs_Mag_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
         )
         fig.savefig(save_loc, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
@@ -3716,6 +3728,10 @@ class Limits:
                     y_, va_ = _ylo, 'bottom'
                 return x_, y_, ha_, va_
 
+            # Gridspec columns are resized to the panel aspects once the
+            # first zoom window is known (see inside the loop).
+            _inset_geom_done = False
+
             for i, mag_target in enumerate(mag_targets):
                 ax_inject = fig.add_subplot(gs[inset_row, i])
                 flux_hat = np.nan
@@ -3830,6 +3846,51 @@ class Limits:
                     )
                     ax_inject.set_xlim(x0_zoom, x1_zoom)
                     ax_inject.set_ylim(y0_zoom, y1_zoom)
+
+                    if not _inset_geom_done:
+                        _inset_geom_done = True
+                        try:
+                            # Equal-aspect thumbnails shrink inside cells that
+                            # do not match the data aspect. Give each column a
+                            # width proportional to its panel aspect (the three
+                            # zoom panels share one window; the sites panel
+                            # shows the full cutout) and resize the figure so
+                            # the inset row height matches too.
+                            az = (x1_zoom - x0_zoom) / max(
+                                float(y1_zoom - y0_zoom), 1.0
+                            )
+                            ac = float(nx) / max(float(ny), 1.0)
+                            col_aspects = [az, az, az, ac]
+                            if gs.ncols == len(col_aspects):
+                                gs.set_width_ratios(col_aspects)
+                            spp = gs.get_subplot_params(fig)
+                            ws = float(spp.wspace or 0.0)
+                            hs = float(spp.hspace or 0.0)
+                            hratios = [
+                                float(h)
+                                for h in (
+                                    gs.get_height_ratios()
+                                    or [1.0] * gs.nrows
+                                )
+                            ]
+                            fig_w = float(fig.get_size_inches()[0])
+                            # Margin estimates only; tight_layout refines the
+                            # actual margins at save time.
+                            margin_w, margin_h = 1.15, 1.35
+                            grid_w = max(fig_w - margin_w, 1.0)
+                            row_unit = grid_w / (
+                                sum(col_aspects)
+                                * (1.0 + ws * (gs.ncols - 1) / gs.ncols)
+                            )
+                            grid_h = row_unit * sum(hratios) * (
+                                1.0 + hs * (gs.nrows - 1) / gs.nrows
+                            )
+                            fig_h = float(
+                                np.clip(grid_h + margin_h, 3.0, 24.0)
+                            )
+                            fig.set_size_inches(fig_w, fig_h)
+                        except Exception:
+                            pass
 
                     # Transient marker at the cutout centre.
                     from matplotlib.patches import Circle
@@ -4077,6 +4138,7 @@ class Limits:
                             )
                     else:
                         ax_inject.set_ylabel('')
+                        ax_inject.tick_params(axis='y', labelleft=False)
                     ax_inject.tick_params(labelsize=8)
 
             # Fourth panel: original cutout with all injection sites marked.
@@ -4125,6 +4187,29 @@ class Limits:
                 ax_sites.set_xlabel('X [pixels]', fontsize=8)
                 ax_sites.set_ylabel('Y [pixels]', fontsize=8)
                 ax_sites.tick_params(labelsize=8)
+
+                # Site markers have no other label; name them once at figure
+                # level. The guard keeps combined multi-row figures from
+                # stacking duplicate legends.
+                if not fig.legends:
+                    import matplotlib.lines as mlines
+
+                    _site_color = PLOT_COLORS.get('injection_site', '#7FB8D9')
+                    fig.legend(
+                        handles=[
+                            mlines.Line2D(
+                                [], [], marker="+", linestyle="None",
+                                color=_site_color, markersize=6,
+                                markeredgewidth=0.8,
+                                label="Injection site",
+                            )
+                        ],
+                        loc="upper center",
+                        bbox_to_anchor=(0.5, 1.0),
+                        ncol=1,
+                        fontsize=8,
+                        frameon=False,
+                    )
 
             # Dashed lines at the top of the main plot marking the demo
             # injection magnitudes.

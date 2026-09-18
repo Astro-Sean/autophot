@@ -7461,13 +7461,6 @@ NNW
             import gc
 
             gc.collect()
-            if figsize is None:
-                from functions import set_size
-
-                # Original default was (12, 6): height/width = 0.5
-                # set_size uses height/width = aspect / golden_ratio
-                golden_ratio = (5**0.5 + 1) / 2
-                figsize = set_size(540, aspect=0.5 * golden_ratio)
 
             with (
                 fits.open(sci_cat_path) as sci_hdul,
@@ -7493,8 +7486,35 @@ NNW
             from plotting_utils import apply_autophot_mplstyle, get_plot_color
             apply_autophot_mplstyle()
 
+            # Equal-aspect panels shrink inside cells that do not match the
+            # data aspect, so size the figure from the image shapes and give
+            # each column a width proportional to its panel aspect. The
+            # appended colorbars (fraction + pad) steal ~9% of each cell's
+            # width, which cbar_overhead adds back.
+            img_h1, img_w1 = sci_data.shape
+            img_h2, img_w2 = ref_data.shape
+            aspect1 = img_w1 / img_h1
+            aspect2 = img_w2 / img_h2
+            ax_h = 3.4
+            cbar_overhead = 1.10
+            left, right, bottom, top = 0.05, 0.98, 0.10, 0.80
+            wspace = 0.05
+            if figsize is None:
+                fig_w = (
+                    (aspect1 + aspect2) * ax_h * cbar_overhead
+                    * (1 + wspace / 2) / (right - left)
+                )
+                fig_h = ax_h / (top - bottom)
+                figsize = (fig_w, fig_h)
             fig, (ax1, ax2) = plt.subplots(
-                1, 2, figsize=figsize, constrained_layout=True
+                1, 2, figsize=figsize,
+                gridspec_kw={
+                    "width_ratios": [aspect1, aspect2],
+                    "wspace": wspace,
+                },
+            )
+            fig.subplots_adjust(
+                left=left, right=right, top=top, bottom=bottom
             )
             zscale_sci = ZScaleInterval()
             zscale_ref = ZScaleInterval()
@@ -7535,7 +7555,9 @@ NNW
             cbar2.set_label("Reference [ADU]", fontsize=7)
             cbar2.ax.tick_params(labelsize=6)
             ax2.set_xlabel("X [Pixel]")
-            ax2.set_ylabel("Y [Pixel]")
+            # Panels share the same field y extent; repeat labels add clutter.
+            ax2.set_ylabel("")
+            ax2.tick_params(axis="y", labelleft=False)
 
             def int_to_label(i):
                 if i < 26:
@@ -7639,6 +7661,11 @@ NNW
                     # Default to uniform if invalid mode
                     return select_sources_spatially(catalog, max_sources, image_shape, "uniform", random_seed)
 
+            # Track which overlay styles are actually drawn so the figure
+            # legend only lists markers that appear.
+            drew_matched = False
+            drew_unmatched = False
+
             sci_positions = []
             sci_h, sci_w = sci_data.shape
 
@@ -7671,6 +7698,10 @@ NNW
                         linewidth=circle_edge_width,
                     )
                     ax1.add_patch(circle)
+                    if "MATCH_ID" in row.colnames:
+                        drew_matched = True
+                    else:
+                        drew_unmatched = True
                     ax1.text(
                         x_0based,
                         y_0based - circle_radius_sci * rebin_scale - 2,
@@ -7714,6 +7745,10 @@ NNW
                         linewidth=circle_edge_width,
                     )
                     ax2.add_patch(circle)
+                    if "MATCH_ID" in row.colnames:
+                        drew_matched = True
+                    else:
+                        drew_unmatched = True
                     ax2.text(
                         x_0based,
                         y_0based - circle_radius_ref * rebin_scale - 2,
@@ -7828,8 +7863,38 @@ NNW
             logging.debug("Reference: %s plotted + %s crosses = %s total", len(ref_selected), ref_remaining, total_sources_ref)
             logging.debug("Plotted %s science and %s reference sources within image bounds", len(sci_positions), len(ref_positions))
 
-            # `constrained_layout=True` keeps colorbars and labels from
-            # overlapping, so no additional tight_layout is needed.
+            # Identify the overlay markers once at figure level; the
+            # per-source letter labels already identify individual circles,
+            # and SCAMP squares have their own panel legend above.
+            from matplotlib.lines import Line2D
+
+            handles = []
+            if drew_matched:
+                handles.append(
+                    Line2D([0], [0], marker="o", linestyle="None", markersize=6,
+                           color=matched_circle_color, markerfacecolor="none",
+                           markeredgecolor=matched_circle_color,
+                           label="Matched source")
+                )
+            if drew_unmatched:
+                handles.append(
+                    Line2D([0], [0], marker="o", linestyle="None", markersize=6,
+                           color=unmatched_circle_color, markerfacecolor="none",
+                           markeredgecolor=unmatched_circle_color,
+                           label="Unmatched source")
+                )
+            if (sci_remaining or 0) > 0 or (ref_remaining or 0) > 0:
+                handles.append(
+                    Line2D([0], [0], marker="+", linestyle="None", markersize=6,
+                           color="r", label="Additional sources")
+                )
+            if handles:
+                fig.legend(
+                    handles=handles, loc="upper center",
+                    bbox_to_anchor=(0.5, 1.0), ncol=len(handles),
+                    fontsize=8, frameon=False,
+                )
+
             plt.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
             plt.close(fig)
             gc.collect()
@@ -8313,7 +8378,10 @@ NNW
             ransac_grid(ax)
             set_mag_axes_inverted_xy(ax)
             _ext = get_plot_ext(self.input_yaml)
-            ransac_savefig(fig, str(Path(sci_cat_path).with_suffix(".png")).replace(".png", f"_Mag_Fit{_ext}"))
+            ransac_savefig(
+                fig,
+                str(Path(sci_cat_path).parent / f"Mag_Fit_{Path(sci_cat_path).stem}{_ext}"),
+            )
             plt.close(fig)
 
         # --- Spatial distribution diagnostic ---
