@@ -54,7 +54,7 @@ from concurrent.futures import ThreadPoolExecutor
 import astropy.units as u
 
 sys.path.append(str(Path(__file__).parent.parent))
-from functions import remove_wcs_from_header, log_warning_from_exception
+from functions import remove_wcs_from_header, log_warning_from_exception, resolve_verbose_level, clean_subprocess_log
 from wcs import get_wcs, _normalize_projection_codes
 from utils.run_sex import SExtractorWrapper
 
@@ -217,17 +217,20 @@ class ImageDistortionCorrector:
 
     # ---------------------------- Constructor / logger ----------------------------
     def __init__(
-        self, input_yaml, verbose_level: int = 1, delete_originals: bool = True
+        self, input_yaml, verbose_level: int | None = None, delete_originals: bool = True
     ):
         """
         Initialize the ImageDistortionCorrector.
 
         Args:
             input_yaml: Configuration YAML for the pipeline.
-            verbose_level: Logging verbosity (0: quiet, 1: info, 2: verbose).
+            verbose_level: Logging verbosity (0: quiet, 1: info, 2: verbose);
+                None reads ``global_verbose_level`` from *input_yaml*.
             delete_originals: Remove original FITS after creating *_align products.
         """
-        self.verbose_level = verbose_level
+        if verbose_level is None:
+            verbose_level = (input_yaml or {}).get("global_verbose_level", 1)
+        self.verbose_level = resolve_verbose_level(verbose_level)
         self.delete_originals = delete_originals
         self.logger = logging.getLogger(__name__)
         self.default_threads = 4
@@ -640,7 +643,7 @@ NNW
             zscale = ZScaleInterval()
             vmin, vmax = zscale.get_limits(data)
 
-            from plotting_utils import apply_autophot_mplstyle
+            from plotting_utils import apply_autophot_mplstyle, safe_tight_layout
             apply_autophot_mplstyle()
 
             fig, ax = plt.subplots(figsize=figsize)
@@ -688,7 +691,7 @@ NNW
                         va="top",
                     )
 
-            plt.tight_layout()
+            safe_tight_layout()
             plt.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
             plt.close(fig)
 
@@ -779,6 +782,7 @@ NNW
         output_file = input_file if output_file is None else output_file
         with open(output_file, "w") as f:
             f.write(clean)
+        clean_subprocess_log(output_file)
         return output_file
 
     def determine_saturation_level(self, fits_path: str) -> float:

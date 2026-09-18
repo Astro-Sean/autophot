@@ -21,7 +21,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Tuple, List, Set
+from typing import Optional, Tuple, List, Set, Dict
 
 import numpy as np
 import pandas as pd
@@ -287,7 +287,7 @@ class SExtractorWrapper:
             Path: Path to the created convolution file.
         """
 
-        logger.info(
+        logger.debug(
             "Creating convolution kernel with FWHM: %.1f pixels", fwhm_pixels
         )
 
@@ -569,7 +569,11 @@ class SExtractorWrapper:
             return sources
 
         n0 = len(sources)
-        logger.info("Initial source count: %s", n0)
+        logger.debug("Initial source count: %s", n0)
+        cut_counts: Dict[str, int] = {}
+
+        def _note_cut(label: str, count: int) -> None:
+            cut_counts[label] = cut_counts.get(label, 0) + int(count)
         # Expose the raw detection count back through the config so that callers
         # (e.g. crowded-field heuristics in main.py) can distinguish between the
         # total detections and the filtered/downsampled subset used for FWHM.
@@ -595,7 +599,8 @@ class SExtractorWrapper:
             n_bad = int(in_bad.sum())
             if n_bad > 0:
                 sources = sources[~in_bad].copy()
-                logger.info(
+                _note_cut("bad-region", n_bad)
+                logger.debug(
                     f"Rejected {n_bad} sources inside constant-value / chip-gap regions"
                 )
 
@@ -607,9 +612,11 @@ class SExtractorWrapper:
         _sex_err_mask = (sources["fwhm"] <= 0) | ~np.isfinite(sources["fwhm"])
         if _sex_err_mask.any():
             sources = sources[~_sex_err_mask].copy()
-            logger.info(
+            n_inv_fwhm = int(_sex_err_mask.sum())
+            _note_cut("invalid-fwhm", n_inv_fwhm)
+            logger.debug(
                 "Rejected %d sources with invalid FWHM (<=0 or non-finite)",
-                int(_sex_err_mask.sum()),
+                n_inv_fwhm,
             )
         if relaxed_cuts:
             fwhm_lo, fwhm_hi = 0.5, 150.0
@@ -624,7 +631,8 @@ class SExtractorWrapper:
         n_rejected_fwhm = int(mask.sum())
         sources = sources[~mask].copy()
         if n_rejected_fwhm > 0:
-            logger.info(
+            _note_cut("fwhm", n_rejected_fwhm)
+            logger.debug(
                 f"Rejected {n_rejected_fwhm} sources outside FWHM range [{fwhm_lo}, {fwhm_hi}]"
             )
         # If this removed everything (or nearly everything), disable the FWHM cut
@@ -641,7 +649,8 @@ class SExtractorWrapper:
         n_after_snr = int((~snr_ok).sum())
         sources = sources.loc[snr_ok].copy()
         if n_after_snr > 0:
-            logger.info("Rejected %s low-SNR sources (SNR < %.1f)", n_after_snr, snr_limit)
+            _note_cut("low-snr", n_after_snr)
+            logger.debug("Rejected %s low-SNR sources (SNR < %.1f)", n_after_snr, snr_limit)
 
         # --- Step 3b: FLAGS cut (before FWHM estimation) ---
         # Apply FLAGS early so flagged/blended sources don't inflate the FWHM.
@@ -649,7 +658,8 @@ class SExtractorWrapper:
             n_flagged = int((sources["flags"] > flags).sum())
             sources = sources[sources["flags"] <= flags].copy()
             if n_flagged > 0:
-                logger.info(
+                _note_cut("flags", n_flagged)
+                logger.debug(
                     "Rejected %d sources with FLAGS > %d", n_flagged, flags
                 )
 
@@ -667,7 +677,8 @@ class SExtractorWrapper:
             n_sharp = int(sharp_bad.sum())
             if n_sharp > 0:
                 sources = sources[~sharp_bad].copy()
-                logger.info(
+                _note_cut("sharpness", n_sharp)
+                logger.debug(
                     f"Pre-FWHM sharpness cut: rejected {n_sharp} sources "
                     f"(SHARPNESS outside [{sharp_lo}, {sharp_hi}])"
                 )
@@ -686,7 +697,8 @@ class SExtractorWrapper:
                 n_fr = int(_fr_bad.sum())
                 if n_fr > 0 and (~_fr_bad).sum() >= 5:
                     sources = sources[~_fr_bad].copy()
-                    logger.info(
+                    _note_cut("cr-like", n_fr)
+                    logger.debug(
                         f"Pre-FWHM FLUX_RADIUS cut: rejected {n_fr} CR-like "
                         f"sources (FLUX_RADIUS < {_fr_min:.2f} px, median={_fr_med:.2f})"
                     )
@@ -762,7 +774,8 @@ class SExtractorWrapper:
                 removed_near_masked = int(near_masked.sum())
                 sources = sources.loc[~near_masked].copy()
                 if removed_near_masked > 0:
-                    logger.info(
+                    _note_cut("near-mask", removed_near_masked)
+                    logger.debug(
                         "Rejected %d sources within %.2f pixels of masked regions",
                         removed_near_masked,
                         match_radius,
@@ -777,7 +790,8 @@ class SExtractorWrapper:
             rejected_sharp = mask.sum()
             sources = sources[~mask].copy()
             if rejected_sharp > 0:
-                logger.info(
+                _note_cut("sharpness", rejected_sharp)
+                logger.debug(
                     f"Rejected {rejected_sharp} sources based on sharpness (range [{sharp_lo}, {sharp_hi}])"
             )
 
@@ -786,7 +800,8 @@ class SExtractorWrapper:
             n_saturated = len(sources[sources["peak_flux"] >= 0.99 * saturation])
             sources = sources[sources["peak_flux"] < 0.99 * saturation].copy()
             if n_saturated > 0:
-                logger.info(
+                _note_cut("saturated", n_saturated)
+                logger.debug(
                     f"Rejected {n_saturated} saturated sources (peak_flux >= 0.99 x saturation)"
                 )
 
@@ -802,12 +817,14 @@ class SExtractorWrapper:
         edge_rejected = mask.sum()
         sources = sources[~mask].copy()
         if edge_rejected > 0:
-            logger.info(
+            _note_cut("edge", edge_rejected)
+            logger.debug(
                 f"Rejected {edge_rejected} sources within {margin} pixels of the image edge"
             )
 
         # --- Step 10: Spatial Downsampling if needed ---
         if NMAX is not None and len(sources) > NMAX:
+            _note_cut("downsampled", len(sources) - NMAX)
             x_pix = sources["x_pix"].values
             y_pix = sources["y_pix"].values
 
@@ -882,7 +899,7 @@ class SExtractorWrapper:
                 .sort_values(by="snr", ascending=False)
                 .head(NMAX)
             )
-            logger.info(
+            logger.debug(
                 f"Downsampled catalogue to {NMAX} sources using a {n_grid} x {n_grid} spatial grid"
             )
 
@@ -899,7 +916,14 @@ class SExtractorWrapper:
 
         sources = sources.reset_index(drop=True)
         elapsed = time.time() - start
-        logger.info(
+        if cut_counts:
+            logger.info(
+                "Source cuts: %d -> %d kept (%s)",
+                n0,
+                len(sources),
+                ", ".join(f"{k}={v}" for k, v in cut_counts.items()),
+            )
+        logger.debug(
             f"Filtering completed in {elapsed:.3f} s "
             f"(retained {len(sources)} of {n0} initial sources)"
         )
@@ -1078,7 +1102,7 @@ class SExtractorWrapper:
             # Format as integer string if whole number (SExtractor prefers this)
             if float(saturation).is_integer():
                 saturation = int(saturation)
-            logger.info(
+            logger.debug(
                 "SExtractor saturation: raw=%r, parsed=%s, satur_key=%s",
                 saturation_raw, saturation, satur_key,
             )
@@ -1100,7 +1124,7 @@ class SExtractorWrapper:
                         fwhm_for_kernel = vv
                         break
             if fwhm_for_kernel > 0:
-                logger.info(
+                logger.debug(
                     "Using FWHM = %.1f pixels to construct the SExtractor convolution kernel",
                     fwhm_for_kernel,
                 )
@@ -1289,7 +1313,7 @@ class SExtractorWrapper:
                     sources_df = sources_df.nlargest(nmax, "FLUX_AUTO")
 
                 sources = Table.from_pandas(sources_df)
-                logger.info(
+                logger.debug(
                     "Filtered from %d to %d sources (raw mode)",
                     initial_count,
                     len(sources),
@@ -1447,7 +1471,7 @@ class SExtractorWrapper:
                 if nmax is not None and len(sources) > nmax:
                     sources = sources.nlargest(nmax, "FLUX_AUTO")
                 
-                logger.info(
+                logger.debug(
                     "Filtered from %d to %d sources (full table mode)",
                     initial_count,
                     len(sources),
@@ -1539,7 +1563,6 @@ class SExtractorWrapper:
             )
 
             final_count = len(sources)
-            logger.info("Filtered from %s to %s point sources", initial_count, final_count)
             if final_count == 0:
                 logger.warning("[ERROR] All sources filtered out")
                 return 0.0, None, default_scale
@@ -1552,8 +1575,9 @@ class SExtractorWrapper:
             raw_scale = max(float(scale_multiplier) * float(fwhm), float(default_scale))
             scale = clamp_scale_from_config(self.config, raw_scale)
             logger.info(
-                "Found %d point sources, robust FWHM %.2f px; scale = %.1f (FWHM x %.2f from source_detection / config)",
+                "Detected %d/%d point sources | robust FWHM %.2f px | scale %.1f px (FWHM x %.2f)",
                 final_count,
+                initial_count,
                 fwhm,
                 scale,
                 scale_multiplier,

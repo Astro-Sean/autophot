@@ -2963,12 +2963,12 @@ class PSF:
 
         log.info(
             "[contamination] Rejected %d/%d PSF-star cutouts "
-            "(%d hardware-defect, %d flux-based):",
+            "(%d hardware-defect, %d flux-based)",
             n_final_rejected, n_stars, n_hw_rejected,
             n_final_rejected - n_hw_rejected,
         )
         for r in reject_reasons:
-            log.info(r)
+            log.debug(r)
 
         filtered = EPSFStars([epsfstars._data[i] for i in keep_idx])
         filtered_tbl = stars_tbl[keep_idx]
@@ -3961,7 +3961,7 @@ class PSF:
             else:
                 cen_box = _odd(max(7, int(np.ceil(2.0 * fwhm))))
 
-            log.info(
+            log.debug(
                 f"FWHM={fwhm:.2f} pix  recenter={recenter_func.__name__}  "
                 f"recenter_box={cen_box}  oversample={oversample}x"
                 + (" (pre-adaptive)" if _adaptive_oversample_enabled else "")
@@ -4071,7 +4071,7 @@ class PSF:
                 )
                 fit_boxsize = _fit_boxsize_clamped
 
-            log.info("Initial sources: %s", len(df))
+            log.debug("Initial sources: %s", len(df))
             if threshold_limit_eff is not None and "threshold" in df.columns:
                 mask_thr = df["threshold"] > threshold_limit_eff
                 n_keep_thr = int(np.sum(mask_thr))
@@ -4110,7 +4110,7 @@ class PSF:
                         n_keep_snr,
                         min_keep_snr,
                     )
-            log.info("Sources after cuts: %s", len(df))
+            log.debug("Sources after cuts: %s", len(df))
 
             if len(df) == 0:
                 log.error("No PSF candidates after filtering.")
@@ -4163,7 +4163,7 @@ class PSF:
                 snrcol=snrcol,
                 thrcol=thrcol,
             )
-            log.info(
+            log.debug(
                 f"Using {len(df_uniform)}/{len(df)} PSF candidates after spatial downselection"
             )
             df = df_uniform
@@ -4346,9 +4346,9 @@ class PSF:
                 ),
             )
             if smooth_kernel is None:
-                log.info("ePSF smoothing kernel: disabled (psf_smoothing_kernel=none)")
+                log.debug("ePSF smoothing kernel: disabled (psf_smoothing_kernel=none)")
             else:
-                log.info(
+                log.debug(
                     "ePSF smoothing kernel: %s %dx%d (footprint %.2f native px, "
                     "oversample=x%d)",
                     smooth_kind,
@@ -4362,7 +4362,7 @@ class PSF:
             # This ensures PSF and AP photometry measure flux over the same effective area.
             norm_radius = float(aperture_radius)
 
-            log.info(
+            log.debug(
                 "PSF build FWHM: input=%.2f px, used=%.2f px; normalisation radius=%.2f px (same as photometry aperture_radius); oversample=x%d",
                 fwhm_input,
                 fwhm,
@@ -4384,14 +4384,14 @@ class PSF:
                 if n_stars < 20:
                     epsf_clip_sigma = 3.0
                     epsf_clip_maxiters = 5
-                    log.info(
+                    log.debug(
                         "Adaptive sigma clipping: using less aggressive settings (sigma=%.1f, maxiters=%d) for %d stars",
                         epsf_clip_sigma, epsf_clip_maxiters, n_stars
                     )
                 elif n_stars > 100:
                     epsf_clip_sigma = 5.0
                     epsf_clip_maxiters = 20
-                    log.info(
+                    log.debug(
                         "Adaptive sigma clipping: using more aggressive settings (sigma=%.1f, maxiters=%d) for %d stars",
                         epsf_clip_sigma, epsf_clip_maxiters, n_stars
                     )
@@ -4427,7 +4427,7 @@ class PSF:
                 float(epsf_clip_sigma), int(epsf_clip_maxiters),
                 float(fft_min_frac), int(fft_min_abs),
             )
-            log.info(
+            log.debug(
                 "PSF build windows: fit_box=%.2f*FWHM (base %.2f, min %.2f arcsec) -> %d px, "
                 "cutout=%.2f*FWHM (base %.2f, min %.2f arcsec) -> %d px, sigma_clip=%.2f (%d iters)",
                 fit_boxsize_scale,
@@ -4661,7 +4661,7 @@ class PSF:
                     oversampling=osamp_c,
                 )
                 if osamp_c == oversample:
-                    log.info(
+                    log.debug(
                         "ePSF init kernel: moffat_beta=%g, gamma=%g px, size=%dx%d",
                         moffat_beta,
                         float(moffat_gamma_c),
@@ -6774,7 +6774,7 @@ class PSF:
             _any_low_snr = np.any(psf_snr < emcee_s2n) if emcee_s2n > 0 else False
             use_emcee_all = _any_low_snr and emcee_fitter is not None
             tier_fitter_all = emcee_fitter if use_emcee_all else lsq_fitter
-            log.info(
+            log.debug(
                 "[PSF photometry: %d sources] (%s, single-call for simultaneous fit)",
                 len(init_params),
                 "MCMC" if use_emcee_all else "LSQ",

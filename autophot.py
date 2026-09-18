@@ -506,12 +506,15 @@ try:
     from functions import (  # type: ignore
         AutophotYaml,
         border_msg,
+        ColoredLevelFormatter,
         concatenate_csv_files,
         log_step,
         log_exception,
         normalize_target_name,
         print_progress_bar,
+        resolve_verbose_level,
         sanitize_photometric_filters,
+        verbose_to_log_level,
     )
     from prepare import Prepare  # type: ignore
 except Exception as _exc:  # pragma: no cover
@@ -525,23 +528,29 @@ except Exception as _exc:  # pragma: no cover
         from functions import (  # type: ignore
             AutophotYaml,
             border_msg,
+            ColoredLevelFormatter,
             concatenate_csv_files,
             log_step,
             log_exception,
             normalize_target_name,
             print_progress_bar,
+            resolve_verbose_level,
             sanitize_photometric_filters,
+            verbose_to_log_level,
         )
         from prepare import Prepare  # type: ignore
     except Exception as _exc2:
         _IMPORT_ERROR_AUTOPHOT_DEPS = _exc2
         log_step = None  # type: ignore
         border_msg = None  # type: ignore
+        ColoredLevelFormatter = None  # type: ignore
         AutophotYaml = None  # type: ignore
         concatenate_csv_files = None  # type: ignore
         print_progress_bar = None  # type: ignore
         log_exception = None  # type: ignore
         sanitize_photometric_filters = None  # type: ignore
+        resolve_verbose_level = lambda v: 1  # type: ignore
+        verbose_to_log_level = lambda v: logging.INFO  # type: ignore
         Prepare = None  # type: ignore
 
 
@@ -2448,26 +2457,44 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = AutomatedPhotometry()
     config = ap.load()
 
-    # Global verbosity control (0=warnings/errors, 1=info, 2=debug).
-    try:
-        vlevel = int(config.get("global_verbose_level", 1))
-    except Exception:
-        vlevel = 1
-    if vlevel <= 0:
-        log_level = logging.WARNING
-    elif vlevel == 1:
-        log_level = logging.INFO
-    else:
-        log_level = logging.DEBUG
+    # CLI verbosity flags override the YAML setting: -v/--verbose -> 2,
+    # -q/--quiet -> 0, --verbose-level LEVEL -> explicit 0/1/2 or name.
+    _cli_verbose = None
+    if any(a in ("-v", "--verbose") for a in argv):
+        _cli_verbose = 2
+    elif any(a in ("-q", "--quiet") for a in argv):
+        _cli_verbose = 0
+    elif "--verbose-level" in argv:
+        _vi = argv.index("--verbose-level")
+        if _vi + 1 < len(argv):
+            _cli_verbose = argv[_vi + 1]
+    if _cli_verbose is not None:
+        config["global_verbose_level"] = _cli_verbose
 
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    do_run = len(argv) > 0 and str(argv[0]).lower() == "run"
+    # Global verbosity control (0=warnings/errors, 1=info, 2=debug).
+    vlevel = resolve_verbose_level(config.get("global_verbose_level", 1))
+    config["global_verbose_level"] = vlevel
+    log_level = verbose_to_log_level(vlevel)
+
+    _handler = logging.StreamHandler()
+    if ColoredLevelFormatter is not None:
+        _handler.setFormatter(ColoredLevelFormatter(use_color=True))
+    else:
+        _handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+    logging.basicConfig(level=log_level, handlers=[_handler])
+
+    driver_start = time.time()
+    _log("Started: %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(driver_start)))
+
+    do_run = any(str(a).lower() == "run" for a in argv)
     output = ap.run_photometry(config, do_photometry=do_run)
     _log(f"Output light curve: {output}")
+    driver_end = time.time()
+    _log(
+        "Finished: %s  (%.1f s)"
+        % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(driver_end)),
+           driver_end - driver_start)
+    )
     return 0
 
 
