@@ -3426,16 +3426,27 @@ def run_photometry():
             min_psf_pool,
             int(input_yaml["photometry"].get("psf_pool_preferred_min", 25)),
         )
+        # On undersampled images the ePSF build is sampling-starved (each
+        # star lands on ~1/osamp^2 of the grid), so star count is the
+        # dominant stabiliser; the tail screen exists for CoG aperture
+        # stability and costs the ePSF a third of its stars.  Prefer the
+        # larger pre-optimum pool whenever it has more sources -- the
+        # build's own vetting and per-pixel contamination masking still
+        # apply.
+        _undersampled = bool(input_yaml.get("undersampled_mode", False))
+        _prefer_broader = len(IsolatedSources) < preferred_psf_pool or _undersampled
         if (
-            len(IsolatedSources) < preferred_psf_pool
+            _prefer_broader
             and len(psf_source_pool) > len(IsolatedSources)
             and len(psf_source_pool) >= min_psf_pool
         ):
             logging.info(
-                "Optimum-radius selection returned %d sources (< preferred %d); using broader "
+                "Optimum-radius selection returned %d sources%s; using broader "
                 "pre-optimum pool (%d sources) for PSF building.",
                 len(IsolatedSources),
-                preferred_psf_pool,
+                " (undersampled: star count drives ePSF stability)"
+                if _undersampled
+                else f" (< preferred {preferred_psf_pool})",
                 len(psf_source_pool),
             )
         else:
@@ -5378,6 +5389,10 @@ def run_photometry():
                     # Science uses the built ePSF when available (analytic
                     # Moffat otherwise); no template ePSF exists at this
                     # stage, so an analytic model at the template FWHM is used.
+                    # An analytic model cannot capture real PSF structure, so
+                    # its mismatch floor must be larger: with the empirical
+                    # 5% floor, bright stars - the best kernel anchors - get
+                    # vetoed on the analytic side for model error alone.
                     _psf_vetting = None
                     if bool(_ts_cfg.get("sfft_psf_vetting", True)):
                         try:
@@ -5385,6 +5400,11 @@ def run_photometry():
                             if _psf_sci is None:
                                 _psf_sci = _analytic_psf_for_injection(ImageFWHM)
                             _psf_tpl = _analytic_psf_for_injection(template_fwhm)
+                            _floor_ana = float(
+                                _ts_cfg.get(
+                                    "sfft_psf_model_floor_frac_analytic", 0.15
+                                )
+                            )
                             if _psf_sci is not None and _psf_tpl is not None:
                                 _psf_vetting = {
                                     "image_sci": image,
@@ -5396,7 +5416,12 @@ def run_photometry():
                                     "gain_sci": gain,
                                     "gain_tpl": float(template_gain),
                                     "mask_sci": hardware_defects_mask,
+                                    "model_floor_frac_tpl": _floor_ana,
                                 }
+                                if epsf_model is None:
+                                    _psf_vetting[
+                                        "model_floor_frac_sci"
+                                    ] = _floor_ana
                         except Exception:
                             logging.debug(
                                 "PSF-fit-quality vetting setup failed; "
@@ -7884,7 +7909,7 @@ def run_photometry():
                             _fig_r.tight_layout(rect=[0, 0, 1, 0.92])
                             _plot_path_re = os.path.join(
                                 os.path.dirname(fpath),
-                                f"PSF_Reconvolution_Target_{os.path.splitext(base_filename)[0]}{get_plot_ext(input_yaml)}",
+                                f"PSF_Reconv_Target_{os.path.splitext(base_filename)[0]}{get_plot_ext(input_yaml)}",
                             )
                             _fig_r.savefig(_plot_path_re, dpi=150, bbox_inches="tight", facecolor="white")
                             plt.close(_fig_r)
@@ -8008,7 +8033,7 @@ def run_photometry():
                         base0 = os.path.splitext(os.path.basename(fpath))[0]
                         write_dir0 = os.path.dirname(fpath)
                         save_png = os.path.join(
-                            write_dir0, f"LPI_Target_{base0}{get_plot_ext(input_yaml)}"
+                            write_dir0, f"Injection_Target_{base0}{get_plot_ext(input_yaml)}"
                         )
                         save_lpi_diagnostic_plot(
                             image=diff_image_for_plot if PreformSubtraction else image,

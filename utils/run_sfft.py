@@ -99,6 +99,49 @@ def _odd(n: int) -> int:
     return int(n)
 
 
+def _combine_output_masks(
+    combined_invalid_mask: np.ndarray,
+    prior_ban_mask: Optional[np.ndarray],
+) -> np.ndarray:
+    """Union the no-data input mask with the universal source mask.
+
+    A finite pixel inside the universal mask can carry raw input flux into
+    the difference image - e.g. a saturated star whose template footprint
+    was blanked leaves DIFF ~= SCI - Conv(~0) ~= SCI - and reads as a
+    bright transient to downstream measurement.  Both mask layers must
+    therefore be re-imposed on the output products, not just the NaN/zero
+    input pixels.
+    """
+    out = np.asarray(combined_invalid_mask, dtype=bool).copy()
+    if prior_ban_mask is not None and prior_ban_mask.shape == out.shape:
+        out |= np.asarray(prior_ban_mask, dtype=bool)
+    return out
+
+
+def _remask_diff_fits(
+    fits_path: str, invalid_mask: np.ndarray
+) -> Tuple[int, int]:
+    """NaN out ``invalid_mask`` pixels in a FITS image, in place.
+
+    Returns ``(n_newly_masked, n_invalid_total)``: how many previously
+    finite pixels the mask invalidated and the total non-finite count
+    afterwards, both wanted in the log to detect masked-pixel leakage.
+    """
+    with fits.open(fits_path, mode="update", memmap=False) as hdul:
+        data = np.asarray(hdul[0].data)
+        if data.shape != invalid_mask.shape:
+            raise ValueError(
+                f"invalid mask shape {invalid_mask.shape} != data shape {data.shape}"
+            )
+        out_dtype = data.dtype
+        work = data.astype(float, copy=False)
+        n_new = int(np.count_nonzero(np.isfinite(work) & invalid_mask))
+        work[invalid_mask] = np.nan
+        hdul[0].data = work.astype(out_dtype, copy=False)
+        hdul.flush()
+    return n_new, int(np.count_nonzero(~np.isfinite(work)))
+
+
 def run_sfft() -> Optional[int]:
     """
     SFFT (Sparse Field Flux Transport) image subtraction pipeline.
@@ -1262,6 +1305,23 @@ def run_sfft() -> Optional[int]:
         except Exception as e:
             log_warning(f"Could not load mask '{args.mask}': {e}")
 
+    # Output invalid mask: no-data inputs plus the universal source mask
+    # (saturated footprints, defects).  SFFT only masks pixels it detects
+    # as unusable; a finite pixel inside our mask can keep raw science
+    # flux in the diff and read as a transient, so the full mask is
+    # re-imposed on every output product below.
+    output_invalid_mask = _combine_output_masks(combined_invalid_mask, prior_ban_mask)
+    n_src_only = int(
+        np.count_nonzero(output_invalid_mask & ~combined_invalid_mask)
+    )
+    if n_src_only:
+        log_info(
+            f"Output invalid mask: {int(np.count_nonzero(output_invalid_mask))} pixels "
+            f"({np.mean(output_invalid_mask) * 100:.1f}%) = invalid inputs "
+            f"({int(np.count_nonzero(combined_invalid_mask))}) + source-mask-only "
+            f"({n_src_only})."
+        )
+
     # Images ARE background-subtracted before reaching SFFT: the pipeline
     # subtracts a sigma-clipped median from both science and template
     # (templates.py sfft_sky_subtract=True, default).  BACK_TYPE=MANUAL with
@@ -1960,6 +2020,20 @@ def run_sfft() -> Optional[int]:
                 diff_arr = np.asarray(hdul[0].data, dtype=np.float64)
                 diff_hdr = hdul[0].header
 
+                # Masked pixels that stayed finite carry unsubtracted input
+                # flux; they would contaminate the decorrelation convolution
+                # and the noise IQR below, so invalidate them up front.
+                if output_invalid_mask.shape == diff_arr.shape:
+                    _n_leak = int(
+                        np.count_nonzero(np.isfinite(diff_arr) & output_invalid_mask)
+                    )
+                    if _n_leak:
+                        log_info(
+                            f"Invalidating {_n_leak} finite masked pixels in diff "
+                            "(saturated/defect footprints carrying raw input flux)."
+                        )
+                        diff_arr[output_invalid_mask] = np.nan
+
                 _nan_mask = ~np.isfinite(diff_arr)
 
                 # Estimate per-image variances from sigma-clipped noise of each
@@ -2135,59 +2209,33 @@ def run_sfft() -> Optional[int]:
             log_warning(f"Post-subtraction processing failed ({_post_e}); skipping.")
 
         # ------------------------------------------------------------------
-        # Re-impose invalid-pixel mask on output difference image
-        #
-        # Some subtraction / resampling steps can emit exact zeros in regions
-        # where either input image had NaNs or zeros (chip gaps / no-data / SWarp
-        # padding). Those pixels should remain "invalid" and propagate as NaNs,
-        # otherwise downstream background/SNR/limits can be biased.
+        # Re-impose the full invalid-pixel mask on the output difference
+        # products.  Two layers: no-data inputs (NaN/zero - chip gaps, SWarp
+        # padding) and the universal source mask (saturated/defect
+        # footprints).  Masked pixels that stayed finite carry unsubtracted
+        # input flux and read as transient candidates downstream, so they
+        # must not survive into the saved products.  This also covers the
+        # path where post-subtraction processing raised before writing.
         # ------------------------------------------------------------------
-        try:
-            if np.any(combined_invalid_mask) and FITS_DIFF and os.path.isfile(FITS_DIFF):
-                # Re-apply the mask to the main difference image.
-                with fits.open(FITS_DIFF, mode="update", memmap=False) as hdul:
-                    diff = np.asarray(hdul[0].data, dtype=float)
-                    if diff.shape == combined_invalid_mask.shape:
-                        n_before = int(np.count_nonzero(~np.isfinite(diff)))
-                        diff[combined_invalid_mask] = np.nan
-                        hdul[0].data = diff
-                        hdul.flush()
-                        n_after = int(np.count_nonzero(~np.isfinite(diff)))
-                        log_info(
-                            f"Invalid mask applied to main diff: {n_before} -> {n_after} finite pixels"
-                        )
-                    else:
-                        log_warning(
-                            f"combined_invalid_mask shape {combined_invalid_mask.shape} "
-                            f"!= diff shape {diff.shape}; cannot reapply invalid mask."
-                        )
-                
-                # Same for the decorrelated side file, if present.
-                _decorr_diff_path = FITS_DIFF.replace(".fits", "_decorr.fits")
-                if os.path.isfile(_decorr_diff_path):
-                    with fits.open(_decorr_diff_path, mode="update", memmap=False) as hdul:
-                        diff = np.asarray(hdul[0].data, dtype=float)
-                        if diff.shape == combined_invalid_mask.shape:
-                            n_before = int(np.count_nonzero(~np.isfinite(diff)))
-                            diff[combined_invalid_mask] = np.nan
-                            hdul[0].data = diff
-                            hdul.flush()
-                            n_after = int(np.count_nonzero(~np.isfinite(diff)))
-                            log_info(
-                                f"Invalid mask applied to decorrelated diff: {n_before} -> {n_after} finite pixels"
-                            )
-                        else:
-                            log_warning(
-                                f"combined_invalid_mask shape {combined_invalid_mask.shape} "
-                                f"!= decorrelated diff shape {diff.shape}; cannot reapply invalid mask."
-                            )
-                
-                n_mask = int(np.count_nonzero(combined_invalid_mask))
-                log_info(
-                    f"Applied combined invalid mask: {n_mask} pixels masked"
-                )
-        except Exception as e:
-            log_warning(f"Failed to reapply invalid mask to diff: {e}")
+        if (
+            np.any(output_invalid_mask)
+            and FITS_DIFF
+            and os.path.isfile(FITS_DIFF)
+        ):
+            for _path, _label in (
+                (FITS_DIFF, "main diff"),
+                (FITS_DIFF.replace(".fits", "_decorr.fits"), "decorrelated diff"),
+            ):
+                if not os.path.isfile(_path):
+                    continue
+                try:
+                    _n_new, _n_tot = _remask_diff_fits(_path, output_invalid_mask)
+                    log_info(
+                        f"Output mask applied to {_label}: {_n_new} finite "
+                        f"masked pixels invalidated ({_n_tot} total non-finite)."
+                    )
+                except Exception as _e:
+                    log_warning(f"Could not apply output mask to {_label}: {_e}")
 
         # Write ForceConv and solution path to difference image header so
         # downstream photometry knows which PSF the difference image has and
@@ -2308,7 +2356,7 @@ def run_sfft() -> Optional[int]:
                     _plot_fmt = str(getattr(args, "plot_format", "png") or "png").strip().lower().lstrip(".")
                     if _plot_fmt not in ("png", "svg"):
                         _plot_fmt = "png"
-                    png_path = os.path.join(out_dir, f"Var_Check_{out_base}.{_plot_fmt}")
+                    png_path = os.path.join(out_dir, f"SFFT_Matching_{out_base}.{_plot_fmt}")
                     try:
                         plt.savefig(
                             png_path, bbox_inches="tight", dpi=150, facecolor="white"

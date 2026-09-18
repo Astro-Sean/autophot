@@ -366,44 +366,64 @@ class AlignmentVerifier:
         _cmap = plt.get_cmap('gray').copy()
         _cmap.set_bad(color='magenta')
 
-        plt.figure(figsize=(12, 8))
-        plt.subplot(2, 2, 1)
-        plt.imshow(sci_data, cmap=_cmap, origin='lower')
-        plt.title('Science Image')
-        plt.colorbar()
+        # Equal-aspect image panels shrink inside cells that do not match
+        # the data aspect, so size the figure from the image shape. The
+        # vertical colorbars steal ~20% of each cell's width (default
+        # fraction + pad), which cbar_overhead adds back.
+        img_h, img_w = sci_data.shape
+        aspect = img_w / img_h
+        ax_h = 3.2
+        cbar_overhead = 1.25
+        left, right, bottom, top = 0.07, 0.98, 0.09, 0.94
+        wspace, hspace = 0.05, 0.30
+        fig_w = 2 * ax_h * aspect * cbar_overhead * (1 + wspace / 2) / (right - left)
+        fig_h = 2 * ax_h * (1 + hspace / 2) / (top - bottom)
+        fig, axes = plt.subplots(2, 2, figsize=(fig_w, fig_h))
+        fig.subplots_adjust(
+            left=left, right=right, top=top, bottom=bottom,
+            wspace=wspace, hspace=hspace,
+        )
+        ax_sci, ax_ref = axes[0]
+        ax_diff, ax_off = axes[1]
 
-        plt.subplot(2, 2, 2)
-        plt.imshow(ref_data, cmap=_cmap, origin='lower')
-        plt.title('Reference Image')
-        plt.colorbar()
+        im = ax_sci.imshow(sci_data, cmap=_cmap, origin='lower')
+        ax_sci.set_title('Science Image')
+        fig.colorbar(im, ax=ax_sci)
 
-        plt.subplot(2, 2, 3)
-        plt.imshow(diff_data, cmap=_cmap, origin='lower', vmin=-np.percentile(np.abs(diff_data), 99),
-                   vmax=np.percentile(np.abs(diff_data), 99))
-        plt.title('Difference (Science - Reference)')
-        plt.colorbar()
+        im = ax_ref.imshow(ref_data, cmap=_cmap, origin='lower')
+        ax_ref.set_title('Reference Image')
+        fig.colorbar(im, ax=ax_ref)
+        # Panels in a row share the same y extent; repeat labels add clutter.
+        ax_ref.tick_params(axis='y', labelleft=False)
+
+        im = ax_diff.imshow(
+            diff_data, cmap=_cmap, origin='lower',
+            vmin=-np.percentile(np.abs(diff_data), 99),
+            vmax=np.percentile(np.abs(diff_data), 99),
+        )
+        ax_diff.set_title('Difference (Science - Reference)')
+        fig.colorbar(im, ax=ax_diff)
 
         # 2. Coordinate offset map
-        if 'coordinate_accuracy' in results and results['coordinate_accuracy']['test_points']:
-            plt.subplot(2, 2, 4)
-            points = results['coordinate_accuracy']['test_points']
-            if points:
-                xs = [p['position'][0] for p in points]
-                ys = [p['position'][1] for p in points]
-                offsets = [p['offset_pixels'] for p in points]
+        points = (results.get('coordinate_accuracy') or {}).get('test_points') or []
+        if points:
+            xs = [p['position'][0] for p in points]
+            ys = [p['position'][1] for p in points]
+            offsets = [p['offset_pixels'] for p in points]
 
-                scatter = plt.scatter(xs, ys, c=offsets, cmap='viridis', s=20)
-                plt.colorbar(scatter, label='Offset (pixels)')
-                plt.title('Coordinate Offset Map')
-                plt.xlabel('X (pixels)')
-                plt.ylabel('Y (pixels)')
-        
-        plt.tight_layout()
-        plt.savefig(
+            scatter = ax_off.scatter(xs, ys, c=offsets, cmap='viridis', s=20)
+            fig.colorbar(scatter, ax=ax_off, label='Offset (pixels)')
+            ax_off.set_title('Coordinate Offset Map')
+            ax_off.set_xlabel('X (pixels)')
+            ax_off.set_ylabel('Y (pixels)')
+        else:
+            ax_off.set_visible(False)
+
+        fig.savefig(
             output_dir / f'Alignment_Verification_{base}{get_plot_ext({"plot_format": self.plot_format})}',
             dpi=150, bbox_inches='tight', facecolor='white',
         )
-        plt.close(plt.gcf())
+        plt.close(fig)
         
         self.logger.info("Alignment verification plots saved to %s", output_dir)
     

@@ -37,6 +37,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
 
 from astropy.stats import (
     SigmaClip,
@@ -2076,69 +2077,18 @@ class BackgroundSubtractor:
         mask=None,
     ) -> None:
         """Save a 4-panel diagnostic plot (image, background, noise RMS, residual)."""
-        apply_autophot_mplstyle()
-
-        arrays = [image, background, rms, subtracted]
-        titles = [
-            "Science [ADU]",
-            "Background [ADU]",
-            "Noise RMS [ADU]",
-            "Subtracted [ADU]",
-        ]
-        interval = ZScaleInterval()
-
-        fig, axes = plt.subplots(1, 4, figsize=set_size(540, 1))
-        axes = np.atleast_1d(axes)
-
-        for i, (ax, data, title) in enumerate(zip(axes, arrays, titles)):
-            vmin, vmax = self._safe_zlimits(data, interval)
-            # Render NaNs as magenta "no data" regions.
-            cmap = plt.get_cmap("gray").copy()
-            cmap.set_bad(color="magenta")
-
-            im = ax.imshow(
-                data,
-                origin="lower",
-                cmap=cmap,
-                vmin=vmin,
-                vmax=vmax,
-                interpolation="none",
-            )
-            self._attach_colorbar(fig, ax, im, title)
-            ax.set_aspect("equal")
-
-            if i > 0:
-                ax.set_yticklabels([])
-                ax.set_ylabel("")
-            # Leftmost subplot: overlay masked pixels as a second image:
-            # an RGBA array where masked pixels are semi-transparent magenta and
-            # unmasked pixels are fully transparent.
-            if (
-                i == 0
-                and mask is not None
-                and np.any(mask)
-                and mask.shape == data.shape
-            ):
-                try:
-                    ny, nx = mask.shape
-                    overlay = np.zeros((ny, nx, 4), dtype=float)
-                    overlay[..., 0] = mask.astype(float)  # red channel = 1 where masked
-                    overlay[..., 2] = mask.astype(float)  # blue channel = 1 -> magenta
-                    overlay[..., 3] = (
-                        mask.astype(float) * 0.6
-                    )  # alpha = 0.6 where masked
-
-                    ax.imshow(
-                        overlay,
-                        origin="lower",
-                        interpolation="nearest",
-                        zorder=10,
-                    )
-                except Exception:
-                    pass
-
-        plt.tight_layout()
-        self._save_figure(fig, fpath, "background")
+        self._plot_image_row(
+            [image, background, rms, subtracted],
+            [
+                "Science [ADU]",
+                "Background [ADU]",
+                "Noise RMS [ADU]",
+                "Subtracted [ADU]",
+            ],
+            fpath,
+            "background",
+            mask=mask,
+        )
 
     def _plot_local_diagnostics(
         self,
@@ -2149,13 +2099,36 @@ class BackgroundSubtractor:
         mask=None,
     ) -> None:
         """Save a 3-panel local background diagnostic plot (cutout, background, subtracted)."""
+        self._plot_image_row(
+            [cutout, background, subtracted],
+            ["Science [ADU]", "Background [ADU]", "Subtracted [ADU]"],
+            fpath,
+            "local_background",
+            mask=mask,
+        )
+
+    def _plot_image_row(self, arrays, titles, fpath, prefix, mask=None) -> None:
+        """Save a row of equal-aspect image panels with per-panel colorbars."""
         apply_autophot_mplstyle()
-
-        arrays = [cutout, background, subtracted]
-        titles = ["Science [ADU]", "Background [ADU]", "Subtracted [ADU]"]
         interval = ZScaleInterval()
+        n = len(arrays)
 
-        fig, axes = plt.subplots(1, 3, figsize=set_size(540, 1))
+        # Equal-aspect panels shrink inside mismatched figure cells, leaving
+        # gaps no wspace can remove. Size the figure from the image aspect so
+        # cells fit the data; the appended top colorbar adds ~18% cell height.
+        img_h, img_w = arrays[0].shape
+        aspect = img_w / img_h
+        ax_h = 3.6
+        cbar_overhead = 1.18
+        left, right, bottom, top = 0.045, 0.99, 0.09, 0.90
+        wspace = 0.05
+        fig_w = n * ax_h * aspect * (1 + wspace) / (right - left)
+        fig_h = ax_h * cbar_overhead / (top - bottom)
+
+        fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h))
+        fig.subplots_adjust(
+            left=left, right=right, top=top, bottom=bottom, wspace=wspace
+        )
         axes = np.atleast_1d(axes)
 
         for i, (ax, data, title) in enumerate(zip(axes, arrays, titles)):
@@ -2174,25 +2147,49 @@ class BackgroundSubtractor:
             )
             self._attach_colorbar(fig, ax, im, title)
             ax.set_aspect("equal")
+            ax.set_xlabel("X [Pixel]", fontsize=9)
+            if i == 0:
+                ax.set_ylabel("Y [Pixel]", fontsize=9)
+            else:
+                ax.set_ylabel("")
+                ax.tick_params(axis="y", labelleft=False)
 
-            if i == 0 and mask is not None and np.any(mask):
-                try:
-                    ny, nx = mask.shape
-                    overlay = np.zeros((ny, nx, 4), dtype=float)
-                    overlay[..., 0] = mask.astype(float)
-                    overlay[..., 2] = mask.astype(float)  # +blue -> magenta
-                    overlay[..., 3] = mask.astype(float) * 0.6
+            # Leftmost panel: overlay masked pixels in semi-transparent magenta.
+            if (
+                i == 0
+                and mask is not None
+                and np.any(mask)
+                and mask.shape == data.shape
+            ):
+                overlay = np.zeros((*mask.shape, 4), dtype=float)
+                overlay[..., 0] = mask.astype(float)
+                overlay[..., 2] = mask.astype(float)
+                overlay[..., 3] = mask.astype(float) * 0.6
+                ax.imshow(
+                    overlay,
+                    origin="lower",
+                    interpolation="nearest",
+                    zorder=10,
+                )
 
-                    ax.imshow(
-                        overlay,
-                        origin="lower",
-                        interpolation="nearest",
-                    )
-                except Exception:
-                    pass
+        handles = []
+        if (mask is not None and np.any(mask)) or any(
+            np.isnan(np.asarray(a)).any() for a in arrays
+        ):
+            handles.append(
+                mpatches.Patch(facecolor="magenta", alpha=0.6, label="Masked / NaN")
+            )
+        if handles:
+            fig.legend(
+                handles=handles,
+                loc="upper center",
+                bbox_to_anchor=(0.5, 1.0),
+                ncol=len(handles),
+                fontsize=8,
+                frameon=False,
+            )
 
-        plt.tight_layout()
-        self._save_figure(fig, fpath, "local_background")
+        self._save_figure(fig, fpath, prefix)
 
     # -------------------------------------------------------------------------
     # Private plot helpers

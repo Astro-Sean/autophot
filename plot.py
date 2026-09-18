@@ -50,6 +50,32 @@ except ImportError:
     photometry_filter_series = None
 
 
+def _object_label(otype, name, max_len: int = 20):
+    """Label text for a SIMBAD object marker.
+
+    Prefers the object name (``MAIN_ID``, e.g. "NGC 1068" or
+    "2MASX J...") and falls back to the object type code
+    (``OTYPE_opt``, e.g. "G", "QSO") when no name is available.
+    Returns ``None`` when neither is usable -- including a bare "SN*"
+    type code with no real name, which carries no information.
+    Labels longer than ``max_len`` are truncated as ``first8...last8``.
+    """
+    label = None
+    if isinstance(name, str) and name.strip() and name.strip().lower() != "nan":
+        label = name.strip()
+    elif (
+        isinstance(otype, str)
+        and otype.strip()
+        and otype.strip().lower() != "nan"
+    ):
+        if "SN*" in otype:
+            return None
+        label = otype.strip()
+    if label is not None and len(label) > max_len:
+        label = f"{label[:8]}...{label[-8:]}"
+    return label
+
+
 class Plot:
     """Diagnostic plotting utilities for AutoPHOT.
 
@@ -181,16 +207,21 @@ class Plot:
                     vmaxs[key] = np.nanmax(img_data)
 
             n_images = len(images)
-            if n_images == 4:  # With decorrelated image
-                fig = plt.figure(figsize=(20, 5), constrained_layout=False)
-                gs = GridSpec(1, 4, figure=fig, width_ratios=[1, 1, 1, 1], wspace=0.12)
-                axes = [fig.add_subplot(gs[0, i]) for i in range(4)]
-                plt.subplots_adjust(left=0.03, right=0.98, top=0.92, bottom=0.11)
-            else:  # Standard 3-panel layout
-                fig = plt.figure(figsize=(15, 5), constrained_layout=False)
-                gs = GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 1], wspace=0.12)
-                axes = [fig.add_subplot(gs[0, i]) for i in range(3)]
-                plt.subplots_adjust(left=0.05, right=0.97, top=0.92, bottom=0.11)
+            # Panels use aspect="equal" on the Image dimensions, so size the
+            # figure so each gridspec cell matches the image aspect ratio;
+            # otherwise equal-aspect shrinks the axes inside wide cells and
+            # leaves gaps between panels no wspace setting can remove.
+            img_h0, img_w0 = image.shape
+            aspect = img_w0 / img_h0
+            ax_h = 4.2  # inches of axes height per panel
+            left, right, bottom, top = 0.05, 0.98, 0.11, 0.88
+            wspace = 0.04
+            fig_w = n_images * ax_h * aspect * (1 + wspace) / (right - left)
+            fig_h = ax_h / (top - bottom)
+            fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=False)
+            gs = GridSpec(1, n_images, figure=fig, wspace=wspace)
+            axes = [fig.add_subplot(gs[0, i]) for i in range(n_images)]
+            plt.subplots_adjust(left=left, right=right, top=top, bottom=bottom)
 
             img_height, img_width = image.shape
             margin = 0.05
@@ -236,7 +267,12 @@ class Plot:
                 ax.set_ylim(0, ref_height)
                 ax.set_title(title, fontsize=10, pad=5)
                 ax.set_xlabel("X [Pixel]", fontsize=9)
-                ax.set_ylabel("Y [Pixel]", fontsize=9)
+                if i == 0:
+                    ax.set_ylabel("Y [Pixel]", fontsize=9)
+                else:
+                    # Panels share the same y limits; repeat labels add clutter.
+                    ax.set_ylabel("")
+                    ax.tick_params(axis="y", labelleft=False)
 
             # Marker box shows the full kernel when known, else the inset extent.
             if kernel_half_width is not None and kernel_half_width > 0:
@@ -303,10 +339,10 @@ class Plot:
                                 (x_plot - half_size, y_plot - half_size),
                                 square_size,
                                 square_size,
-                                linewidth=0.5,
-                                edgecolor=PLOT_COLORS.get('reference', '#0072B2'),
+                                linewidth=0.9,
+                                edgecolor=PLOT_COLORS.get('matched_box', '#00CFFF'),
                                 facecolor="none",
-                                alpha=0.5,
+                                alpha=0.9,
                             )
                             ax.add_patch(rect)
                             valid_markers += 1
@@ -356,8 +392,7 @@ class Plot:
                         x = x_plot
                         y = y_plot
 
-                        if "SN*" in otype:
-                            otype = name
+                        if isinstance(otype, str) and "SN*" in otype:
                             circle = mpatches.Circle(
                                 (x, y),
                                 cross_len * 2,
@@ -383,9 +418,10 @@ class Plot:
                         #         lw=0.5,
                         #         zorder=2,
                         #     )
-                        if len(axes) > 0:
+                        _label = _object_label(otype, name)
+                        if _label and len(axes) > 0:
                             axes[0].annotate(
-                                otype,
+                                _label,
                                 xy=(x, y),
                                 xytext=(x, y + cross_len / 2),
                                 ha="center",
@@ -467,9 +503,11 @@ class Plot:
                     ax_inset.set_ylim(y - inset_size, y + inset_size)
                     ax_inset.set_xticks([])
                     ax_inset.set_yticks([])
+                    # Red frame ties the inset to the red zoom rectangle
+                    # on the main panel.
                     for spine in ax_inset.spines.values():
-                        spine.set_color(PLOT_COLORS.get('spine_color', '#000000'))
-                        spine.set_linewidth(0.5)
+                        spine.set_color(PLOT_COLORS.get('target', '#FF0000'))
+                        spine.set_linewidth(1.0)
                     inset_axes_list.append(ax_inset)
                     panel_to_inset[i] = ax_inset
 
@@ -519,18 +557,19 @@ class Plot:
                             )
                         )
 
-            # Optional mask overlay (skip difference and decorrelated images)
+            # Optional mask overlay (skip difference and decorrelated main
+            # panels; their insets still get it so the zoomed view flags the
+            # masked region around the target).
             if mask is not None:
                 red_overlay = colors.ListedColormap(["none", PLOT_COLORS.get('mask_overlay', '#FF0000')])
                 for i, ax in enumerate(fig.axes[:-1]):
                     if ax not in inset_axes_list:
-                        # Skip difference image (index 2) and decorrelated image (index 3 if present)
-                        if i == 2 or (n_images == 4 and i == 3):
-                            continue
-                        ax.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
                         ax_inset = panel_to_inset.get(i)
                         if ax_inset is not None:
                             ax_inset.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
+                        if i == 2 or (n_images == 4 and i == 3):
+                            continue
+                        ax.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
 
             if fitted_location and len(fitted_location) == 2:
                 radius = aperture_size
@@ -569,6 +608,43 @@ class Plot:
                             # ax.add_line(hline)
                             # ax.add_line(vline)
 
+
+            # Legend for the overlay markers; only list what was actually drawn.
+            legend_handles = []
+            if matching_sources is not None and len(matching_sources) > 0:
+                legend_handles.append(
+                    mpatches.Rectangle(
+                        (0, 0), 1, 1, facecolor="none",
+                        edgecolor=PLOT_COLORS.get('matched_box', '#00CFFF'),
+                        linewidth=0.9, label="Matched sources",
+                    )
+                )
+            if mask is not None:
+                legend_handles.append(
+                    mpatches.Patch(
+                        facecolor=PLOT_COLORS.get('mask_overlay', 'magenta'),
+                        alpha=0.5, label="Masked pixels",
+                    )
+                )
+            if masked_sources is not None and len(masked_sources) > 0:
+                legend_handles.append(
+                    mlines.Line2D(
+                        [], [], marker="x", linestyle="None", markersize=6,
+                        color=PLOT_COLORS.get('target', '#FF0000'),
+                        label="Masked variable",
+                    )
+                )
+            if legend_handles:
+                fig.legend(
+                    handles=legend_handles,
+                    loc="upper center",
+                    bbox_to_anchor=(0.5, 1.0),
+                    ncol=len(legend_handles),
+                    fontsize=8,
+                    frameon=False,
+                    handlelength=1.4,
+                    columnspacing=1.5,
+                )
 
             fig.savefig(
                 save_path, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white')
@@ -628,7 +704,7 @@ class Plot:
         from astropy.visualization import ZScaleInterval
         from matplotlib import colors
         import matplotlib.patches as mpatches
-        from functions import set_size
+        import matplotlib.lines as mlines
 
         cx, cy = center
         if cx is None or cy is None:
@@ -673,18 +749,40 @@ class Plot:
         else:
             vmin, vmax = np.nanmin(cut), np.nanmax(cut)
 
-        fig, axes = plt.subplots(
-            1, 3, figsize=set_size(540, 1), constrained_layout=True
+        # Equal-aspect panels shrink inside mismatched figure cells, leaving
+        # gaps no wspace can remove. All three panels show the same cutout,
+        # so size the figure from cut.shape so each cell fits the image.
+        img_h, img_w = cut.shape
+        aspect = img_w / img_h
+        ax_h = 3.0
+        left, right, bottom, top = 0.055, 0.99, 0.10, 0.86
+        wspace = 0.05
+        fig_w = 3 * ax_h * aspect * (1 + wspace) / (right - left)
+        fig_h = ax_h / (top - bottom)
+
+        fig, axes = plt.subplots(1, 3, figsize=(fig_w, fig_h))
+        fig.subplots_adjust(
+            left=left, right=right, top=top, bottom=bottom, wspace=wspace
         )
 
         titles = ["Target cutout", "Segmentation", "Neighbor mask"]
-        for ax, t in zip(axes, titles):
-            ax.set_title(t, fontsize=7, pad=2)
+        for i, (ax, t) in enumerate(zip(axes, titles)):
+            ax.set_title(t, fontsize=8, pad=2)
             ax.set_xlabel("X [Pixel]")
-            ax.set_ylabel("Y [Pixel]")
+            if i == 0:
+                ax.set_ylabel("Y [Pixel]")
+            else:
+                # Panels share the same y extent; repeat labels add clutter.
+                ax.set_ylabel("")
+                ax.tick_params(axis="y", labelleft=False)
 
         tx = cx - x0
         ty = cy - y0
+
+        # Track which overlays were drawn so the figure legend lists only
+        # markers that are actually visible.
+        aperture_drawn = False
+        seg_drawn = False
 
         cmap_vir = plt.get_cmap(PLOT_COLORS.get('image_cmap_alt', 'viridis')).copy()
         cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
@@ -707,6 +805,7 @@ class Plot:
                     lw=0.8,
                 )
             )
+            aperture_drawn = True
 
         axes[1].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
@@ -721,6 +820,7 @@ class Plot:
                 linewidths=0.4,
                 alpha=0.9,
             )
+            seg_drawn = True
         axes[1].axvline(tx, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
         axes[1].axhline(ty, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
 
@@ -731,6 +831,54 @@ class Plot:
         axes[2].imshow(nmask.astype(int), origin="lower", cmap=overlay, alpha=0.35)
         axes[2].axvline(tx, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
         axes[2].axhline(ty, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
+
+        handles = [
+            mlines.Line2D(
+                [0], [0],
+                color=PLOT_COLORS.get('reference', '#0072B2'),
+                lw=0.8,
+                label="Target",
+            )
+        ]
+        if aperture_drawn:
+            handles.append(
+                mlines.Line2D(
+                    [0], [0],
+                    marker="o",
+                    color=PLOT_COLORS.get('reference', '#0072B2'),
+                    markerfacecolor="none",
+                    markersize=6,
+                    linestyle="None",
+                    label="Aperture",
+                )
+            )
+        if seg_drawn:
+            handles.append(
+                mlines.Line2D(
+                    [0], [0],
+                    color=PLOT_COLORS.get('segmentation', '#00AA00'),
+                    lw=0.8,
+                    label="Segmentation",
+                )
+            )
+        if np.any(nmask):
+            handles.append(
+                mpatches.Patch(
+                    facecolor=PLOT_COLORS.get('mask_overlay', '#FF0000'),
+                    edgecolor="none",
+                    alpha=0.35,
+                    label="Neighbor mask",
+                )
+            )
+        fig.legend(
+            handles=handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.0),
+            ncol=len(handles),
+            fontsize=8,
+            frameon=False,
+        )
+
         fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
 
@@ -1067,17 +1215,7 @@ class Plot:
 
                         # Prefer the source name, fall back to otype. NaN or
                         # non-string labels get no annotation.
-                        _label = None
-                        if name is not None and isinstance(name, str) and name.strip() and name.strip().lower() != "nan":
-                            _label = name.strip()
-                        elif otype is not None and isinstance(otype, str) and otype.strip() and otype.strip().lower() != "nan":
-                            if "SN*" in otype:
-                                _label = None  # SN* without a real name -> skip
-                            else:
-                                _label = otype.strip()
-
-                        if _label is not None and len(_label) > 20:
-                            _label = f"{_label[:8]}...{_label[-8:]}"
+                        _label = _object_label(otype, name)
 
                         if _label:
                             ax1.annotate(
@@ -1219,7 +1357,7 @@ class Plot:
                 )
             else:
                 save_loc = os.path.join(
-                    write_dir, f"Subtracted_Source_Check_{base}{_ext}"
+                    write_dir, f"Source_Check_Subtracted_{base}{_ext}"
                 )
 
             fig.savefig(
@@ -2397,7 +2535,6 @@ class Plot:
         try:
             import matplotlib.pyplot as plt
             import numpy as np
-            from functions import set_size
             from astropy.visualization import (
                 ImageNormalize,
                 LinearStretch,
@@ -2413,26 +2550,46 @@ class Plot:
             )[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
             save_path = os.path.join(
-                write_dir, f"Match_Sources_{base}{get_plot_ext(self.input_yaml)}"
+                write_dir, f"Matched_Sources_{base}{get_plot_ext(self.input_yaml)}"
             )
 
             sci_matched_xy = np.asarray(sci_matched_xy, float)
             tpl_matched_xy = np.asarray(tpl_matched_xy, float)
             n_matched = len(sci_matched_xy)
 
-            golden_ratio = (5**0.5 + 1) / 2
-            figsize = set_size(540, aspect=0.5 * golden_ratio)
+            # Equal-aspect panels shrink inside mismatched figure cells,
+            # leaving gaps no wspace can remove. Science and template shapes
+            # can differ, so give each cell a width ratio matching its image
+            # aspect and size the figure from the mean aspect.
+            _sci_h, _sci_w = sci_image.shape[:2]
+            _tpl_h, _tpl_w = tpl_image.shape[:2]
+            _aspects = [_sci_w / _sci_h, _tpl_w / _tpl_h]
+            ax_h = 4.0
+            left, right, bottom, top = 0.06, 0.98, 0.10, 0.88
+            # When the image heights differ both panels keep their y tick
+            # labels and axis label, so the gap must fit them (~0.7 in).
+            _gap_in = 0.7 if _sci_h != _tpl_h else 0.25
+            wspace = _gap_in / (ax_h * sum(_aspects) / 2)
+            fig_w = (
+                (ax_h * sum(_aspects) + _gap_in) / (right - left)
+            )
+            fig_h = ax_h / (top - bottom)
             fig, (ax1, ax2) = plt.subplots(
-                1, 2, figsize=figsize, constrained_layout=True
+                1, 2,
+                figsize=(fig_w, fig_h),
+                gridspec_kw={"width_ratios": _aspects, "wspace": wspace},
+            )
+            fig.subplots_adjust(
+                left=left, right=right, top=top, bottom=bottom, wspace=wspace
             )
 
             cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
             cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
 
-            for ax, img, title in [
+            for i, (ax, img, title) in enumerate([
                 (ax1, sci_image, "Science"),
                 (ax2, tpl_image, "Template"),
-            ]:
+            ]):
                 img_f = np.asarray(img, dtype=np.float32)
                 z = ZScaleInterval()
                 vmin, vmax = z.get_limits(img_f)
@@ -2441,11 +2598,17 @@ class Plot:
                 )
                 ax.imshow(
                     img_f, cmap=cmap, norm=norm,
-                    origin="lower", aspect="auto",
+                    origin="lower", aspect="equal",
                 )
                 ax.set_title(title)
                 ax.set_xlabel("X [Pixel]")
-                ax.set_ylabel("Y [Pixel]")
+                # Only suppress the duplicate y labels when both panels
+                # share the same y extent.
+                if i == 0 or _sci_h != _tpl_h:
+                    ax.set_ylabel("Y [Pixel]")
+                else:
+                    ax.set_ylabel("")
+                    ax.tick_params(axis="y", labelleft=False)
 
             _fwhm_default = float(self.input_yaml.get("fwhm", 3.0))
             _r_sci = 3.0 * (float(sci_fwhm) if sci_fwhm is not None else _fwhm_default)
@@ -2465,6 +2628,10 @@ class Plot:
                 # >1 px from any matched source = unmatched.
                 return np.where(d > 1.0)[0]
 
+            # Track which overlays were drawn so the figure legend lists only
+            # markers that are actually visible.
+            _drew_unmatched = False
+            _drew_target = False
             if sci_all_xy is not None:
                 sci_all = np.asarray(sci_all_xy, float)
                 _sci_unmatched = _find_unmatched(sci_all, sci_matched_xy)
@@ -2475,6 +2642,7 @@ class Plot:
                         marker="x", s=12, c=PLOT_COLORS.get('unmatched', '#FF0000'), alpha=0.6,
                         linewidths=0.5, zorder=3,
                     )
+                    _drew_unmatched = True
             if tpl_all_xy is not None:
                 tpl_all = np.asarray(tpl_all_xy, float)
                 _tpl_unmatched = _find_unmatched(tpl_all, tpl_matched_xy)
@@ -2485,8 +2653,8 @@ class Plot:
                         marker="x", s=12, c=PLOT_COLORS.get('unmatched', '#FF0000'), alpha=0.6,
                         linewidths=0.5, zorder=3,
                     )
+                    _drew_unmatched = True
 
-            _first_match_label = "Matched" if n_matched > 0 else None
             for (sx, sy) in sci_matched_xy:
                 ax1.add_patch(Circle(
                     (sx, sy), _r_sci,
@@ -2531,6 +2699,7 @@ class Plot:
                     edgecolor=PLOT_COLORS.get('variable', '#FFD700'), facecolor="none",
                     linewidth=1.5, linestyle="-", zorder=10,
                 ))
+                _drew_target = True
                 if _display_name:
                     ax1.text(
                         _target_x, _target_y + _box_half + 2,
@@ -2570,29 +2739,26 @@ class Plot:
                     pass
 
             _legend_handles = []
-            if n_matched > 0:
-                _legend_handles.append(_L2([0], [0], marker="o", color=PLOT_COLORS.get('matched', '#0072B2'),
-                                           markerfacecolor="none", markersize=5,
-                                           linestyle="None", label=f"Matched [{n_matched}]"))
-            if sci_all_xy is not None and len(np.asarray(sci_all_xy, float)) > 0:
+            # Matched count already appears in the stats box, so no legend
+            # entry is needed for the matched circles.
+            if _drew_unmatched:
                 _legend_handles.append(_L2([0], [0], marker="x", color=PLOT_COLORS.get('unmatched', '#FF0000'),
                                            markersize=5, linestyle="None",
                                            label="Unmatched"))
-            if _target_x is not None and np.isfinite(_target_x):
+            if _drew_target:
                 _legend_handles.append(_L2([0], [0], marker="s", color=PLOT_COLORS.get('variable', '#FFD700'),
                                            markerfacecolor="none", markersize=5,
                                            linestyle="None", label="Transient"))
             if _legend_handles:
-                _leg = ax1.legend(
-                    handles=_legend_handles, loc="upper right",
-                    frameon=True, fontsize=8,
-                    facecolor=PLOT_COLORS.get('legend_facecolor', 'white'),
-                    edgecolor=PLOT_COLORS.get('legend_edgecolor', '#999999'),
-                    framealpha=0.9,
+                # Figure-level legend keeps marker overlays from covering it.
+                fig.legend(
+                    handles=_legend_handles,
+                    loc="upper center",
+                    bbox_to_anchor=(0.5, 1.0),
+                    ncol=len(_legend_handles),
+                    fontsize=8,
+                    frameon=False,
                 )
-                # Source overlays use zorder up to 11; the legend must sit
-                # above them so markers cannot cover its text.
-                _leg.set_zorder(20)
 
             _n_sci_unmatched = len(_find_unmatched(
                 np.asarray(sci_all_xy, float) if sci_all_xy is not None else np.empty((0, 2)),
