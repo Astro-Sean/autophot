@@ -46,18 +46,8 @@ Most reduction pipelines stack data from a single instrument. AutoPhOT does the 
 2. Prepares each image: cosmic-ray rejection, satellite-streak detection, background estimation, and FWHM measurement. Thresholds adapt for sparse and crowded fields.
 3. Runs aperture and PSF photometry at the target position. The PSF model is built from in-frame stars using `photutils` ePSFBuilder. Three fitters are available: least-squares (default), Poisson likelihood, and MCMC (`emcee`).
 4. Calibrates against a catalogue (Gaia DR3, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and others). Different catalogues can be assigned to different filter groups in a single run, and Gaia XP synthetic photometry is supported.
-5. Optionally subtracts a template using SFFT, HOTPANTS, or ZOGY, with automatic fallback between methods.
-6. Measures limiting magnitudes by injecting and recovering artificial sources at 3σ and 5σ.
-
-Other things worth knowing:
-
-- Data from many facilities can be combined into one light curve.
-- Up to six alignment methods (spalipy, SWarp, reproject, AstroAlign, tweakwcs, chi2_shift) are tried in turn, with quality gates scaled to the image FWHM.
-- On difference images, a fading source can be picked up as a negative PSF dip (inverted-fit detection).
-- A Poisson-likelihood fitter is available for low-count photometry, where it behaves better than χ² (Fermilab TM-2543-AE).
-- The emcee fitter adapts its chain length on the fly and extracts the full parameter covariance.
-- Calibration can be done directly against Gaia DR3 XP spectra with custom transmission curves.
-- Target coordinates and redshifts can be looked up automatically from the Transient Name Server.
+5. Optionally subtracts a template using SFFT, HOTPANTS, or ZOGY, with automatic fallback between methods. On difference images a fading source can be recovered as a negative PSF dip.
+6. Measures limiting magnitudes by injecting and recovering artificial sources.
 
 ---
 
@@ -74,10 +64,9 @@ conda config --set solver libmamba
 ```
 
 ```bash
-# Method 1: install into an existing env
+# Install into an existing env, or create a dedicated one
 conda install -c conda-forge -c astro-sean autophot
 
-# Method 2: create a dedicated environment
 conda create -n autophot -c conda-forge -c astro-sean python=3.11 autophot
 conda activate autophot
 ```
@@ -88,14 +77,6 @@ conda activate autophot
 > pip install sfft==1.7.3 sip_tpv==1.1
 > ```
 
-Alternatively, use `mamba`:
-
-```bash
-conda install -c conda-forge mamba
-mamba create -n autophot -c conda-forge -c astro-sean python=3.11 autophot
-conda activate autophot
-```
-
 Check the install worked:
 
 ```bash
@@ -105,8 +86,6 @@ autophot-main -h
 
 ### From source (developer)
 
-**Option A: editable pip install**
-
 ```bash
 git clone https://github.com/Astro-Sean/autophot.git
 cd autophot
@@ -114,27 +93,19 @@ pip install -e .
 pip install sfft==1.7.3 sip_tpv==1.1  # not on conda
 ```
 
-**Option B: full conda environment (reproducible)**
-
-`environment.yml` pins all dependency versions:
+For a reproducible environment, `environment.yml` pins all dependency versions (including the pip-only ones):
 
 ```bash
-git clone https://github.com/Astro-Sean/autophot.git
-cd autophot
 conda env create -f environment.yml
 conda activate autophot
 pip install -e .
 ```
 
-> [!NOTE]
-> `environment.yml` includes `sfft==1.7.3` in the pip section, so pip-only
-> dependencies are installed automatically.
-
 ---
 
 ## Testing
 
-There are 186 tests covering the core functions, data validation, PSF validation, uncertainty calibration, MCMC diagnostics, injection/recovery, quality flags, and regressions. Everything runs on synthetic data, so no external images are needed.
+The test suite covers the core functions, data validation, PSF validation, uncertainty calibration, MCMC diagnostics, injection/recovery, quality flags, and regressions. Everything runs on synthetic data, so no external images are needed.
 
 ```bash
 pip install -e ".[test]"    # install test dependencies
@@ -218,19 +189,16 @@ cd hotpants && make
 
 Before subtraction the template has to be aligned to the science image. Six methods are available; `spalipy` is the default and usually gives the best sub-pixel accuracy. If you set `alignment_method` to a specific method it is tried first, and the pipeline falls back to the rest of the cascade if it fails.
 
-| Method | `alignment_method` | Install | Typical RMS | Speed |
-|--------|---------------------|---------|-------------|-------|
-| **spalipy** (default) | `spalipy` | `pip install spalipy>=3.5` | 0.05-0.2 px | Medium |
-| **SWarp** (SCAMP+SWarp) | `swarp` | Astromatic suite | 0.1-0.5 px | Fast |
-| **WCS Reproject** | `reproject` | bundled | 0.1-0.3 px | Fast |
-| **AstroAlign** | `astroalign` | bundled | 0.2-1.0 px | Medium |
-| **tweakwcs** | `tweakwcs` | `pip install tweakwcs>=0.8` | 0.1-0.5 px | Medium |
-| **chi2_shift** | `chi2_shift` | `pip install image-registration>=0.2` | 0.5-2.0 px | Fast |
+| Method | `alignment_method` | Install | Typical RMS |
+|--------|---------------------|---------|-------------|
+| **spalipy** (default) | `spalipy` | `pip install spalipy>=3.5` | 0.05-0.2 px |
+| **SWarp** (SCAMP+SWarp) | `swarp` | Astromatic suite | 0.1-0.5 px |
+| **WCS Reproject** | `reproject` | bundled | 0.1-0.3 px |
+| **AstroAlign** | `astroalign` | bundled | 0.2-1.0 px |
+| **tweakwcs** | `tweakwcs` | `pip install tweakwcs>=0.8` | 0.1-0.5 px |
+| **chi2_shift** | `chi2_shift` | `pip install image-registration>=0.2` | 0.5-2.0 px |
 
-```yaml
-template_subtraction:
-  alignment_method: spalipy  # or swarp, reproject, astroalign, tweakwcs, chi2_shift
-```
+Each method is checked against offset, RMS, and p95 alignment-quality gates scaled to the image FWHM; a method that fails is rejected and the next one is tried. The gate thresholds are under `template_subtraction` in the config (`alignment_max_offset_px`, `alignment_max_rms_px`, `alignment_max_p95_px`).
 
 Install all optional alignment methods at once:
 
@@ -238,78 +206,25 @@ Install all optional alignment methods at once:
 pip install -e ".[spalipy,tweakwcs,chi2-shift]"
 ```
 
-There are also quality gates on the alignment: if a method exceeds any of these, it is rejected and the next method is tried.
-
-```yaml
-template_subtraction:
-  alignment_max_offset_px: 0.5
-  alignment_max_rms_px: 0.75
-  alignment_max_p95_px: 1.5
-  alignment_min_sources_for_field_gate: 20
-  post_swarp_verify: True
-```
-
 ---
 
 ## PSF Photometry
 
-AutoPhOT builds an empirical ePSF model from in-frame stars using `photutils` ePSFBuilder. For undersampled images (FWHM < 2.5 px) the oversampling factor is increased automatically.
+AutoPhOT builds an empirical ePSF model from in-frame stars using `photutils` ePSFBuilder. For undersampled images (FWHM < 2.5 px) the oversampling factor is increased automatically. PSF stars are selected from a SExtractor detection run with cuts on saturation, elongation, isolation, FWHM consistency, and CLASS_STAR, plus an FFT-based check for close companions.
 
 ### Fitters
 
 | Fitter | Config key | Use case |
 |--------|-----------|----------|
-| **Least-squares** (default) | — | Fast, general-purpose |
-| **Poisson likelihood** | `use_poisson_likelihood_fitter: True` | Low-count regime; behaves better than χ² (Fermilab TM-2543-AE) |
+| **Least-squares** (default) | - | Fast, general-purpose |
+| **Poisson likelihood** | `use_poisson_likelihood_fitter: True` | Low-count regime; behaves better than chi2 (Fermilab TM-2543-AE) |
 | **MCMC (emcee)** | `perform_emcee_fitting_s2n: 10` | Bayesian uncertainties; runs when the target S/N drops below the threshold |
 
-### MCMC configuration
-
-The emcee fitter is adaptive: the chain is extended until the autocorrelation time stabilises (up to 50,000 steps), then 10×τ is discarded as burn-in and the chain is thinned.
-
-```yaml
-photometry:
-  perform_emcee_fitting_s2n: 10   # run MCMC when target S/N < this
-  emcee_nwalkers: 32
-  emcee_nsteps: null              # null = adaptive
-  emcee_burnin_frac: 0.3
-  emcee_thin: 10
-  emcee_adaptive_tau_target: 50
-  emcee_min_autocorr_N: 100
-  emcee_store_samples: False      # store chains for corner plots
-  emcee_threads: 1
-```
-
-With `emcee_store_samples` enabled, a corner plot is saved as `PSF_Corner_*.{png,svg}`.
+The emcee fitter is adaptive: the chain is extended until the autocorrelation time stabilises, burn-in is discarded, and the chain is thinned. Chain length, walker count, and thinning are configurable under `photometry` (`emcee_nwalkers`, `emcee_nsteps`, `emcee_thin`, and related keys). With `emcee_store_samples` enabled, a corner plot is saved as `PSF_Corner_*.{png,svg}`.
 
 ### Inverted-fit detection
 
-On difference images a fading transient shows up as a negative residual. AutoPhOT can fit the target on a sign-flipped copy of the image:
-
-```yaml
-photometry:
-  check_inverted_image: True
-```
-
-These results are flagged with an `_inverted_fit` column.
-
-### PSF star selection
-
-PSF stars come from a SExtractor detection run, followed by quality cuts on saturation, elongation, isolation, FWHM fraction, and CLASS_STAR. An FFT-based check removes stars with close companions.
-
-```yaml
-photometry:
-  psf_min_candidates: 8
-  psf_saturate_fraction: 0.90
-  psf_elongation_max: 1.5
-  psf_isolation_radius_fwhm: 3.0
-  psf_fwhm_min_frac: 0.5
-  psf_fwhm_max_frac: 2.5
-  psf_class_star_min: 0.4
-  psf_fft_rejection: True
-  undersampled_fwhm_threshold: 2.5
-  psf_auto_oversample_undersampled: True
-```
+On difference images a fading transient shows up as a negative residual. Setting `photometry.check_inverted_image: True` fits the target on a sign-flipped copy of the image; these results are flagged with an `_inverted_fit` column.
 
 ---
 
@@ -323,50 +238,19 @@ photometry:
 | **HOTPANTS** | `hotpants` | Build from source | Classic kernel-matching algorithm |
 | **ZOGY** | `zogy` | Auto-downloaded from [pmvreeswijk/ZOGY](https://github.com/pmvreeswijk/ZOGY) | PSF-matched subtraction; propagates noise correctly |
 
-### SFFT configuration
+Key SFFT options under `template_subtraction`:
 
-```yaml
-template_subtraction:
-  method: sfft
-  kernel_order: "auto"             # 0=constant, 1=linear, 2=quadratic, 3=cubic, or "auto"
-  kernel_hw_fwhm_multiplier: 2.5   # kernel half-width as FWHM multiplier
-  forceconv: REF                   # REF (default, always convolve reference), SCI, or AUTO
-  sfft_decorrelate_noise: False    # noise decorrelation (SFFT v1.7.3+)
-  sfft_save_decorrelated: False    # save decorrelated diff image separately
-  sfft_use_bspline_kernel: False   # B-spline kernel (requires CUDA/Cupy)
-  sfft_bg_order: 0                 # background spatial polynomial order
-  sfft_crowded_auto: False         # auto-enable crowded-field tuning
-  sfft_use_post_anomaly_feedback: True
-```
+- `kernel_order`: polynomial degree of the spatially varying kernel, or `"auto"`
+- `forceconv`: `REF` (default, convolve the reference to the science PSF), `SCI`, or `AUTO`
+- `sfft_decorrelate_noise`, `sfft_use_bspline_kernel`, `sfft_bg_order`: optional SFFT tuning
 
-### Template inpainting
-
-Saturated star cores in the template can be inpainted before subtraction to stop them leaving artifacts in the difference image:
-
-```yaml
-template_subtraction:
-  inpaint_template_cores: False
-  inpaint_method: biharmonic       # biharmonic or telea
-  inpaint_saturate_frac: 0.90
-  inpaint_dilate_radius: 6         # px
-```
+Saturated star cores in the template can be inpainted before subtraction (`inpaint_template_cores`) so they do not leave artifacts in the difference image.
 
 ---
 
 ## Limiting Magnitudes
 
-Limiting magnitudes are measured by injecting artificial sources into the image and checking which ones are recovered, at one or more S/N thresholds. The defaults produce `Limit_3p0S2N` and `Limit_5p0S2N` columns.
-
-```yaml
-limiting_magnitude:
-  snr_thresholds: [3, 5]           # S/N thresholds for limit columns
-  recovery_method: auto            # auto=match transient; or PSF, AP, EMCEE
-  injection_strategy: ring_quiet   # ring_quiet or annulus_random
-  injection_n_sites: 25
-  inject_min_radius_fwhm: 2.0
-  inject_max_radius_fwhm: 6.0
-  plot_injection_recovery: False
-```
+Limiting magnitudes are measured by injecting artificial sources into the image and checking which ones are recovered, at one or more S/N thresholds. The defaults produce `Limit_3p0S2N` and `Limit_5p0S2N` columns. Thresholds, injection strategy, and site count are configurable under `limiting_magnitude`.
 
 ---
 
@@ -386,12 +270,7 @@ limiting_magnitude:
 | Custom CSV | `custom` | Set `catalog.catalog_custom_fpath` |
 | Gaia + custom curves | `gaia_custom` | User-provided transmission curves |
 
-```yaml
-catalog:
-  use_catalog: gaia
-```
-
-### Per-filter catalog routing
+Different catalogs can be assigned to different filter groups in one run:
 
 ```yaml
 catalog:
@@ -402,9 +281,7 @@ catalog:
     default: gaia
 ```
 
-### Gaia custom transmission curves
-
-For non-standard filters, provide transmission curve files:
+For non-standard filters, provide transmission curve files and use `gaia_custom`:
 
 ```yaml
 catalog:
@@ -444,14 +321,14 @@ A few notes on the outputs:
 - The default CSV (`lightcurve_output.csv`) is long-form: one row per image with a `filter` column.
 - Multi-S/N limit columns (e.g. `Limit_3p0S2N`, `Limit_5p0S2N`) are generated automatically.
 - Inverted-fit results are flagged with an `_inverted_fit` boolean column.
-- Lightcurve x-axes are in MJD by default. For data spanning less than a day the axis switches to minutes or hours since the first observation (e.g. `Time since 9th August 9:00pm UTC [hr]`).
-- `plot_variability_check` writes `Variability_Check_<method>[_<target_name>].png` next to the photometry CSV. It reads the per-image `Calib_*.csv` catalogs, subtracts each epoch's reference-ensemble mean instrumental magnitude (common-mode instrumental/atmospheric drift) from the target and the reference stars, and plots the residuals. If the target residuals sit inside the reference scatter, the apparent variability was instrumental rather than real.
+- Lightcurve x-axes are in MJD by default; for data spanning less than a day the axis switches to minutes or hours since the first observation.
+- `plot_variability_check` compares the target against the reference-star ensemble after removing each epoch's common-mode instrumental drift, separating real variability from instrumental or atmospheric trends.
 
 ---
 
 ## Environment Variables
 
-Needed for TNS lookups and RefCAT2 access. Don't hard-code these in scripts:
+Needed for TNS lookups and RefCAT2 access. Do not hard-code these in scripts:
 
 ```bash
 export MASTCASJOBS_WSID="..."
@@ -504,13 +381,10 @@ config["template_subtraction"]["method"] = "sfft"
 config["template_subtraction"]["alignment_method"] = "spalipy"
 config["template_subtraction"]["kernel_order"] = 1
 
-# Optional credentials from environment
-if os.getenv("TNS_BOT_ID"):
-    config["wcs"]["TNS_BOT_ID"] = os.getenv("TNS_BOT_ID")
-if os.getenv("TNS_BOT_NAME"):
-    config["wcs"]["TNS_BOT_NAME"] = os.getenv("TNS_BOT_NAME")
-if os.getenv("TNS_BOT_API"):
-    config["wcs"]["TNS_BOT_API"] = os.getenv("TNS_BOT_API")
+# Optional TNS credentials from environment
+for key in ("TNS_BOT_ID", "TNS_BOT_NAME", "TNS_BOT_API"):
+    if os.getenv(key):
+        config["wcs"][key] = os.getenv(key)
 
 # Create template directories
 prepare_template_directory(
