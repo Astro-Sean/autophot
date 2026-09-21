@@ -1135,9 +1135,10 @@ class MCMCFitter:
         thin: int = 10,
         random_state=None,
         inplace=None,
-        adaptive_tau_target: int = 50,
+        adaptive_tau_target: int = 100,
         min_autocorr_N: int = 300,
         batch_steps: int = 100,
+        early_stop: bool = True,
         jitter_scale: float = 0.02,
         use_nddata_uncertainty: bool = False,
         gain: float = 1.0,
@@ -1155,6 +1156,9 @@ class MCMCFitter:
         self.adaptive_tau_target = adaptive_tau_target
         self.min_autocorr_N = min_autocorr_N
         self.batch_steps = int(batch_steps)
+        self.early_stop = bool(early_stop)
+        self._ll_ctx = None
+        self._last_tau = None
         self.jitter_scale = float(jitter_scale)
         self.threads = int(threads)
         self.store_samples = bool(store_samples)
@@ -1176,6 +1180,22 @@ class MCMCFitter:
         self._readnoise = float(readnoise)
         self._background_rms = background_rms
 
+    def __getstate__(self):
+        # The sampler owns the worker pool and the bound log_prob_fn, so it
+        # cannot be pickled; workers only need the plain attributes.  The
+        # default random_state is the np.random module itself, which also
+        # cannot be pickled - and only the parent's _jitter_within_bounds
+        # uses it, before the pool starts.
+        state = self.__dict__.copy()
+        state["sampler"] = None
+        state["random_state"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if self.random_state is None:
+            self.random_state = np.random
+
     # ---- Prior / likelihood -----------------------------------------------
 
     def _in_bounds(self, value, bounds):
@@ -1183,7 +1203,86 @@ class MCMCFitter:
         hi = np.inf if bounds[1] is None else bounds[1]
         return lo <= value <= hi
 
+    def _build_eval_context(self, model, x, y, data, weights, noise_variance):
+        """Precompute per-fit constants for the likelihood and prior.
+
+        These run inside log_prob which is called nwalkers * nsteps
+        times; hoisting the broadcasts, variance build, and the
+        parameter-name string parsing removes the per-call overhead.
+        """
+        ctx = {"ok": False}
+        try:
+            data = np.asarray(data, float)
+            if np.isscalar(noise_variance):
+                var = np.full(data.shape, float(noise_variance))
+            else:
+                var = np.broadcast_to(
+                    np.asarray(noise_variance, float), data.shape
+                ).copy()
+            if weights is not None:
+                w = np.broadcast_to(np.asarray(weights, float), data.shape)
+                var = var / np.clip(w, 1e-12, None) ** 2
+            var = np.clip(var, 1e-30, None)
+            ctx["inv_var"] = 1.0 / var
+            ctx["log_const"] = 0.5 * float(
+                np.sum(np.log(2.0 * np.pi * var))
+            )
+
+            lo, hi, neg_forbid, pos_req = [], [], [], []
+            for name in model.param_names:
+                bounds = getattr(model, name).bounds
+                lo.append(-np.inf if bounds[0] is None else bounds[0])
+                hi.append(np.inf if bounds[1] is None else bounds[1])
+                n = name.lower()
+                neg_forbid.append(
+                    any(k in n for k in ("flux", "amplitude", "amp"))
+                    and not self.allow_negative_flux
+                )
+                pos_req.append(
+                    any(
+                        k in n
+                        for k in ("sigma", "stddev", "fwhm", "alpha", "beta")
+                    )
+                )
+            ctx["lo"] = np.asarray(lo, float)
+            ctx["hi"] = np.asarray(hi, float)
+            ctx["neg_forbid"] = np.asarray(neg_forbid, bool)
+            ctx["pos_req"] = np.asarray(pos_req, bool)
+
+            # evaluate() skips the astropy parameter machinery
+            # (validation, broadcasting, unit handling) and is ~5-7x
+            # faster than parameters= + __call__.  Signatures differ
+            # across model types, so use it only after verifying it
+            # reproduces model(x, y) exactly for this model.
+            ctx["evaluate"] = False
+            try:
+                p0 = np.asarray(model.parameters, float)
+                trial = np.asarray(model.evaluate(x, y, *p0))
+                ref = np.asarray(model(x, y))
+                ctx["evaluate"] = (
+                    trial.shape == ref.shape
+                    and np.allclose(trial, ref, equal_nan=True)
+                )
+            except Exception:
+                pass
+
+            ctx["ok"] = True
+        except Exception:
+            pass
+        return ctx
+
     def log_prior(self, params, model):
+        ctx = getattr(self, "_ll_ctx", None)
+        if ctx is not None and ctx["ok"]:
+            p = np.asarray(params, float)
+            if np.any(p < ctx["lo"]) or np.any(p > ctx["hi"]):
+                return -np.inf
+            if ctx["neg_forbid"].any() and np.any(p[ctx["neg_forbid"]] < 0):
+                return -np.inf
+            if ctx["pos_req"].any() and np.any(p[ctx["pos_req"]] <= 0):
+                return -np.inf
+            return 0.0
+
         for name, param_value in zip(model.param_names, params):
             if not self._in_bounds(param_value, getattr(model, name).bounds):
                 return -np.inf
@@ -1202,6 +1301,26 @@ class MCMCFitter:
         return 0.0
 
     def log_likelihood(self, params, model, x, y, data, weights, noise_variance):
+        ctx = getattr(self, "_ll_ctx", None)
+        if ctx is not None and ctx["ok"]:
+            # Fast path: variance and the log-normalisation were
+            # precomputed once per fit in _build_eval_context.
+            params = np.asarray(params, float)
+            if ctx["evaluate"]:
+                mu = model.evaluate(x, y, *params)
+            else:
+                saved_params = model.parameters.copy()
+                try:
+                    model.parameters = params
+                    mu = model(x, y)
+                finally:
+                    model.parameters = saved_params
+            resid = np.asarray(data, float) - mu
+            return (
+                -0.5 * float(np.sum(resid * resid * ctx["inv_var"]))
+                - ctx["log_const"]
+            )
+
         x = np.asarray(x, float)
         y = np.asarray(y, float)
         data = np.asarray(data, float)
@@ -1429,6 +1548,12 @@ class MCMCFitter:
 
         self.sampler = emcee.EnsembleSampler(**sampler_kwargs)
 
+        # Precompute the likelihood/prior invariants once per fit; they
+        # would otherwise be rebuilt on every log_prob call.
+        self._ll_ctx = self._build_eval_context(
+            model, x, y, data, weights, noise_variance
+        )
+
         total_steps = 0
         max_steps = (
             self.nsteps if self.nsteps is not None else self._max_steps_when_auto
@@ -1439,49 +1564,66 @@ class MCMCFitter:
                 max_steps,
             )
 
-        # Adaptive convergence should only apply when nsteps was not explicitly
-        # set (nsteps=None).  When a fixed nsteps is given, we must honour it.
-        adaptive = self.nsteps is None
+        # Adaptive convergence always applies when nsteps was not explicitly
+        # set (nsteps=None).  With a fixed nsteps, emcee_early_stop lets a
+        # converged chain finish early instead of burning evaluations.
+        adaptive = self.nsteps is None or self.early_stop
 
-        while total_steps < max_steps:
-            batch_n = min(self.batch_steps, max_steps - total_steps)
-            self.sampler.run_mcmc(
-                pos0 if total_steps == 0 else None,
-                batch_n,
-                progress=False,
-            )
-            total_steps += batch_n
+        # The context and the worker pool must be released even when the
+        # sampler raises: a stale context would silently apply this fit's
+        # variance to a later log_likelihood call.
+        try:
+            while total_steps < max_steps:
+                batch_n = min(self.batch_steps, max_steps - total_steps)
+                self.sampler.run_mcmc(
+                    pos0 if total_steps == 0 else None,
+                    batch_n,
+                    progress=False,
+                )
+                total_steps += batch_n
 
-            if not adaptive:
-                continue
+                if not adaptive:
+                    continue
 
-            # Start autocorrelation checks only after enough steps per walker.
-            # emcee's get_autocorr_time issues warnings when the chain is
-            # shorter than 50*tau - which is exactly the regime we're in
-            # during early iterations.  Suppress these warnings aggressively
-            # since they're expected and not actionable.
-            if total_steps >= self.min_autocorr_N:
+                # Start autocorrelation checks only after enough steps per walker.
+                # emcee's get_autocorr_time issues warnings when the chain is
+                # shorter than 50*tau - which is exactly the regime we're in
+                # during early iterations.  Suppress these warnings aggressively
+                # since they're expected and not actionable.
+                if total_steps >= self.min_autocorr_N:
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings("ignore", message=".*chain is shorter.*")
+                            warnings.filterwarnings("ignore", message=".*autocorrelation.*")
+                            tau = self.sampler.get_autocorr_time(quiet=True)
+                        tau_est = np.nanmean(tau)
+                        # Standard emcee recommendation: each walker must run for at
+                        # least 50 * tau steps.  We use adaptive_tau_target*tau as
+                        # the convergence threshold (default 100) to ensure a
+                        # healthy effective sample size
+                        # (n_eff ~ n_walkers * (total_steps - burnin) / thin / tau).
+                        # The old 50*tau threshold produced n_eff ~ 92, which is
+                        # marginal for reliable posterior contours.
+                        if (
+                            np.isfinite(tau_est)
+                            and total_steps > self.adaptive_tau_target * tau_est
+                        ):
+                            log.info(
+                                "[MCMC] Converged at %d steps, tau=%.1f",
+                                total_steps,
+                                tau_est,
+                            )
+                            break
+                    except emcee.autocorr.AutocorrError as exc:
+                        log.debug("[MCMC] tau estimation failed: %s", exc)
+        finally:
+            self._ll_ctx = None
+            if pool is not None:
                 try:
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings("ignore", message=".*chain is shorter.*")
-                        warnings.filterwarnings("ignore", message=".*autocorrelation.*")
-                        tau = self.sampler.get_autocorr_time(quiet=True)
-                    tau_est = np.nanmean(tau)
-                    # Standard emcee recommendation: each walker must run for at
-                    # least 50 * tau steps.  We use 100*tau as the convergence
-                    # threshold to ensure a healthy effective sample size
-                    # (n_eff ~ n_walkers * (total_steps - burnin) / thin / tau).
-                    # The old 50*tau threshold produced n_eff ~ 92, which is
-                    # marginal for reliable posterior contours.
-                    if np.isfinite(tau_est) and total_steps > 100 * tau_est:
-                        log.info(
-                            "[MCMC] Converged at %d steps, tau=%.1f",
-                            total_steps,
-                            tau_est,
-                        )
-                        break
-                except emcee.autocorr.AutocorrError as exc:
-                    log.debug("[MCMC] tau estimation failed: %s", exc)
+                    pool.close()
+                    pool.join()
+                except Exception:
+                    pass
 
         if total_steps >= max_steps and adaptive:
             log.warning(
@@ -1503,13 +1645,6 @@ class MCMCFitter:
 
         if not 0.15 <= acc <= 0.8:
             log.warning("[MCMC] Suboptimal acceptance; consider tuning delta/nwalkers")
-
-        if pool is not None:
-            try:
-                pool.close()
-                pool.join()
-            except Exception:
-                pass
 
     # ---- __call__ ---------------------------------------------------------
 
@@ -6484,10 +6619,11 @@ class PSF:
                     burnin_frac=float(phot_cfg.get("emcee_burnin_frac", 0.3)),
                     thin=int(phot_cfg.get("emcee_thin", 10)),
                     adaptive_tau_target=int(
-                        phot_cfg.get("emcee_adaptive_tau_target", 50)
+                        phot_cfg.get("emcee_adaptive_tau_target", 100)
                     ),
                     min_autocorr_N=int(phot_cfg.get("emcee_min_autocorr_N", 100)),
                     batch_steps=int(phot_cfg.get("emcee_batch_steps", 100)),
+                    early_stop=bool(phot_cfg.get("emcee_early_stop", True)),
                     jitter_scale=float(phot_cfg.get("emcee_jitter_scale", 0.01)),
                     use_nddata_uncertainty=True,
                     gain=float(resolve_gain_e_per_adu(None, self.input_yaml)),
