@@ -4042,6 +4042,11 @@ def run_photometry():
         # To build from the original (pre-alignment) image instead (to avoid interpolation
         # artifacts in the PSF model itself), set psf_build_from_aligned=False.
         epsf_model = None
+        # Provenance of the PSF model actually used: "epsf" (built from
+        # image sources), "analytic-moffat" (opt-in fallback only), or
+        # "none". Written to the Output CSV so an analytic substitution is
+        # never silent in the data products.
+        psf_model_kind = "none"
         PSFSources = None
         build_from_aligned = bool(
             phot_cfg.get("psf_build_from_aligned", True)
@@ -4103,10 +4108,11 @@ def run_photometry():
                     logging.info(
                         f"Building PSF from original image using {len(psf_sources_orig)} sources that passed linearity and optimum-aperture checks."
                     )
-                    epsf_model, PSFSources = PSF(
+                    _psf_builder = PSF(
                         image=image_orig,
                         input_yaml=input_yaml,
-                    ).build(
+                    )
+                    epsf_model, PSFSources = _psf_builder.build(
                         psfSources=psf_sources_orig,
                         mask=result_orig["hardware_defects_mask"],
                         background_rms=result_orig["background_rms"],
@@ -4115,6 +4121,9 @@ def run_photometry():
                     # PSF build - it is no longer needed and can be ~64MB.
                     del image_orig, result_orig
                     if epsf_model is not None:
+                        psf_model_kind = getattr(
+                            _psf_builder, "psf_model_kind", "epsf"
+                        )
                         logging.info(
                             "PSF built from original (pre-alignment) science image to avoid resampling degradation."
                         )
@@ -4139,14 +4148,19 @@ def run_photometry():
                 )
             try:
                 Calibrate_Catalog = Catalog(input_yaml=input_yaml)
-                epsf_model, PSFSources = PSF(
+                _psf_builder = PSF(
                     image=image,
                     input_yaml=input_yaml,
-                ).build(
+                )
+                epsf_model, PSFSources = _psf_builder.build(
                     psfSources=psf_source_pool,
                     mask=hardware_defects_mask,
                     background_rms=background_rms,
                 )
+                if epsf_model is not None:
+                    psf_model_kind = getattr(
+                        _psf_builder, "psf_model_kind", "epsf"
+                    )
                 if epsf_model is None:
                     logging.warning(
                         "PSF build returned no model (e.g. insufficient isolated stars); continuing with aperture-only."
@@ -9938,6 +9952,9 @@ def run_photometry():
                 if not do_aperture_ONLY and "fwhm_psf" in TargetPosition.columns
                 else np.nan
             ),
+            # Which PSF model was used: epsf / analytic-moffat / none.
+            # Empirical is the default; analytic only via explicit opt-in.
+            "psf_model": psf_model_kind,
             "separation": separation if "separation" in locals() else np.nan,
             "beta": target_beta,
             # Limiting magnitude in the instrumental-magnitude system.
