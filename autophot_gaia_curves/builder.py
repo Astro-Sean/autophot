@@ -15,6 +15,7 @@ from autophot_gaia_curves.gaia_archive import (
     gaia_xp_source_query,
     gaia_xp_sql_top_n,
     launch_gaia_adql_to_pandas,
+    retry_with_backoff,
     sort_gaia_table_nearest_to_target,
 )
 
@@ -405,16 +406,16 @@ class GaiaCurveCatalogBuilder:
         svo_filters: Optional[Dict[str, str]] = None,
         curve_cache_dir: str | Path = "svo_curves",
         timeout_sec: int = 60,
-        gaia_query_pause_before_sec: float = 1.0,
-        gaia_query_pause_after_sec: float = 1.0,
+        gaia_query_pause_before_sec: float = 0.25,
+        gaia_query_pause_after_sec: float = 0.25,
         gaia_xp_batch_size: int = 200,
-        gaia_xp_batch_pause_sec: float = 1.0,
+        gaia_xp_batch_pause_sec: float = 0.5,
         gaia_archive_max_retries: int = 3,
         gaia_archive_retry_base_delay_sec: float = 2.0,
         gaia_xp_order_by: str = "distance",
-        gaia_xp_show_progress: bool = True,
+        gaia_xp_show_progress: bool = False,
         gaia_nearest_prefetch_factor: int = 50,
-        gaia_nearest_prefetch_min: int = 500,
+        gaia_nearest_prefetch_min: int = 200,
         gaia_nearest_prefetch_max: int = 10000,
     ) -> pd.DataFrame:
         out_path = Path(out_csv)
@@ -436,7 +437,15 @@ class GaiaCurveCatalogBuilder:
                 self.logger.info(
                     "Downloading SVO filter %s for band %s ...", svo_id, band
                 )
-                self.download_svo_curve(svo_id, out, timeout_sec=timeout_sec)
+                retry_with_backoff(
+                    lambda: self.download_svo_curve(
+                        svo_id, out, timeout_sec=timeout_sec
+                    ),
+                    max_retries=gaia_archive_max_retries,
+                    base_delay_sec=gaia_archive_retry_base_delay_sec,
+                    logger=self.logger,
+                    op_name=f"SVO filter download {svo_id}",
+                )
                 band_to_curve_path[band] = out
 
         if not band_to_curve_path:
@@ -554,14 +563,20 @@ class GaiaCurveCatalogBuilder:
                 )
             except ImportError:
                 pass
+        # Index the ADQL rows once so the per-source join is O(1) instead of
+        # a full-frame scan for every calibrated spectrum.
+        gaia_by_sid = gaia.drop_duplicates("_sid_key", keep="first").set_index(
+            "_sid_key", drop=False
+        )
         join_miss_logged = 0
         extract_fail_logged = 0
         for _, row in row_iter:
             sid = _format_gaia_source_id(row["source_id"])
             if not sid:
                 continue
-            match = gaia.loc[gaia["_sid_key"] == sid]
-            if match.empty:
+            try:
+                base = gaia_by_sid.loc[sid]
+            except KeyError:
                 if join_miss_logged < 3:
                     self.logger.warning(
                         "No ADQL row for GaiaXPy source_id=%s (join mismatch).",
@@ -569,7 +584,6 @@ class GaiaCurveCatalogBuilder:
                     )
                     join_miss_logged += 1
                 continue
-            base = match.iloc[0]
             try:
                 wavelength_nm, flux_w_m2_nm, flux_err_w_m2_nm = (
                     self.extract_spectrum_columns(
@@ -667,16 +681,16 @@ def build_custom_catalog(
     svo_filters: Optional[Dict[str, str]] = None,
     curve_cache_dir: str | Path = "svo_curves",
     timeout_sec: int = 60,
-    gaia_query_pause_before_sec: float = 1.0,
-    gaia_query_pause_after_sec: float = 1.0,
+    gaia_query_pause_before_sec: float = 0.25,
+    gaia_query_pause_after_sec: float = 0.25,
     gaia_xp_batch_size: int = 200,
-    gaia_xp_batch_pause_sec: float = 1.0,
+    gaia_xp_batch_pause_sec: float = 0.5,
     gaia_archive_max_retries: int = 3,
     gaia_archive_retry_base_delay_sec: float = 2.0,
     gaia_xp_order_by: str = "distance",
-    gaia_xp_show_progress: bool = True,
+    gaia_xp_show_progress: bool = False,
     gaia_nearest_prefetch_factor: int = 50,
-    gaia_nearest_prefetch_min: int = 500,
+    gaia_nearest_prefetch_min: int = 200,
     gaia_nearest_prefetch_max: int = 10000,
     log_level: int = logging.INFO,
 ) -> pd.DataFrame:

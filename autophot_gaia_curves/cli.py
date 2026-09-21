@@ -66,6 +66,7 @@ def main() -> None:
         out_csv=args.out_csv,
         svo_filters=svo_curves if svo_curves else None,
         curve_cache_dir=args.curve_cache_dir,
+        gaia_xp_show_progress=True,
     )
 
 

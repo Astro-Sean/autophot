@@ -360,7 +360,9 @@ default_input:
     gaia_xp_generate_error_correction: True # bool --- If True, ask GaiaXPy `generate()` to apply empirical flux-error corrections (see Montegriffo+ 2022; GaiaXPy generator tutorial).
     gaia_xp_generate_truncation: False # bool --- If True, enable GaiaXPy `generate(..., truncation=True)` (GaiaXPy >= 2.1.4) to reduce high-order basis noise for faint sources.
     gaia_xp_photometric_systems: ["SDSS_Std", "JKC_Std"] # list[str]|null --- Which GaiaXPy photometric systems to generate.
-      # Set to null or [] to disable XP synthetic photometry and fall back to base DR3 photometry only.
+      # null uses the default (SDSS_Std + JKC_Std). Set to [] to skip XP synthetic photometry (faster).
+      # WARNING: with [] the result has no SdssStd/JkcStd bands, so the "gaia" catalog cannot calibrate
+      # standard filters; use another catalog then.
     include_IR_sequence_data: False # bool --- If True, augment catalog with IR sequence data (when available).
     MASTcasjobs_wsid: null # str|null --- Optional MAST CasJobs workspace ID for refcat/casjobs-backed catalog queries.
     MASTcasjobs_pwd: null # str|null --- Optional MAST CasJobs password/token for refcat/casjobs-backed catalog queries.
