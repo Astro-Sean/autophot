@@ -1202,7 +1202,8 @@ def border_msg(msg: str, body: str = "=", corner: str = "+",
     lines = [_rule_line(text, rule, width)]
     if metadata:
         lines.append(_rule_line(str(metadata).strip(), "-", width))
-    return "\n".join(lines)
+    # Leading newline separates the banner from dense output above it.
+    return "\n" + "\n".join(lines)
 
 
 def ascii_kv(title: str, pairs, width: int = 70, framed: bool = False) -> str:
@@ -1241,7 +1242,7 @@ def ascii_kv(title: str, pairs, width: int = 70, framed: bool = False) -> str:
         lines.append(line[:width] if len(line) > width else line)
     if framed:
         lines.append("=" * width)
-    return "\n".join(lines)
+    return "\n" + "\n".join(lines)
 
 
 def ascii_table(title: str, headers, rows, width: int = 70) -> str:
@@ -1280,7 +1281,7 @@ def ascii_table(title: str, headers, rows, width: int = 70) -> str:
             "   " + "  ".join(c.ljust(col_w[i]) for i, c in enumerate(cells)).rstrip()
         )
     lines.append("-" * rule_w)
-    return "\n".join(lines)
+    return "\n" + "\n".join(lines)
 
 
 def ascii_card(title: str, lines, width: int = 70) -> str:
@@ -1298,7 +1299,7 @@ def ascii_card(title: str, lines, width: int = 70) -> str:
     out = [_rule_line(str(title), "=", width)]
     out.extend(f"  {l[: width - 4]}" if l.strip() else "" for l in body)
     out.append("=" * width)
-    return "\n".join(out)
+    return "\n" + "\n".join(out)
 
 
 def metrics_table(metrics: dict[str, tuple], title: str | None = None, width: int = 70) -> str:
