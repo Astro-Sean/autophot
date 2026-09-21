@@ -564,6 +564,49 @@ def _epsf_residual_mad(stars, model, fit_rad_px: float) -> float:
     return float(np.median(mads)) if mads else float("nan")
 
 
+def _epsf_usable(model) -> bool:
+    """Whether an ePSF/PSF model holds finite data with positive range."""
+    try:
+        d = np.asarray(getattr(model, "data", None), dtype=float)
+        if d is None or d.size == 0:
+            return False
+        fin = np.isfinite(d)
+        if fin.mean() < 0.5:
+            return False
+        vals = d[fin]
+        return np.ptp(vals) > 0 and np.nansum(vals) > 0
+    except Exception:
+        return False
+
+
+def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
+    """Pixel-integrated Moffat ImagePSF at the given FWHM.
+
+    astropy's Moffat2DKernel calls the power-law index "alpha"; in
+    astronomy it is conventionally the Moffat beta index.  The continuous
+    Moffat is convolved with the square pixel response so the model is an
+    effective PSF, matching both the ePSF fixed point and what PSF
+    photometry needs on pixel-integrated data.  Without this the model is
+    systematically narrower than the true effective PSF on undersampled
+    data.  The stamp is rescaled to the photutils flux convention
+    sum == prod(oversampling); otherwise fitted fluxes come out osamp^2
+    too faint (~3 mag at osamp=4).
+    """
+    osamp = max(1, int(oversampling))
+    beta = max(1.1, float(beta))
+    gamma = (osamp * fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0))
+    kernel = Moffat2DKernel(
+        gamma=max(float(gamma), 1e-6),
+        alpha=float(beta),
+        x_size=osamp * cutout_n,
+        y_size=osamp * cutout_n,
+    )
+    data = pixel_integrate_oversampled(kernel.array, osamp)
+    data = data * float(osamp) ** 2
+    ctr = (osamp * cutout_n - 1) / 2.0
+    return ImagePSF(data=data, x_0=ctr, y_0=ctr, oversampling=osamp)
+
+
 def measure_epsf_fwhm_native(epsf_data: np.ndarray, oversampling: int) -> float:
     """FWHM of an (oversampled) ePSF array in native pixels.
 
@@ -4097,6 +4140,46 @@ class PSF:
                 )
                 fit_boxsize = _fit_boxsize_clamped
 
+            # Opt-in only: analytic substitution of a usable empirical
+            # model is never silent (see psf_model_kind / PSFBUILD).
+            _analytic_fallback = bool(
+                phot_cfg.get("psf_analytic_fallback", False)
+            )
+            # Failure backdoor: when the empirical build cannot produce
+            # any usable model at all, an analytic Moffat at the measured
+            # FWHM keeps PSF photometry alive.  This never swaps a usable
+            # empirical model -- that swap stays behind
+            # psf_analytic_fallback.
+            _analytic_on_failure = bool(
+                phot_cfg.get("psf_analytic_fallback_on_failure", True)
+            )
+            moffat_beta = max(
+                1.1, float(phot_cfg.get("psf_init_moffat_beta", 4.765))
+            )
+
+            def _analytic_failure_psf(reason):
+                if not (_analytic_on_failure or _analytic_fallback):
+                    return None
+                try:
+                    model = _analytic_moffat_psf(
+                        fwhm, oversample, cutout_n, moffat_beta
+                    )
+                except Exception:
+                    return None
+                if not _epsf_usable(model):
+                    return None
+                log.warning(
+                    "ePSF unavailable (%s); using analytic Moffat PSF "
+                    "(FWHM=%.2f px, beta=%.2f) as the failure backdoor "
+                    "(psf_analytic_fallback_on_failure). Recorded as "
+                    "psf_model='analytic-moffat'.",
+                    reason,
+                    fwhm,
+                    moffat_beta,
+                )
+                self.psf_model_kind = "analytic-moffat"
+                return model
+
             log.debug("Initial sources: %s", len(df))
             if threshold_limit_eff is not None and "threshold" in df.columns:
                 mask_thr = df["threshold"] > threshold_limit_eff
@@ -4140,12 +4223,12 @@ class PSF:
 
             if len(df) == 0:
                 log.error("No PSF candidates after filtering.")
-                return None, df
+                return _analytic_failure_psf("no PSF candidates after filtering"), df
 
             xcol, ycol, snrcol, thrcol = _locate_columns(df)
             if xcol is None or ycol is None:
                 log.error("Required coordinate columns not found.")
-                return None, df
+                return _analytic_failure_psf("no coordinate columns"), df
 
             # Optionally pre-select the highest-quality candidates (by SNR /
             # threshold / flux) before enforcing spatial uniformity, so that
@@ -4211,7 +4294,7 @@ class PSF:
 
             if len(epsfstars) == 0:
                 log.error("All PSF-star candidates rejected.")
-                return None, df
+                return _analytic_failure_psf("all PSF-star candidates rejected"), df
 
             # Reject cutouts whose extracted centre is too far from the
             # cutout's geometric centre (bad centroid/extraction that slipped
@@ -4229,7 +4312,9 @@ class PSF:
                 )
             if len(epsfstars) == 0:
                 log.error("All PSF-star candidates rejected by cutout validation.")
-                return None, df
+                return _analytic_failure_psf(
+                    "all PSF-star candidates rejected by cutout validation"
+                ), df
 
             # Optional: remove pathological PSF-star cutouts (blends, cosmic
             # rays) via power-spectrum comparison; uses MAD + median deviation.
@@ -4489,25 +4574,6 @@ class PSF:
             # default is kept since tightening only burns iterations.
             _bld_params = _inspect.signature(EPSFBuilder.__init__).parameters
 
-            # Last-resort analytic fallback: a diverged/absent ePSF would
-            # otherwise disable PSF photometry, the PSF zeropoint, and the
-            # limiting-magnitude injection.  The Moffat init kernel is already
-            # an ImagePSF at the measured FWHM, so it is a drop-in replacement.
-            def _epsf_usable(model):
-                try:
-                    d = np.asarray(getattr(model, "data", None), dtype=float)
-                    if d is None or d.size == 0:
-                        return False
-                    fin = np.isfinite(d)
-                    if fin.mean() < 0.5:
-                        return False
-                    vals = d[fin]
-                    return np.ptp(vals) > 0 and np.nansum(vals) > 0
-                except Exception:
-                    return False
-
-            moffat_beta = float(phot_cfg.get("psf_init_moffat_beta", 4.765))
-            moffat_beta = max(1.1, moffat_beta)
             _fwhm_lo = float(phot_cfg.get("psf_epsf_fwhm_min_frac", 0.85))
             _fwhm_hi = float(phot_cfg.get("psf_epsf_fwhm_max_frac", 1.5))
             # A real PSF is positive; only noise and resampling ringing
@@ -4523,12 +4589,6 @@ class PSF:
             )
             _res_ratio_max = float(
                 phot_cfg.get("psf_epsf_residual_ratio_max", 1.3)
-            )
-            # Opt-in only: the photometry PSF must come from image sources.
-            # Analytic substitution is never silent (see psf_model_kind and
-            # the PSFBUILD header keyword).
-            _analytic_fallback = bool(
-                phot_cfg.get("psf_analytic_fallback", False)
             )
 
             # Coarse-to-fine schedule for undersampled osamp>=2 builds:
@@ -4659,44 +4719,16 @@ class PSF:
                     if kern_wide is not None:
                         _p1_iters = min(4, max(2, base_maxiters // 3))
 
-                # Initialise ePSF from a Moffat profile.  astropy's
-                # Moffat2DKernel calls the power-law index "alpha"; in
-                # astronomy it is conventionally the Moffat beta index.
-                moffat_gamma_c = (osamp_c * fwhm) / (
-                    2.0 * np.sqrt(2.0 ** (1.0 / moffat_beta) - 1.0)
-                )
-                kernel_c = Moffat2DKernel(
-                    gamma=max(float(moffat_gamma_c), 1e-6),
-                    alpha=float(moffat_beta),
-                    x_size=osamp_c * cutout_n,
-                    y_size=osamp_c * cutout_n,
-                )
-                # Convolve the continuous Moffat with the square pixel
-                # response so the model is an effective PSF, matching both
-                # the ePSF fixed point and what PSF photometry needs on
-                # pixel-integrated data.  Without this the init (and the
-                # analytic fallback) is systematically narrower than the true
-                # effective PSF on undersampled data.
-                init_data_c = pixel_integrate_oversampled(kernel_c.array, osamp_c)
-                # photutils normalises ePSF data to sum == prod(oversampling),
-                # so that ``evaluate(flux=F)`` yields a source of total flux F.
-                # ``pixel_integrate_oversampled`` returns a unit-sum array;
-                # without this rescale the analytic fallback (and the
-                # iteration-1 seed) is osamp^2 too faint and fitted fluxes
-                # come out inflated by that factor (~3 mag at osamp=4).
-                init_data_c = init_data_c * float(osamp_c) ** 2
-                cutout_ctr_c = (osamp_c * cutout_n - 1) / 2.0
-                init_epsf_c = ImagePSF(
-                    data=init_data_c,
-                    x_0=cutout_ctr_c,
-                    y_0=cutout_ctr_c,
-                    oversampling=osamp_c,
+                # Initialise ePSF from a Moffat profile.  The helper applies
+                # the pixel response and the photutils flux convention, so the
+                # same stamp doubles as the analytic failure backdoor.
+                init_epsf_c = _analytic_moffat_psf(
+                    fwhm, osamp_c, cutout_n, moffat_beta
                 )
                 if osamp_c == oversample:
                     log.debug(
-                        "ePSF init kernel: moffat_beta=%g, gamma=%g px, size=%dx%d",
+                        "ePSF init kernel: moffat_beta=%g, size=%dx%d",
                         moffat_beta,
-                        float(moffat_gamma_c),
                         int(osamp_c * cutout_n),
                         int(osamp_c * cutout_n),
                     )
@@ -5059,7 +5091,12 @@ class PSF:
                     _epsf_fwhm_meas < _fwhm_lo * fwhm
                     or _epsf_fwhm_meas > _fwhm_hi * fwhm
                 )
-                if _analytic_fallback and _epsf_usable(init_epsf):
+                _emp_usable = _epsf_usable(epsf)
+                if (
+                    _emp_usable
+                    and _analytic_fallback
+                    and _epsf_usable(init_epsf)
+                ):
                     if _fwhm_bad:
                         log.warning(
                             "ePSF measured FWHM %.2f px is outside "
@@ -5090,9 +5127,13 @@ class PSF:
                     _epsf_fwhm_meas = measure_epsf_fwhm_native(
                         np.asarray(epsf.data, float), oversample
                     )
-                elif epsf is None or not _epsf_usable(epsf):
-                    log.error("ePSF build produced no usable model.")
-                    return None, df
+                elif not _emp_usable:
+                    _backdoor = _analytic_failure_psf(
+                        "ePSF build produced no usable model"
+                    )
+                    if _backdoor is None:
+                        log.error("ePSF build produced no usable model.")
+                    return _backdoor, df
                 elif _fwhm_bad:
                     log.warning(
                         "ePSF measured FWHM %.2f px is outside "
@@ -5100,6 +5141,15 @@ class PSF:
                         "psf_analytic_fallback is disabled -- keeping the "
                         "degraded empirical model.",
                         _epsf_fwhm_meas, _fwhm_lo, _fwhm_hi, fwhm,
+                    )
+                else:
+                    log.warning(
+                        "ePSF build did not pass the quality gates "
+                        "(final_center_accuracy=%.3g px, measured FWHM=%.3g px) "
+                        "but psf_analytic_fallback is disabled -- keeping the "
+                        "degraded empirical model.",
+                        _final_acc,
+                        _epsf_fwhm_meas,
                     )
 
             # Post-build cosmetic cleanup on the empirical model only:
@@ -5311,6 +5361,46 @@ class PSF:
 
         except Exception as exc:
             log.error("[build] Fatal: %s\n%s", exc, traceback.format_exc())
+            # Best-effort failure backdoor: derive the Moffat from config
+            # since build locals may not exist at this point.
+            try:
+                _pcfg = self.input_yaml.get("photometry", {}) or {}
+                _fb_allowed = bool(
+                    _pcfg.get("psf_analytic_fallback_on_failure", True)
+                ) or bool(_pcfg.get("psf_analytic_fallback", False))
+                if _fb_allowed:
+                    _fb_fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                    _fb_osamp = max(1, int(_pcfg.get("psf_oversample", 1)))
+                    _fb_auto = bool(
+                        _pcfg.get("oversample_psf", False)
+                    ) or bool(
+                        _pcfg.get("psf_auto_oversample_undersampled", True)
+                    )
+                    if _fb_auto and _fb_fwhm <= float(
+                        _pcfg.get("undersampled_fwhm_threshold", 2.5)
+                    ):
+                        _fb_osamp = max(_fb_osamp, 4)
+                    _fb_beta = max(
+                        1.1,
+                        float(_pcfg.get("psf_init_moffat_beta", 4.765)),
+                    )
+                    _fb_cut = _odd(max(25, int(np.ceil(6.0 * _fb_fwhm))))
+                    _fb_model = _analytic_moffat_psf(
+                        _fb_fwhm, _fb_osamp, _fb_cut, _fb_beta
+                    )
+                    if _epsf_usable(_fb_model):
+                        log.warning(
+                            "ePSF build crashed; using analytic Moffat PSF "
+                            "(FWHM=%.2f px, beta=%.2f) as the failure "
+                            "backdoor (psf_analytic_fallback_on_failure). "
+                            "Recorded as psf_model='analytic-moffat'.",
+                            _fb_fwhm,
+                            _fb_beta,
+                        )
+                        self.psf_model_kind = "analytic-moffat"
+                        return _fb_model, None
+            except Exception:
+                pass
             return None, None
 
     # -----------------------------------------------------------------------
