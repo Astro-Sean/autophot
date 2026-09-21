@@ -26,6 +26,7 @@ Most reduction pipelines stack data from a single instrument. AutoPhOT does the 
 - [Installation](#installation)
 - [Testing](#testing)
 - [Quick Start](#quick-start)
+- [Running on Multiple CPUs](#running-on-multiple-cpus)
 - [CLI Entry Points](#cli-entry-points)
 - [Optional Dependencies](#optional-dependencies)
 - [Alignment Methods](#alignment-methods)
@@ -135,6 +136,33 @@ To list every configurable parameter:
 ```python
 from autophot import list_parameters
 list_parameters()
+```
+
+---
+
+## Running on Multiple CPUs
+
+Set `nCPU` to process several images at once:
+
+```python
+config["nCPU"] = 4  # 4 images in parallel; default 1 = serial
+```
+
+Each image runs as an independent subprocess with its own output directory and log file (`LOG_<image>.log` inside the reduced directory). The terminal stays quiet - you get one counter line per finished image plus any failures:
+
+```text
+Running 7 science files with nCPU=3 (parallel).
+[1/7] [OK]    image_001.fits
+[2/7] [FAIL]  image_002.fits (exit code 1)
+...
+```
+
+Per-image worker settings (`photometry.aperture_n_jobs`, `limiting_magnitude.n_jobs`) multiply `nCPU`, so keep the product at or below your core count. `nCPU` can also be set via the `AUTOPHOT_NCPU` environment variable.
+
+To run a plain file list without writing a driver script:
+
+```bash
+python batch_main.py -f image1.fits image2.fits -c config.yml --jobs 4
 ```
 
 ---
