@@ -1322,6 +1322,32 @@ def inspect_telescope(
     return new_data
 
 
+def _run_transient_color_correction(default_input, output_loc, reduced_loc, log):
+    """Optional post-step: color-correct the transient light curve.
+
+    Applies each image's zeropoint color term using the transient's own
+    paired color-index observations (same telescope + instrument within
+    postprocessing.color_correction_dt days), writing
+    *_colorcorrected.csv next to the light curve.  Failures are logged
+    and never fatal.
+    """
+    try:
+        pp_cfg = default_input.get("postprocessing", {}) or {}
+        if not pp_cfg.get("transient_color_correction", False):
+            return
+        dt = float(pp_cfg.get("color_correction_dt", 1.0))
+        max_err = float(pp_cfg.get("color_correction_max_err", 0.5))
+        from color_correction import correct_lightcurve
+
+        out = correct_lightcurve(
+            output_loc, reduced_dir=reduced_loc, dt=dt, max_err=max_err
+        )
+        if out:
+            log(f"Color-corrected light curve: {out}")
+    except Exception as exc:
+        log(f"[WARNING] Transient color correction skipped: {exc}")
+
+
 def __getattr__(name: str):
     """
     Resolve common misspellings for public module symbols.
@@ -2466,6 +2492,8 @@ class AutomatedPhotometry:
                 loc_file="Output_*.csv",
             )
 
+            _run_transient_color_correction(default_input, output_loc, reduced_loc, _log)
+
             # Concatenate additional-target per-image CSVs into per-target
             # lightcurve files.  Each additional target's per-image CSV is
             # named AdditionalTarget_{safe_name}_{base}.csv.
@@ -2528,6 +2556,9 @@ class AutomatedPhotometry:
                     loc_file="Output_*.csv",
                 )
                 _log_always(f"Output light curve: {output_photometry}")
+                _run_transient_color_correction(
+                    default_input, output_photometry, reduced_loc, _log
+                )
 
                 # Recover additional-target lightcurves too
                 _at_resolved = default_input.get("_additional_targets_resolved") or []
