@@ -2041,6 +2041,9 @@ class PSF:
         self.input_yaml = input_yaml
         self.image = image
         self.header = header
+        # Provenance of the last build(): "epsf" (empirical, from image
+        # sources), "analytic-moffat" (opt-in fallback only), or "none".
+        self.psf_model_kind = "none"
 
     # -----------------------------------------------------------------------
     # Centroiding
@@ -3092,6 +3095,7 @@ class PSF:
             SNR_limit = [5, 1e6]
 
         log = logging.getLogger(__name__)
+        self.psf_model_kind = "none"
 
         # ---- nested helpers ------------------------------------------------
         def _validate_epsfstars(epsfstars_obj, cutout_shape, fit_boxsize):
@@ -4520,6 +4524,12 @@ class PSF:
             _res_ratio_max = float(
                 phot_cfg.get("psf_epsf_residual_ratio_max", 1.3)
             )
+            # Opt-in only: the photometry PSF must come from image sources.
+            # Analytic substitution is never silent (see psf_model_kind and
+            # the PSFBUILD header keyword).
+            _analytic_fallback = bool(
+                phot_cfg.get("psf_analytic_fallback", False)
+            )
 
             # Coarse-to-fine schedule for undersampled osamp>=2 builds:
             # a wide-kernel first phase produces a smooth model so the
@@ -4978,12 +4988,13 @@ class PSF:
             # stars worse than the pixel-integrated analytic model (the
             # ePSF is fitted to these stars, so it has every advantage --
             # measured: degraded production stamps fit 3-16x worse than
-            # the Moffat while good builds sit at ~parity).  Demote to
-            # the analytic model in that case.
+            # the Moffat while good builds sit at ~parity).  The comparison
+            # always runs as a diagnostic; the swap to the analytic model
+            # only happens when the user explicitly opts in via
+            # psf_analytic_fallback.
             if (
                 _good
                 and _res_gate
-                and bool(phot_cfg.get("psf_analytic_fallback", True))
                 and init_kept is not None
                 and _epsf_usable(init_kept)
             ):
@@ -5009,24 +5020,35 @@ class PSF:
                         _mad_emp, _mad_ana, _fit_rad, len(_stars_eval),
                     )
                     if _mad_emp > _res_ratio_max * _mad_ana:
-                        log.warning(
-                            "Empirical ePSF fits the PSF stars %.2fx worse "
-                            "than the analytic Moffat (residual MAD %.4f vs "
-                            "%.4f) -- the empirical model is degraded; using "
-                            "the analytic model.",
-                            _mad_emp / _mad_ana, _mad_emp, _mad_ana,
-                        )
-                        epsf = init_kept
-                        fitted_stars = epsfstars
-                        _used_analytic_psf = True
-                        oversample = int(
-                            np.atleast_1d(
-                                getattr(init_kept, "oversampling", oversample)
-                            )[0]
-                        )
-                        _epsf_fwhm_meas = measure_epsf_fwhm_native(
-                            np.asarray(epsf.data, float), oversample
-                        )
+                        if _analytic_fallback:
+                            log.warning(
+                                "Empirical ePSF fits the PSF stars %.2fx worse "
+                                "than the analytic Moffat (residual MAD %.4f vs "
+                                "%.4f) -- the empirical model is degraded; using "
+                                "the analytic model.",
+                                _mad_emp / _mad_ana, _mad_emp, _mad_ana,
+                            )
+                            epsf = init_kept
+                            fitted_stars = epsfstars
+                            _used_analytic_psf = True
+                            oversample = int(
+                                np.atleast_1d(
+                                    getattr(init_kept, "oversampling", oversample)
+                                )[0]
+                            )
+                            _epsf_fwhm_meas = measure_epsf_fwhm_native(
+                                np.asarray(epsf.data, float), oversample
+                            )
+                        else:
+                            log.warning(
+                                "Empirical ePSF fits the PSF stars %.2fx worse "
+                                "than the analytic Moffat (residual MAD %.4f vs "
+                                "%.4f) -- the empirical model is degraded, but "
+                                "keeping it since psf_analytic_fallback is "
+                                "disabled (the PSF model stays based on the "
+                                "image sources).",
+                                _mad_emp / _mad_ana, _mad_emp, _mad_ana,
+                            )
 
             if not _good and not _used_analytic_psf:
                 # Re-evaluate the final candidate's flags for the message
@@ -5037,7 +5059,7 @@ class PSF:
                     _epsf_fwhm_meas < _fwhm_lo * fwhm
                     or _epsf_fwhm_meas > _fwhm_hi * fwhm
                 )
-                if bool(phot_cfg.get("psf_analytic_fallback", True)) and _epsf_usable(init_epsf):
+                if _analytic_fallback and _epsf_usable(init_epsf):
                     if _fwhm_bad:
                         log.warning(
                             "ePSF measured FWHM %.2f px is outside "
@@ -5251,8 +5273,11 @@ class PSF:
                     "Measured ePSF FWHM in native pixels",
                 )
             _psf_hdr["NPSFSTAR"] = (int(n_epsf_stars), "Stars used in ePSF build")
+            self.psf_model_kind = (
+                "analytic-moffat" if _used_analytic_psf else "epsf"
+            )
             _psf_hdr["PSFBUILD"] = (
-                "analytic-moffat" if _used_analytic_psf else "epsf",
+                self.psf_model_kind,
                 "PSF model construction method",
             )
             _orig = getattr(epsf, "origin", None)
