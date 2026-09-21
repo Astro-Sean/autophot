@@ -10542,8 +10542,32 @@ def run_photometry():
                         output[f"zp_{m_low}_nsrc"] = int(
                             image_zeropoint[method].get("n_sources", 0)
                         )
+                        output[f"color_term_{m_low}"] = image_zeropoint[method].get(
+                            "color_term", np.nan
+                        )
+                        output[f"color_term_{m_low}_err"] = image_zeropoint[
+                            method
+                        ].get("color_term_error", np.nan)
                 except Exception:
                     pass
+
+        # Color-term provenance for the post-processing transient
+        # correction: the index the term applies to and the calibrator
+        # median color the zeropoint is anchored to.
+        try:
+            _ct_info = image_zeropoint.get("PSF") or image_zeropoint.get("AP") or {}
+            _c1, _c2 = _ct_info.get("color1"), _ct_info.get("color2")
+            output["color_index"] = f"{_c1}-{_c2}" if _c1 and _c2 else ""
+            output["color_ref"] = float(
+                _ct_info.get("median_color", np.nan)
+            )
+            output["has_color_term"] = bool(
+                _ct_info.get("has_color_term", False)
+            )
+        except Exception:
+            output["color_index"] = ""
+            output["color_ref"] = np.nan
+            output["has_color_term"] = False
 
         # -------------------------------------------------------------------------
         # Derived outputs: limiting magnitude in apparent system (limits.py-consistent)

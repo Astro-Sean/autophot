@@ -687,3 +687,8 @@ default_input:
     local_cutout_annulus_sigma_mult: 2.0 # float --- Additional requirement: raise the local cutout floor so the background-like median is >= (this * annulus_std), where annulus_std is sigma-clipped std in an annulus around the target on the locally subtracted cutout.
     local_cutout_annulus_in_scale_fwhm: 3.0 # float --- Inner radius for the annulus_std estimate, in units of FWHM (pixels). The effective inner radius is max(exclude_inner_radius, this*FWHM).
     local_cutout_annulus_width_scale_fwhm: 2.0 # float --- Width of the annulus used for annulus_std estimate, in units of FWHM (pixels).
+
+  postprocessing:
+    transient_color_correction: False # bool --- If True, after the light curve is collected, apply per-image zeropoint color terms to the transient using its own paired color-index observations (same telescope+instrument, within color_correction_dt days; solved iteratively). Writes LightCurve_Output_colorcorrected.csv.
+    color_correction_dt: 1.0 # float --- Max |t1 - t2| in days for pairing color-index filters (e.g. ZTF g and r) in the transient color correction.
+    color_correction_max_err: 0.5 # float --- Max magnitude error (mag) for both members of a color-index pair; non-detections and low-S/N points cannot anchor a color.
