@@ -5477,12 +5477,14 @@ class PSF:
             extent = [0.0, nx * scale, 0.0, ny * scale]
             epsf_fwhm_meas = measure_epsf_fwhm_native(data, oversample)
 
-            # LogNorm requires strictly positive values.
-            data_log = data - np.nanmin(data) + 1e-10
-            norm_log = LogNorm(
-                vmin=vmin - np.nanmin(data) + 1e-10,
-                vmax=vmax - np.nanmin(data) + 1e-10,
-            )
+            # True log colour scale of the PSF flux: LogNorm on the data
+            # itself (no offset shift, which would distort wing ratios).
+            # Non-positive wing pixels clip to the floor so the panel
+            # spans ~6 decades down from the peak.
+            _peak = np.nanmax(data)
+            _floor = _peak * 1e-6 if np.isfinite(_peak) and _peak > 0 else 1e-12
+            data_log = np.clip(data, _floor, None)
+            norm_log = LogNorm(vmin=_floor, vmax=_peak)
 
             # Render NaNs as magenta "no data" regions.
             try:
