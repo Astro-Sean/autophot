@@ -213,6 +213,7 @@ from functions import (
     mag,
     points_in_circum,
     beta_aperture,
+    ascii_kv,
 )
 from aperture import (
     Aperture,
@@ -1708,21 +1709,19 @@ class Limits:
                         cutout_cy = _new_cy
                         H, W = cutout.shape
                         logger.info(
-                            "Re-extracted injection cutout:"
-                            "\n    scale: %.1f -> %.1f"
-                            "\n    size: %dx%d -> %dx%d"
-                            "\n    target: %.1f, %.1f"
-                            "\n    cutout_cx: %.1f, %.1f"
-                            "\n    needed_half: %.1f"
-                            "\n    edge_margin: %.1f"
-                            "\n    r_max: %.1f"
-                            "\n    excl: %.1f",
-                            float(base_scale), float(scale_used),
-                            _old_W, _old_H, int(W), int(H),
-                            float(_orig_position[0]), float(_orig_position[1]),
-                            float(cutout_cx), float(cutout_cy),
-                            float(min_half_size), float(edge_margin),
-                            float(r_max), float(target_exclusion_r),
+                            ascii_kv(
+                                "Re-extracted injection cutout",
+                                [
+                                    ("scale", f"{float(base_scale):.1f} -> {float(scale_used):.1f}"),
+                                    ("size", f"{_old_W}x{_old_H} -> {int(W)}x{int(H)}"),
+                                    ("target", f"{float(_orig_position[0]):.1f}, {float(_orig_position[1]):.1f}"),
+                                    ("cutout_cx", f"{float(cutout_cx):.1f}, {float(cutout_cy):.1f}"),
+                                    ("needed_half", f"{float(min_half_size):.1f}"),
+                                    ("edge_margin", f"{float(edge_margin):.1f}"),
+                                    ("r_max", f"{float(r_max):.1f}"),
+                                    ("excl", f"{float(target_exclusion_r):.1f}"),
+                                ],
+                            )
                         )
                     else:
                         logger.warning(
@@ -2009,26 +2008,25 @@ class Limits:
             n5 = int(len(cand_df))
 
             logger.info(
-                "Injection candidate attrition:"
-                "\n    generated: %d"
-                "\n    excl_target: %d"
-                "\n    edge: %d"
-                "\n    aperture_validity: %d"
-                "\n    annulus_support: %d"
-                "\n    pixel_stats: %d"
-                "\n    cutout: %dx%d"
-                "\n    center: %.1f, %.1f"
-                "\n    r_min: %.1f"
-                "\n    r_max: %.1f"
-                "\n    edge_margin: %.1f"
-                "\n    ap_r: %.1f"
-                "\n    annulus_in: %.1f"
-                "\n    annulus_out: %.1f",
-                n0, n1, n2, n3, n4, n5,
-                int(W), int(H), float(cutout_cx), float(cutout_cy),
-                float(r_min_with_jitter), float(r_max), float(edge_margin),
-                float(aperture_radius_local),
-                float(annulus_in_local), float(annulus_out_local),
+                ascii_kv(
+                    "Injection candidate attrition",
+                    [
+                        ("generated", f"{n0}"),
+                        ("excl_target", f"{n1}"),
+                        ("edge", f"{n2}"),
+                        ("aperture_validity", f"{n3}"),
+                        ("annulus_support", f"{n4}"),
+                        ("pixel_stats", f"{n5}"),
+                        ("cutout", f"{int(W)}x{int(H)}"),
+                        ("center", f"{float(cutout_cx):.1f}, {float(cutout_cy):.1f}"),
+                        ("r_min", f"{float(r_min_with_jitter):.1f}"),
+                        ("r_max", f"{float(r_max):.1f}"),
+                        ("edge_margin", f"{float(edge_margin):.1f}"),
+                        ("ap_r", f"{float(aperture_radius_local):.1f}"),
+                        ("annulus_in", f"{float(annulus_in_local):.1f}"),
+                        ("annulus_out", f"{float(annulus_out_local):.1f}"),
+                    ],
+                )
             )
 
             if len(cand_df) == 0:

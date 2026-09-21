@@ -2110,8 +2110,8 @@ class Zeropoint:
                         }
                     )
 
-                msg = f"[{flux_type}] ZP={ZP:.3f} +/- {zp_std:.3f} (N={n_sources})"
-                logger.info(msg)
+                # Per-method ZP/err/N/slope are rendered as a table by the
+                # caller (see the "Zeropoint" ascii_table in main.py).
 
                 if zp_std > 0.05:
                     logger.warning(
@@ -2231,7 +2231,7 @@ class Zeropoint:
                                 f"or background annulus contamination."
                             )
                         else:
-                            logger.info(
+                            logger.debug(
                                 f"[{flux_type}] Free-slope fit: slope={_slope_free:.4f}+/-{_slope_err:.4f} "
                                 f"(deviation from 1: {_dev:+.4f}, {_slope_sig:.1f} sigma) -- "
                                 f"slope=1 assumption is valid."

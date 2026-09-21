@@ -120,6 +120,8 @@ from functions import (
     AutophotYaml,
     log_step,
     border_msg,
+    ascii_kv,
+    ascii_table,
     PlainFormatter,
     ColoredLevelFormatter,
     metrics_table,
@@ -922,6 +924,8 @@ def run_photometry():
         )
         if was_shortened or replaced:
             logging.info("Using pre-processed file")
+        # Header facts collected here and rendered as one table below.
+        _img_kv = []
 
         # When processing a template, ensure TELESCOP/INSTRUME/FILTER exist (e.g. after restore from .original)
         # Create a copy in the science directory to avoid crosstalk when multiple images use the same template
@@ -1238,10 +1242,8 @@ def run_photometry():
                     f"No valid exposure time in FITS header for {fpath!r}: {exc}"
                 ) from exc
         header["exptime"] = float(exposure_time)
-        logging.info(
-            "Exposure time:\t%.5g s (header keyword %s)",
-            float(exposure_time),
-            used_exptime_key,
+        _img_kv.append(
+            ("Exposure time", f"{float(exposure_time):.5g} s ({used_exptime_key})")
         )
 
         ImageFWHM = None
@@ -1427,7 +1429,7 @@ def run_photometry():
         # Accept WCS-derived value only if it looks sensible
         if np.isfinite(pixel_scale_candidate) and 0 < pixel_scale_candidate <= 5:
             pixel_scale = pixel_scale_candidate
-            logging.info("Pixel scale:\t%.3f arcsec/pixel", pixel_scale)
+            _img_kv.append(("Pixel scale", f"{pixel_scale:.3f} arcsec/px (WCS)"))
         else:
             if not is_template:
                 # Fallback: use telescope.yml pixel_scale if defined
@@ -1437,9 +1439,8 @@ def run_photometry():
                 if ps is not None:
                     try:
                         pixel_scale = float(ps)
-                        logging.info(
-                            "Pixel scale:\t%.3f arcsec/pixel (telescope.yml)",
-                            pixel_scale,
+                        _img_kv.append(
+                            ("Pixel scale", f"{pixel_scale:.3f} arcsec/px (telescope.yml)")
                         )
                     except Exception:
                         pixel_scale = None
@@ -1473,15 +1474,13 @@ def run_photometry():
         if isinstance(primary_gain, (int, float)) and primary_gain > 0:
             gain = float(primary_gain)
             gain_header_key = f"telescope.yml_gain_{primary_gain}"
-            logging.info(
-                "Gain:\t\t%.5g e-/ADU (from telescope.yml)", gain
-            )
+            _img_kv.append(("Gain", f"{gain:.5g} e-/ADU (telescope.yml)"))
         elif primary_gain == "not_given_by_user":
             # No gain specified in telescope.yml, use header lookup
             try:
                 gain, gain_header_key = gain_e_per_adu_from_header(header, [])
-                logging.info(
-                    "Gain:\t\t%.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
+                _img_kv.append(
+                    ("Gain", f"{float(gain):.5g} e-/ADU ({gain_header_key})")
                 )
             except ValueError as exc:
                 img_type = "template" if is_template else "science"
@@ -1495,16 +1494,14 @@ def run_photometry():
                 )
                 gain = float(resolve_gain_e_per_adu(None, input_yaml))
                 gain_header_key = f"fallback_from_yaml_gain_{gain:.2f}"
-                logging.info(
-                    "Gain:\t\t%.5g e-/ADU (from input_yaml fallback)", float(gain)
-                )
+                _img_kv.append(("Gain", f"{gain:.5g} e-/ADU (input_yaml fallback)"))
         else:
             # telescope.yml gain is a header keyword string
             pref_gain = [primary_gain]
             try:
                 gain, gain_header_key = gain_e_per_adu_from_header(header, pref_gain)
-                logging.info(
-                    "Gain:\t\t%.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
+                _img_kv.append(
+                    ("Gain", f"{float(gain):.5g} e-/ADU ({gain_header_key})")
                 )
             except ValueError as exc:
                 img_type = "template" if is_template else "science"
@@ -1518,9 +1515,7 @@ def run_photometry():
                 )
                 gain = float(resolve_gain_e_per_adu(None, input_yaml))
                 gain_header_key = f"fallback_from_yaml_gain_{gain:.2f}"
-                logging.info(
-                    "Gain:\t\t%.5g e-/ADU (from input_yaml fallback)", float(gain)
-                )
+                _img_kv.append(("Gain", f"{gain:.5g} e-/ADU (input_yaml fallback)"))
 
         #  Update WCS Pixel Scale
         input_yaml["wcs"]["pixel_scale"] = pixel_scale
@@ -1645,27 +1640,32 @@ def run_photometry():
         except Exception:
             formatted_date = date_str  # Fallback to original format if parsing fails
         
-        logging.info(
-            "Observation:\t%s at %s | Telescope: %s, Instrument: %s, Filter: %s",
-            formatted_date, formatted_time, telescope, instrument, imageFilter,
+        _img_kv.append(
+            (
+                "Observation",
+                f"{formatted_date} {formatted_time} | {telescope} | "
+                f"{instrument} | {imageFilter}",
+            )
         )
 
         if pixel_scale:
             input_yaml["pixel_scale"] = pixel_scale
 
         if np.isfinite(saturate) and saturate != SATURATE_INTERNAL_FALLBACK:
-            logging.info("Saturation:\t%.1f ADU", saturate)
+            _img_kv.append(("Saturation", f"{saturate:.1f} ADU"))
         else:
-            logging.info("Saturation:\tnot available (no limit)")
+            _img_kv.append(("Saturation", "not available (no limit)"))
 
         if readnoise > 0:
-            logging.info("Read noise:\t%.3f e-", readnoise)
+            _img_kv.append(("Read noise", f"{readnoise:.3f} e-"))
 
         if "airmass" in input_yaml and input_yaml["airmass"]:
-            logging.info("Airmass:\t%.3f", input_yaml['airmass'])
+            _img_kv.append(("Airmass", f"{input_yaml['airmass']:.3f}"))
 
         header["gain"] = gain
         # saturate and RDNOISE were already written to the header above.
+
+        logging.info(ascii_kv("IMAGE", _img_kv, framed=True))
 
         # =============================================================================
         # Image Preprocessing
@@ -4380,6 +4380,36 @@ def run_photometry():
             fit_mode=fit_mode,
             n_segments=n_segments,
         )
+
+        def _fmt3(v):
+            try:
+                return f"{float(v):.3f}" if np.isfinite(float(v)) else "-"
+            except (TypeError, ValueError):
+                return "-"
+
+        _zp_rows = []
+        for _m in ("AP", "PSF"):
+            _zpd = image_zeropoint.get(_m) if isinstance(image_zeropoint, dict) else None
+            if not _zpd or "zeropoint" not in _zpd:
+                continue
+            _slope = _zpd.get("free_slope", np.nan)
+            _zp_rows.append(
+                [
+                    _m,
+                    _fmt3(_zpd.get("zeropoint")),
+                    _fmt3(_zpd.get("zeropoint_error")),
+                    str(int(_zpd.get("n_sources", 0) or 0)),
+                    f"{float(_slope):.4f}"
+                    if np.isfinite(_slope if _slope is not None else np.nan)
+                    else "-",
+                ]
+            )
+        if _zp_rows:
+            logging.info(
+                ascii_table(
+                    "Zeropoint", ["Method", "ZP", "err", "N", "slope"], _zp_rows
+                )
+            )
 
         for m in image_zeropoint.keys():
             try:
@@ -10947,6 +10977,41 @@ def run_photometry():
                 image_sources.to_csv(file, index=False, float_format="%.6f")
 
         end = time.time()
+
+        def _fnum(v, p=3):
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return "-"
+            return f"{f:.{p}f}" if np.isfinite(f) else "-"
+
+        def _pm(v, e, p=3):
+            # value +/- err, or the bare value when err is missing
+            if _fnum(e, p) == "-":
+                return _fnum(v, p)
+            return f"{_fnum(v, p)} +/- {_fnum(e, p)}"
+
+        _res_pairs = [
+            ("Target", str(input_yaml.get("target_name") or "-")),
+            ("Filter", str(input_yaml.get("imageFilter") or "-")),
+            (
+                "Detection",
+                "DETECTION" if output.get("is_detection") else "non-detection",
+            ),
+            ("SNR", _fnum(output.get("snr"), 2)),
+            ("mag_psf", _pm(output.get("mag_psf"), output.get("mag_psf_err"))),
+            ("mag_ap", _pm(output.get("mag_ap"), output.get("mag_ap_err"))),
+            ("ZP (PSF)", _pm(output.get("zp_psf"), output.get("zp_psf_err"))),
+            ("ZP (AP)", _pm(output.get("zp_ap"), output.get("zp_ap_err"))),
+            ("flux_psf", _fnum(output.get("flux_psf"))),
+            ("flux_ap", _fnum(output.get("flux_ap"))),
+            ("reduced chi2", _fnum(output.get("reduced_chi2"), 2)),
+            ("lim. mag", _fnum(output.get("limiting_mag"))),
+            ("PSF model", str(output.get("psf_model") or "none")),
+            ("Image FWHM", f"{_fnum(output.get('image_fwhm'), 2)} px"),
+        ]
+        logging.info(ascii_kv("PHOTOMETRY", _res_pairs, framed=True))
+
         logging.info(log_step("Photometry finished"))
         logging.info(
             "Finished: %s  (%.1f s)",
