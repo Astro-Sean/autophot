@@ -5508,12 +5508,24 @@ class PSF:
                         lw=0.8,
                     )
                 )
-            _title = f"Oversample={oversample}x"
+            # Annotation inside the image panel (top right, one entry
+            # per line) -- a title above the axes collides with the
+            # right projection panel.
+            _info_lines = [f"Oversample={oversample}x"]
             if np.isfinite(epsf_fwhm_meas):
-                _title += f" - ePSF FWHM={epsf_fwhm_meas:.2f} px"
+                _info_lines.append(f"ePSF FWHM={epsf_fwhm_meas:.2f} px")
             if _has_fwhm:
-                _title += f" (image {float(fwhm_native):.2f} px)"
-            ax.set_title(_title, fontsize=8, pad=2)
+                _info_lines.append(f"image FWHM={float(fwhm_native):.2f} px")
+            ax.text(
+                0.98,
+                0.98,
+                "\n".join(_info_lines),
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=7,
+                color="white",
+            )
             ax.set_xlabel("X [native px]")
             ax.set_ylabel("Y [native px]")
             ax.set_xticks([])
