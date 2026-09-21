@@ -374,14 +374,13 @@ def list_parameters(
         if section != last_section:
             if last_section is not None:
                 print("-" * len(header))
-            # Make section headings visually obvious in plain terminals.
+            # Section headings in the same === TITLE === style as the logs.
             section_title = str(section).replace("_", " ").upper()
-            title_line = f"*** {section_title} ***"
-            star_line = "*" * len(title_line)
             print("")
-            print(star_line)
-            print(title_line)
-            print(star_line)
+            if border_msg:
+                print(border_msg(section_title))
+            else:
+                print(f"=== {section_title} ===")
             print("")
             last_section = section
 
@@ -2363,6 +2362,13 @@ class AutomatedPhotometry:
                                 + ", ".join(os.path.basename(f) for f in failed_files)
                                 + " - see per-image LOG_<base>.log files."
                             )
+                        _done_msg = (
+                            f"Done: {total - len(failed_files)}/{total} images OK"
+                            + (f", {len(failed_files)} failed" if failed_files else "")
+                        )
+                        _log_always(
+                            border_msg(_done_msg) if border_msg else _done_msg
+                        )
                         gc.collect()
                     else:
                         # Only show progress bar for multiple files. tqdm is an
@@ -2406,6 +2412,9 @@ class AutomatedPhotometry:
                                 _log(
                                     f"[{counter + 1}/{len(file_list)}] [ERROR] Problem with file: {file}: {e} | {tb}"
                                 )
+                        if len(file_list) > 1:
+                            _done_msg = f"Done: {counter}/{len(file_list)} images processed"
+                            _log(border_msg(_done_msg) if border_msg else _done_msg)
 
             # Concatenate per-image outputs into one light curve CSV
             reduced_loc = f"{default_input['fits_dir']}_{default_input['outdir_name']}"

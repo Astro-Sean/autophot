@@ -1162,25 +1162,35 @@ def log_step(msg: str) -> str:
     return f"[{m}]"
 
 
-def border_msg(msg: str, body: str = "-", corner: str = "+",
+def _rule_line(title: str, char: str, width: int = 70) -> str:
+    """Centered title embedded in a full-width rule, e.g. ``=== X ===``."""
+    t = str(title).strip()
+    inner = width
+    if len(t) > inner - 2:
+        t = t[: inner - 5] + "..."
+    side = (inner - len(t) - 2) // 2
+    return f"{char * side} {t} {char * (inner - side - len(t) - 2)}"
+
+
+def border_msg(msg: str, body: str = "=", corner: str = "+",
                metadata: str | None = None, width: int = 70, use_ansi: bool | None = None) -> str:
     """
-    Clean bordered banner for major log sections with bold title.
+    Section banner for major log sections: ``=== Title ===``.
 
     Parameters
     ----------
     msg : str
-        Main section title (centered if shorter than width, rendered in bold)
+        Main section title (centered in a full-width '=' rule)
     body : str
-        Border character (default: box-drawing '-')
+        Rule character (default '=')
     corner : str
-        Corner character (default: '+'/'+' with '+'/'+')
+        Unused; kept for backward compatibility with older call sites.
     metadata : str | None
-        Optional second line with key=value pairs
+        Optional second line, rendered as ``--- metadata ---``
     width : int
         Total banner width in characters
     use_ansi : bool | None
-        Force ANSI codes on/off. If None, auto-detect based on TTY.
+        Unused; kept for backward compatibility.
 
     Example:
         logging.info(border_msg("Template Preparation", metadata="align=SWarp catalog=Gaia"))
@@ -1188,63 +1198,88 @@ def border_msg(msg: str, body: str = "-", corner: str = "+",
     text = str(msg).strip()
     if not text:
         return ""
-
-    # Use simple ASCII if box-drawing may not render
-    try:
-        use_unicode = sys.stdout.encoding == 'utf-8'
-    except Exception:
-        use_unicode = False
-
-    # ANSI codes only when output is a TTY.
-    if use_ansi is None:
-        try:
-            use_ansi = sys.stdout.isatty()
-        except Exception:
-            use_ansi = False
-
-    # ANSI bold codes for title (only if TTY)
-    BOLD = "\033[1m" if use_ansi else ""
-    RESET = "\033[0m" if use_ansi else ""
-
-    if not use_unicode:
-        body = "-"
-        corner = "+"
-        left_corner = "+"
-        right_corner = "+"
-        bottom_left = "+"
-        bottom_right = "+"
-        side = "|"
-    else:
-        left_corner = "+" if corner == "+" else corner
-        right_corner = "+" if corner == "+" else corner
-        bottom_left = "+"
-        bottom_right = "+"
-        side = "|"
-
-    max_title = width - 2  # space for left and right corner chars
-    # ANSI bold codes do not count toward the visible width.
-    visible_text = text
-    if len(visible_text) > max_title:
-        visible_text = visible_text[:max_title-3] + "..."
-
-    padding = max_title - len(visible_text)
-    left_pad = padding // 2
-    right_pad = padding - left_pad
-    # Bold the title text only, not the padding.
-    centered = f"{' ' * left_pad}{BOLD}{visible_text}{RESET}{' ' * right_pad}"
-
-    top_border = f"{left_corner}{body * (width - 2)}{right_corner}"
-    bottom_border = f"{bottom_left}{body * (width - 2)}{bottom_right}"
-    title_line = f"{side}{centered}{side}"
-
-    lines = [top_border, title_line]
-
+    rule = str(body or "=")[0]
+    lines = [_rule_line(text, rule, width)]
     if metadata:
-        meta_clean = str(metadata).strip()[:max_title - 2]
-        meta_padded = f" {meta_clean}{' ' * (max_title - len(meta_clean) - 1)}"
-        lines.append(f"{side}{meta_padded}{side}")
+        lines.append(_rule_line(str(metadata).strip(), "-", width))
+    return "\n".join(lines)
 
-    lines.append(bottom_border)
+
+def ascii_kv(title: str, pairs, width: int = 70, framed: bool = False) -> str:
+    """
+    Key/value block with dotted leaders.
+
+    pairs : iterable of (label, value) tuples; values are pre-formatted
+    strings.  With ``framed=False`` the block is a lightweight sub-section:
+
+        * Title
+          ------------------  ----------------
+          label ........... value
+
+    With ``framed=True`` it is wrapped in '=' rules for major blocks:
+
+        ============================ Title ============================
+          label ........... value
+        ================================================================
+    """
+    rows = [(str(k), str(v)) for k, v in pairs]
+    if not rows:
+        return ""
+    label_w = max(len(k) for k, _ in rows)
+    label_w = max(label_w, 8)
+    val_x = label_w + 8  # '  ' + label + ' ... ' gap
+    val_w = width - val_x - 2
+    lines = []
+    if framed:
+        lines.append(_rule_line(str(title), "=", width))
+    else:
+        lines.append(f"* {str(title).strip()}")
+        lines.append("  " + "-" * label_w + "  " + "-" * max(8, min(val_w, 24)))
+    for k, v in rows:
+        dots = "." * max(3, val_x - 2 - len(k) - 4)
+        line = f"  {k} {dots} {v}"
+        lines.append(line[:width] if len(line) > width else line)
+    if framed:
+        lines.append("=" * width)
+    return "\n".join(lines)
+
+
+def ascii_table(title: str, headers, rows, width: int = 70) -> str:
+    """
+    Column table framed in '-' rules:
+
+        --------------------------- Title ----------------------------
+           Method     ZP      err      N
+           ------  -------  ------  ----
+           AP      24.547   0.003   159
+        -----------------------------------------------------------------
+    """
+    headers = [str(h) for h in headers]
+    rows = [[str(c) for c in r] for r in rows]
+    if not headers or not rows:
+        return ""
+    ncols = len(headers)
+    col_w = [len(h) for h in headers]
+    for r in rows:
+        for i in range(min(ncols, len(r))):
+            col_w[i] = max(col_w[i], len(r[i]))
+    body_w = 4 + sum(col_w) + 2 * ncols  # leading indent + columns + gaps
+    rule_w = min(max(width, body_w), max(width, 40))
+    lines = []
+    if title:
+        lines.append(_rule_line(str(title), "-", rule_w))
+    else:
+        lines.append("-" * rule_w)
+    lines.append(
+        "   " + "  ".join(h.ljust(col_w[i]) for i, h in enumerate(headers)).rstrip()
+    )
+    lines.append("   " + "  ".join("-" * col_w[i] for i in range(ncols)))
+    for r in rows:
+        cells = [r[i] if i < len(r) else "" for i in range(ncols)]
+        lines.append(
+            "   " + "  ".join(c.ljust(col_w[i]) for i, c in enumerate(cells)).rstrip()
+        )
+    lines.append("-" * rule_w)
     return "\n".join(lines)
 
 
@@ -1269,25 +1304,11 @@ def metrics_table(metrics: dict[str, tuple], title: str | None = None, width: in
     """
     if not metrics:
         return ""
-
-    lines: list[str] = []
-    if title:
-        lines.append(f"+- {title}{' ' * (width - len(title) - 4)}+")
-    else:
-        lines.append(f"+{'-' * (width - 2)}+")
-
-    max_label = max(len(k) for k in metrics.keys())
-    value_space = width - max_label - 10  # spacing for "|  label... value  |"
-
-    for label, (value, unit) in metrics.items():
-        val_str = f"{value} {unit}".strip()
-        if len(val_str) > value_space:
-            val_str = val_str[:value_space-3] + "..."
-        line = f"|  {label:<{max_label}}  {val_str:>{value_space}}  |"
-        lines.append(line[:width])  # safety truncate
-
-    lines.append(f"+{'-' * (width - 2)}+")
-    return "\n".join(lines)
+    pairs = [
+        (label, f"{value} {unit}".strip())
+        for label, (value, unit) in metrics.items()
+    ]
+    return ascii_kv(title or "Metrics", pairs, width=width, framed=True)
 
 
 def compact_status(filename: str, results: dict) -> str:
