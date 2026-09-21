@@ -210,6 +210,24 @@ def _nddata_clone(nd: NDData, data: Optional[np.ndarray] = None) -> NDData:
 # ===========================================================================
 
 
+def _sanitize_error_array(err: np.ndarray, fallback: float) -> np.ndarray:
+    """Floor a per-pixel sigma array and replace non-finite values.
+
+    np.maximum floors zeros but lets NaN/inf through; photutils fitters
+    abort the whole fit on non-finite errors. Pixels with non-finite
+    errors get the median finite sigma (typical weight) or ``fallback``
+    when nothing finite remains. NaN-data pixels are masked downstream,
+    so this only affects finite-data pixels with uncomputable errors.
+    """
+    np.maximum(err, 1e-12, out=err)
+    bad = ~np.isfinite(err)
+    if np.any(bad):
+        finite = err[~bad]
+        fill = float(np.median(finite)) if finite.size else float(fallback)
+        err[bad] = fill
+    return err
+
+
 def _odd(n: int) -> int:
     """Return *n* if odd, else *n* + 1."""
     n = int(n)
@@ -1271,9 +1289,9 @@ class MCMCFitter:
             bkg_rms_e = np.zeros_like(image_e)
         else:
             bkg_rms_arr = np.asarray(background_rms, float)
-            # Replace NaN values (chip gaps, interpolation failures) with
-            # the median of finite values so the error model doesn't break.
-            if bkg_rms_arr.ndim == 2 and np.any(np.isnan(bkg_rms_arr)):
+            # Replace non-finite values (chip gaps, interpolation failures)
+            # with the median of finite values so the error model doesn't break.
+            if bkg_rms_arr.ndim == 2 and np.any(~np.isfinite(bkg_rms_arr)):
                 _finite_median = float(np.nanmedian(bkg_rms_arr))
                 if not np.isfinite(_finite_median) or _finite_median <= 0:
                     _finite_median = float(readnoise) if readnoise > 0 else 1.0
@@ -1321,7 +1339,9 @@ class MCMCFitter:
                 total_error, float(smooth_variance_sigma), mode="nearest"
             )
 
-        return np.maximum(total_error, 1e-12)
+        return _sanitize_error_array(
+            total_error, max(float(readnoise), 1.0)
+        )
 
     # ---- MCMC run ---------------------------------------------------------
 
@@ -2082,9 +2102,9 @@ class PSF:
             bkg_rms_e = np.zeros_like(image_e)
         else:
             bkg_rms_arr = np.asarray(background_rms, float)
-            # Replace NaN values (chip gaps, interpolation failures) with
-            # the median of finite values so the error model doesn't break.
-            if bkg_rms_arr.ndim == 2 and np.any(np.isnan(bkg_rms_arr)):
+            # Replace non-finite values (chip gaps, interpolation failures)
+            # with the median of finite values so the error model doesn't break.
+            if bkg_rms_arr.ndim == 2 and np.any(~np.isfinite(bkg_rms_arr)):
                 _finite_median = float(np.nanmedian(bkg_rms_arr))
                 if not np.isfinite(_finite_median) or _finite_median <= 0:
                     _finite_median = float(read_noise) if read_noise > 0 else 1.0
@@ -2123,7 +2143,9 @@ class PSF:
                 total_error, float(smooth_variance_sigma), mode="nearest"
             )
 
-        np.maximum(total_error, 1e-12, out=total_error)
+        _sanitize_error_array(
+            total_error, max(float(read_noise), 1.0)
+        )
 
         return NDData(
             data=image_e,
