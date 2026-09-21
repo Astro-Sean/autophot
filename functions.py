@@ -595,6 +595,32 @@ def parse_supported_filter_group_key(group_key):
     return None
 
 
+def invalid_use_catalog_keys(use_catalog):
+    """
+    Return ``use_catalog`` mapping keys that can never match a filter band.
+
+    A key is usable if it normalizes to a single supported band (the
+    exact-match path) or parses to a supported band group. Keys such as
+    "uRI" (mixed photometric families) satisfy neither, so images for
+    those bands silently fall back to the "default" entry.
+    """
+    bad = []
+    if not isinstance(use_catalog, dict):
+        return bad
+    for key, value in use_catalog.items():
+        if value is None:
+            continue
+        key_s = str(key).strip()
+        if key_s.lower() in {"default", "*", "all"}:
+            continue
+        if (
+            normalize_photometric_filter_name(key_s) is None
+            and parse_supported_filter_group_key(key_s) is None
+        ):
+            bad.append(key_s)
+    return bad
+
+
 def normalize_photometric_filter_name(filter_name, available_filters=None):
     """
     Normalize a filter token to a supported photometric band.

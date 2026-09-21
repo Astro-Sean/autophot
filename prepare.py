@@ -29,6 +29,7 @@ from functions import (
     normalize_photometric_filter_name,
     sanitize_photometric_filters,
     parse_supported_filter_group_key,
+    invalid_use_catalog_keys,
     log_step,
     log_warning_from_exception,
 )
@@ -401,6 +402,17 @@ class Prepare:
         selected_catalog = self.input_yaml["catalog"]["use_catalog"]
         script_dir = os.path.dirname(os.path.abspath(__file__))
         catalog_yml_path = os.path.join(script_dir, "databases", "catalog.yml")
+
+        # Keys that parse to no supported band (e.g. mixed-family "uRI")
+        # never match and silently fall back to "default" - warn once here.
+        bad_keys = invalid_use_catalog_keys(selected_catalog)
+        if bad_keys:
+            self.logger.warning(
+                "catalog.use_catalog keys never match any filter band "
+                "(unsupported or mixed-family groups): %s. Images in those "
+                "bands fall back to the 'default' entry.",
+                bad_keys,
+            )
 
         def _resolve_catalog_for_filter(catalog_choice, image_filter=None):
             if not isinstance(catalog_choice, dict):

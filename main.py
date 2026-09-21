@@ -9123,11 +9123,14 @@ def run_photometry():
             border_msg("Calibrated magnitudes (AP and PSF on target)")
         )
         #  Calibrate Magnitudes
+        # Primary-target row label; must be bound even when no zeropoint is
+        # available, since downstream code (limits, output dict) uses it.
+        idx = TargetPosition.index[0]
+
         for method in ["AP", "PSF"]:
             if method not in image_zeropoint or "zeropoint" not in image_zeropoint[method]:
                 logging.warning("%s zeropoint not available - magnitudes stay instrumental", method)
                 continue
-            idx = 0
             # Strict subtraction quality mode: block photometry on failed
             # subtraction rather than returning unreliable measurements.
             _strict_sub = bool(
