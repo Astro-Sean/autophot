@@ -27,7 +27,7 @@ default_input:
   additional_targets: null # list[str]|null --- Names of additional targets to resolve via TNS (then SIMBAD fallback), e.g. ['SN2021gmj'].
   additional_targets_ra_dec: null # list[list[float]]|null --- Explicit [RA, Dec] pairs (degrees) for additional targets, e.g. [[123.456, +45.678], [...]]. Used when names are not available or to skip name resolution.
 
-  nCPU: 1 # int --- Number of CPU workers used for image-level parallelism (1=serial).
+  nCPU: 1 # int --- Number of CPU workers used for image-level parallelism (1=serial). >1 runs each image in its own subprocess with per-image logs (LOG_<base>.log); terminal shows only a [i/N] counter plus failures. Multiply by per-image n_jobs settings to avoid oversubscribing CPUs.
 
   restart: True # bool --- If True, reprocess all files (ignore existing outputs where applicable).
 

@@ -595,30 +595,36 @@ def _run_main_subprocess(
     filename: str,
     input_file: str,
     is_template: bool,
+    suppress_output: bool = False,
 ) -> Tuple[str, int]:
     """
     Run the low-level photometry pipeline (main.py) on a single FITS file.
 
     Returns (filename, return_code) so callers can detect failures.
+
+    suppress_output must be passed explicitly: ProcessPoolExecutor workers
+    do not reliably inherit module state (spawn/forkserver re-import the
+    module, resetting QUIET_MODE), so reading QUIET_MODE here would leak
+    child output to the terminal on non-fork platforms.
     """
     if not os.path.exists(input_file):
-        _log(
-            f"[ERROR] Input YAML snapshot is missing: {input_file}\n"
-            "It looks like it was deleted mid-run. Re-run the pipeline to regenerate it."
-        )
+        if not suppress_output:
+            _log(
+                f"[ERROR] Input YAML snapshot is missing: {input_file}\n"
+                "It looks like it was deleted mid-run. Re-run the pipeline to regenerate it."
+            )
         return filename, 2
     args = [python_executable, autophot_exe, "-f", filename, "-c", input_file]
     if is_template:
         args.append("-temp")
 
-    # When QUIET_MODE is enabled (multi-file, batch use), completely suppress
-    # child-process stdout/stderr so that nothing reaches the terminal. Logs
-    # can still be written to per-process files if configured inside main.py.
+    # In parallel mode the child's stdout/stderr go to DEVNULL so nothing
+    # reaches the terminal; each main.py still writes its own per-image
+    # LOG_<base>.log. The parent prints a [i/N] counter line per completion.
     from subprocess import DEVNULL
 
-    global QUIET_MODE
     kwargs = {"check": False, "text": True}
-    if bool(QUIET_MODE):
+    if suppress_output:
         kwargs.update({"stdout": DEVNULL, "stderr": DEVNULL})
 
     try:
@@ -1399,7 +1405,10 @@ class AutomatedPhotometry:
             str: Path to the aggregated light curve CSV.
         """
         global QUIET_MODE
-        
+        # Start clean: a previous call that raised mid-run would otherwise
+        # leave QUIET_MODE stuck on and silence this call's logging.
+        QUIET_MODE = False
+
         # Deep-copy the input configuration to prevent modifications from
         # persisting across multiple calls to run_photometry()
         default_input = copy.deepcopy(default_input)
@@ -1423,7 +1432,6 @@ class AutomatedPhotometry:
             n_cpu = 1
         parallel_files = n_cpu > 1
 
-        global QUIET_MODE
         if parallel_files:
             # Suppress this orchestrator's chatter in multi-file mode; the per-image
             # main.py processes still handle their own detailed logging.
@@ -1440,6 +1448,25 @@ class AutomatedPhotometry:
                         handler.setLevel(logging.WARNING)
                 except Exception:
                     continue
+
+            # Warn on CPU oversubscription: image-level workers multiply
+            # any within-image parallelism (aperture / limiting-magnitude
+            # worker loops are per subprocess).
+            _phot_cfg = default_input.get("photometry") or {}
+            _lim_cfg = default_input.get("limiting_magnitude") or {}
+            _per_image_jobs = max(
+                int(_phot_cfg.get("aperture_n_jobs", 1) or 1),
+                int(_lim_cfg.get("n_jobs", 1) or 1),
+            )
+            _total_slots = n_cpu * _per_image_jobs
+            _cpu_count = os.cpu_count() or 1
+            if _total_slots > _cpu_count:
+                _log_always(
+                    f"[WARNING] nCPU={n_cpu} with per-image jobs={_per_image_jobs} "
+                    f"requests {_total_slots} workers on {_cpu_count} CPUs. "
+                    "Oversubscription can slow runs or exhaust process/thread "
+                    "limits - lower nCPU or the per-image n_jobs settings."
+                )
 
         # Normalise paths and close open figures
         fits_dir = default_input.get("fits_dir") or ""
@@ -2215,6 +2242,7 @@ class AutomatedPhotometry:
                         _log_always(
                             f"Running {len(template_file_list)} template files with nCPU={n_cpu} (parallel)."
                         )
+                        failed_templates = []
                         with ProcessPoolExecutor(max_workers=n_cpu) as executor:
                             futures = {
                                 executor.submit(
@@ -2224,20 +2252,37 @@ class AutomatedPhotometry:
                                     template,
                                     input_file,
                                     True,
+                                    suppress_output=True,
                                 ): template
                                 for template in template_file_list
                             }
                             total_t = len(futures)
                             done_t = 0
+                            # Completions are consumed only here in the parent,
+                            # so the counter needs no locking.
                             for fut in as_completed(futures):
-                                fname, rc = fut.result()
+                                try:
+                                    fname, rc = fut.result()
+                                except Exception as exc:
+                                    fname, rc = futures[fut], 1
+                                    _log_always(
+                                        f"[WORKER ERROR] {fname}: {exc}"
+                                    )
                                 done_t += 1
                                 if rc != 0:
+                                    failed_templates.append(fname)
                                     _log_always(
                                         f"[{done_t}/{total_t}] [TEMPLATE FAIL] {fname} (exit code {rc})"
                                     )
                                 else:
-                                    _log(f"[{done_t}/{total_t}] [TEMPLATE OK]   {fname}")
+                                    _log_always(
+                                        f"[{done_t}/{total_t}] [TEMPLATE OK]   {fname}"
+                                    )
+                        if failed_templates:
+                            _log_always(
+                                f"[WARNING] {len(failed_templates)}/{total_t} "
+                                "template files failed - see per-image logs."
+                            )
                         gc.collect()
                     else:
                         _log(log_step("Reduce/calibrate template files"))
@@ -2275,6 +2320,7 @@ class AutomatedPhotometry:
                         _log_always(
                             f"Running {len(file_list)} science files with nCPU={n_cpu} (parallel)."
                         )
+                        failed_files = []
                         with ProcessPoolExecutor(max_workers=n_cpu) as executor:
                             futures = {
                                 executor.submit(
@@ -2284,16 +2330,24 @@ class AutomatedPhotometry:
                                     str(file),
                                     input_file,
                                     False,
+                                    suppress_output=True,
                                 ): str(file)
                                 for file in file_list
                             }
                             total = len(futures)
+                            # as_completed delivers results only to this parent
+                            # loop, so the counter is race-free by construction.
                             for fut in as_completed(futures):
-                                fname, rc = fut.result()
+                                try:
+                                    fname, rc = fut.result()
+                                except Exception as exc:
+                                    fname, rc = futures[fut], 1
+                                    _log_always(f"[WORKER ERROR] {fname}: {exc}")
                                 counter += 1
                                 if rc == 0:
-                                    _log(f"[{counter}/{total}] [OK]    {fname}")
+                                    _log_always(f"[{counter}/{total}] [OK]    {fname}")
                                 else:
+                                    failed_files.append(fname)
                                     _log_always(f"[{counter}/{total}] [FAIL]  {fname} (exit code {rc})")
                                     if rc == 2 and (not os.path.exists(input_file)):
                                         _log_always(
@@ -2301,14 +2355,30 @@ class AutomatedPhotometry:
                                             "Stopping early; re-run required."
                                         )
                                         break
+                        if failed_files:
+                            _log_always(
+                                f"[WARNING] {len(failed_files)}/{total} science files failed: "
+                                + ", ".join(os.path.basename(f) for f in failed_files)
+                                + " - see per-image LOG_<base>.log files."
+                            )
                         gc.collect()
                     else:
-                        # Only show progress bar for multiple files
+                        # Only show progress bar for multiple files. tqdm is an
+                        # optional nicety - fall back to plain iteration and
+                        # the [i/N] log lines if it is not installed.
+                        file_iter = file_list
                         if len(file_list) > 1:
-                            from tqdm import tqdm
-                            file_iter = tqdm(file_list, desc="Processing", unit="file", total=len(file_list))
-                        else:
-                            file_iter = file_list
+                            try:
+                                from tqdm import tqdm
+                            except ImportError:
+                                pass
+                            else:
+                                file_iter = tqdm(
+                                    file_list,
+                                    desc="Processing",
+                                    unit="file",
+                                    total=len(file_list),
+                                )
                         for file in file_iter:
                             try:
                                 fname, rc = _run_main_subprocess(
