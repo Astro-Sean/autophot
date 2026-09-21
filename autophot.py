@@ -376,7 +376,6 @@ def list_parameters(
                 print("-" * len(header))
             # Section headings in the same === TITLE === style as the logs.
             section_title = str(section).replace("_", " ").upper()
-            print("")
             if border_msg:
                 print(border_msg(section_title))
             else:
@@ -2106,7 +2105,6 @@ class AutomatedPhotometry:
 
                 # Pre-download reference catalog(s) once, before the per-image loop.
                 # main.py will find the cached CSV and skip re-downloading.
-                _log("")
                 _log(border_msg("Reference Photometric Catalog") if border_msg else log_step("Reference photometric catalog (pre-download)"))
                 try:
                     from catalog import Catalog as _Catalog
@@ -2128,7 +2126,6 @@ class AutomatedPhotometry:
                     ]
 
                     if not _unique_cats:
-                        _log("")
                         _log(
                             ascii_card(
                                 "No photometric catalog selected",
@@ -2206,7 +2203,6 @@ class AutomatedPhotometry:
                                     c for c in _available_catalogs
                                     if c not in [n.lower() for n in _unique_cats]
                                 ]
-                                _log("")
                                 _log(
                                     ascii_card(
                                         f"Catalog '{_cat_name}' returned 0 sources",
