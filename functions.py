@@ -565,23 +565,23 @@ _GROUP_KEY_SEPARATORS = re.compile(r"[,;|+\-/\s]+")
 
 
 def _parse_band_token(token):
-    """Parse one separator-free token into bands, or None if any char is unknown."""
+    """Parse one separator-free token into bands, or None if any char is unknown.
+
+    Case is significant: 'r' is ugriz r and 'R' is UBVRI R, so band
+    letters are always used exactly as written. The only case fallback
+    fires when NO character is a valid band ("jhk" -> JHK, "bv" -> BV);
+    uppercasing can then only turn non-band letters into bands, never
+    swap one band for another. A token mixing real band letters with
+    unknown ones fails ("bvri", "uXQ") rather than guessing at case.
+    """
     if not token:
         return None
-    # As written: every char must be a band letter (mixed families allowed).
     if all(ch in _ALL_BAND_CHARS for ch in token):
         return tuple(dict.fromkeys(token))
-    # All-caps fallback for family-shaped words written lowercase
-    # ("bvri" -> BVRI, "jhk" -> JHK). Only tried when the direct parse
-    # fails, so "gri" keeps its ugriz meaning.
-    upper = token.upper()
-    if upper != token and all(ch in _ALL_BAND_CHARS for ch in upper):
-        return tuple(dict.fromkeys(upper))
-    # Per-char promotion for letters that only exist uppercase
-    # ("yw" -> ('Y', 'w')).
-    promoted = [ch if ch in _ALL_BAND_CHARS else ch.upper() for ch in token]
-    if all(ch in _ALL_BAND_CHARS for ch in promoted):
-        return tuple(dict.fromkeys(promoted))
+    if not any(ch in _ALL_BAND_CHARS for ch in token):
+        upper = token.upper()
+        if all(ch in _ALL_BAND_CHARS for ch in upper):
+            return tuple(dict.fromkeys(upper))
     return None
 
 
@@ -594,8 +594,10 @@ def parse_supported_filter_group_key(group_key):
       - Any mix of band letters, families may mix: "griz", "u", "BV",
         "uRI", "rJ", "gBVw"
       - Separators as token boundaries: "u, RI", "u|JHK"
-      - Lowercase aliases of uppercase-only families when the direct parse
-        fails: "bvri" -> BVRI, "jhk" -> JHK ("gri" stays ugriz)
+      - Lowercase words with no valid band letters get an uppercase
+        rescue: "jhk" -> JHK, "bv" -> BV. Case is otherwise exact:
+        "bvri" fails because r and i are real band letters - the rescue
+        never swaps one band for another (no r->R or u->U guessing).
       - Composite keys: "grizJHK", "ugrizJHK" (optical + JHK for
         catalog.use_catalog maps), incl. case variants via the composite
         table ("GRIZJHK", "grizjhk")
