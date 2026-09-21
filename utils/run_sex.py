@@ -30,7 +30,7 @@ from astropy.stats import sigma_clip
 from astropy.table import Table
 from scipy.spatial import cKDTree
 
-from functions import log_step, log_warning_from_exception
+from functions import log_step, log_warning_from_exception, STATUS
 from wcs import get_wcs
 
 logger = logging.getLogger(__name__)
@@ -716,7 +716,8 @@ class SExtractorWrapper:
             fwhm_sources = high_snr if len(high_snr) >= 5 else sources
             fwhm_est = self.calculate_robust_fwhm(fwhm_sources["fwhm"].values)
             fwhm_std = np.nanstd(fwhm_sources["fwhm"].values)
-            logger.info(
+            logger.log(
+                STATUS,
                 f"Estimated FWHM: {fwhm_est:.2f} pixels (sigma = {fwhm_std:.2f} pixels, "
                 f"from {len(fwhm_sources)} sources, SNR >= {fwhm_snr_min if len(high_snr) >= 5 else 3.0})"
             )
@@ -1574,7 +1575,8 @@ class SExtractorWrapper:
             # FWHM-based scale is too small.
             raw_scale = max(float(scale_multiplier) * float(fwhm), float(default_scale))
             scale = clamp_scale_from_config(self.config, raw_scale)
-            logger.info(
+            logger.log(
+                STATUS,
                 "Detected %d/%d point sources | robust FWHM %.2f px | scale %.1f px (FWHM x %.2f)",
                 final_count,
                 initial_count,

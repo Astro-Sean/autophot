@@ -379,7 +379,7 @@ class RemoveCosmicRays:
                 mask = self._create_mask(self.image, satlevel)
         _n_protected = int(np.count_nonzero(mask))
         _frac_protected = _n_protected / mask.size
-        self.logger.info(
+        self.logger.debug(
             "Protecting %d pixels (%.2f%%) from CR detection "
             "(saturated/bright/NaN).",
             _n_protected, _frac_protected * 100,
@@ -429,13 +429,13 @@ class RemoveCosmicRays:
                 _poisson_data = self.image - _sky_est
             sigma = calc_total_error(_poisson_data, bkg_rms, effective_gain=gain)
             invar = np.asarray(sigma, dtype=np.float32) ** 2
-            self.logger.info("Computed variance map from total error.")
+            self.logger.debug("Computed variance map from total error.")
 
         # --- PSF Size Calculation ---
         psf_size = int(np.ceil(3 * psf_fwhm))
         if psf_size % 2 == 0:
             psf_size += 1  # Ensure it's odd
-        self.logger.info("Using PSF size: %s (FWHM: %.1f pixels)", psf_size, psf_fwhm)
+        self.logger.debug("Using PSF size: %s (FWHM: %.1f pixels)", psf_size, psf_fwhm)
 
         # --- Run cosmic ray removal ---
         # ccdproc is only needed for the lacosmic path; keep the import lazy
@@ -484,7 +484,7 @@ class RemoveCosmicRays:
                     inmask=mask,
                 )
             else:
-                self.logger.info("Using astroscrappy for cosmic ray removal")
+                self.logger.debug("Using astroscrappy for cosmic ray removal")
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     cr_mask, clean_image = astroscrappy.detect_cosmics(
@@ -526,7 +526,7 @@ class RemoveCosmicRays:
                 self.logger.warning(
                     f"High cosmic ray fraction: {cr_fraction:.2%}. Check parameters."
                 )
-            self.logger.info(
+            self.logger.debug(
                 f"Detected {n_cr_raw:,} CR pixels, dilated to {n_cr:,} "
                 f"({cr_fraction:.2%} of image for source exclusion)"
             )

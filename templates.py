@@ -188,7 +188,7 @@ try:
 except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
-from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write
+from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write, STATUS
 try:
     from functions import download_zogy
 except ImportError:
@@ -1088,7 +1088,8 @@ def compute_alignment_rms(
         median_offset = float(np.sqrt(_med_dx**2 + _med_dy**2))
         p90 = float(np.nanpercentile(d_clipped, 90.0))
         rms = float(np.sqrt(np.mean(d_clipped**2)))
-        logger.info(
+        logger.log(
+            STATUS,
             "Alignment RMS:\tmed=%.3f px (dx=%.3f, dy=%.3f) rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped) max=%.2f px",
             median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
             len(d_mut) - len(d_clipped), max_sep,
@@ -3409,7 +3410,7 @@ class Templates:
                 if not _swarp_ok:
                     return None, None
                 method_used = res.get("alignment_method", "scamp_swarp")
-                logger.info("Alignment succeeded (method: %s).", method_used)
+                logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
                 # Store alignment RMS in the aligned reference header for
                 # downstream SFFT kernel sizing and photometry provenance.
                 try:
@@ -3514,7 +3515,7 @@ class Templates:
                 if not _aa_ok:
                     return None, None
                 method_used = res.get("alignment_method", "astroalign")
-                logger.info("Alignment succeeded (method: %s).", method_used)
+                logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
                 # Store alignment RMS in the aligned reference header for
                 # downstream SFFT kernel sizing and photometry provenance.
                 try:
@@ -3598,7 +3599,7 @@ class Templates:
                 # Only the template is resampled; the science WCS is
                 # unchanged, so target coordinates need no update.
                 method_used = "reproject"
-                logger.info("Alignment succeeded (method: %s).", method_used)
+                logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
                 return scienceFpath, result.template_path
 
             def _check_sub_tile_feasibility(det, shape, sub_tile, min_per_tile=4):
@@ -4154,7 +4155,7 @@ class Templates:
                                 _spline_order = _o
                                 break
 
-                    logger.info(
+                    logger.debug(
                         "spalipy: hash_dist=%.4f match_dist=%.2f min_quad_sep=%.1f "
                         "edge_buf=%d max_cand=%d min_match=%d n_quad=%d "
                         "sub_tile=%d spline_order=%d (FWHM=%.1f, n_sources=%d).",
@@ -4443,7 +4444,7 @@ class Templates:
                         logger.debug("Match sources plot skipped: %s", _plot_err)
 
                     method_used = "spalipy"
-                    logger.info("Alignment succeeded (method: %s).", method_used)
+                    logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
                     # Science image unchanged - no target coordinate update needed
                     return scienceFpath, new_templateFpath
 
@@ -4650,7 +4651,7 @@ class Templates:
                     )
 
                     method_used = "tweakwcs"
-                    logger.info("Alignment succeeded (method: %s).", method_used)
+                    logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
                     return scienceFpath, new_templateFpath
 
                 except Exception as _e:
@@ -4801,7 +4802,7 @@ class Templates:
                     )
 
                     method_used = "chi2_shift"
-                    logger.info("Alignment succeeded (method: %s).", method_used)
+                    logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
                     return scienceFpath, new_templateFpath
 
                 except Exception as _e:

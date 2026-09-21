@@ -58,6 +58,7 @@ import traceback
 # Local imports
 from functions import (
     AutophotYaml,
+    STATUS,
     log_step,
     pix_dist,
     mag,
@@ -785,7 +786,7 @@ class Catalog:
         DataFrame
             DataFrame containing the catalog data, or None if an error occurs.
         """
-        logger.info(log_step("Catalog: sequence sources in field"))
+        logger.log(STATUS, log_step("Catalog: sequence sources in field"))
 
         try:
             catalogName = self._require_catalog_selected(catalogName)
@@ -1240,7 +1241,8 @@ class Catalog:
                     logger.critical("Catalog %s is not recognized.", catalogName)
                     sys.exit()
 
-                logger.info(
+                logger.log(
+                    STATUS,
                     "%s catalog contains %d sources",
                     catalogName.upper(),
                     len(selectedCatalog),

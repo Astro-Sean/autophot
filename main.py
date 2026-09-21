@@ -146,7 +146,10 @@ from functions import (
     LogMessageNormalizeFilter,
     safe_fits_write,
     resolve_verbose_level,
-    verbose_to_log_level,
+    verbose_to_console_level,
+    ConsoleLevelFilter,
+    STATUS,
+    log_status,
     VERBOSE_LEVELS,
 )
 from limits import BETA_APERTURE_SIGMA_N, Limits, _analytic_psf_for_injection
@@ -493,7 +496,7 @@ def run_photometry():
         "--verbose",
         dest="verbose",
         action="store_true",
-        help="Debug verbosity: show detailed diagnostics (overrides global_verbose_level).",
+        help="Verbose mode: show intermediate diagnostics (overrides global_verbose_level).",
         default=False,
     )
     parser.add_argument(
@@ -501,7 +504,7 @@ def run_photometry():
         "--quiet",
         dest="quiet",
         action="store_true",
-        help="Quiet mode: warnings and errors only (overrides global_verbose_level).",
+        help="Quiet mode: warnings, errors, and the final result only (overrides global_verbose_level).",
         default=False,
     )
     parser.add_argument(
@@ -510,7 +513,7 @@ def run_photometry():
         type=str,
         default=None,
         metavar="LEVEL",
-        help="Set verbosity explicitly: 0/1/2 or quiet, normal, debug (overrides global_verbose_level).",
+        help="Set verbosity explicitly: 0/1/2/3 or quiet, normal, verbose, debug (overrides global_verbose_level).",
     )
     args = parser.parse_args()
 
@@ -540,7 +543,7 @@ def run_photometry():
         )
         raise SystemExit(2)
 
-    # CLI verbosity flags override the YAML setting.  The resolved 0/1/2
+    # CLI verbosity flags override the YAML setting.  The resolved 0-3
     # value is written back so every sub-component sees a consistent level.
     _cli_verbose = None
     if getattr(args, "verbose", False):
@@ -759,8 +762,8 @@ def run_photometry():
                 if prepare_template
                 else f"Output_{base}.csv in {cur_dir}"
             )
-            logging.info(
-                log_step(
+            logging.log(
+                STATUS, log_step(
                     f"Skip (restart=False): {os.path.basename(science_file)} - {_out}. "
                     "Set restart=True to reprocess."
                 )
@@ -815,46 +818,47 @@ def run_photometry():
             handler.close()
             logging.root.removeHandler(handler)
 
-        # Global verbosity control (0=warnings/errors, 1=info, 2=debug).
-        # Already resolved to 0/1/2 after YAML load; resolve again for
-        # callers that build input_yaml by hand.
+        # Global verbosity control (0=quiet, 1=normal, 2=verbose, 3=debug).
+        # The console handler is level-gated by the tier; the per-image log
+        # file always records DEBUG+ so the full diagnostic record is kept
+        # regardless of how quiet the console is.
         vlevel = resolve_verbose_level(input_yaml.get("global_verbose_level", 1))
-        log_level = verbose_to_log_level(vlevel)
+        console_level = verbose_to_console_level(vlevel)
 
         # Plain formatter for the file log (no ANSI codes).
         log_file = os.path.join(cur_dir, f"LOG_{input_yaml['base']}.log")
         file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
-        file_handler.setLevel(log_level)
+        file_handler.setLevel(logging.DEBUG)
         # No per-line timestamp: the run's wall-clock start/end are logged
         # explicitly, so the level tag is the only prefix kept in the file.
         plain_formatter = PlainFormatter(
             fmt="%(levelname)s - %(message)s",
         )
         file_handler.setFormatter(plain_formatter)
-        
+
         normalize_filter = LogMessageNormalizeFilter(width=150)
         file_handler.addFilter(normalize_filter)
 
         root_logger = logging.getLogger("")
-        root_logger.setLevel(log_level)
+        root_logger.setLevel(logging.DEBUG)
         root_logger.addHandler(file_handler)
 
         console = logging.StreamHandler()
-        console.setLevel(log_level)
+        console.setLevel(logging.DEBUG)  # level enforced by ConsoleLevelFilter
+        console.addFilter(ConsoleLevelFilter(console_level))
 
         formatter = ColoredLevelFormatter(use_color=True)
         console.setFormatter(formatter)
         console.addFilter(normalize_filter)
 
         logging.getLogger("").addHandler(console)
-        logging.getLogger("").setLevel(log_level)
 
         # Prevents logging errors from crashing the program.
         logging.raiseExceptions = False
 
         # Wall-clock bracket for the whole run; the console formatter prints
         # no per-line timestamp, so the run's start/end live in the log itself.
-        logging.info(
+        log_status(
             "Started: %s",
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start)),
         )
@@ -1665,12 +1669,12 @@ def run_photometry():
         header["gain"] = gain
         # saturate and RDNOISE were already written to the header above.
 
-        logging.info(ascii_kv("IMAGE", _img_kv, framed=True))
+        log_status(ascii_kv("IMAGE", _img_kv, framed=True))
 
         # =============================================================================
         # Image Preprocessing
         # =============================================================================
-        logging.info(border_msg("Image preprocessing"))
+        log_status(border_msg("Image preprocessing"))
 
         # -------------------------------------------------------------------------
         # Trim NaN boundaries (chip gaps / no-coverage edges)
@@ -1692,7 +1696,7 @@ def run_photometry():
                                 0,
                             )
                             target_x, target_y = float(target_x), float(target_y)
-                            logging.info(
+                            logging.debug(
                                 "Target position for NaN trimming: (%.1f, %.1f) px",
                                 target_x,
                                 target_y,
@@ -1736,7 +1740,7 @@ def run_photometry():
                             )
                             input_yaml["target_x_pix"] = float(new_target_x)
                             input_yaml["target_y_pix"] = float(new_target_y)
-                            logging.info(
+                            logging.debug(
                                 "Target pixel coordinates refreshed after trimming: (%.1f, %.1f) px",
                                 float(new_target_x),
                                 float(new_target_y),
@@ -1780,8 +1784,8 @@ def run_photometry():
         
         if do_trim:
             try:
-                logging.info(
-                    log_step(
+                logging.log(
+                    STATUS, log_step(
                         f"Trim: {base_filename} to {trim_image} arcmin (target center)"
                     )
                 )
@@ -1867,8 +1871,8 @@ def run_photometry():
             width = right_col - left_col + 1
 
             if (height < image.shape[0] - 1) or (width < image.shape[1] - 1):
-                logging.info(
-                    log_step(
+                logging.log(
+                    STATUS, log_step(
                         f"Recrop: {base_filename} (remove uniform edge rows/cols)"
                     )
                 )
@@ -1903,7 +1907,7 @@ def run_photometry():
                     )
                     input_yaml["target_x_pix"] = float(target_x_pix)
                     input_yaml["target_y_pix"] = float(target_y_pix)
-                    logging.info(
+                    logging.debug(
                         f"Target pixel coordinates refreshed after trimming: "
                         f"({target_x_pix:.1f}, {target_y_pix:.1f}) px"
                     )
@@ -1939,7 +1943,7 @@ def run_photometry():
         # =============================================================================
         #   Run SExtractor
         # =============================================================================
-        logging.info(border_msg("Source detection and FWHM"))
+        log_status(border_msg("Source detection and FWHM"))
         _fwhm_err = np.nan
         try:
             _sex_wrapper = SExtractorWrapper(config=input_yaml)
@@ -1985,7 +1989,7 @@ def run_photometry():
         # =============================================================================
         # Measuring the background statistics (don't remove it)
         # =============================================================================
-        logging.info(border_msg("Background: initial pass"))
+        log_status(border_msg("Background: initial pass"))
 
         bg_remover = BackgroundSubtractor(input_yaml)
         result = bg_remover.remove(image, plot=False, fwhm=ImageFWHM)
@@ -2003,7 +2007,7 @@ def run_photometry():
 
         _seeing_arcsec = float(ImageFWHM) * pixel_scale if np.isfinite(ImageFWHM) else float("nan")
         logging.info("Preliminary FWHM: %.1f pixels", ImageFWHM)
-        logging.info("Image seeing: %.2f arcseconds", _seeing_arcsec)
+        log_status("Image seeing: %.2f arcseconds", _seeing_arcsec)
 
         # Save the initially measured FWHM for the post-alignment inflation
         # check.  input_yaml["fwhm"] may still hold the config default (e.g.,
@@ -2026,7 +2030,7 @@ def run_photometry():
             float(ImageFWHM) if np.isfinite(ImageFWHM) else 3.0, input_yaml
         )
         input_yaml["sampling_regime"] = _sampling_regime
-        logging.info(
+        log_status(
             "Undersampled mode: %s | Sampling regime: %s (FWHM=%.2f px, threshold=%.2f px)",
             input_yaml["undersampled_mode"],
             _sampling_regime,
@@ -2100,8 +2104,8 @@ def run_photometry():
             input_yaml["cosmic_rays"].get("remove_cmrays", False)
             and not already_cleaned
         ):
-            logging.info(
-                log_step(
+            logging.log(
+                STATUS, log_step(
                     f"Remove cosmic rays / streaks: {base_filename}"
                 )
             )
@@ -2141,7 +2145,7 @@ def run_photometry():
         # =============================================================================
         #          Check for Existing WCS
         # =============================================================================
-        logging.info(border_msg("WCS: check header and plate solve"))
+        log_status(border_msg("WCS: check header and plate solve"))
 
         existingWCS = False
         updated_header = None
@@ -2198,7 +2202,7 @@ def run_photometry():
                         "WCS solve failed and fallback to existing WCS is disabled."
                     )
             else:
-                logging.info("Plate solve successful")
+                log_status("Plate solve successful")
                 if apply_solved_to_fits:
                     header = updated_header
                     safe_fits_write(fpath, image, header)
@@ -2378,7 +2382,7 @@ def run_photometry():
         # =============================================================================
         # Remove the background
         # =============================================================================
-        logging.info(
+        log_status(
             border_msg("Background: masked pass (variable sources, SIMBAD)")
         )
 
@@ -2452,7 +2456,7 @@ def run_photometry():
             if (tname and str(tname).strip() != "Transient")
             else "Target position"
         )
-        logging.info(border_msg(section_title))
+        log_status(border_msg(section_title))
 
         if (input_yaml["target_name"] is None) or (
             input_yaml["target_name"] == "Transient"
@@ -2594,7 +2598,7 @@ def run_photometry():
             input_yaml["template_subtraction"].get("do_subtraction", False)
             and not prepare_template
         ):
-            logging.info(border_msg("Template: locate, align, and match"))
+            log_status(border_msg("Template: locate, align, and match"))
             try:
                 templateFpath = template_functions.get_template()
                 try:
@@ -2642,8 +2646,8 @@ def run_photometry():
                     if not templateFpath:
                         input_yaml["template_subtraction"]["do_subtraction"] = False
                         template_available = False
-                        logging.info(
-                            log_step("No template images - skip subtraction")
+                        logging.log(
+                            STATUS, log_step("No template images - skip subtraction")
                         )
                     else:
                         fpath, templateFpath = template_functions.align(
@@ -2812,7 +2816,7 @@ def run_photometry():
         # =============================================================================
         # Get background statistics after subtraction
         # =============================================================================
-        logging.info(
+        log_status(
             border_msg("Calibration stage: image, background, and weight")
         )
 
@@ -2853,7 +2857,7 @@ def run_photometry():
         # =============================================================================
         #     Get a Reference catalog
         # =============================================================================
-        logging.info(border_msg("Reference photometric catalog"))
+        log_status(border_msg("Reference photometric catalog"))
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
 
         selected_catalog_name = Calibrate_Catalog._require_catalog_selected(
@@ -2971,7 +2975,7 @@ def run_photometry():
         # =============================================================================
         # Run source detection on final calibrated image
         # =============================================================================
-        logging.info(border_msg("Source detection on calibrated image"))
+        log_status(border_msg("Source detection on calibrated image"))
 
         def _run_sextractor_two_pass(config, fpath, **kwargs):
             """Run SExtractor with optional FWHM refinement pass."""
@@ -3124,8 +3128,8 @@ def run_photometry():
         except Exception:
             pixel_scale_arcsec = 0.3
         _seeing_arcsec = float(ImageFWHM) * pixel_scale_arcsec if np.isfinite(ImageFWHM) else float("nan")
-        logging.info("Image FWHM: %.2f px", float(ImageFWHM))
-        logging.info("Image seeing: %.2f arcseconds", _seeing_arcsec)
+        log_status("Image FWHM: %.2f px", float(ImageFWHM))
+        log_status("Image seeing: %.2f arcseconds", _seeing_arcsec)
         area_sq_arcmin = (
             (ny * nx) * (pixel_scale_arcsec / 60.0) ** 2 if pixel_scale_arcsec else 0.0
         )
@@ -3362,7 +3366,7 @@ def run_photometry():
         # =============================================================================
         # PSF Model Building
         # =============================================================================
-        logging.info(
+        log_status(
             border_msg("Aperture, optimum radius, and PSF on sequence stars")
         )
 
@@ -4222,7 +4226,7 @@ def run_photometry():
         # =============================================================================
         # Zeropoint Calculation
         # =============================================================================
-        logging.info(border_msg("Zeropoint and color terms"))
+        log_status(border_msg("Zeropoint and color terms"))
 
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
         GetZeropoint = Zeropoint(input_yaml=input_yaml)
@@ -4405,7 +4409,7 @@ def run_photometry():
                 ]
             )
         if _zp_rows:
-            logging.info(
+            log_status(
                 ascii_table(
                     "Zeropoint", ["Method", "ZP", "err", "N", "slope"], _zp_rows
                 )
@@ -4544,12 +4548,12 @@ def run_photometry():
             and template_available
             and not prepare_template
         ):
-            logging.info(border_msg("Difference image (template subtraction)"))
+            log_status(border_msg("Difference image (template subtraction)"))
             science_image = get_image(fpath)
             template_image = get_image(templateFpath)
             if science_image.shape != template_image.shape:
-                logging.info(
-                    log_step(
+                logging.log(
+                    STATUS, log_step(
                         f"Crop: {os.path.basename(fpath)} vs {os.path.basename(templateFpath)}"
                     )
                 )
@@ -4697,8 +4701,8 @@ def run_photometry():
             # These sources were detected on the original image before resampling degradation,
             # then recentered and validated for PSF building. Using them avoids detecting
             # sources on the degraded resampled image (important for undersampled data like ZTF).
-            logging.info(
-                log_step(
+            logging.log(
+                STATUS, log_step(
                     f"Match sources: {os.path.basename(fpath)} vs {os.path.basename(templateFpath)}"
                 )
             )
@@ -8415,7 +8419,7 @@ def run_photometry():
         # =============================================================================
 
         #  Log Start of Targeted Photometry
-        logging.info(
+        log_status(
             border_msg(f"Target photometry: {input_yaml['target_name']}")
         )
 
@@ -9181,7 +9185,7 @@ def run_photometry():
             )
         )
         if _targ_diag:
-            logging.info(ascii_kv("Target diagnostics", _targ_diag))
+            log_status(ascii_kv("Target diagnostics", _targ_diag))
 
         fitted_ra_deg = fitted_sky.ra.degree
         fitted_dec_deg = fitted_sky.dec.degree
@@ -9189,7 +9193,7 @@ def run_photometry():
         # =============================================================================
         # Calibration and Output
         # =============================================================================
-        logging.info(
+        log_status(
             border_msg("Calibrated magnitudes (AP and PSF on target)")
         )
         #  Calibrate Magnitudes
@@ -9513,7 +9517,7 @@ def run_photometry():
                         _ot_sources = _ot_sources[_dist > 3.0].copy()
 
                 if not _ot_sources.empty:
-                    logging.info(
+                    log_status(
                         border_msg(
                             f"Other transients: {len(_ot_sources)} sources found "
                             f"(types: {', '.join(sorted(_ot_sources['OTYPE_opt'].unique()))})"
@@ -9648,7 +9652,7 @@ def run_photometry():
             or get_LimitingMagnitude
         ):
             snr_val = TargetPosition.at[idx, "SNR"]
-            logging.info(
+            log_status(
                 border_msg("Limiting magnitude (injection) near target")
             )
             # Limits instance already created earlier for get_cutout
@@ -10222,7 +10226,7 @@ def run_photometry():
 
             # --- Log detection decision with all metrics ---
             _det_status = "DETECTION" if is_det else "non-detection"
-            logging.info(
+            log_status(
                 "Detection decision: %s | SNR=%.2f (threshold=%.1f) | "
                 "flux_psf=%.4f flux_ap=%.4f | chi2=%s | inverted=%s",
                 _det_status,
@@ -11036,10 +11040,10 @@ def run_photometry():
             ("PSF model", str(output.get("psf_model") or "none")),
             ("Image FWHM", f"{_fnum(output.get('image_fwhm'), 2)} px"),
         ]
-        logging.info(ascii_kv("PHOTOMETRY", _res_pairs, framed=True))
+        log_status(ascii_kv("PHOTOMETRY", _res_pairs, framed=True), ui=True)
 
-        logging.info(log_step("Photometry finished"))
-        logging.info(
+        log_status(log_step("Photometry finished"))
+        log_status(
             "Finished: %s  (%.1f s)",
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end)),
             end - start,

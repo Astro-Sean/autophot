@@ -12,7 +12,7 @@ default_input:
 
   selected_filters: [] # list[str]|null --- Optional list of filters to run (e.g. `["g","r"]`). When empty/null, run all available filters.
 
-  global_verbose_level: 1 # int|str --- Global verbosity: 0/quiet=warnings and errors only, 1/normal=standard info, 2/debug=detailed diagnostics (very chatty). CLI flags -v/-q/--verbose-level override this at runtime.
+  global_verbose_level: 1 # int|str --- Console verbosity: 0/quiet=warnings, errors, and the final result only; 1/normal=stage progress and key measurements; 2/verbose=intermediate diagnostics; 3/debug=full internal diagnostics. The per-image LOG_*.log file always records everything (DEBUG). CLI flags -v/-q/--verbose-level override this at runtime.
 
   target_name: Transient # str --- Target name used in outputs (e.g. IAU name).
   target_ra: null # float --- Target right ascension (degrees, FK5/J2000).

@@ -31,9 +31,11 @@ from astropy.table import Table
 
 # --- Local Imports (optional) ---
 try:
-    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header  # type: ignore
+    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, STATUS  # type: ignore
 except (ModuleNotFoundError, ImportError):
     # Minimal fallback for environments missing the full photometry stack.
+    STATUS = logging.INFO  # degrade STATUS to INFO when functions is absent
+
     def log_step(message: str, *args, **kwargs) -> str:
         m = str(message).strip()
         if not m:
@@ -2527,8 +2529,9 @@ class WCSSolver:
                     if self._run_solve_field(
                         args, wcs_file, timeout_sec, astrometry_log_fpath
                     ):
-                        logger.info(
-                            "WCS solved (%s) with tweak order %s", label, tweak_order
+                        logger.log(
+                            STATUS,
+                            "WCS solved (%s) with tweak order %s", label, tweak_order,
                         )
                         # solve-field may return no usable SIP even when asked:
                         # too few matched stars for the requested order yields
@@ -2851,7 +2854,8 @@ class WCSSolver:
                     if self._run_solve_field(
                         args_no_sex, wcs_file, timeout_sec, astrometry_log_fpath
                     ):
-                        logger.info(
+                        logger.log(
+                            STATUS,
                             "WCS solved without SExtractor (tweak order %s)",
                             tweak_order,
                         )
@@ -2890,8 +2894,9 @@ class WCSSolver:
                     if self._run_solve_field(
                         args_blind, wcs_file, timeout_sec, astrometry_log_fpath
                     ):
-                        logger.info(
-                            "WCS solved with blind solve (tweak order %s)", tweak_order
+                        logger.log(
+                            STATUS,
+                            "WCS solved with blind solve (tweak order %s)", tweak_order,
                         )
                         break
                     logger.warning(
@@ -3031,7 +3036,8 @@ class WCSSolver:
                         else:
                             logger.debug("solved_wcs_for_compare is None, skipping comparison")
                             med_sv, p95_sv, sh_sv = np.nan, np.nan, 0.0
-                        logger.info(
+                        logger.log(
+                            STATUS,
                             "WCS compare:\tn=%d | input med/p95=%.3f/%.3f\" (shift=%+.1f px) | solved med/p95=%.3f/%.3f\" (shift=%+.1f px)",
                             int(len(x_d)),
                             float(med_in),

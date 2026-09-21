@@ -7914,14 +7914,9 @@ NNW
             exc_type, exc_obj, exc_tb = sys.exc_info()
             fname = os.path.basename(exc_tb.tb_frame.f_code.co_filename)
             lineno = exc_tb.tb_lineno
-            logging.info(
-                f"\n\n Issue creating side by side plot \n"
-                f"\n"
-                f"Type     : {exc_type.__name__}\n"
-                f"File     : {fname}\n"
-                f"Line     : {lineno}\n"
-                f"Message  : {str(e)}\n"
-                f"\n" + traceback.format_exc()
+            logging.debug(
+                "Issue creating side by side plot: %s:%d: %s\n%s",
+                fname, lineno, e, traceback.format_exc(),
             )
 
     def _filter_sci_to_ref_counterparts(
