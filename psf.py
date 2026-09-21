@@ -5526,7 +5526,8 @@ class PSF:
                 fontsize=7,
                 color="white",
             )
-            ax.set_xlabel("X [native px]")
+            # The image x ticks are hidden; the shared x label lives on
+            # the bottom projection panel.
             ax.set_ylabel("Y [native px]")
             ax.set_xticks([])
 
@@ -5567,7 +5568,7 @@ class PSF:
                         alpha=0.5,
                         ls=":",
                     )
-            ax_B.set_ylabel("Mean ePSF flux [normalised]")
+            ax_B.set_ylabel("Mean flux [norm.]", fontsize=7)
             ax_B.set_xlabel("X [native px]")
             ax_R.yaxis.tick_right()
             ax_R.tick_params(axis="x", rotation=90)
