@@ -5415,11 +5415,11 @@ class PSF:
         cmap: str = "viridis",
         use_zscale: bool = True,
         zscale_contrast: float = 0.25,
-        use_log_scale: bool = False,
         fwhm_native: Optional[float] = None,
     ):
         """
-        Three-panel figure: oversampled PSF image + X/Y projections.
+        Four-panel figure: oversampled PSF image (linear + log scale) with
+        X/Y projections.
 
         Axes are in native-pixel units so the ePSF width is directly
         comparable to the image FWHM.  When ``fwhm_native`` is given, a
@@ -5453,10 +5453,24 @@ class PSF:
                 vmin, vmax = np.nanmin(data), np.nanmax(data)
 
             apply_autophot_mplstyle()
-            fig, ax = plt.subplots(figsize=set_size(540, 1))
-            divider = make_axes_locatable(ax)
-            ax_R = divider.append_axes("right", size="25%", pad=0.25, sharey=ax)
-            ax_B = divider.append_axes("bottom", size="25%", pad=0.25, sharex=ax)
+            # Two image panels: linear (core) + log colour scale (wings),
+            # each with its own projection strip.  On the linear scale the
+            # wings vanish into the background, so the log panel is the
+            # primary wing-shape diagnostic.
+            fig = plt.figure(figsize=set_size(540, aspect=0.8, fraction=1.9))
+            gs = fig.add_gridspec(
+                2,
+                3,
+                width_ratios=[1.0, 0.28, 1.0],
+                height_ratios=[1.0, 0.30],
+                wspace=0.05,
+                hspace=0.06,
+            )
+            ax = fig.add_subplot(gs[0, 0])
+            ax_R = fig.add_subplot(gs[0, 1], sharey=ax)
+            ax_log = fig.add_subplot(gs[0, 2], sharex=ax, sharey=ax)
+            ax_B = fig.add_subplot(gs[1, 0], sharex=ax)
+            ax_Blog = fig.add_subplot(gs[1, 2], sharex=ax)
 
             ny, nx = data.shape
             scale = 1.0 / max(1, int(oversample))
@@ -5464,12 +5478,11 @@ class PSF:
             epsf_fwhm_meas = measure_epsf_fwhm_native(data, oversample)
 
             # LogNorm requires strictly positive values.
-            if use_log_scale:
-                data_for_plot = data - np.nanmin(data) + 1e-10
-                norm = LogNorm(vmin=vmin - np.nanmin(data) + 1e-10, vmax=vmax - np.nanmin(data) + 1e-10)
-            else:
-                data_for_plot = data
-                norm = None
+            data_log = data - np.nanmin(data) + 1e-10
+            norm_log = LogNorm(
+                vmin=vmin - np.nanmin(data) + 1e-10,
+                vmax=vmax - np.nanmin(data) + 1e-10,
+            )
 
             # Render NaNs as magenta "no data" regions.
             try:
@@ -5481,42 +5494,52 @@ class PSF:
 
             # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
             # which could be valid sources
-            _mask = ~np.isfinite(data_for_plot)
-            im = ax.imshow(
-                np.ma.array(data_for_plot, mask=_mask),
+            _mask = ~np.isfinite(data)
+            ax.imshow(
+                np.ma.array(data, mask=_mask),
                 extent=extent,
                 origin="lower",
                 cmap=_cmap,
                 interpolation="none",
-                norm=norm,
-                vmin=None if use_log_scale else vmin,
-                vmax=None if use_log_scale else vmax,
+                vmin=vmin,
+                vmax=vmax,
+            )
+            ax_log.imshow(
+                np.ma.array(data_log, mask=_mask),
+                extent=extent,
+                origin="lower",
+                cmap=_cmap,
+                interpolation="none",
+                norm=norm_log,
             )
 
             cx, cy = nx * scale / 2.0, ny * scale / 2.0
-            ax.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
-            ax.axhline(cy, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
             _has_fwhm = fwhm_native is not None and np.isfinite(fwhm_native)
-            if _has_fwhm:
-                ax.add_patch(
-                    Circle(
-                        (cx, cy),
-                        0.5 * float(fwhm_native),
-                        fill=False,
-                        color="white",
-                        ls="--",
-                        lw=0.8,
+            for _a in (ax, ax_log):
+                _a.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
+                _a.axhline(cy, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
+                if _has_fwhm:
+                    _a.add_patch(
+                        Circle(
+                            (cx, cy),
+                            0.5 * float(fwhm_native),
+                            fill=False,
+                            color="white",
+                            ls="--",
+                            lw=0.8,
+                        )
                     )
-                )
             _title = f"Oversample={oversample}x"
             if np.isfinite(epsf_fwhm_meas):
                 _title += f" - ePSF FWHM={epsf_fwhm_meas:.2f} px"
             if _has_fwhm:
                 _title += f" (image {float(fwhm_native):.2f} px)"
             ax.set_title(_title, fontsize=8, pad=2)
-            ax.set_xlabel("X [native px]")
+            ax_log.set_title("log scale", fontsize=8, pad=2)
             ax.set_ylabel("Y [native px]")
             ax.set_xticks([])
+            ax_log.set_xticks([])
+            ax_log.tick_params(axis="y", labelleft=False)
 
             x_phys = (np.arange(nx) + 0.5) * scale
             y_phys = (np.arange(ny) + 0.5) * scale
@@ -5558,7 +5581,45 @@ class PSF:
             ax_B.set_ylabel("Mean ePSF flux [normalised]")
             ax_B.set_xlabel("X [native px]")
             ax_R.yaxis.tick_right()
-            ax_R.tick_params(axis="x", rotation=90)
+            ax_R.tick_params(axis="x", rotation=90, labelsize=6)
+            ax_R.tick_params(axis="y", labelleft=False, labelright=False)
+
+            # Log-y x/y profiles under the log image -- wing shape and any
+            # left-right/top-bottom asymmetry are visible at low flux.
+            ax_Blog.step(
+                x_phys,
+                hx,
+                color=PLOT_COLORS.get('psf', '#00AA00'),
+                lw=0.5,
+                where="mid",
+                label="x",
+            )
+            ax_Blog.step(
+                y_phys,
+                hy,
+                color=PLOT_COLORS.get('epsf_aperture', '#CC79A7'),
+                lw=0.5,
+                where="mid",
+                ls="--",
+                label="y",
+            )
+            ax_Blog.set_yscale("log")
+            ax_Blog.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
+            if _has_fwhm:
+                for sgn in (-1.0, 1.0):
+                    ax_Blog.axvline(
+                        cx + sgn * 0.5 * float(fwhm_native),
+                        color=PLOT_COLORS.get('spine_color', '#000000'),
+                        lw=0.5,
+                        alpha=0.5,
+                        ls=":",
+                    )
+            _hx_peak = np.nanmax(hx) if np.isfinite(hx).any() else np.nan
+            if np.isfinite(_hx_peak) and _hx_peak > 0:
+                ax_Blog.set_ylim(bottom=_hx_peak * 1e-6)
+            ax_Blog.set_ylabel("Mean ePSF flux (log)", fontsize=7)
+            ax_Blog.set_xlabel("X [native px]")
+            ax_Blog.legend(fontsize=6, loc="upper right", frameon=False)
 
             for axis in (ax_R, ax_B):
                 fmt = ScalarFormatter(useMathText=True)
