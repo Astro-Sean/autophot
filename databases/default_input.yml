@@ -215,7 +215,8 @@ default_input:
     emcee_delta: null # float|null --- Proposal scale / step size override (implementation-specific).
     emcee_burnin_frac: 0.3 # float --- Fraction of samples to discard as burn-in.
     emcee_thin: 10 # int --- Thinning factor for saved chain samples.
-    emcee_adaptive_tau_target: 50 # int --- Target integrated autocorrelation time for adaptive stopping (if enabled).
+    emcee_adaptive_tau_target: 100 # int --- Convergence threshold for adaptive stopping: stop when chain length > this factor * autocorrelation time (100 gives a healthy effective sample size; the emcee floor is ~50).
+    emcee_early_stop: True # bool --- If True, a converged chain may stop before emcee_nsteps is reached (nsteps acts as a cap). Set False to always run the full fixed nsteps.
     emcee_min_autocorr_N: 100 # int --- Minimum chain length (in steps) before autocorr is estimated.
     emcee_batch_steps: 100 # int --- Steps per batch when running emcee in batches.
     emcee_jitter_scale: 0.01 # float --- Small jitter applied to initial walker positions (relative scale).
