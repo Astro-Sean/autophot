@@ -4370,8 +4370,8 @@ def run_photometry():
             n_segments = 1
         else:
             logging.info(
-                "Color term correction enabled (photometry.apply_colorterms=True); "
-                "measuring and applying color term corrections to catalog sources."
+                "Color term correction requested (photometry.apply_colorterms=True); "
+                "measuring the color term (applied only if well measured)."
             )
             phot_cfg = input_yaml.get("photometry", {}) or {}
             n_segments = int(phot_cfg.get("color_term_n_segments", 1))
@@ -4418,6 +4418,24 @@ def run_photometry():
                         ImageColorTermError = (
                             color_coeff_errors[1] if color_coeff_errors is not None else None
                         )
+
+            # A rejected fit returns zero coefficients; normalize to None so
+            # downstream code and has_color_term metadata record "no
+            # correction" rather than applying a zero slope.
+            if color_coeffs is not None:
+                if n_segments > 1:
+                    _slopes = np.asarray(color_coeffs[1], dtype=float)
+                    _zero_term = bool(np.all(np.abs(_slopes) < 1e-9))
+                else:
+                    _zero_term = abs(float(color_coeffs[1])) < 1e-9
+                if _zero_term:
+                    logging.info(
+                        "Color term fit did not produce a usable correction; "
+                        "using the uncorrected zeropoint fit."
+                    )
+                    color_coeffs, color_coeff_errors = None, None
+                    n_segments = 1
+                    ImageColorTerm, ImageColorTermError = None, None
 
         fit_mode = "piecewise" if n_segments > 1 else "polynomial"
         CatalogSources, image_zeropoint = GetZeropoint.fit_zeropoint(

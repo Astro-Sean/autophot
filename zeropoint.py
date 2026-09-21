@@ -3813,25 +3813,9 @@ class Zeropoint:
                     f"n_inliers={n_in}, color_range={x_range:.3f} mag"
                 )
 
-            # If color term is negligible or not statistically significant, treat as zero.
-            # Two criteria: (1) absolute magnitude < 0.01 (negligible effect), or
-            # (2) |slope| < 2 * slope_err (not significant at 2-sigma).
-            # Applying a non-significant color term injects noise into the ZP without
-            # removing real systematics, degrading calibration precision.
-            if fit_mode == "polynomial" and poly_order == 1:
-                _slope_sig = (
-                    np.isfinite(coefficient_errors[1])
-                    and coefficient_errors[1] > 0
-                    and abs(coefficients[1]) < 2.0 * coefficient_errors[1]
-                )
-                if abs(coefficients[1]) < 0.01 or _slope_sig:
-                    logger.info(
-                        f"fit_color_term: linear slope {coefficients[1]:.4f} +/- {coefficient_errors[1]:.4f} "
-                        f"is negligible (< 0.01) or not significant (< 2-sigma); "
-                        "returning 0 to avoid adding noise"
-                    )
-                    return (0.0, 0.0), (0.0, 0.0)
-            elif fit_mode == "polynomial" and poly_order == 2:
+            # Quadratic first: drop to linear when the x^2 term is
+            # negligible or not significant at 2-sigma.
+            if fit_mode == "polynomial" and poly_order == 2:
                 _quad_sig = (
                     np.isfinite(coefficient_errors[2])
                     and coefficient_errors[2] > 0
@@ -3843,10 +3827,55 @@ class Zeropoint:
                         f"is negligible (< 0.01) or not significant (< 2-sigma); "
                         "falling back to linear fit"
                     )
-                    # Fall back to linear if quadratic term is negligible
                     coefficients = (coefficients[0], coefficients[1])
                     coefficient_errors = (coefficient_errors[0], coefficient_errors[1])
                     poly_order = 1
+
+            # Apply the color term only when it is well measured.
+            # A poorly-constrained slope injects noise into the ZP rather
+            # than removing a real systematic, so require all of:
+            #   (1) enough inliers for a meaningful slope (>= 10),
+            #   (2) |slope| >= 3 * slope_err (marginal ~2-sigma slopes on
+            #       production data frequently degraded the ZP),
+            #   (3) the correction demonstrably reduces the residual
+            #       scatter (corrected MAD < uncorrected MAD),
+            #   (4) |slope| >= 0.01 (negligible absolute effect).
+            if fit_mode == "polynomial" and poly_order == 1:
+                _slope = coefficients[1]
+                _slope_err = coefficient_errors[1]
+                _sig_ok = (
+                    np.isfinite(_slope_err)
+                    and _slope_err > 0
+                    and abs(_slope) >= 3.0 * _slope_err
+                )
+                _resid_corr = yi - (coefficients[0] + _slope * xi)
+                _mad_before = mad_std(yi, ignore_nan=True)
+                _mad_after = mad_std(_resid_corr, ignore_nan=True)
+                _improves = (
+                    np.isfinite(_mad_after)
+                    and np.isfinite(_mad_before)
+                    and _mad_after < _mad_before
+                )
+                if (
+                    n_in < 10
+                    or not _sig_ok
+                    or not _improves
+                    or abs(_slope) < 0.01
+                ):
+                    logger.info(
+                        "fit_color_term: linear slope %.4f +/- %.4f rejected "
+                        "(n_inliers=%d, |slope|/err=%.1f, MAD %.3f -> %.3f); "
+                        "returning 0 to avoid adding noise",
+                        _slope,
+                        _slope_err,
+                        n_in,
+                        abs(_slope) / _slope_err
+                        if np.isfinite(_slope_err) and _slope_err > 0
+                        else -1.0,
+                        _mad_before,
+                        _mad_after,
+                    )
+                    return (0.0, 0.0), (0.0, 0.0)
 
             # Aliases for plotting.
             plot_intercept = coefficients[0]
