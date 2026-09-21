@@ -33,6 +33,7 @@ from functions import (
     SUPPORTED_PHOTOMETRIC_FILTERS,
     log_step,
     log_warning_from_exception,
+    ascii_table,
 )
 from check import FitsInfo
 from tns import get_coords, get_coords_simbad
@@ -361,14 +362,29 @@ class Prepare:
             accepted.append(fpath)
 
         if rejected:
-            self.logger.warning("FITS header validation: %d file(s) REJECTED:", len(rejected))
-            for fpath, reasons in rejected:
-                self.logger.warning("  %s: %s", os.path.basename(fpath), "; ".join(reasons))
+            self.logger.warning(
+                ascii_table(
+                    f"FITS header validation: {len(rejected)} file(s) REJECTED",
+                    ["File", "Reason"],
+                    [
+                        [os.path.basename(fpath), "; ".join(reasons)]
+                        for fpath, reasons in rejected
+                    ],
+                )
+            )
 
         if warnings_list:
-            self.logger.warning("FITS header validation: %d file(s) with MISSING important keywords:", len(warnings_list))
-            for fpath, warns in warnings_list:
-                self.logger.warning("  %s: %s", os.path.basename(fpath), "; ".join(warns))
+            self.logger.warning(
+                ascii_table(
+                    f"FITS header validation: {len(warnings_list)} file(s) "
+                    "with MISSING important keywords",
+                    ["File", "Issue"],
+                    [
+                        [os.path.basename(fpath), "; ".join(warns)]
+                        for fpath, warns in warnings_list
+                    ],
+                )
+            )
 
             if not self.input_yaml.get("validate_fits_headers_non_interactive", False):
                 try:

@@ -8728,22 +8728,30 @@ def run_photometry():
 
         # When MCMC is used, LSQ quality metrics (reduced_chi2, cfit, qfit) may be NaN.
         # Only log them when they are present and finite.
+        _fit_quality = []
         if "reduced_chi2" in TargetPosition:
             reduced_chi2_value = TargetPosition["reduced_chi2"].iloc[0]
             if np.isfinite(reduced_chi2_value):
-                logging.info("Target reduced chi2%s:\t%.1e", inverted_tag, reduced_chi2_value)
+                _fit_quality.append(
+                    (f"Reduced chi2{inverted_tag}", f"{reduced_chi2_value:.1e}")
+                )
 
         if "cfit" in TargetPosition:
             cfit_value = TargetPosition["cfit"].iloc[0]
             if np.isfinite(cfit_value):
-                logging.info("Target cfit%s:\t\t%.1e", inverted_tag, cfit_value)
+                _fit_quality.append((f"cfit{inverted_tag}", f"{cfit_value:.1e}"))
 
         if "qfit" in TargetPosition:
             qfit_value = TargetPosition["qfit"].iloc[0]
             if np.isfinite(qfit_value):
-                logging.info(
-                    f"Target qfit{inverted_tag}:\t\t{qfit_value:.1e} (qfit of zero indicates a good fit)"
+                _fit_quality.append(
+                    (
+                        f"qfit{inverted_tag}",
+                        f"{qfit_value:.1e} (zero indicates a good fit)",
+                    )
                 )
+        if _fit_quality:
+            logging.info(ascii_kv("Target fit quality", _fit_quality))
 
         # =============================================================================
         # Limiting magnitudes
@@ -9041,9 +9049,13 @@ def run_photometry():
         except Exception:
             target_beta = np.nan
 
+        # Collect target diagnostics into a single key/value block so the
+        # metrics align under one heading instead of scattered \t-padded lines.
+        _targ_diag = []
+
         snr_ap = float(TargetPosition["SNR"].iloc[0])
-        logging.info("Target SNR (aperture):\t%.1f", snr_ap)
-        
+        _targ_diag.append(("SNR (aperture)", f"{snr_ap:.1f}"))
+
         # If inverted fit was used, also log the inverted SNR for aperture
         if "_inverted_fit" in TargetPosition.columns and TargetPosition["_inverted_fit"].iloc[0]:
             # |flux| because the inverted-fit flux is negative by construction.
@@ -9052,8 +9064,10 @@ def run_photometry():
                 ap_err = float(TargetPosition["flux_AP_err"].iloc[0])
                 if ap_err > 0 and np.isfinite(ap_err):
                     snr_ap_inverted = np.abs(ap_flux) / ap_err
-                    logging.info("Target SNR (aperture) [inverted]:\t%.1f", snr_ap_inverted)
-        
+                    _targ_diag.append(
+                        ("SNR (aperture) [inverted]", f"{snr_ap_inverted:.1f}")
+                    )
+
         if (
             not do_aperture_ONLY
             and "flux_PSF" in TargetPosition.columns
@@ -9067,7 +9081,7 @@ def run_photometry():
                 else np.nan
             )
             if np.isfinite(snr_psf):
-                logging.info("Target SNR (PSF)%s:\t%.1f", inverted_tag, snr_psf)
+                _targ_diag.append((f"SNR (PSF){inverted_tag}", f"{snr_psf:.1f}"))
             # Difference-image PSF before inverted replacement (negative flux = oversubtraction dip)
             if (
                 "_inverted_fit" in TargetPosition.columns
@@ -9077,33 +9091,37 @@ def run_photometry():
                 fn = float(TargetPosition["flux_PSF_normal"].iloc[0])
                 fne = float(TargetPosition["flux_PSF_err_normal"].iloc[0])
                 if np.isfinite(fn) and np.isfinite(fne) and fne > 0:
-                    logging.info(
-                        "Target PSF on difference image (pre-invert): flux=%.4g +/- %.4g e/s, SNR=%.1f",
-                        fn,
-                        fne,
-                        np.abs(fn) / fne,
+                    _targ_diag.append(
+                        (
+                            "PSF pre-invert",
+                            f"flux={fn:.4g} +/- {fne:.4g} e/s, "
+                            f"SNR={np.abs(fn) / fne:.1f}",
+                        )
                     )
                 elif np.isfinite(fn):
-                    logging.info(
-                        "Target PSF on difference image (pre-invert): flux=%.4g e/s",
-                        fn,
-                    )
-        logging.info(
-            f"Target threshold:\t{TargetPosition['threshold'].iloc[0]:.1f} x background standard deviation"
+                    _targ_diag.append(("PSF pre-invert", f"flux={fn:.4g} e/s"))
+        _targ_diag.append(
+            (
+                "Threshold",
+                f"{TargetPosition['threshold'].iloc[0]:.1f} x background std",
+            )
         )
-        logging.info("Target detectability:\t%.1f %", target_beta * 100)
-        logging.info("Target FWHM:\t\t%.1f px", target_fwhm)
+        _targ_diag.append(("Detectability", f"{target_beta * 100:.1f} %"))
+        _targ_diag.append(("Target FWHM", f"{target_fwhm:.1f} px"))
 
         dx_pix = TargetPosition["x_fit"].iloc[0] - input_yaml["target_x_pix"]
         dy_pix = TargetPosition["y_fit"].iloc[0] - input_yaml["target_y_pix"]
         offset_pix = np.sqrt(dx_pix**2 + dy_pix**2)
 
-        logging.info(
-            "Position offset:\texpected (%.3f, %.3f) -> fitted (%.3f, %.3f) px | "
-            "dx=%+.3f, dy=%+.3f | total=%.3f px",
-            input_yaml['target_x_pix'], input_yaml['target_y_pix'],
-            TargetPosition['x_fit'].iloc[0], TargetPosition['y_fit'].iloc[0],
-            dx_pix, dy_pix, offset_pix,
+        _targ_diag.append(
+            (
+                "Position offset",
+                f"expected ({input_yaml['target_x_pix']:.3f}, "
+                f"{input_yaml['target_y_pix']:.3f}) -> fitted "
+                f"({TargetPosition['x_fit'].iloc[0]:.3f}, "
+                f"{TargetPosition['y_fit'].iloc[0]:.3f}) px | "
+                f"dx={dx_pix:+.3f}, dy={dy_pix:+.3f} | total={offset_pix:.3f} px",
+            )
         )
 
         if not np.isnan(TargetPosition["x_fit_err"].iloc[0]) and not np.isnan(
@@ -9127,15 +9145,18 @@ def run_photometry():
             ra_err = sky_center.separation(sky_dx).arcsecond
             dec_err = sky_center.separation(sky_dy).arcsecond
             fitting_error_arcsec = np.sqrt(ra_err**2 + dec_err**2)
-            logging.info(
-                "Fitting uncertainty: %.3f, %.3f px",
-                TargetPosition['x_fit_err'].iloc[0], TargetPosition['y_fit_err'].iloc[0],
+            _targ_diag.append(
+                (
+                    "Fitting uncertainty",
+                    f"{TargetPosition['x_fit_err'].iloc[0]:.3f}, "
+                    f"{TargetPosition['y_fit_err'].iloc[0]:.3f} px",
+                )
             )
         else:
             ra_err = np.nan
             dec_err = np.nan
             fitting_error_arcsec = 0
-            logging.info("Fitting uncertainty: N/A (fit did not converge)")
+            _targ_diag.append(("Fitting uncertainty", "N/A (fit did not converge)"))
 
         # pixel_to_world uses 0-based indexing by default (matching numpy arrays)
         expected_sky = imageWCS.pixel_to_world(
@@ -9152,10 +9173,15 @@ def run_photometry():
             * np.cos(np.radians(expected_sky.dec.degree))
         )
         ddec_arcsec = (fitted_sky.dec.degree - expected_sky.dec.degree) * 3600
-        logging.info(
-            "Sky offset: dRA=%+.3f\", dDec=%+.3f\" | total separation: %.3f +/- %.3f arcsec",
-            dra_arcsec, ddec_arcsec, separation, fitting_error_arcsec,
+        _targ_diag.append(
+            (
+                "Sky offset",
+                f"dRA={dra_arcsec:+.3f}\", dDec={ddec_arcsec:+.3f}\" | "
+                f"total {separation:.3f} +/- {fitting_error_arcsec:.3f} arcsec",
+            )
         )
+        if _targ_diag:
+            logging.info(ascii_kv("Target diagnostics", _targ_diag))
 
         fitted_ra_deg = fitted_sky.ra.degree
         fitted_dec_deg = fitted_sky.dec.degree

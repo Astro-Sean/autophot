@@ -13,6 +13,8 @@ from scipy.spatial import cKDTree
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+from functions import ascii_kv
+
 logger = logging.getLogger(__name__)
 
 
@@ -429,32 +431,47 @@ class AlignmentVerifier:
     
     def _log_verification_results(self, results: dict):
         """Log a human-readable summary of all verification sub-checks."""
-        
-        self.logger.info("Alignment Verification Results:")
-        self.logger.info("  Overall Quality: %s (score: %.3f)", results['alignment_quality'], results.get('alignment_score', 0))
-        self.logger.info("  Precise Alignment: %s", results['precise_alignment'])
-        
+        pairs = [
+            (
+                "Overall quality",
+                f"{results['alignment_quality']} "
+                f"(score {results.get('alignment_score', 0):.3f})",
+            ),
+            ("Precise alignment", results['precise_alignment']),
+        ]
+        issues = []
+
         if 'wcs_consistency' in results:
             wcs = results['wcs_consistency']
-            self.logger.info("  WCS Consistency: %s", 'PASS' if wcs['consistent'] else 'FAIL')
-            if wcs['issues']:
-                for issue in wcs['issues']:
-                    self.logger.warning("    %s", issue)
-        
+            pairs.append(
+                ("WCS consistency", 'PASS' if wcs['consistent'] else 'FAIL')
+            )
+            issues.extend(wcs['issues'] or [])
+
         if 'pixel_alignment' in results:
             pix = results['pixel_alignment']
-            self.logger.info("  Pixel Grid: %s", 'PASS' if pix['consistent'] else 'FAIL')
+            pairs.append(
+                ("Pixel grid", 'PASS' if pix['consistent'] else 'FAIL')
+            )
             if not pix['consistent']:
-                for issue in pix['issues']:
-                    self.logger.warning("    %s", issue)
-        
+                issues.extend(pix['issues'] or [])
+
         if 'coordinate_accuracy' in results:
             coord = results['coordinate_accuracy']
-            self.logger.info("  Coordinate Accuracy: max offset = %.3f px", coord.get('max_offset_pixels', 0))
-        
+            pairs.append(
+                (
+                    "Coordinate accuracy",
+                    f"max offset {coord.get('max_offset_pixels', 0):.3f} px",
+                )
+            )
+
         if 'resampling_quality' in results:
             resamp = results['resampling_quality']
-            self.logger.info("  Resampling Quality: %.3f", resamp.get('quality_score', 0))
-            if resamp['issues']:
-                for issue in resamp['issues']:
-                    self.logger.warning("    %s", issue)
+            pairs.append(
+                ("Resampling quality", f"{resamp.get('quality_score', 0):.3f}")
+            )
+            issues.extend(resamp['issues'] or [])
+
+        self.logger.info(ascii_kv("Alignment verification", pairs))
+        for issue in issues:
+            self.logger.warning("  %s", issue)

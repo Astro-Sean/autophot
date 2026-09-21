@@ -11,6 +11,8 @@ import json
 import logging
 from collections import OrderedDict
 
+from functions import ascii_kv
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,30 +46,26 @@ def plot_transient_info(data):
         logger.info("No TNS data available to display.")
         return
 
-    summary_lines = [
-        "Transient Summary:",
-        "-" * 40,
-        f"Name:         {data.get('name_prefix', '')}{data.get('objname', '')}",
-        f"Type:         {data.get('object_type', {}).get('name', 'Unknown')}",
-        f"RA / Dec:     {data.get('ra')} / {data.get('dec')}",
-        f"RA / Dec deg: {data.get('radeg')} / {data.get('decdeg')}",
-        f"Redshift:     {data.get('redshift', 'N/A')}",
-        f"Discovered:   {data.get('discoverydate')}",
+    pairs = [
+        ("Name", f"{data.get('name_prefix', '')}{data.get('objname', '')}"),
+        ("Type", data.get("object_type", {}).get("name", "Unknown")),
+        ("RA / Dec", f"{data.get('ra')} / {data.get('dec')}"),
+        ("RA / Dec deg", f"{data.get('radeg')} / {data.get('decdeg')}"),
+        ("Redshift", data.get("redshift", "N/A")),
+        ("Discovered", data.get("discoverydate")),
         (
-            "Disc. Mag:    "
+            "Disc. mag",
             f"{data.get('discoverymag')} mag "
-            f"(filter: {data.get('discmagfilter', {}).get('name', 'N/A')})"
+            f"(filter: {data.get('discmagfilter', {}).get('name', 'N/A')})",
         ),
-        f"Discoverer:   {data.get('discoverer')}",
-        f"Reporter:     {data.get('reporter')}",
+        ("Discoverer", data.get("discoverer")),
+        ("Reporter", data.get("reporter")),
     ]
     internal = data.get("internal_names")
     if internal:
-        summary_lines.append(f"Internal IDs: {internal}")
-    summary_lines.append("-" * 40)
+        pairs.append(("Internal IDs", internal))
 
-    for line in summary_lines:
-        logger.info(line)
+    logger.info(ascii_kv("Transient summary", pairs))
 
 
 def get_coords(objname, TNS_BOT_ID=None, TNS_BOT_NAME=None, TNS_BOT_API=None):

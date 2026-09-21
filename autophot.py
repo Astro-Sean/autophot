@@ -504,6 +504,8 @@ _IMPORT_ERROR_AUTOPHOT_DEPS: Exception | None = None
 try:
     from functions import (  # type: ignore
         AutophotYaml,
+        ascii_card,
+        ascii_kv,
         border_msg,
         ColoredLevelFormatter,
         concatenate_csv_files,
@@ -526,6 +528,8 @@ except Exception as _exc:  # pragma: no cover
     try:
         from functions import (  # type: ignore
             AutophotYaml,
+            ascii_card,
+            ascii_kv,
             border_msg,
             ColoredLevelFormatter,
             concatenate_csv_files,
@@ -542,6 +546,8 @@ except Exception as _exc:  # pragma: no cover
         _IMPORT_ERROR_AUTOPHOT_DEPS = _exc2
         log_step = None  # type: ignore
         border_msg = None  # type: ignore
+        ascii_card = None  # type: ignore
+        ascii_kv = None  # type: ignore
         ColoredLevelFormatter = None  # type: ignore
         AutophotYaml = None  # type: ignore
         concatenate_csv_files = None  # type: ignore
@@ -1867,16 +1873,25 @@ class AutomatedPhotometry:
                         "and no fallback RA/Dec provided in the configuration."
                     )
                     print(
-                        f"\n{'='*60}\n"
-                        f"ERROR: Cannot proceed without target coordinates.\n\n"
-                        f"You must provide one of:\n"
-                        f"  1. target_name + TNS API credentials (in wcs: TNS_BOT_ID, etc.)\n"
-                        f"  2. target_ra and target_dec coordinates manually\n"
-                        f"  3. target_name with RA/Dec fallback (if TNS fails)\n\n"
-                        f"Add to your input:\n"
-                        f"   autophot_input['target_ra'] = <RA in degrees>\n"
-                        f"   autophot_input['target_dec'] = <Dec in degrees>\n"
-                        f"{'='*60}\n"
+                        "\n"
+                        + (
+                            ascii_card(
+                                "ERROR: cannot proceed without target coordinates",
+                                [
+                                    "You must provide one of:",
+                                    "  1. target_name + TNS API credentials (in wcs: TNS_BOT_ID, etc.)",
+                                    "  2. target_ra and target_dec coordinates manually",
+                                    "  3. target_name with RA/Dec fallback (if TNS fails)",
+                                    "",
+                                    "Add to your input:",
+                                    "   autophot_input['target_ra'] = <RA in degrees>",
+                                    "   autophot_input['target_dec'] = <Dec in degrees>",
+                                ],
+                            )
+                            if ascii_card
+                            else "ERROR: Cannot proceed without target coordinates."
+                        )
+                        + "\n"
                     )
                     sys.exit("Stopped: No target coordinates provided.")
 
@@ -2114,16 +2129,21 @@ class AutomatedPhotometry:
 
                     if not _unique_cats:
                         _log("")
-                        _log("=" * 70)
-                        _log("  No photometric catalog selected.")
-                        _log(f"  Target: RA={backup_yaml['target_ra']:.6f} deg, "
-                             f"Dec={backup_yaml['target_dec']:.6f} deg")
-                        _log("")
-                        _log("  A reference catalog is required for photometric calibration.")
-                        _log("  Set 'catalog.use_catalog' in your YAML to one of:")
-                        for _alt in _available_catalogs:
-                            _log(f"    - {_alt}")
-                        _log("=" * 70)
+                        _log(
+                            ascii_card(
+                                "No photometric catalog selected",
+                                [
+                                    f"Target: RA={backup_yaml['target_ra']:.6f} deg, "
+                                    f"Dec={backup_yaml['target_dec']:.6f} deg",
+                                    "",
+                                    "A reference catalog is required for photometric calibration.",
+                                    "Set 'catalog.use_catalog' in your YAML to one of:",
+                                ]
+                                + [f"  - {_alt}" for _alt in _available_catalogs],
+                            )
+                            if ascii_card
+                            else "No photometric catalog selected."
+                        )
                         _log("")
                         sys.exit(0)
                     _target_coords = SkyCoord(
@@ -2187,21 +2207,28 @@ class AutomatedPhotometry:
                                     if c not in [n.lower() for n in _unique_cats]
                                 ]
                                 _log("")
-                                _log("=" * 70)
-                                _log(f"  Catalog '{_cat_name}' returned 0 sources in this field.")
-                                _log(f"  Target: RA={backup_yaml['target_ra']:.6f} deg, "
-                                     f"Dec={backup_yaml['target_dec']:.6f} deg")
-                                _log("")
-                                _log("  This usually means the catalog does not cover this")
-                                _log("  region of sky, or the query service is unavailable.")
-                                _log("")
-                                _log("  Try one of these alternative catalogs instead:")
-                                for _alt in _alternatives:
-                                    _log(f"    - {_alt}")
-                                _log("")
-                                _log("  Set 'catalog.use_catalog' in your YAML to one of the")
-                                _log("  alternatives above, then re-run.")
-                                _log("=" * 70)
+                                _log(
+                                    ascii_card(
+                                        f"Catalog '{_cat_name}' returned 0 sources",
+                                        [
+                                            f"Target: RA={backup_yaml['target_ra']:.6f} deg, "
+                                            f"Dec={backup_yaml['target_dec']:.6f} deg",
+                                            "",
+                                            "This usually means the catalog does not cover this",
+                                            "region of sky, or the query service is unavailable.",
+                                            "",
+                                            "Try one of these alternative catalogs instead:",
+                                        ]
+                                        + [f"  - {_alt}" for _alt in _alternatives]
+                                        + [
+                                            "",
+                                            "Set 'catalog.use_catalog' in your YAML to one of the",
+                                            "alternatives above, then re-run.",
+                                        ],
+                                    )
+                                    if ascii_card
+                                    else f"Catalog '{_cat_name}' returned 0 sources."
+                                )
                                 _log("")
                                 sys.exit(0)
                             else:
