@@ -124,6 +124,16 @@ def _sleep_sec(seconds: float, reason: str = "") -> None:
     time.sleep(float(seconds))
 
 
+def _is_permanent_http_error(exc: BaseException) -> bool:
+    """True for HTTP 4xx other than 408/429 - retrying a bad request cannot help."""
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    if status is None:
+        return False
+    status = int(status)
+    return 400 <= status < 500 and status not in (408, 429)
+
+
 def retry_with_backoff(
     fn: Callable[[], T],
     *,
@@ -140,7 +150,7 @@ def retry_with_backoff(
             return fn()
         except Exception as exc:
             last_exc = exc
-            if attempt >= attempts - 1:
+            if attempt >= attempts - 1 or _is_permanent_http_error(exc):
                 break
             delay = float(base_delay_sec) * (2**attempt)
             if logger is not None:
@@ -161,8 +171,8 @@ def retry_with_backoff(
 def launch_gaia_adql_to_pandas(
     query: str,
     *,
-    pause_before_sec: float = 1.0,
-    pause_after_sec: float = 1.0,
+    pause_before_sec: float = 0.25,
+    pause_after_sec: float = 0.25,
     max_retries: int = 3,
     retry_base_delay_sec: float = 2.0,
     logger: Optional[logging.Logger] = None,
@@ -254,7 +264,7 @@ def calibrate_source_ids_batched(
     source_ids: List[str],
     *,
     batch_size: int = 200,
-    inter_batch_pause_sec: float = 1.0,
+    inter_batch_pause_sec: float = 0.5,
     max_retries: int = 3,
     retry_base_delay_sec: float = 2.0,
     logger: Optional[logging.Logger] = None,
@@ -330,7 +340,7 @@ def generate_source_ids_batched(
     photometric_system: Any,
     *,
     batch_size: int = 200,
-    inter_batch_pause_sec: float = 1.0,
+    inter_batch_pause_sec: float = 0.5,
     max_retries: int = 3,
     retry_base_delay_sec: float = 2.0,
     logger: Optional[logging.Logger] = None,
@@ -405,7 +415,7 @@ def gaia_xp_sql_top_n(
     order_by: str,
     *,
     prefetch_factor: int = 50,
-    prefetch_min: int = 500,
+    prefetch_min: int = 200,
     prefetch_max: int = 10000,
 ) -> tuple[int, bool]:
     """
@@ -419,11 +429,12 @@ def gaia_xp_sql_top_n(
     if gaia_xp_uses_python_distance_sort(order_by):
         factor = max(1, int(prefetch_factor))
         # Smaller final N -> cap multiplier so we do not over-fetch the archive
-        # (e.g. 100 nearest does not need TOP 5000 by default).
+        # (e.g. 100 nearest does not need TOP 5000 by default). The caps are
+        # non-decreasing in ms so a larger request never prefetches less.
         if ms <= 50:
-            factor = min(factor, 8)
-        elif ms <= 100:
             factor = min(factor, 5)
+        elif ms <= 100:
+            factor = min(factor, 8)
         elif ms <= 200:
             factor = min(factor, 10)
         elif ms <= 500:
@@ -445,7 +456,6 @@ def sort_gaia_table_nearest_to_target(
     """Keep up to ``max_rows`` rows with smallest angular distance to the target."""
     if df.empty or max_rows <= 0:
         return df.iloc[:0].copy()
-    import numpy as np
     from astropy import units as u
     from astropy.coordinates import SkyCoord
 

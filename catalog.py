@@ -392,7 +392,7 @@ class Catalog:
         xp_order = str(cat_cfg.get("gaia_xp_order_by", "brightness")).strip().lower()
         xp_show_progress = bool(cat_cfg.get("gaia_xp_show_progress", False))
         prefetch_factor = int(cat_cfg.get("gaia_nearest_prefetch_factor", 50))
-        prefetch_min = int(cat_cfg.get("gaia_nearest_prefetch_min", 500))
+        prefetch_min = int(cat_cfg.get("gaia_nearest_prefetch_min", 200))
         prefetch_max = int(cat_cfg.get("gaia_nearest_prefetch_max", 10000))
 
         sql_top, sort_by_distance = gaia_xp_sql_top_n(
@@ -461,16 +461,25 @@ class Catalog:
                 cfg_list = list(cfg) if cfg else []
 
                 if not cfg_list:
-                    logger.info(
-                        "Gaia XP synthetic photometry disabled (empty photometric systems)."
+                    logger.warning(
+                        "gaia_xp_photometric_systems is empty; returning base Gaia DR3 "
+                        "photometry only. The catalog will have no SdssStd/JkcStd "
+                        "columns, so no standard-band magnitudes can be mapped "
+                        "downstream."
                     )
                     return results
 
                 phot_systems = []
                 for sys_name in cfg_list:
                     if isinstance(sys_name, str):
-                        sys_name = sys_name.strip()
-                        phot_systems.append(getattr(PhotometricSystem, sys_name))
+                        name = sys_name.strip()
+                        try:
+                            phot_systems.append(getattr(PhotometricSystem, name))
+                        except AttributeError:
+                            raise ValueError(
+                                f"Unknown GaiaXPy photometric system '{name}'. "
+                                f"Valid options: {[p.name for p in PhotometricSystem]}"
+                            )
                     else:
                         # Enum values are accepted directly.
                         phot_systems.append(sys_name)
@@ -522,29 +531,18 @@ class Catalog:
 
             # Skip bands absent from the merged table (e.g. when XP failed and
             # only base DR3 photometry is available); also guards F<=0.
-            for band in ["u", "g", "r", "i", "z"]:
-                f_col = f"SdssStd_flux_{band}"
-                e_col = f"SdssStd_flux_error_{band}"
-                m_err_col = f"SdssStd_mag_error_{band}"
-                if f_col not in merged.columns or e_col not in merged.columns:
-                    continue
-                valid = merged[f_col] > 0
-                merged[m_err_col] = np.nan
-                merged.loc[valid, m_err_col] = (
-                    factor * merged.loc[valid, e_col] / merged.loc[valid, f_col]
-                )
-
-            for band in ["U", "B", "V", "R", "I"]:
-                f_col = f"JkcStd_flux_{band}"
-                e_col = f"JkcStd_flux_error_{band}"
-                m_err_col = f"JkcStd_mag_error_{band}"
-                if f_col not in merged.columns or e_col not in merged.columns:
-                    continue
-                valid = merged[f_col] > 0
-                merged[m_err_col] = np.nan
-                merged.loc[valid, m_err_col] = (
-                    factor * merged.loc[valid, e_col] / merged.loc[valid, f_col]
-                )
+            for prefix, bands in (("SdssStd", "ugriz"), ("JkcStd", "UBVRI")):
+                for band in bands:
+                    f_col = f"{prefix}_flux_{band}"
+                    e_col = f"{prefix}_flux_error_{band}"
+                    m_err_col = f"{prefix}_mag_error_{band}"
+                    if f_col not in merged.columns or e_col not in merged.columns:
+                        continue
+                    valid = merged[f_col] > 0
+                    merged[m_err_col] = np.nan
+                    merged.loc[valid, m_err_col] = (
+                        factor * merged.loc[valid, e_col] / merged.loc[valid, f_col]
+                    )
 
             logger.info(
                 "Successfully merged Gaia DR3 catalog and XP photometry for %d sources.",

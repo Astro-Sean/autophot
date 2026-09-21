@@ -1664,14 +1664,14 @@ class AutomatedPhotometry:
                         else None
                     ),
                     gaia_query_pause_before_sec=float(
-                        catalog_cfg.get("gaia_archive_query_pause_before_sec", 1.0)
+                        catalog_cfg.get("gaia_archive_query_pause_before_sec", 0.25)
                     ),
                     gaia_query_pause_after_sec=float(
-                        catalog_cfg.get("gaia_archive_query_pause_after_sec", 1.0)
+                        catalog_cfg.get("gaia_archive_query_pause_after_sec", 0.25)
                     ),
                     gaia_xp_batch_size=int(catalog_cfg.get("gaia_xp_batch_size", 200)),
                     gaia_xp_batch_pause_sec=float(
-                        catalog_cfg.get("gaia_xp_batch_pause_sec", 1.0)
+                        catalog_cfg.get("gaia_xp_batch_pause_sec", 0.5)
                     ),
                     gaia_archive_max_retries=int(
                         catalog_cfg.get("gaia_archive_max_retries", 3)
@@ -1681,13 +1681,13 @@ class AutomatedPhotometry:
                     ),
                     gaia_xp_order_by=curve_order,
                     gaia_xp_show_progress=bool(
-                        catalog_cfg.get("gaia_xp_show_progress", True)
+                        catalog_cfg.get("gaia_xp_show_progress", False)
                     ),
                     gaia_nearest_prefetch_factor=int(
                         catalog_cfg.get("gaia_nearest_prefetch_factor", 50)
                     ),
                     gaia_nearest_prefetch_min=int(
-                        catalog_cfg.get("gaia_nearest_prefetch_min", 500)
+                        catalog_cfg.get("gaia_nearest_prefetch_min", 200)
                     ),
                     gaia_nearest_prefetch_max=int(
                         catalog_cfg.get("gaia_nearest_prefetch_max", 10000)
