@@ -214,6 +214,7 @@ from functions import (
     points_in_circum,
     beta_aperture,
     ascii_kv,
+    STATUS,
 )
 from aperture import (
     Aperture,
@@ -2667,7 +2668,8 @@ class Limits:
                     if np.isfinite(inject_lmag_err)
                     else "+/-n/a"
                 )
-                logger.info(
+                logger.log(
+                    STATUS,
                     "Limiting magnitude: inst=%.3f %s%s  ZP=%s  "
                     "method=%s  completeness=%.0f%%  trials=%d  [%.1fs]",
                     float(inject_lmag), err_str, app_str, zp_log,

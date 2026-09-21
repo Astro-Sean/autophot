@@ -76,7 +76,7 @@ from scipy.ndimage import (
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # --- Local ---
-from functions import border_msg, log_step, set_size, log_warning_from_exception
+from functions import border_msg, log_step, set_size, log_warning_from_exception, STATUS
 from wcs import get_wcs
 
 
@@ -158,7 +158,7 @@ class BackgroundSubtractor:
         if not np.isfinite(cap) or cap <= 0:
             return fp
         if fp > cap:
-            self.logger.info(
+            self.logger.debug(
                 "Background mesh: capping FWHM %.2f -> %.2f px (background.max_fwhm_pixels=%.1f) to limit Background2D memory use.",
                 fp,
                 cap,
@@ -405,7 +405,7 @@ class BackgroundSubtractor:
             mesh_filter += 1
         filter_size = mesh_filter
 
-        self.logger.info(
+        self.logger.debug(
             "Background mesh: FWHM=%.2f px scale=%.1f box=%s filter=%d",
             fwhm_pixels, mesh_scale, box_size, filter_size,
         )
@@ -636,7 +636,7 @@ class BackgroundSubtractor:
                 break
 
         n_masked = np.sum(mask)
-        self.logger.info(
+        self.logger.debug(
             "Source mask contains %d pixels (%.2f%% of the image) after %d iteration(s)",
             n_masked,
             100.0 * n_masked / image.size if image.size > 0 else 0.0,
@@ -657,7 +657,7 @@ class BackgroundSubtractor:
         if np.any(sat_mask):
             selem = _disk_structuring_element(dilate_radius)
             sat_mask = binary_dilation(sat_mask, structure=selem, iterations=1)
-            self.logger.info(
+            self.logger.debug(
                 f"Saturation mask: {np.sum(sat_mask)} px "
                 f"({100.0 * np.sum(sat_mask) / image.size if image.size > 0 else 0.0:.2f}%)"
             )
@@ -845,7 +845,7 @@ class BackgroundSubtractor:
         streak_mask = binary_dilation(streak_mask, structure=struct, iterations=2)
         n_streak = np.sum(streak_mask)
         if n_streak > np.sum(sat_core):
-            self.logger.info(
+            self.logger.debug(
                 "Saturation streak/bleed mask: %d px (extended from %d saturated, curved=%s)",
                 n_streak,
                 int(np.sum(sat_core)),
@@ -1065,7 +1065,7 @@ class BackgroundSubtractor:
         if large_scale_ratio > 0.4:
             regime = "nebulous" if regime == "sparse" else "crowded_nebulous"
 
-        self.logger.info(
+        self.logger.debug(
             "Background regime=%s  bright_frac=%.3f  large_scale_ratio=%.3f",
             regime,
             bright_frac,
@@ -1529,7 +1529,7 @@ class BackgroundSubtractor:
         )
 
         masked_frac = mask.mean()
-        self.logger.info("Masked fraction (total): %.1f%%", 100.0 * masked_frac)
+        self.logger.debug("Masked fraction (total): %.1f%%", 100.0 * masked_frac)
 
         # If essentially the entire image is saturated or masked, this frame is
         # not usable for reliable background / photometry. Bail out early with
@@ -1625,8 +1625,9 @@ class BackgroundSubtractor:
         except Exception as e:
             self.logger.debug("Background edge flattening skipped: %s", e)
 
-        self.logger.info(
-            f"Background median={bkg_median:.3e} RMS={np.nanmean(bkg_rms):.3e}"
+        self.logger.log(
+            STATUS,
+            f"Background median={bkg_median:.3e} RMS={np.nanmean(bkg_rms):.3e}",
         )
 
         # ---- Subtract background ----

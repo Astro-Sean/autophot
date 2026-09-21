@@ -506,6 +506,10 @@ try:
         ascii_card,
         ascii_kv,
         border_msg,
+        ConsoleLevelFilter,
+        STATUS,
+        log_status,
+        verbose_to_console_level,
         ColoredLevelFormatter,
         concatenate_csv_files,
         log_step,
@@ -530,6 +534,10 @@ except Exception as _exc:  # pragma: no cover
             ascii_card,
             ascii_kv,
             border_msg,
+            ConsoleLevelFilter,
+            STATUS,
+            log_status,
+            verbose_to_console_level,
             ColoredLevelFormatter,
             concatenate_csv_files,
             log_step,
@@ -545,6 +553,10 @@ except Exception as _exc:  # pragma: no cover
         _IMPORT_ERROR_AUTOPHOT_DEPS = _exc2
         log_step = None  # type: ignore
         border_msg = None  # type: ignore
+        ConsoleLevelFilter = None  # type: ignore
+        STATUS = 25  # type: ignore
+        log_status = None  # type: ignore
+        verbose_to_console_level = verbose_to_log_level  # type: ignore
         ascii_card = None  # type: ignore
         ascii_kv = None  # type: ignore
         ColoredLevelFormatter = None  # type: ignore
@@ -574,7 +586,9 @@ def _log(message: str) -> None:
         return
     logger = logging.getLogger(__name__)
     if logger.handlers:
-        logger.info(message)
+        # Driver messages are user-facing progress; STATUS shows them in
+        # normal mode without leaking per-image INFO diagnostics.
+        logger.log(STATUS, message)
     else:
         # Fallback for environments without configured logging handlers.
         if not QUIET_MODE:
@@ -2575,17 +2589,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     if _cli_verbose is not None:
         config["global_verbose_level"] = _cli_verbose
 
-    # Global verbosity control (0=warnings/errors, 1=info, 2=debug).
+    # Global verbosity control (0=quiet, 1=normal, 2=verbose, 3=debug).
     vlevel = resolve_verbose_level(config.get("global_verbose_level", 1))
     config["global_verbose_level"] = vlevel
-    log_level = verbose_to_log_level(vlevel)
+    console_level = verbose_to_console_level(vlevel)
 
     _handler = logging.StreamHandler()
+    _handler.setLevel(logging.DEBUG)
+    if ConsoleLevelFilter is not None:
+        _handler.addFilter(ConsoleLevelFilter(console_level))
+    else:
+        _handler.setLevel(console_level)
     if ColoredLevelFormatter is not None:
         _handler.setFormatter(ColoredLevelFormatter(use_color=True))
     else:
         _handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
-    logging.basicConfig(level=log_level, handlers=[_handler])
+    logging.basicConfig(level=logging.DEBUG, handlers=[_handler])
 
     driver_start = time.time()
     _log("Started: %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(driver_start)))

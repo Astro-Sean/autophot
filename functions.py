@@ -229,7 +229,9 @@ class ColoredLevelFormatter(logging.Formatter):
             record.msg = msg_clean
             record.args = ()
 
-        if self._compact and record.levelno == logging.INFO:
+        # STATUS lines (stage banners, key measurements) render like INFO:
+        # no level tag, banner/step spacing rules apply.
+        if self._compact and record.levelno < logging.WARNING:
             base = self._format_info(record, msg_clean)
         else:
             base = self._format_leveled(record, msg_clean)
@@ -432,23 +434,61 @@ def configure_console_logging(
 
 # Verbosity names accepted by ``global_verbose_level`` (YAML) and the
 # ``--verbose-level`` CLI option.  Numeric values pass straight through.
+#
+# Tiers: quiet(0) -> WARNING+, normal(1) -> STATUS+, verbose(2) -> INFO+,
+# debug(3) -> DEBUG.  The per-image log FILE always records DEBUG+
+# regardless of the console tier, so nothing is ever lost from the log.
 VERBOSE_LEVELS = {
     "quiet": 0,
     "warning": 0,
     "error": 0,
     "normal": 1,
-    "info": 1,
     "verbose": 2,
-    "debug": 2,
+    "info": 2,
+    "debug": 3,
 }
+
+# Custom level between INFO and WARNING: user-facing progress and key
+# scientific results.  Shows on the console in "normal" mode while the
+# bulk of INFO diagnostics stays in the log file / verbose console.
+STATUS = 25
+logging.addLevelName(STATUS, "STATUS")
+
+
+def log_status(msg: str, *args, ui: bool = False, **kwargs) -> None:
+    """Log a user-facing progress/result message at STATUS level.
+
+    ``ui=True`` marks the record so the console UI filter passes it even
+    at quiet level (reserved for the final result card).
+    """
+    extra = kwargs.pop("extra", None) or {}
+    if ui:
+        extra = {**extra, "ui": True}
+    logging.getLogger(__name__).log(STATUS, msg, *args, extra=extra, **kwargs)
+
+
+class ConsoleLevelFilter(logging.Filter):
+    """
+    Pass records at or above the console level, plus any record carrying
+    ``ui=True`` (final results always reach the console, even in quiet).
+    """
+
+    def __init__(self, min_level: int):
+        super().__init__()
+        self.min_level = min_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= self.min_level or bool(
+            getattr(record, "ui", False)
+        )
 
 
 def resolve_verbose_level(value) -> int:
     """
     Normalize a verbosity setting to the 0/1/2 integer convention.
 
-    Accepts ints (clamped to 0-2) or names: ``quiet``/``warning``/``error``
-    -> 0, ``normal``/``info`` -> 1, ``verbose``/``debug`` -> 2.
+    Accepts ints (clamped to 0-3) or names: ``quiet``/``warning``/``error``
+    -> 0, ``normal`` -> 1, ``verbose``/``info`` -> 2, ``debug`` -> 3.
     Unrecognised values fall back to 1 (normal).
     """
     if isinstance(value, str):
@@ -463,31 +503,50 @@ def resolve_verbose_level(value) -> int:
         v = int(value)
     except (TypeError, ValueError):
         return 1
-    return 0 if v <= 0 else (2 if v >= 2 else 1)
+    return 0 if v <= 0 else (3 if v >= 3 else v)
 
 
 def verbose_to_log_level(value) -> int:
-    """Map a verbosity value (0/1/2 or name) to a ``logging`` level."""
+    """
+    Map a verbosity value (0/1/2/3 or name) to a ``logging`` level.
+
+    Kept for backward compatibility -- prefer verbose_to_console_level for
+    the console handler; the log file should always use DEBUG.
+    """
+    return verbose_to_console_level(value)
+
+
+def verbose_to_console_level(value) -> int:
+    """Map a verbosity tier to the console handler threshold."""
     return {
         0: logging.WARNING,
-        1: logging.INFO,
-        2: logging.DEBUG,
+        1: STATUS,
+        2: logging.INFO,
+        3: logging.DEBUG,
     }[resolve_verbose_level(value)]
 
 
 def set_verbose_level(value) -> int:
     """
-    Apply a verbosity setting to the root logger and its handlers.
+    Apply a verbosity setting to the root logger and console handlers.
 
-    Use for runtime changes (e.g. a ``--verbose`` CLI flag read after the
-    logging handlers are already configured).  Returns the normalized
-    0/1/2 verbosity level.
+    Only stream (console) handlers are re-levelled -- FileHandlers stay at
+    DEBUG so the log file always keeps the complete diagnostic record.
+    Returns the normalized 0-3 verbosity tier.
     """
-    level = verbose_to_log_level(value)
+    level = verbose_to_console_level(value)
     root = logging.getLogger()
-    root.setLevel(level)
+    root.setLevel(logging.DEBUG)
     for handler in root.handlers:
-        handler.setLevel(level)
+        if isinstance(handler, logging.FileHandler):
+            handler.setLevel(logging.DEBUG)
+            continue
+        # Console handlers stay at DEBUG; ConsoleLevelFilter owns the
+        # effective threshold so ui-tagged records always pass.
+        handler.setLevel(logging.DEBUG)
+        for flt in handler.filters:
+            if isinstance(flt, ConsoleLevelFilter):
+                flt.min_level = level
     return resolve_verbose_level(value)
 
 

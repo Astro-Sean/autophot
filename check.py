@@ -16,6 +16,7 @@ import re
 import yaml
 import logging
 from functions import (
+    STATUS,
     log_step,
     AutophotYaml,
     concatenate_csv_files,
@@ -426,7 +427,7 @@ class FitsInfo:
 
     def check(self):
         """Main pipeline: classify files, setup telescope DB, extract filters."""
-        self.logger.info(log_step(f"File check: {len(self.flist)} FITS"))
+        self.logger.log(STATUS, log_step(f"File check: {len(self.flist)} FITS"))
 
         headers_cache = {f: h for f in self.flist if (h := get_header(f))}
 
@@ -448,7 +449,7 @@ class FitsInfo:
 
     def _classify_files(self, headers_cache):
         """Phase 1: Classify files by TELESCOP/INSTRUME presence."""
-        self.logger.info(log_step("Headers (basic)"))
+        self.logger.log(STATUS, log_step("Headers (basic)"))
         incorrect, correct = [], []
         tele_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
         for fname in tqdm(self.flist) if len(self.flist) > 1 else self.flist:
@@ -518,7 +519,7 @@ class FitsInfo:
 
     def _extract_filters(self, db, headers_cache, correct_files):
         """Phase 3: Extract and map filter keywords from all valid files."""
-        self.logger.info(log_step(f"Filters: {len(correct_files)} files"))
+        self.logger.log(STATUS, log_step(f"Filters: {len(correct_files)} files"))
         for fname in tqdm(correct_files) if len(correct_files) > 1 else correct_files:
             header = headers_cache.get(fname)
             if not header:

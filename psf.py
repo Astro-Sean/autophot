@@ -163,7 +163,7 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import log_step, set_size, log_warning_from_exception
+from functions import log_step, set_size, log_warning_from_exception, STATUS
 from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, PLOT_COLORS
 from aperture import (
     gain_e_per_adu_from_header,
@@ -5211,7 +5211,7 @@ class PSF:
                     n_epsf_stars,
                 )
             else:
-                log.info("ePSF built from %d stars", n_epsf_stars)
+                log.log(STATUS, "ePSF built from %d stars", n_epsf_stars)
 
             # The effective PSF is the pixel-integrated PSF, so for
             # undersampled data a measurement ~5-10% broader than the
