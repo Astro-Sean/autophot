@@ -413,9 +413,13 @@ class ImageDistortionCorrector:
                         new_hdul.append(new_hdu)
                     else:
                         new_hdul.append(hdu.copy())
-                # Atomic write: write to temp then rename to avoid race conditions
-                # when parallel processes cache the same GAIA catalog simultaneously.
-                tmp_cat = cat_path.with_suffix(".cat.tmp")
+                # Atomic write via unique temp name + rename. The pid suffix
+                # matters: parallel image workers share the same cache key, and
+                # a fixed ".tmp" name would let two writers interleave on the
+                # same temp file before either renames it.
+                tmp_cat = cat_path.with_name(
+                    f"{cat_path.name}.{os.getpid()}.tmp"
+                )
                 new_hdul.writeto(str(tmp_cat), overwrite=True)
                 os.replace(str(tmp_cat), str(cat_path))
 
@@ -424,7 +428,9 @@ class ImageDistortionCorrector:
                 "catalog": "GAIA-DR3",
                 "cache_key": cache_key,
             }
-            tmp_meta = meta_path.with_suffix(".json.tmp")
+            tmp_meta = meta_path.with_name(
+                f"{meta_path.name}.{os.getpid()}.tmp"
+            )
             with open(tmp_meta, "w") as f:
                 json.dump(meta, f)
             os.replace(str(tmp_meta), str(meta_path))
