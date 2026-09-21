@@ -1945,6 +1945,15 @@ def run_photometry():
             except Exception as check_exc:
                 logging.warning("Could not check target pixel value: %s", check_exc)
 
+        # Stage-closing summary: what the preprocessing pass produced.
+        log_status(
+            "Preprocessing: done | %dx%d px | trim=%.1f arcmin | NaN-edge-trim=%s",
+            image.shape[1],
+            image.shape[0],
+            float(input_yaml["preprocessing"].get("trim_image", 0) or 0),
+            "on" if trim_nan_edges else "off",
+        )
+
         # =============================================================================
         #   Run SExtractor
         # =============================================================================
@@ -2146,6 +2155,13 @@ def run_photometry():
             # keyword and cleaned data survive a pipeline crash before the
             # next FITS write (which is after the second background pass).
             safe_fits_write(fpath, image, header)
+            log_status(
+                "Cosmic rays: cleaned | %d px masked (%.2f%%)",
+                int(cosmic_rays_mask.sum()),
+                100.0 * cosmic_rays_mask.sum() / cosmic_rays_mask.size,
+            )
+        elif input_yaml["cosmic_rays"].get("remove_cmrays", False):
+            log_status("Cosmic rays: skipped (already cleaned)")
 
         # =============================================================================
         #          Check for Existing WCS
@@ -2273,6 +2289,12 @@ def run_photometry():
         input_yaml["dy"] = np.ceil(ImageFWHM)
 
         input_yaml["pixel_scale"] = pixel_scale
+
+        # Stage-closing summary for the WCS section.
+        _wcs_state = (
+            "solved" if wcs_updated else ("existing" if existingWCS else "none")
+        )
+        log_status("WCS: %s | scale=%.3f arcsec/px", _wcs_state, pixel_scale)
 
         # =============================================================================
         # WCS Refinement (optional: enable via wcs.refine_after_solve if needed)
@@ -2443,6 +2465,15 @@ def run_photometry():
         base, ext = os.path.splitext(fpath)
         weight_fpath = f"{base}.weight{ext}"
         safe_fits_write(weight_fpath, background_rms, header)
+        # Stage-closing summary for the masked background pass.
+        log_status(
+            "Background (masked): sky=%.3e ADU | RMS=%.3e ADU | masked=%.1f%%",
+            float(np.nanmedian(background_surface)),
+            float(np.nanmedian(background_rms)),
+            100.0
+            * np.count_nonzero(hardware_defects_mask)
+            / hardware_defects_mask.size,
+        )
         del background_surface
 
         # =============================================================================
@@ -2858,6 +2889,13 @@ def run_photometry():
         base, ext = os.path.splitext(fpath)
         weight_fpath = f"{base}.weight{ext}"
         safe_fits_write(weight_fpath, background_rms, header)
+        # Stage-closing summary for the calibration stage.
+        log_status(
+            "Calibration: sky=%.3e ADU | RMS=%.3e ADU | weight=%s",
+            float(np.nanmedian(background_surface)),
+            float(np.nanmedian(background_rms)),
+            os.path.basename(weight_fpath),
+        )
 
         # =============================================================================
         #     Get a Reference catalog
@@ -7091,6 +7129,49 @@ def run_photometry():
                             "Could not read difference-image quality from header: %s",
                             _dq_e,
                         )
+
+                    # Stage-closing summary: method, matched priors, global
+                    # difference statistics, and the quality classification.
+                    try:
+                        _diff_arr = get_image(fpath)
+                        _dmed = float(np.nanmedian(_diff_arr))
+                        _dstd = float(np.nanstd(_diff_arr))
+                        _dnan = (
+                            float(np.mean(~np.isfinite(_diff_arr))) * 100.0
+                        )
+                        _ts_cfg = (
+                            input_yaml.get("template_subtraction", {}) or {}
+                        )
+                        _n_match = (
+                            len(ConsistentSources)
+                            if ConsistentSources is not None
+                            else 0
+                        )
+                        _qclass = input_yaml.get("diff_quality_class")
+                        _qscore = input_yaml.get("diff_quality_score")
+                        _qtxt = (
+                            f"{_qclass} ({_qscore:.3f})"
+                            if _qclass
+                            and _qscore is not None
+                            and np.isfinite(_qscore)
+                            else (_qclass or "n/a")
+                        )
+                        log_status(
+                            "Subtraction: OK | %s (forceconv=%s, kernel=%s) | "
+                            "matched=%d | diff med=%.2f std=%.2f ADU | "
+                            "masked=%.1f%% | quality=%s",
+                            _ts_cfg.get("method", "?"),
+                            _ts_cfg.get("forceconv", "?"),
+                            _ts_cfg.get("kernel_order", "?"),
+                            _n_match,
+                            _dmed,
+                            _dstd,
+                            _dnan,
+                            _qtxt,
+                        )
+                        del _diff_arr
+                    except Exception as _se:
+                        logging.debug("Subtraction summary failed: %s", _se)
 
                 if os.path.exists(sfft_matched_sources):
                     MatchingSources = pd.read_csv(sfft_matched_sources)
