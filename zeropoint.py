@@ -2170,7 +2170,10 @@ class Zeropoint:
                     "--",
                     color=colors[flux_type],
                     lw=get_line_width("medium"),
-                    label=msg + "  (m_cal = m_inst + ZP, slope=1)",
+                    label=(
+                        f"{flux_type} ZP={ZP:.3f} +/- {zp_std:.3f} "
+                        f"(N={n_sources})  (m_cal = m_inst + ZP, slope=1)"
+                    ),
                 )
                 ax.fill_between(
                     xs,

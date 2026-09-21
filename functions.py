@@ -1283,6 +1283,24 @@ def ascii_table(title: str, headers, rows, width: int = 70) -> str:
     return "\n".join(lines)
 
 
+def ascii_card(title: str, lines, width: int = 70) -> str:
+    """
+    Framed free-text block for errors, warnings, and explanatory cards:
+
+        ============================ Title ============================
+          some explanatory line
+          another line
+        ================================================================
+    """
+    body = [str(l) for l in lines]
+    if not any(l.strip() for l in body):
+        return ""
+    out = [_rule_line(str(title), "=", width)]
+    out.extend(f"  {l[: width - 4]}" if l.strip() else "" for l in body)
+    out.append("=" * width)
+    return "\n".join(out)
+
+
 def metrics_table(metrics: dict[str, tuple], title: str | None = None, width: int = 70) -> str:
     """
     Format a compact two-column metrics table.
