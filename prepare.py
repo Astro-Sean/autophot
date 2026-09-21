@@ -30,6 +30,7 @@ from functions import (
     sanitize_photometric_filters,
     parse_supported_filter_group_key,
     invalid_use_catalog_keys,
+    SUPPORTED_PHOTOMETRIC_FILTERS,
     log_step,
     log_warning_from_exception,
 )
@@ -403,15 +404,16 @@ class Prepare:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         catalog_yml_path = os.path.join(script_dir, "databases", "catalog.yml")
 
-        # Keys that parse to no supported band (e.g. mixed-family "uRI")
-        # never match and silently fall back to "default" - warn once here.
+        # Keys that parse to no supported band never match and silently
+        # fall back to "default" - warn once here.
         bad_keys = invalid_use_catalog_keys(selected_catalog)
         if bad_keys:
             self.logger.warning(
                 "catalog.use_catalog keys never match any filter band "
-                "(unsupported or mixed-family groups): %s. Images in those "
-                "bands fall back to the 'default' entry.",
+                "(unknown band letters): %s. Valid bands: %s. Images in "
+                "those bands fall back to the 'default' entry.",
                 bad_keys,
+                " ".join(sorted(SUPPORTED_PHOTOMETRIC_FILTERS)),
             )
 
         def _resolve_catalog_for_filter(catalog_choice, image_filter=None):
@@ -419,6 +421,11 @@ class Prepare:
                 return catalog_choice
             use_filter = str(image_filter or "").strip()
             use_filter_norm = normalize_photometric_filter_name(use_filter)
+            # Canonical band for group membership (e.g. imageFilter "h" -> "H"),
+            # matching the runtime resolver in catalog.py.
+            band_for_group = (
+                use_filter_norm if use_filter_norm is not None else use_filter
+            )
             if use_filter:
                 membership_matches = []
                 for k, v in catalog_choice.items():
@@ -429,7 +436,7 @@ class Prepare:
                     if key_l in {"default", "*", "all"}:
                         continue
                     key_bands = parse_supported_filter_group_key(key_s)
-                    if key_bands and use_filter in key_bands:
+                    if key_bands and band_for_group in key_bands:
                         membership_matches.append(str(k))
                 if len(membership_matches) > 1:
                     self.logger.warning(
@@ -463,7 +470,7 @@ class Prepare:
                     if key_l in {"default", "*", "all"}:
                         continue
                     key_bands = parse_supported_filter_group_key(key_s)
-                    if v is not None and key_bands and use_filter in key_bands:
+                    if v is not None and key_bands and band_for_group in key_bands:
                         return v
             for dkey in ("default", "*", "all"):
                 if dkey in catalog_choice and catalog_choice[dkey] is not None:

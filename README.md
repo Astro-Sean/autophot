@@ -281,6 +281,8 @@ catalog:
     default: gaia
 ```
 
+Mapping keys are flexible: single bands (`u`), family groups (`UBVRI`, `JHK`), mixed sets (`uRI` = u + R + I), and separator-delimited lists (`u, RI`) all work. A key with no valid bands falls back to `default` with a warning.
+
 For non-standard filters, provide transmission curve files and use `gaia_custom`:
 
 ```yaml

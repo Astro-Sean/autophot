@@ -334,7 +334,11 @@ default_input:
     TNS_BOT_API: null # str|null --- Optional TNS API key/token (if querying TNS).
 
   catalog:
-    use_catalog: null # str|dict|null --- Catalog backend for calibration (e.g. `"refcat"`) or per-filter mapping (e.g. `{"ugriz":"sdss","UBVRI":"apass","default":"gaia"}`). Special value: `"gaia_custom"` builds a Gaia curve-map custom catalog from `catalog.transmission_curve_map` and routes to `custom`.
+    use_catalog: null # str|dict|null --- Catalog backend for calibration (e.g. `"refcat"`) or per-filter mapping (e.g. `{"ugriz":"sdss","UBVRI":"apass","default":"gaia"}`).
+      # Mapping keys are flexible band sets: single bands ("g"), family groups ("ugriz","UBVRI","JHK"),
+      # mixed sets ("uRI" = u+R+I), separators ("u,RI"), and lowercase aliases of upper-only families
+      # ("bvri"->BVRI, "jhk"->JHK). Keys with unknown letters fall back to "default" with a warning.
+      # Special value: `"gaia_custom"` builds a Gaia curve-map custom catalog from `catalog.transmission_curve_map` and routes to `custom`.
     catalog_custom_fpath: null # str|null --- Optional path to a user-supplied catalog file.
     transmission_curve_map: null # dict[str,str]|null --- Optional band->throughput file map for Gaia curve-map custom catalog builds. Example: `{"g":"curves/g.dat","r":"curves/r.dat","i":"curves/i.dat"}`.
     curve_map_svo: null # dict[str,str]|null --- Optional band->SVO filter-ID map to fetch curves. Example: `{"g":"SDSS/SDSS.g","r":"SDSS/SDSS.r","i":"SDSS/SDSS.i"}`.

@@ -547,6 +547,9 @@ def get_supported_photometric_filters() -> tuple:
 
 
 # Composite YAML keys (optical + near-IR) that are not one single family letter-set.
+# Kept for backward compat: the same strings also parse via the generic
+# per-character path below, but the lowercased lookup additionally accepts
+# case variants such as "GRIZJHK" or "grizjhk".
 _COMPOSITE_FILTER_GROUP_KEYS = {
     "grizjhk": tuple("grizJHK"),  # g,r,i,z,J,H,K (matches common refcat / Pan-STARRS+2MASS style maps)
     "ugrizjhk": tuple("ugrizJHK"),  # u,g,r,i,z,J,H,K
@@ -554,18 +557,50 @@ _COMPOSITE_FILTER_GROUP_KEYS = {
     "ugrizjhkYw": tuple("ugrizJHKYw"),  # u,g,r,i,z,J,H,K,Y,w (extended filter set)
 }
 
+# Band letters are unique across families (u vs U are different bands), so a
+# mixed key like "uRI" parses unambiguously one char at a time.
+_ALL_BAND_CHARS = frozenset(SUPPORTED_PHOTOMETRIC_FILTERS)
+
+_GROUP_KEY_SEPARATORS = re.compile(r"[,;|+\-/\s]+")
+
+
+def _parse_band_token(token):
+    """Parse one separator-free token into bands, or None if any char is unknown."""
+    if not token:
+        return None
+    # As written: every char must be a band letter (mixed families allowed).
+    if all(ch in _ALL_BAND_CHARS for ch in token):
+        return tuple(dict.fromkeys(token))
+    # All-caps fallback for family-shaped words written lowercase
+    # ("bvri" -> BVRI, "jhk" -> JHK). Only tried when the direct parse
+    # fails, so "gri" keeps its ugriz meaning.
+    upper = token.upper()
+    if upper != token and all(ch in _ALL_BAND_CHARS for ch in upper):
+        return tuple(dict.fromkeys(upper))
+    # Per-char promotion for letters that only exist uppercase
+    # ("yw" -> ('Y', 'w')).
+    promoted = [ch if ch in _ALL_BAND_CHARS else ch.upper() for ch in token]
+    if all(ch in _ALL_BAND_CHARS for ch in promoted):
+        return tuple(dict.fromkeys(promoted))
+    return None
+
 
 def parse_supported_filter_group_key(group_key):
     """
     Parse a mapping-group key into explicit supported bands.
 
     Accepted examples:
-      - Full groups: "UBVRI", "ugriz", "JHK"
-      - Valid subsets/singletons of one family: "griz", "u", "BV", "HK"
-      - Composite keys: "grizJHK", "ugrizJHK" (optical + JHK for catalog.use_catalog maps)
+      - Full groups: "UBVRI", "ugriz", "JHK", "extended"
+      - Any mix of band letters, families may mix: "griz", "u", "BV",
+        "uRI", "rJ", "gBVw"
+      - Separators as token boundaries: "u, RI", "u|JHK"
+      - Lowercase aliases of uppercase-only families when the direct parse
+        fails: "bvri" -> BVRI, "jhk" -> JHK ("gri" stays ugriz)
+      - Composite keys: "grizJHK", "ugrizJHK" (optical + JHK for
+        catalog.use_catalog maps), incl. case variants via the composite
+        table ("GRIZJHK", "grizjhk")
     Rejected:
-      - Mixed-family tokens: "uBV", "rJ"
-      - Unsupported tokens/bands.
+      - Keys containing unknown band letters: "xyz", "uXQ"
     """
     if group_key is None:
         return None
@@ -581,18 +616,19 @@ def parse_supported_filter_group_key(group_key):
     if comp is not None:
         return comp
 
-    # Accept subsets of exactly one canonical family.
-    for family_bands in SUPPORTED_FILTER_GROUPS.values():
-        fam_set = set(family_bands)
-        if all(ch in fam_set for ch in key):
-            ordered = []
-            seen = set()
-            for ch in key:
-                if ch not in seen:
-                    ordered.append(ch)
-                    seen.add(ch)
-            return tuple(ordered)
-    return None
+    bands = []
+    for token in _GROUP_KEY_SEPARATORS.split(key):
+        if not token:
+            continue
+        parsed = _parse_band_token(token)
+        if parsed is None:
+            # Reject the whole key: a partially valid key silently mapping
+            # fewer bands than the user wrote is worse than no match.
+            return None
+        for b in parsed:
+            if b not in bands:
+                bands.append(b)
+    return tuple(bands) if bands else None
 
 
 def invalid_use_catalog_keys(use_catalog):
@@ -600,8 +636,8 @@ def invalid_use_catalog_keys(use_catalog):
     Return ``use_catalog`` mapping keys that can never match a filter band.
 
     A key is usable if it normalizes to a single supported band (the
-    exact-match path) or parses to a supported band group. Keys such as
-    "uRI" (mixed photometric families) satisfy neither, so images for
+    exact-match path) or parses to a supported band group. Keys containing
+    unknown band letters (e.g. "uXQ") satisfy neither, so images for
     those bands silently fall back to the "default" entry.
     """
     bad = []
