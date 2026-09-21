@@ -574,7 +574,7 @@ def _log(message: str) -> None:
     else:
         # Fallback for environments without configured logging handlers.
         if not QUIET_MODE:
-            print(message)
+            print(message, flush=True)
 
 
 def _log_always(message: str) -> None:
@@ -586,7 +586,9 @@ def _log_always(message: str) -> None:
     if logger.handlers:
         logger.warning(message)
     else:
-        print(message)
+        # flush=True: when stdout is piped (tee, batch logs) print() is
+        # block-buffered and the parallel progress counter would lag.
+        print(message, flush=True)
 
 
 def _run_main_subprocess(
