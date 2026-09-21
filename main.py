@@ -147,6 +147,7 @@ from functions import (
     safe_fits_write,
     resolve_verbose_level,
     verbose_to_console_level,
+    silence_noisy_loggers,
     ConsoleLevelFilter,
     STATUS,
     log_status,
@@ -852,6 +853,10 @@ def run_photometry():
         console.addFilter(normalize_filter)
 
         logging.getLogger("").addHandler(console)
+
+        # Library DEBUG output (matplotlib findfont alone emits ~50k lines
+        # per image) would flood the DEBUG-level log file.
+        silence_noisy_loggers()
 
         # Prevents logging errors from crashing the program.
         logging.raiseExceptions = False

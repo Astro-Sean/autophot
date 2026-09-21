@@ -518,6 +518,7 @@ try:
         print_progress_bar,
         resolve_verbose_level,
         sanitize_photometric_filters,
+        silence_noisy_loggers,
         verbose_to_log_level,
     )
     from prepare import Prepare  # type: ignore
@@ -546,6 +547,7 @@ except Exception as _exc:  # pragma: no cover
             print_progress_bar,
             resolve_verbose_level,
             sanitize_photometric_filters,
+            silence_noisy_loggers,
             verbose_to_log_level,
         )
         from prepare import Prepare  # type: ignore
@@ -565,6 +567,7 @@ except Exception as _exc:  # pragma: no cover
         print_progress_bar = None  # type: ignore
         log_exception = None  # type: ignore
         sanitize_photometric_filters = None  # type: ignore
+        silence_noisy_loggers = lambda *a, **k: None  # type: ignore
         resolve_verbose_level = lambda v: 1  # type: ignore
         verbose_to_log_level = lambda v: logging.INFO  # type: ignore
         Prepare = None  # type: ignore
@@ -2605,6 +2608,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         _handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
     logging.basicConfig(level=logging.DEBUG, handlers=[_handler])
+    silence_noisy_loggers()
 
     driver_start = time.time()
     _log("Started: %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(driver_start)))

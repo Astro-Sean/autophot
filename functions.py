@@ -412,6 +412,26 @@ class LogMessageNormalizeFilter(logging.Filter):
         return True
 
 
+def silence_noisy_loggers(level: int = logging.WARNING) -> None:
+    """
+    Clamp third-party loggers whose DEBUG output floods the log file.
+
+    With the root logger at DEBUG (so the per-image log file keeps the
+    complete diagnostic record), library internals propagate to the
+    handlers.  matplotlib alone emits ~50k findfont/locator lines per
+    image; none of it is diagnostically useful.
+    """
+    for name in (
+        "matplotlib",
+        "PIL",
+        "urllib3",
+        "requests",
+        "filelock",
+        "charset_normalizer",
+    ):
+        logging.getLogger(name).setLevel(level)
+
+
 def configure_console_logging(
     *,
     level: int = logging.INFO,
