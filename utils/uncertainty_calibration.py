@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 
 log = logging.getLogger(__name__)
 
@@ -242,3 +243,92 @@ def apply_calibration(
         )
         return flux_error
     return flux_error * calibration_factor
+
+
+def scale_error_columns(
+    df,
+    factor: float,
+    method: str,
+    filt: str,
+) -> list[str]:
+    """Scale a photometry row's error columns by an empirical factor in place.
+
+    The injection/recovery calibration factor applies to the *measurement*
+    error only, so flux and instrumental-magnitude errors scale linearly
+    while calibrated magnitude errors grow by the quadrature delta
+
+        mag_err^2  ->  mag_err^2 + (factor^2 - 1) * inst_err^2
+
+    which leaves the zeropoint/systematic terms untouched (they are not
+    exercised by same-image injections).
+
+    Parameters
+    ----------
+    df : DataFrame
+        Photometry table to update in place (typically the 1-row target table).
+    factor : float
+        Calibration factor (``UncertaintyCalibrationResult.calibration_factor``).
+    method : str
+        Recovery method the factor was measured with: "PSF"/"EMCEE"/"MCMC"
+        scale the PSF-fit columns, "AP" scales the aperture columns.
+    filt : str
+        Image filter name used in the calibrated-magnitude column names
+        (``{filt}_PSF_err``, ``inst_{filt}_PSF_err``, ...).
+
+    Returns
+    -------
+    list of str
+        Names of the columns that were modified.
+    """
+    if df is None or len(df) == 0:
+        return []
+    f = float(factor)
+    if not np.isfinite(f) or f <= 0 or np.isclose(f, 1.0):
+        return []
+
+    psf_family = str(method).strip().upper() in ("PSF", "EMCEE", "MCMC")
+    filt = str(filt)
+    scaled: list[str] = []
+
+    def _scale(col: str) -> None:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce") * f
+            scaled.append(col)
+
+    # Calibrated magnitude error: adjust only the instrumental-error term of
+    # the quadrature sum (zp error and systematic floors are unchanged).
+    inst_col = f"inst_{filt}_{'PSF' if psf_family else 'AP'}_err"
+    cal_col = f"{filt}_{'PSF' if psf_family else 'AP'}_err"
+    if inst_col in df.columns and cal_col in df.columns:
+        inst_err = pd.to_numeric(df[inst_col], errors="coerce").to_numpy(float)
+        cal_err = pd.to_numeric(df[cal_col], errors="coerce").to_numpy(float)
+        new_err = np.sqrt(
+            np.clip(cal_err**2 + (f**2 - 1.0) * inst_err**2, 0.0, None)
+        )
+        df[cal_col] = new_err
+        scaled.append(cal_col)
+
+    if psf_family:
+        for col in (
+            "flux_PSF_err",
+            "flux_PSF_err_normal",
+            "flux_PSF_err_inverted",
+            inst_col,
+            f"inst_{filt}_PSF_normal_err",
+            "inst_inverted_err",
+        ):
+            _scale(col)
+    else:
+        for col in (
+            "flux_AP_err",
+            "flux_AP_err_inverted",
+            inst_col,
+        ):
+            _scale(col)
+        # Aperture SNR columns are flux/error ratios: scale inversely.
+        for col in ("SNR", "SNR_AP_inverted"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce") / f
+                scaled.append(col)
+
+    return scaled

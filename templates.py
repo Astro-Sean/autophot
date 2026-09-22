@@ -5617,6 +5617,19 @@ class Templates:
         gain = float(gain) if np.isfinite(gain) and gain > 0 else 1.0
         ny, nx = img.shape
 
+        # A GriddedPSFModel must be pinned to the local ePSF at each
+        # source's detector position before stamp rendering - the render
+        # call uses stamp-local coordinates, which would otherwise select
+        # the wrong grid cell.
+        _psf_is_gridded = False
+        try:
+            from photutils.psf import GriddedPSFModel as _GPM
+            from psf import epsf_at_position as _epsf_at_pos
+
+            _psf_is_gridded = isinstance(psf_model, _GPM)
+        except Exception:
+            _psf_is_gridded = False
+
         for i in range(n):
             x, y = float(x_pos[i]), float(y_pos[i])
             if not (np.isfinite(x) and np.isfinite(y)):
@@ -5664,10 +5677,18 @@ class Templates:
             except Exception:
                 pass
 
+            _m = psf_model
+            if _psf_is_gridded:
+                try:
+                    _m = _epsf_at_pos(psf_model, x, y)
+                except Exception:
+                    _m = None
+                if _m is None:
+                    continue
             try:
                 P = np.asarray(
                     _render_epsf_on_cutout(
-                        psf_model, 2 * h + 1, 2 * h + 1, lx, ly, 1.0, osamp
+                        _m, 2 * h + 1, 2 * h + 1, lx, ly, 1.0, osamp
                     ),
                     dtype=float,
                 )
@@ -7659,8 +7680,23 @@ class Templates:
                 except OSError:
                     return files[0]
 
-            science_psf_files = glob.glob(str(scienceDir / "PSF_model_image*fits"))
-            template_psf_files = glob.glob(str(scienceDir / "PSF_model_template*fits"))
+            # Gridded-PSF runs place model FITS under PSF_MODELS/; plain
+            # runs write them beside the other outputs.  Per-cell stamps
+            # (``_cellxIyJ``) are not field models -- exclude them so the
+            # mtime fallback cannot pick one.
+            def _field_psf_globs(root, prefix):
+                files = glob.glob(str(root / f"{prefix}*fits")) + glob.glob(
+                    str(root / "PSF_MODELS" / f"{prefix}*fits")
+                )
+                return [
+                    f for f in files
+                    if "_cellx" not in os.path.basename(f)
+                ]
+
+            science_psf_files = _field_psf_globs(scienceDir, "PSF_model_image")
+            template_psf_files = _field_psf_globs(
+                scienceDir, "PSF_model_template"
+            )
             science_psf = _pick_psf(science_psf_files, scienceFpath)
             template_psf = _pick_psf(template_psf_files, templateFpath)
 
@@ -9513,6 +9549,23 @@ class Templates:
                     cmd_local += ["-decorrelate_noise", "true"]
                 if ts_sub.get("sfft_save_decorrelated", False):
                     cmd_local += ["-save_decorrelated", "true"]
+
+                # Kernel regularization (B-Spline path, Cupy backend only).
+                # "auto" lets run_sfft.py decide from the matched-source count.
+                _reg_mode = str(
+                    ts_sub.get("sfft_regularize_kernel", "auto")
+                ).strip().lower()
+                if _reg_mode not in ("auto", "true", "false"):
+                    _reg_mode = "auto"
+                cmd_local += ["-regularize_kernel", _reg_mode]
+                cmd_local += [
+                    "-regularize_lambda",
+                    str(float(ts_sub.get("sfft_regularize_lambda", 1e-6))),
+                ]
+                cmd_local += [
+                    "-regularize_sparse_threshold",
+                    str(int(ts_sub.get("sfft_regularize_sparse_threshold", 30))),
+                ]
 
                 # Variable star rejection: enable flags must be passed alongside
                 # their thresholds, otherwise the thresholds are ignored and variable

@@ -142,6 +142,43 @@ def _remask_diff_fits(
     return n_new, int(np.count_nonzero(~np.isfinite(work)))
 
 
+def _resolve_kernel_regularization(
+    mode: str,
+    n_matched: int,
+    sparse_threshold: int,
+    lam: float,
+    xy: Optional[np.ndarray],
+) -> Optional[dict]:
+    """Return BSP kernel-regularization kwargs, or None when disabled/unusable.
+
+    ``mode`` is "auto" (enable only when ``n_matched`` < ``sparse_threshold``),
+    "true", or "false".  ``xy`` are the (x, y) positions at which the Laplacian
+    penalty is sampled (SFFT ``XY_REGULARIZE``) - the matched kernel-fit
+    sources in FITS 1-based pixel coordinates.
+    """
+    mode = str(mode).strip().lower()
+    enable = (
+        n_matched < int(sparse_threshold)
+        if mode == "auto"
+        else mode == "true"
+    )
+    if not enable or xy is None:
+        return None
+    xy = np.asarray(xy, dtype=float)
+    if xy.ndim != 2 or xy.shape[1] != 2:
+        return None
+    xy = xy[np.isfinite(xy).all(axis=1)]
+    if len(xy) == 0:
+        return None
+    return {
+        "REGULARIZE_KERNEL": True,
+        "IGNORE_LAPLACIAN_KERCENT": True,
+        "XY_REGULARIZE": xy,
+        "WEIGHT_REGULARIZE": None,
+        "LAMBDA_REGULARIZE": float(lam),
+    }
+
+
 def run_sfft() -> Optional[int]:
     """
     SFFT (Sparse Field Flux Transport) image subtraction pipeline.
@@ -494,6 +531,30 @@ def run_sfft() -> Optional[int]:
         type=str,
         default="false",
         help="Use B-Spline kernel matching (SFFT v1.5.0+). Requires CUDA/Cupy backend. 'true' enables B-Spline kernel for complex PSF variations.",
+    )
+    parser.add_argument(
+        "-regularize_kernel",
+        type=str,
+        default="auto",
+        help=(
+            "B-Spline kernel regularization (Hu et al. 2024; Cupy backend only). "
+            "Applies a Laplacian penalty on the matching kernel's second "
+            "derivatives to suppress delta-basis overfitting. "
+            "'auto' enables it when matched sources < -regularize_sparse_threshold; "
+            "'true'/'false' force on/off."
+        ),
+    )
+    parser.add_argument(
+        "-regularize_lambda",
+        type=float,
+        default=1e-6,
+        help="Regularization strength lambda for -regularize_kernel (SFFT LAMBDA_REGULARIZE).",
+    )
+    parser.add_argument(
+        "-regularize_sparse_threshold",
+        type=int,
+        default=30,
+        help="With -regularize_kernel=auto, enable regularization only when matched sources fall below this count.",
     )
     parser.add_argument(
         "-decorrelate_noise",
@@ -1256,6 +1317,17 @@ def run_sfft() -> Optional[int]:
     decorrelate_noise = _parse_bool_str("decorrelate_noise", args.decorrelate_noise)
     save_decorrelated = _parse_bool_str("save_decorrelated", args.save_decorrelated)
 
+    # Tri-state: "auto" resolves to True/False at the BSP call once the matched
+    # source count is known; explicit true/false force it.
+    regularize_kernel_mode = str(args.regularize_kernel).strip().lower()
+    if regularize_kernel_mode not in ("auto", "true", "false"):
+        log_warning(
+            f"Unrecognized -regularize_kernel '{args.regularize_kernel}'; using 'auto'."
+        )
+        regularize_kernel_mode = "auto"
+    regularize_lambda = float(args.regularize_lambda)
+    regularize_sparse_threshold = int(args.regularize_sparse_threshold)
+
     if use_bspline_kernel and not _HAS_BSPLINE:
         log_warning("B-Spline kernel requested but not available (SFFT v1.5.0+ required). Using standard kernel.")
         use_bspline_kernel = False
@@ -1630,7 +1702,17 @@ def run_sfft() -> Optional[int]:
                     f"Field is too sparse for reliable SFFT subtraction."
                 )
 
-            # Apply B-Spline kernel if requested (SFFT v1.5.0+)
+            # Apply B-Spline kernel if requested (SFFT v1.5.0+).
+            # NOTE: in sfft 1.7.x the B-Spline path is Cupy/GPU-only - on the
+            # Numpy backend SSC() returns None and ESS() raises an unbound
+            # local error, so skip explicitly rather than catching it below.
+            if use_bspline_kernel and _HAS_BSPLINE and BACKEND_4SUBTRACT != "Cupy":
+                log_warning(
+                    "B-Spline kernel refinement requires the Cupy backend "
+                    "(sfft 1.7.x has no Numpy path); keeping the standard "
+                    "kernel result. Install cupy to enable."
+                )
+                use_bspline_kernel = False
             if use_bspline_kernel and _HAS_BSPLINE:
                 try:
                     log_info("Applying B-Spline kernel refinement...")
@@ -1671,6 +1753,40 @@ def run_sfft() -> Optional[int]:
                         NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
                         VERBOSE_LEVEL=2,
                     )
+
+                    # Kernel regularization (Hu et al. 2024): Laplacian penalty
+                    # on the matching kernel sampled at the matched-source
+                    # positions.  "auto" enables it on sparse fields where the
+                    # delta-function basis is most prone to overfitting.
+                    _rx, _ry = _pick_xy_columns(matched_sources)
+                    _reg_xy = (
+                        matched_sources[[_rx, _ry]].to_numpy(dtype=float)
+                        if _rx is not None and _ry is not None
+                        else None
+                    )
+                    _reg_kwargs = _resolve_kernel_regularization(
+                        regularize_kernel_mode,
+                        _n_matched,
+                        regularize_sparse_threshold,
+                        regularize_lambda,
+                        _reg_xy,
+                    )
+                    if _reg_kwargs is not None:
+                        _bsp_kwargs.update(_reg_kwargs)
+                        log_info(
+                            "Kernel regularization enabled "
+                            f"(lambda={regularize_lambda:g}, "
+                            f"{len(_reg_kwargs['XY_REGULARIZE'])} points)."
+                        )
+                    elif regularize_kernel_mode != "false" and (
+                        regularize_kernel_mode != "auto"
+                        or _n_matched < regularize_sparse_threshold
+                    ):
+                        log_warning(
+                            "Kernel regularization requested but no valid "
+                            "matched-source coordinates; running unregularized."
+                        )
+
                     bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
                     # BSP returns (Solution, PixA_DIFF) -- NOTE the order differs
                     # from ESP/ECP, which return (PixA_DIFF, SFFTPrepDict, ...).
