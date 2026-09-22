@@ -3960,82 +3960,178 @@ def run_photometry():
             logging.debug("PSF pool FWHM vs inst_mag plot failed: %s", _e)
 
         # =============================================================================
-        # Supplement PSF pool with catalog sources when SExtractor pool is too small
+        # Supplement PSF pool from catalog AND detection-table sources
         # =============================================================================
         # In sparse fields or images with NaN borders, the SExtractor-detected PSF
         # pool may have too few valid sources (or all may fail with aperture_has_nan).
-        # The catalog sources (measured above via Calibrate_Catalog.measure) have
-        # already passed aperture photometry successfully, so they are valid PSF
-        # candidates.  Supplement the pool when it is below the minimum threshold.
+        # Two supplement frames are offered:
+        #   - CatalogSources: photometric catalogue stars (already aperture-
+        #     measured and border-filtered above)
+        #   - FWHMSources: the cleaned SExtractor detection table, re-derived on
+        #     the aligned image so it shares the build frame.  The catalogue only
+        #     covers catalogued stars, so detected-but-uncatalogued sources across
+        #     the image never reach the pool without this frame.  Detection
+        #     enrichment is offered whenever a spatial grid is requested (per-cell
+        #     density is what enables it) or the pool is below minimum.
         #
         # Quality filtering:
+        #   - finite coords, positive flux, inside the image border
         #   - SNR >= psf_snr_min (default 5) to exclude low-S/N sources
-        #   - Isolation check against ALL catalog sources (not just the supplement)
-        #     to avoid blended cutouts corrupting the ePSF
+        #   - Isolation check against ALL known sources (catalogue + detections
+        #     + the raw detection table) to avoid blended cutouts corrupting the ePSF
         #   - Carry all useful columns (SNR, flux_AP, threshold, fwhm, flags,
         #     class_star, sharpness, elongation, peak_flux) so the PSF build can
         #     apply its full suite of quality cuts.
+        _supp_frames = []
         if (
-            psf_source_pool is not None
-            and len(psf_source_pool) < min_psf_pool
-            and CatalogSources is not None
+            CatalogSources is not None
             and len(CatalogSources) > 0
             and {"x_pix", "y_pix", "flux_AP"}.issubset(CatalogSources.columns)
+        ):
+            _supp_frames.append(("catalog", CatalogSources))
+        _grid_requested = bool(
+            input_yaml["photometry"].get("psf_spatial_grid", False)
+        )
+        _pool_starved = (
+            psf_source_pool is not None and len(psf_source_pool) < min_psf_pool
+        )
+        if _grid_requested or _pool_starved:
+            # The filtered detection table is re-derived on the aligned
+            # image, and the raw detection table (stored on the config) is
+            # the same frame; both reach detected-but-uncatalogued stars
+            # the reference catalogue misses.  The raw table is widest:
+            # its low-SNR/blended members are removed by the SNR and
+            # isolation cuts below, and PSF.build() applies the rest.
+            for _fname, _f in (
+                ("detections", FWHMSources),
+                ("detections(raw)", (input_yaml.get("photometry") or {}).get(
+                    "last_raw_sex_catalog"
+                )),
+            ):
+                if (
+                    _f is not None
+                    and len(_f) > 0
+                    and {"x_pix", "y_pix", "flux_AP"}.issubset(_f.columns)
+                ):
+                    _supp_frames.append((_fname, _f))
+
+        if (
+            psf_source_pool is not None
+            and _supp_frames
+            and (_pool_starved or _grid_requested)
         ):
             _psf_snr_min = float(phot_cfg.get("psf_snr_min", 5.0))
             _psf_iso_fwhm = float(phot_cfg.get("psf_isolation_radius_fwhm", 3.0))
             _hdr_fwhm = input_yaml.get("fwhm", 3.0)
             _iso_radius = _psf_iso_fwhm * float(_hdr_fwhm) if _hdr_fwhm > 0 else 15.0
+            _supp_max_add = int(phot_cfg.get("psf_supplement_max_add", 800))
 
-            # Start with basic validity: finite coords, positive flux
-            _cat_valid = CatalogSources[
-                np.isfinite(CatalogSources["x_pix"])
-                & np.isfinite(CatalogSources["y_pix"])
-                & np.isfinite(CatalogSources["flux_AP"])
-                & (CatalogSources["flux_AP"] > 0)
-            ].copy()
-
-            # SNR cut: use "SNR" (aperture) or "snr" (catalog measure) column
-            _snr_col = "SNR" if "SNR" in _cat_valid.columns else (
-                "snr" if "snr" in _cat_valid.columns else None
+            # Neighbour tree over every known REAL source: catalogue +
+            # detections + the unfiltered detection table, but only entries
+            # with SNR >= psf_snr_min.  Sub-threshold detections are mostly
+            # noise peaks; using them as neighbours would veto nearly every
+            # candidate in a crowded field while adding no real protection
+            # (their flux contribution is handled by per-cutout masking at
+            # build time).  Positions are deduplicated at ~1 px so a source
+            # present in several frames counts once.
+            _nb_rows = []
+            for _f in _supp_frames:
+                _nb_rows.append(_f[1])
+            _raw_cat = (input_yaml.get("photometry") or {}).get(
+                "last_raw_sex_catalog"
             )
-            if _snr_col is not None:
-                _snr_vals = pd.to_numeric(_cat_valid[_snr_col], errors="coerce")
-                _snr_ok = _snr_vals >= _psf_snr_min
-                _n_low_snr = int((~_snr_ok).sum())
-                if _n_low_snr > 0:
-                    logging.info(
-                        "PSF supplement: excluding %d low-S/N catalog sources (SNR < %.1f).",
-                        _n_low_snr, _psf_snr_min,
+            if (
+                _raw_cat is not None
+                and len(_raw_cat) > 0
+                and {"x_pix", "y_pix"}.issubset(_raw_cat.columns)
+            ):
+                _nb_rows.append(_raw_cat)
+            _nb = pd.concat(
+                [
+                    f[["x_pix", "y_pix"]].assign(
+                        _snr=pd.to_numeric(
+                            f["snr"] if "snr" in f.columns
+                            else f["SNR"] if "SNR" in f.columns
+                            else pd.Series(np.nan, index=f.index),
+                            errors="coerce",
+                        )
                     )
-                    _cat_valid = _cat_valid.loc[_snr_ok].copy()
+                    for f in _nb_rows
+                ],
+                ignore_index=True,
+            )
+            _nb = _nb[
+                np.isfinite(_nb["x_pix"]) & np.isfinite(_nb["y_pix"])
+            ]
+            _nb_real = _nb[
+                _nb["_snr"].isna() | (_nb["_snr"] >= _psf_snr_min)
+            ]
+            _nb_xy = (
+                _nb_real.assign(_xr=_nb_real["x_pix"].round(), _yr=_nb_real["y_pix"].round())
+                .drop_duplicates(subset=["_xr", "_yr"])[["x_pix", "y_pix"]]
+                .to_numpy(dtype=float)
+            )
+            from scipy.spatial import cKDTree
+            _all_tree = cKDTree(_nb_xy) if len(_nb_xy) > 0 else None
 
-            # Isolation check: reject catalog sources with a neighbour within iso_radius
-            # Check against ALL catalog sources (including non-supplemented ones) to
-            # avoid blended cutouts.
-            if len(_cat_valid) >= 2:
-                from scipy.spatial import cKDTree
-                _all_cat_xy = CatalogSources[["x_pix", "y_pix"]].to_numpy(dtype=float)
-                _valid_xy = _cat_valid[["x_pix", "y_pix"]].to_numpy(dtype=float)
-                _all_tree = cKDTree(_all_cat_xy)
-                _neighbour_counts = _all_tree.query_ball_point(
-                    _valid_xy, r=_iso_radius, return_length=True
+            for _fname, _frame in _supp_frames:
+                # Start with basic validity: finite coords, positive flux,
+                # inside the image border (cutouts cannot extend past it).
+                _cand = _frame[
+                    np.isfinite(_frame["x_pix"])
+                    & np.isfinite(_frame["y_pix"])
+                    & np.isfinite(_frame["flux_AP"])
+                    & (_frame["flux_AP"] > 0)
+                    & (_frame["x_pix"] >= border)
+                    & (_frame["x_pix"] < width - border)
+                    & (_frame["y_pix"] >= border)
+                    & (_frame["y_pix"] < height - border)
+                ].copy()
+
+                # SNR cut: "SNR" (aperture) or "snr" (catalog/detection) column
+                _snr_col = "SNR" if "SNR" in _cand.columns else (
+                    "snr" if "snr" in _cand.columns else None
                 )
-                _isolated = _neighbour_counts <= 1  # only self within iso_radius
-                _n_blended = int((~_isolated).sum())
-                if _n_blended > 0:
-                    logging.info(
-                        "PSF supplement: excluding %d non-isolated catalog sources "
-                        "(neighbour within %.1f px = %.1f FWHM).",
-                        _n_blended, _iso_radius, _psf_iso_fwhm,
-                    )
-                    _cat_valid = _cat_valid.loc[_isolated].copy()
+                if _snr_col is not None:
+                    _snr_vals = pd.to_numeric(_cand[_snr_col], errors="coerce")
+                    _snr_ok = _snr_vals >= _psf_snr_min
+                    _n_low_snr = int((~_snr_ok).sum())
+                    if _n_low_snr > 0:
+                        logging.info(
+                            "PSF supplement (%s): excluding %d low-S/N sources (SNR < %.1f).",
+                            _fname, _n_low_snr, _psf_snr_min,
+                        )
+                        _cand = _cand.loc[_snr_ok].copy()
 
-            if len(_cat_valid) > 0:
+                # Isolation: reject sources with a neighbour within iso_radius
+                # in the densest available source list.  Sources closer than
+                # ~2 px are the candidate's own entries (the same object can
+                # appear in several frames at slightly different positions).
+                if len(_cand) >= 2 and _all_tree is not None:
+                    _valid_xy = _cand[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                    _self_r = min(2.0, 0.5 * _iso_radius)
+                    _n_iso = _all_tree.query_ball_point(
+                        _valid_xy, r=_iso_radius, return_length=True
+                    )
+                    _n_self = _all_tree.query_ball_point(
+                        _valid_xy, r=_self_r, return_length=True
+                    )
+                    _isolated = (np.asarray(_n_iso) - np.asarray(_n_self)) <= 0
+                    _n_blended = int((~_isolated).sum())
+                    if _n_blended > 0:
+                        logging.info(
+                            "PSF supplement (%s): excluding %d non-isolated sources "
+                            "(neighbour within %.1f px = %.1f FWHM).",
+                            _fname, _n_blended, _iso_radius, _psf_iso_fwhm,
+                        )
+                        _cand = _cand.loc[_isolated].copy()
+
+                if len(_cand) == 0:
+                    continue
                 logging.info(
-                    "PSF pool has only %d sources; supplementing with %d quality-filtered "
-                    "catalog sources (SNR >= %.1f, isolated at %.1f FWHM).",
-                    len(psf_source_pool), len(_cat_valid), _psf_snr_min, _psf_iso_fwhm,
+                    "PSF pool: supplementing with %d quality-filtered %s sources "
+                    "(SNR >= %.1f, isolated at %.1f FWHM).",
+                    len(_cand), _fname, _psf_snr_min, _psf_iso_fwhm,
                 )
                 # Carry the quality columns so PSF.build() can apply its cuts.
                 _carry_cols = ["x_pix", "y_pix"]
@@ -4045,9 +4141,9 @@ def run_photometry():
                     "sharpness", "roundness", "ELONGATION", "a", "b",
                     "mu_max", "flux_radius",
                 ]:
-                    if _c in _cat_valid.columns:
+                    if _c in _cand.columns:
                         _carry_cols.append(_c)
-                _supplement = _cat_valid[_carry_cols].copy()
+                _supplement = _cand[_carry_cols].copy()
 
                 # Avoid duplicates: skip supplements within 2 px of a pooled source.
                 _existing_xy = (
@@ -4058,11 +4154,19 @@ def run_photometry():
                 _supplement_xy = _supplement[["x_pix", "y_pix"]].to_numpy(dtype=float)
                 _is_new = np.ones(len(_supplement), dtype=bool)
                 if len(_existing_xy) > 0:
-                    from scipy.spatial import cKDTree as _cKDTree
-                    _tree = _cKDTree(_existing_xy)
+                    _tree = cKDTree(_existing_xy)
                     _dups, _ = _tree.query(_supplement_xy, k=1)
                     _is_new = _dups > 2.0
                 _supplement = _supplement.loc[_is_new].reset_index(drop=True)
+
+                # Bound pathological pools: keep the highest-SNR additions.
+                if len(_supplement) > _supp_max_add and _snr_col is not None:
+                    _ord = np.argsort(
+                        pd.to_numeric(
+                            _supplement[_snr_col], errors="coerce"
+                        ).to_numpy(dtype=float)
+                    )[::-1]
+                    _supplement = _supplement.iloc[_ord[:_supp_max_add]]
                 if len(_supplement) > 0:
                     psf_source_pool = pd.concat(
                         [psf_source_pool, _supplement], ignore_index=True
@@ -4155,9 +4259,23 @@ def run_photometry():
                     logging.info(
                         f"Building PSF from original image using {len(psf_sources_orig)} sources that passed linearity and optimum-aperture checks."
                     )
+                    # A gridded ePSF's cell fiducials live in the detector
+                    # frame of the image it was built on; building on the
+                    # pre-alignment original while fitting on the aligned
+                    # image would mis-map cells.  Force the single ePSF here.
+                    _orig_yaml = dict(input_yaml)
+                    _orig_phot = dict(input_yaml.get("photometry") or {})
+                    if _orig_phot.get("psf_spatial_grid"):
+                        _orig_phot["psf_spatial_grid"] = False
+                        logging.info(
+                            "psf_spatial_grid disabled for build-from-original: "
+                            "grid fiducials would be in the wrong frame after "
+                            "alignment. Building a single ePSF."
+                        )
+                    _orig_yaml["photometry"] = _orig_phot
                     _psf_builder = PSF(
                         image=image_orig,
-                        input_yaml=input_yaml,
+                        input_yaml=_orig_yaml,
                     )
                     epsf_model, PSFSources = _psf_builder.build(
                         psfSources=psf_sources_orig,
@@ -7481,6 +7599,11 @@ def run_photometry():
         # -----------------------------------------------------------------------
         _forceconv_diff = None
         _epsf_original = None
+        # The model that matches the SCIENCE image.  The subtraction block
+        # below may convolve epsf_model with the SFFT kernel (ForceConv=SCI)
+        # or replace it entirely (ZOGY diff PSF); any later refit on the
+        # science image (e.g. redo_sources) must use this snapshot instead.
+        _epsf_science = epsf_model
         if PreformSubtraction:
             _forceconv_hdr = str(header.get("FORCECON", "")).strip().upper()
             # SFFT writes "AUTO" to the header when ForceConv=AUTO, but internally
@@ -7611,10 +7734,16 @@ def run_photometry():
                 # If science ePSF build failed (sparse field), load the
                 # PSF model file built by the ZOGY PSF builder.
                 if epsf_model is None:
-                    _sci_psf_file = os.path.join(
-                        write_dir,
-                        f"PSF_model_image_{os.path.splitext(os.path.basename(science_path_original))[0]}.fits",
+                    _sci_psf_base = (
+                        f"PSF_model_image_{os.path.splitext(os.path.basename(science_path_original))[0]}.fits"
                     )
+                    # Gridded-PSF runs keep model FITS under PSF_MODELS/;
+                    # the plain layout writes them next to the outputs.
+                    _sci_psf_file = os.path.join(
+                        write_dir, "PSF_MODELS", _sci_psf_base
+                    )
+                    if not os.path.isfile(_sci_psf_file):
+                        _sci_psf_file = os.path.join(write_dir, _sci_psf_base)
                     if os.path.isfile(_sci_psf_file):
                         try:
                             from photutils.psf import ImagePSF
@@ -7656,6 +7785,7 @@ def run_photometry():
                                     oversampling=1,
                                 )
                             do_aperture_ONLY = False
+                            _epsf_science = epsf_model
                             logging.info(
                                 "ZOGY CONVD=REF: loaded science PSF model from %s "
                                 "(%dx%d px) for photometry.",
@@ -7755,6 +7885,7 @@ def run_photometry():
                     if epsf_model is not None and _solpath and os.path.isfile(_solpath):
                         try:
                             from sfft.utils.SFFTSolutionReader import Realize_MatchingKernel
+                            from photutils.psf import GriddedPSFModel
 
                             _kerhw = int(header.get("KERHW", 0))
                             _kerorder = int(header.get("KERORDER", header.get("KERPOLY", 0)))
@@ -7767,14 +7898,168 @@ def run_photometry():
                             # Use image centre as default (correct for order 0, approximate for >0).
                             _cx = float(_nx) / 2.0
                             _cy = float(_ny) / 2.0
-                            _XY_q = np.array([[_cx, _cy]])
+                            _is_gridded_epsf = isinstance(epsf_model, GriddedPSFModel)
+                            if _is_gridded_epsf:
+                                # Each grid cell gets the kernel realized at
+                                # its own fiducial position - the matching
+                                # kernel is spatially varying, so one kernel
+                                # cannot serve the whole field.
+                                _XY_q = np.asarray(
+                                    epsf_model.grid_xypos, dtype=float
+                                )
+                            else:
+                                _XY_q = np.array([[_cx, _cy]])
 
                             _ker_stack = Realize_MatchingKernel(_XY_q).FromFITS(_solpath)
                             # SFFT stores images/kernel in transposed (X, Y) = (col, row)
                             # order.  Transpose to numpy (Y, X) = (row, col) for fftconvolve.
                             _ker_2d = np.asarray(_ker_stack[0]).squeeze().T
 
-                            if _ker_2d.ndim == 2 and _ker_2d.shape[0] == _L:
+                            if _is_gridded_epsf:
+                                _ker_list = [
+                                    np.asarray(_ker_stack[i]).squeeze().T
+                                    for i in range(len(_XY_q))
+                                ]
+                                if all(
+                                    _kk.ndim == 2 and _kk.shape[0] == _L
+                                    for _kk in _ker_list
+                                ):
+                                    from psf import (
+                                        convolve_gridded_epsf_with_kernel,
+                                    )
+
+                                    (
+                                        _epsf_conv_model,
+                                        _epsf_native_cube,
+                                        _epsf_conv_cube,
+                                    ) = convolve_gridded_epsf_with_kernel(
+                                        epsf_model, _ker_list
+                                    )
+                                    epsf_model = _epsf_conv_model
+                                    logging.info(
+                                        "Gridded ePSF convolved with per-cell "
+                                        "SFFT kernels (%d cells, KerHW=%d px, "
+                                        "order=%d): each cell uses the kernel "
+                                        "realized at its fiducial position.",
+                                        len(_ker_list), _kerhw, _kerorder,
+                                    )
+                                    # Keep the existing 3-panel diagnostic:
+                                    # show the cell nearest the image centre.
+                                    _ic = int(
+                                        np.argmin(
+                                            (_XY_q[:, 0] - _cx) ** 2
+                                            + (_XY_q[:, 1] - _cy) ** 2
+                                        )
+                                    )
+                                    _epsf_native = _epsf_native_cube[_ic]
+                                    _epsf_conv_native = _epsf_conv_cube[_ic]
+                                    _ker_2d = _ker_list[_ic]
+
+                                    # Kernel spatial-variation systematic,
+                                    # same estimator as the single-ePSF path.
+                                    if _kerorder > 0:
+                                        try:
+                                            _n_sample = 9
+                                            _xs_k = np.linspace(0, _nx, _n_sample)
+                                            _ys_k = np.linspace(0, _ny, _n_sample)
+                                            _XY_sample = np.array(
+                                                [[x, y] for y in _ys_k for x in _xs_k]
+                                            )
+                                            _ker_sample = Realize_MatchingKernel(
+                                                _XY_sample
+                                            ).FromFITS(_solpath)
+                                            _ker_arrays = []
+                                            for _ks in _ker_sample:
+                                                _k2d = np.asarray(_ks).squeeze().T
+                                                if _k2d.ndim == 2 and _k2d.shape[0] == _L:
+                                                    _ker_arrays.append(_k2d)
+                                            if len(_ker_arrays) >= 4:
+                                                _ker_stack_arr = np.stack(_ker_arrays)
+                                                _ker_med = np.median(_ker_stack_arr, axis=0)
+                                                _ker_std = np.std(_ker_stack_arr, axis=0)
+                                                _nonzero = np.abs(_ker_med) > 1e-8
+                                                if np.any(_nonzero):
+                                                    _frac_var = np.median(
+                                                        _ker_std[_nonzero] / np.abs(_ker_med[_nonzero])
+                                                    )
+                                                    _psf_model_err_frac = float(
+                                                        np.clip(_frac_var * 0.5, 0.0, 0.20)
+                                                    )
+                                                    if _psf_model_err_frac > 0.005:
+                                                        input_yaml["psf_kernel_model_err_frac"] = _psf_model_err_frac
+                                                        logging.info(
+                                                            "SFFT kernel spatial variation: "
+                                                            "median fractional variation=%.4f -> "
+                                                            "PSF model error fraction=%.4f "
+                                                            "(will be added as systematic to PSF photometry).",
+                                                            _frac_var, _psf_model_err_frac,
+                                                        )
+                                        except Exception as _ker_unc_e:
+                                            logging.debug(
+                                                "Kernel uncertainty estimation skipped: %s",
+                                                _ker_unc_e,
+                                            )
+
+                                    # --- Diagnostic plot (same 3-panel format
+                                    # as the single-ePSF path): centre-cell
+                                    # ePSF / its kernel / convolved ePSF ---
+                                    try:
+                                        import matplotlib
+                                        matplotlib.use("Agg", force=True)
+                                        import matplotlib.pyplot as plt
+
+                                        from astropy.visualization import ZScaleInterval
+                                        from plotting_utils import apply_autophot_mplstyle, get_plot_ext, safe_tight_layout
+                                        apply_autophot_mplstyle()
+                                        _zs = ZScaleInterval()
+                                        _cmap_v = plt.get_cmap("viridis").copy()
+                                        _cmap_v.set_bad(color="magenta")
+
+                                        _fig, _axes = plt.subplots(1, 3, figsize=(15, 5))
+                                        _fig.suptitle(
+                                            f"PSF Convolution - gridded ePSF cell {_ic} "
+                                            f"(ForceConv=SCI, KerHW={_kerhw}, order={_kerorder})\n"
+                                            f"{base_filename}",
+                                            fontsize=11,
+                                        )
+                                        _v0 = _zs.get_limits(_epsf_native)
+                                        _im0 = _axes[0].imshow(_epsf_native, origin="lower", cmap=_cmap_v, vmin=_v0[0], vmax=_v0[1])
+                                        _axes[0].set_title("Science ePSF - centre cell\n(native pixels)")
+                                        _axes[0].set_xlabel("X (px)")
+                                        _axes[0].set_ylabel("Y (px)")
+                                        _fig.colorbar(_im0, ax=_axes[0], fraction=0.046, pad=0.04)
+                                        _v1 = _zs.get_limits(_ker_2d)
+                                        _im1 = _axes[1].imshow(_ker_2d, origin="lower", cmap=_cmap_v, vmin=_v1[0], vmax=_v1[1])
+                                        _axes[1].set_title(f"SFFT Kernel at cell fiducial\n({_ker_2d.shape[0]}x{_ker_2d.shape[1]} px)")
+                                        _axes[1].set_xlabel("X (px)")
+                                        _axes[1].set_ylabel("Y (px)")
+                                        _fig.colorbar(_im1, ax=_axes[1], fraction=0.046, pad=0.04)
+                                        _v2 = _zs.get_limits(_epsf_conv_native)
+                                        _im2 = _axes[2].imshow(_epsf_conv_native, origin="lower", cmap=_cmap_v, vmin=_v2[0], vmax=_v2[1])
+                                        _axes[2].set_title("Convolved ePSF - centre cell\n(diff-image PSF, native px)")
+                                        _axes[2].set_xlabel("X (px)")
+                                        _axes[2].set_ylabel("Y (px)")
+                                        _fig.colorbar(_im2, ax=_axes[2], fraction=0.046, pad=0.04)
+                                        safe_tight_layout(_fig, rect=[0, 0, 1, 0.92])
+                                        _plot_path = os.path.join(
+                                            os.path.dirname(fpath),
+                                            f"PSF_Convolution_{os.path.splitext(base_filename)[0]}{get_plot_ext(input_yaml)}",
+                                        )
+                                        _fig.savefig(_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
+                                        plt.close(_fig)
+                                        logging.info("Saved PSF convolution diagnostic plot: %s", os.path.basename(_plot_path))
+                                    except Exception as _pe:
+                                        logging.debug("PSF convolution plot failed: %s", _pe)
+                                else:
+                                    logging.warning(
+                                        "SFFT per-cell kernel realization "
+                                        "failed (shapes %s, expected %dx%d); "
+                                        "using unconvolved gridded ePSF.",
+                                        str([_kk.shape for _kk in _ker_list]),
+                                        _L, _L,
+                                    )
+                                    _ker_2d = None
+                            elif _ker_2d.ndim == 2 and _ker_2d.shape[0] == _L:
                                 # The SFFT kernel operates in native
                                 # (un-oversampled) pixel space while the ePSF
                                 # may be oversampled.  convolve_epsf_with_kernel
@@ -7950,13 +8235,30 @@ def run_photometry():
                                     _gauss_sigma, x_size=int(2 * int(np.ceil(_gauss_sigma * 3)) + 1),
                                     y_size=int(2 * int(np.ceil(_gauss_sigma * 3)) + 1),
                                 )
-                                (
-                                    _epsf_conv_model,
-                                    _epsf_native,
-                                    _epsf_conv_native,
-                                ) = convolve_epsf_with_kernel(
-                                    epsf_model, _gauss_kernel.array
-                                )
+                                from photutils.psf import GriddedPSFModel as _GPM
+
+                                if isinstance(epsf_model, _GPM):
+                                    from psf import (
+                                        convolve_gridded_epsf_with_kernel,
+                                    )
+
+                                    _n_cells = len(epsf_model.grid_xypos)
+                                    (
+                                        _epsf_conv_model,
+                                        _epsf_native,
+                                        _epsf_conv_native,
+                                    ) = convolve_gridded_epsf_with_kernel(
+                                        epsf_model,
+                                        [_gauss_kernel.array] * _n_cells,
+                                    )
+                                else:
+                                    (
+                                        _epsf_conv_model,
+                                        _epsf_native,
+                                        _epsf_conv_native,
+                                    ) = convolve_epsf_with_kernel(
+                                        epsf_model, _gauss_kernel.array
+                                    )
                                 epsf_model = _epsf_conv_model
                                 logging.info(
                                     "ePSF convolved with Gaussian kernel (sigma=%.2f px, "
@@ -8027,10 +8329,27 @@ def run_photometry():
         # When KerPolyOrder > 0, the SFFT kernel changes across the field.
         # The initial realization used the image centre; now that we know the
         # target position, re-realize and re-convolve the ePSF for accuracy.
+        # A GriddedPSFModel is skipped: each cell was already convolved with
+        # the kernel realized at its own fiducial, and evaluate() interpolates
+        # the local PSF at the target position - more correct than any single
+        # re-realized kernel.
+        try:
+            from photutils.psf import GriddedPSFModel as _GPM_re
+
+            _epsf_is_gridded = isinstance(epsf_model, _GPM_re)
+        except Exception:
+            _epsf_is_gridded = False
+        if _epsf_is_gridded and _forceconv_diff == "SCI":
+            logging.info(
+                "Gridded ePSF: skipping target-position kernel "
+                "re-realization - each grid cell already carries the "
+                "kernel realized at its own fiducial."
+            )
         if (
             _forceconv_diff == "SCI"
             and epsf_model is not None
             and _epsf_original is not None
+            and not _epsf_is_gridded
             and PreformSubtraction
             and np.isfinite(target_x_pix)
             and np.isfinite(target_y_pix)
@@ -8714,12 +9033,38 @@ def run_photometry():
                 inverted_image = None
 
         if not do_aperture_ONLY:
+            # The target fit runs in cutout-local coordinates when a cutout
+            # is in use; a GriddedPSFModel would then select the ePSF cell
+            # from local (not detector) coordinates.  Pin the grid to the
+            # local PSF at the target's detector position - spatial
+            # variation across the small cutout is negligible.  Additional
+            # targets inside the same cutout share this local PSF.
+            _epsf_for_target = epsf_model
+            if target_cutout is not None and epsf_model is not None:
+                try:
+                    from photutils.psf import GriddedPSFModel as _GPM_t
+
+                    if isinstance(epsf_model, _GPM_t):
+                        from psf import epsf_at_position
+
+                        _epsf_for_target = epsf_at_position(
+                            epsf_model,
+                            float(bg_target_x_pix),
+                            float(bg_target_y_pix),
+                        )
+                        logging.info(
+                            "Gridded ePSF pinned to local PSF at detector "
+                            "(%.1f, %.1f) for cutout-frame target fit.",
+                            float(bg_target_x_pix), float(bg_target_y_pix),
+                        )
+                except Exception as _pin_t:
+                    logging.debug("Gridded ePSF pinning skipped: %s", _pin_t)
             TargetPosition = PSF(
                 image=image_for_target,
                 input_yaml=input_yaml,
                 header=header,
             ).fit(
-                epsf_model=epsf_model,
+                epsf_model=_epsf_for_target,
                 sources=TargetPosition,
                 plotTarget=True,
                 forcePhotometry=perform_ForcePhotometry,
@@ -9891,6 +10236,32 @@ def run_photometry():
                                 _lp_x, _lp_y,
                             )
                         lim_pos = (_lp_x, _lp_y)
+                        # A GriddedPSFModel selects the ePSF cell from the
+                        # (x_0, y_0) passed to evaluate(), but the injection
+                        # machinery renders on cutout-local coordinates - pin
+                        # the model to the local PSF at the target's detector
+                        # position (spatial variation across the cutout is
+                        # negligible).
+                        try:
+                            from photutils.psf import GriddedPSFModel as _GPM_inj
+
+                            if isinstance(epsf_for_injection, _GPM_inj):
+                                from psf import epsf_at_position
+
+                                epsf_for_injection = epsf_at_position(
+                                    epsf_for_injection,
+                                    float(lim_pos[0]),
+                                    float(lim_pos[1]),
+                                )
+                                logging.info(
+                                    "Limiting magnitude: pinned gridded ePSF "
+                                    "to local PSF at detector (%.1f, %.1f).",
+                                    float(lim_pos[0]), float(lim_pos[1]),
+                                )
+                        except Exception as _pin_exc:
+                            logging.debug(
+                                "Gridded ePSF pinning skipped: %s", _pin_exc
+                            )
                         lim_rms = background_rms
                         # Limiting-magnitude injection uses the same image used for target
                         # measurement by default (including any local DC bias/lift applied by
@@ -10063,6 +10434,87 @@ def run_photometry():
                 InjectedLimit = np.nan
 
         # =============================================================================
+        # Empirical uncertainty calibration (from injection/recovery trials)
+        # =============================================================================
+        # The limiting-magnitude machinery measures the same recovery estimator
+        # on injected sources; the z-score scatter of (measured - true)/sigma
+        # tells us whether the reported errors are honest.  Apply the factor to
+        # the matching method's error columns on TargetPosition so everything
+        # downstream (SNR, detection flag, output CSV) is consistent.
+        _uncal_factor_applied = np.nan
+        _uncal_applied = False
+        _uncal_nsrc = 0
+        _uncal_zstd = np.nan
+        try:
+            _uncal_info = getattr(getDetectionLimits, "last_uncal", None)
+            _lim_cfg_uncal = input_yaml.get("limiting_magnitude") or {}
+            if _uncal_info is not None and bool(
+                _lim_cfg_uncal.get("uncal_apply", True)
+            ):
+                _uncal_res = _uncal_info.get("result")
+                _uncal_method = str(_uncal_info.get("method", "PSF"))
+                _uncal_factor = float(
+                    getattr(_uncal_res, "calibration_factor", np.nan)
+                )
+                _uncal_nsrc = int(getattr(_uncal_res, "n_sources", 0) or 0)
+                _uncal_zstd = float(getattr(_uncal_res, "z_mad_std", np.nan))
+                _uncal_min = int(_lim_cfg_uncal.get("uncal_min_sources", 30))
+                _uncal_clip = _lim_cfg_uncal.get(
+                    "uncal_factor_clip", [0.5, 2.0]
+                )
+                _clip_lo, _clip_hi = float(_uncal_clip[0]), float(_uncal_clip[1])
+                _uncal_ok = (
+                    _uncal_res is not None
+                    and _uncal_nsrc >= _uncal_min
+                    and np.isfinite(_uncal_factor)
+                    and _clip_lo <= _uncal_factor <= _clip_hi
+                )
+                if _uncal_ok:
+                    from utils.uncertainty_calibration import scale_error_columns
+
+                    _scaled = scale_error_columns(
+                        TargetPosition,
+                        _uncal_factor,
+                        _uncal_method,
+                        input_yaml["imageFilter"],
+                    )
+                    # Additional targets share the same image noise model;
+                    # their calibrated mag errors are recomputed downstream
+                    # from the (now scaled) inst_*_err columns.
+                    if _additional_targets_fit_results is not None:
+                        scale_error_columns(
+                            _additional_targets_fit_results,
+                            _uncal_factor,
+                            _uncal_method,
+                            input_yaml["imageFilter"],
+                        )
+                    if _scaled:
+                        _uncal_factor_applied = _uncal_factor
+                        _uncal_applied = True
+                        logging.log(
+                            STATUS,
+                            "Uncertainty calibration: scaled %d error columns "
+                            "(%s) by factor %.3f from %d injection trials.",
+                            len(_scaled),
+                            _uncal_method,
+                            _uncal_factor,
+                            _uncal_nsrc,
+                        )
+                elif _uncal_res is not None:
+                    logging.info(
+                        "Uncertainty calibration not applied: factor=%.3f, "
+                        "n=%d (min %d, clip %s)",
+                        _uncal_factor,
+                        _uncal_nsrc,
+                        _uncal_min,
+                        _uncal_clip,
+                    )
+        except Exception as _uncal_exc:
+            logging.debug(
+                "Uncertainty calibration application skipped: %s", _uncal_exc
+            )
+
+        # =============================================================================
         # Save Output
         # =============================================================================
 
@@ -10212,6 +10664,13 @@ def run_photometry():
                 output["reduced_chi2"] = float(TargetPosition.at[idx, "reduced_chi2"])
         except Exception:
             pass
+
+        # Empirical uncertainty-calibration diagnostics (NaN / False when the
+        # injection sample was too small or the factor fell outside the clip).
+        output["uncal_factor"] = _uncal_factor_applied
+        output["uncal_applied"] = _uncal_applied
+        output["uncal_n_sources"] = _uncal_nsrc
+        output["uncal_z_std"] = _uncal_zstd
 
         # -------------------------------------------------------------------------
         # Multi-criteria detection flag
@@ -11086,11 +11545,15 @@ def run_photometry():
                 IsolatedSources["y_pix"] < height - border
             )
             IsolatedSources = IsolatedSources[mask_x & mask_y]
+            # This refit runs on the reloaded SCIENCE image, so it needs the
+            # unconvolved science model - not epsf_model, which by this point
+            # may be the SFFT-convolved ePSF or the ZOGY diff PSF.  None ->
+            # fit() returns the table unchanged (no valid science PSF).
             IsolatedSources = PSF(
                 image=image,
                 input_yaml=input_yaml,
             ).fit(
-                epsf_model=epsf_model,
+                epsf_model=_epsf_science,
                 sources=IsolatedSources,
                 plotTarget=False,
                 background_rms=background_rms,

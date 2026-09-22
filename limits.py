@@ -826,6 +826,10 @@ class Limits:
         self.input_yaml = input_yaml
         self.catalog = catalog
 
+        # Most recent injection/recovery uncertainty calibration
+        # ({"result": UncertaintyCalibrationResult, "method": str} or None).
+        self.last_uncal = None
+
         # Optional RNG seed for reproducible limiting-magnitude experiments.
         seed = self.input_yaml.get("rng_seed", None)
         self._rng = (
@@ -977,6 +981,7 @@ class Limits:
         """
         logger = logging.getLogger(__name__)
         start_time = time.time()
+        self.last_uncal = None
 
         try:
             lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
@@ -2249,6 +2254,16 @@ class Limits:
                 betas = np.array([r[1] for r in results], dtype=float)
                 recovered_fluxes = np.array([r[2] for r in results], dtype=float)
                 recovered_flux_errs = np.array([r[3] for r in results], dtype=float)
+
+                # Collect (true, measured, err) per trial for the empirical
+                # uncertainty calibration.  All finite trials count, detected
+                # or not: the z-score is scale-free, and restricting to
+                # detections would bias the coverage statistics.
+                if _uncal_collect:
+                    _f_true = float(F) * _uncal_true_scale
+                    for _rf, _rfe in zip(recovered_fluxes, recovered_flux_errs):
+                        if np.isfinite(_rf) and np.isfinite(_rfe) and _rfe > 0:
+                            _uncal_rows.append((_f_true, float(_rf), float(_rfe)))
                 # Surface worker exceptions: a systematic failure would otherwise
                 # masquerade as 0% completeness with no diagnostic output.
                 trial_errors = [r[4] for r in results if len(r) > 4 and r[4]]
@@ -2289,6 +2304,36 @@ class Limits:
             bisect_steps: list[tuple] = []
             _trial_cache: dict[str, tuple] = {}
             _flag_cache: dict[str, np.ndarray] = {}
+
+            # Per-trial (true_flux, measured_flux, measured_err) samples for the
+            # empirical uncertainty calibration.  For PSF/EMCEE recovery the
+            # recovered flux is a total-flux estimate directly comparable to the
+            # injected F_amp; for AP recovery it is an aperture flux, so the
+            # true flux is scaled by the measured aperture fraction.
+            _uncal_rows: list[tuple] = []
+            _uncal_method = (
+                str(recovery_method).strip().upper()
+                if recovery_method is not None
+                else "AP"
+            )
+            _uncal_true_scale = 1.0
+            if _uncal_method not in ("PSF", "EMCEE", "MCMC"):
+                _ap_corr_mag = local_input_yaml.get("aperture_correction", np.nan)
+                try:
+                    _ap_corr_mag = float(_ap_corr_mag)
+                except (TypeError, ValueError):
+                    _ap_corr_mag = np.nan
+                if np.isfinite(_ap_corr_mag):
+                    # aperture_correction = m_total - m_ap < 0, so
+                    # F_ap / F_total = 10^(0.4 * ap_corr).
+                    _uncal_true_scale = 10.0 ** (0.4 * _ap_corr_mag)
+                else:
+                    # No aperture correction: AP flux is not on the total-flux
+                    # scale, so calibration samples would be biased.  Skip.
+                    _uncal_true_scale = np.nan
+            _uncal_collect = bool(
+                lim_cfg.get("uncal_from_injections", True)
+            ) and np.isfinite(_uncal_true_scale)
 
             with _pool_or_serial(
                 n_jobs,
@@ -2681,6 +2726,49 @@ class Limits:
                     "Limiting magnitude search failed  [%.1fs]", elapsed
                 )
 
+            # ----------------------------------------------------------
+            # Empirical uncertainty calibration from the injection trials.
+            # z = (F_meas - F_true) / sigma_F should have std ~ 1; the
+            # MAD-based std is the calibration factor main.py applies to
+            # the reported measurement errors.
+            # ----------------------------------------------------------
+            self.last_uncal = None
+            if _uncal_collect and len(_uncal_rows) > 0:
+                try:
+                    from utils.uncertainty_calibration import (
+                        calibrate_uncertainties,
+                    )
+
+                    _uncal_arr = np.asarray(_uncal_rows, dtype=float)
+                    _uncal_res = calibrate_uncertainties(
+                        _uncal_arr[:, 0],
+                        _uncal_arr[:, 1],
+                        _uncal_arr[:, 2],
+                        min_sources=int(
+                            lim_cfg.get("uncal_min_sources", 30)
+                        ),
+                    )
+                    self.last_uncal = {
+                        "result": _uncal_res,
+                        "method": _uncal_method,
+                    }
+                    logger.info(
+                        "Uncertainty calibration (%s, %d trials): "
+                        "z-std=%.3f factor=%.3f bias=%.2f%% "
+                        "(coverage 1sig=%.0f%% 2sig=%.0f%%)",
+                        _uncal_method,
+                        _uncal_res.n_sources,
+                        _uncal_res.z_mad_std,
+                        _uncal_res.calibration_factor,
+                        100.0 * _uncal_res.bias_frac,
+                        100.0 * _uncal_res.fraction_within_1sigma,
+                        100.0 * _uncal_res.fraction_within_2sigma,
+                    )
+                except Exception as _uncal_exc:
+                    logger.debug(
+                        "Uncertainty calibration skipped: %s", _uncal_exc
+                    )
+
             # The limiting magnitude is already exposure-time-normalized via flux_for_mag
             result_mag = float(inject_lmag)
             if _return_details:
@@ -2707,6 +2795,12 @@ class Limits:
                     "exposure_time": exposure_time,
                     "cutout_cx": cutout_cx,
                     "cutout_cy": cutout_cy,
+                    # Empirical uncertainty calibration (or None when skipped).
+                    "uncal": (
+                        self.last_uncal["result"].to_dict()
+                        if self.last_uncal is not None
+                        else None
+                    ),
                 }
             return result_mag
 

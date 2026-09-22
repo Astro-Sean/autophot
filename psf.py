@@ -12,6 +12,7 @@ autophot pipeline.
 # Standard library
 # ---------------------------------------------------------------------------
 import inspect
+import itertools
 import logging
 import os
 import time
@@ -79,6 +80,7 @@ from photutils.psf import (
     SourceGrouper,
     IterativePSFPhotometry,
     ImagePSF,
+    GriddedPSFModel,
 )
 from photutils.detection import DAOStarFinder
 from photutils.segmentation import detect_threshold
@@ -164,7 +166,7 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
 # Local
 # ---------------------------------------------------------------------------
 from functions import log_step, set_size, log_warning_from_exception, STATUS
-from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, PLOT_COLORS
+from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, safe_tight_layout, PLOT_COLORS
 from aperture import (
     gain_e_per_adu_from_header,
     resolve_exposure_time_seconds,
@@ -449,7 +451,281 @@ def get_smoothing_kernel(
     return get_quartic_kernel(osamp, kernel_size, degree=degree)
 
 
-def _select_adaptive_oversample(n_stars: int, phot_cfg: dict) -> int:
+def _parse_spatial_grid(value) -> Optional[object]:
+    """Normalise the ``psf_spatial_grid`` config value.
+
+    Returns ``None`` when the spatially-varying PSF build is disabled,
+    ``"auto"`` for automatic grid sizing, or an int grid dimension N
+    (NxN cells, clamped to 2-3).
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        return "auto"
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("false", "off", "none", "0", ""):
+            return None
+        if v == "auto":
+            return "auto"
+        try:
+            value = int(v)
+        except ValueError:
+            return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    if n <= 1:
+        return None
+    return max(2, min(3, n))
+
+
+def _axis_edge_candidates(L, n, t, min_w):
+    """Candidate boundary vectors for one axis of an n-cell grid.
+
+    Yields strictly increasing edge vectors (length n + 1, endpoints
+    pinned to 0 and L) covering three families: the uniform split,
+    uniformly shifted splits, and placements where the interior edges
+    nearest the target coordinate ``t`` bracket it near a cell centre.
+    Every yielded vector keeps all cells at least ``min_w`` wide.
+    """
+    L = float(L)
+    w = L / n
+    base = np.linspace(0.0, L, n + 1)
+    spots = []
+    for i in range(1, n):
+        p = {float(base[i]), t - 0.5 * w, t + 0.5 * w}
+        for f in (-0.4, -0.25, 0.25, 0.4):
+            p.add(float(base[i]) + f * w)
+        spots.append(sorted(v for v in p if min_w <= v <= L - min_w))
+    if any(len(s) == 0 for s in spots):
+        return
+    seen = set()
+    for combo in itertools.product(*spots):
+        e = np.concatenate([[0.0], np.asarray(combo, float), [L]])
+        if np.any(np.diff(e) < min_w):
+            continue
+        key = tuple(np.round(e, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        yield e
+
+
+def _choose_target_aware_edges(
+    xs, ys, n, nx, ny, tx, ty, min_per_cell, require_all
+):
+    """Search non-uniform grid edges that centre the target's cell on it.
+
+    A layout is valid only when the cell containing ``(tx, ty)`` holds at
+    least ``min_per_cell`` candidates and the usual population rule
+    passes - every cell populated when ``require_all`` (auto sizing),
+    else at least half the cells.  Among valid layouts the score
+    maximises the target's normalised clearance to its nearest cell edge
+    (0.5 = dead centre), then prefers a better-populated target cell,
+    then more populated cells overall.  Returns ``(xedges, yedges,
+    counts)`` or ``None`` when no layout improves on failing the rules.
+    """
+    n_cells = n * n
+    min_populated = max(2, int(np.ceil(0.5 * n_cells)))
+    # Cells thinner than ~2 ePSF cutouts carry no independent spatial
+    # information; 15% of the uniform width is a conservative floor.
+    min_wx = max(30.0, 0.15 * nx / n)
+    min_wy = max(30.0, 0.15 * ny / n)
+    best = None
+    best_key = None
+    for xe in _axis_edge_candidates(nx, n, tx, min_wx):
+        for ye in _axis_edge_candidates(ny, n, ty, min_wy):
+            cnt, _, _ = np.histogram2d(ys, xs, bins=[ye, xe])
+            pop = cnt >= min_per_cell
+            ix = int(np.clip(np.digitize([tx], xe[1:-1]), 0, n - 1)[0])
+            iy = int(np.clip(np.digitize([ty], ye[1:-1]), 0, n - 1)[0])
+            if not pop[iy, ix]:
+                continue
+            if require_all:
+                if int(cnt.min()) < min_per_cell:
+                    continue
+            elif int(pop.sum()) < min_populated:
+                continue
+            fx = min(tx - xe[ix], xe[ix + 1] - tx) / (xe[ix + 1] - xe[ix])
+            fy = min(ty - ye[iy], ye[iy + 1] - ty) / (ye[iy + 1] - ye[iy])
+            key = (
+                min(fx, fy),
+                min(int(cnt[iy, ix]), 4 * min_per_cell),
+                int(pop.sum()),
+                int(cnt.min()),
+            )
+            if best_key is None or key > best_key:
+                best_key = key
+                best = (xe, ye, cnt.astype(int))
+    return best
+
+
+def _repair_starved_cells(
+    xs, ys, xe, ye, min_per_cell, min_w=30.0, tx=None, ty=None,
+    max_cells=None,
+):
+    """Grow or merge grid cells until every cell has >= min_per_cell.
+
+    Growth moves a shared edge outward into the neighbouring cell while
+    the neighbour keeps >= min_per_cell sources and >= min_w width.
+    Merging removes a shared interior edge, joining the whole row/column
+    pair -- a rectangular fiducial grid cannot express a single-cell
+    merge.  An axis is never merged below 2 cells.  The target's cell is
+    repaired first so the grid keeps its local PSF where it matters.
+    ``max_cells`` additionally caps the total cell count, merging the
+    least costly row/column pairs until the grid fits.
+    Returns ``(xedges, yedges, counts)`` after repair.
+    """
+    xe = np.asarray(xe, float).copy()
+    ye = np.asarray(ye, float).copy()
+    xs = np.asarray(xs, float)
+    ys = np.asarray(ys, float)
+
+    def _counts(xe_, ye_):
+        return np.histogram2d(ys, xs, bins=[ye_, xe_])[0].astype(int)
+
+    for _ in range(10):
+        cnt = _counts(xe, ye)
+        nyc, nxc = cnt.shape
+        starved = np.argwhere(cnt < min_per_cell)
+        if len(starved) == 0:
+            break
+        # Repair the target's cell first when it is starved.
+        pick = None
+        if tx is not None and ty is not None:
+            tix = int(np.clip(np.digitize([tx], xe[1:-1]), 0, nxc - 1)[0])
+            tiy = int(np.clip(np.digitize([ty], ye[1:-1]), 0, nyc - 1)[0])
+            if cnt[tiy, tix] < min_per_cell:
+                pick = (tiy, tix)
+        if pick is None:
+            order = np.argsort(cnt[starved[:, 0], starved[:, 1]])
+            iy0, ix0 = starved[order[0]]
+            pick = (int(iy0), int(ix0))
+        iy, ix = pick
+        deficit = min_per_cell - int(cnt[iy, ix])
+
+        moves = []
+        if ix > 0:
+            moves.append(("x", ix, -1))
+        if ix < nxc - 1:
+            moves.append(("x", ix + 1, +1))
+        if iy > 0:
+            moves.append(("y", iy, -1))
+        if iy < nyc - 1:
+            moves.append(("y", iy + 1, +1))
+
+        # 1) Try to grow: shift one shared edge into the neighbour so the
+        # starved cell annexes enough sources.  Moving an edge transfers
+        # sources across ALL rows/columns it bounds, not just the starved
+        # cell's -- accept a position only if it fixes the starved cell
+        # without pushing any cell in the robbed column/row below the
+        # floor.
+        grown = False
+        for axis, ei, d in moves:
+            if axis == "x":
+                n_i = ix + d
+                lo_n, hi_n = xe[n_i], xe[n_i + 1]
+                sel = (
+                    (ys >= ye[iy]) & (ys < ye[iy + 1])
+                    & (xs >= lo_n) & (xs < hi_n)
+                )
+                vals = np.sort(xs[sel])
+            else:
+                n_i = iy + d
+                lo_n, hi_n = ye[n_i], ye[n_i + 1]
+                sel = (
+                    (xs >= xe[ix]) & (xs < xe[ix + 1])
+                    & (ys >= lo_n) & (ys < hi_n)
+                )
+                vals = np.sort(ys[sel])
+            if d < 0:
+                vals = vals[::-1]  # nearest to shared edge first
+            # Candidate positions annex k of the neighbour's row/column
+            # sources; try the smallest that fixes the starved cell.
+            for take in range(deficit, len(vals) + 1):
+                new_edge = (
+                    vals[take - 1] - 1e-3 if d < 0 else vals[take - 1] + 1e-3
+                )
+                if d < 0 and new_edge - lo_n < min_w:
+                    break
+                if d > 0 and hi_n - new_edge < min_w:
+                    break
+                xe_t = xe.copy() if axis == "x" else xe
+                ye_t = ye.copy() if axis == "y" else ye
+                if axis == "x":
+                    xe_t[ei] = new_edge
+                else:
+                    ye_t[ei] = new_edge
+                c2 = _counts(xe_t, ye_t)
+                if axis == "x":
+                    robbed = c2[:, n_i]
+                    target_cell = c2[iy, ix]
+                else:
+                    robbed = c2[n_i, :]
+                    target_cell = c2[iy, ix]
+                if target_cell < min_per_cell:
+                    continue
+                if robbed.min() < min_per_cell:
+                    break  # farther positions only rob more
+                xe, ye = xe_t, ye_t
+                grown = True
+                break
+            if grown:
+                break
+
+        if grown:
+            continue
+
+        # 2) Merge: remove the shared edge whose removal leaves the best
+        # worst-cell count.  Whole row/column merge (rectangular grids
+        # cannot merge a single cell); never reduce an axis below 2 cells.
+        best = None
+        for axis, ei, d in moves:
+            if axis == "x":
+                if len(xe) <= 3:
+                    continue
+                xe2, ye2 = np.delete(xe, ei), ye
+            else:
+                if len(ye) <= 3:
+                    continue
+                ye2, xe2 = np.delete(ye, ei), xe
+            c2 = _counts(xe2, ye2)
+            key = (int(c2.min()),)
+            if best is None or key > best[0]:
+                best = (key, xe2, ye2)
+        if best is None:
+            break
+        _, xe, ye = best
+
+    # Enforce the cell budget: drop the interior edge whose removal keeps
+    # the best worst-cell count, until the grid fits max_cells.
+    if max_cells is not None:
+        while (len(xe) - 1) * (len(ye) - 1) > max_cells:
+            best = None
+            if len(xe) > 3:
+                for ei in range(1, len(xe) - 1):
+                    c2 = _counts(np.delete(xe, ei), ye)
+                    key = (int(c2.min()),)
+                    if best is None or key > best[0]:
+                        best = (key, np.delete(xe, ei), ye)
+            if len(ye) > 3:
+                for ei in range(1, len(ye) - 1):
+                    c2 = _counts(xe, np.delete(ye, ei))
+                    key = (int(c2.min()),)
+                    if best is None or key > best[0]:
+                        best = (key, xe, np.delete(ye, ei))
+            if best is None:
+                break
+            _, xe, ye = best
+
+    return xe, ye, _counts(xe, ye)
+
+
+def _select_adaptive_oversample(
+    n_stars: int, phot_cfg: dict, min_samples: float = None
+) -> int:
     """Adaptive ePSF oversampling factor for undersampled images.
 
     With N stars and oversampling k each oversampled gridpoint is
@@ -475,9 +751,12 @@ def _select_adaptive_oversample(n_stars: int, phot_cfg: dict) -> int:
             n_final, hard_min,
         )
         return 1
-    min_samples = float(
-        phot_cfg.get("psf_oversample_min_samples_per_pixel", 3.0)
-    )
+    if min_samples is None:
+        min_samples = float(
+            phot_cfg.get("psf_oversample_min_samples_per_pixel", 3.0)
+        )
+    else:
+        min_samples = float(min_samples)
     max_os = max(1, int(phot_cfg.get("psf_oversample_max", 4)))
     min_os = max(1, int(phot_cfg.get("psf_oversample_min_undersampled", 1)))
     if min_samples > 0:
@@ -920,6 +1199,111 @@ def convolve_epsf_with_kernel(epsf_model, kernel_2d):
         oversampling=k,
     )
     return model, native, conv_native
+
+
+def convolve_gridded_epsf_with_kernel(epsf_model, kernels):
+    """Convolve each cell of a GriddedPSFModel with its own kernel.
+
+    The SFFT matching kernel is spatially varying, so each grid cell's
+    ePSF must be convolved with the kernel realized at that cell's
+    fiducial position - a single kernel evaluated at the image centre or
+    target position is wrong for every other cell.
+
+    Parameters
+    ----------
+    epsf_model : GriddedPSFModel
+        The spatially-varying ePSF grid.
+    kernels : sequence of 2-D ndarray
+        Native-pixel kernels, one per grid cell, in the same order as
+        ``epsf_model.grid_xypos``.
+
+    Returns
+    -------
+    (model, native_in, native_out) : tuple
+        *model* is a new `~photutils.psf.GriddedPSFModel`; *native_in* and
+        *native_out* are the (n_cell, ny, nx) native-resolution cubes
+        before and after convolution (for diagnostics).
+    """
+    xypos = np.asarray(epsf_model.grid_xypos, dtype=float)
+    data_cube = np.asarray(epsf_model.data, dtype=float)
+    if len(kernels) != len(xypos):
+        raise ValueError(
+            f"{len(kernels)} kernels for {len(xypos)} grid cells"
+        )
+    try:
+        k = int(np.atleast_1d(epsf_model.oversampling)[0])
+    except (TypeError, ValueError, IndexError):
+        k = 1
+    k = max(1, k)
+    osamp_pair = tuple(int(v) for v in np.atleast_1d(epsf_model.oversampling))
+    if len(osamp_pair) == 1:
+        osamp_pair = (osamp_pair[0], osamp_pair[0])
+
+    conv_cells = []
+    native_in = []
+    native_out = []
+    for i in range(len(xypos)):
+        conv, native, conv_native = convolve_psf_stamp(
+            data_cube[i], np.asarray(kernels[i], dtype=float), k,
+            return_stages=True,
+        )
+        conv_cells.append(conv)
+        native_in.append(native)
+        native_out.append(conv_native)
+
+    # Rebuild the gridded model directly (grid_from_epsfs is deprecated in
+    # photutils 3.0); grid order follows grid_xypos, which _define_grid
+    # re-sorts internally, so any consistent ordering works.
+    meta = {
+        "grid_xypos": [tuple(p) for p in xypos],
+        "oversampling": osamp_pair,
+        "fill_value": getattr(epsf_model, "fill_value", 0.0),
+    }
+    model = GriddedPSFModel(
+        NDData(np.stack(conv_cells, axis=0), meta=meta),
+        fill_value=meta["fill_value"],
+    )
+    return model, np.stack(native_in, axis=0), np.stack(native_out, axis=0)
+
+
+def epsf_at_position(epsf_model, x, y):
+    """Realize the local PSF at detector position ``(x, y)`` as an ImagePSF.
+
+    For a `~photutils.psf.GriddedPSFModel` this bilinearly interpolates the
+    per-cell ePSFs at (x, y); for any other model the input is returned
+    unchanged.  Used where downstream code renders the PSF on cutout-local
+    coordinates (e.g. limiting-magnitude injection), since a gridded model
+    would interpret those local coordinates as detector positions.
+    """
+    if not isinstance(epsf_model, GriddedPSFModel):
+        return epsf_model
+    data_cube = np.asarray(epsf_model.data, dtype=float)
+    ny_s, nx_s = data_cube.shape[1:]
+    osamp = np.atleast_1d(epsf_model.oversampling)
+    k_y = max(1, int(osamp[0]))
+    k_x = max(1, int(osamp[-1]))
+    # GriddedPSFModel.origin is (x, y, grid-axis) - the stamp centre.
+    ox = float(np.atleast_1d(epsf_model.origin)[0])
+    oy = float(np.atleast_1d(epsf_model.origin)[1])
+    # evaluate() maps detector offsets to stamp indices via origin, so
+    # sampling at x + (j - ox)/k_x returns the interpolated stamp array.
+    jj, ii = np.meshgrid(np.arange(nx_s), np.arange(ny_s))
+    xg = float(x) + (jj - ox) / k_x
+    yg = float(y) + (ii - oy) / k_y
+    stamp = np.asarray(
+        epsf_model.evaluate(
+            xg, yg, flux=1.0, x_0=float(x), y_0=float(y)
+        ),
+        dtype=float,
+    )
+    return ImagePSF(
+        data=stamp,
+        flux=1.0,
+        x_0=ox,
+        y_0=oy,
+        origin=(ox, oy),
+        oversampling=(k_y, k_x),
+    )
 
 
 def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None):
@@ -2569,7 +2953,7 @@ class PSF:
             # Accept stars with <5% bad pixels in core
             valid_mask = core_bad_frac < 0.05
             valid_indices = np.where(valid_mask)[0]
-            
+
             n_rejected = len(epsfstars) - len(valid_indices)
             if n_rejected > 0:
                 log.info(
@@ -2578,7 +2962,7 @@ class PSF:
                 )
                 epsfstars = EPSFStars([epsfstars._data[i] for i in valid_indices])
                 stars_tbl = stars_tbl[valid_indices]
-            
+
             if len(epsfstars) == 0:
                 log.error("[robust_extract_stars] No valid cutouts after NaN/mask filtering")
                 return EPSFStars([]), Table()
@@ -2596,6 +2980,56 @@ class PSF:
             if len(epsfstars) == 0:
                 log.error(
                     "[robust_extract_stars] No valid cutouts after contamination check"
+                )
+                return EPSFStars([]), Table()
+
+            # Reject stars still carrying masked/non-finite pixels inside
+            # the flux-normalisation circle.  The ePSF build normalises
+            # each star within aperture_radius, so masked pixels there
+            # silently shrink the normalised area and bias that star's
+            # flux scale relative to the ensemble.  This runs after the
+            # contamination check on purpose: its keep-floor path masks
+            # annulus pixels (r >= ~1.5*FWHM) that can still land inside
+            # the normalisation circle.
+            _norm_r = float(phot_cfg.get("aperture_radius") or np.nan)
+            if not np.isfinite(_norm_r) or _norm_r <= 0:
+                _norm_r = 1.5 * fwhm_eff
+            _norm_frac_max = float(
+                phot_cfg.get("psf_norm_radius_mask_frac_max", 0.0)
+            )
+            _nyy, _nxx = np.mgrid[:ny_cut, :nx_cut]
+            _in_norm = (
+                np.hypot(
+                    _nyy - (ny_cut - 1) / 2.0, _nxx - (nx_cut - 1) / 2.0
+                )
+                <= _norm_r
+            )
+            _norm_keep = np.ones(len(epsfstars), dtype=bool)
+            for _si, _st in enumerate(epsfstars):
+                _bad = ~np.isfinite(np.asarray(_st.data, float))
+                _m = getattr(_st, "mask", None)
+                if _m is not None:
+                    _bad |= np.asarray(_m, dtype=bool)
+                _norm_keep[_si] = (
+                    np.sum(_bad & _in_norm)
+                    <= _norm_frac_max * float(_in_norm.sum())
+                )
+            if not _norm_keep.all():
+                _keep_idx = np.where(_norm_keep)[0]
+                log.info(
+                    "[robust_extract_stars] Rejected %d cutouts with "
+                    "masked/non-finite pixels inside the normalisation "
+                    "radius %.1f px (%d/%d)",
+                    int((~_norm_keep).sum()), _norm_r,
+                    int((~_norm_keep).sum()), len(epsfstars),
+                )
+                epsfstars = EPSFStars([epsfstars._data[i] for i in _keep_idx])
+                stars_tbl = stars_tbl[_keep_idx]
+
+            if len(epsfstars) == 0:
+                log.error(
+                    "[robust_extract_stars] No valid cutouts after "
+                    "normalisation-radius mask filtering"
                 )
                 return EPSFStars([]), Table()
 
@@ -3087,12 +3521,37 @@ class PSF:
                 if ann_total > 0 and (ann_masked / ann_total) > 0.10:
                     hw_reject[i] = True
 
-        # Always apply hardware-defect rejections
-        keep_idx = np.where(~hw_reject)[0]
+        # A discrete secondary peak inside the maskable radius is
+        # unrepairable: the mask-keep path below only blanks pixels
+        # outside ~1.5*FWHM, so a detected neighbour sitting inside the
+        # fit region would still enter the ePSF stack unchanged.  Such
+        # stars are always rejected alongside the hardware defects, even
+        # when the keep-floor binds.  Core ellipticity stays in the
+        # flux-based class -- on undersampled cores the second-moment
+        # test is noisy enough to flag clean stars.
+        _mask_inner = max(2.0, float(np.ceil(1.5 * fwhm_eff)))
+        _core_reject_enabled = bool(
+            phot_cfg.get("psf_contam_core_reject", True)
+        )
+        core_reject = np.zeros(n_stars, dtype=bool)
+        if _core_reject_enabled:
+            core_reject = flag_second & (second_dist < _mask_inner)
+        unrepairable = hw_reject | core_reject
+
+        # Always apply hardware-defect and core-contamination rejections
+        keep_idx = np.where(~unrepairable)[0]
         n_hw_rejected = int(hw_reject.sum())
+        n_core_rejected = int((core_reject & ~hw_reject).sum())
+        if n_core_rejected > 0:
+            log.info(
+                "[contamination] Rejected %d core-contaminated cutouts "
+                "(secondary peak < %.0fpx): masking cannot repair "
+                "a detected neighbour inside the fit region.",
+                n_core_rejected, _mask_inner,
+            )
 
         # For remaining flux-based rejections, apply min_keep_frac safety net
-        remaining_reject = reject_flags & ~hw_reject
+        remaining_reject = reject_flags & ~unrepairable
         n_flux_rejected = int(remaining_reject.sum())
         n_after_hw = len(keep_idx)
         min_keep_flux = max(min_candidates, int(np.ceil(min_keep_frac * n_stars)))
@@ -3113,7 +3572,6 @@ class PSF:
             # narrow enough that a wing gradient does not inflate the band
             # MAD, and starting inside the annulus catches blobs sitting in
             # the photometry fit region.
-            _mask_inner = max(2.0, float(np.ceil(1.5 * fwhm_eff)))
             band_masks = [
                 (_rr >= r0) & (_rr < r0 + 1.0)
                 for r0 in np.arange(_mask_inner, ann_outer, 1.0)
@@ -3149,14 +3607,35 @@ class PSF:
                     n_masked_stars += 1
             log.info(
                 "[contamination] Would reject %d/%d cutouts total "
-                "(%d hardware-defect, %d flux-based). Keep-floor bound "
+                "(%d hardware-defect, %d core-unrepairable, "
+                "%d flux-based). Keep-floor bound "
                 "(%d would remain < %d min): keeping the %d flux-flagged "
                 "cutouts but masking %d contaminating annulus pixels "
                 "in %d of them (cores retained).",
-                n_rejected, n_stars, n_hw_rejected, n_flux_rejected,
+                n_rejected, n_stars, n_hw_rejected, n_core_rejected,
+                n_flux_rejected,
                 n_after_hw - n_flux_rejected, min_keep_flux,
                 n_flux_rejected, n_pix_masked, n_masked_stars,
             )
+            # Per-star flag reasons are invisible at INFO when the
+            # keep-floor binds; the flag-type breakdown and per-star list
+            # keep the masked set auditable at DEBUG.
+            _breakdown = {
+                "asymmetry": flag_asym, "edge": flag_edge,
+                "border": flag_border | flag_border_max,
+                "radial_reversal": flag_reversal,
+                "secondary_peak": flag_second, "streak": flag_row | flag_col | flag_diag,
+                "annulus_peak": flag_ann_peak, "flux_excess": flag_flux,
+                "core_ellipticity": flag_ellip,
+            }
+            log.debug(
+                "[contamination] mask-keep flag breakdown: %s",
+                ", ".join(
+                    f"{k}={int(v.sum())}" for k, v in _breakdown.items()
+                ),
+            )
+            for r in reject_reasons:
+                log.debug(r)
         else:
             keep_idx = np.where(~reject_flags)[0]
 
@@ -3166,9 +3645,9 @@ class PSF:
 
         log.info(
             "[contamination] Rejected %d/%d PSF-star cutouts "
-            "(%d hardware-defect, %d flux-based)",
-            n_final_rejected, n_stars, n_hw_rejected,
-            n_final_rejected - n_hw_rejected,
+            "(%d hardware-defect, %d core-unrepairable, %d flux-based)",
+            n_final_rejected, n_stars, n_hw_rejected, n_core_rejected,
+            n_final_rejected - n_hw_rejected - n_core_rejected,
         )
         for r in reject_reasons:
             log.debug(r)
@@ -3274,6 +3753,7 @@ class PSF:
 
         log = logging.getLogger(__name__)
         self.psf_model_kind = "none"
+        self.n_epsf_stars = None
 
         # ---- nested helpers ------------------------------------------------
         def _validate_epsfstars(epsfstars_obj, cutout_shape, fit_boxsize):
@@ -3408,6 +3888,9 @@ class PSF:
             # For small candidate pools, apply these cuts adaptively so we do not
             # over-prune and end up with an unstable ePSF from too few stars.
             phot_cfg = self.input_yaml.get("photometry", {}) or {}
+            _spatial_grid = _parse_spatial_grid(
+                phot_cfg.get("psf_spatial_grid", False)
+            )
             # Use consistent fallback with main.py
             try:
                 from main import SATURATE_INTERNAL_FALLBACK
@@ -3968,6 +4451,9 @@ class PSF:
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]
+            # Gridded-PSF cell builds set a per-cell base so their diagnostic
+            # files do not overwrite each other or the field-wide products.
+            base = str(self.input_yaml.get("_psf_base_override") or base)
             oversample = max(
                 1, int(self.input_yaml["photometry"].get("psf_oversample", 1))
             )
@@ -4244,25 +4730,38 @@ class PSF:
                     )
                     fit_boxsize = _fit_box_cap
 
-            # PSF cutout size: use both the configured angular scale and the
-            # image-space FWHM to guarantee that even undersampled wings are
-            # represented.  For undersampled images the FWHM constraint
-            # dominates; for well-sampled data this reduces to the previous
-            # behaviour.
+            # PSF cutout size: wing coverage is a physical property of the
+            # PSF (set by FWHM), not of the sampling -- the build boost
+            # exists to give the fit box subpixel margin on undersampled
+            # data and is not applied here.  The legacy 2*scale term is
+            # also dropped: `scale` is the SExtractor *detection* box
+            # half-size (floored at scale_min_px), and on undersampled
+            # fields it inflated the cutout to ~20x FWHM -- mostly
+            # neighbour-contamination surface the keep-floor then has to
+            # mask pixel-by-pixel.  The fit-box floor keeps the fit
+            # region plus an annulus for the contamination tests inside
+            # the stamp.
             cutout_size_scale_base = float(
                 phot_cfg.get("psf_cutout_size_scale_fwhm", 10.0)
             )
-            cutout_size_scale = cutout_size_scale_base * build_sampling_boost
             cutout_min_arcsec = float(phot_cfg.get("psf_cutout_min_arcsec", 9.0))
             cutout_min_px = cutout_min_arcsec / pixel_scale if has_pixel_scale else np.nan
             cutout_n = _odd(
                 max(
                     12,
-                    int(2 * scale),  # legacy behaviour (arcsec scale)
-                    int(cutout_size_scale * fwhm),  # configurable wing coverage
+                    int(cutout_size_scale_base * fwhm),  # configurable wing coverage
                     int(np.ceil(cutout_min_px)) if np.isfinite(cutout_min_px) else 0,
+                    int(2 * fit_boxsize + 5),  # fit region + annulus margin
                 )
             )
+            # Spatial-grid cell builds pass a fixed cutout so every cell
+            # stacks into identical stamp shapes regardless of per-cell
+            # FWHM re-estimation drift.
+            _fixed_cutout = phot_cfg.get("_psf_fixed_cutout")
+            if _fixed_cutout is not None:
+                cutout_n = _odd(
+                    max(fit_boxsize + 3, int(_fixed_cutout))
+                )
             cutout_shape = (cutout_n, cutout_n)
             if fit_boxsize >= cutout_n - 2:
                 _fit_boxsize_clamped = _odd(cutout_n - 3)
@@ -4414,6 +4913,46 @@ class PSF:
 
             if "SNR" in df.columns:
                 df = df.sort_values("SNR", ascending=False).reset_index(drop=True)
+
+            # --- Spatially-varying PSF: per-cell ePSF -> GriddedPSFModel ---
+            # Only attempted when psf_spatial_grid is enabled AND every (or
+            # enough, per fill policy) detector cell has >=
+            # psf_grid_min_stars_per_cell vetted stars.  Any insufficiency
+            # or failure falls back to the single field-averaged ePSF below.
+            # Skipped for template-PSF builds: those consumers expect a
+            # single 2-D stamp.
+            if _spatial_grid is not None and not make_template_psf:
+                _grid_res = None
+                try:
+                    _grid_res = self._build_spatial_grid_epsf(
+                        df,
+                        xcol=xcol,
+                        ycol=ycol,
+                        grid_mode=_spatial_grid,
+                        phot_cfg=phot_cfg,
+                        fwhm=fwhm,
+                        undersampled=undersampled,
+                        oversample_psf=oversample_psf,
+                        oversample=oversample,
+                        cutout_n=cutout_n,
+                        mask=mask,
+                        background_rms=background_rms,
+                        threshold_limit=threshold_limit,
+                        SNR_limit=SNR_limit,
+                        filename_prefix=filename_prefix,
+                    )
+                except Exception as _grid_exc:
+                    log.warning(
+                        "Spatially-varying ePSF build failed (%s); "
+                        "falling back to the single field-averaged ePSF.",
+                        _grid_exc,
+                    )
+                if _grid_res is not None:
+                    return _grid_res
+                log.info(
+                    "Spatially-varying PSF not used; continuing with the "
+                    "single field-averaged ePSF."
+                )
 
             ndimage = self.create_nddata_with_fitting_weights(
                 image=self.image,
@@ -4680,7 +5219,7 @@ class PSF:
                 fit_boxsize_scale_base,
                 fit_box_min_arcsec,
                 fit_boxsize,
-                cutout_size_scale,
+                cutout_size_scale_base,
                 cutout_size_scale_base,
                 cutout_min_arcsec,
                 cutout_n,
@@ -5029,7 +5568,14 @@ class PSF:
             # at osamp=1 every star constrains every gridpoint and the build
             # recovered the true ~2 px effective width in 2 iterations.
             _osamp_ladder = [oversample]
-            if undersampled and oversample > 1:
+            # Gridded-PSF cell builds freeze the ladder: per-cell descent
+            # produces shape-inconsistent stamps that cannot stack into a
+            # GriddedPSFModel; a cell that cannot hold the shared factor is
+            # filled from a neighbour instead.
+            _freeze_osamp = bool(
+                phot_cfg.get("_psf_freeze_oversample", False)
+            )
+            if undersampled and oversample > 1 and not _freeze_osamp:
                 # Step down one factor at a time: with the coarse-to-fine
                 # schedule, osamp=3 is often viable where osamp=4 starved,
                 # and keeps finer core resolution than jumping to 1x.
@@ -5338,6 +5884,7 @@ class PSF:
 
             # ---- ePSF quality diagnostics ----
             n_epsf_stars = len(epsfstars)
+            self.n_epsf_stars = int(n_epsf_stars)
             if n_epsf_stars < 20:
                 log.warning(
                     "ePSF built from only %d stars -- model may be noisy, "
@@ -5426,15 +5973,18 @@ class PSF:
 
             # The stamp plot is the primary visual PSF diagnostic; produce
             # it at every oversampling factor (osamp=1 stamps are the
-            # common robust-regime product, not an edge case).
-            self.plot_oversampled_psf(
-                epsf,
-                oversample=oversample,
-                save_path=os.path.join(
-                    write_dir, f"PSF_Image_{base}{get_plot_ext(self.input_yaml)}"
-                ),
-                fwhm_native=fwhm,
-            )
+            # common robust-regime product, not an edge case).  Suppressed
+            # for internal builds (per-cell grid builds pass plot=False -
+            # their diagnostics live in PSF_Grid_*).
+            if plot:
+                self.plot_oversampled_psf(
+                    epsf,
+                    oversample=oversample,
+                    save_path=os.path.join(
+                        write_dir, f"PSF_Image_{base}{get_plot_ext(self.input_yaml)}"
+                    ),
+                    fwhm_native=fwhm,
+                )
 
             save_path = os.path.join(write_dir, f"{filename_prefix}_{base}.fits")
             from functions import safe_fits_write
@@ -5479,18 +6029,19 @@ class PSF:
             # The visualisation is diagnostic only: a failure here (e.g.
             # fitted_stars absent after a fallback) must not discard the
             # successfully built and written ePSF.
-            try:
-                self._create_psf_visualization(
-                    fitted_stars,
-                    epsf,
-                    cutout_shape[0],
-                    norm_radius,
-                    write_dir,
-                    f"{filename_prefix}_{base}",
-                    use_log_scale=False,  # Set to True for log color scale on 2D PSF
-                )
-            except Exception as _viz_err:
-                log.warning("PSF visualisation failed: %s", _viz_err)
+            if plot:
+                try:
+                    self._create_psf_visualization(
+                        fitted_stars,
+                        epsf,
+                        cutout_shape[0],
+                        norm_radius,
+                        write_dir,
+                        f"{filename_prefix}_{base}",
+                        use_log_scale=False,  # Set to True for log color scale on 2D PSF
+                    )
+                except Exception as _viz_err:
+                    log.warning("PSF visualisation failed: %s", _viz_err)
 
             return epsf, df
 
@@ -5736,6 +6287,945 @@ class PSF:
     # PSF visualisation (star cutouts + ePSF)
     # -----------------------------------------------------------------------
 
+    def _build_spatial_grid_epsf(
+        self,
+        df,
+        xcol,
+        ycol,
+        grid_mode,
+        phot_cfg,
+        fwhm,
+        undersampled,
+        oversample_psf,
+        oversample,
+        cutout_n=None,
+        mask=None,
+        background_rms=None,
+        threshold_limit=5.0,
+        SNR_limit=None,
+        filename_prefix="PSF_model_image",
+    ):
+        """Build a `~photutils.psf.GriddedPSFModel`: one ePSF per detector cell.
+
+        Every populated cell runs the full single-field build (candidate
+        vetting, cutout extraction, EPSFBuilder, post-build gates) on its
+        own star subset, so each cell model is individually gated by the
+        same quality machinery as the single ePSF.  Cells below
+        ``psf_grid_min_stars_per_cell`` are first grown into a neighbour's
+        territory then merged with it (the grid may become rectangular,
+        e.g. 2x3); cells that still cannot be rescued - and cells whose
+        own build fails its gates - are copied from the nearest
+        successful cell (``psf_spatial_fill_missing="nearest"``) or veto
+        the whole grid (``"fail"``).
+
+        Returns ``(GriddedPSFModel, df)`` or ``None`` when the field
+        cannot support a grid - the caller then falls back to the single
+        field-averaged ePSF.
+        """
+        log = logging.getLogger(__name__)
+        min_per_cell = max(
+            1, int(phot_cfg.get("psf_grid_min_stars_per_cell", 25))
+        )
+        fill_mode = str(
+            phot_cfg.get("psf_spatial_fill_missing", "nearest")
+        ).strip().lower()
+        if fill_mode not in ("nearest", "fail"):
+            log.warning(
+                "Unknown psf_spatial_fill_missing %r; using 'nearest'.",
+                fill_mode,
+            )
+            fill_mode = "nearest"
+
+        ny_img, nx_img = np.asarray(self.image).shape[:2]
+        xs_all = pd.to_numeric(df[xcol], errors="coerce").to_numpy(float)
+        ys_all = pd.to_numeric(df[ycol], errors="coerce").to_numpy(float)
+        finite_xy = np.isfinite(xs_all) & np.isfinite(ys_all)
+        df = df.loc[finite_xy].reset_index(drop=True)
+        xs_all = xs_all[finite_xy]
+        ys_all = ys_all[finite_xy]
+        if len(df) < 4:
+            log.info(
+                "Spatially-varying PSF: only %d vetted stars; cannot grid.",
+                len(df),
+            )
+            return None
+
+        # The target position is read whenever it is known in the build
+        # image's detector frame: target-aware edge placement uses it,
+        # and the psf_grid_require_target_cell gate needs it to know
+        # which cell must hold a real build.
+        target_xy = None
+        try:
+            _tx = float(self.input_yaml.get("target_x_pix"))
+            _ty = float(self.input_yaml.get("target_y_pix"))
+        except (TypeError, ValueError):
+            _tx = _ty = None
+        if (
+            _tx is not None
+            and np.isfinite(_tx)
+            and np.isfinite(_ty)
+            and 0.0 <= _tx <= nx_img
+            and 0.0 <= _ty <= ny_img
+        ):
+            target_xy = (_tx, _ty)
+
+        target_aware = bool(phot_cfg.get("psf_grid_target_aware", True))
+
+        def _assign(n, require_all=False):
+            xe = ye = cnt = None
+            if target_xy is not None and target_aware:
+                got = _choose_target_aware_edges(
+                    xs_all, ys_all, n, float(nx_img), float(ny_img),
+                    target_xy[0], target_xy[1], min_per_cell,
+                    require_all=require_all,
+                )
+                if got is not None:
+                    xe, ye, cnt = got
+            if xe is None:
+                xe = np.linspace(0.0, float(nx_img), n + 1)
+                ye = np.linspace(0.0, float(ny_img), n + 1)
+                cnt = np.zeros((n, n), dtype=int)
+                np.add.at(
+                    cnt,
+                    (
+                        np.clip(np.digitize(ys_all, ye[1:-1]), 0, n - 1),
+                        np.clip(np.digitize(xs_all, xe[1:-1]), 0, n - 1),
+                    ),
+                    1,
+                )
+            # Starved cells are first grown into a neighbour's territory,
+            # then merged with it, so the surviving cells all carry >=
+            # min_per_cell candidates; only cells that cannot be rescued
+            # (axes already at 2 cells) fall through to fill/fail.
+            min_w = max(
+                20.0,
+                0.15 * float(nx_img) / n,
+                0.15 * float(ny_img) / n,
+            )
+            # A spatial grid below 2x2 is degenerate, so the cap is
+            # floored at 4 cells.
+            max_cells = max(
+                4, int(phot_cfg.get("psf_grid_max_cells", 6))
+            )
+            xe, ye, cnt = _repair_starved_cells(
+                xs_all, ys_all, xe, ye, min_per_cell, min_w=min_w,
+                tx=target_xy[0] if target_xy is not None else None,
+                ty=target_xy[1] if target_xy is not None else None,
+                max_cells=max_cells,
+            )
+            nxc, nyc = len(xe) - 1, len(ye) - 1
+            xi = np.clip(np.digitize(xs_all, xe[1:-1]), 0, nxc - 1)
+            yi = np.clip(np.digitize(ys_all, ye[1:-1]), 0, nyc - 1)
+            return xi, yi, xe, ye, cnt
+
+        if str(grid_mode) == "auto":
+            chosen = None
+            for cand in (3, 2):
+                xi, yi, xe, ye, cnt = _assign(cand, require_all=True)
+                if cnt.min() >= min_per_cell:
+                    chosen = (xi, yi, xe, ye, cnt)
+                    break
+            if chosen is None:
+                log.info(
+                    "psf_spatial_grid=auto: no 3x3 or 2x2 split (after "
+                    "cell grow/merge) gives >= %d stars per cell "
+                    "(%d stars); single ePSF.",
+                    min_per_cell,
+                    len(df),
+                )
+                return None
+            xi, yi, xe, ye, cnt = chosen
+        else:
+            xi, yi, xe, ye, cnt = _assign(int(grid_mode))
+
+        nx_c, ny_c = len(xe) - 1, len(ye) - 1
+
+        fid_x = 0.5 * (xe[:-1] + xe[1:])
+        fid_y = 0.5 * (ye[:-1] + ye[1:])
+        target_cell = None
+        if target_xy is not None:
+            target_cell = (
+                int(
+                    np.clip(
+                        np.digitize([target_xy[0]], xe[1:-1]), 0, nx_c - 1
+                    )[0]
+                ),
+                int(
+                    np.clip(
+                        np.digitize([target_xy[1]], ye[1:-1]), 0, ny_c - 1
+                    )[0]
+                ),
+            )
+        populated = cnt >= min_per_cell
+        n_pop = int(populated.sum())
+        n_cells = nx_c * ny_c
+        # A grid mostly assembled from copied cells carries no spatial
+        # information - require at least half the cells to be real builds.
+        min_populated = max(2, int(np.ceil(0.5 * n_cells)))
+        if n_pop < min_populated:
+            log.info(
+                "Spatially-varying PSF %dx%d: only %d/%d cells have >= %d "
+                "stars (need >= %d populated); single ePSF.",
+                nx_c, ny_c, n_pop, n_cells, min_per_cell, min_populated,
+            )
+            return None
+        if fill_mode == "fail" and n_pop < n_cells:
+            log.info(
+                "Spatially-varying PSF %dx%d: %d/%d cells under-populated "
+                "and psf_spatial_fill_missing='fail'; single ePSF.",
+                nx_c, ny_c, n_cells - n_pop, n_cells,
+            )
+            return None
+
+        if target_cell is not None and not (
+            np.allclose(xe, np.linspace(0.0, float(nx_img), nx_c + 1))
+            and np.allclose(ye, np.linspace(0.0, float(ny_img), ny_c + 1))
+        ):
+            _tix, _tiy = target_cell
+            log.info(
+                "Spatially-varying PSF: target-aware edges put target "
+                "(%.1f, %.1f) in cell (x%d, y%d) spanning x[%.0f, %.0f] "
+                "y[%.0f, %.0f] with %d candidates.",
+                target_xy[0], target_xy[1], _tix, _tiy,
+                xe[_tix], xe[_tix + 1], ye[_tiy], ye[_tiy + 1],
+                int(cnt[_tiy, _tix]),
+            )
+
+        # All cells must share one oversampling to stack into a grid;
+        # freeze the adaptive pick at the weakest populated cell's star
+        # count -- each cell builds with only its own subset, so sizing
+        # the factor off the field-wide pool would overshoot the samples
+        # per gridpoint that thin cells can support.
+        osamp_fixed = max(1, int(oversample))
+        if oversample_psf and undersampled and osamp_fixed <= 1:
+            # Cells hold only a few tens of stars, so the field-wide
+            # minimum-samples floor (~3, the bare minimum for the
+            # sigma-clipped median) is too permissive: at exactly
+            # n/min_samples gridpoints a boundary-count cell lands one
+            # factor too high and collapses.  Use a stricter floor and
+            # discount candidates by the expected vetting survival so
+            # the weakest cell is the one sized for.
+            _grid_min_samp = float(
+                phot_cfg.get("psf_grid_min_samples_per_gridpoint", 4.5)
+            )
+            _survival = float(
+                phot_cfg.get("psf_grid_oversample_survival_frac", 0.75)
+            )
+            osamp_fixed = int(
+                _select_adaptive_oversample(
+                    int(cnt[populated].min() * _survival),
+                    phot_cfg,
+                    min_samples=_grid_min_samp,
+                )
+            )
+
+        base = str(self.input_yaml.get("base", "image"))
+        cell_phot = dict(phot_cfg)
+        cell_phot.update(
+            # A per-cell build is itself a complete single-ePSF build:
+            # recursion and analytic substitution are both disabled so a
+            # failed cell reports failure (fill/fail decides) rather than
+            # silently returning a Moffat.
+            psf_spatial_grid=False,
+            psf_analytic_fallback=False,
+            psf_analytic_fallback_on_failure=False,
+            oversample_psf=False,
+            psf_auto_oversample_undersampled=False,
+            psf_oversample=osamp_fixed,
+            # Per-cell builds must share one oversampling AND one cutout
+            # size to stack into a GriddedPSFModel; freeze both so
+            # per-cell FWHM re-estimation cannot diverge the stamp shape.
+            _psf_freeze_oversample=True,
+            _psf_fixed_cutout=cutout_n,
+            # Thin cells (~tens of stars) need stronger residual
+            # smoothing to damp per-gridpoint noise at x>=2 oversampling.
+            # The iteration budget is intentionally NOT raised: on
+            # undersampled data convergence is unreachable and extra
+            # iterations only accumulate centre-drift noise.
+            psf_smoothing_kernel_target_samples=float(
+                phot_cfg.get("psf_grid_cell_smoothing_target", 15.0)
+            ),
+        )
+        cell_yaml = dict(self.input_yaml)
+        cell_yaml["photometry"] = cell_phot
+
+        # Per-cell artefacts (FITS stamps, any plots) go to PSF_MODELS/;
+        # filenames carry the grid shape so a 3x2 cell is not confused
+        # with a 3x3 one.
+        models_dir = os.path.join(
+            self.input_yaml["write_dir"], "PSF_MODELS"
+        )
+        os.makedirs(models_dir, exist_ok=True)
+        cell_yaml["write_dir"] = models_dir
+
+        def _attempt_grid_build(osamp_val):
+            """Build every populated cell at one shared oversampling
+            factor.  Returns (cell_models, cell_dfs, canon_sig) or None
+            when too few cells produce usable models."""
+            cell_phot["psf_oversample"] = int(osamp_val)
+            cell_yaml["photometry"] = cell_phot
+            cell_models = {}
+            cell_stats = {}
+            cell_dfs = []
+            for iy in range(ny_c):
+                for ix in range(nx_c):
+                    if not populated[iy, ix]:
+                        continue
+                    sub = df[(xi == ix) & (yi == iy)]
+                    cy = dict(cell_yaml)
+                    cy["_psf_base_override"] = (
+                        f"grid{nx_c}x{ny_c}_{base}_cellx{ix}y{iy}"
+                    )
+                    m_c, df_c, cell_obj = None, None, None
+                    try:
+                        cell_obj = PSF(
+                            input_yaml=cy,
+                            image=self.image,
+                            header=self.header,
+                        )
+                        m_c, df_c = cell_obj.build(
+                            psfSources=sub,
+                            usePSFlist=False,
+                            numSources=len(sub),
+                            mask=mask,
+                            background_rms=background_rms,
+                            threshold_limit=threshold_limit,
+                            SNR_limit=SNR_limit,
+                            # Per-cell PSF_Image/PSF_Sources plots are
+                            # redundant with PSF_Grid_*; suppress them.
+                            plot=False,
+                            filename_prefix=filename_prefix,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "Spatially-varying PSF: cell (x%d, y%d) build "
+                            "failed: %s",
+                            ix, iy, exc,
+                        )
+                    if not (
+                        isinstance(m_c, ImagePSF) and _epsf_usable(m_c)
+                    ):
+                        log.warning(
+                            "Spatially-varying PSF: cell (x%d, y%d) produced "
+                            "no usable empirical ePSF; treating as unpopulated.",
+                            ix, iy,
+                        )
+                        continue
+                    # The candidate-count gate runs on the vetted pool; the
+                    # cell's own vetting may still have rejected most of them.
+                    # A cell only counts as populated if a reasonable fraction
+                    # of its candidates survived into the ePSF build.
+                    _n_used = getattr(cell_obj, "n_epsf_stars", None)
+                    _survival_floor = max(3, min_per_cell // 2)
+                    if _n_used is not None and _n_used < _survival_floor:
+                        log.warning(
+                            "Spatially-varying PSF: cell (x%d, y%d) kept only "
+                            "%d stars after vetting (< %d); treating as "
+                            "unpopulated.",
+                            ix, iy, _n_used, _survival_floor,
+                        )
+                        continue
+                    # A cell can complete every vetting step yet still stack
+                    # into a degenerate ePSF (e.g. a thin cell whose surviving
+                    # stars were mostly mask-trimmed).  Reuse the single-ePSF
+                    # FWHM sanity band: a collapsed or inflated cell model is
+                    # demoted to unpopulated so fill/fail decides.
+                    _cell_fwhm_meas = measure_epsf_fwhm_native(
+                        np.asarray(m_c.data, float), m_c.oversampling
+                    )
+                    # Cells use a wider FWHM band than the single-ePSF
+                    # gate: stamp FWHM measured from ~30-50 noisy star
+                    # stacks scatters by ~0.1-0.2 px, and real spatial
+                    # PSF variation is what the grid exists to capture.
+                    # Degenerate builds are caught by the negative-flux
+                    # and ensemble-consistency gates instead.
+                    _f_lo = float(
+                        phot_cfg.get("psf_grid_cell_fwhm_min_frac", 0.70)
+                    )
+                    _f_hi = float(
+                        phot_cfg.get("psf_grid_cell_fwhm_max_frac", 1.70)
+                    )
+                    if np.isfinite(_cell_fwhm_meas) and not (
+                        _f_lo * fwhm <= _cell_fwhm_meas <= _f_hi * fwhm
+                    ):
+                        log.warning(
+                            "Spatially-varying PSF: cell (x%d, y%d) ePSF FWHM "
+                            "%.2f px outside [%.2f, %.2f]x image FWHM %.2f px; "
+                            "treating as unpopulated.",
+                            ix, iy, _cell_fwhm_meas, _f_lo, _f_hi, fwhm,
+                        )
+                        continue
+                    # A starved stack can collapse to a sharp core with
+                    # ringing wings while its measured FWHM stays inside
+                    # the sanity band.  The ringing shows up as a high
+                    # negative-pixel fraction before the FWHM drifts out.
+                    # Unlike the single-ePSF psf_epsf_negfrac_max gate
+                    # this check is NOT exempt at osamp=1: there a noisy
+                    # grid has a strictly better rung left (the field-wide
+                    # ePSF fallback), and a cell whose stamp is mostly
+                    # negative pixels is suspect at any oversampling.
+                    _cell_data = np.asarray(m_c.data, float)
+                    _cell_peak = float(np.nanmax(_cell_data))
+                    _cell_sum = float(np.nansum(_cell_data))
+                    _cell_negfrac = float(np.mean(_cell_data < 0))
+                    _negfrac_max = float(
+                        phot_cfg.get("psf_grid_cell_negfrac_max", 0.10)
+                    )
+                    _neg_bad = _cell_negfrac > _negfrac_max
+                    if (
+                        not np.isfinite(_cell_peak)
+                        or _cell_peak <= 0
+                        or not np.isfinite(_cell_sum)
+                        or _cell_sum <= 0
+                        or _neg_bad
+                    ):
+                        _why = (
+                            f"{100.0 * _cell_negfrac:.0f}% negative pixels "
+                            f"vs {100.0 * _negfrac_max:.0f}% allowed"
+                            if _neg_bad
+                            else f"peak {_cell_peak:.3g}, sum {_cell_sum:.3g}"
+                        )
+                        log.warning(
+                            "Spatially-varying PSF: cell (x%d, y%d) ePSF "
+                            "degenerate (%s); treating as unpopulated.",
+                            ix, iy, _why,
+                        )
+                        continue
+                    cell_models[(ix, iy)] = m_c
+                    cell_stats[(ix, iy)] = (
+                        _cell_peak / _cell_sum,
+                        _cell_fwhm_meas,
+                    )
+                    if df_c is not None and len(df_c):
+                        df_c = df_c.copy()
+                        df_c["psf_grid_ix"] = ix
+                        df_c["psf_grid_iy"] = iy
+                        cell_dfs.append(df_c)
+                    log.info(
+                        "Spatially-varying PSF: cell (x%d, y%d) built from %d "
+                        "stars surviving vetting (of %d candidates; centre "
+                        "%.0f, %.0f).",
+                        ix, iy,
+                        int(_n_used) if _n_used is not None else int(cnt[iy, ix]),
+                        int(cnt[iy, ix]), fid_x[ix], fid_y[iy],
+                    )
+
+            # Cross-cell consistency: cells on one field share one PSF to
+            # within a modest spatial variation, so a cell whose sharpness
+            # (peak/sum -- normalisation-invariant) or FWHM disagrees with
+            # the ensemble median by more than the tolerance is a failed
+            # build that slipped through the per-cell gates.  Demote it so
+            # it is filled from a healthy neighbour rather than used.
+            _cons_max = float(
+                phot_cfg.get("psf_grid_cell_consistency_max", 1.6)
+            )
+            if _cons_max > 1.0 and len(cell_models) >= 3:
+                _sharp_med = float(
+                    np.median([cell_stats[k][0] for k in cell_models])
+                )
+                _fw_med = float(
+                    np.nanmedian([cell_stats[k][1] for k in cell_models])
+                )
+                for key in list(cell_models):
+                    sharp, fw = cell_stats[key]
+                    # sharpness ~ 1/FWHM^2 for a fixed profile shape, so
+                    # its tolerance is the square of the FWHM one.
+                    _sharp_bad = _sharp_med > 0 and (
+                        sharp / _sharp_med > _cons_max**2
+                        or _sharp_med / sharp > _cons_max**2
+                    )
+                    _fw_bad = (
+                        np.isfinite(fw)
+                        and np.isfinite(_fw_med)
+                        and _fw_med > 0
+                        and (
+                            fw / _fw_med > _cons_max
+                            or _fw_med / fw > _cons_max
+                        )
+                    )
+                    if _sharp_bad or _fw_bad:
+                        log.warning(
+                            "Spatially-varying PSF: cell %s ePSF inconsistent "
+                            "with the ensemble (sharpness %.3g vs median "
+                            "%.3g, FWHM %.2f vs median %.2f; tolerance "
+                            "x%.2f); treating as unpopulated.",
+                            key, sharp, _sharp_med, fw, _fw_med, _cons_max,
+                        )
+                        del cell_models[key]
+
+            # GriddedPSFModel needs identical stamp shape and oversampling in
+            # every cell; cells that descended the oversampling ladder or
+            # produced a different stamp size are demoted to unpopulated.
+            shape_groups = {}
+            for key, m in cell_models.items():
+                sig = (
+                    tuple(np.asarray(m.data).shape),
+                    tuple(int(v) for v in np.atleast_1d(m.oversampling)),
+                )
+                shape_groups.setdefault(sig, []).append(key)
+            if not shape_groups:
+                log.info("Spatially-varying PSF: no cell produced a usable ePSF.")
+                return None
+            canon_sig = max(shape_groups, key=lambda s: len(shape_groups[s]))
+            for key in list(cell_models):
+                sig = (
+                    tuple(np.asarray(cell_models[key].data).shape),
+                    tuple(int(v) for v in np.atleast_1d(cell_models[key].oversampling)),
+                )
+                if sig != canon_sig:
+                    log.warning(
+                        "Spatially-varying PSF: cell %s has shape %s "
+                        "(grid uses %s); treating as unpopulated.",
+                        key, sig, canon_sig,
+                    )
+                    del cell_models[key]
+            if len(cell_models) < min_populated:
+                log.info(
+                    "Spatially-varying PSF: only %d shape-consistent cells; "
+                    "single ePSF.",
+                    len(cell_models),
+                )
+                return None
+            if fill_mode == "fail" and len(cell_models) < n_cells:
+                log.info(
+                    "Spatially-varying PSF: %d cells failed their build and "
+                    "psf_spatial_fill_missing='fail'; single ePSF.",
+                    n_cells - len(cell_models),
+                )
+                return None
+
+            # The grid exists to put a local ePSF at the target; when the
+            # target's own cell could not be built, its "local" model is a
+            # copy of a distant cell and the interpolation buys nothing at
+            # the position that matters most.  Reject the attempt so the
+            # oversampling ladder can still rescue the cell at a lower
+            # factor; if no factor builds it the caller falls back to the
+            # field-wide ePSF.
+            if (
+                target_cell is not None
+                and bool(
+                    phot_cfg.get("psf_grid_require_target_cell", True)
+                )
+                and target_cell not in cell_models
+            ):
+                log.warning(
+                    "Spatially-varying PSF: target cell (x%d, y%d) has no "
+                    "usable ePSF at oversample=x%d "
+                    "(psf_grid_require_target_cell); rejecting this "
+                    "attempt.",
+                    target_cell[0], target_cell[1], osamp_val,
+                )
+                return None
+
+            return cell_models, cell_dfs, canon_sig
+
+        # If too few cells produce usable models at the picked factor,
+        # rebuild the whole grid at the next lower oversampling: the
+        # stamps stay shape-uniform within an attempt, and a thinner
+        # grid is more stable because every star then constrains every
+        # gridpoint.  Only the accepted attempt's models are used.
+        _osamp_ladder = [osamp_fixed]
+        if bool(phot_cfg.get("psf_grid_osamp_descent", True)):
+            _osamp_ladder += list(range(osamp_fixed - 1, 0, -1))
+        cell_models = None
+        for _li, _osamp_try in enumerate(_osamp_ladder):
+            _res = _attempt_grid_build(_osamp_try)
+            if _res is not None:
+                cell_models, cell_dfs, canon_sig = _res
+                if _osamp_try != osamp_fixed:
+                    log.info(
+                        "Spatially-varying PSF: grid accepted at "
+                        "reduced oversampling x%d (initial pick x%d).",
+                        _osamp_try, osamp_fixed,
+                    )
+                break
+            if _li + 1 < len(_osamp_ladder):
+                log.info(
+                    "Spatially-varying PSF: grid attempt at x%d did not "
+                    "pass acceptance; retrying the whole grid at x%d.",
+                    _osamp_try, _osamp_ladder[_li + 1],
+                )
+        if cell_models is None:
+            return None
+
+        # Fill empty cells from the nearest built cell (Euclidean in cell
+        # units); copies are full stamps, not references.
+        grid = {}
+        n_filled = 0
+        for iy in range(ny_c):
+            for ix in range(nx_c):
+                m = cell_models.get((ix, iy))
+                if m is None:
+                    best = min(
+                        cell_models,
+                        key=lambda c: (c[0] - ix) ** 2 + (c[1] - iy) ** 2,
+                    )
+                    src = cell_models[best]
+
+                    def _pval(obj, name, default):
+                        v = getattr(obj, name, default)
+                        v = getattr(v, "value", v)
+                        return float(np.atleast_1d(v)[0])
+
+                    m = ImagePSF(
+                        data=np.array(src.data, dtype=float, copy=True),
+                        flux=_pval(src, "flux", 1.0),
+                        x_0=_pval(src, "x_0", 0.0),
+                        y_0=_pval(src, "y_0", 0.0),
+                        origin=getattr(src, "origin", None),
+                        oversampling=canon_sig[1],
+                    )
+                    n_filled += 1
+                grid[(ix, iy)] = m
+
+        epsf_list = []
+        xypos = []
+        for iy in range(ny_c):
+            for ix in range(nx_c):
+                epsf_list.append(grid[(ix, iy)])
+                xypos.append((float(fid_x[ix]), float(fid_y[iy])))
+
+        meta = {
+            "grid_xypos": xypos,
+            "oversampling": canon_sig[1],
+            "fill_value": 0.0,
+        }
+        gridded = GriddedPSFModel(
+            NDData(np.stack([np.asarray(m.data, float) for m in epsf_list]),
+                   meta=meta),
+            fill_value=0.0,
+        )
+        self.psf_model_kind = f"gridded-epsf-{nx_c}x{ny_c}"
+        self.psf_grid_xypos = xypos
+        log.info(
+            "Spatially-varying PSF: %dx%d GriddedPSFModel built "
+            "(%d cells built, %d filled from neighbours, %d stars total).",
+            nx_c, ny_c, len(cell_models), n_filled, len(df),
+        )
+        if target_cell is not None and target_cell not in cell_models:
+            log.warning(
+                "Spatially-varying PSF: the target's own cell (x%d, y%d) "
+                "could not be built and holds a copy of the nearest "
+                "healthy cell - the PSF at the target is not local. "
+                "Set psf_grid_require_target_cell: true (the default) to "
+                "fall back to the field-wide ePSF in this case.",
+                target_cell[0], target_cell[1],
+            )
+
+        df_out = (
+            pd.concat(cell_dfs, ignore_index=True) if cell_dfs else df
+        )
+
+        # FITS output: the standard-name file stays a 2-D ePSF stamp (the
+        # grid pinned at the image centre) so consumers expecting a single
+        # ePSF (SFFT prior vetting, ZOGY stamps, reloads) keep working; the
+        # full cube + grid fiducials go to PSF_model_grid_*.
+        try:
+            from functions import safe_fits_write
+
+            write_dir = self.input_yaml["write_dir"]
+            hdr = fits.Header()
+            hdr["PSFBUILD"] = (
+                self.psf_model_kind, "PSF model construction method"
+            )
+            hdr["NGRIDX"] = (nx_c, "ePSF grid cells along x")
+            hdr["NGRIDY"] = (ny_c, "ePSF grid cells along y")
+            hdr["NFILLED"] = (n_filled, "cells copied from nearest neighbour")
+            hdr["NPSFSTAR"] = (int(len(df)), "stars in the vetted pool")
+            hdr["FWHM_PIX"] = (float(fwhm), "image FWHM in native pixels")
+            for k_i, (gx, gy) in enumerate(xypos):
+                hdr[f"GX{k_i}"] = (float(gx), "grid fiducial x (detector px)")
+                hdr[f"GY{k_i}"] = (float(gy), "grid fiducial y (detector px)")
+
+            centre_model = epsf_at_position(
+                gridded, nx_img / 2.0, ny_img / 2.0
+            )
+            stamp2d = (
+                np.asarray(centre_model.data, dtype=float)
+                if centre_model is not None
+                else None
+            )
+            if stamp2d is not None and stamp2d.ndim == 2:
+                hdr_c = hdr.copy()
+                try:
+                    _osamp_c = int(
+                        np.atleast_1d(
+                            getattr(centre_model, "oversampling", 1)
+                        )[0]
+                    )
+                except Exception:
+                    _osamp_c = int(canon_sig[1][0])
+                hdr_c["OVERSAMP"] = (
+                    _osamp_c, "ePSF oversampling factor (grid px per native px)"
+                )
+                hdr_c["PSFNPIX"] = (
+                    max(1, int(round((min(stamp2d.shape) - 1) / _osamp_c))),
+                    "ePSF native-pixel cutout size",
+                )
+                _orig_c = getattr(centre_model, "origin", None)
+                if _orig_c is not None:
+                    hdr_c["PSFX0"] = (
+                        float(np.atleast_1d(_orig_c)[0]),
+                        "ePSF x origin (oversampled array coord)",
+                    )
+                    hdr_c["PSFY0"] = (
+                        float(np.atleast_1d(_orig_c)[-1]),
+                        "ePSF y origin (oversampled array coord)",
+                    )
+                safe_fits_write(
+                    os.path.join(
+                        models_dir, f"{filename_prefix}_{base}.fits"
+                    ),
+                    stamp2d.astype(np.float32),
+                    hdr_c,
+                )
+            safe_fits_write(
+                os.path.join(
+                    models_dir,
+                    f"PSF_model_grid{nx_c}x{ny_c}_{base}.fits",
+                ),
+                np.asarray(gridded.data, float),
+                hdr,
+            )
+        except Exception as _fits_exc:
+            log.warning("Gridded ePSF FITS write failed: %s", _fits_exc)
+
+        try:
+            self._plot_epsf_grid(
+                gridded,
+                nx_c,
+                ny_c,
+                xypos,
+                populated_cells=set(cell_models),
+                cell_counts=cnt,
+                write_dir=self.input_yaml["write_dir"],
+                base=base,
+                xedges=xe,
+                yedges=ye,
+                src_xy=(xs_all, ys_all, xi, yi),
+            )
+        except Exception as _plot_exc:
+            log.warning("Gridded ePSF plot failed: %s", _plot_exc)
+
+        return gridded, df_out
+
+    # Per-cell colours drawn from the RPTH-family palette used by
+    # PLOT_COLORS so each cell reads as a distinct unit on both the
+    # stamp panels and the science-image overlay.
+    _GRID_CELL_COLORS = (
+        "#005CAB", "#009E73", "#D9A020", "#E31B23", "#5B9BD5",
+        "#003366", "#4E857B", "#8FA9BD", "#CC79A7",
+    )
+
+    def _plot_epsf_grid(
+        self, gridded, nx_c, ny_c, xypos, populated_cells, cell_counts,
+        write_dir, base, xedges=None, yedges=None, src_xy=None,
+    ):
+        """Per-cell ePSF stamps (left) beside the science image overlaid
+        with the grid cells and their PSF stars (right)."""
+        from matplotlib.patches import Rectangle
+
+        apply_autophot_mplstyle()
+        plt.ioff()
+        cmap = plt.get_cmap("viridis").copy()
+        cmap.set_bad(color=PLOT_COLORS.get("nan_color", "magenta"))
+
+        data_cube = np.asarray(gridded.data, dtype=float)
+        _img_arr = (
+            np.asarray(getattr(self.image, "data", self.image), float)
+            if self.image is not None
+            else None
+        )
+        has_img = _img_arr is not None and _img_arr.ndim == 2
+        # Size the figure from the content: the left block is exactly
+        # nx_c x ny_c square stamp panels, the right axes matches the
+        # image's native aspect -- otherwise equal-aspect imshow
+        # letterboxes and leaves dead space between the blocks.
+        _stamp_in = 2.1
+        _left_w = _stamp_in * nx_c
+        _content_h = max(_stamp_in * ny_c, 4.4)
+        if has_img:
+            _img_aspect = _img_arr.shape[0] / _img_arr.shape[1]
+            _right_w = _content_h / _img_aspect
+        else:
+            _right_w = 0.0
+        fig = plt.figure(
+            figsize=(_left_w + _right_w + 0.9, _content_h + 1.0)
+        )
+        # Explicit margins: subgridspec axes are "not compatible" with
+        # tight_layout, so its rect cannot reserve suptitle space here.
+        # No suptitle -- the user prefers title-free diagnostic figures.
+        gs = fig.add_gridspec(
+            1, 2,
+            width_ratios=[_left_w, _right_w] if has_img else [1, 1],
+            wspace=0.08,
+            left=0.03,
+            right=0.98,
+            top=0.98,
+            bottom=0.08,
+        )
+        cell_color = {}
+        for iy in range(ny_c):
+            for ix in range(nx_c):
+                cell_color[(ix, iy)] = self._GRID_CELL_COLORS[
+                    (iy * nx_c + ix) % len(self._GRID_CELL_COLORS)
+                ]
+
+        # Left: ny x nx per-cell ePSF stamps tiled edge-to-edge like the
+        # PSF_Sources panel; the cell tag is drawn inside each stamp in
+        # the cell's colour so no inter-panel gap is needed for titles.
+        # grid_xypos order is (iy-major): index = iy * nx_c + ix.
+        # Row 0 of a subgridspec is the TOP of the figure while cell
+        # iy=0 is the bottom of the image - flip rows so the stamp
+        # mosaic shares the science image's orientation.
+        left_sub = gs[0].subgridspec(ny_c, nx_c, hspace=0.02, wspace=0.02)
+        xy_arr = np.asarray(xypos, dtype=float)
+        xs_sorted = np.sort(np.unique(xy_arr[:, 0]))
+        ys_sorted = np.sort(np.unique(xy_arr[:, 1]))
+        for i, stamp in enumerate(data_cube):
+            gx, gy = xy_arr[i]
+            ix = int(np.searchsorted(xs_sorted, gx))
+            iy = int(np.searchsorted(ys_sorted, gy))
+            ax = fig.add_subplot(left_sub[ny_c - 1 - iy, ix])
+            try:
+                vmin, vmax = ZScaleInterval().get_limits(stamp)
+                norm = ImageNormalize(vmin=vmin, vmax=vmax)
+            except Exception:
+                norm = None
+            ax.imshow(
+                np.ma.array(stamp, mask=~np.isfinite(stamp)),
+                origin="lower",
+                cmap=cmap,
+                norm=norm,
+                interpolation="none",
+                aspect="equal",
+            )
+            built = (ix, iy) in populated_cells
+            n_stars = int(cell_counts[iy, ix])
+            tag = f"{n_stars}*" if built else f"fill({n_stars})"
+            cc = cell_color[(ix, iy)]
+            ax.text(
+                0.03,
+                0.97,
+                f"x{ix}y{iy} {tag}\n({gx:.0f},{gy:.0f})",
+                transform=ax.transAxes,
+                fontsize=7,
+                color="white",
+                va="top",
+                ha="left",
+                bbox=dict(
+                    facecolor=cc, edgecolor="none", alpha=0.85, pad=1.5
+                ),
+            )
+            for sp in ax.spines.values():
+                sp.set_edgecolor(cc)
+                sp.set_linewidth(2.2)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        # Right: the science image in the house greyscale with cell
+        # rectangles; each cell's PSF stars are square markers in that
+        # cell's colour (dashed border = cell filled from a neighbour
+        # rather than built).
+        if has_img:
+            ax_img = fig.add_subplot(gs[1])
+            img = _img_arr
+            cmap_img = plt.get_cmap(
+                PLOT_COLORS.get("image_cmap", "gray")
+            ).copy()
+            cmap_img.set_bad(color=PLOT_COLORS.get("nan_color", "magenta"))
+            try:
+                vmin_i, vmax_i = ZScaleInterval().get_limits(img)
+                norm_i = ImageNormalize(vmin=vmin_i, vmax=vmax_i)
+            except Exception:
+                norm_i = None
+            ax_img.imshow(
+                np.ma.array(img, mask=~np.isfinite(img)),
+                origin="lower",
+                cmap=cmap_img,
+                norm=norm_i,
+                interpolation="none",
+            )
+            if xedges is not None and yedges is not None:
+                # Inset each cell's border a few px so neighbouring cells'
+                # shared edges do not overlap into an unreadable double
+                # line; all borders stay solid (filled cells are tagged
+                # in their stamp label).
+                _cell_pad = 0.015 * min(
+                    float(np.diff(xedges).min()),
+                    float(np.diff(yedges).min()),
+                )
+                for iy in range(ny_c):
+                    for ix in range(nx_c):
+                        ax_img.add_patch(
+                            Rectangle(
+                                (xedges[ix] + _cell_pad, yedges[iy] + _cell_pad),
+                                xedges[ix + 1] - xedges[ix] - 2 * _cell_pad,
+                                yedges[iy + 1] - yedges[iy] - 2 * _cell_pad,
+                                fill=False,
+                                edgecolor=cell_color[(ix, iy)],
+                                linewidth=2.0,
+                                linestyle="-",
+                            )
+                        )
+            if src_xy is not None:
+                xs_s, ys_s, xi_s, yi_s = src_xy
+                for iy in range(ny_c):
+                    for ix in range(nx_c):
+                        sel = (xi_s == ix) & (yi_s == iy)
+                        if np.any(sel):
+                            ax_img.scatter(
+                                xs_s[sel],
+                                ys_s[sel],
+                                marker="s",
+                                s=6,
+                                facecolors="none",
+                                edgecolors=cell_color[(ix, iy)],
+                                linewidths=0.4,
+                            )
+            # Transient position (same frame as the build image -- the
+            # pipeline re-derives target_*_pix from WCS after alignment).
+            _tx = self.input_yaml.get("target_x_pix")
+            _ty = self.input_yaml.get("target_y_pix")
+            if (
+                _tx is not None
+                and _ty is not None
+                and np.isfinite(float(_tx))
+                and np.isfinite(float(_ty))
+            ):
+                ax_img.scatter(
+                    [float(_tx)],
+                    [float(_ty)],
+                    marker="*",
+                    s=160,
+                    facecolors="none",
+                    # Magenta contrasts with all four cell colours and the
+                    # grayscale background.
+                    edgecolors="#FF00FF",
+                    linewidths=1.2,
+                    label="transient",
+                )
+                ax_img.legend(
+                    loc="upper right", fontsize=7, framealpha=0.7
+                )
+            ax_img.set_xlabel("x (pix)", fontsize=8)
+            ax_img.set_ylabel("y (pix)", fontsize=8)
+            # Keep the y label/ticks on the far side so they never
+            # overlap the stamp block in the narrow wspace gap.
+            ax_img.yaxis.set_label_position("right")
+            ax_img.yaxis.tick_right()
+            ax_img.tick_params(labelsize=7)
+
+        out = os.path.join(
+            write_dir,
+            f"PSF_Grid_{base}{get_plot_ext(self.input_yaml)}",
+        )
+        fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        logging.getLogger(__name__).info(
+            "Saved gridded ePSF diagnostic plot: %s", os.path.basename(out)
+        )
+
     def _create_psf_visualization(
         self, stars, epsf, star_shape, aperture_radius, write_dir, base, use_log_scale=True
     ):
@@ -5808,10 +7298,20 @@ class PSF:
             except Exception:
                 # Fallback if zscale fails
                 norm_i = None
+            # Render star.mask alongside non-finite pixels so masked
+            # contaminant pixels are visible in the diagnostic rather than
+            # silently excluded only at fit time.
+            _star_mask = getattr(stars[i], "mask", None)
+            if _star_mask is not None:
+                _plot_mask = ~np.isfinite(stars[i]) | np.asarray(
+                    _star_mask, bool
+                )
+            else:
+                _plot_mask = ~np.isfinite(stars[i])
             ax.imshow(
-                np.ma.array(stars[i], mask=~np.isfinite(stars[i])),
+                np.ma.array(stars[i], mask=_plot_mask),
                 origin="lower",
-                cmap='viridis',
+                cmap=cmap_vir,
                 norm=norm_i,
                 interpolation="none",
             )
