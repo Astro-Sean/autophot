@@ -31,10 +31,11 @@ from astropy.table import Table
 
 # --- Local Imports (optional) ---
 try:
-    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, STATUS  # type: ignore
+    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, cap_console_lines, STATUS  # type: ignore
 except (ModuleNotFoundError, ImportError):
     # Minimal fallback for environments missing the full photometry stack.
     STATUS = logging.INFO  # degrade STATUS to INFO when functions is absent
+    cap_console_lines = None
 
     def log_step(message: str, *args, **kwargs) -> str:
         m = str(message).strip()
@@ -71,6 +72,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(levelname)s - %(message)s",
 )
+if cap_console_lines is not None:
+    cap_console_lines(logging.getLogger().handlers)
 logger = logging.getLogger(__name__)
 
 # --- Suppress Astropy Warnings ---
@@ -146,9 +149,12 @@ def _log_scamp_vizier_failure_hint(
     ):
         return
     logger.warning(
-        "SCAMP astrometric catalog fetch failed (Vizier/network). Raise `wcs.scamp_ref_timeout` (AutoPHoT default 60 s; SCAMP built-in is 10 s) "
-        "or set `wcs.scamp_ref_server` to another mirror (default is vizier.cfa.harvard.edu; "
-        "alternatives include vizier.unistra.fr, vizier.ast.cam.ac.uk). SCAMP log: %s",
+        "SCAMP astrometric catalog fetch failed (Vizier/network).\n"
+        "    Raise `wcs.scamp_ref_timeout` (AutoPHoT default 60 s; SCAMP\n"
+        "    built-in is 10 s) or set `wcs.scamp_ref_server` to another\n"
+        "    mirror (default is vizier.cfa.harvard.edu; alternatives\n"
+        "    include vizier.unistra.fr, vizier.ast.cam.ac.uk).\n"
+        "    SCAMP log: %s",
         scamp_log_fpath,
     )
 
@@ -2098,9 +2104,11 @@ class WCSSolver:
 
         if not solvefield_exe or not os.path.isfile(str(solvefield_exe)):
             logger.warning(
-                "Astrometry.net 'solve-field' executable not found; skipping solve-field WCS step. To install with conda:\n"
-                "  conda install -c conda-forge astrometry\n"
-                "Then ensure 'solve-field' is on PATH or set wcs.solve_field_exe_loc in your YAML."
+                "Astrometry.net 'solve-field' executable not found;\n"
+                "    skipping solve-field WCS step. To install with conda:\n"
+                "    conda install -c conda-forge astrometry\n"
+                "    Then ensure 'solve-field' is on PATH or set\n"
+                "    wcs.solve_field_exe_loc in your YAML."
             )
             return np.nan
         else:
@@ -2979,11 +2987,12 @@ class WCSSolver:
                 )
                 if wcs_header.get("A_ORDER", 0) > 0 and not _has_nonzero_sip(wcs_header):
                     logger.warning(
-                        "astrometry.net solved WCS has A_ORDER=%d but all SIP "
-                        "coefficients are zero (too few matched stars for the "
-                        "requested tweak order). WCS is effectively TAN (linear). "
-                        "Consider lowering solve_field_tweak_order or increasing "
-                        "source detection sensitivity.",
+                        "astrometry.net solved WCS has A_ORDER=%d but all SIP\n"
+                        "    coefficients are zero (too few matched stars for\n"
+                        "    the requested tweak order). WCS is effectively\n"
+                        "    TAN (linear). Consider lowering\n"
+                        "    solve_field_tweak_order or increasing source\n"
+                        "    detection sensitivity.",
                         int(wcs_header.get("A_ORDER", 0)),
                     )
                 force_preserve_input_distortion = False

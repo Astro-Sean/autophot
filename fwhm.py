@@ -277,14 +277,20 @@ class Find_FWHM:
         cleaned_df = coordinates_df[coordinates_df["is_isolated"]].copy()
 
         if plot:
-            from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext
+            from plotting_utils import (
+                apply_autophot_mplstyle,
+                get_marker_size,
+                get_plot_ext,
+                overlay_mask_hatch,
+            )
             apply_autophot_mplstyle()
             zscale = ZScaleInterval()
             norm = ImageNormalize(image, interval=zscale)
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.3))
             cmap = plt.get_cmap("gray").copy()
-            cmap.set_bad(color="magenta")
+            cmap.set_bad(color="none")
             ax.imshow(image, cmap=cmap, origin="lower", norm=norm)
+            overlay_mask_hatch(ax, ~np.isfinite(np.asarray(image)))
             ax.contour(
                 deblended_map.data,
                 levels=np.unique(deblended_map.data[deblended_map.data > 0]),

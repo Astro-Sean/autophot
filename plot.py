@@ -19,6 +19,8 @@ try:
         get_marker_size,
         get_plot_color,
         get_plot_ext,
+        mask_legend_patch,
+        overlay_mask_hatch,
         safe_tight_layout,
         PLOT_COLORS,
     )
@@ -29,6 +31,8 @@ except ImportError:
     get_marker_size = None
     get_plot_color = None
     get_plot_ext = lambda _iy=None: ".png"
+    mask_legend_patch = lambda **kw: None
+    overlay_mask_hatch = lambda *a, **kw: None
     safe_tight_layout = lambda fig=None, **kw: fig.tight_layout(**kw) if fig is not None else None
     PLOT_COLORS = {}
 
@@ -152,7 +156,6 @@ class Plot:
         from matplotlib.gridspec import GridSpec
         from mpl_toolkits.axes_grid1.inset_locator import inset_axes
         from matplotlib.patches import ConnectionPatch, Rectangle
-        from matplotlib import colors
         import numpy as np
         import matplotlib.patches as mpatches
         import matplotlib.lines as mlines
@@ -256,7 +259,7 @@ class Plot:
                 img_data = images[title]
                 # Grayscale keeps colored markers readable.
                 cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+                cmap.set_bad(color="none")
                 ax.imshow(
                     img_data,
                     origin="lower",
@@ -265,6 +268,7 @@ class Plot:
                     vmin=vmins[title],
                     vmax=vmaxs[title],
                 )
+                overlay_mask_hatch(ax, ~np.isfinite(np.asarray(img_data)))
                 ax.set_xlim(0, ref_width)
                 ax.set_ylim(0, ref_height)
                 ax.set_title(title, fontsize=10, pad=5)
@@ -492,7 +496,7 @@ class Plot:
 
                     ax_inset = inset_axes(ax, width="30%", height="30%", loc=inset_loc)
                     cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                    cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+                    cmap.set_bad(color="none")
                     ax_inset.imshow(
                         img_data,
                         origin="lower",
@@ -501,6 +505,7 @@ class Plot:
                         vmin=vmins[title],
                         vmax=vmaxs[title],
                     )
+                    overlay_mask_hatch(ax_inset, ~np.isfinite(np.asarray(img_data)))
                     ax_inset.set_xlim(x - inset_size, x + inset_size)
                     ax_inset.set_ylim(y - inset_size, y + inset_size)
                     ax_inset.set_xticks([])
@@ -563,15 +568,14 @@ class Plot:
             # panels; their insets still get it so the zoomed view flags the
             # masked region around the target).
             if mask is not None:
-                red_overlay = colors.ListedColormap(["none", PLOT_COLORS.get('mask_overlay', '#FF0000')])
                 for i, ax in enumerate(fig.axes[:-1]):
                     if ax not in inset_axes_list:
                         ax_inset = panel_to_inset.get(i)
                         if ax_inset is not None:
-                            ax_inset.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
+                            overlay_mask_hatch(ax_inset, mask)
                         if i == 2 or (n_images == 4 and i == 3):
                             continue
-                        ax.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
+                        overlay_mask_hatch(ax, mask)
 
             if fitted_location and len(fitted_location) == 2:
                 radius = aperture_size
@@ -623,10 +627,7 @@ class Plot:
                 )
             if mask is not None:
                 legend_handles.append(
-                    mpatches.Patch(
-                        facecolor=PLOT_COLORS.get('mask_overlay', 'magenta'),
-                        alpha=0.5, label="Masked pixels",
-                    )
+                    mask_legend_patch(label="Masked pixels")
                 )
             if masked_sources is not None and len(masked_sources) > 0:
                 legend_handles.append(
@@ -704,7 +705,6 @@ class Plot:
         import numpy as np
         import matplotlib.pyplot as plt
         from astropy.visualization import ZScaleInterval
-        from matplotlib import colors
         import matplotlib.patches as mpatches
         import matplotlib.lines as mlines
 
@@ -787,10 +787,11 @@ class Plot:
         seg_drawn = False
 
         cmap_vir = plt.get_cmap(PLOT_COLORS.get('image_cmap_alt', 'viridis')).copy()
-        cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+        cmap_vir.set_bad(color="none")
         axes[0].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
+        overlay_mask_hatch(axes[0], ~np.isfinite(np.asarray(cut)))
         axes[0].axvline(tx, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
         axes[0].axhline(ty, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
         if (
@@ -812,6 +813,7 @@ class Plot:
         axes[1].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
+        overlay_mask_hatch(axes[1], ~np.isfinite(np.asarray(cut)))
         levels = np.unique(seg)
         levels = levels[levels > 0]
         if levels.size:
@@ -829,8 +831,7 @@ class Plot:
         axes[2].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
-        overlay = colors.ListedColormap(["none", PLOT_COLORS.get('mask_overlay', '#FF0000')])
-        axes[2].imshow(nmask.astype(int), origin="lower", cmap=overlay, alpha=0.35)
+        overlay_mask_hatch(axes[2], nmask | ~np.isfinite(np.asarray(cut)))
         axes[2].axvline(tx, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
         axes[2].axhline(ty, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
 
@@ -865,12 +866,7 @@ class Plot:
             )
         if np.any(nmask):
             handles.append(
-                mpatches.Patch(
-                    facecolor=PLOT_COLORS.get('mask_overlay', '#FF0000'),
-                    edgecolor="none",
-                    alpha=0.35,
-                    label="Neighbor mask",
-                )
+                mask_legend_patch(label="Neighbor mask")
             )
         fig.legend(
             handles=handles,
@@ -1029,7 +1025,7 @@ class Plot:
                 image, interval=ZScaleInterval(), stretch=LinearStretch()
             )
             cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray'))
-            cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+            cmap.set_bad(color="none")
             im = ax1.imshow(
                 image,
                 origin="lower",
@@ -1038,6 +1034,7 @@ class Plot:
                 interpolation=None,
                 norm=norm,
             )
+            overlay_mask_hatch(ax1, ~np.isfinite(np.asarray(image)))
 
             # Harmonize pixel-origin conventions for overlay markers.
             # Some WCS-derived catalogs can be 1-based while detected sources
@@ -1299,10 +1296,7 @@ class Plot:
                 logger.debug("Distortion vector overlay skipped: %s", e)
 
             if mask is not None:
-                from matplotlib import colors
-
-                mask_cmap = colors.ListedColormap(["none", PLOT_COLORS.get('mask_overlay_alt', 'white')])
-                ax1.imshow(mask, cmap=mask_cmap, alpha=1.0, origin="lower")
+                overlay_mask_hatch(ax1, mask)
 
             if distortion_grid_artist is not None:
                 try:
@@ -2586,7 +2580,7 @@ class Plot:
             )
 
             cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-            cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+            cmap.set_bad(color="none")
 
             for i, (ax, img, title) in enumerate([
                 (ax1, sci_image, "Science"),
@@ -2602,6 +2596,7 @@ class Plot:
                     img_f, cmap=cmap, norm=norm,
                     origin="lower", aspect="equal",
                 )
+                overlay_mask_hatch(ax, ~np.isfinite(img_f))
                 ax.set_title(title)
                 ax.set_xlabel("X [Pixel]")
                 # Only suppress the duplicate y labels when both panels

@@ -46,6 +46,14 @@ def main(argv=None):
         format="%(levelname)-8s %(message)s",
         stream=sys.stdout,
     )
+    try:
+        from functions import cap_console_lines
+    except ImportError:
+        pass
+    else:
+        cap_console_lines(
+            logging.getLogger().handlers, prefix_fmt="{levelname:<8} "
+        )
 
     from autophot import inspect_telescope
 

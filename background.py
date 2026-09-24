@@ -37,7 +37,6 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-import matplotlib.patches as mpatches
 
 from astropy.stats import (
     SigmaClip,
@@ -45,7 +44,12 @@ from astropy.stats import (
     mad_std,
     gaussian_fwhm_to_sigma,
 )
-from plotting_utils import apply_autophot_mplstyle, get_plot_ext
+from plotting_utils import (
+    apply_autophot_mplstyle,
+    get_plot_ext,
+    mask_legend_patch,
+    overlay_mask_hatch,
+)
 from astropy.convolution import Gaussian2DKernel
 from astropy.convolution import convolve
 from astropy.visualization import ZScaleInterval
@@ -2134,9 +2138,9 @@ class BackgroundSubtractor:
 
         for i, (ax, data, title) in enumerate(zip(axes, arrays, titles)):
             vmin, vmax = self._safe_zlimits(data, interval)
-            # Render NaNs as magenta "no data" regions.
+            # Non-finite regions get a transparent fill plus a hatch overlay.
             cmap = plt.get_cmap("gray").copy()
-            cmap.set_bad(color="magenta")
+            cmap.set_bad(color="none")
 
             im = ax.imshow(
                 data,
@@ -2146,6 +2150,7 @@ class BackgroundSubtractor:
                 vmax=vmax,
                 interpolation="none",
             )
+            overlay_mask_hatch(ax, ~np.isfinite(np.asarray(data)))
             self._attach_colorbar(fig, ax, im, title)
             ax.set_aspect("equal")
             ax.set_xlabel("X [Pixel]", fontsize=9)
@@ -2155,30 +2160,21 @@ class BackgroundSubtractor:
                 ax.set_ylabel("")
                 ax.tick_params(axis="y", labelleft=False)
 
-            # Leftmost panel: overlay masked pixels in semi-transparent magenta.
+            # Leftmost panel: overlay masked pixels with the shared hatch.
             if (
                 i == 0
                 and mask is not None
                 and np.any(mask)
                 and mask.shape == data.shape
             ):
-                overlay = np.zeros((*mask.shape, 4), dtype=float)
-                overlay[..., 0] = mask.astype(float)
-                overlay[..., 2] = mask.astype(float)
-                overlay[..., 3] = mask.astype(float) * 0.6
-                ax.imshow(
-                    overlay,
-                    origin="lower",
-                    interpolation="nearest",
-                    zorder=10,
-                )
+                overlay_mask_hatch(ax, mask, zorder=10)
 
         handles = []
         if (mask is not None and np.any(mask)) or any(
             np.isnan(np.asarray(a)).any() for a in arrays
         ):
             handles.append(
-                mpatches.Patch(facecolor="magenta", alpha=0.6, label="Masked / NaN")
+                mask_legend_patch(label="Masked / NaN")
             )
         if handles:
             fig.legend(

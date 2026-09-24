@@ -37,7 +37,7 @@ import pandas as pd
 from astropy.io import fits
 
 from aperture import Aperture
-from functions import beta_aperture, mag, points_in_circum
+from functions import beta_aperture, cap_console_lines, mag, points_in_circum
 from psf import MCMCFitter
 
 
@@ -222,6 +222,7 @@ def main() -> int:
         format="%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%H:%M:%S",
     )
+    cap_console_lines(logging.getLogger().handlers, extra_reserve=11)
 
     img = _read_fits_2d(args.fits)
     rms = _read_fits_2d(args.rms_fits) if args.rms_fits else None

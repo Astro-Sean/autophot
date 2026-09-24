@@ -542,8 +542,10 @@ class GaiaCurveCatalogBuilder:
             )
         elif not spectra_df.empty:
             self.logger.warning(
-                "GaiaXPy did not return a separate wavelength sampling array; expecting wavelength columns inside each row. If the catalog is "
-                "empty, update autophot_gaia_curves or inspect calibrate() output."
+                "GaiaXPy did not return a separate wavelength sampling\n"
+                "    array; expecting wavelength columns inside each row.\n"
+                "    If the catalog is empty, update autophot_gaia_curves\n"
+                "    or inspect calibrate() output."
             )
 
         if "source_id" not in spectra_df.columns:
@@ -626,9 +628,11 @@ class GaiaCurveCatalogBuilder:
             out_df = pd.DataFrame(columns=cols)
             if not spectra_df.empty:
                 self.logger.warning(
-                    "Gaia curve-map catalog has 0 usable rows after band integration (%d calibrated sources skipped). "
-                    "spectra_df columns=%s; xp_sampling_nm=%s. "
-                    "Check XP flux column names, wavelength grid, and filter overlap.",
+                    "Gaia curve-map catalog has 0 usable rows after band\n"
+                    "    integration (%d calibrated sources skipped).\n"
+                    "    spectra_df columns=%s; xp_sampling_nm=%s.\n"
+                    "    Check XP flux column names, wavelength grid, and\n"
+                    "    filter overlap.",
                     len(spectra_df),
                     list(spectra_df.columns),
                     "None"
@@ -657,10 +661,13 @@ class GaiaCurveCatalogBuilder:
                     bad_bands.append(f"{b} (0/{n} finite)")
             if len(bad_bands) == len(list(loaded_curves.keys())):
                 self.logger.warning(
-                    "Gaia curve-map catalog build produced %d row(s) but no finite synthetic magnitudes for any requested band(s): %s. "
-                    "Likely causes: (1) curve wavelength units misinterpreted (A vs nm), "
-                    "(2) no overlap with Gaia XP spectra (~330-1050 nm), "
-                    "(3) GaiaXPy output format changed (flux column names).",
+                    "Gaia curve-map catalog build produced %d row(s) but no\n"
+                    "    finite synthetic magnitudes for any requested\n"
+                    "    band(s): %s.\n"
+                    "    Likely causes: (1) curve wavelength units\n"
+                    "    misinterpreted (A vs nm), (2) no overlap with Gaia\n"
+                    "    XP spectra (~330-1050 nm), (3) GaiaXPy output\n"
+                    "    format changed (flux column names).",
                     n,
                     ", ".join(bad_bands),
                 )
@@ -698,6 +705,12 @@ def build_custom_catalog(
         level=log_level,
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
+    try:
+        from functions import cap_console_lines
+    except ImportError:
+        pass
+    else:
+        cap_console_lines(logging.getLogger().handlers, extra_reserve=26)
     builder = GaiaCurveCatalogBuilder()
     return builder.build(
         ra_deg=ra_deg,

@@ -166,7 +166,7 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
 # Local
 # ---------------------------------------------------------------------------
 from functions import log_step, set_size, log_warning_from_exception, STATUS
-from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, safe_tight_layout, PLOT_COLORS
+from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
 from aperture import (
     gain_e_per_adu_from_header,
     resolve_exposure_time_seconds,
@@ -884,6 +884,265 @@ def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
     data = data * float(osamp) ** 2
     ctr = (osamp * cutout_n - 1) / 2.0
     return ImagePSF(data=data, x_0=ctr, y_0=ctr, oversampling=osamp)
+
+
+def _moffat_sum_profile(r, params, n_comp):
+    """Sum of ``n_comp`` Moffat profiles at radii ``r``.
+
+    ``params`` packs ``(amp, gamma, beta)`` triples; each component is
+    ``amp * (1 + (r/gamma)^2)^(-beta)``.
+    """
+    v = np.zeros_like(r, dtype=float)
+    for i in range(n_comp):
+        a, g, b = params[3 * i : 3 * i + 3]
+        v += a * (1.0 + (r / g) ** 2) ** (-b)
+    return v
+
+
+def _fit_moffat_composite(stars, fwhm, max_components=3):
+    """Fit a sum of Moffats to the stacked PSF-star cutouts.
+
+    A single Moffat cannot represent a real PSF, whose narrow core and
+    extended wings need different slopes; a 2-3 component sum can.  All
+    cutout pixels are fitted jointly in a sign-preserving sqrt space so
+    the faint wings carry weight against the bright core.  Components
+    are tried from ``max_components`` down to one; the first converged
+    fit wins.  Returns a list of ``(amp, gamma, beta)`` in native
+    pixels (per-star flux-normalised units), or None.
+    """
+    from scipy.optimize import least_squares
+
+    rs, vs, ws = [], [], []
+    for s in stars:
+        data = np.asarray(getattr(s, "data", None), float)
+        if data.size == 0:
+            continue
+        ny, nx = data.shape
+        cc_attr = getattr(s, "cutout_center", None)
+        if cc_attr is None:
+            cc = np.array([(nx - 1) / 2.0, (ny - 1) / 2.0])
+        else:
+            cc = np.asarray(cc_attr, float)
+        yy, xx = np.indices(data.shape)
+        rr = np.hypot(xx - cc[0], yy - cc[1])
+        ok = np.isfinite(data)
+        m = getattr(s, "mask", None)
+        if m is not None:
+            ok &= ~np.asarray(m, bool)
+        w = np.asarray(getattr(s, "weights", None), float)
+        if w.shape != data.shape:
+            w = np.ones_like(data)
+        ok &= w > 0
+        if int(ok.sum()) < 9:
+            continue
+        flux = float(getattr(s, "flux", np.nan))
+        if not np.isfinite(flux) or flux <= 0:
+            flux = np.nansum(np.where(ok & (rr < 1.5 * fwhm), data, 0.0))
+        if not np.isfinite(flux) or flux <= 0:
+            continue
+        rs.append(rr[ok])
+        vs.append(data[ok] / flux)
+        # Inverse-variance weights rescale by flux^2 after normalisation.
+        ws.append(w[ok] * flux * flux)
+    if not rs:
+        return None
+    r = np.concatenate(rs)
+    v = np.concatenate(vs)
+    w = np.concatenate(ws)
+    good = np.isfinite(r) & np.isfinite(v) & np.isfinite(w) & (w > 0)
+    r, v, w = r[good], v[good], w[good]
+    if r.size < 30:
+        return None
+    peak = float(np.nanmax(v))
+    if not np.isfinite(peak) or peak <= 0:
+        return None
+    wscale = np.sqrt(w / np.median(w))
+    v_sqrt = np.sign(v) * np.sqrt(np.abs(v))
+
+    def _resid(p, k):
+        model = _moffat_sum_profile(r, p, k)
+        t = np.sign(model) * np.sqrt(np.abs(model)) - v_sqrt
+        return t * wscale
+
+    fwhm = max(0.5, float(fwhm))
+    for k in range(int(max_components), 0, -1):
+        g0 = fwhm * np.array([0.8, 1.8, 4.5][:k])
+        b0 = np.array([4.5, 2.5, 1.7][:k])
+        a0 = peak * np.array([0.7, 0.25, 0.05][:k])
+        p0 = np.column_stack([a0, g0, b0]).ravel()
+        lo = np.tile([0.0, 0.2 * fwhm, 1.2], k)
+        hi = np.tile([10.0 * peak, 12.0 * fwhm, 12.0], k)
+        try:
+            sol = least_squares(
+                lambda p: _resid(p, k),
+                p0,
+                bounds=(lo, hi),
+                method="trf",
+                max_nfev=4000,
+            )
+        except Exception:
+            continue
+        if not sol.success or not np.isfinite(sol.x).all():
+            continue
+        comps = [
+            (
+                float(sol.x[3 * i]),
+                float(sol.x[3 * i + 1]),
+                float(sol.x[3 * i + 2]),
+            )
+            for i in range(k)
+        ]
+        # Drop collapsed components: a ~zero-amplitude term adds nothing
+        # and only marks the extra component count as wasted.
+        comps = [c for c in comps if c[0] > 0.01 * peak]
+        if comps:
+            return comps
+    return None
+
+
+def _default_moffat_composite(fwhm, beta):
+    """Canonical three-component PSF when no stars are available to fit.
+
+    A dominant core at the image FWHM plus progressively wider, fainter
+    wing terms: closer to a real seeing PSF than a single Moffat while
+    still needing only the measured FWHM.  Fractions are flux shares,
+    converted to peak amplitudes via the Moffat integral
+    ``flux = amp * pi * gamma^2 / (beta - 1)``.
+    """
+    spec = (
+        (0.85, 1.0, max(1.1, float(beta))),
+        (0.12, 2.2, 2.5),
+        (0.03, 4.5, 1.7),
+    )
+    comps = []
+    for frac, fscale, b in spec:
+        gamma = (fscale * fwhm) / (
+            2.0 * np.sqrt(2.0 ** (1.0 / b) - 1.0)
+        )
+        amp = frac * (b - 1.0) / (np.pi * gamma**2)
+        comps.append((amp, gamma, b))
+    return comps
+
+
+def _composite_moffat_psf(components, oversampling, cutout_n):
+    """ImagePSF stamp from a sum-of-Moffats profile.
+
+    Same conventions as ``_analytic_moffat_psf``: the continuous profile
+    is evaluated on the oversampled grid, pixel-integrated, and rescaled
+    to ``sum == prod(oversampling)``.  Component ``gamma`` values are in
+    native pixels, so radii are converted from grid units before
+    evaluation.  The stamp carries ``_autophot_kind`` for the
+    PSFBUILD/psf_model provenance record.
+    """
+    osamp = max(1, int(oversampling))
+    n = int(osamp * cutout_n)
+    ctr = (n - 1) / 2.0
+    yy, xx = np.indices((n, n))
+    r = np.hypot(xx - ctr, yy - ctr) / osamp
+    data = np.zeros_like(r)
+    for amp, gamma, beta in components:
+        data += float(amp) * (
+            1.0 + (r / max(float(gamma), 1e-6)) ** 2
+        ) ** (-float(beta))
+    data = pixel_integrate_oversampled(data, osamp)
+    # pixel_integrate_oversampled only normalises when it convolves; at
+    # osamp==1 it returns the raw profile, so normalise unconditionally
+    # before the photutils flux-convention rescale.
+    total = float(np.nansum(data))
+    if np.isfinite(total) and total > 0:
+        data = data / total
+    data = data * float(osamp) ** 2
+    stamp = ImagePSF(data=data, x_0=ctr, y_0=ctr, oversampling=osamp)
+    stamp._autophot_kind = (
+        "analytic-composite" if len(components) > 1 else "analytic-moffat"
+    )
+    return stamp
+
+
+def _analytic_psf_stamp(
+    fwhm, oversampling, cutout_n, beta, stars=None, max_components=3
+):
+    """Analytic PSF model and its fitted components.
+
+    With ``stars`` a multi-Moffat composite is fitted to the cutouts;
+    without them the fixed canonical composite is used.  Returns
+    ``(stamp, components)``; ``components`` is the canonical fallback
+    when the fit fails.
+    """
+    comps = None
+    if stars is not None and len(stars) > 0:
+        try:
+            comps = _fit_moffat_composite(
+                stars, fwhm, max_components=max_components
+            )
+        except Exception:
+            comps = None
+    if comps is None:
+        comps = _default_moffat_composite(fwhm, beta)
+    return _composite_moffat_psf(comps, oversampling, cutout_n), comps
+
+
+def _psf_pair_separation_drop(xy, min_sep_px, dup_px, rank):
+    """Boolean drop mask for the PSF-candidate pair-separation rule.
+
+    The candidate pool merges entries from several source lists, so a
+    close pair can arrive through different lists and dodge every
+    per-list isolation check.  Two candidates closer than
+    ``min_sep_px`` are either the same star centroided twice or an
+    unresolved blend; both corrupt the ePSF core.  Positions nearer
+    than ``dup_px`` are treated as duplicate detections of one star
+    (the lower-ranked entry is dropped); a wider sub-``min_sep_px``
+    pair is a genuine blend and both entries are dropped.
+    """
+    xy = np.asarray(xy, dtype=float)
+    n = len(xy)
+    drop = np.zeros(n, dtype=bool)
+    if n < 2 or min_sep_px <= 0:
+        return drop
+    fin = np.isfinite(xy).all(axis=1)
+    if fin.sum() < 2:
+        return drop
+    from scipy.spatial import cKDTree
+
+    fin_idx = np.where(fin)[0]
+    tree = cKDTree(xy[fin])
+    rank = np.asarray(rank, dtype=float)
+    rank = np.where(np.isfinite(rank), rank, -np.inf)
+    for pi, pj in tree.query_pairs(min_sep_px):
+        i, j = fin_idx[pi], fin_idx[pj]
+        if np.hypot(xy[i, 0] - xy[j, 0], xy[i, 1] - xy[j, 1]) < dup_px:
+            drop[i if rank[i] < rank[j] else j] = True
+        else:
+            drop[i] = drop[j] = True
+    return drop
+
+
+def _psf_mask_distances(image, mask, xy):
+    """Distance (px) from each candidate to the nearest bad pixel.
+
+    Bad pixels are non-finite image pixels plus every pixel set in
+    ``mask`` (chip gaps, saturation, streaks, cosmic rays).  Returns
+    ``inf`` for candidates with non-finite coordinates and everywhere
+    when no bad pixels exist, so the result can be thresholded
+    directly.
+    """
+    image = np.asarray(image)
+    bad = ~np.isfinite(image.astype(float, copy=False))
+    if mask is not None and np.shape(mask) == image.shape:
+        bad = bad | np.asarray(mask, dtype=bool)
+    xy = np.asarray(xy, dtype=float)
+    dist = np.full(len(xy), np.inf)
+    if len(xy) == 0 or not np.any(bad):
+        return dist
+    from scipy.ndimage import distance_transform_edt
+
+    distmap = distance_transform_edt(~bad)
+    fin = np.isfinite(xy).all(axis=1)
+    if fin.any():
+        xi = np.clip(np.rint(xy[fin, 0]).astype(int), 0, distmap.shape[1] - 1)
+        yi = np.clip(np.rint(xy[fin, 1]).astype(int), 0, distmap.shape[0] - 1)
+        dist[fin] = distmap[yi, xi]
+    return dist
 
 
 def measure_epsf_fwhm_native(epsf_data: np.ndarray, oversampling: int) -> float:
@@ -2604,7 +2863,8 @@ class PSF:
         self.image = image
         self.header = header
         # Provenance of the last build(): "epsf" (empirical, from image
-        # sources), "analytic-moffat" (opt-in fallback only), or "none".
+        # sources), "analytic-composite"/"analytic-moffat" (analytic
+        # substitution or failure backdoor), or "none".
         self.psf_model_kind = "none"
 
     # -----------------------------------------------------------------------
@@ -2997,6 +3257,10 @@ class PSF:
             _norm_frac_max = float(
                 phot_cfg.get("psf_norm_radius_mask_frac_max", 0.0)
             )
+            _norm_rescue_frac_max = float(
+                phot_cfg.get("psf_norm_radius_mask_frac_rescue_max", 0.25)
+            )
+            _min_cand = max(4, int(phot_cfg.get("psf_min_candidates", 8)))
             _nyy, _nxx = np.mgrid[:ny_cut, :nx_cut]
             _in_norm = (
                 np.hypot(
@@ -3004,16 +3268,44 @@ class PSF:
                 )
                 <= _norm_r
             )
-            _norm_keep = np.ones(len(epsfstars), dtype=bool)
+            _norm_frac = np.zeros(len(epsfstars))
             for _si, _st in enumerate(epsfstars):
                 _bad = ~np.isfinite(np.asarray(_st.data, float))
                 _m = getattr(_st, "mask", None)
                 if _m is not None:
                     _bad |= np.asarray(_m, dtype=bool)
-                _norm_keep[_si] = (
-                    np.sum(_bad & _in_norm)
-                    <= _norm_frac_max * float(_in_norm.sum())
+                _norm_frac[_si] = np.sum(_bad & _in_norm) / float(
+                    _in_norm.sum()
                 )
+            _norm_keep = _norm_frac <= _norm_frac_max
+            if not _norm_keep.all():
+                # Keep-floor rescue: on a sparse field a strict cut can
+                # starve the build (observed: 5 -> 3 stars).  Rescue the
+                # least-bad cutouts while their masked fraction inside the
+                # normalisation circle stays under the rescue cap -- a
+                # partially masked star still contributes valid samples,
+                # and its masked pixels carry weight 0.
+                if int(_norm_keep.sum()) < _min_cand:
+                    _rej = np.flatnonzero(~_norm_keep)
+                    _rej = _rej[np.argsort(_norm_frac[_rej])]
+                    _n_rescued = 0
+                    for _ri in _rej:
+                        if int(_norm_keep.sum()) >= _min_cand:
+                            break
+                        if _norm_frac[_ri] <= _norm_rescue_frac_max:
+                            _norm_keep[_ri] = True
+                            _n_rescued += 1
+                    if _n_rescued:
+                        log.info(
+                            "[robust_extract_stars] Keep-floor rescue: "
+                            "keeping %d cutouts with <= %.0f%% masked "
+                            "pixels inside the normalisation radius to "
+                            "avoid starving the ePSF build (%d/%d kept)",
+                            _n_rescued,
+                            100.0 * _norm_rescue_frac_max,
+                            int(_norm_keep.sum()),
+                            len(epsfstars),
+                        )
             if not _norm_keep.all():
                 _keep_idx = np.where(_norm_keep)[0]
                 log.info(
@@ -3224,6 +3516,9 @@ class PSF:
         _core_ellip_max = float(
             phot_cfg.get("psf_contam_core_ellipticity_max", 0.15)
         )
+        _core_ellip_snr_min = float(
+            phot_cfg.get("psf_contam_core_ellipticity_snr_min", 8.0)
+        )
         _border_max_thresh = float(
             phot_cfg.get("psf_contam_border_max_sigma", 8.0)
         )
@@ -3414,6 +3709,7 @@ class PSF:
             # don't form a separate local maximum).
             ellip = np.full(n_stars, np.nan)
             core_tot = np.zeros(n_stars)
+            core_peak_snr = np.zeros(n_stars)
             if _core_ellip_max > 0:
                 core_e = np.where(
                     core_mask[None] & finite_stack,
@@ -3421,17 +3717,41 @@ class PSF:
                     0.0,
                 )
                 core_tot = np.sum(core_e, axis=(1, 2))
-                safe_tot = np.where(core_tot > 0, core_tot, np.nan)
+                core_peak_snr = np.nanmax(
+                    np.where(
+                        core_mask[None] & finite_stack,
+                        all_data - bg_level[:, None, None],
+                        np.nan,
+                    ),
+                    axis=(1, 2),
+                ) / ann_std
+                # Moment weights must be non-negative: pixels below the
+                # background act as negative weights and can drive the
+                # second-moment sum through zero, which inflates the
+                # ellipticity to ~1e10 on noise-dominated cores.
+                core_w = np.clip(core_e, 0.0, None)
+                w_tot = np.sum(core_w, axis=(1, 2))
+                safe_w = np.where(w_tot > 0, w_tot, np.nan)
                 dx = _xx - cx_c
                 dy = _yy - cy_c
-                cx2 = np.sum(core_e * dx * dx, axis=(1, 2)) / safe_tot
-                cy2 = np.sum(core_e * dy * dy, axis=(1, 2)) / safe_tot
-                cxy = np.sum(core_e * dx * dy, axis=(1, 2)) / safe_tot
-                ellip = np.sqrt(
-                    (cx2 - cy2) ** 2 + 4 * cxy ** 2
-                ) / np.maximum(cx2 + cy2, 1e-10)
+                cx2 = np.sum(core_w * dx * dx, axis=(1, 2)) / safe_w
+                cy2 = np.sum(core_w * dy * dy, axis=(1, 2)) / safe_w
+                cxy = np.sum(core_w * dx * dy, axis=(1, 2)) / safe_w
+                mom_sum = cx2 + cy2
+                ellip = np.where(
+                    np.isfinite(mom_sum) & (mom_sum > 0),
+                    np.sqrt((cx2 - cy2) ** 2 + 4 * cxy ** 2)
+                    / np.where(mom_sum > 0, mom_sum, np.nan),
+                    np.nan,
+                )
+            # The shape test needs real signal in the core: below the
+            # peak-SNR floor the moments are noise-dominated and cannot
+            # distinguish a close blend from sky fluctuations.
             flag_ellip = (
-                gate & (core_tot > 0) & np.isfinite(ellip)
+                gate
+                & (core_tot > 0)
+                & (core_peak_snr >= _core_ellip_snr_min)
+                & np.isfinite(ellip)
                 & (ellip > _core_ellip_max)
             )
 
@@ -3913,6 +4233,18 @@ class PSF:
             snr_min_eff = float(phot_cfg.get("psf_snr_min", SNR_limit[0]))
             snr_max_eff = float(phot_cfg.get("psf_snr_max", SNR_limit[1]))
 
+            # Strike counter for the multi-fail veto below.  Every
+            # quality cut is keep-floor-gated so a sparse pool is not
+            # starved one cut at a time; the side effect is that a
+            # compact defect can dodge each cut individually and still
+            # reach the ePSF.  Candidates failing
+            # psf_defect_veto_min_fails or more cuts are removed
+            # unconditionally at the end of the chain.
+            _veto_min_fails = int(
+                phot_cfg.get("psf_defect_veto_min_fails", 2)
+            )
+            df["_psf_veto"] = 0
+
             n_before = len(df)
             # When the starting pool is modest, relax shape/saturation cuts slightly.
             if n_before <= max(2 * min_psf_candidates, 20):
@@ -3933,6 +4265,7 @@ class PSF:
                     ok = df[peak_col] < sat_cut
                     n_sat = (~ok).sum()
                     if n_sat > 0:
+                        df["_psf_veto"] += (~ok).astype(int)
                         n_keep = int(np.sum(ok))
                         if n_keep >= min_psf_candidates:
                             df = df[ok].copy()
@@ -3962,6 +4295,7 @@ class PSF:
                 psf_flags_max = int(phot_cfg.get("psf_flags_max", 1))
                 flag_vals = pd.to_numeric(df[_flags_col], errors="coerce").fillna(0).astype(int)
                 ok_flags = flag_vals <= psf_flags_max
+                df["_psf_veto"] += (~ok_flags).astype(int)
                 n_keep_flags = int(ok_flags.sum())
                 min_keep_flags = max(
                     min_psf_candidates,
@@ -3999,6 +4333,7 @@ class PSF:
             ) if elong_col is None else None
             if elong_col is not None and np.isfinite(elong_max) and elong_max > 0:
                 ok_elong = df[elong_col].astype(float) <= elong_max
+                df["_psf_veto"] += (~ok_elong).astype(int)
                 n_keep_elong = int(ok_elong.sum())
                 min_keep_elong = max(
                     min_psf_candidates,
@@ -4021,6 +4356,7 @@ class PSF:
                 # Convert elongation_max to ellipticity: e = 1 - 1/elong
                 ellip_max = 1.0 - 1.0 / elong_max
                 ok_ellip = df[ellip_col].astype(float) <= ellip_max
+                df["_psf_veto"] += (~ok_ellip).astype(int)
                 n_keep_ellip = int(ok_ellip.sum())
                 min_keep_ellip = max(
                     min_psf_candidates,
@@ -4079,6 +4415,7 @@ class PSF:
                     ok_fwhm = ok_fwhm  # reject NaN FWHM
                 else:
                     ok_fwhm = ok_fwhm_with_nan  # keep NaN FWHM (safety)
+                df["_psf_veto"] += (~ok_fwhm).astype(int)
                 n_keep_fwhm = int(ok_fwhm.sum())
                 if n_keep_fwhm >= min_keep_fwhm:
                     n_drop_fwhm = int((~ok_fwhm).sum())
@@ -4182,6 +4519,7 @@ class PSF:
                 fr_vals = pd.to_numeric(df[_fr_col], errors="coerce")
                 ok_fr = fr_vals >= _fr_lo
                 ok_fr = ok_fr | fr_vals.isna()  # keep NaN (can't judge)
+                df["_psf_veto"] += (~ok_fr).astype(int)
                 n_keep_fr = int(ok_fr.sum())
                 min_keep_fr = max(
                     min_psf_candidates,
@@ -4238,6 +4576,7 @@ class PSF:
                         )
                     ok_pk = pd.Series(ratio, index=df.index)
                     ok_pk = (ok_pk <= _pk_ratio_max) | ok_pk.isna()
+                    df["_psf_veto"] += (~ok_pk).astype(int)
                     n_keep_pk = int(ok_pk.sum())
                     min_keep_pk = max(
                         min_psf_candidates,
@@ -4288,6 +4627,7 @@ class PSF:
                     b_vals = pd.to_numeric(df[_b_col], errors="coerce")
                     ok_ab = (a_vals >= _ab_min) & (b_vals >= _ab_min)
                     ok_ab = ok_ab | a_vals.isna() | b_vals.isna()
+                    df["_psf_veto"] += (~ok_ab).astype(int)
                     n_keep_ab = int(ok_ab.sum())
                     min_keep_ab = max(
                         min_psf_candidates,
@@ -4321,6 +4661,7 @@ class PSF:
                 sharp_vals = pd.to_numeric(df[_sharp_col], errors="coerce")
                 ok_sharp = sharp_vals <= sharp_max
                 ok_sharp = ok_sharp | sharp_vals.isna()  # keep NaN (can't judge)
+                df["_psf_veto"] += (~ok_sharp).astype(int)
                 n_keep_sharp = int(ok_sharp.sum())
                 min_keep_sharp = max(
                     min_psf_candidates,
@@ -4352,6 +4693,7 @@ class PSF:
             if _cs_col is not None and np.isfinite(class_star_min) and class_star_min > 0:
                 cs_vals = pd.to_numeric(df[_cs_col], errors="coerce")
                 ok_cs = cs_vals >= class_star_min
+                df["_psf_veto"] += (~ok_cs).astype(int)
                 n_keep_cs = int(ok_cs.sum())
                 min_keep_cs = max(
                     min_psf_candidates,
@@ -4425,6 +4767,7 @@ class PSF:
                     pairs = tree.query_ball_point(np.column_stack([xs, ys]), r=iso_r)
                     isolated = np.array([len(p) == 1 for p in pairs])
                     _iso_source = "PSF candidates only"
+                df["_psf_veto"] += (~isolated).astype(int)
                 n_keep_iso = int(isolated.sum())
                 min_keep_iso = max(
                     min_psf_candidates,
@@ -4447,6 +4790,140 @@ class PSF:
                         "Skipping isolation cut (r=%.1f px, vs %s): would leave only %d candidates (< %d).",
                         iso_r, _iso_source, n_keep_iso, min_keep_iso,
                     )
+
+            # ---- Multi-fail defect veto ----
+            # The per-cut keep-floor guards protect sparse pools from
+            # being starved one cut at a time, but they also let a
+            # compact defect (cosmic ray, hot pixel, bad-column blob)
+            # survive by dodging each cut individually.  A candidate
+            # failing several independent quality cuts is a defect, not
+            # a star: veto it unconditionally.  Starving the pool here
+            # is safe - the analytic backdoor below covers an empty
+            # build, and a degraded ePSF is worse than no ePSF.
+            if _veto_min_fails > 0:
+                _vetoed = df["_psf_veto"] >= _veto_min_fails
+                _n_veto = int(_vetoed.sum())
+                if _n_veto:
+                    df = df.loc[~_vetoed].copy()
+                    log.info(
+                        "PSF defect veto: removed %d candidates failing "
+                        ">= %d quality cuts (%d kept)",
+                        _n_veto, _veto_min_fails, len(df),
+                    )
+            df = df.drop(columns=["_psf_veto"], errors="ignore")
+
+            # ---- Candidate pair-separation cut ----
+            # The pool merges entries from several source lists
+            # (catalogue, filtered detections, raw detections), so the
+            # per-list isolation checks cannot see a close pair that
+            # arrives through different lists.  Two candidates closer
+            # than ~1 FWHM are either the same star centroided twice or
+            # an unresolved blend; both corrupt the ePSF core.
+            _pair_sep_fwhm = float(
+                phot_cfg.get("psf_min_pair_separation_fwhm", 1.0)
+            )
+            _dup_px = float(phot_cfg.get("psf_dup_radius_px", 2.0))
+            if (
+                _pair_sep_fwhm > 0
+                and xcol_now is not None
+                and ycol_now is not None
+                and len(df) >= 2
+            ):
+                _rank_col = next(
+                    (
+                        c
+                        for c in (
+                            "SNR", "snr", "signal_to_noise", "flux_snr",
+                            "threshold", "flux_AP", "flux_ap", "FLUX_AUTO",
+                        )
+                        if c in df.columns
+                    ),
+                    None,
+                )
+                _drop_pair = _psf_pair_separation_drop(
+                    df[[xcol_now, ycol_now]].to_numpy(dtype=float),
+                    _pair_sep_fwhm * _fwhm_for_iso,
+                    _dup_px,
+                    pd.to_numeric(
+                        df[_rank_col], errors="coerce"
+                    ).to_numpy(dtype=float)
+                    if _rank_col is not None
+                    else np.zeros(len(df), dtype=float),
+                )
+                if _drop_pair.any():
+                    df = df.loc[~_drop_pair].copy()
+                    log.info(
+                        "PSF pair-separation cut (< %.1f px = %.1f FWHM): "
+                        "removed %d close/blended or duplicate candidates "
+                        "(%d kept)",
+                        _pair_sep_fwhm * _fwhm_for_iso, _pair_sep_fwhm,
+                        int(_drop_pair.sum()), len(df),
+                    )
+
+            # ---- Defect-mask proximity cut ----
+            # Supplement-pool members bypass the defect-proximity
+            # rejection applied to the FWHM source list upstream, so
+            # repeat it here on the build mask: a candidate whose core
+            # overlaps a chip gap, saturated streak, or cosmic-ray
+            # region cannot be repaired by per-pixel weights.
+            if (
+                xcol_now is not None
+                and ycol_now is not None
+                and len(df) > 0
+            ):
+                _mask_dist = _psf_mask_distances(
+                    self.image, mask,
+                    df[[xcol_now, ycol_now]].to_numpy(dtype=float),
+                )
+                # Mask inside the stellar core is unrecoverable:
+                # always reject, no keep-floor.
+                _core_r = (
+                    float(phot_cfg.get("psf_mask_core_min_dist_fwhm", 0.75))
+                    * _fwhm_for_iso
+                )
+                if _core_r > 0:
+                    _core_hit = _mask_dist <= _core_r
+                    if _core_hit.any():
+                        df = df.loc[~_core_hit].copy()
+                        _mask_dist = _mask_dist[~_core_hit]
+                        log.info(
+                            "PSF mask-core cut: removed %d candidates "
+                            "within %.1f px (%.2f FWHM) of masked pixels "
+                            "(%d kept)",
+                            int(_core_hit.sum()), _core_r,
+                            _core_r / max(_fwhm_for_iso, 1e-9), len(df),
+                        )
+                # Wider proximity cut matching the upstream FWHM-source
+                # exclusion radius; keep-floor-gated like the other
+                # cuts since a distant mask edge only clips the cutout
+                # wings.
+                _prox_fwhm = float(
+                    phot_cfg.get("psf_defect_exclusion_fwhm", 2.0)
+                )
+                _prox_r = _prox_fwhm * _fwhm_for_iso
+                if _prox_r > _core_r and len(df) > 0:
+                    _prox_hit = _mask_dist <= _prox_r
+                    _n_keep_prox = int((~_prox_hit).sum())
+                    _min_keep_prox = max(
+                        min_psf_candidates,
+                        int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    )
+                    if _n_keep_prox >= _min_keep_prox:
+                        if _prox_hit.any():
+                            df = df.loc[~_prox_hit].copy()
+                            log.info(
+                                "PSF defect-proximity cut (<= %.1f px = "
+                                "%.1f FWHM of masked pixels): removed %d "
+                                "candidates (%d kept)",
+                                _prox_r, _prox_fwhm,
+                                int(_prox_hit.sum()), len(df),
+                            )
+                    else:
+                        log.info(
+                            "Skipping defect-proximity cut (<= %.1f px): "
+                            "would leave only %d candidates (< %d).",
+                            _prox_r, _n_keep_prox, _min_keep_prox,
+                        )
 
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
@@ -4780,8 +5257,8 @@ class PSF:
                 phot_cfg.get("psf_analytic_fallback", False)
             )
             # Failure backdoor: when the empirical build cannot produce
-            # any usable model at all, an analytic Moffat at the measured
-            # FWHM keeps PSF photometry alive.  This never swaps a usable
+            # any usable model at all, an analytic composite-Moffat keeps
+            # PSF photometry alive.  This never swaps a usable
             # empirical model -- that swap stays behind
             # psf_analytic_fallback.
             _analytic_on_failure = bool(
@@ -4791,27 +5268,35 @@ class PSF:
                 1.1, float(phot_cfg.get("psf_init_moffat_beta", 4.765))
             )
 
-            def _analytic_failure_psf(reason):
+            def _analytic_failure_psf(reason, stars=None):
                 if not (_analytic_on_failure or _analytic_fallback):
                     return None
                 try:
-                    model = _analytic_moffat_psf(
-                        fwhm, oversample, cutout_n, moffat_beta
+                    model, comps = _analytic_psf_stamp(
+                        fwhm,
+                        oversample,
+                        cutout_n,
+                        moffat_beta,
+                        stars=stars,
+                        max_components=int(
+                            phot_cfg.get("psf_analytic_components", 3)
+                        ),
                     )
                 except Exception:
                     return None
                 if not _epsf_usable(model):
                     return None
                 log.warning(
-                    "ePSF unavailable (%s); using analytic Moffat PSF "
-                    "(FWHM=%.2f px, beta=%.2f) as the failure backdoor "
-                    "(psf_analytic_fallback_on_failure). Recorded as "
-                    "psf_model='analytic-moffat'.",
+                    "ePSF unavailable (%s); using analytic composite-Moffat "
+                    "PSF (%d components, FWHM=%.2f px) as the failure "
+                    "backdoor (psf_analytic_fallback_on_failure). "
+                    "Recorded as psf_model='%s'.",
                     reason,
+                    len(comps),
                     fwhm,
-                    moffat_beta,
+                    model._autophot_kind,
                 )
-                self.psf_model_kind = "analytic-moffat"
+                self.psf_model_kind = model._autophot_kind
                 return model
 
             log.debug("Initial sources: %s", len(df))
@@ -4825,12 +5310,42 @@ class PSF:
                 if n_keep_thr >= min_keep_thr:
                     df = df[mask_thr]
                 else:
-                    log.info(
-                        "Skipping threshold cut (>%s): would leave %d candidates (< required %d).",
-                        threshold_limit_eff,
-                        n_keep_thr,
-                        min_keep_thr,
+                    # Keep-floor relaxes the strict cut so the build is
+                    # not starved, but a sub-noise "candidate" still adds
+                    # only junk samples.  Apply a hard floor so the
+                    # relaxed pool cannot include pure background peaks.
+                    _thr_hard = float(
+                        phot_cfg.get("psf_threshold_hard_min", 3.0)
                     )
+                    if _thr_hard > 0 and _thr_hard < threshold_limit_eff:
+                        _hard = df["threshold"] > _thr_hard
+                        _n_hard = int(np.sum(_hard))
+                        if 0 < _n_hard < len(df):
+                            log.info(
+                                "Keep-floor threshold cut at %.1f: dropping "
+                                "%d sub-noise candidates (strict cut >%s "
+                                "would leave %d < required %d).",
+                                _thr_hard,
+                                len(df) - _n_hard,
+                                threshold_limit_eff,
+                                n_keep_thr,
+                                min_keep_thr,
+                            )
+                            df = df[_hard]
+                        else:
+                            log.info(
+                                "Skipping threshold cut (>%s): would leave %d candidates (< required %d).",
+                                threshold_limit_eff,
+                                n_keep_thr,
+                                min_keep_thr,
+                            )
+                    else:
+                        log.info(
+                            "Skipping threshold cut (>%s): would leave %d candidates (< required %d).",
+                            threshold_limit_eff,
+                            n_keep_thr,
+                            min_keep_thr,
+                        )
             _snr_cut_col = next(
                 (c for c in ("SNR", "snr", "signal_to_noise", "flux_snr") if c in df.columns),
                 None,
@@ -4846,13 +5361,43 @@ class PSF:
                 if n_keep_snr >= min_keep_snr:
                     df = df[mask_snr]
                 else:
-                    log.info(
-                        "Skipping strict SNR cut ([%s, %s]): would leave %d candidates (< required %d).",
-                        snr_min_eff,
-                        snr_max_eff,
-                        n_keep_snr,
-                        min_keep_snr,
+                    # Same keep-floor guard as the threshold cut: the
+                    # relaxed pool must not admit sub-noise detections.
+                    _snr_hard = float(
+                        phot_cfg.get("psf_snr_hard_min", 3.0)
                     )
+                    if _snr_hard > 0 and _snr_hard < snr_min_eff:
+                        _hard = _snr_vals >= _snr_hard
+                        _n_hard = int(np.sum(_hard))
+                        if 0 < _n_hard < len(df):
+                            log.info(
+                                "Keep-floor SNR cut at %.1f: dropping %d "
+                                "sub-noise candidates (strict cut [%s, %s] "
+                                "would leave %d < required %d).",
+                                _snr_hard,
+                                len(df) - _n_hard,
+                                snr_min_eff,
+                                snr_max_eff,
+                                n_keep_snr,
+                                min_keep_snr,
+                            )
+                            df = df[_hard]
+                        else:
+                            log.info(
+                                "Skipping strict SNR cut ([%s, %s]): would leave %d candidates (< required %d).",
+                                snr_min_eff,
+                                snr_max_eff,
+                                n_keep_snr,
+                                min_keep_snr,
+                            )
+                    else:
+                        log.info(
+                            "Skipping strict SNR cut ([%s, %s]): would leave %d candidates (< required %d).",
+                            snr_min_eff,
+                            snr_max_eff,
+                            n_keep_snr,
+                            min_keep_snr,
+                        )
             log.debug("Sources after cuts: %s", len(df))
 
             if len(df) == 0:
@@ -4968,7 +5513,9 @@ class PSF:
 
             if len(epsfstars) == 0:
                 log.error("All PSF-star candidates rejected.")
-                return _analytic_failure_psf("all PSF-star candidates rejected"), df
+                return _analytic_failure_psf(
+                    "all PSF-star candidates rejected", stars=epsfstars
+                ), df
 
             # Reject cutouts whose extracted centre is too far from the
             # cutout's geometric centre (bad centroid/extraction that slipped
@@ -4987,7 +5534,8 @@ class PSF:
             if len(epsfstars) == 0:
                 log.error("All PSF-star candidates rejected by cutout validation.")
                 return _analytic_failure_psf(
-                    "all PSF-star candidates rejected by cutout validation"
+                    "all PSF-star candidates rejected by cutout validation",
+                    stars=epsfstars,
                 ), df
 
             # Optional: remove pathological PSF-star cutouts (blends, cosmic
@@ -5393,16 +5941,19 @@ class PSF:
                     if kern_wide is not None:
                         _p1_iters = min(4, max(2, base_maxiters // 3))
 
-                # Initialise ePSF from a Moffat profile.  The helper applies
-                # the pixel response and the photutils flux convention, so the
-                # same stamp doubles as the analytic failure backdoor.
-                init_epsf_c = _analytic_moffat_psf(
-                    fwhm, osamp_c, cutout_n, moffat_beta
+                # Initialise ePSF from the analytic model.  The helper
+                # applies the pixel response and the photutils flux
+                # convention, so the same stamp doubles as the analytic
+                # failure backdoor.
+                init_epsf_c = _composite_moffat_psf(
+                    _analytic_comps, osamp_c, cutout_n
                 )
                 if osamp_c == oversample:
                     log.debug(
-                        "ePSF init kernel: moffat_beta=%g, size=%dx%d",
-                        moffat_beta,
+                        "ePSF init kernel: %d-component composite, "
+                        "fitted=%s, size=%dx%d",
+                        len(_analytic_comps),
+                        _analytic_fitted,
                         int(osamp_c * cutout_n),
                         int(osamp_c * cutout_n),
                     )
@@ -5482,10 +6033,10 @@ class PSF:
                     ):
                         # Continue iterating from the first-pass model for the
                         # remaining budget rather than rebuilding from the
-                        # Moffat seed: the iteration is Markovian in the
+                        # analytic seed: the iteration is Markovian in the
                         # current ePSF, so base+retry iterations land at the
                         # same endpoint as a fresh max_maxiters run at half
-                        # the cost.  Revert to the Moffat seed when the
+                        # the cost.  Revert to the analytic seed when the
                         # first-pass model is degenerate -- a bad seed would
                         # just propagate.
                         _retry_iters = max_maxiters - base_maxiters
@@ -5580,6 +6131,31 @@ class PSF:
                 # schedule, osamp=3 is often viable where osamp=4 starved,
                 # and keeps finer core resolution than jumping to 1x.
                 _osamp_ladder.extend(range(oversample - 1, 0, -1))
+
+            # Fit the analytic model once on the final star set: a sum of
+            # Moffats captures core-plus-wing structure a single Moffat
+            # cannot.  The same components seed every ladder attempt and
+            # serve as the fallback/backdoor model.
+            _analytic_comps = _fit_moffat_composite(
+                epsfstars,
+                fwhm,
+                max_components=int(
+                    phot_cfg.get("psf_analytic_components", 3)
+                ),
+            )
+            if _analytic_comps is None:
+                _analytic_comps = _default_moffat_composite(
+                    fwhm, moffat_beta
+                )
+                _analytic_fitted = False
+            else:
+                _analytic_fitted = True
+                log.info(
+                    "Analytic PSF model: fitted %d-component Moffat "
+                    "composite to %d PSF stars.",
+                    len(_analytic_comps),
+                    len(epsfstars),
+                )
 
             epsf = fitted_stars = None
             _final_acc = float("nan")
@@ -5696,12 +6272,14 @@ class PSF:
             oversample = _kept_osamp
 
             _used_analytic_psf = False
+            _analytic_kind = "analytic-moffat"
             # Residual accuracy gate on the accepted empirical model: a
             # build can pass every shape gate yet still represent the
             # stars worse than the pixel-integrated analytic model (the
             # ePSF is fitted to these stars, so it has every advantage --
             # measured: degraded production stamps fit 3-16x worse than
-            # the Moffat while good builds sit at ~parity).  The comparison
+            # the analytic model while good builds sit at ~parity).  The
+            # comparison
             # always runs as a diagnostic; the swap to the analytic model
             # only happens when the user explicitly opts in via
             # psf_analytic_fallback.
@@ -5736,7 +6314,7 @@ class PSF:
                         if _analytic_fallback:
                             log.warning(
                                 "Empirical ePSF fits the PSF stars %.2fx worse "
-                                "than the analytic Moffat (residual MAD %.4f vs "
+                                "than the analytic composite (residual MAD %.4f vs "
                                 "%.4f) -- the empirical model is degraded; using "
                                 "the analytic model.",
                                 _mad_emp / _mad_ana, _mad_emp, _mad_ana,
@@ -5744,6 +6322,9 @@ class PSF:
                             epsf = init_kept
                             fitted_stars = epsfstars
                             _used_analytic_psf = True
+                            _analytic_kind = getattr(
+                                init_kept, "_autophot_kind", "analytic-moffat"
+                            )
                             oversample = int(
                                 np.atleast_1d(
                                     getattr(init_kept, "oversampling", oversample)
@@ -5755,7 +6336,7 @@ class PSF:
                         else:
                             log.warning(
                                 "Empirical ePSF fits the PSF stars %.2fx worse "
-                                "than the analytic Moffat (residual MAD %.4f vs "
+                                "than the analytic composite (residual MAD %.4f vs "
                                 "%.4f) -- the empirical model is degraded, but "
                                 "keeping it since psf_analytic_fallback is "
                                 "disabled (the PSF model stays based on the "
@@ -5791,15 +6372,18 @@ class PSF:
                         )
                     log.warning(
                         "ePSF model %s (final_center_accuracy=%.3g px); falling back to "
-                        "analytic Moffat PSF (FWHM=%.2f px, beta=%.2f). PSF photometry, "
+                        "analytic composite-Moffat PSF (FWHM=%.2f px). PSF photometry, "
                         "the PSF zeropoint, and limiting-magnitude injection will use "
                         "this analytic model.",
                         "is degenerate" if epsf is not None else "unavailable",
-                        _final_acc, fwhm, moffat_beta,
+                        _final_acc, fwhm,
                     )
                     epsf = init_epsf
                     fitted_stars = epsfstars
                     _used_analytic_psf = True
+                    _analytic_kind = getattr(
+                        init_epsf, "_autophot_kind", "analytic-moffat"
+                    )
                     # The analytic init is defined on the primary
                     # (first-attempt) oversampled grid.
                     oversample = int(
@@ -5810,19 +6394,57 @@ class PSF:
                     )
                 elif not _emp_usable:
                     _backdoor = _analytic_failure_psf(
-                        "ePSF build produced no usable model"
+                        "ePSF build produced no usable model",
+                        stars=epsfstars,
                     )
                     if _backdoor is None:
                         log.error("ePSF build produced no usable model.")
                     return _backdoor, df
                 elif _fwhm_bad:
-                    log.warning(
-                        "ePSF measured FWHM %.2f px is outside "
-                        "[%.2f, %.2f]x the image FWHM %.2f px but "
-                        "psf_analytic_fallback is disabled -- keeping the "
-                        "degraded empirical model.",
-                        _epsf_fwhm_meas, _fwhm_lo, _fwhm_hi, fwhm,
-                    )
+                    # A starved build (fewer stars than the candidate
+                    # floor) whose measured FWHM misses the band is not a
+                    # usable model: the analytic backdoor treats it as a
+                    # build failure even when the opt-in swap is off.
+                    _starved = len(epsfstars) < min_psf_candidates
+                    if (
+                        _starved
+                        and _analytic_on_failure
+                        and _epsf_usable(init_epsf)
+                    ):
+                        log.warning(
+                            "ePSF built from only %d stars has measured "
+                            "FWHM %.2f px outside [%.2f, %.2f]x the image "
+                            "FWHM %.2f px -- a starved empirical model is "
+                            "untrustworthy; using the analytic composite "
+                            "PSF (psf_analytic_fallback_on_failure).",
+                            len(epsfstars),
+                            _epsf_fwhm_meas,
+                            _fwhm_lo,
+                            _fwhm_hi,
+                            fwhm,
+                        )
+                        epsf = init_epsf
+                        fitted_stars = epsfstars
+                        _used_analytic_psf = True
+                        _analytic_kind = getattr(
+                            init_epsf, "_autophot_kind", "analytic-moffat"
+                        )
+                        oversample = int(
+                            np.atleast_1d(
+                                getattr(init_epsf, "oversampling", oversample)
+                            )[0]
+                        )
+                        _epsf_fwhm_meas = measure_epsf_fwhm_native(
+                            np.asarray(epsf.data, float), oversample
+                        )
+                    else:
+                        log.warning(
+                            "ePSF measured FWHM %.2f px is outside "
+                            "[%.2f, %.2f]x the image FWHM %.2f px but "
+                            "psf_analytic_fallback is disabled -- keeping the "
+                            "degraded empirical model.",
+                            _epsf_fwhm_meas, _fwhm_lo, _fwhm_hi, fwhm,
+                        )
                 else:
                     log.warning(
                         "ePSF build did not pass the quality gates "
@@ -6009,7 +6631,7 @@ class PSF:
                 )
             _psf_hdr["NPSFSTAR"] = (int(n_epsf_stars), "Stars used in ePSF build")
             self.psf_model_kind = (
-                "analytic-moffat" if _used_analytic_psf else "epsf"
+                _analytic_kind if _used_analytic_psf else "epsf"
             )
             _psf_hdr["PSFBUILD"] = (
                 self.psf_model_kind,
@@ -6047,8 +6669,8 @@ class PSF:
 
         except Exception as exc:
             log.error("[build] Fatal: %s\n%s", exc, traceback.format_exc())
-            # Best-effort failure backdoor: derive the Moffat from config
-            # since build locals may not exist at this point.
+            # Best-effort failure backdoor: derive the composite from
+            # config since build locals may not exist at this point.
             try:
                 _pcfg = self.input_yaml.get("photometry", {}) or {}
                 _fb_allowed = bool(
@@ -6071,19 +6693,22 @@ class PSF:
                         float(_pcfg.get("psf_init_moffat_beta", 4.765)),
                     )
                     _fb_cut = _odd(max(25, int(np.ceil(6.0 * _fb_fwhm))))
-                    _fb_model = _analytic_moffat_psf(
-                        _fb_fwhm, _fb_osamp, _fb_cut, _fb_beta
+                    _fb_model = _composite_moffat_psf(
+                        _default_moffat_composite(_fb_fwhm, _fb_beta),
+                        _fb_osamp,
+                        _fb_cut,
                     )
                     if _epsf_usable(_fb_model):
                         log.warning(
-                            "ePSF build crashed; using analytic Moffat PSF "
-                            "(FWHM=%.2f px, beta=%.2f) as the failure "
+                            "ePSF build crashed; using analytic composite-"
+                            "Moffat PSF (FWHM=%.2f px) as the failure "
                             "backdoor (psf_analytic_fallback_on_failure). "
-                            "Recorded as psf_model='analytic-moffat'.",
+                            "Recorded as psf_model='analytic-composite'.",
                             _fb_fwhm,
-                            _fb_beta,
                         )
-                        self.psf_model_kind = "analytic-moffat"
+                        self.psf_model_kind = getattr(
+                            _fb_model, "_autophot_kind", "analytic-composite"
+                        )
                         return _fb_model, None
             except Exception:
                 pass
@@ -6157,11 +6782,11 @@ class PSF:
                 data_for_plot = data
                 norm = None
 
-            # Render NaNs as magenta "no data" regions.
+            # Non-finite regions get a transparent fill plus a hatch overlay.
             try:
                 _cmap = plt.get_cmap(cmap).copy() if isinstance(cmap, str) else cmap
                 _cmap = _cmap.copy() if hasattr(_cmap, "copy") else _cmap
-                _cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+                _cmap.set_bad(color="none")
             except Exception:
                 _cmap = cmap
 
@@ -6178,6 +6803,7 @@ class PSF:
                 vmin=None if use_log_scale else vmin,
                 vmax=None if use_log_scale else vmax,
             )
+            overlay_mask_hatch(ax, _mask, extent=extent)
 
             cx, cy = nx * scale / 2.0, ny * scale / 2.0
             ax.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
@@ -6525,7 +7151,7 @@ class PSF:
             # A per-cell build is itself a complete single-ePSF build:
             # recursion and analytic substitution are both disabled so a
             # failed cell reports failure (fill/fail decides) rather than
-            # silently returning a Moffat.
+            # silently returning an analytic model.
             psf_spatial_grid=False,
             psf_analytic_fallback=False,
             psf_analytic_fallback_on_failure=False,
@@ -7028,7 +7654,7 @@ class PSF:
         apply_autophot_mplstyle()
         plt.ioff()
         cmap = plt.get_cmap("viridis").copy()
-        cmap.set_bad(color=PLOT_COLORS.get("nan_color", "magenta"))
+        cmap.set_bad(color="none")
 
         data_cube = np.asarray(gridded.data, dtype=float)
         _img_arr = (
@@ -7100,6 +7726,7 @@ class PSF:
                 interpolation="none",
                 aspect="equal",
             )
+            overlay_mask_hatch(ax, ~np.isfinite(stamp))
             built = (ix, iy) in populated_cells
             n_stars = int(cell_counts[iy, ix])
             tag = f"{n_stars}*" if built else f"fill({n_stars})"
@@ -7133,7 +7760,7 @@ class PSF:
             cmap_img = plt.get_cmap(
                 PLOT_COLORS.get("image_cmap", "gray")
             ).copy()
-            cmap_img.set_bad(color=PLOT_COLORS.get("nan_color", "magenta"))
+            cmap_img.set_bad(color="none")
             try:
                 vmin_i, vmax_i = ZScaleInterval().get_limits(img)
                 norm_i = ImageNormalize(vmin=vmin_i, vmax=vmax_i)
@@ -7146,6 +7773,7 @@ class PSF:
                 norm=norm_i,
                 interpolation="none",
             )
+            overlay_mask_hatch(ax_img, ~np.isfinite(img))
             if xedges is not None and yedges is not None:
                 # Inset each cell's border a few px so neighbouring cells'
                 # shared edges do not overlap into an unreadable double
@@ -7288,7 +7916,7 @@ class PSF:
 
         # Individual normalization per star (not global) for better visibility
         cmap_vir = plt.get_cmap("viridis").copy()
-        cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+        cmap_vir.set_bad(color="none")
         for i in range(num_stars):
             row, col = divmod(i, ncols)
             ax = fig.add_subplot(left_sub[row, col])
@@ -7315,6 +7943,7 @@ class PSF:
                 norm=norm_i,
                 interpolation="none",
             )
+            overlay_mask_hatch(ax, _plot_mask)
             # Use actual cutout_center if available, fallback to geometric center
             # cutout_center is (y, x) but we need (x, y) for matplotlib
             cy, cx = getattr(stars[i], "cutout_center", (stars[i].shape[0] / 2, stars[i].shape[1] / 2))
@@ -7358,14 +7987,15 @@ class PSF:
         # 2D ePSF image (right side, top of right subgrid)
         ax_right = fig.add_subplot(right_sub[0, 0])
         cmap_vir = plt.get_cmap("viridis").copy()
-        cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+        cmap_vir.set_bad(color="none")
         im = ax_right.imshow(
             np.ma.array(psf_model_plot, mask=~np.isfinite(psf_model_plot)),
             origin="lower",
-            cmap='viridis',
+            cmap=cmap_vir,
             norm=norm_p,
             interpolation="none",
         )
+        overlay_mask_hatch(ax_right, ~np.isfinite(psf_model_plot))
         ax_right.set_title(f"2D ePSF{title_suffix}", fontsize=8, pad=2)
         ax_right.set_xticks([])
         ax_right.set_yticks([])
@@ -9591,14 +10221,15 @@ class PSF:
                         _cutout, interval=ZScaleInterval(), stretch=LinearStretch()
                     )
                 _cmap = plt.get_cmap("viridis").copy()
-                _cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+                _cmap.set_bad(color="none")
                 _im = _ax.imshow(
                     np.ma.array(first_image, mask=~np.isfinite(first_image)),
                     origin="lower",
-                    cmap='viridis',
+                    cmap=_cmap,
                     norm=_norm,
                     interpolation=None,
                 )
+                overlay_mask_hatch(_ax, ~np.isfinite(first_image))
                 if _tcol == 0:
                     im1 = _im  # colorbar reference from primary
 
@@ -9753,14 +10384,15 @@ class PSF:
                         cutout2, interval=ZScaleInterval(), stretch=LinearStretch()
                     )
                 cmap_vir = plt.get_cmap("viridis").copy()
-                cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+                cmap_vir.set_bad(color="none")
                 im2 = ax2.imshow(
                 np.ma.array(second_image, mask=~np.isfinite(second_image)),
                 origin="lower",
-                cmap='viridis',
+                cmap=cmap_vir,
                     norm=norm2,
                     interpolation=None,
                 )
+                overlay_mask_hatch(ax2, ~np.isfinite(second_image))
                 # Same cutout window as the science panels so the residual
                 # stamp and its projections cover an identical x/y region.
                 ax2.set_xlim(x0, x1)
@@ -9832,14 +10464,15 @@ class PSF:
                     epsf.data, interval=ZScaleInterval(), stretch=LinearStretch()
                 )
                 cmap_vir = plt.get_cmap("viridis").copy()
-                cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+                cmap_vir.set_bad(color="none")
                 im3 = ax3.imshow(
                 np.ma.array(epsf.data, mask=~np.isfinite(epsf.data)),
                 origin="lower",
-                cmap='viridis',
+                cmap=cmap_vir,
                     norm=norm3,
                     interpolation=None,
                 )
+                overlay_mask_hatch(ax3, ~np.isfinite(epsf.data))
                 ax3.set_title(
                     f"Oversampled ePSF (x{epsf.oversampling})", fontsize=7, pad=2
                 )

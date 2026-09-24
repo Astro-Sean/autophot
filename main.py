@@ -143,7 +143,6 @@ from functions import (
     log_exception,
     log_warning_from_exception,
     odd,
-    LogMessageNormalizeFilter,
     safe_fits_write,
     resolve_verbose_level,
     verbose_to_console_level,
@@ -235,6 +234,27 @@ def _heuristic_filter_mapping(raw_filter: str) -> str:
 
     # Unrecognised names pass through unchanged.
     return raw_filter
+
+
+def _ranked_keep_mask(df, values, valid, keep_n, keep_largest):
+    """
+    Boolean row mask keeping the keep_n best-ranked finite candidates plus
+    every non-finite row.
+
+    Used by the SFFT matching-source filters when a hard quality cut would
+    starve the kernel fit: instead of keeping everything, rank candidates
+    and retain only the best few.  keep_largest=True ranks descending
+    (e.g. CLASS_STAR, higher is more point-like); False ranks ascending
+    (e.g. elongation, lower is rounder).
+    """
+    finite = values[valid]
+    if keep_n >= len(finite):
+        keep_idx = finite.index
+    elif keep_largest:
+        keep_idx = finite.nlargest(keep_n).index
+    else:
+        keep_idx = finite.nsmallest(keep_n).index
+    return df.index.isin(keep_idx) | np.asarray(~valid)
 
 
 def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffer_pixels=10):
@@ -395,11 +415,13 @@ def run_photometry():
 
     if missing_tools:
         logger.warning(
-            "Optional Astromatic tools not found on PATH: %s. These are only required for advanced features (SCAMP for TPV distortion, "
-            "SWarp for image resampling). The pipeline will fall back to alternative methods "
-            "(astrometry.net for WCS, AstroAlign/Reproject for template alignment). "
-            "To install: conda install -c conda-forge astromatic-source-extractor "
-            "astromatic-scamp astromatic-swarp",
+            "Optional Astromatic tools not found on PATH: %s.\n"
+            "    These are only required for advanced features (SCAMP for\n"
+            "    TPV distortion, SWarp for image resampling). The pipeline\n"
+            "    will fall back to alternative methods (astrometry.net for\n"
+            "    WCS, AstroAlign/Reproject for template alignment).\n"
+            "    To install: conda install -c conda-forge\n"
+            "    astromatic-source-extractor astromatic-scamp astromatic-swarp",
             ", ".join(missing_tools)
         )
 
@@ -835,10 +857,8 @@ def run_photometry():
         plain_formatter = PlainFormatter(
             fmt="%(levelname)s - %(message)s",
         )
+        # PlainFormatter wraps file lines itself (max_width=150).
         file_handler.setFormatter(plain_formatter)
-
-        normalize_filter = LogMessageNormalizeFilter(width=150)
-        file_handler.addFilter(normalize_filter)
 
         root_logger = logging.getLogger("")
         root_logger.setLevel(logging.DEBUG)
@@ -848,9 +868,10 @@ def run_photometry():
         console.setLevel(logging.DEBUG)  # level enforced by ConsoleLevelFilter
         console.addFilter(ConsoleLevelFilter(console_level))
 
+        # ColoredLevelFormatter wraps console lines itself (max_width=90,
+        # level-aware so the "[LEVEL] " tag stays inside the budget).
         formatter = ColoredLevelFormatter(use_color=True)
         console.setFormatter(formatter)
-        console.addFilter(normalize_filter)
 
         logging.getLogger("").addHandler(console)
 
@@ -1955,6 +1976,89 @@ def run_photometry():
         )
 
         # =============================================================================
+        #   Optional: optical distortion correction (SCAMP + SWarp)
+        # =============================================================================
+        # Removes field distortion (e.g. telescope flexure) before source
+        # detection so catalogs, masks and photometry all share the
+        # undistorted pixel grid. Requires a header WCS (SCAMP seed) and
+        # scamp+swarp executables; any failure keeps the original image.
+        if (input_yaml.get("wcs") or {}).get("correct_distortion", False):
+            log_status(border_msg("Distortion correction: SCAMP + SWarp"))
+            try:
+                _dc_wcs = get_wcs(header)
+                if _dc_wcs is None or not getattr(
+                    _dc_wcs, "has_celestial", False
+                ):
+                    log_status(
+                        "Distortion correction: skipped | no usable header WCS "
+                        "(SCAMP needs a WCS seed)"
+                    )
+                else:
+                    _idc = run_IDC.ImageDistortionCorrector(
+                        input_yaml=input_yaml
+                    )
+                    _dc_out = _idc.undistort_image(
+                        fpath,
+                        output_dir=os.path.join(write_dir, "distortion"),
+                        resampling_type=(input_yaml.get("wcs") or {}).get(
+                            "correct_distortion_resampling_type", "LANCZOS3"
+                        ),
+                    )
+                    if _dc_out:
+                        from functions import (
+                            invalidate_fits_cache,
+                            update_header_from_wcs,
+                        )
+
+                        with fits.open(_dc_out) as _dc_hdul:
+                            _dc_data = np.asarray(
+                                _dc_hdul[0].data, dtype=np.float32
+                            )
+                            _dc_wcs_new = get_wcs(_dc_hdul[0].header)
+                        if _dc_wcs_new is None:
+                            log_status(
+                                "Distortion correction: skipped | corrected "
+                                "image has no usable WCS (keeping original)"
+                            )
+                        else:
+                            # SWarp COPY_KEYWORDS keeps only a small key
+                            # list; merge the corrected WCS into the full
+                            # header so instrument metadata is preserved.
+                            update_header_from_wcs(header, _dc_wcs_new)
+                            safe_fits_write(fpath, _dc_data, header)
+                            invalidate_fits_cache(fpath)
+                            image = _dc_data
+                            input_yaml["NAXIS1"] = image.shape[1]
+                            input_yaml["NAXIS2"] = image.shape[0]
+                            if (
+                                "target_ra" in input_yaml
+                                and "target_dec" in input_yaml
+                            ):
+                                _dtx, _dty = _dc_wcs_new.all_world2pix(
+                                    float(input_yaml["target_ra"]),
+                                    float(input_yaml["target_dec"]),
+                                    0,
+                                )
+                                input_yaml["target_x_pix"] = float(_dtx)
+                                input_yaml["target_y_pix"] = float(_dty)
+                            log_status(
+                                "Distortion correction: applied | %s "
+                                "resampled onto undistorted grid",
+                                base_filename,
+                            )
+                    else:
+                        log_status(
+                            "Distortion correction: skipped | SCAMP/SWarp "
+                            "unavailable or failed (keeping original image)"
+                        )
+            except Exception as _dc_exc:
+                log_exception(
+                    _dc_exc,
+                    "Distortion correction failed - continuing with "
+                    "original image",
+                )
+
+        # =============================================================================
         #   Run SExtractor
         # =============================================================================
         log_status(border_msg("Source detection and FWHM"))
@@ -2723,12 +2827,15 @@ def run_photometry():
                                 and _am == "reproject"
                             ):
                                 logging.warning(
-                                    "alignment_method=reproject but wcs.apply_solved_to_fits "
-                                    "is False: reprojection uses the WCS **on disk**, which may "
-                                    "differ from a newer plate solution computed in memory. "
-                                    "Expect residual source misalignment / dipoles. Fix: set "
-                                    "apply_solved_to_fits: True, or use alignment_method "
-                                    "'astroalign' / 'swarp'."
+                                    "alignment_method=reproject but\n"
+                                    "    wcs.apply_solved_to_fits is False:\n"
+                                    "    reprojection uses the WCS **on disk**,\n"
+                                    "    which may differ from a newer plate\n"
+                                    "    solution computed in memory. Expect\n"
+                                    "    residual source misalignment / dipoles.\n"
+                                    "    Fix: set apply_solved_to_fits: True, or\n"
+                                    "    use alignment_method 'astroalign' /\n"
+                                    "    'swarp'."
                                 )
                         except Exception as e:
                             logging.warning("Template alignment check failed: %s", e)
@@ -4194,9 +4301,9 @@ def run_photometry():
         # artifacts in the PSF model itself), set psf_build_from_aligned=False.
         epsf_model = None
         # Provenance of the PSF model actually used: "epsf" (built from
-        # image sources), "analytic-moffat" (opt-in fallback only), or
-        # "none". Written to the Output CSV so an analytic substitution is
-        # never silent in the data products.
+        # image sources), "analytic-composite"/"analytic-moffat" (analytic
+        # substitution), or "none". Written to the Output CSV so an
+        # analytic substitution is never silent in the data products.
         psf_model_kind = "none"
         PSFSources = None
         build_from_aligned = bool(
@@ -4760,9 +4867,13 @@ def run_photometry():
                     # Validate WCS transformation result
                     if not (np.isfinite(science_center_world[0]) and np.isfinite(science_center_world[1])):
                         logger.error(
-                            f"WCS transformation returned invalid coordinates at pixel center {science_center_pix}. "
-                            f"RA={science_center_world[0]}, Dec={science_center_world[1]}. "
-                            f"This indicates an invalid WCS header. Check SCAMP alignment results."
+                            f"WCS transformation returned invalid\n"
+                            f"    coordinates at pixel center\n"
+                            f"    {science_center_pix}. RA=\n"
+                            f"    {science_center_world[0]}, Dec=\n"
+                            f"    {science_center_world[1]}. This indicates\n"
+                            f"    an invalid WCS header. Check SCAMP\n"
+                            f"    alignment results."
                         )
                         raise ValueError(
                             f"Invalid WCS transformation: pixel center {science_center_pix} maps to "
@@ -4776,9 +4887,11 @@ def run_photometry():
                         )
                         if not (np.isfinite(test_px) and np.isfinite(test_py)):
                             logger.error(
-                                f"WCS round-trip failed: world2pix returned invalid pixel coordinates. "
-                                f"Input RA/Dec={science_center_world}, output px,py={test_px},{test_py}. "
-                                f"This indicates a corrupted WCS header from SWarp."
+                                f"WCS round-trip failed: world2pix returned\n"
+                                f"    invalid pixel coordinates. Input RA/Dec=\n"
+                                f"    {science_center_world}, output px,py=\n"
+                                f"    {test_px},{test_py}. This indicates a\n"
+                                f"    corrupted WCS header from SWarp."
                             )
                             raise ValueError(
                                 f"Invalid WCS round-trip: world2pix returned NaN/Inf for valid sky coordinates"
@@ -4819,9 +4932,12 @@ def run_photometry():
                         )
                         if not (np.isfinite(test_tx) and np.isfinite(test_ty)):
                             logger.error(
-                                f"Template WCS cannot convert center coordinate to valid pixel coordinates. "
-                                f"Input RA/Dec={science_center_world}, output px,py={test_tx},{test_ty}. "
-                                f"Template WCS is likely corrupted from SWarp alignment."
+                                f"Template WCS cannot convert center\n"
+                                f"    coordinate to valid pixel coordinates.\n"
+                                f"    Input RA/Dec={science_center_world},\n"
+                                f"    output px,py={test_tx},{test_ty}.\n"
+                                f"    Template WCS is likely corrupted from\n"
+                                f"    SWarp alignment."
                             )
                             raise ValueError(
                                 f"Invalid template WCS: world2pix returned NaN/Inf for valid sky coordinates. "
@@ -4829,8 +4945,9 @@ def run_photometry():
                             )
                     except Exception as e:
                         logger.error(
-                            f"Template WCS validation failed: {e}. "
-                            f"The template WCS from SWarp alignment is likely corrupted."
+                            f"Template WCS validation failed: {e}.\n"
+                            f"    The template WCS from SWarp alignment is\n"
+                            f"    likely corrupted."
                         )
                         raise ValueError(
                             f"Template WCS validation failed: cannot convert sky coordinates to pixels. "
@@ -4986,6 +5103,24 @@ def run_photometry():
                 )
             else:
                 MatchingSources["y_coord"] = MatchingSources["y_pix"]
+
+            # Drop rows with non-finite coords before clustering: NaN
+            # distances make the fclusterdata dendrogram undefined, and
+            # the entries would survive as NaN medians in merged_sources.
+            _finite_coords = np.isfinite(
+                pd.to_numeric(MatchingSources["x_coord"], errors="coerce")
+            ) & np.isfinite(
+                pd.to_numeric(MatchingSources["y_coord"], errors="coerce")
+            )
+            if not _finite_coords.all():
+                logging.info(
+                    "Matching: dropping %d source(s) with non-finite "
+                    "coordinates before clustering.",
+                    int((~_finite_coords).sum()),
+                )
+                MatchingSources = MatchingSources[_finite_coords].reset_index(
+                    drop=True
+                )
 
             coords = MatchingSources[["x_coord", "y_coord"]].values
 
@@ -5258,9 +5393,12 @@ def run_photometry():
                     excluded_sources = excluded_sources[~_usable]
                     if _n_nan_center > 0:
                         logging.warning(
-                            f"Proximity filter excluded all {len(excluded_sources) + _n_nan_center} sources. "
-                            f"Relaxed filter: removed {_n_nan_center} sources with NaN center pixel "
-                            f"in science/template, kept {len(matched_df)} with valid centers."
+                            f"Proximity filter excluded all\n"
+                            f"    {len(excluded_sources) + _n_nan_center} sources.\n"
+                            f"    Relaxed filter: removed {_n_nan_center}\n"
+                            f"    sources with NaN center pixel in\n"
+                            f"    science/template, kept {len(matched_df)}\n"
+                            f"    with valid centers."
                         )
                     else:
                         logging.warning(
@@ -5459,9 +5597,9 @@ def run_photometry():
                     median_offset = float(np.nanmedian(distance))
                     std_offset = float(np.nanstd(distance))
                     logging.info(
-                        "Centroid alignment: mean=%.3f, median=%.3f, std=%.3f px, "
-                        "systematic offset=(%.3f, %.3f) px (%.3f total), "
-                        "residual mean=%.3f px (tolerance=%.1f px)",
+                        "Centroid alignment: mean=%.3f, median=%.3f, std=%.3f px\n"
+                        "                    systematic offset=(%.3f, %.3f) px (%.3f total)\n"
+                        "                    residual mean=%.3f px (tolerance=%.1f px)",
                         mean_offset, median_offset, std_offset,
                         med_dx, med_dy, systematic_offset,
                         float(np.nanmean(residual_distance)), POSITION_TOLERANCE
@@ -5727,10 +5865,13 @@ def run_photometry():
                         )
                         MatchingSources = _fallback_sources.head(_max_fallback)
                         logging.warning(
-                            f"Flux consistency returned only {len(MatchingSources)} sources "
-                            f"(from {len(image_sources)} input). Using top {len(MatchingSources)} "
-                            f"well-aligned sources by {_rank_col or 'index order'} as fallback "
-                            f"(capped at {_max_fallback}). SFFT will vet sources independently."
+                            f"Flux consistency returned only\n"
+                            f"    {len(MatchingSources)} sources (from\n"
+                            f"    {len(image_sources)} input). Using top\n"
+                            f"    {len(MatchingSources)} well-aligned sources\n"
+                            f"    by {_rank_col or 'index order'} as fallback\n"
+                            f"    (capped at {_max_fallback}). SFFT will vet\n"
+                            f"    sources independently."
                         )
                     # Add back sources with NaN flux (failed aperture photometry).
                     # SFFT only needs (x,y) positions as priors - it does its own
@@ -5888,17 +6029,26 @@ def run_photometry():
                         f"elongation={_has_elong}"
                     )
                     try:
-                        # --- HARD elongation filter (no safety bypass) ---
-                        # Elongated sources (A/B > threshold) are NEVER suitable
+                        # --- HARD elongation filter (ranked rescue floor) ---
+                        # Elongated sources (A/B > threshold) are unsuitable
                         # for SFFT kernel fitting: they are either blended,
                         # extended, or stretched by astrometric distortion.
-                        # Unlike other filters, this has NO 5-source minimum
-                        # safety bypass -- elongated sources are always rejected
-                        # even in sparse fields.  Using an elongated source is
-                        # worse than having fewer sources.
+                        # The cut is normally absolute - using an elongated
+                        # source is worse than having fewer.  However, when
+                        # applying it would starve the kernel fit entirely
+                        # (< sfft_elongation_rescue_min sources left), the
+                        # roundest candidates are kept instead: an
+                        # under-constrained kernel fails outright, while a
+                        # mildly elongated source may still be usable.
                         _ts_cfg_hard = input_yaml.get("template_subtraction", {}) or {}
                         _hard_max_elong = float(
                             _ts_cfg_hard.get("sfft_hard_max_elongation", 1.5)
+                        )
+                        _elong_rescue_min = int(
+                            _ts_cfg_hard.get(
+                                "sfft_elongation_rescue_min",
+                                _ts_cfg_hard.get("sfft_min_prior_sources", 3),
+                            )
                         )
                         if _hard_max_elong > 1.0:
                             _elong_col = None
@@ -5906,38 +6056,56 @@ def run_photometry():
                                 if _ec in ms.columns:
                                     _elong_col = _ec
                                     break
+                            _elong_series = None
+                            _elong_valid = None
                             if _elong_col is not None:
-                                _elong_vals = pd.to_numeric(
+                                _elong_series = pd.to_numeric(
                                     ms[_elong_col], errors="coerce"
                                 )
-                                _elong_finite = _elong_vals.notna()
-                                if _elong_finite.any():
-                                    _elong_bad = _elong_finite & (_elong_vals > _hard_max_elong)
-                                    _n_elong_bad = int(_elong_bad.sum())
-                                    if _n_elong_bad > 0:
-                                        logging.info(
-                                            f"HARD elongation filter: removed {_n_elong_bad} "
-                                            f"elongated sources (ELONGATION > {_hard_max_elong}, "
-                                            f"no safety bypass). "
-                                            f"{len(ms) - _n_elong_bad} sources remain."
-                                        )
-                                        ms = ms[~_elong_bad]
+                                _elong_valid = _elong_series.notna()
                             elif "a" in ms.columns and "b" in ms.columns:
                                 _a_vals = pd.to_numeric(ms["a"], errors="coerce")
                                 _b_vals = pd.to_numeric(ms["b"], errors="coerce")
                                 _ab_valid = _a_vals.notna() & _b_vals.notna() & (_b_vals > 0)
                                 if _ab_valid.any():
-                                    _ab_elong = _a_vals / _b_vals
-                                    _ab_bad = _ab_valid & (_ab_elong > _hard_max_elong)
-                                    _n_ab_bad = int(_ab_bad.sum())
-                                    if _n_ab_bad > 0:
+                                    _elong_series = _a_vals / _b_vals
+                                    _elong_series = _elong_series.where(_ab_valid)
+                                    _elong_valid = _ab_valid
+                            if _elong_series is not None and _elong_valid.any():
+                                _elong_bad = _elong_valid & (_elong_series > _hard_max_elong)
+                                _n_elong_bad = int(_elong_bad.sum())
+                                if _n_elong_bad > 0:
+                                    _n_remain = int((~_elong_bad).sum())
+                                    if _n_remain >= _elong_rescue_min:
                                         logging.info(
-                                            f"HARD elongation filter (A/B): removed {_n_ab_bad} "
-                                            f"elongated sources (A/B > {_hard_max_elong}, "
-                                            f"no safety bypass). "
-                                            f"{len(ms) - _n_ab_bad} sources remain."
+                                            f"HARD elongation filter: removed {_n_elong_bad} "
+                                            f"elongated sources (ELONGATION > {_hard_max_elong}). "
+                                            f"{_n_remain} sources remain."
                                         )
-                                        ms = ms[~_ab_bad]
+                                        ms = ms[~_elong_bad]
+                                    else:
+                                        # Ranked rescue: keep the roundest
+                                        # finite candidates so the kernel fit
+                                        # still has sfft_elongation_rescue_min
+                                        # sources to work with.
+                                        _keep_n = min(
+                                            _elong_rescue_min,
+                                            int(_elong_valid.sum()),
+                                        )
+                                        _keep = _ranked_keep_mask(
+                                            ms, _elong_series, _elong_valid,
+                                            _keep_n, keep_largest=False,
+                                        )
+                                        logging.info(
+                                            f"HARD elongation filter relaxed:\n"
+                                            f"    removing {_n_elong_bad} elongated\n"
+                                            f"    sources would leave {_n_remain}\n"
+                                            f"    (< {_elong_rescue_min}). Keeping\n"
+                                            f"    the {_keep_n} roundest\n"
+                                            f"    candidates; {int(_keep.sum())}\n"
+                                            f"    sources remain."
+                                        )
+                                        ms = ms[_keep]
 
                         # --- Point-source selection via CLASS_STAR ---
                         # SExtractor's CLASS_STAR ranges from 0 (extended) to 1
@@ -5981,14 +6149,44 @@ def run_photometry():
                                     cs_pass = cs >= cs_threshold
                                     n_cs_rejected = int((cs_finite & ~cs_pass).sum())
                                     n_cs_kept = int((cs_finite & cs_pass).sum())
+                                    _cs_rescue_min = int(
+                                        input_yaml["template_subtraction"].get(
+                                            "sfft_class_star_rescue_min", 10
+                                        )
+                                    )
                                     # Safety: if the filter would remove ALL or
-                                    # nearly all finite-CLASS_STAR sources, skip it.
+                                    # nearly all finite-CLASS_STAR sources, the
+                                    # classifier is uncalibrated for this field
+                                    # - skip it entirely.
                                     if n_cs_kept < 5 and n_cs_rejected > 0:
                                         logging.info(
                                             f"CLASS_STAR filter skipped: only {n_cs_kept} sources "
                                             f"would survive (need >= 5 for reliable kernel). "
                                             f"Keeping all {n_cs} sources."
                                         )
+                                    elif (
+                                        n_cs_rejected > 0
+                                        and n_cs_kept < _cs_rescue_min
+                                    ):
+                                        # Ranked rescue: the hard threshold
+                                        # would leave a starved kernel fit.
+                                        # Keep the most point-like candidates
+                                        # instead so SFFT has enough sources.
+                                        _keep_n = min(_cs_rescue_min, n_cs)
+                                        _keep = _ranked_keep_mask(
+                                            ms, cs, cs_finite,
+                                            _keep_n, keep_largest=True,
+                                        )
+                                        logging.info(
+                                            f"CLASS_STAR filter relaxed:\n"
+                                            f"    threshold {cs_threshold} would\n"
+                                            f"    keep only {n_cs_kept}/{n_cs} sources\n"
+                                            f"    (< {_cs_rescue_min} needed for\n"
+                                            f"    kernel). Keeping the {_keep_n} most\n"
+                                            f"    point-like candidates;\n"
+                                            f"    {int(_keep.sum())} remain."
+                                        )
+                                        ms = ms[_keep]
                                     elif n_cs_rejected > 0:
                                         logging.info(
                                             f"CLASS_STAR filter: removed {n_cs_rejected} extended sources "
@@ -6233,10 +6431,12 @@ def run_photometry():
                             # Skip if it would leave < 5 sources
                             if n_crowd_rejected > 0 and isolated.sum() >= 5:
                                 logging.info(
-                                    f"Kernel-stamp isolation: removed {n_crowd_rejected} sources "
-                                    f"(isolation_radius={_isolation_r:.1f}px = ker_hw={_ker_hw} + "
-                                    f"0.5*FWHM_broad={0.5*_fwhm_broad_k:.1f}, "
-                                    f"max_nei={max_nei}, checked against {len(_all_tree_xy)} sources)"
+                                    f"Kernel-stamp isolation: removed\n"
+                                    f"    {n_crowd_rejected} sources\n"
+                                    f"    (isolation_radius={_isolation_r:.1f}px =\n"
+                                    f"    ker_hw={_ker_hw} + 0.5*FWHM_broad=\n"
+                                    f"    {0.5*_fwhm_broad_k:.1f}, max_nei={max_nei},\n"
+                                    f"    checked against {len(_all_tree_xy)} sources)"
                                 )
                                 ms = ms[isolated]
                             elif n_crowd_rejected > 0:
@@ -6643,11 +6843,12 @@ def run_photometry():
 
                                 if _n_fft_rej > 0 and _n_fft_keep >= _fft_min_keep:
                                     logging.info(
-                                        f"SFFT FFT rejection: removed {_n_fft_rej} "
-                                        f"sources (power-spectrum outlier > "
-                                        f"{_fft_n_sigma} sigma in {_img_labels_str}, "
-                                        f"cutout_r={_fft_cutout_r} px, kept="
-                                        f"{_n_fft_keep}/{len(ms)})."
+                                        f"SFFT FFT rejection: removed\n"
+                                        f"    {_n_fft_rej} sources (power-spectrum\n"
+                                        f"    outlier > {_fft_n_sigma} sigma in\n"
+                                        f"    {_img_labels_str}, cutout_r=\n"
+                                        f"    {_fft_cutout_r} px, kept=\n"
+                                        f"    {_n_fft_keep}/{len(ms)})."
                                     )
                                     ms = ms[_fft_keep]
                                 elif _n_fft_rej > 0:
@@ -6700,18 +6901,21 @@ def run_photometry():
                             )
                         if n_after_refine < 5:
                             logging.warning(
-                                f"Only {n_after_refine} vetted point-source priors "
-                                f"remain after refinement (was {n_before_refine}). "
-                                f"SFFT kernel fit may be under-constrained; "
-                                f"consider providing more sources or relaxing "
-                                f"quality cuts if kernel residuals are poor."
+                                f"Only {n_after_refine} vetted point-source\n"
+                                f"    priors remain after refinement (was\n"
+                                f"    {n_before_refine}). SFFT kernel fit may\n"
+                                f"    be under-constrained; consider providing\n"
+                                f"    more sources or relaxing quality cuts if\n"
+                                f"    kernel residuals are poor."
                             )
 
                         MatchingSources = ms
                     except Exception as e:
                         logging.getLogger(__name__).warning(
-                            "Refining matching sources for SFFT/HOTPANTS failed (non-fatal): %s. "
-                            "Unrefined sources (%d) will be passed to SFFT -- kernel quality may be degraded.",
+                            "Refining matching sources for SFFT/HOTPANTS\n"
+                            "    failed (non-fatal): %s.\n"
+                            "    Unrefined sources (%d) will be passed to\n"
+                            "    SFFT -- kernel quality may be degraded.",
                             e,
                             len(MatchingSources) if MatchingSources is not None else 0,
                         )
@@ -7422,9 +7626,11 @@ def run_photometry():
                     background_rms = background_rms * _vscale_header
                 if abs(_vscale_header - 1.0) > 0.1:
                     logging.warning(
-                        "VSCALE=%.4f in difference image header: background_rms rescaled "
-                        "by the same factor to keep error model consistent with image pixels. "
-                        "A VSCALE far from 1.0 may indicate noise model assumptions need review.",
+                        "VSCALE=%.4f in difference image header:\n"
+                        "    background_rms rescaled by the same factor to\n"
+                        "    keep error model consistent with image pixels.\n"
+                        "    A VSCALE far from 1.0 may indicate noise model\n"
+                        "    assumptions need review.",
                         _vscale_header,
                     )
                 else:
@@ -8009,11 +8215,11 @@ def run_photometry():
                                         import matplotlib.pyplot as plt
 
                                         from astropy.visualization import ZScaleInterval
-                                        from plotting_utils import apply_autophot_mplstyle, get_plot_ext, safe_tight_layout
+                                        from plotting_utils import apply_autophot_mplstyle, get_plot_ext, overlay_mask_hatch, safe_tight_layout
                                         apply_autophot_mplstyle()
                                         _zs = ZScaleInterval()
                                         _cmap_v = plt.get_cmap("viridis").copy()
-                                        _cmap_v.set_bad(color="magenta")
+                                        _cmap_v.set_bad(color="none")
 
                                         _fig, _axes = plt.subplots(1, 3, figsize=(15, 5))
                                         _fig.suptitle(
@@ -8024,18 +8230,21 @@ def run_photometry():
                                         )
                                         _v0 = _zs.get_limits(_epsf_native)
                                         _im0 = _axes[0].imshow(_epsf_native, origin="lower", cmap=_cmap_v, vmin=_v0[0], vmax=_v0[1])
+                                        overlay_mask_hatch(_axes[0], ~np.isfinite(_epsf_native))
                                         _axes[0].set_title("Science ePSF - centre cell\n(native pixels)")
                                         _axes[0].set_xlabel("X (px)")
                                         _axes[0].set_ylabel("Y (px)")
                                         _fig.colorbar(_im0, ax=_axes[0], fraction=0.046, pad=0.04)
                                         _v1 = _zs.get_limits(_ker_2d)
                                         _im1 = _axes[1].imshow(_ker_2d, origin="lower", cmap=_cmap_v, vmin=_v1[0], vmax=_v1[1])
+                                        overlay_mask_hatch(_axes[1], ~np.isfinite(_ker_2d))
                                         _axes[1].set_title(f"SFFT Kernel at cell fiducial\n({_ker_2d.shape[0]}x{_ker_2d.shape[1]} px)")
                                         _axes[1].set_xlabel("X (px)")
                                         _axes[1].set_ylabel("Y (px)")
                                         _fig.colorbar(_im1, ax=_axes[1], fraction=0.046, pad=0.04)
                                         _v2 = _zs.get_limits(_epsf_conv_native)
                                         _im2 = _axes[2].imshow(_epsf_conv_native, origin="lower", cmap=_cmap_v, vmin=_v2[0], vmax=_v2[1])
+                                        overlay_mask_hatch(_axes[2], ~np.isfinite(_epsf_conv_native))
                                         _axes[2].set_title("Convolved ePSF - centre cell\n(diff-image PSF, native px)")
                                         _axes[2].set_xlabel("X (px)")
                                         _axes[2].set_ylabel("Y (px)")
@@ -8161,11 +8370,11 @@ def run_photometry():
                                     import matplotlib.pyplot as plt
 
                                     from astropy.visualization import ZScaleInterval
-                                    from plotting_utils import apply_autophot_mplstyle, get_plot_ext, safe_tight_layout
+                                    from plotting_utils import apply_autophot_mplstyle, get_plot_ext, overlay_mask_hatch, safe_tight_layout
                                     apply_autophot_mplstyle()
                                     _zs = ZScaleInterval()
                                     _cmap_v = plt.get_cmap("viridis").copy()
-                                    _cmap_v.set_bad(color="magenta")
+                                    _cmap_v.set_bad(color="none")
 
                                     _fig, _axes = plt.subplots(1, 3, figsize=(15, 5))
                                     _fig.suptitle(
@@ -8176,6 +8385,7 @@ def run_photometry():
                                     # Original ePSF (native resolution for fair comparison)
                                     _v0 = _zs.get_limits(_epsf_native)
                                     _im0 = _axes[0].imshow(_epsf_native, origin="lower", cmap=_cmap_v, vmin=_v0[0], vmax=_v0[1])
+                                    overlay_mask_hatch(_axes[0], ~np.isfinite(_epsf_native))
                                     _axes[0].set_title("Original Science ePSF\n(native pixels)")
                                     _axes[0].set_xlabel("X (px)")
                                     _axes[0].set_ylabel("Y (px)")
@@ -8183,6 +8393,7 @@ def run_photometry():
                                     # SFFT kernel
                                     _v1 = _zs.get_limits(_ker_2d)
                                     _im1 = _axes[1].imshow(_ker_2d, origin="lower", cmap=_cmap_v, vmin=_v1[0], vmax=_v1[1])
+                                    overlay_mask_hatch(_axes[1], ~np.isfinite(_ker_2d))
                                     _axes[1].set_title(f"SFFT Matching Kernel\n({_ker_2d.shape[0]}x{_ker_2d.shape[1]} px)")
                                     _axes[1].set_xlabel("X (px)")
                                     _axes[1].set_ylabel("Y (px)")
@@ -8190,6 +8401,7 @@ def run_photometry():
                                     # Convolved ePSF (native resolution)
                                     _v2 = _zs.get_limits(_epsf_conv_native)
                                     _im2 = _axes[2].imshow(_epsf_conv_native, origin="lower", cmap=_cmap_v, vmin=_v2[0], vmax=_v2[1])
+                                    overlay_mask_hatch(_axes[2], ~np.isfinite(_epsf_conv_native))
                                     _axes[2].set_title("Convolved ePSF\n(diff-image PSF, native px)")
                                     _axes[2].set_xlabel("X (px)")
                                     _axes[2].set_ylabel("Y (px)")
@@ -8389,11 +8601,11 @@ def run_photometry():
                             import matplotlib.pyplot as plt
 
                             from astropy.visualization import ZScaleInterval
-                            from plotting_utils import apply_autophot_mplstyle, get_plot_ext, safe_tight_layout
+                            from plotting_utils import apply_autophot_mplstyle, get_plot_ext, overlay_mask_hatch, safe_tight_layout
                             apply_autophot_mplstyle()
                             _zs_r = ZScaleInterval()
                             _cmap_vr = plt.get_cmap("viridis").copy()
-                            _cmap_vr.set_bad(color="magenta")
+                            _cmap_vr.set_bad(color="none")
 
                             _fig_r, _axes_r = plt.subplots(1, 3, figsize=(15, 5))
                             _fig_r.suptitle(
@@ -8403,18 +8615,21 @@ def run_photometry():
                             )
                             _v0r = _zs_r.get_limits(_epsf_native_re)
                             _im0r = _axes_r[0].imshow(_epsf_native_re, origin="lower", cmap=_cmap_vr, vmin=_v0r[0], vmax=_v0r[1])
+                            overlay_mask_hatch(_axes_r[0], ~np.isfinite(_epsf_native_re))
                             _axes_r[0].set_title("Original Science ePSF\n(native pixels)")
                             _axes_r[0].set_xlabel("X (px)")
                             _axes_r[0].set_ylabel("Y (px)")
                             _fig_r.colorbar(_im0r, ax=_axes_r[0], fraction=0.046, pad=0.04)
                             _v1r = _zs_r.get_limits(_ker_2d_re)
                             _im1r = _axes_r[1].imshow(_ker_2d_re, origin="lower", cmap=_cmap_vr, vmin=_v1r[0], vmax=_v1r[1])
+                            overlay_mask_hatch(_axes_r[1], ~np.isfinite(_ker_2d_re))
                             _axes_r[1].set_title(f"Kernel at target pos\n({_ker_2d_re.shape[0]}x{_ker_2d_re.shape[1]} px)")
                             _axes_r[1].set_xlabel("X (px)")
                             _axes_r[1].set_ylabel("Y (px)")
                             _fig_r.colorbar(_im1r, ax=_axes_r[1], fraction=0.046, pad=0.04)
                             _v2r = _zs_r.get_limits(_epsf_conv_native_re)
                             _im2r = _axes_r[2].imshow(_epsf_conv_native_re, origin="lower", cmap=_cmap_vr, vmin=_v2r[0], vmax=_v2r[1])
+                            overlay_mask_hatch(_axes_r[2], ~np.isfinite(_epsf_conv_native_re))
                             _axes_r[2].set_title("Re-convolved ePSF\n(target kernel, native px)")
                             _axes_r[2].set_xlabel("X (px)")
                             _axes_r[2].set_ylabel("Y (px)")
@@ -10568,8 +10783,9 @@ def run_photometry():
                 if not do_aperture_ONLY and "fwhm_psf" in TargetPosition.columns
                 else np.nan
             ),
-            # Which PSF model was used: epsf / analytic-moffat / none.
-            # Empirical is the default; analytic only via explicit opt-in.
+            # Which PSF model was used: epsf / analytic-composite /
+            # analytic-moffat / none. Empirical is the default; analytic
+            # only via explicit opt-in or a total empirical failure.
             "psf_model": psf_model_kind,
             "separation": separation if "separation" in locals() else np.nan,
             "beta": target_beta,

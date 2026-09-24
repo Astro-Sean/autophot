@@ -2227,11 +2227,13 @@ class Zeropoint:
                         _slope_sig = abs(_dev) / _slope_err if np.isfinite(_slope_err) and _slope_err > 0 else np.inf
                         if _slope_sig > 3:
                             logger.warning(
-                                f"[{flux_type}] Free-slope fit: slope={_slope_free:.4f}+/-{_slope_err:.4f} "
-                                f"deviates from 1 by {_dev:+.4f} ({_slope_sig:.1f} sigma). "
-                                f"This indicates magnitude-dependent flux bias -- "
-                                f"check PSF model match, detector non-linearity, "
-                                f"or background annulus contamination."
+                                f"[{flux_type}] Free-slope fit: slope="
+                                f"{_slope_free:.4f}+/-{_slope_err:.4f}\n"
+                                f"    deviates from 1 by {_dev:+.4f} "
+                                f"({_slope_sig:.1f} sigma). This indicates\n"
+                                f"    magnitude-dependent flux bias -- check\n"
+                                f"    PSF model match, detector non-linearity,\n"
+                                f"    or background annulus contamination."
                             )
                         else:
                             logger.debug(

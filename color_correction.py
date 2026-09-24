@@ -421,6 +421,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    from functions import cap_console_lines
+    cap_console_lines(logging.getLogger().handlers, prefix_fmt="{levelname} ")
 
     if os.path.isdir(args.path):
         reduced_dir = args.path

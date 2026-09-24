@@ -188,7 +188,7 @@ try:
 except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
-from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write, STATUS
+from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write, cap_console_lines, STATUS
 try:
     from functions import download_zogy
 except ImportError:
@@ -245,6 +245,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(levelname)s - %(message)s",
 )
+cap_console_lines(logging.getLogger().handlers)
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -1090,7 +1091,10 @@ def compute_alignment_rms(
         rms = float(np.sqrt(np.mean(d_clipped**2)))
         logger.log(
             STATUS,
-            "Alignment RMS:\tmed=%.3f px (dx=%.3f, dy=%.3f) rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped) max=%.2f px",
+            "Alignment RMS:\tmed=%.3f px\n"
+            "                  dx=%.3f, dy=%.3f\n"
+            "                  rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped)\n"
+            "                  max=%.2f px",
             median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
             len(d_mut) - len(d_clipped), max_sep,
         )
@@ -1215,8 +1219,8 @@ def _compute_per_quadrant_rms(
 
     if np.isfinite(_max_rms) and _max_rms > 0:
         logger.info(
-            "Per-quadrant alignment RMS: Q1=%.3f Q2=%.3f Q3=%.3f Q4=%.3f px "
-            "(max=%s=%.3f px)",
+            "Per-quadrant alignment RMS: Q1=%.3f Q2=%.3f\n"
+            "                            Q3=%.3f Q4=%.3f px (max=%s=%.3f px)",
             _result["q1_rms"], _result["q2_rms"],
             _result["q3_rms"], _result["q4_rms"],
             _max_quad, _max_rms,
@@ -1271,6 +1275,26 @@ def _wcs_footprints_overlap(
         )
     except Exception:
         return False
+
+
+def _pad_to_shape(image, target_shape, fill=np.nan, mask=None):
+    """Pad ``image`` up to ``target_shape`` on the high side of each axis.
+
+    Axes already >= the target extent are left alone (the array is never
+    cropped).  ``mask`` (boolean, same shape as ``image``) is padded with
+    True so the added border counts as invalid.
+
+    Returns ``(padded_image, padded_mask_or_None)``.
+    """
+    pad = tuple(
+        (0, max(int(t) - int(s), 0)) for s, t in zip(image.shape, target_shape)
+    )
+    if not any(p[1] for p in pad):
+        return image, mask
+    image = np.pad(image, pad, mode="constant", constant_values=fill)
+    if mask is not None:
+        mask = np.pad(mask, pad, mode="constant", constant_values=True)
+    return image, mask
 
 
 def _reproject_template(
@@ -1439,9 +1463,11 @@ def _reproject_template(
     n_total = fp_mask.size
     if n_footprint == 0:
         logger.error(
-            f"Reproject has zero footprint coverage ({n_footprint}/{n_total} pixels). "
-            f"Template and science WCS do not overlap. This is likely due to SCAMP failure "
-            f"causing large WCS shift. Returning failure to trigger fallback to AstroAlign."
+            f"Reproject has zero footprint coverage\n"
+            f"    ({n_footprint}/{n_total} pixels). Template and science\n"
+            f"    WCS do not overlap. This is likely due to SCAMP failure\n"
+            f"    causing large WCS shift. Returning failure to trigger\n"
+            f"    fallback to AstroAlign."
         )
         return _FAIL
 
@@ -3839,11 +3865,12 @@ class Templates:
                                 templateHeader, templateImage.shape,
                             ):
                                 logger.warning(
-                                    "spalipy: only %d RA/DEC matched sources but "
-                                    "WCS footprints overlap - WCS offset may exceed "
-                                    "the match radius. Falling back to spalipy "
-                                    "internal quad matching on all detections "
-                                    "(sci=%d, tpl=%d).",
+                                    "spalipy: only %d RA/DEC matched sources\n"
+                                    "    but WCS footprints overlap - WCS\n"
+                                    "    offset may exceed the match radius.\n"
+                                    "    Falling back to spalipy internal quad\n"
+                                    "    matching on all detections\n"
+                                    "    (sci=%d, tpl=%d).",
                                     len(_sci_matched),
                                     _n_sci_before, _n_tpl_before,
                                 )
@@ -4171,6 +4198,30 @@ class Templates:
                     sp = None
                     _try_sub_tile = _sub_tile
                     _aligned_ok = False
+                    # spalipy tiles the template-role (science) detections for
+                    # quad construction using the *source* image's shape.  When
+                    # the source image is smaller than the science frame,
+                    # science detections beyond the source's pixel bounds are
+                    # silently dropped from the template quadlist - for a
+                    # centred cutout this removes nearly all anchors and the
+                    # quad-hash match fails.  Pad the source data/mask up to
+                    # the science frame so the tiling sees the correct extent.
+                    # The pad uses the median fill (not NaN - the NaN would
+                    # propagate through the order>1 spline prefilter and blank
+                    # the whole resample) and is masked, so warped pad pixels
+                    # are re-masked to NaN downstream.
+                    _sp_src_shape = _tpl_fill.shape
+                    _tpl_fill, _tpl_nan = _pad_to_shape(
+                        _tpl_fill, scienceImage.shape,
+                        fill=float(np.median(_tpl_fill)), mask=_tpl_nan,
+                    )
+                    if _tpl_fill.shape != _sp_src_shape:
+                        logger.info(
+                            "spalipy: source image %s smaller than the science "
+                            "frame %s - padded so template-detection tiling "
+                            "uses the correct extent.",
+                            _sp_src_shape, _tpl_fill.shape,
+                        )
                     # spalipy logs per-quad progress through the root logger;
                     # keep only warnings on normal runs.
                     from functions import quiet_root_logger
@@ -4613,10 +4664,11 @@ class Templates:
                         # SCAMP+SWarp (which has its own residual check) try.
                         if _tquad is not None and _tquad.get("coverage_ok") is False:
                             logger.warning(
-                                "tweakwcs alignment rejected: %d matched sources "
-                                "cover only %.0f%%x%.0f%% of the field - the "
-                                "WCS correction is underconstrained outside the "
-                                "cluster. Falling back to next alignment method.",
+                                "tweakwcs alignment rejected: %d matched\n"
+                                "    sources cover only %.0f%%x%.0f%% of the\n"
+                                "    field - the WCS correction is\n"
+                                "    underconstrained outside the cluster.\n"
+                                "    Falling back to next alignment method.",
                                 _tquad.get("n_matched", 0),
                                 100.0 * _tquad.get("span_x", 0.0),
                                 100.0 * _tquad.get("span_y", 0.0),
@@ -5279,9 +5331,11 @@ class Templates:
         
         if not (np.isfinite(cx) and np.isfinite(cy)):
             logger.error(
-                f"Invalid crop center coordinates: cx={cx}, cy={cy}. "
-                f"This indicates find_non_uniform_center returned invalid values. "
-                f"Science image shape: {scienceImage.shape}, Template image shape: {templateImage.shape}"
+                f"Invalid crop center coordinates: cx={cx}, cy={cy}.\n"
+                f"    This indicates find_non_uniform_center returned\n"
+                f"    invalid values. Science image shape:\n"
+                f"    {scienceImage.shape}, template image shape:\n"
+                f"    {templateImage.shape}"
             )
             raise ValueError(
                 f"Invalid crop center: cx={cx}, cy={cy} (must be finite)"
@@ -5301,8 +5355,10 @@ class Templates:
                 test_ra, test_dec = imageWCS.all_pix2world([cx], [cy], 0)
                 if not (np.isfinite(test_ra[0]) and np.isfinite(test_dec[0])):
                     logger.error(
-                        f"Invalid WCS transformation at crop center (cx={cx}, cy={cy}): RA={test_ra[0]}, Dec={test_dec[0]}. "
-                        f"This will cause the crop to fail. Falling back to no crop."
+                        f"Invalid WCS transformation at crop center\n"
+                        f"    (cx={cx}, cy={cy}): RA={test_ra[0]},\n"
+                        f"    Dec={test_dec[0]}. This will cause the crop\n"
+                        f"    to fail. Falling back to no crop."
                     )
                     return scienceFpath, templateFpath
             except Exception as e:
@@ -6332,21 +6388,24 @@ class Templates:
 
                 if _corr_pearson < _min_corr:
                     logger.warning(
-                        "Flux linearity check FAILED: Pearson r=%.3f < %.3f. "
-                        "Magnitude relationship is not linear -- sources may "
-                        "include variables, mismatches, or flux-dependent bias. "
-                        "Proceeding with inliers but SFFT may reject many sources.",
+                        "Flux linearity check FAILED: Pearson r=%.3f < %.3f.\n"
+                        "    Magnitude relationship is not linear -- sources\n"
+                        "    may include variables, mismatches, or\n"
+                        "    flux-dependent bias. Proceeding with inliers but\n"
+                        "    SFFT may reject many sources.",
                         _corr_pearson, _min_corr,
                     )
 
                 if abs(_corr_resid) > _max_resid_corr:
                     logger.warning(
-                        "Flux linearity check FAILED: residual-mag Spearman rho=%.3f "
-                        "> %.3f. Residuals correlate with magnitude -- the flux "
-                        "relationship is non-linear (curved). This indicates "
-                        "systematic flux-dependent bias (e.g., different aperture "
-                        "sizes for different FWHM) or a large fraction of "
-                        "variable sources. SFFT kernel fit may be poor.",
+                        "Flux linearity check FAILED:\n"
+                        "    residual-mag Spearman rho=%.3f > %.3f.\n"
+                        "    Residuals correlate with magnitude -- the flux\n"
+                        "    relationship is non-linear (curved). This\n"
+                        "    indicates systematic flux-dependent bias (e.g.,\n"
+                        "    different aperture sizes for different FWHM) or a\n"
+                        "    large fraction of variable sources. SFFT kernel\n"
+                        "    fit may be poor.",
                         abs(_corr_resid), _max_resid_corr,
                     )
                     # Flag non-linear sources: reject inliers whose residuals
@@ -7955,12 +8014,13 @@ class Templates:
                 ):
                     kernel_order = 1
                     logger.warning(
-                        "Auto-boosting kernel_order from 0 to 1: large PSF "
-                        "rel_diff=%.2f (FWHM_sci=%.1f, FWHM_ref=%.1f) with %d "
-                        "matched sources requires a spatially-varying kernel. "
-                        "A constant kernel (order 0) causes flux scaling "
-                        "mismatches and dipole residuals. Set kernel_order: "
-                        "\"auto\" in YAML to suppress this boost.",
+                        "Auto-boosting kernel_order from 0 to 1:\n"
+                        "    large PSF rel_diff=%.2f (FWHM_sci=%.1f,\n"
+                        "    FWHM_ref=%.1f) with %d matched sources requires\n"
+                        "    a spatially-varying kernel. A constant kernel\n"
+                        "    (order 0) causes flux scaling mismatches and\n"
+                        "    dipole residuals. Set kernel_order: \"auto\" in\n"
+                        "    YAML to suppress this boost.",
                         _rel_diff_check, science_fwhm, template_fwhm, n_eff,
                     )
             else:
@@ -8450,10 +8510,12 @@ class Templates:
                 # Log warnings for degraded quality
                 if diff_quality_metrics.quality_class == "fail":
                     logger.error(
-                        "Subtraction quality FAILED (score=%.3f): "
-                        "dipoles=%d/%d checked (%.1f%%), bright_star_resid=%.1f sigma, "
-                        "bg_spatial_std=%.3f, edge_ratio=%.2f. "
-                        "Downstream photometry should be treated with caution.",
+                        "Subtraction quality FAILED (score=%.3f):\n"
+                        "    dipoles=%d/%d checked (%.1f%%),\n"
+                        "    bright_star_resid=%.1f sigma,\n"
+                        "    bg_spatial_std=%.3f, edge_ratio=%.2f.\n"
+                        "    Downstream photometry should be treated with\n"
+                        "    caution.",
                         diff_quality_metrics.quality_score,
                         diff_quality_metrics.dipole_count,
                         diff_quality_metrics.dipole_checked,
@@ -9206,12 +9268,13 @@ class Templates:
                 logger.warning("Unknown forceconv=%r; defaulting to REF.", _fc_cfg)
             if _fc_deconvolves:
                 logger.warning(
-                    "SFFT ForceConv=%s requires deconvolution: the convolved "
-                    "image (FWHM=%.2f) is broader than the target (%.2f). "
-                    "The kernel must remove width, producing negative "
-                    "sidelobes that are unstable with few matched sources. "
-                    "Consider forceconv=SCI or AUTO (note: SCI direction "
-                    "gives the difference image the *reference* PSF).",
+                    "SFFT ForceConv=%s requires deconvolution: the convolved\n"
+                    "    image (FWHM=%.2f) is broader than the target (%.2f).\n"
+                    "    The kernel must remove width, producing negative\n"
+                    "    sidelobes that are unstable with few matched\n"
+                    "    sources. Consider forceconv=SCI or AUTO (note: SCI\n"
+                    "    direction gives the difference image the\n"
+                    "    *reference* PSF).",
                     forceconv,
                     template_fwhm if forceconv == "REF" else science_fwhm,
                     science_fwhm if forceconv == "REF" else template_fwhm,
@@ -9384,10 +9447,10 @@ class Templates:
             if _cpr_auto_eligible and _n_matching_sfft < _cpr_sparse_thresh:
                 const_phot_ratio = True
                 logger.info(
-                    "SFFT: auto-enabling ConstPhotRatio=True for very sparse "
-                    "field (%d matching sources < %d threshold): constant "
-                    "flux-scaling model instead of a spatial polynomial the "
-                    "source count cannot constrain.",
+                    "SFFT: auto-enabling ConstPhotRatio=True for very\n"
+                    "    sparse field (%d matching sources < %d threshold):\n"
+                    "    constant flux-scaling model instead of a spatial\n"
+                    "    polynomial the source count cannot constrain.",
                     _n_matching_sfft,
                     _cpr_sparse_thresh,
                 )
@@ -9412,10 +9475,11 @@ class Templates:
                 # auto-size (which uses FWHM_broad as primary term).
                 _sfft_pass_kernel_hw = kernel_half_width
                 logger.info(
-                    "SFFT: sparse field (%d vetted sources < %d threshold) -- "
-                    "passing templates.py kernel_hw=%d px instead of auto-sizing "
-                    "(run_sfft.py would use ~%d px = ceil(%.1f*FWHM_broad), "
-                    "under-constrained for %d sources).",
+                    "SFFT: sparse field (%d vetted sources < %d threshold)\n"
+                    "    -- passing templates.py kernel_hw=%d px instead of\n"
+                    "    auto-sizing (run_sfft.py would use ~%d px =\n"
+                    "    ceil(%.1f*FWHM_broad), under-constrained for %d\n"
+                    "    sources).",
                     _n_matching_sfft,
                     _sparse_threshold,
                     kernel_half_width,
@@ -9694,7 +9758,42 @@ class Templates:
                     post_anom_xy = []
 
                 n_post = len(post_anom_xy)
-                n_ref = max(1, len(current_matching_sources))
+
+                # Load the sources SFFT actually used for the kernel fit
+                # before computing the anomaly fraction.  Anomalies are a
+                # subset of SFFT's own SubSource list, so that list - not
+                # the pipeline priors - is the correct denominator.
+                sfft_vetted_sources = []
+                if matching_sources_csv.exists():
+                    try:
+                        df_match = pd.read_csv(matching_sources_csv)
+                        _mx = (
+                            "X_IMAGE_REF_SCI_MEAN"
+                            if "X_IMAGE_REF_SCI_MEAN" in df_match.columns
+                            else None
+                        )
+                        _my = (
+                            "Y_IMAGE_REF_SCI_MEAN"
+                            if "Y_IMAGE_REF_SCI_MEAN" in df_match.columns
+                            else None
+                        )
+                        if _mx and _my:
+                            _mxy = df_match[[_mx, _my]].apply(
+                                pd.to_numeric, errors="coerce"
+                            )
+                            _mxy = _mxy.replace(
+                                [np.inf, -np.inf], np.nan
+                            ).dropna()
+                            sfft_vetted_sources = [
+                                (float(v[0]) - 1.0, float(v[1]) - 1.0)
+                                for v in _mxy.to_numpy(float)
+                            ]
+                    except Exception:
+                        sfft_vetted_sources = []
+
+                n_ref = max(
+                    1, len(sfft_vetted_sources) or len(current_matching_sources)
+                )
                 frac_post = float(n_post) / float(n_ref)
                 # High anomaly fraction (frac_post > max_frac) does NOT mean
                 # we should skip the retry.  It means the kernel was bad
@@ -9706,40 +9805,14 @@ class Templates:
                 _high_anomaly = frac_post > post_anom_max_frac
                 if _high_anomaly:
                     logger.warning(
-                        "SFFT post-anomaly fraction=%.2f exceeds threshold=%.2f "
-                        "(%d/%d sources anomalous). High anomaly fraction "
-                        "indicates a bad kernel fit - proceeding with retry "
-                        "using SFFT-vetted sources.",
+                        "SFFT post-anomaly fraction=%.2f exceeds\n"
+                        "    threshold=%.2f (%d/%d sources anomalous).\n"
+                        "    High anomaly fraction indicates a bad kernel\n"
+                        "    fit - proceeding with retry using SFFT-vetted\n"
+                        "    sources.",
                         frac_post, post_anom_max_frac, n_post, n_ref,
                     )
                 if n_post >= post_anom_min_count:
-                    sfft_vetted_sources = []
-                    if matching_sources_csv.exists():
-                        try:
-                            df_match = pd.read_csv(matching_sources_csv)
-                            _mx = (
-                                "X_IMAGE_REF_SCI_MEAN"
-                                if "X_IMAGE_REF_SCI_MEAN" in df_match.columns
-                                else None
-                            )
-                            _my = (
-                                "Y_IMAGE_REF_SCI_MEAN"
-                                if "Y_IMAGE_REF_SCI_MEAN" in df_match.columns
-                                else None
-                            )
-                            if _mx and _my:
-                                _mxy = df_match[[_mx, _my]].apply(
-                                    pd.to_numeric, errors="coerce"
-                                )
-                                _mxy = _mxy.replace(
-                                    [np.inf, -np.inf], np.nan
-                                ).dropna()
-                                sfft_vetted_sources = [
-                                    (float(v[0]) - 1.0, float(v[1]) - 1.0)
-                                    for v in _mxy.to_numpy(float)
-                                ]
-                        except Exception:
-                            sfft_vetted_sources = []
 
                     # --- Improve matching sources using SFFT-vetted results ---
                     # After the first SFFT pass, SFFT writes the sources it
@@ -10028,16 +10101,19 @@ class Templates:
                                 "PSFs or too few sources for kernel fitting."
                             )
                         logger.warning(
-                            "SFFT flux scaling discrepancy: convolution=%.4f vs photometric=%.4f "
-                            "(%.1f%% mismatch). NOTE: FSCAL_PHOT comes from SExtractor photometry "
-                            "on the *unconvolved* images (BACKPHOTO_TYPE=LOCAL) and is biased low "
-                            "when the reference PSF is broader (fixed apertures lose more wing "
-                            "flux) or matched sources sit on structured background -- FSCAL_CONV "
-                            "is measured through the actual convolved product and is usually the "
-                            "more trustworthy scale. Treat moderate discrepancies (<15%%) as a "
-                            "kernel-quality flag, not proof of wrong normalisation. Genuine kernel "
-                            "error produces dipole residuals at source positions; poor astrometric "
-                            "alignment or a deconvolving ForceConv direction are other causes.%s",
+                            "SFFT flux scaling discrepancy:\n"
+                            "    convolution=%.4f vs photometric=%.4f (%.1f%% mismatch)\n"
+                            "    NOTE: FSCAL_PHOT comes from SExtractor photometry on the\n"
+                            "    *unconvolved* images (BACKPHOTO_TYPE=LOCAL) and is biased\n"
+                            "    low when the reference PSF is broader (fixed apertures\n"
+                            "    lose more wing flux) or matched sources sit on structured\n"
+                            "    background -- FSCAL_CONV is measured through the actual\n"
+                            "    convolved product and is usually the more trustworthy\n"
+                            "    scale. Treat moderate discrepancies (<15%%) as a\n"
+                            "    kernel-quality flag, not proof of wrong normalisation.\n"
+                            "    Genuine kernel error produces dipole residuals at source\n"
+                            "    positions; poor astrometric alignment or a deconvolving\n"
+                            "    ForceConv direction are other causes.%s",
                             _conv_scale, _phot_scale, _discrep_pct, _fc_msg,
                         )
                     else:
@@ -10225,10 +10301,11 @@ class Templates:
             )
             if _do_const_phot_retry:
                 logger.warning(
-                    "SFFT flux scaling discrepancy=%.1f%% > %.1f%% with only %d "
-                    "vetted sources. Retrying with ConstPhotRatio=True "
-                    "(constant flux-scaling model -- reduces spatial-polynomial "
-                    "overfit; does not repin the kernel sum).",
+                    "SFFT flux scaling discrepancy=%.1f%% > %.1f%% with\n"
+                    "    only %d vetted sources. Retrying with\n"
+                    "    ConstPhotRatio=True (constant flux-scaling model\n"
+                    "    -- reduces spatial-polynomial overfit; does not\n"
+                    "    repin the kernel sum).",
                     _discrep_pct, _const_phot_retry_thresh, _n_matched_local,
                 )
                 _saved_cpr = const_phot_ratio

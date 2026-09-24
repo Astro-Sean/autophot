@@ -463,10 +463,11 @@ class Catalog:
 
                 if not cfg_list:
                     logger.warning(
-                        "gaia_xp_photometric_systems is empty; returning base Gaia DR3 "
-                        "photometry only. The catalog will have no SdssStd/JkcStd "
-                        "columns, so no standard-band magnitudes can be mapped "
-                        "downstream."
+                        "gaia_xp_photometric_systems is empty; returning\n"
+                        "    base Gaia DR3 photometry only. The catalog\n"
+                        "    will have no SdssStd/JkcStd columns, so no\n"
+                        "    standard-band magnitudes can be mapped\n"
+                        "    downstream."
                     )
                     return results
 
@@ -977,7 +978,10 @@ class Catalog:
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
                     logger.warning(
-                        "REFCAT requires MAST CasJobs credentials. Set `default_input.catalog.MASTcasjobs_wsid` and `default_input.catalog.MASTcasjobs_pwd` (or provide them via environment/local overrides)."
+                        "REFCAT requires MAST CasJobs credentials. Set\n"
+                        "    `default_input.catalog.MASTcasjobs_wsid` and\n"
+                        "    `default_input.catalog.MASTcasjobs_pwd` (or\n"
+                        "    provide them via environment/local overrides)."
                     )
                     # Some auth backends reject non-str; cast and strip here.
                     userid = self.input_yaml["catalog"].get("MASTcasjobs_wsid")
@@ -2490,9 +2494,11 @@ class Catalog:
                 n_inlier_mask = len(inlier_mask)
                 if not (n_clean == n_flux == n_mag == n_inst == n_inlier_mask):
                     logger.error(
-                        f"Array length mismatch: clean_catalog={n_clean}, flux={n_flux}, "
-                        f"catalog_mag_linear={n_mag}, inst_mag_linear={n_inst}, inlier_mask={n_inlier_mask}. "
-                        f"Skipping robust selection."
+                        f"Array length mismatch: clean_catalog={n_clean},\n"
+                        f"    flux={n_flux}, catalog_mag_linear={n_mag},\n"
+                        f"    inst_mag_linear={n_inst},\n"
+                        f"    inlier_mask={n_inlier_mask}.\n"
+                        f"    Skipping robust selection."
                     )
                     clean_catalog = clean_catalog[inlier_mask] if n_clean == n_inlier_mask else clean_catalog
                     return clean_catalog, saturation_range
@@ -2603,8 +2609,10 @@ class Catalog:
                             n_inliers = np.sum(inlier_mask)
                             if len(inlier_residual_mask) != n_inliers:
                                 logger.warning(
-                                    f"Array length mismatch: inlier_residual_mask={len(inlier_residual_mask)}, "
-                                    f"inlier_mask.sum()={n_inliers}. Skipping residual masking."
+                                    f"Array length mismatch:\n"
+                                    f"    inlier_residual_mask={len(inlier_residual_mask)},\n"
+                                    f"    inlier_mask.sum()={n_inliers}.\n"
+                                    f"    Skipping residual masking."
                                 )
                                 linear_residual_mask = inlier_mask.copy()
                             else:
@@ -2620,10 +2628,15 @@ class Catalog:
                             n_selected = np.sum(final_linear_mask)
                             
                             logger.info(
-                                f"Robust linear selection: flux range {min_linear_flux:.1f} - {max_linear_flux:.1f}, "
-                                f"residual thresh {residual_threshold:.3f} mag, "
-                                f"cut {n_bright_cut} bright + {n_faint_cut} faint + {n_outlier_cut} outlier, "
-                                f"would keep {n_selected} sources (keeping all {len(inlier_catalog)} inliers for ZP fit)"
+                                f"Robust linear selection:\n"
+                                f"    flux range {min_linear_flux:.1f} - "
+                                f"{max_linear_flux:.1f}, residual thresh "
+                                f"{residual_threshold:.3f} mag\n"
+                                f"    cut {n_bright_cut} bright + {n_faint_cut} "
+                                f"faint + {n_outlier_cut} outlier, would keep "
+                                f"{n_selected} sources\n"
+                                f"    (keeping all {len(inlier_catalog)} inliers "
+                                f"for ZP fit)"
                             )
                             
                             if n_selected > 0:
@@ -3092,7 +3105,7 @@ class Catalog:
                 vmin, vmax = interval.get_limits(np.asarray(stars[i]))
                 norm = ImageNormalize(vmin=vmin, vmax=vmax)
                 cmap = plt.get_cmap("viridis").copy()
-                cmap.set_bad(color="magenta")
+                cmap.set_bad(color="none")
                 ax.imshow(
                     stars[i],
                     origin="lower",
@@ -3100,6 +3113,8 @@ class Catalog:
                     norm=norm,
                     interpolation="none",
                 )
+                from plotting_utils import overlay_mask_hatch
+                overlay_mask_hatch(ax, ~np.isfinite(np.asarray(stars[i])))
                 ax.text(
                     0.98,
                     0.98,
