@@ -366,7 +366,7 @@ class AlignmentVerifier:
         diff_data = sci_data - ref_data
 
         _cmap = plt.get_cmap('gray').copy()
-        _cmap.set_bad(color='magenta')
+        _cmap.set_bad(color='none')
 
         # Equal-aspect image panels shrink inside cells that do not match
         # the data aspect, so size the figure from the image shape. The
@@ -388,11 +388,14 @@ class AlignmentVerifier:
         ax_sci, ax_ref = axes[0]
         ax_diff, ax_off = axes[1]
 
+        from plotting_utils import overlay_mask_hatch
         im = ax_sci.imshow(sci_data, cmap=_cmap, origin='lower')
+        overlay_mask_hatch(ax_sci, ~np.isfinite(np.asarray(sci_data)))
         ax_sci.set_title('Science Image')
         fig.colorbar(im, ax=ax_sci)
 
         im = ax_ref.imshow(ref_data, cmap=_cmap, origin='lower')
+        overlay_mask_hatch(ax_ref, ~np.isfinite(np.asarray(ref_data)))
         ax_ref.set_title('Reference Image')
         fig.colorbar(im, ax=ax_ref)
         # Panels in a row share the same y extent; repeat labels add clutter.
@@ -403,6 +406,7 @@ class AlignmentVerifier:
             vmin=-np.percentile(np.abs(diff_data), 99),
             vmax=np.percentile(np.abs(diff_data), 99),
         )
+        overlay_mask_hatch(ax_diff, ~np.isfinite(np.asarray(diff_data)))
         ax_diff.set_title('Difference (Science - Reference)')
         fig.colorbar(im, ax=ax_diff)
 

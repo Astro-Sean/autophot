@@ -19,6 +19,7 @@ from functions import (
     STATUS,
     log_step,
     AutophotYaml,
+    cap_console_lines,
     concatenate_csv_files,
     print_progress_bar,
     sanitize_photometric_filters,
@@ -194,6 +195,7 @@ class FitsInfo:
         logging.basicConfig(
             level=logging.INFO, format="%(levelname)s - %(message)s"
         )
+        cap_console_lines(logging.getLogger().handlers)
         self.logger = logging.getLogger(__name__)
 
         filters_path = Path(__file__).parent / "databases" / "filters.yml"

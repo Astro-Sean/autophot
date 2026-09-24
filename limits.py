@@ -221,7 +221,7 @@ from aperture import (
     resolve_exposure_time_seconds,
     resolve_gain_e_per_adu,
 )
-from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, safe_tight_layout, PLOT_COLORS
+from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
 
 
 def _effective_exposure_seconds(input_yaml: dict) -> float:
@@ -1860,11 +1860,11 @@ class Limits:
             if not (np.isfinite(counts_ref) and counts_ref > 0
                     and np.isfinite(F_ref) and F_ref > 0):
                 logger.error(
-                    f"PSF calibration failed: counts_ref_adu={counts_ref_adu:.4e}, "
-                    f"counts_ref(e-)={counts_ref:.4e}, F_ref={F_ref:.4e} "
-                    f"(both must be finite and positive). "
-                    f"PSF sum={np.sum(psf_unit):.4e}, shape={psf_unit.shape}, oversampling={oversampling}, "
-                    f"gain={_gain_canon:.4g} e/ADU"
+                    f"PSF calibration failed: counts_ref_adu=\n"
+                    f"    {counts_ref_adu:.4e}, counts_ref(e-)={counts_ref:.4e},\n"
+                    f"    F_ref={F_ref:.4e} (both must be finite and positive).\n"
+                    f"    PSF sum={np.sum(psf_unit):.4e}, shape={psf_unit.shape},\n"
+                    f"    oversampling={oversampling}, gain={_gain_canon:.4g} e/ADU"
                 )
                 if _return_details:
                     return {"inject_lmag": np.nan, "inject_lmag_err": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": locals().get('completeness_target', 0.5), "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
@@ -3947,7 +3947,7 @@ class Limits:
                     else:
                         vmin, vmax = np.nanmin(injected_disp), np.nanmax(injected_disp)
                     cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                    cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+                    cmap.set_bad(color="none")
                     im = ax_inject.imshow(
                         np.ma.array(injected_disp, mask=~np.isfinite(injected_disp)),
                         origin="lower",
@@ -3955,6 +3955,7 @@ class Limits:
                         vmin=vmin,
                         vmax=vmax,
                     )
+                    overlay_mask_hatch(ax_inject, ~np.isfinite(injected_disp))
                     ax_inject.set_xlim(x0_zoom, x1_zoom)
                     ax_inject.set_ylim(y0_zoom, y1_zoom)
 
@@ -4225,7 +4226,7 @@ class Limits:
                     from astropy.visualization import simple_norm
                     norm = simple_norm(cutout, 'sqrt', percent=99.5)
                     cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                    cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+                    cmap.set_bad(color="none")
                     # Mask NaN/inf only; zeros can be real sky-subtracted pixels.
                     cut_disp = np.asarray(cutout, dtype=float).copy()
                     ax_inject.imshow(
@@ -4234,6 +4235,7 @@ class Limits:
                         cmap=cmap,
                         norm=norm,
                     )
+                    overlay_mask_hatch(ax_inject, ~np.isfinite(cut_disp))
                     ax_inject.set_xlim(0, nx)
                     ax_inject.set_ylim(0, ny)
                     ax_inject.set_title(f'Injection failed', fontsize=9)
@@ -4260,7 +4262,7 @@ class Limits:
                 from astropy.visualization import simple_norm
                 norm = simple_norm(cutout, 'sqrt', percent=99.5)
                 cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'magenta'))
+                cmap.set_bad(color="none")
                 # Mask NaN/inf only; zeros can be real sky-subtracted pixels.
                 cut_disp = np.asarray(cutout, dtype=float).copy()
                 ax_sites.imshow(
@@ -4269,6 +4271,7 @@ class Limits:
                     cmap=cmap,
                     norm=norm,
                 )
+                overlay_mask_hatch(ax_sites, ~np.isfinite(cut_disp))
                 ax_sites.set_xlim(0, nx)
                 ax_sites.set_ylim(0, ny)
 

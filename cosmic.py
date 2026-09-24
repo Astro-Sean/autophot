@@ -19,7 +19,6 @@ import numpy as np
 import astroscrappy
 from typing import Optional, Tuple
 from scipy.ndimage import binary_dilation, binary_fill_holes
-import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 from astropy.visualization import ZScaleInterval
 from skimage.morphology import disk
@@ -213,7 +212,12 @@ class RemoveCosmicRays:
         base = os.path.splitext(os.path.basename(fpath))[0]
         write_dir = os.path.dirname(fpath)
 
-        from plotting_utils import apply_autophot_mplstyle, get_plot_ext
+        from plotting_utils import (
+            apply_autophot_mplstyle,
+            get_plot_ext,
+            mask_legend_patch,
+            overlay_mask_hatch,
+        )
 
         apply_autophot_mplstyle()
 
@@ -248,7 +252,7 @@ class RemoveCosmicRays:
         # Mask CR pixels so they show as the "bad" colour (red) in the colormap
         original_masked = np.ma.array(original, mask=cr_mask)
         cmap_orig = plt.get_cmap("gray").copy()
-        cmap_orig.set_bad(color="magenta")
+        cmap_orig.set_bad(color="none")
         im0 = axes[0].imshow(
             original_masked,
             cmap=cmap_orig,
@@ -256,6 +260,7 @@ class RemoveCosmicRays:
             vmin=vmin,
             vmax=vmax,
         )
+        overlay_mask_hatch(axes[0], cr_mask)
         n_cr = int(np.count_nonzero(cr_mask))
         axes[0].set_title(
             f"Original ({n_cr:,} CR pixels)", fontsize=9
@@ -265,7 +270,7 @@ class RemoveCosmicRays:
 
         # --- Right panel: cleaned image ---
         cmap_clean = plt.get_cmap("gray").copy()
-        cmap_clean.set_bad(color="magenta")
+        cmap_clean.set_bad(color="none")
         im1 = axes[1].imshow(
             cleaned,
             cmap=cmap_clean,
@@ -273,6 +278,7 @@ class RemoveCosmicRays:
             vmin=vmin,
             vmax=vmax,
         )
+        overlay_mask_hatch(axes[1], ~np.isfinite(np.asarray(cleaned)))
         axes[1].set_title("Cleaned", fontsize=9)
         # Both panels share the same y extent; repeat labels add clutter.
         axes[1].tick_params(axis="y", labelleft=False)
@@ -281,12 +287,10 @@ class RemoveCosmicRays:
 
         # --- Finalize ---
         fig.suptitle(title, fontsize=10)
-        # The colormap "bad" color marks CR-masked and non-finite pixels.
+        # The hatched overlay marks CR-masked and non-finite pixels.
         fig.legend(
             handles=[
-                mpatches.Patch(
-                    facecolor="magenta", label="Cosmic ray / NaN pixels"
-                )
+                mask_legend_patch(label="Cosmic ray / NaN pixels")
             ],
             loc="upper center",
             bbox_to_anchor=(0.5, 0.94),

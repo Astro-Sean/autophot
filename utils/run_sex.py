@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 # Cached path to a working SExtractor binary (avoids repeated subprocess checks).
 _SEXTRACTOR_EXE: Optional[str] = None
+_SEXTRACTOR_VERSION: tuple = (0, 0, 0)
 _SEXTRACTOR_PROBE_FAILED: bool = False
 
 # =============================================================================
@@ -66,7 +67,7 @@ def get_sextractor_executable() -> Optional[str]:
     Returns:
         Absolute path to the executable, or None if not found / not working.
     """
-    global _SEXTRACTOR_EXE, _SEXTRACTOR_PROBE_FAILED
+    global _SEXTRACTOR_EXE, _SEXTRACTOR_VERSION, _SEXTRACTOR_PROBE_FAILED
     if _SEXTRACTOR_EXE is not None:
         return _SEXTRACTOR_EXE
     if _SEXTRACTOR_PROBE_FAILED:
@@ -102,6 +103,7 @@ def get_sextractor_executable() -> Optional[str]:
 
     if best_path is not None:
         _SEXTRACTOR_EXE = best_path
+        _SEXTRACTOR_VERSION = best_version
         if best_version < (2, 25, 0):
             logger.warning(
                 "SExtractor %s.%s.%s at %s does not handle NaN pixels correctly; "
@@ -128,8 +130,9 @@ def reset_sextractor_executable_cache() -> None:
     Reset the cached SExtractor executable path and probe-failed flag.
     Call this if SExtractor is installed after the pipeline has already started.
     """
-    global _SEXTRACTOR_EXE, _SEXTRACTOR_PROBE_FAILED
+    global _SEXTRACTOR_EXE, _SEXTRACTOR_VERSION, _SEXTRACTOR_PROBE_FAILED
     _SEXTRACTOR_EXE = None
+    _SEXTRACTOR_VERSION = (0, 0, 0)
     _SEXTRACTOR_PROBE_FAILED = False
     logger.info("SExtractor executable cache cleared.")
 
@@ -142,6 +145,57 @@ def is_sextractor_installed() -> bool:
         bool: True if SExtractor is found, False otherwise.
     """
     return get_sextractor_executable() is not None
+
+
+def _nan_filled_copy(fits_path: Path, temp_dir: Path) -> Path:
+    """Write a non-finite-free copy of *fits_path* for SExtractor < 2.25.0.
+
+    Old SExtractor builds a NaN background map when any input pixel is
+    non-finite and detects nothing.  Non-finite pixels are replaced by the
+    finite median so the pixel grid - and therefore catalog coordinates -
+    is unchanged.  Returns the original path when no fill is needed.
+    """
+    fits_path = Path(fits_path)
+    with fits.open(fits_path, memmap=True) as hdul:
+        data = hdul[0].data
+        if data is None:
+            return fits_path
+        arr = np.asarray(data)
+        bad = ~np.isfinite(arr)
+        if not bad.any():
+            return fits_path
+        good = ~bad
+        fill = float(np.median(arr[good])) if good.any() else 0.0
+        cleaned = np.where(bad, fill, arr).astype(np.float32)
+        header = hdul[0].header.copy()
+    # Keep the original stem: derived catalog names (<stem>_PYSEx_CAT.cat)
+    # are looked up by downstream SCAMP/IDC consumers.
+    out_path = Path(temp_dir) / fits_path.name
+    if out_path.resolve() == fits_path.resolve():
+        out_path = Path(temp_dir) / f"{fits_path.stem}_nanfilled.fits"
+    fits.writeto(out_path, cleaned, header, overwrite=True)
+    logger.info(
+        "SExtractor < 2.25.0 cannot handle non-finite pixels: %s has %d - "
+        "running detection on a median-filled copy.",
+        fits_path.name,
+        int(bad.sum()),
+    )
+    return out_path
+
+
+def nan_filled_copy_for_detection(fits_path, temp_dir) -> Path:
+    """Return a detection-safe copy of *fits_path* for this SExtractor version.
+
+    SExtractor < 2.25.0 produces an empty catalog when the input contains
+    non-finite pixels, so callers that run ``sex`` directly (e.g. IDC
+    distortion correction) should detect on the median-filled copy this
+    returns.  With SExtractor >= 2.25.0, or when the image is already
+    finite, the original path is returned unchanged.
+    """
+    get_sextractor_executable()
+    if _SEXTRACTOR_VERSION >= (2, 25, 0):
+        return Path(fits_path)
+    return _nan_filled_copy(Path(fits_path), Path(temp_dir))
 
 
 def scale_multiplier_from_config(config: dict) -> float:
@@ -1107,6 +1161,14 @@ class SExtractorWrapper:
                 "SExtractor saturation: raw=%r, parsed=%s, satur_key=%s",
                 saturation_raw, saturation, satur_key,
             )
+
+            if _SEXTRACTOR_VERSION < (2, 25, 0):
+                # Chip gaps / masked borders stored as NaN make old
+                # SExtractor produce an empty catalog; detect on a
+                # median-filled copy instead (pixel grid is unchanged).
+                fits_path = _nan_filled_copy(fits_path, temp_dir)
+                if fits_ref is not None:
+                    fits_ref = _nan_filled_copy(Path(fits_ref), temp_dir)
 
             fwhm_for_kernel = float(use_FWHM)
             if not np.isfinite(fwhm_for_kernel) or fwhm_for_kernel <= 0:

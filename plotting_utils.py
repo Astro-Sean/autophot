@@ -139,9 +139,9 @@ PLOT_COLORS = {
     # --- Image display ---
     'image_cmap':       'gray',     # Default colormap for image display
     'image_cmap_alt':   'viridis',  # Alternate colormap (crowding plot)
-    'nan_color':        'magenta',  # Color for NaN/masked pixels in image display
-    'mask_overlay':     'magenta',  # Overlay for defect masks (matches NaN 'nan_color')
-    'mask_overlay_alt': 'magenta',  # Overlay for source masks (source_check)
+    'nan_color':        'magenta',  # Hatch/overlay color for NaN/masked pixels (see overlay_mask_hatch)
+    'mask_overlay':     'magenta',  # Hatch color for defect masks (matches NaN 'nan_color')
+    'mask_overlay_alt': 'magenta',  # Hatch color for source masks (source_check)
 
     # --- Figure chrome ---
     'figure_facecolor': 'white',    # Figure background
@@ -367,3 +367,101 @@ def add_clean_legend(ax, labels=None, *, loc="best", bbox_to_anchor=None, **kwar
         defaults["bbox_to_anchor"] = bbox_to_anchor
     defaults.update(kwargs)
     return ax.legend(handles, leg_labels, **defaults)
+
+
+MASK_HATCH = "/////"
+MASK_FILL_ALPHA = 0.0
+
+
+def _image_background_color(ax):
+    """Median colour of the last image on the axes.
+
+    Transparent bad pixels reveal the axes facecolor; painting it with the
+    image's own background tone keeps masked gaps from showing as a flat
+    white band while staying distinguishable from real pixels.
+    """
+    for im in reversed(ax.images):
+        try:
+            arr = np.ma.filled(im.get_array(), np.nan)
+            if arr.ndim != 2:
+                continue
+            finite = arr[np.isfinite(arr)]
+            if finite.size:
+                return im.cmap(im.norm(np.nanmedian(finite)))
+        except Exception:
+            continue
+    return None
+
+
+def overlay_mask_hatch(ax, mask, color=None, hatch=MASK_HATCH,
+                       fill_alpha=MASK_FILL_ALPHA, zorder=6, extent=None):
+    """Overlay masked/non-finite pixels with a transparent hatch.
+
+    Replaces the old solid-``nan_color`` rendering: masked regions keep the
+    underlying image visible under a ``/////`` hatch, which also reads in
+    grayscale prints.  ``mask`` is a boolean array in image coordinates
+    (``mask[i, j]`` at pixel ``(j, i)``) matching ``imshow(origin="lower")``.
+    ``extent`` may be given when the underlying imshow uses one - the hatch
+    is then drawn in those coordinates.  No-op when nothing is masked.
+    """
+    import matplotlib.pyplot as plt
+
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return
+    color = color or PLOT_COLORS.get("nan_color", "magenta")
+    bg = _image_background_color(ax)
+    if bg is not None:
+        ax.set_facecolor(bg)
+    z = mask.astype(float)
+    cf_args = [z]
+    if extent is not None:
+        # Cell centers matching imshow(extent=[x0, x1, y0, y1]).
+        ny, nx = mask.shape
+        dx = (extent[1] - extent[0]) / nx
+        dy = (extent[3] - extent[2]) / ny
+        xs = extent[0] + (np.arange(nx) + 0.5) * dx
+        ys = extent[2] + (np.arange(ny) + 0.5) * dy
+        cf_args = [xs, ys, z]
+    if fill_alpha > 0:
+        ax.contourf(
+            *cf_args,
+            levels=[0.5, 1.5],
+            colors=[color],
+            alpha=fill_alpha,
+            zorder=zorder,
+        )
+    with plt.rc_context({"hatch.color": color}):
+        ax.contourf(
+            *cf_args,
+            levels=[0.5, 1.5],
+            colors="none",
+            hatches=[hatch],
+            zorder=zorder,
+        )
+    # Boundary line so the masked region's edge stays visible where the
+    # sparse hatch meets unmasked pixels.
+    ax.contour(
+        *cf_args,
+        levels=[0.5],
+        colors=color,
+        linewidths=0.8,
+        zorder=zorder,
+    )
+
+
+def mask_legend_patch(color=None, hatch=MASK_HATCH,
+                      fill_alpha=MASK_FILL_ALPHA, **kwargs):
+    """Legend patch matching :func:`overlay_mask_hatch` styling."""
+    import matplotlib.patches as mpatches
+    from matplotlib.colors import to_rgba
+
+    color = color or PLOT_COLORS.get("nan_color", "magenta")
+    face = to_rgba(color, fill_alpha) if fill_alpha > 0 else "#d9d9d9"
+    return mpatches.Patch(
+        facecolor=face,
+        hatch=hatch,
+        edgecolor=color,
+        linewidth=0,
+        **kwargs,
+    )

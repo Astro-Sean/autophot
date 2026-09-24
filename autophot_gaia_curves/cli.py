@@ -52,6 +52,12 @@ def main() -> None:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
+    try:
+        from functions import cap_console_lines
+    except ImportError:
+        pass
+    else:
+        cap_console_lines(logging.getLogger().handlers, extra_reserve=26)
 
     builder = GaiaCurveCatalogBuilder()
     local_curves = builder.parse_mapping(args.curve, "--curve")

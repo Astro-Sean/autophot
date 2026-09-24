@@ -506,6 +506,7 @@ try:
         ascii_card,
         ascii_kv,
         border_msg,
+        cap_console_lines,
         ConsoleLevelFilter,
         STATUS,
         log_status,
@@ -535,6 +536,7 @@ except Exception as _exc:  # pragma: no cover
             ascii_card,
             ascii_kv,
             border_msg,
+            cap_console_lines,
             ConsoleLevelFilter,
             STATUS,
             log_status,
@@ -556,6 +558,7 @@ except Exception as _exc:  # pragma: no cover
         log_step = None  # type: ignore
         border_msg = None  # type: ignore
         ConsoleLevelFilter = None  # type: ignore
+        cap_console_lines = None  # type: ignore
         STATUS = 25  # type: ignore
         log_status = None  # type: ignore
         verbose_to_console_level = verbose_to_log_level  # type: ignore
@@ -2638,6 +2641,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         _handler.setFormatter(ColoredLevelFormatter(use_color=True))
     else:
         _handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+        if cap_console_lines is not None:
+            cap_console_lines([_handler])
     logging.basicConfig(level=logging.DEBUG, handlers=[_handler])
     silence_noisy_loggers()
 

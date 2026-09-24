@@ -128,7 +128,10 @@ class ImageDistortionCorrector:
         "DETECT_MINAREA": 3,
         "BACK_SIZE": 32,
         "DEBLEND_NTHRESH": 64,
-        "BACK_TYPE": "MANUAL",
+        # AUTO estimates the background mesh: MANUAL writes no BACK_VALUE
+        # (implicit 0), so an image that still carries positive sky sits
+        # entirely above DETECT_THRESH and merges into one giant object.
+        "BACK_TYPE": "AUTO",
         "DEBLEND_MINCONT": 0.001,
         "BACK_FILTERSIZE": 5,
         "FILTER": "Y",
@@ -649,23 +652,28 @@ NNW
             zscale = ZScaleInterval()
             vmin, vmax = zscale.get_limits(data)
 
-            from plotting_utils import apply_autophot_mplstyle, safe_tight_layout
+            from plotting_utils import (
+                apply_autophot_mplstyle,
+                overlay_mask_hatch,
+                safe_tight_layout,
+            )
             apply_autophot_mplstyle()
 
             fig, ax = plt.subplots(figsize=figsize)
-            # Render NaNs as magenta "no data" regions.
+            # Non-finite regions get a transparent fill plus a hatch overlay.
             cmap = plt.get_cmap(cmap).copy() if isinstance(cmap, str) else cmap
             try:
                 cmap = cmap.copy()
             except Exception:
                 pass
             try:
-                cmap.set_bad(color="magenta")
+                cmap.set_bad(color="none")
             except Exception:
                 pass
             im = ax.imshow(
                 data, cmap=cmap, vmin=vmin, vmax=vmax, origin="lower", **imshow_kwargs
             )
+            overlay_mask_hatch(ax, ~np.isfinite(np.asarray(data)))
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
             for i, row in enumerate(catalog[:max_sources]):
@@ -709,6 +717,14 @@ NNW
         """Resolve tool path or raise. Cached for speed."""
         if name in self._executables:
             return self._executables[name]
+        # run_sex.nan_filled_copy_for_detection decides its <2.25.0 shim
+        # from the HIGHEST-version binary on PATH, so IDC must run that
+        # same binary or the shim decision applies to a different version.
+        if name == "sex":
+            _sx = self._resolve_sextractor()
+            if _sx:
+                self._executables[name] = _sx
+                return _sx
         for cmd in (name, f"{name}.exe"):
             try:
                 subprocess.run(
@@ -725,10 +741,40 @@ NNW
                 continue
         raise FileNotFoundError(f"Executable not found: {name}")
 
+    @staticmethod
+    def _header_fwhm_pixels(header) -> float:
+        """PSF FWHM in pixels from a FITS header.
+
+        Prefer FWHMPIX: pipelines like GROND write FWHM in arcseconds
+        while FWHMPIX is always pixels, and reading the arcsec value as
+        pixels makes the convolution kernel ~2.4x too narrow versus the
+        real PSF.  Falls back to FWHM (assumed pixels), then 2.0.
+        """
+        try:
+            v = float(header.get("FWHMPIX", header.get("FWHM", 2.0)))
+        except (TypeError, ValueError):
+            return 2.0
+        return v if np.isfinite(v) and v > 0 else 2.0
+
+    @staticmethod
+    def _resolve_sextractor() -> Optional[str]:
+        """Return the highest-version SExtractor binary, else None."""
+        try:
+            from utils.run_sex import get_sextractor_executable
+
+            return get_sextractor_executable()
+        except Exception:
+            return None
+
     def _is_executable_available(self, name: str) -> bool:
         """Check if an executable is installed without raising. Cached for speed."""
         if name in self._executables:
             return True
+        if name == "sex":
+            _sx = self._resolve_sextractor()
+            if _sx:
+                self._executables[name] = _sx
+                return True
         for cmd in (name, f"{name}.exe"):
             try:
                 subprocess.run(
@@ -886,8 +932,7 @@ NNW
             # Header FWHM can be stale from previous runs or instrument defaults
             if fwhm_pixels is None or fwhm_pixels <= 0:
                 with fits.open(fits_image) as hdul:
-                    header = hdul[0].header
-                    fwhm_pixels = header.get("FWHM", 2.0)
+                    fwhm_pixels = self._header_fwhm_pixels(hdul[0].header)
 
             pixel_scale_header = None
             with fits.open(fits_image) as hdul:
@@ -1049,10 +1094,38 @@ NNW
                     good = np.ones(len(catalog), dtype=bool)
                     filt = {
                         "SNR_WIN": lambda c: c > 1,
+                        # NaN centroid errors become NaN weights in SCAMP's
+                        # normal equations (singular "not positive definite"
+                        # matrix -> chealpix crash).
+                        "ERRAWIN_IMAGE": np.isfinite,
+                        "ERRBWIN_IMAGE": np.isfinite,
                     }
                     for col, cond in filt.items():
                         if col in catalog.colnames:
                             good &= cond(catalog[col])
+                    # Windowed centroids outside the frame are edge junk (they
+                    # appear on median-filled NaN-gap borders) and corrupt the
+                    # SCAMP distortion fit.
+                    if (
+                        "XWIN_IMAGE" in catalog.colnames
+                        and "YWIN_IMAGE" in catalog.colnames
+                    ):
+                        try:
+                            _nx_img = int(header.get("NAXIS1", 0))
+                            _ny_img = int(header.get("NAXIS2", 0))
+                            if _nx_img > 0 and _ny_img > 0:
+                                _xw = np.asarray(catalog["XWIN_IMAGE"], float)
+                                _yw = np.asarray(catalog["YWIN_IMAGE"], float)
+                                good &= (
+                                    np.isfinite(_xw)
+                                    & np.isfinite(_yw)
+                                    & (_xw >= 0)
+                                    & (_xw <= _nx_img)
+                                    & (_yw >= 0)
+                                    & (_yw <= _ny_img)
+                                )
+                        except Exception:
+                            pass
                     # Alignment source selection:
                     # Default behavior prefers star-like sources by excluding very large FWHM objects.
                     # For sparse fields, extended sources (galaxies) can be useful alignment anchors.
@@ -1677,12 +1750,13 @@ NNW
                     if n_oob > 0:
                         severity = "severe" if n_oob >= 2 else "minor"
                         self.logger.warning(
-                            "Reference image may not fully cover science image region "
-                            "(%d/4 corners out of bounds, %s). "
-                            "Science corners in ref pixels: X=%s, Y=%s. "
-                            "Uncovered regions will produce NaN/zero borders in the "
-                            "aligned template, increasing the masked fraction and "
-                            "reducing sources available for SFFT kernel fitting.",
+                            "Reference image may not fully cover science image\n"
+                            "    region (%d/4 corners out of bounds, %s).\n"
+                            "    Science corners in ref pixels: X=%s, Y=%s.\n"
+                            "    Uncovered regions will produce NaN/zero\n"
+                            "    borders in the aligned template, increasing\n"
+                            "    the masked fraction and reducing sources\n"
+                            "    available for SFFT kernel fitting.",
                             n_oob, severity,
                             np.round(ref_x, 1).tolist(), np.round(ref_y, 1).tolist(),
                         )
@@ -2991,10 +3065,11 @@ NNW
                 _ps_ratio = max(sci_pix_scale, ref_pix_scale) / min(sci_pix_scale, ref_pix_scale)
                 if _ps_ratio > 1.5:
                     self.logger.warning(
-                        "Large pixel scale ratio (%.2fx): sci=%.4f\"/px ref=%.4f\"/px. "
-                        "Resampling to the coarser grid will degrade the PSF of the "
-                        "finer-scale image. SFFT kernel should compensate, but "
-                        "subtraction quality may be reduced.",
+                        "Large pixel scale ratio (%.2fx): sci=%.4f\"/px\n"
+                        "    ref=%.4f\"/px. Resampling to the coarser grid\n"
+                        "    will degrade the PSF of the finer-scale image.\n"
+                        "    SFFT kernel should compensate, but subtraction\n"
+                        "    quality may be reduced.",
                         _ps_ratio, sci_pix_scale, ref_pix_scale,
                     )
 
@@ -3534,9 +3609,11 @@ NNW
 
                         total_offset = np.sqrt(med_dx**2 + med_dy**2)
                         self.logger.info(
-                            "Alignment verification: offset=(%.3f, %.3f) px, "
-                            "RMS=(%.3f, %.3f) px, total=%.3f px, "
-                            "P95=%.3f px, max=%.3f px, local-P95/max=%.3f/%.3f px (%d matches)",
+                            "Alignment verification: offset=(%.3f, %.3f) px\n"
+                            "                        RMS=(%.3f, %.3f) px total=%.3f px\n"
+                            "                        P95=%.3f px max=%.3f px "
+                            "local-P95/max=%.3f/%.3f px\n"
+                            "                        %d matches",
                             med_dx, med_dy, rms_dx, rms_dy, total_offset,
                             _p95_offset, _max_offset, _local_offset_p95,
                             _local_offset_max, n_matched_verify,
@@ -3769,10 +3846,11 @@ NNW
                     )
                     if _scamp_trustworthy_override:
                         self.logger.info(
-                            "Post-SWarp gate rejected on RMS/P95 (%s; %d matches) "
-                            "but median offset=%.2f px is good and SCAMP residual=%.3f px "
-                            "(%d stars). Galaxy contamination in verification likely. "
-                            "Accepting SCAMP+SWarp alignment.",
+                            "Post-SWarp gate rejected on RMS/P95 (%s;\n"
+                            "    %d matches) but median offset=%.2f px is\n"
+                            "    good and SCAMP residual=%.3f px (%d stars).\n"
+                            "    Galaxy contamination in verification likely.\n"
+                            "    Accepting SCAMP+SWarp alignment.",
                             "; ".join(_reasons), _n_match, _off,
                             _scamp_rms_pix_check, _scamp_nstars_check,
                         )
@@ -3962,9 +4040,9 @@ NNW
                             except OSError:
                                 pass
                         self.logger.warning(
-                            "All alignment methods rejected; accepting best result: "
-                            "%s (offset=%.2f px, RMS=%.2f px, P95=%.2f px, %d matches). "
-                            "Subtraction quality may be degraded.",
+                            "All alignment methods rejected; accepting best result: %s\n"
+                            "  offset=%.2f px RMS=%.2f px P95=%.2f px (%d matches)\n"
+                            "  Subtraction quality may be degraded.",
                             _best.get("alignment_method", "unknown"),
                             _best.get("reject_offset", 0),
                             _best.get("reject_rms", 0),
@@ -3974,8 +4052,9 @@ NNW
                         return _best
                 else:
                     self.logger.info(
-                        "Post-SWarp alignment accepted: offset=%.2f px, RMS=%.2f px, "
-                        "P95=%.2f px (%d matches, FWHM=%.1f px).",
+                        "Post-SWarp alignment accepted: offset=%.2f px\n"
+                        "                               RMS=%.2f px P95=%.2f px\n"
+                        "                               %d matches, FWHM=%.1f px",
                         _off, _rms, _p95, _n_match, _gate_fwhm,
                     )
             elif _post_swarp_verify and resample_mode == "common_grid" and bool(
@@ -4904,9 +4983,10 @@ NNW
                             )
 
                         self.logger.info(
-                            "Post-reproject alignment: offset=(%.3f, %.3f) px, "
-                            "RMS=(%.3f, %.3f) px, total=%.3f px, rms=%.3f px, "
-                            "P95=%.3f px (%d matches)",
+                            "Post-reproject alignment: offset=(%.3f, %.3f) px\n"
+                            "                          RMS=(%.3f, %.3f) px "
+                            "total=%.3f px rms=%.3f px\n"
+                            "                          P95=%.3f px (%d matches)",
                             _med_dx, _med_dy, _rms_dx, _rms_dy, _total, _rms,
                             _p95_reproj, _n_match_reproj,
                         )
@@ -6325,9 +6405,11 @@ NNW
             if not use_aafitrans:
                 if (fwhm_sci_pix < _aa_us_thresh or fwhm_ref_pix < _aa_us_thresh):
                     self.logger.warning(
-                        "AstroAlign (skimage fallback): using default cubic interpolation "
-                        "for undersampled image (sci FWHM=%.2f, ref FWHM=%.2f). "
-                        "Ringing artifacts may occur; aafitrans path with bilinear is preferred.",
+                        "AstroAlign (skimage fallback): using default cubic\n"
+                        "    interpolation for undersampled image\n"
+                        "    (sci FWHM=%.2f, ref FWHM=%.2f). Ringing\n"
+                        "    artifacts may occur; aafitrans path with\n"
+                        "    bilinear is preferred.",
                         fwhm_sci_pix, fwhm_ref_pix,
                     )
                 aligned_ref_img, footprint = aa.apply_transform(tform, ref_img, sci_img)
@@ -7379,6 +7461,272 @@ NNW
         self.clean_image(Path(aligned_image))
         return aligned_image
 
+    def undistort_image(
+        self,
+        fits_path: str,
+        output_dir: Optional[str] = None,
+        resampling_type: Optional[str] = None,
+    ) -> Optional[str]:
+        """Remove optical distortion (e.g. telescope flexure) via SCAMP + SWarp.
+
+        Detects sources with SExtractor, fits a TPV distortion solution
+        against GAIA-DR3 with SCAMP, then resamples onto a distortion-free
+        grid (same centre, pixel scale and dimensions) with SWarp.  SCAMP
+        retries with descending DISTORT_DEGREES when a solve fails - a
+        degenerate solve ("Not a positive definite matrix" + chealpix
+        crash) usually means the polynomial is over-parameterized for the
+        matched geometry.
+
+        Parameters
+        ----------
+        fits_path : str
+            Science image to correct. Must carry a usable WCS - SCAMP
+            needs it as the GAIA match seed.
+        output_dir : str, optional
+            Directory for intermediate products and the corrected FITS.
+        resampling_type : str, optional
+            SWarp RESAMPLING_TYPE. Defaults to
+            ``wcs.correct_distortion_resampling_type`` then "LANCZOS3".
+
+        Returns
+        -------
+        str or None
+            Path to the corrected FITS, or None when correction is not
+            possible. The caller keeps the original image in that case.
+        """
+        fits_path = str(fits_path)
+        wcs_cfg = (
+            self.input_yaml.get("wcs", {})
+            if isinstance(self.input_yaml, dict)
+            else {}
+        )
+        resampling_type = str(
+            resampling_type
+            or wcs_cfg.get("correct_distortion_resampling_type", "LANCZOS3")
+        )
+
+        for exe in ("scamp", "swarp"):
+            if not self._is_executable_available(exe):
+                self.logger.warning(
+                    "Distortion correction requested but '%s' is not on PATH; "
+                    "keeping the original image.",
+                    exe,
+                )
+                return None
+
+        try:
+            wcs_obj, pixel_scale, sci_head = self._extract_wcs_and_scale(
+                fits_path
+            )
+        except Exception as e:
+            log_warning_from_exception(
+                self.logger, f"Could not read WCS from {fits_path}", e
+            )
+            return None
+        if wcs_obj is None or not getattr(wcs_obj, "has_celestial", False):
+            self.logger.warning(
+                "Distortion correction: no usable WCS in %s (SCAMP needs a "
+                "WCS seed); keeping the original image.",
+                fits_path,
+            )
+            return None
+        ny, nx = int(sci_head["NAXIS2"]), int(sci_head["NAXIS1"])
+
+        out_dir = (
+            Path(output_dir)
+            if output_dir
+            else Path(mkdtemp(prefix="undistort_"))
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- SExtractor detection (SCAMP consumes the LDAC catalog) ---
+        sex_dir = out_dir / "sextractor"
+        sex_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            from utils.run_sex import nan_filled_copy_for_detection
+
+            det_path = str(
+                nan_filled_copy_for_detection(fits_path, sex_dir)
+            )
+        except Exception:
+            det_path = fits_path
+        try:
+            sex_res = self.run_sextractor(
+                det_path, output_dir=str(sex_dir), for_alignment=True
+            )
+        except Exception as e:
+            log_warning_from_exception(
+                self.logger, "Distortion correction: SExtractor failed", e
+            )
+            return None
+        catalog_path = (sex_res or {}).get("catalog_path")
+        catalog = (sex_res or {}).get("catalog")
+        n_src = len(catalog) if catalog is not None else 0
+        if (
+            not catalog_path
+            or not Path(catalog_path).exists()
+            or n_src < 8
+        ):
+            self.logger.warning(
+                "Distortion correction: only %d usable sources in %s; "
+                "need >= 8 for a GAIA cross-match - keeping original image.",
+                n_src,
+                fits_path,
+            )
+            return None
+
+        # Match the feasible distortion degree to the source count. The
+        # detection count is a proxy for the GAIA match yield (typically
+        # 50-80%), so the thresholds are conservative.
+        want_degree = int(wcs_cfg.get("scamp_distort_degrees", 3) or 3)
+        min_sources = {1: 12, 2: 100, 3: 180, 4: 300}
+        degree = 1
+        for d in range(min(want_degree, 4), 0, -1):
+            if n_src >= min_sources.get(d, 999):
+                degree = d
+                break
+        if degree < want_degree:
+            self.logger.warning(
+                "Distortion correction: only %d sources - reducing "
+                "DISTORT_DEGREES %d -> %d.",
+                n_src,
+                want_degree,
+                degree,
+            )
+
+        # SCAMP writes .head next to the catalog; output_dir must match the
+        # catalog directory for run_scamp's .head glob to find it.  Retry
+        # with descending DISTORT_DEGREES on failure - a degenerate solve
+        # ("Not a positive definite matrix" + chealpix crash) usually means
+        # the polynomial is over-parameterized for the matched geometry.
+        scamp_res = None
+        head_src = None
+        for attempt_degree in range(degree, 0, -1):
+            if attempt_degree < degree:
+                self.logger.info(
+                    "Distortion correction: retrying SCAMP with "
+                    "DISTORT_DEGREES=%d",
+                    attempt_degree,
+                )
+            for stale_head in sex_dir.glob("*.head"):
+                try:
+                    stale_head.unlink()
+                except OSError:
+                    pass
+            scamp_res = self.run_scamp(
+                catalog_paths=catalog_path,
+                reference_cat=None,  # GAIA-DR3
+                output_dir=str(sex_dir),
+                config={
+                    "DISTORT_DEGREES": attempt_degree,
+                    "CROSSID_RADIUS": "5.0",
+                },
+            )
+            if scamp_res is None:
+                continue
+            head_src = Path(scamp_res.get("head_file") or "")
+            if head_src.exists() and head_src.stat().st_size > 0:
+                degree = attempt_degree
+                break
+        if (
+            scamp_res is None
+            or head_src is None
+            or not head_src.exists()
+            or head_src.stat().st_size == 0
+        ):
+            self.logger.warning(
+                "Distortion correction: SCAMP failed at all distortion "
+                "degrees - keeping original image."
+            )
+            return None
+        dist = scamp_res.get("distortion") or {}
+        self.logger.info(
+            "Distortion correction: SCAMP matched %s sources, astrometric "
+            "RMS %s arcsec (DISTORT_DEGREES=%d)",
+            dist.get("n_matched_stars"),
+            dist.get("astrometric_rms_arcsec"),
+            degree,
+        )
+
+        # SWarp picks up the SCAMP WCS from <stem>.head next to the input.
+        head_dst = Path(fits_path).with_suffix(".head")
+        try:
+            shutil.copy2(str(head_src), str(head_dst))
+            _normalize_head_file(head_dst)
+        except Exception as e:
+            log_warning_from_exception(
+                self.logger,
+                f"Could not copy SCAMP .head next to {fits_path}",
+                e,
+            )
+            return None
+
+        # Resample onto the same grid: identical centre, pixel scale and
+        # dimensions, only the distortion removed.
+        _cx = (nx + 1) / 2.0
+        _cy = (ny + 1) / 2.0
+        center_ra, center_dec = wcs_obj.all_pix2world([_cx], [_cy], 1)
+        swarp_dir = out_dir / "swarp"
+        swarp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            swarp_res = self.run_swarp(
+                [fits_path],
+                scamp_results=scamp_res,
+                output_dir=str(swarp_dir),
+                config={
+                    "CENTER_TYPE": "MANUAL",
+                    "CENTER": f"{float(center_ra[0]):.8f},{float(center_dec[0]):.8f}",
+                    "PIXELSCALE_TYPE": "MANUAL",
+                    "PIXEL_SCALE": pixel_scale,
+                    "IMAGE_SIZE": f"{nx},{ny}",
+                    "RESAMPLING_TYPE": resampling_type,
+                    "COMBINE": "Y",
+                    "COMBINE_TYPE": "MEDIAN",
+                    "OVERSAMPLING": 0,
+                },
+            )
+        finally:
+            try:
+                head_dst.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if swarp_res is None:
+            self.logger.warning(
+                "Distortion correction: SWarp failed - keeping original image."
+            )
+            return None
+        corrected = Path(swarp_res.get("corrected_image") or "")
+        if not corrected.exists():
+            self.logger.warning(
+                "Distortion correction: SWarp output missing - keeping "
+                "original image."
+            )
+            return None
+        self.clean_image(corrected)
+
+        # Sanity-check the resampled product before the caller adopts it.
+        try:
+            with fits.open(corrected) as hdul:
+                cdata = hdul[0].data
+            if cdata is None or cdata.shape != (ny, nx):
+                raise ValueError(f"bad shape {getattr(cdata, 'shape', None)}")
+            if not np.isfinite(cdata).any():
+                raise ValueError("no finite pixels")
+        except Exception as e:
+            log_warning_from_exception(
+                self.logger,
+                f"Distortion correction: invalid SWarp output {corrected}",
+                e,
+            )
+            return None
+
+        self.logger.info(
+            "Distortion correction: resampled %s -> %s",
+            fits_path,
+            corrected,
+        )
+        return str(corrected)
+
     def clean_image(self, path: Path):
         """Replace non-finite values (NaN/inf) in a FITS image with NaN.
 
@@ -7536,7 +7884,7 @@ NNW
             except Exception:
                 pass
             try:
-                cmap_img.set_bad(color="magenta")
+                cmap_img.set_bad(color="none")
             except Exception:
                 pass
             im1 = ax1.imshow(
@@ -7547,6 +7895,8 @@ NNW
                 **imshow_kwargs,
                 origin="lower",
             )
+            from plotting_utils import overlay_mask_hatch
+            overlay_mask_hatch(ax1, ~np.isfinite(np.asarray(sci_data)))
             ax1.set_title("Science Image")
             cbar1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
             cbar1.set_label("Science [ADU]", fontsize=7)
@@ -7561,6 +7911,7 @@ NNW
                 **imshow_kwargs,
                 origin="lower",
             )
+            overlay_mask_hatch(ax2, ~np.isfinite(np.asarray(ref_data)))
             cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
             cbar2.set_label("Reference [ADU]", fontsize=7)
             cbar2.ax.tick_params(labelsize=6)

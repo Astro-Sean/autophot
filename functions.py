@@ -115,10 +115,15 @@ class PlainFormatter(logging.Formatter):
     line's prefix.
     """
     ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    
+
+    def __init__(self, *args, max_width: int = 150, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._max_width = int(max_width)
+
     def format(self, record: logging.LogRecord) -> str:
         msg = super().format(record)
         msg = self.ANSI_ESCAPE.sub('', msg)
+        msg = normalize_log_message(msg, width=self._max_width)
         # Indent continuation lines so border banners and other multi-line
         # output align under the first line's timestamp/level prefix.
         if '\n' in msg:
@@ -148,6 +153,8 @@ class ColoredLevelFormatter(logging.Formatter):
           left so lines stay short.
         - Non-INFO messages carry a ``[LEVEL]`` tag; wrapped continuation
           lines align under the message text.
+        - Lines are soft-wrapped so no emitted line exceeds ``max_width``
+          (default 90), including the ``[LEVEL]`` tag where present.
 
     Color scheme:
         - INFO/DEBUG:     Plain black (no color)
@@ -161,10 +168,12 @@ class ColoredLevelFormatter(logging.Formatter):
     RED = "\033[31m"
     YELLOW = "\033[33m"
 
-    def __init__(self, *args, use_color: bool = True, compact: bool = True, **kwargs):
+    def __init__(self, *args, use_color: bool = True, compact: bool = True,
+                 max_width: int = 90, **kwargs):
         super().__init__(*args, **kwargs)
         self._use_color = use_color
         self._compact = compact
+        self._max_width = int(max_width)
         self._msg_count = 0
         self._in_section = False   # a banner has opened a pipeline section
         self._last_kind = None     # "banner" | "step" | "msg"
@@ -223,7 +232,14 @@ class ColoredLevelFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         msg_raw = record.getMessage()
-        msg_clean = normalize_log_message(msg_raw)
+        # Reserve room for the "[LEVEL] " tag _format_leveled prepends so
+        # tagged lines stay within max_width as well.
+        tag_len = 0
+        if not self._compact or record.levelno >= logging.WARNING:
+            tag_len = len(record.levelname) + 3
+        msg_clean = normalize_log_message(
+            msg_raw, width=max(40, self._max_width - tag_len)
+        )
         old_msg, old_args = record.msg, record.args
         if msg_clean != msg_raw:
             record.msg = msg_clean
@@ -310,6 +326,84 @@ def _to_ascii(text: str) -> str:
     return text.encode("ascii", "ignore").decode("ascii")
 
 
+def _is_metric_dense(line: str) -> bool:
+    """Heuristic for stat-dump lines (key=value lists, pipe-separated
+    segments) that read badly when wrapped at arbitrary word gaps."""
+    return line.count("=") >= 3 or line.count("|") >= 2
+
+
+_METRIC_KEY = re.compile(r"^[(\[]?[A-Za-z_][\w.\[\]()]{0,40}=")
+
+
+def _metric_atoms(s: str):
+    """Split a metric-dense line into atoms, each starting at a logical
+    boundary: a '|' separator, a 'key=' token, or the token after a
+    comma.  Parenthesised groups (e.g. '(dx=1, dy=2)') stay together.
+    Original whitespace is preserved inside atoms."""
+    toks = re.split(r"(?<=\s)(?=\S)", s)
+    atoms, cur, depth = [], [], 0
+    for tok in toks:
+        t = tok.strip()
+        opens = t.count("(") + t.count("[") - t.count(")") - t.count("]")
+        boundary = depth <= 0 and (t == "|" or bool(_METRIC_KEY.match(t)))
+        if boundary and cur:
+            atoms.append("".join(cur))
+            cur = []
+        cur.append(tok)
+        depth += opens
+        if depth <= 0 and t.endswith(",") and cur:
+            atoms.append("".join(cur))
+            cur = []
+    if cur:
+        atoms.append("".join(cur))
+    return atoms
+
+
+def _wrap_metric_line(ln: str, width: int, indent: str) -> list[str]:
+    """Wrap a stat-dump line at metric boundaries, packing whole atoms
+    per line and aligning continuations under the first value after a
+    'Label:' prefix.  Returns None when the line has too few atoms to
+    benefit (caller falls back to plain textwrap)."""
+    atoms = _metric_atoms(ln.strip())
+    if len(atoms) < 2:
+        return None
+    m = re.match(r"^([^\s][^:]{0,50}?:)(\s+)", ln.strip())
+    cont_col = len(indent) + len(m.group(0)) if m else 0
+    if not (0 < cont_col <= width // 2):
+        cont_col = len(indent) + 2
+    cont = " " * cont_col
+
+    # cur is either pure indentation or ends with a separator space, so
+    # atoms can always be appended directly.
+    out, cur = [], indent
+    for a in atoms:
+        piece = a.strip()
+        if not piece:
+            continue
+        if len(cur + piece) <= width:
+            cur += piece + " "
+            continue
+        out.append(cur.rstrip())
+        if len(piece) > width - cont_col:
+            # Single atom wider than the budget: hard-wrap it.
+            out.extend(
+                textwrap.wrap(
+                    piece,
+                    width=width,
+                    initial_indent=cont,
+                    subsequent_indent=cont,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+            )
+            cur = cont
+        else:
+            cur = cont + piece + " "
+    if cur.strip():
+        out.append(cur.rstrip())
+    return out
+
+
 def normalize_log_message(message: str, width: int = 150) -> str:
     """
     Normalize log message formatting for readability and consistency.
@@ -347,12 +441,17 @@ def normalize_log_message(message: str, width: int = 150) -> str:
             continue
         indent_len = len(ln) - len(ln.lstrip(" "))
         indent = " " * indent_len
+        if _is_metric_dense(ln):
+            dense = _wrap_metric_line(ln, width, indent)
+            if dense is not None:
+                wrapped.extend(dense)
+                continue
         wrapped_ln = textwrap.fill(
             ln.strip(),
             width=width,
             initial_indent=indent,
             subsequent_indent=indent + "  ",
-            break_long_words=False,
+            break_long_words=True,
             break_on_hyphens=False,
         )
         wrapped.extend(wrapped_ln.splitlines())
@@ -396,20 +495,74 @@ def clean_subprocess_log(path) -> None:
 
 
 class LogMessageNormalizeFilter(logging.Filter):
-    """Filter that normalizes message text before emission."""
+    """Filter that normalizes message text before emission.
 
-    def __init__(self, width: int = 150):
+    ``width`` is the rendered line budget.  When the handler's formatter
+    prepends a per-record prefix, ``prefix_fmt`` reserves space for it so
+    the emitted line still fits ``width``:
+
+    - ``"{levelname} - "`` for plain ``%(levelname)s - %(message)s``
+      handlers (prefix on every level -> ``prefix_min_level=0``).
+    - ``"[{levelname}] "`` for the compact ColoredLevelFormatter
+      convention (tag only at WARNING+).
+
+    ``extra_reserve`` covers additional fixed-width columns such as
+    ``%(asctime)s`` timestamps.
+    """
+
+    def __init__(
+        self,
+        width: int = 150,
+        prefix_fmt: str | None = None,
+        prefix_min_level: int = logging.WARNING,
+        extra_reserve: int = 0,
+    ):
         super().__init__()
         self.width = int(width)
+        self.prefix_fmt = prefix_fmt
+        self.prefix_min_level = int(prefix_min_level)
+        self.extra_reserve = int(extra_reserve)
+
+    def _line_budget(self, record: logging.LogRecord) -> int:
+        budget = self.width - self.extra_reserve
+        if self.prefix_fmt and record.levelno >= self.prefix_min_level:
+            budget -= len(self.prefix_fmt.format(levelname=record.levelname))
+        return max(40, budget)
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            normalized = normalize_log_message(record.getMessage(), width=self.width)
+            normalized = normalize_log_message(
+                record.getMessage(), width=self._line_budget(record)
+            )
             record.msg = normalized
             record.args = ()
         except Exception:
             pass
         return True
+
+
+def cap_console_lines(
+    handlers,
+    width: int = 90,
+    prefix_fmt: str | None = "{levelname} - ",
+    extra_reserve: int = 0,
+) -> None:
+    """Attach a 90-column normalize filter to plain-format console handlers.
+
+    For handlers using ``logging.Formatter`` directly (basicConfig fallback
+    setups), where neither ColoredLevelFormatter nor PlainFormatter performs
+    the wrapping.  ``prefix_fmt`` should mirror the handler's level prefix
+    and ``extra_reserve`` any fixed columns such as ``%(asctime)s``.
+    """
+    for h in handlers:
+        h.addFilter(
+            LogMessageNormalizeFilter(
+                width=width,
+                prefix_fmt=prefix_fmt,
+                prefix_min_level=0,
+                extra_reserve=extra_reserve,
+            )
+        )
 
 
 def silence_noisy_loggers(level: int = logging.WARNING) -> None:
@@ -445,9 +598,16 @@ def configure_console_logging(
 
     handler = logging.StreamHandler()
     handler.setLevel(level)
-    handler.addFilter(LogMessageNormalizeFilter(width=150))
     if formatter is None:
+        # ColoredLevelFormatter wraps lines itself (max_width=90).
         formatter = ColoredLevelFormatter(use_color=use_color)
+    elif not isinstance(formatter, ColoredLevelFormatter):
+        # Stock/plain formatters do not wrap; reserve the "LEVEL - " prefix.
+        handler.addFilter(
+            LogMessageNormalizeFilter(
+                width=90, prefix_fmt="{levelname} - ", prefix_min_level=0
+            )
+        )
     handler.setFormatter(formatter)
     return handler
 
@@ -2211,13 +2371,45 @@ def get_image_and_header(fpath):
                         telescop_header = hdul[i].header
                         for key in telescop_header.keys():
                             if key not in headinfo and (
-                                key.upper() in ['TELESCOP', 'INSTRUME', 'FILTER', 
+                                key.upper() in ['TELESCOP', 'INSTRUME', 'FILTER',
                                                'EXPTIME', 'MJD-OBS', 'DATE-OBS',
                                                'GAIN', 'RDNOISE', 'SATURATE']
                             ):
                                 headinfo[key] = telescop_header[key]
                         break
-            
+
+            # Warn when integer-stored data arrives without its FITS scaling:
+            # the signature of a scaled/compressed HDU rewritten with
+            # do_not_scale_image_data=True (raw stored codes left in the
+            # pixels, BLANK kept but BZERO/BSCALE lost).  The ~-BZERO sky
+            # pedestal is absorbed by background subtraction, but SATURATE and
+            # GAIN then describe physical units the data no longer uses.
+            try:
+                _bitpix = headinfo.get("BITPIX", -32)
+                if (
+                    isinstance(_bitpix, (int, np.integer))
+                    and _bitpix > 0
+                    and "BLANK" in headinfo
+                    and "BZERO" not in headinfo
+                    and "BSCALE" not in headinfo
+                ):
+                    _fin = np.isfinite(image)
+                    if _fin.any():
+                        _med = float(np.median(image[_fin]))
+                        if _med < -1.0e3:
+                            logger.warning(
+                                "%s: integer FITS data (BITPIX=%d) with BLANK\n"
+                                "    but no BZERO/BSCALE and median %.3g ADU -\n"
+                                "    the file looks like raw stored integers\n"
+                                "    whose scaling was stripped. Sky level,\n"
+                                "    SATURATE and flux scales may be in stored\n"
+                                "    units; re-export the file with scaling\n"
+                                "    applied.",
+                                os.path.basename(fpath), _bitpix, _med,
+                            )
+            except Exception:
+                pass
+
             if key is not None:
                 with _FITS_CACHE_LOCK:
                     _FITS_IMAGE_CACHE[key] = (image, headinfo)

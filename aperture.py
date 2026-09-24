@@ -1481,10 +1481,12 @@ class Aperture:
                 )
                 norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
                 cmap = plt.get_cmap("viridis").copy()
-                cmap.set_bad(color="magenta")
+                cmap.set_bad(color="none")
                 zmask = ~np.isfinite(zoom_image)
                 zoom_disp = np.ma.array(zoom_image, mask=zmask)
                 ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="equal")
+                from plotting_utils import overlay_mask_hatch
+                overlay_mask_hatch(ax_main, zmask)
                 ax_main.set_xlim(0, zoom_image.shape[1])
                 ax_main.set_ylim(0, zoom_image.shape[0])
                 cx_local = cx - x_min
@@ -1499,15 +1501,18 @@ class Aperture:
                     )
                 continue
 
+            from plotting_utils import overlay_mask_hatch
+
             norm = ImageNormalize(vmin=vmin_shared, vmax=vmax_shared)
             cmap = plt.get_cmap("viridis").copy()
-            cmap.set_bad(color="magenta")
+            cmap.set_bad(color="none")
             zmask = ~np.isfinite(zoom_image)
             if plot_zero_as_nan:
                 zmask |= (np.asarray(zoom_image, dtype=float) == 0.0)
             zoom_disp = np.ma.array(zoom_image, mask=zmask)
 
             ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="equal")
+            overlay_mask_hatch(ax_main, zmask)
             ax_main.set_xlim(0, zoom_image.shape[1])
             ax_main.set_ylim(0, zoom_image.shape[0])
 
@@ -1754,7 +1759,7 @@ class Aperture:
             )
             norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
             cmap = plt.get_cmap("viridis").copy()
-            cmap.set_bad(color="magenta")
+            cmap.set_bad(color="none")
             # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
             zmask = ~np.isfinite(zoom_image)
             zoom_disp = np.ma.array(zoom_image, mask=zmask)
@@ -1766,6 +1771,8 @@ class Aperture:
                 cmap=cmap,
                 aspect="equal",
             )
+            from plotting_utils import overlay_mask_hatch
+            overlay_mask_hatch(ax_main, zmask)
             ax_main.set_xlim(0, zoom_image.shape[1])
             ax_main.set_ylim(0, zoom_image.shape[0])
 
@@ -1805,9 +1812,11 @@ class Aperture:
             plt.close(fig)
             return
 
+        from plotting_utils import overlay_mask_hatch
+
         norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
         cmap = plt.get_cmap("viridis").copy()
-        cmap.set_bad(color="magenta")
+        cmap.set_bad(color="none")
         plot_zero_as_nan = bool(
             (self.input_yaml.get("plotting") or {}).get("plot_zero_as_nan", True)
         )
@@ -1824,6 +1833,7 @@ class Aperture:
             cmap=cmap,
             aspect="equal",
         )
+        overlay_mask_hatch(ax_main, zmask)
         ax_main.set_xlim(0, zoom_image.shape[1])
         ax_main.set_ylim(0, zoom_image.shape[0])
 
