@@ -97,24 +97,45 @@ class Find_FWHM:
     # =============================================================================
 
     @staticmethod
-    def _adaptive_detection_params(fwhm_px: float) -> dict:
-        """Return FWHM-adaptive IRAFStarFinder/DAOStarFinder parameters.
+    def _adaptive_detection_params(fwhm_px: float, finder: str = "iraf") -> dict:
+        """Return FWHM-adaptive finder sharpness/roundness bounds.
 
         Undersampled data (FWHM < 2 px) has broader intrinsic PSF shapes
         because a single pixel can contain most of the flux.  The default
         sharpness/roundness cuts are too restrictive and reject real
         detections.  See Howell (1989) sampling parameter discussion.
 
+        DAOStarFinder sharpness uses a different normalization than
+        IRAFStarFinder's: a perfectly matched Gaussian measures ~0.4,
+        so the IRAF-calibrated bands would reject real stars outright.
+        The DAO bands are centred on that matched value instead.
+
         Parameters
         ----------
         fwhm_px : float
             Estimated FWHM in pixels.
+        finder : str
+            'dao' or 'iraf'.
 
         Returns
         -------
         dict with keys: sharplo, sharphi, roundlo, roundhi
         """
         fwhm_px = float(fwhm_px) if np.isfinite(fwhm_px) else 3.0
+        if finder == "dao":
+            # DAO bounds stay permissive on purpose: a real PSF's
+            # ellipticity and Moffat wings shift the matched-filter
+            # statistics systematically (e.g. GROND PSFs measure
+            # roundness ~-0.3, sharpness ~0.55), so tight bands reject
+            # real stars wholesale.  The post-detection sigma-clips do
+            # the calibrated rejection; these only keep out pathological
+            # morphology.
+            if fwhm_px < 2.0:
+                return dict(sharplo=0.1, sharphi=1.6, roundlo=-1.0, roundhi=1.0)
+            elif fwhm_px < 3.0:
+                return dict(sharplo=0.15, sharphi=1.4, roundlo=-0.9, roundhi=0.9)
+            else:
+                return dict(sharplo=0.15, sharphi=1.3, roundlo=-0.8, roundhi=0.8)
         if fwhm_px < 2.0:
             # Undersampled: broader PSF tolerance, allow more ellipticity
             return dict(sharplo=0.2, sharphi=1.5, roundlo=-1.0, roundhi=1.0)
@@ -124,6 +145,189 @@ class Find_FWHM:
         else:
             # Well/oversampled: standard tight cuts
             return dict(sharplo=0.5, sharphi=1.0, roundlo=-0.3, roundhi=0.3)
+
+    @staticmethod
+    def _source_finder_name(src_cfg: dict) -> str:
+        """Resolve the configured point-source finder to 'dao' or 'iraf'.
+
+        Config key ``source_detection.finder`` defaults to ``dao``.
+        """
+        raw = str((src_cfg or {}).get("finder", "dao")).strip().lower()
+        aliases = {
+            "dao": "dao",
+            "daofind": "dao",
+            "daostarfinder": "dao",
+            "iraf": "iraf",
+            "starfind": "iraf",
+            "irafstarfinder": "iraf",
+        }
+        resolved = aliases.get(raw)
+        if resolved is None:
+            logger.warning(
+                "Unknown source_detection.finder=%r; falling back to 'dao'",
+                raw,
+            )
+            resolved = "dao"
+        return resolved
+
+    @staticmethod
+    def _build_star_finder(
+        finder_name: str,
+        fwhm_px: float,
+        threshold,
+        det_params: dict,
+        saturate: float,
+        ratio: float = 1.0,
+        theta: float = 0.0,
+    ):
+        """Construct the configured point-source finder.
+
+        DAOStarFinder convolves internally with a zero-sum Gaussian
+        kernel (matched filter and local-sky subtraction in one step);
+        with scale_threshold=True photutils rescales ``threshold`` onto
+        the convolved-image noise scale, so it is passed in raw-image
+        units and the finder runs on the unsmoothed data.  ``ratio`` and
+        ``theta`` describe the kernel's ellipticity (minor/major axis
+        ratio and major-axis position angle in degrees CCW from +x);
+        they only matter for DAO - IRAFStarFinder has no kernel-shape
+        parameters of its own.
+        """
+        if finder_name == "dao":
+            return DAOStarFinder(
+                threshold=threshold,
+                fwhm=fwhm_px,
+                ratio=ratio,
+                theta=theta,
+                sharpness_range=(det_params["sharplo"], det_params["sharphi"]),
+                roundness_range=(det_params["roundlo"], det_params["roundhi"]),
+                exclude_border=True,
+                peak_max=0.98 * saturate,
+                min_separation=fwhm_px,
+                scale_threshold=True,
+            )
+        return IRAFStarFinder(
+            fwhm=fwhm_px,
+            threshold=threshold,
+            min_separation=fwhm_px,
+            exclude_border=True,
+            peak_max=0.98 * saturate,
+            sharpness_range=(det_params["sharplo"], det_params["sharphi"]),
+            roundness_range=(det_params["roundlo"], det_params["roundhi"]),
+        )
+
+    @staticmethod
+    def _dao_significance_map(finder, data: np.ndarray, noise_std: float):
+        """Per-pixel detection-significance map for the DAO finder.
+
+        DAOStarFinder detects on the kernel-convolved image, so a
+        detection's significance is convolved_peak / (std * ||kernel||_2).
+        The catalog ``peak`` column is the raw pixel value, which reads
+        ~1/||k||_2 (about 3x for a matched kernel) too low and starves
+        S/N cuts of real detections.
+        """
+        try:
+            k = np.asarray(finder.kernel.data, dtype=float)
+            l2 = float(np.sqrt(np.sum(k * k)))
+            if not np.isfinite(l2) or l2 <= 0 or not noise_std > 0:
+                return None
+            filled = np.where(np.isfinite(data), data, 0.0)
+            return convolve(filled, k, normalize_kernel=False) / (noise_std * l2)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _finder_to_dataframe(tbl) -> pd.DataFrame:
+        """Normalize finder output to a common column schema.
+
+        DAOStarFinder reports per-axis roundness1/roundness2 and no
+        unified ``roundness``; downstream cleaning clips a single
+        ``roundness`` column, so the classical DAOFIND combination
+        (the sum) is synthesized here.
+        """
+        df = tbl.to_pandas()
+        if "roundness" not in df.columns:
+            if "roundness1" in df.columns and "roundness2" in df.columns:
+                df["roundness"] = df["roundness1"] + df["roundness2"]
+            elif "roundness1" in df.columns:
+                df["roundness"] = df["roundness1"]
+        return df
+
+    def _bright_psf_shape(
+        self, image: np.ndarray, df: pd.DataFrame, half: int, n_max: int = 25
+    ) -> Optional[Tuple[float, float, float]]:
+        """Estimate the stellar PSF size and elongation from bright
+        detections.
+
+        The matched-filter kernel only discriminates stars from defects
+        when its FWHM is near the true PSF; an undersized kernel gives
+        compact junk the best response and biases every downstream
+        median.  The brightest unsaturated detections are nearly always
+        real point sources - defects and noise excursions concentrate at
+        the detection threshold - so second moments on their cutouts
+        give a kernel estimate that is insensitive to a junk-dominated
+        source count.
+
+        Returns (major-axis FWHM px, minor/major ratio, major-axis
+        position angle in degrees CCW from +x), or None when too few
+        cutouts yield usable moments.
+        """
+        _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
+        _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
+        peaks = df["peak"].values.astype(float)
+        order = np.argsort(peaks)[::-1][:n_max]
+        xs = df[_xcol].values.astype(float)
+        ys = df[_ycol].values.astype(float)
+        fwhm_maj, ratios, thetas = [], [], []
+        for i in order:
+            if not np.isfinite(xs[i]) or not np.isfinite(ys[i]):
+                continue
+            cut = Cutout2D(
+                image, (xs[i], ys[i]), 2 * half, mode="partial",
+                fill_value=np.nan,
+            ).data
+            if not np.isfinite(cut).any():
+                continue
+            w = np.clip(cut - np.nanmedian(cut), 0.0, None)
+            w[~np.isfinite(w)] = 0.0
+            # Isophotal moments: without a floor the box's noise pixels
+            # carry as much weight as the star wings and the moments
+            # blow up toward the box scale, especially on faint
+            # sources.
+            w_max = float(w.max())
+            if w_max <= 0:
+                continue
+            w = np.where(w > 0.1 * w_max, w, 0.0)
+            w_tot = float(w.sum())
+            if w_tot <= 0:
+                continue
+            yy, xx = np.mgrid[0 : cut.shape[0], 0 : cut.shape[1]]
+            x0 = float((xx * w).sum() / w_tot)
+            y0 = float((yy * w).sum() / w_tot)
+            dx, dy = xx - x0, yy - y0
+            mxx = float((dx * dx * w).sum() / w_tot)
+            myy = float((dy * dy * w).sum() / w_tot)
+            mxy = float((dx * dy * w).sum() / w_tot)
+            lam = 0.5 * (mxx + myy)
+            disc = np.sqrt(max(0.0, 0.25 * (mxx - myy) ** 2 + mxy * mxy))
+            l1, l2 = lam + disc, lam - disc
+            if l1 <= 0 or l2 <= 0:
+                continue
+            fmaj = 2.354820045 * np.sqrt(l1)
+            # Moments from a source that fills the box are truncation-
+            # dominated (merged structure or bloom wings spilling past
+            # the edge) and read far too large.
+            if fmaj > half:
+                continue
+            fwhm_maj.append(fmaj)
+            ratios.append(np.sqrt(l2 / l1))
+            thetas.append(np.degrees(0.5 * np.arctan2(2 * mxy, mxx - myy)))
+        if len(fwhm_maj) < 3:
+            return None
+        return (
+            float(np.median(fwhm_maj)),
+            float(np.clip(np.median(ratios), 0.3, 1.0)),
+            float(np.median(thetas)),
+        )
 
     def create_circular_mask(
         self,
@@ -1053,24 +1257,24 @@ class Find_FWHM:
                 )
             else:
                 mean, med, _ = sigma_clipped_stats(image[~mask], sigma=3.0)
-                std = float(mad_std(image[~mask], ignore_nan=True))
+                std = biweight_sky_sigma(image, mask=mask)
                 bkg = np.full_like(image, med)
                 bkg_rms = np.full_like(image, std)
 
             # --- Direct run with provided fwhm and sigma ---
             if (fwhm is not None) and (sigma is not None):
+                finder_name = self._source_finder_name(src_cfg)
+                _det_params = self._adaptive_detection_params(fwhm, finder_name)
                 thr = sigma * std
-                _det_params = self._adaptive_detection_params(fwhm)
-                finder = IRAFStarFinder(
-                    fwhm=fwhm,
-                    threshold=thr,
-                    minsep_fwhm=1.0,
-                    exclude_border=True,
-                    peakmax=0.98 * saturate,
-                    sharplo=_det_params["sharplo"],
-                    sharphi=_det_params["sharphi"],
-                    roundlo=_det_params["roundlo"],
-                    roundhi=_det_params["roundhi"],
+                if finder_name == "dao":
+                    # Convolved noise excursions mimic stellar morphologies
+                    # under the matched filter, so DAOFIND needs ~4 sigma on
+                    # the convolved scale where IRAF needed 3 on raw pixels.
+                    # scale_threshold converts this raw-unit threshold.
+                    _dao_nsigma = float(src_cfg.get("dao_nsigma", 4.0))
+                    thr = max(sigma, _dao_nsigma) * std
+                finder = self._build_star_finder(
+                    finder_name, fwhm, thr, _det_params, saturate
                 )
                 tbl = finder(image - med, mask=mask)
                 if tbl is None or len(tbl) == 0:
@@ -1079,17 +1283,30 @@ class Find_FWHM:
                     )
                     return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
-                df = tbl.to_pandas()
+                df = self._finder_to_dataframe(tbl)
                 _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
                 _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
                 df["x_pix"] = df[_xcol]
                 df["y_pix"] = df[_ycol]
-                std_safe = np.maximum(std, 1e-12)
-                df["s2n"] = df["peak"] / std_safe
-                fwhm_list = []
-                half = int(max(default_scale, np.ceil(scale_multiplier * fwhm / 2)))
                 _xs = df["x_pix"].values.astype(float)
                 _ys = df["y_pix"].values.astype(float)
+                std_safe = np.maximum(std, 1e-12)
+                if finder_name == "dao":
+                    # Significance on the convolved detection image, not
+                    # raw peak/std (see auto path for why).
+                    _dao_sig = self._dao_significance_map(
+                        finder, image - med, float(std)
+                    )
+                    if _dao_sig is not None:
+                        _xi = np.clip(np.rint(_xs).astype(int), 0, nx - 1)
+                        _yi = np.clip(np.rint(_ys).astype(int), 0, ny - 1)
+                        df["s2n"] = _dao_sig[_yi, _xi]
+                    else:
+                        df["s2n"] = df["peak"] / std_safe
+                else:
+                    df["s2n"] = df["peak"] / std_safe
+                fwhm_list = []
+                half = int(max(default_scale, np.ceil(scale_multiplier * fwhm / 2)))
                 for i in range(len(df)):
                     cut = Cutout2D(
                         image,
@@ -1105,61 +1322,145 @@ class Find_FWHM:
                         fwhm_list.append(np.nan)
                 df["fwhm"] = np.array(fwhm_list, dtype=float)
 
+                # Same elite-subset estimate as the auto path: the
+                # near-threshold population is dominated by sub-stellar
+                # junk that drags a flat median low.
+                _est_lo = float(src_cfg.get("fwhm_est_band_lo", 0.5))
+                _est_hi = float(src_cfg.get("fwhm_est_band_hi", 2.0))
+                _est_s2n = float(src_cfg.get("fwhm_est_s2n_min", 8.0))
+                _elite = df[
+                    (df["s2n"] >= _est_s2n)
+                    & (df["fwhm"] >= _est_lo * fwhm)
+                    & (df["fwhm"] <= _est_hi * fwhm)
+                ]
+                _fwhm_src = _elite if len(_elite) >= 3 else df
                 fwhm_global = (
-                    np.nanmedian(df["fwhm"])
-                    if np.isfinite(df["fwhm"]).any()
+                    np.nanmedian(_fwhm_src["fwhm"])
+                    if np.isfinite(_fwhm_src["fwhm"]).any()
                     else float(fwhm)
                 )
                 scale_out = float(
                     max(default_scale, np.ceil(scale_multiplier * fwhm_global))
                 )
                 self.logger.info(
-                    f"Detected {len(df)} sources, FWHM ~ {fwhm_global:.3f} px"
+                    "Detected %d sources (%s), FWHM ~ %.3f px",
+                    len(df), finder_name, fwhm_global,
                 )
                 self.logger.info("Cutout scale = %.1f px", scale_out)
                 self.logger.info("Elapsed: %.3f s", time.time() - t0)
                 return float(fwhm_global), df.reset_index(drop=True), scale_out
 
             # --- Automatic detection and FWHM estimation ---
-            # Pre-smoothing (only needed on this path -- the direct run above
-            # operates on the unsmoothed image).
-            sigma_smooth = max(0.8, 0.42466 * fwhm_initial)
-            kernel = Gaussian2DKernel(
-                sigma_smooth, x_size=7, y_size=7, mode="oversample"
-            )
-            smooth = convolve(image - bkg, kernel, normalize_kernel=True)
-            # Smoothing suppresses the per-pixel noise by the kernel's L2 norm:
-            # std_smooth = std * sqrt(sum(kernel^2)).  Needed when comparing
-            # smoothed-image peaks against the detection S/N.
-            kernel_l2 = float(np.sqrt(np.sum(np.asarray(kernel.array, dtype=float) ** 2)))
-            std_smooth = float(std) * kernel_l2 if np.isfinite(kernel_l2) and kernel_l2 > 0 else float(std)
-
-            # Use 3.0 sigma to match SExtractor's default detection threshold.
-            # The old 5.0 sigma was too high, producing far fewer sources than
-            # SExtractor and making the pythonic fallback unreliable.
-            thr_img = detect_threshold(smooth, nsigma=3.0, mask=mask)
-            # photutils >=3.0 supports spatially varying 2D threshold arrays.
-            # Use the full 2D threshold image for better detection near chip gaps/gradients.
+            finder_name = self._source_finder_name(src_cfg)
             fwhm_fp = max(2.0, float(fwhm_initial))
-            _det_params = self._adaptive_detection_params(fwhm_fp)
-            finder = IRAFStarFinder(
-                fwhm=fwhm_fp,
-                threshold=thr_img,
-                minsep_fwhm=1.0,
-                roundlo=_det_params["roundlo"],
-                roundhi=_det_params["roundhi"],
-                sharplo=_det_params["sharplo"],
-                sharphi=_det_params["sharphi"],
-                exclude_border=True,
-                peakmax=0.98 * saturate,
-            )
-            tbl = finder(smooth, mask=mask)
-            if tbl is None or len(tbl) == 0:
+            kernel_ratio, kernel_theta = 1.0, 0.0
+            df = None
+            # The detection kernel is only matched to the data when
+            # fwhm_fp ~ the true PSF size.  An undersized kernel gives
+            # compact junk the best matched response, so the detection
+            # population - and every median derived from it - becomes
+            # defect-dominated.  After a first pass, re-estimate the
+            # kernel size (and, for DAO, ellipticity) from the brightest
+            # detections and re-detect when the guess was badly off.
+            for _det_pass in range(3):
+                # Pre-smoothing (only needed on this path -- the direct run
+                # above operates on the unsmoothed image).
+                sigma_smooth = max(0.8, 0.42466 * fwhm_fp)
+                kernel = Gaussian2DKernel(
+                    sigma_smooth, x_size=7, y_size=7, mode="oversample"
+                )
+                smooth = convolve(image - bkg, kernel, normalize_kernel=True)
+                # Smoothing suppresses the per-pixel noise by the kernel's
+                # L2 norm: std_smooth = std * sqrt(sum(kernel^2)).
+                # Needed when comparing smoothed-image peaks against the
+                # detection S/N.
+                kernel_l2 = float(
+                    np.sqrt(np.sum(np.asarray(kernel.array, dtype=float) ** 2))
+                )
+                std_smooth = (
+                    float(std) * kernel_l2
+                    if np.isfinite(kernel_l2) and kernel_l2 > 0
+                    else float(std)
+                )
+
+                # Use 3.0 sigma to match SExtractor's default detection
+                # threshold.  The old 5.0 sigma was too high, producing far
+                # fewer sources than SExtractor and making the pythonic
+                # fallback unreliable.
+                thr_img = detect_threshold(smooth, n_sigma=3.0, mask=mask)
+                # photutils >=3.0 supports spatially varying 2D threshold
+                # arrays.  Use the full 2D threshold image for better
+                # detection near chip gaps/gradients.
+                _det_params = self._adaptive_detection_params(
+                    fwhm_fp, finder_name
+                )
+                if finder_name == "dao":
+                    # DAO applies its own matched Gaussian kernel
+                    # internally, so it runs on the unsmoothed image.  The
+                    # threshold is the raw-image noise map;
+                    # scale_threshold rescales it onto the kernel-convolved
+                    # noise scale.  Convolved noise excursions mimic
+                    # stellar morphologies, so the canonical DAOFIND
+                    # detection level is ~4 sigma rather than the 3 sigma
+                    # used on the pre-smoothed image; a matched star at
+                    # raw S/N ~5 still passes because the convolution
+                    # boosts its significance by ~1/l2.
+                    _dao_nsigma = float(src_cfg.get("dao_nsigma", 4.0))
+                    thr_det = detect_threshold(
+                        image - bkg, n_sigma=_dao_nsigma, mask=mask
+                    )
+                    det_input = image - bkg
+                else:
+                    thr_det = thr_img
+                    det_input = smooth
+                finder = self._build_star_finder(
+                    finder_name, fwhm_fp, thr_det, _det_params, saturate,
+                    ratio=kernel_ratio, theta=kernel_theta,
+                )
+                tbl = finder(det_input, mask=mask)
+                if tbl is None or len(tbl) == 0:
+                    if _det_pass == 0 and fwhm_fp > 4.0:
+                        # An oversized matched kernel detects nothing;
+                        # retry at a smaller scale before giving up.
+                        fwhm_fp *= 0.5
+                        continue
+                    self.logger.warning("No sources in first pass")
+                    self.logger.info("Elapsed: %.3f s", time.time() - t0)
+                    return np.nan, pd.DataFrame(), float(max(scale, default_scale))
+
+                df = self._finder_to_dataframe(tbl)
+
+                if _det_pass < 2:
+                    # The moment box must cover a PSF much larger than
+                    # the current guess, or every usable bright star is
+                    # rejected as box-filling and the estimate is lost;
+                    # but an oversized box integrates bloom wings and
+                    # neighbors and inflates the moments instead.
+                    _shape = self._bright_psf_shape(
+                        image, df,
+                        half=int(np.clip(3 * fwhm_fp, 20, 25)),
+                    )
+                    if _shape is not None:
+                        _f_new, _r_new, _t_new = _shape
+                        if _f_new > 0 and not (
+                            0.75 <= _f_new / fwhm_fp <= 1.33
+                        ):
+                            self.logger.info(
+                                "Refining detection kernel: FWHM %.1f -> "
+                                "%.1f px, axis ratio %.2f",
+                                fwhm_fp, _f_new, _r_new,
+                            )
+                            fwhm_fp = float(_f_new)
+                            if finder_name == "dao":
+                                kernel_ratio = _r_new
+                                kernel_theta = _t_new
+                            continue
+                break
+
+            if df is None or len(df) == 0:
                 self.logger.warning("No sources in first pass")
                 self.logger.info("Elapsed: %.3f s", time.time() - t0)
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
-
-            df = tbl.to_pandas()
 
             # --- Cleaning: saturation and edge ---
             df = df[df["peak"] < 0.98 * saturate]
@@ -1225,6 +1526,15 @@ class Find_FWHM:
             _xs = df[_xcol].values.astype(float)
             _ys = df[_ycol].values.astype(float)
             _peaks = df["peak"].values.astype(float)
+            # For DAO, significance must be measured on the convolved
+            # image the finder detected on; the raw peak/std underestimates
+            # it ~3x and would wrongly reject nearly every detection.
+            _dao_signif = (
+                self._dao_significance_map(finder, det_input, float(std))
+                if finder_name == "dao"
+                else None
+            )
+            _s2n_r = max(1, int(round(0.3 * fwhm_fp)))
             for i in range(len(df)):
                 cut = Cutout2D(
                     image, (_xs[i], _ys[i]), 2 * half, mode="partial", fill_value=np.nan
@@ -1234,9 +1544,29 @@ class Find_FWHM:
                     fwhm_meas.append(float(np.mean(fit)))
                 else:
                     fwhm_meas.append(np.nan)
-                # Peak comes from the SMOOTHED image -> compare against the
-                # smoothed noise level (std * kernel L2 norm), not the raw std.
-                s2n_list.append(_peaks[i] / max(std_smooth, 1e-12))
+                if _dao_signif is not None:
+                    # Centroid can sit ~1 px off the convolved peak;
+                    # sample the local max within a small window.
+                    _px = int(np.clip(np.rint(_xs[i]), 0, nx - 1))
+                    _py = int(np.clip(np.rint(_ys[i]), 0, ny - 1))
+                    s2n_list.append(
+                        float(
+                            np.nanmax(
+                                _dao_signif[
+                                    max(0, _py - _s2n_r) : min(
+                                        ny, _py + _s2n_r + 1
+                                    ),
+                                    max(0, _px - _s2n_r) : min(
+                                        nx, _px + _s2n_r + 1
+                                    ),
+                                ]
+                            )
+                        )
+                    )
+                else:
+                    # IRAF peaks are measured on the smoothed image, so
+                    # compare against the smoothed noise scale.
+                    s2n_list.append(_peaks[i] / max(std_smooth, 1e-12))
             df["fwhm"] = np.asarray(fwhm_meas, dtype=float)
             df["s2n"] = np.asarray(s2n_list, dtype=float)
             df["x_pix"] = df[_xcol].astype(float)
@@ -1257,12 +1587,36 @@ class Find_FWHM:
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
             # --- Global FWHM and final cutout scale ---
-            fwhm_global = float(np.nanmedian(df["fwhm"]))
+            # The detection population near threshold is dominated by
+            # sub-stellar junk (convolved noise excursions, compact
+            # defects), which drags a flat median low.  Estimate the image
+            # FWHM from high-significance detections whose fitted size is
+            # consistent with the detection kernel, falling back to the
+            # full set when that subset is too sparse.
+            _est_lo = float(src_cfg.get("fwhm_est_band_lo", 0.5))
+            _est_hi = float(src_cfg.get("fwhm_est_band_hi", 2.0))
+            _est_s2n = float(src_cfg.get("fwhm_est_s2n_min", 8.0))
+            _elite = df[
+                (df["s2n"] >= _est_s2n)
+                & (df["fwhm"] >= _est_lo * fwhm_fp)
+                & (df["fwhm"] <= _est_hi * fwhm_fp)
+            ]
+            _fwhm_src = _elite if len(_elite) >= 3 else df
+            if len(_elite) >= 3 and len(_elite) < len(df):
+                self.logger.info(
+                    "FWHM estimate uses %d high-S/N kernel-consistent "
+                    "sources (s2n>=%.0f, fwhm within [%.1f, %.1f]x kernel) "
+                    "out of %d detections",
+                    len(_elite), _est_s2n, _est_lo, _est_hi, len(df),
+                )
+            fwhm_global = float(np.nanmedian(_fwhm_src["fwhm"]))
             # FWHM uncertainty: standard error of the median,
             # SE_median = 1.858 * MAD / sqrt(N) (same convention as the
             # zeropoint and aperture-correction errors). Captures star-to-star
             # scatter (PSF variation, fitting noise). N < 2 -> NaN.
-            _fwhm_finite = df["fwhm"].values[np.isfinite(df["fwhm"].values)]
+            _fwhm_finite = _fwhm_src["fwhm"].values[
+                np.isfinite(_fwhm_src["fwhm"].values)
+            ]
             _n_fwhm = len(_fwhm_finite)
             if _n_fwhm >= 2:
                 _fwhm_mad = float(np.nanmedian(np.abs(_fwhm_finite - fwhm_global)))
@@ -1276,7 +1630,7 @@ class Find_FWHM:
                 max(default_scale, np.ceil(scale_multiplier * fwhm_global))
             )
 
-            self.logger.info("Accepted sources: %s", len(df))
+            self.logger.info("Accepted sources: %s (finder=%s)", len(df), finder_name)
             self.logger.info(
                 "Image FWHM ~ %.3f +/- %.3f px (N=%d, SE of median)",
                 fwhm_global, fwhm_err if np.isfinite(fwhm_err) else float("nan"),
