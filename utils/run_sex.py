@@ -378,46 +378,6 @@ class SExtractorWrapper:
             f.write(conv_text.strip() + "\n")
         return conv_path
 
-    def _create_nnw_file(self, temp_dir: Path) -> Path:
-        """
-        Create a neural network weights file for SExtractor's star/galaxy classifier.
-
-        Args:
-            temp_dir (Path): Path to the temporary directory.
-
-        Returns:
-            Path: Path to the created neural network weights file.
-        """
-        nnw_text = """
-            NNW
-            # Neural Network Weights for the SExtractor star/galaxy classifier (V1.3)
-            # inputs: 9 for profile parameters + 1 for seeing.
-            # outputs: Stellarity index (0.0 to 1.0)
-            # Seeing FWHM range: from 0.025 to 5.5'' (images must have 1.5 < FWHM < 5 pixels)
-            # Optimized for Moffat profiles with 2<= beta <= 4.
-            3 10 10  1
-            -1.56604e+00 -2.48265e+00 -1.44564e+00 -1.24675e+00 -9.44913e-01 -5.22453e-01  4.61342e-02  8.31957e-01  2.15505e+00  2.64769e-01
-            3.03477e+00  2.69561e+00  3.16188e+00  3.34497e+00  3.51885e+00  3.65570e+00  3.74856e+00  3.84541e+00  4.22811e+00  3.27734e+00
-            -3.22480e-01 -2.12804e+00  6.50750e-01 -1.11242e+00 -1.40683e+00 -1.55944e+00 -1.84558e+00 -1.18946e-01  5.52395e-01 -4.36564e-01 -5.30052e+00
-            4.62594e-01 -3.29127e+00  1.10950e+00 -6.01857e-01  1.29492e-01  1.42290e+00  2.90741e+00  2.44058e+00 -9.19118e-01  8.42851e-01 -4.69824e+00
-            -2.57424e+00  8.96469e-01  8.34775e-01  2.18845e+00  2.46526e+00  8.60878e-02 -6.88080e-01 -1.33623e-02  9.30403e-02  1.64942e+00 -1.01231e+00
-            4.81041e+00  1.53747e+00 -1.12216e+00 -3.16008e+00 -1.67404e+00 -1.75767e+00 -1.29310e+00  5.59549e-01  8.08468e+00 -1.01592e-02 -7.54052e+00
-            1.01933e+01 -2.09484e+01 -1.07426e+00  9.87912e-01  6.05210e-01 -6.04535e-02 -5.87826e-01 -7.94117e-01 -4.89190e-01 -8.12710e-02 -2.07067e+01
-            -5.31793e+00  7.94240e+00 -4.64165e+00 -4.37436e+00 -1.55417e+00  7.54368e-01  1.09608e+00  1.45967e+00  1.62946e+00 -1.01301e+00  1.13514e-01
-            2.20336e-01  1.70056e+00 -5.20105e-01 -4.28330e-01  1.57258e-03 -3.36502e-01 -8.18568e-02 -7.16163e+00  8.23195e+00 -1.71561e-02 -1.13749e+01
-            3.75075e+00  7.25399e+00 -1.75325e+00 -2.68814e+00 -3.71128e+00 -4.62933e+00 -2.13747e+00 -1.89186e-01  1.29122e+00 -7.49380e-01  6.71712e-01
-            -8.41923e-01  4.64997e+00  5.65808e-01 -3.08277e-01 -1.01687e+00  1.73127e-01 -8.92130e-01  1.89044e+00 -2.75543e-01 -7.72828e-01  5.36745e-01
-            -3.65598e+00  7.56997e+00 -3.76373e+00 -1.74542e+00 -1.37540e-01 -5.55400e-01 -1.59195e-01  1.27910e-01  1.91906e+00  1.42119e+00 -4.35502e+00
-            -1.70059e+00 -3.65695e+00  1.22367e+00 -5.74367e-01 -3.29571e+00  2.46316e+00  5.22353e+00  2.42038e+00  1.22919e+00 -9.22250e-01 -2.32028e+00
-            0.00000e+00
-            1.00000e+00
-        """
-        nnw_path = temp_dir / "default.nnw"
-        cleaned = "\n".join(line.strip() for line in nnw_text.splitlines() if line.strip())
-        with open(nnw_path, "w") as f:
-            f.write(cleaned + "\n")
-        return nnw_path
-
     def _create_param_file(self, temp_dir: Path, params: list) -> Path:
         """
         Create a parameter file for SExtractor.
@@ -562,6 +522,75 @@ class SExtractorWrapper:
             sharp_lo, sharp_hi = (0.1, 1.2) if relaxed_cuts else (0.2, 1.0)
             sharp_vals = pd.to_numeric(fwhm_subset["SHARPNESS"], errors="coerce").fillna(1.0)
             fwhm_subset = fwhm_subset[(sharp_vals > sharp_lo) & (sharp_vals < sharp_hi)]
+
+        # Profile-concentration cut: extended sources (galaxies, blended
+        # defects) have a half-light radius large for their FWHM and pull
+        # the clipped median high.  A point source sits at ~0.5-0.7x; the
+        # bound stays generous so only obvious non-pointlike rows go.
+        # Keep-floor of 3: an unusual catalog never starves the estimate.
+        if "FLUX_RADIUS" in fwhm_subset.columns:
+            _fr_vals = pd.to_numeric(fwhm_subset["FLUX_RADIUS"], errors="coerce")
+            _fw_vals = pd.to_numeric(fwhm_subset[fwhm_col], errors="coerce")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _prof = _fr_vals / _fw_vals.where(_fw_vals > 0)
+            _prof_max = float(
+                (self.config.get("photometry") or {}).get(
+                    "fwhm_flux_radius_max_frac", 1.3
+                )
+            )
+            _prof_keep = (_prof <= _prof_max) | _prof.isna()
+            if _prof_max <= 0:
+                _prof_keep = pd.Series(True, index=fwhm_subset.index)
+            if int(_prof_keep.sum()) >= 3:
+                n_prof = int((~_prof_keep).sum())
+                if n_prof > 0:
+                    logger.debug(
+                        "FWHM estimate: rejected %d extended sources "
+                        "(FLUX_RADIUS/FWHM > %.2f)",
+                        n_prof, _prof_max,
+                    )
+                fwhm_subset = fwhm_subset[_prof_keep]
+
+        # Stellar concentration prefilter: a point source concentrates
+        # ~1/(2 pi sigma^2) of its flux in the peak pixel; compact
+        # defects are far peakier and carry high S/N, so without this
+        # cut they can dominate the FWHM median on junk-rich fields.
+        _pk_col = next(
+            (c for c in ("FLUX_MAX", "peak_flux") if c in fwhm_subset.columns),
+            None,
+        )
+        _ap_col = next(
+            (
+                c
+                for c in ("FLUX_AUTO", "FLUX_APER", "flux_AP")
+                if c in fwhm_subset.columns
+            ),
+            None,
+        )
+        _pk_frac = float(
+            (self.config.get("photometry") or {}).get(
+                "fwhm_peak_concentration_max", 3.0
+            )
+        )
+        if _pk_col is not None and _ap_col is not None and _pk_frac > 0:
+            _pk_v = pd.to_numeric(fwhm_subset[_pk_col], errors="coerce")
+            _ap_v = pd.to_numeric(fwhm_subset[_ap_col], errors="coerce")
+            _fw_v = pd.to_numeric(fwhm_subset[fwhm_col], errors="coerce")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _pk_r = _pk_v / _ap_v.where(_ap_v > 0)
+            _sg = float(np.nanmedian(_fw_v[_fw_v > 0])) / 2.355
+            if np.isfinite(_sg) and _sg > 0:
+                _pk_lim = _pk_frac / (2.0 * np.pi * _sg**2)
+                _pk_keep = (_pk_r <= _pk_lim) | _pk_r.isna()
+                if int(_pk_keep.sum()) >= 3:
+                    n_pk = int((~_pk_keep).sum())
+                    if n_pk > 0:
+                        logger.debug(
+                            "FWHM estimate: rejected %d peaky non-stellar "
+                            "sources (peak/flux > %.3f)",
+                            n_pk, _pk_lim,
+                        )
+                    fwhm_subset = fwhm_subset[_pk_keep]
 
         # High-SNR preference
         snr_col = "SNR_WIN" if "SNR_WIN" in fwhm_subset.columns else (
@@ -757,17 +786,85 @@ class SExtractorWrapper:
                         f"sources (FLUX_RADIUS < {_fr_min:.2f} px, median={_fr_med:.2f})"
                     )
 
+        # --- Step 3e: Extended-profile cut (galaxy rejection before FWHM) ---
+        # A point source's half-light radius is ~0.5-0.7x its FWHM;
+        # galaxies and extended defects run systematically larger and
+        # would bias the FWHM median high.  Applied before FWHM
+        # estimation for the same reason as the sharpness cut above.
+        # This replaces stellarity (CLASS_STAR), which is uncalibrated
+        # on some cameras.
+        if "flux_radius" in sources.columns and len(sources) > 0:
+            _fr_hi = pd.to_numeric(sources["flux_radius"], errors="coerce")
+            _fw_hi = pd.to_numeric(sources["fwhm"], errors="coerce")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _prof_hi = _fr_hi / _fw_hi.where(_fw_hi > 0)
+            _prof_max_hi = float(
+                (self.config.get("photometry") or {}).get(
+                    "fwhm_flux_radius_max_frac", 1.3
+                )
+            )
+            _prof_bad_hi = (_prof_hi > _prof_max_hi).fillna(False)
+            if _prof_max_hi <= 0:
+                _prof_bad_hi = pd.Series(False, index=sources.index)
+            n_prof_hi = int(_prof_bad_hi.sum())
+            if n_prof_hi > 0 and int((~_prof_bad_hi).sum()) >= 5:
+                sources = sources[~_prof_bad_hi].copy()
+                _note_cut("extended", n_prof_hi)
+                logger.debug(
+                    f"Pre-FWHM profile cut: rejected {n_prof_hi} extended "
+                    f"sources (FLUX_RADIUS/FWHM > {_prof_max_hi:.2f})"
+                )
+
         # --- Step 4: Estimate FWHM if needed ---
         if fwhm_est is None and len(sources) > 0:
+            # Stellar concentration prefilter: a point source concentrates
+            # only ~1/(2 pi sigma^2) of its flux in the peak pixel, so
+            # peak/aperture-flux is small for real seeing (~0.01-0.05).
+            # Compact defects (hot pixels, CR spikes, noise blobs) are far
+            # peakier AND carry high S/N, so without this cut they dominate
+            # the FWHM median on junk-rich fields.
+            fwhm_sources = sources
+            _pk_max_frac = float(
+                (self.config.get("photometry") or {}).get(
+                    "fwhm_peak_concentration_max", 3.0
+                )
+            )
+            if (
+                _pk_max_frac > 0
+                and "peak_flux" in sources.columns
+                and "flux_AP" in sources.columns
+                and "fwhm" in sources.columns
+            ):
+                _pk = pd.to_numeric(sources["peak_flux"], errors="coerce")
+                _ap = pd.to_numeric(sources["flux_AP"], errors="coerce")
+                _fw = pd.to_numeric(sources["fwhm"], errors="coerce")
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    _pk_ratio = _pk / _ap.where(_ap > 0)
+                _sig0 = float(np.nanmedian(_fw[_fw > 0])) / 2.355
+                if np.isfinite(_sig0) and _sig0 > 0:
+                    _pk_lim = _pk_max_frac / (2.0 * np.pi * _sig0**2)
+                    _pk_ok = (_pk_ratio <= _pk_lim) | _pk_ratio.isna()
+                    if int(_pk_ok.sum()) >= 5:
+                        n_pk = int((~_pk_ok).sum())
+                        if n_pk > 0:
+                            _note_cut("peaky", n_pk)
+                            logger.debug(
+                                "Pre-FWHM concentration cut: rejected %d "
+                                "peaky non-stellar sources (peak/flux > "
+                                "%.3f)",
+                                n_pk, _pk_lim,
+                            )
+                        fwhm_sources = sources[_pk_ok]
+
             # Use only high-S/N sources for FWHM estimation to avoid bias
             # from faint sources where SExtractor underestimates FWHM_IMAGE
             # (truncated profiles at low S/N produce artificially small FWHM).
             fwhm_snr_min = 10.0
-            if "snr" in sources.columns:
-                high_snr = sources[sources["snr"] >= fwhm_snr_min]
+            if "snr" in fwhm_sources.columns:
+                high_snr = fwhm_sources[fwhm_sources["snr"] >= fwhm_snr_min]
             else:
-                high_snr = sources
-            fwhm_sources = high_snr if len(high_snr) >= 5 else sources
+                high_snr = fwhm_sources
+            fwhm_sources = high_snr if len(high_snr) >= 5 else fwhm_sources
             fwhm_est = self.calculate_robust_fwhm(fwhm_sources["fwhm"].values)
             fwhm_std = np.nanstd(fwhm_sources["fwhm"].values)
             logger.log(
@@ -1220,7 +1317,6 @@ class SExtractorWrapper:
                 if use_filt
                 else None
             )
-            nnw_path = self._create_nnw_file(temp_dir)
 
             # SExtractor parameters
             params = [
@@ -1232,7 +1328,6 @@ class SExtractorWrapper:
                 "ELLIPTICITY",
                 "SNR_WIN",
                 "FLAGS",
-                "CLASS_STAR",
                 "FLUX_MAX",
                 "A_IMAGE",
                 "B_IMAGE",
@@ -1274,7 +1369,6 @@ class SExtractorWrapper:
                 "SEEING_FWHM": str(seeing_fwhm),
                 "PHOT_APERTURES": str(phot_apertures),
                 "FILTER": "Y" if use_filt else "N",
-                "STARNNW_NAME": str(nnw_path),
                 "CLEAN": clean,
                 "CLEAN_PARAM": "1.0",
                 "PHOT_AUTOPARAMS": "2.5,3.5",
@@ -1494,7 +1588,6 @@ class SExtractorWrapper:
                 "roundness",
                 "snr",
                 "flags",
-                "class_star",
                 "peak_flux",
                 "a",
                 "b",
