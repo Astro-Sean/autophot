@@ -257,6 +257,33 @@ def _ranked_keep_mask(df, values, valid, keep_n, keep_largest):
     return df.index.isin(keep_idx) | np.asarray(~valid)
 
 
+def _header_numeric_value(cfg_value, header):
+    """
+    Resolve a telescope.yml keyword entry to a numeric value, or None.
+
+    The entry is either a FITS keyword name ('RDNOISE') or a numeric literal
+    ('8.2' / 8.2) - check.py accepts both at the confirmation prompts. Returns
+    None when there is nothing usable: unknown keyword, non-numeric literal,
+    or a header value that is not a number (MaxIm writes junk strings into
+    RDNOISE/SATURATE on some cameras).
+    """
+    if cfg_value in (None, "", "not_given_by_user"):
+        return None
+    if isinstance(cfg_value, (int, float)) and not isinstance(cfg_value, bool):
+        return float(cfg_value)
+    key = str(cfg_value).strip()
+    raw = header.get(key) if key else None
+    if raw is None:
+        try:
+            return float(key)  # numeric literal written as a string
+        except ValueError:
+            return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffer_pixels=10):
     """
     Trim NaN boundary regions; expand bounds if needed so the target stays in frame.
@@ -1231,14 +1258,31 @@ def run_photometry():
             header["saturate"] = SATURATE_FITS_FALLBACK
 
         #  Handle Read Noise and Airmass (telescope.yml may use not_given_by_user)
+        # MaxIm and similar writers store junk strings in numeric metadata
+        # keywords; coerce here so a string never reaches numeric comparisons.
         rn_key = telescope_config.get("readnoise", "RDNOISE")
-        readnoise = (
-            header.get(rn_key, 0) if rn_key and rn_key != "not_given_by_user" else 0
-        )
+        readnoise = _header_numeric_value(rn_key, header)
+        if readnoise is None:
+            if rn_key not in (None, "", "not_given_by_user") and str(rn_key) in header:
+                logging.warning(
+                    f"Read-noise keyword {rn_key} has invalid value "
+                    f"'{header[str(rn_key)]}' (not a number); using 0."
+                )
+            readnoise = 0.0
+
         am_key = telescope_config.get("airmass", "AIRMASS")
-        airmass = (
-            header.get(am_key, 1) if am_key and am_key != "not_given_by_user" else 1
-        )
+        airmass = _header_numeric_value(am_key, header)
+        if airmass is None or airmass <= 0:
+            if (
+                airmass is None
+                and am_key not in (None, "", "not_given_by_user")
+                and str(am_key) in header
+            ):
+                logging.warning(
+                    f"Airmass keyword {am_key} has invalid value "
+                    f"'{header[str(am_key)]}' (not a number); using 1."
+                )
+            airmass = 1.0
 
         input_yaml["read_noise"] = readnoise
         input_yaml["airmass"] = airmass
