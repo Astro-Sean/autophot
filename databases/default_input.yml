@@ -442,6 +442,11 @@ default_input:
 
   source_detection:
     # Also multiplies measured FWHM to set runtime ``scale`` (PSF cutouts, limits, plots). Legacy code ignored this key and used 4.0.
+    finder: dao # str --- Point-source finder for image-FWHM measurement: 'dao' (DAOStarFinder; Gaussian matched filter on the unsmoothed image, best faint-star sensitivity for well-sampled PSFs) or 'iraf' (IRAFStarFinder; connected-pixel moments on the pre-smoothed image, more tolerant of undersampled/non-Gaussian profiles). Both paths feed the same sharpness/roundness cleaning and per-source Gaussian FWHM fits, so the choice mainly shifts which marginal detections enter the FWHM median.
+    dao_nsigma: 4.0 # float --- Detection significance (sigma) for the DAO finder, measured on the kernel-convolved noise scale. DAOFIND convention is ~4 sigma because convolution turns noise spikes into stellar-looking blobs; matched stars still gain sensitivity (a raw S/N ~5 star passes). Only used when finder='dao'.
+    fwhm_est_s2n_min: 8.0 # float --- Minimum detection S/N for the subset used to estimate the image FWHM. The near-threshold detection population is dominated by sub-stellar junk (noise excursions, compact defects) which drags a flat median low, so the estimate uses only high-S/N, kernel-consistent sources (falls back to all detections if <3 qualify).
+    fwhm_est_band_lo: 0.5 # float --- Lower bound of the FWHM-consistency band (x detection-kernel FWHM) for the FWHM-estimate subset.
+    fwhm_est_band_hi: 2.0 # float --- Upper bound of the FWHM-consistency band (x detection-kernel FWHM) for the FWHM-estimate subset.
     scale_multipler: 3 # float --- FWHM->scale factor (see utils/run_sex.scale_multiplier_from_config).
     scale_min_px: 11 # int --- Minimum allowed runtime `scale` (pixels) after FWHM-based scaling/clamping.
     scale_max_px: 300 # int --- Maximum allowed runtime `scale` (pixels) after FWHM-based scaling/clamping.
