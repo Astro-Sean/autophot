@@ -1661,121 +1661,125 @@ class AutomatedPhotometry:
 
             default_input["catalog"] = catalog_cfg
 
-            if os.path.exists(curve_catalog_csv):
-                _log(
-                    f"Using existing Gaia curve-map catalog: {curve_catalog_csv} "
-                    "(skipping rebuild)."
-                )
-            else:
-                target_ra = default_input.get("target_ra", None)
-                target_dec = default_input.get("target_dec", None)
-                if target_ra is None or target_dec is None:
-                    # If coordinates are not set explicitly, try TNS lookup
-                    # using target_name before failing curve-map catalog build.
-                    # Create a temporary Prepare instance for TNS lookup
-                    try:
-                        temp_prepare = Prepare(default_input=default_input)
-                        tns_coords = temp_prepare.check_tns()
-                        default_input.update(
-                            {
-                                "target_ra": tns_coords["radeg"],
-                                "target_dec": tns_coords["decdeg"],
-                                "name_prefix": tns_coords.get("name_prefix"),
-                                "objname": tns_coords.get("objname"),
-                            }
-                        )
-                        target_ra = default_input.get("target_ra", None)
-                        target_dec = default_input.get("target_dec", None)
-                        _log(
-                            "Resolved target coordinates from TNS for gaia_custom build: "
-                            f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}"
-                        )
-                    except Exception as e:
-                        _log(f"TNS lookup failed: {e}")
-                        pass
-                if target_ra is None or target_dec is None:
-                    raise ValueError(
-                        "catalog.use_catalog requests 'gaia_custom', but target_ra/target_dec are missing. "
-                        "Please set both coordinates in degrees, or provide target_name "
-                        "with working TNS credentials or a SIMBAD-resolvable name."
+            target_ra = default_input.get("target_ra", None)
+            target_dec = default_input.get("target_dec", None)
+            if target_ra is None or target_dec is None:
+                # If coordinates are not set explicitly, try TNS lookup
+                # using target_name before failing curve-map catalog build.
+                # Create a temporary Prepare instance for TNS lookup
+                try:
+                    temp_prepare = Prepare(default_input=default_input)
+                    tns_coords = temp_prepare.check_tns()
+                    default_input.update(
+                        {
+                            "target_ra": tns_coords["radeg"],
+                            "target_dec": tns_coords["decdeg"],
+                            "name_prefix": tns_coords.get("name_prefix"),
+                            "objname": tns_coords.get("objname"),
+                        }
                     )
+                    target_ra = default_input.get("target_ra", None)
+                    target_dec = default_input.get("target_dec", None)
+                    _log(
+                        "Resolved target coordinates from TNS for gaia_custom build: "
+                        f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}"
+                    )
+                except Exception as e:
+                    _log(f"TNS lookup failed: {e}")
+                    pass
+            if target_ra is None or target_dec is None:
+                raise ValueError(
+                    "catalog.use_catalog requests 'gaia_custom', but target_ra/target_dec are missing. "
+                    "Please set both coordinates in degrees, or provide target_name "
+                    "with working TNS credentials or a SIMBAD-resolvable name."
+                )
 
-                radius_deg = float(
-                    catalog_cfg.get(
-                        "gaia_xp_radius_deg",
-                        catalog_cfg.get("catalog_radius", 0.25),
-                    )
+            radius_deg = float(
+                catalog_cfg.get(
+                    "gaia_xp_radius_deg",
+                    catalog_cfg.get("catalog_radius", 0.25),
                 )
-                max_sources = int(
-                    catalog_cfg.get(
-                        "gaia_curve_map_max_sources",
-                        catalog_cfg.get("gaia_xp_max_sources", 100),
-                    )
+            )
+            max_sources = int(
+                catalog_cfg.get(
+                    "gaia_curve_map_max_sources",
+                    catalog_cfg.get("gaia_xp_max_sources", 100),
                 )
-                curve_order = str(
-                    catalog_cfg.get(
-                        "gaia_curve_map_order_by",
-                        catalog_cfg.get("gaia_xp_order_by", "distance"),
-                    )
-                ).strip().lower()
-                svo_curve_map = catalog_cfg.get("curve_map_svo", None)
+            )
+            curve_order = str(
+                catalog_cfg.get(
+                    "gaia_curve_map_order_by",
+                    catalog_cfg.get("gaia_xp_order_by", "distance"),
+                )
+            ).strip().lower()
+            svo_curve_map = catalog_cfg.get("curve_map_svo", None)
 
-                _log(
-                    log_step("Gaia custom catalog (gaia_custom) curve map")
-                )
-                _log(
-                    f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}, "
-                    f"radius={radius_deg:.4f} deg, max_sources={max_sources}, "
-                    f"order_by={curve_order}, bands={sorted(required_bands) if required_bands else 'curve_map keys'}"
-                )
-                from autophot_gaia_curves import build_custom_catalog
+            _log(log_step("Gaia custom catalog (gaia_custom) curve map"))
+            _log(
+                f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}, "
+                f"radius={radius_deg:.4f} deg, max_sources={max_sources}, "
+                f"order_by={curve_order}, bands={sorted(required_bands) if required_bands else 'curve_map keys'}"
+            )
+            from autophot_gaia_curves import build_custom_catalog
 
-                build_custom_catalog(
-                    ra_deg=float(target_ra),
-                    dec_deg=float(target_dec),
-                    radius_deg=radius_deg,
-                    max_sources=max_sources,
-                    curves={str(k): str(v) for k, v in curve_map.items()},
-                    out_csv=curve_catalog_csv,
-                    svo_filters=(
-                        {str(k): str(v) for k, v in svo_curve_map.items()}
-                        if isinstance(svo_curve_map, dict) and len(svo_curve_map) > 0
-                        else None
-                    ),
-                    gaia_query_pause_before_sec=float(
-                        catalog_cfg.get("gaia_archive_query_pause_before_sec", 0.25)
-                    ),
-                    gaia_query_pause_after_sec=float(
-                        catalog_cfg.get("gaia_archive_query_pause_after_sec", 0.25)
-                    ),
-                    gaia_xp_batch_size=int(catalog_cfg.get("gaia_xp_batch_size", 200)),
-                    gaia_xp_batch_pause_sec=float(
-                        catalog_cfg.get("gaia_xp_batch_pause_sec", 0.5)
-                    ),
-                    gaia_archive_max_retries=int(
-                        catalog_cfg.get("gaia_archive_max_retries", 3)
-                    ),
-                    gaia_archive_retry_base_delay_sec=float(
-                        catalog_cfg.get("gaia_archive_retry_base_delay_sec", 2.0)
-                    ),
-                    gaia_xp_order_by=curve_order,
-                    gaia_xp_show_progress=bool(
-                        catalog_cfg.get("gaia_xp_show_progress", False)
-                    ),
-                    gaia_nearest_prefetch_factor=int(
-                        catalog_cfg.get("gaia_nearest_prefetch_factor", 50)
-                    ),
-                    gaia_nearest_prefetch_min=int(
-                        catalog_cfg.get("gaia_nearest_prefetch_min", 200)
-                    ),
-                    gaia_nearest_prefetch_max=int(
-                        catalog_cfg.get("gaia_nearest_prefetch_max", 10000)
-                    ),
-                )
-                logging.getLogger(__name__).debug(
-                    "Gaia curve-map catalog written: %s",
-                    curve_catalog_csv,
-                )
+            # The builder decides whether the on-disk catalog can be reused;
+            # a cached file with fewer rows than gaia_xp_min_sources or a
+            # narrower query cone is rebuilt automatically.
+            build_custom_catalog(
+                ra_deg=float(target_ra),
+                dec_deg=float(target_dec),
+                radius_deg=radius_deg,
+                max_sources=max_sources,
+                curves={str(k): str(v) for k, v in curve_map.items()},
+                out_csv=curve_catalog_csv,
+                svo_filters=(
+                    {str(k): str(v) for k, v in svo_curve_map.items()}
+                    if isinstance(svo_curve_map, dict) and len(svo_curve_map) > 0
+                    else None
+                ),
+                gaia_query_pause_before_sec=float(
+                    catalog_cfg.get("gaia_archive_query_pause_before_sec", 0.25)
+                ),
+                gaia_query_pause_after_sec=float(
+                    catalog_cfg.get("gaia_archive_query_pause_after_sec", 0.25)
+                ),
+                gaia_xp_batch_size=int(catalog_cfg.get("gaia_xp_batch_size", 200)),
+                gaia_xp_batch_pause_sec=float(
+                    catalog_cfg.get("gaia_xp_batch_pause_sec", 0.5)
+                ),
+                gaia_archive_max_retries=int(
+                    catalog_cfg.get("gaia_archive_max_retries", 3)
+                ),
+                gaia_archive_retry_base_delay_sec=float(
+                    catalog_cfg.get("gaia_archive_retry_base_delay_sec", 2.0)
+                ),
+                gaia_xp_order_by=curve_order,
+                gaia_xp_show_progress=bool(
+                    catalog_cfg.get("gaia_xp_show_progress", False)
+                ),
+                gaia_nearest_prefetch_factor=int(
+                    catalog_cfg.get("gaia_nearest_prefetch_factor", 50)
+                ),
+                gaia_nearest_prefetch_min=int(
+                    catalog_cfg.get("gaia_nearest_prefetch_min", 200)
+                ),
+                gaia_nearest_prefetch_max=int(
+                    catalog_cfg.get("gaia_nearest_prefetch_max", 10000)
+                ),
+                gaia_xp_min_sources=int(
+                    catalog_cfg.get("gaia_xp_min_sources", 25)
+                ),
+                gaia_xp_max_radius_deg=float(
+                    catalog_cfg.get("gaia_xp_max_radius_deg", 1.0)
+                ),
+                gaia_xp_grow_factor=float(
+                    catalog_cfg.get("gaia_xp_grow_factor", 1.5)
+                ),
+            )
+            logging.getLogger(__name__).debug(
+                "Gaia curve-map catalog written: %s",
+                curve_catalog_csv,
+            )
 
         # Initialise preparation helper
         prepare_db = Prepare(default_input=default_input)
@@ -2444,6 +2448,7 @@ class AutomatedPhotometry:
                         # optional nicety - fall back to plain iteration and
                         # the [i/N] log lines if it is not installed.
                         file_iter = file_list
+                        _using_tqdm = False
                         if len(file_list) > 1:
                             try:
                                 from tqdm import tqdm
@@ -2456,7 +2461,14 @@ class AutomatedPhotometry:
                                     unit="file",
                                     total=len(file_list),
                                 )
+                                _using_tqdm = True
                         for file in file_iter:
+                            # tqdm redraws its bar on the cursor's current
+                            # line; the child process inherits stdout, so a
+                            # newline here keeps its first output off the
+                            # bar line.
+                            if _using_tqdm:
+                                print()
                             try:
                                 fname, rc = _run_main_subprocess(
                                     python_executable,
@@ -2481,6 +2493,8 @@ class AutomatedPhotometry:
                                 _log(
                                     f"[{counter + 1}/{len(file_list)}] [ERROR] Problem with file: {file}: {e} | {tb}"
                                 )
+                            if _using_tqdm:
+                                print()
                         if len(file_list) > 1:
                             _done_msg = f"Done: {counter}/{len(file_list)} images processed"
                             _log(border_msg(_done_msg) if border_msg else _done_msg)

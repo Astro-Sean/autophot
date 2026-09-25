@@ -383,6 +383,10 @@ default_input:
     curve_map_svo: null # dict[str,str]|null --- Optional band->SVO filter-ID map to fetch curves. Example: `{"g":"SDSS/SDSS.g","r":"SDSS/SDSS.r","i":"SDSS/SDSS.i"}`.
     catalog_radius: 0.25 # float --- Search radius (degrees) around target for catalog query.
     gaia_xp_radius_deg: 0.1667 # float --- Search radius (degrees) for Gaia XP query (if used).
+    # Sparse fields may hold too few XP-spectra sources inside gaia_xp_radius_deg; the cone is then grown by gaia_xp_grow_factor until gaia_xp_min_sources are found or gaia_xp_max_radius_deg is reached. Set gaia_xp_min_sources <= 0 (or the cap <= radius) to disable.
+    gaia_xp_min_sources: 25 # int --- Desired minimum XP-spectra sources; the cone grows when a query returns fewer.
+    gaia_xp_max_radius_deg: 1.0 # float --- Hard cap (degrees) on cone growth.
+    gaia_xp_grow_factor: 1.5 # float --- Radius multiplier per retry while under gaia_xp_min_sources.
     gaia_xp_max_sources: 500 # int --- Max Gaia sources for XP spectra/synthetic photometry (speed vs completeness).
     gaia_xp_order_by: brightness # str --- `brightness` (SQL order) or `distance` (prefetch + Python sort by on-sky sep; Gaia ADQL has no ORDER BY distance).
     gaia_xp_show_progress: False # bool --- tqdm progress for GaiaXPy batched calibrate/generate.

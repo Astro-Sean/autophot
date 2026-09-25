@@ -500,3 +500,153 @@ def gaia_xp_source_query(
       AND phot_g_mean_mag IS NOT NULL
     ORDER BY phot_g_mean_mag
     """
+
+
+def gaia_cone_count(
+    ra_deg: float,
+    dec_deg: float,
+    radius_deg: float,
+    *,
+    xp_only: bool = False,
+    max_retries: int = 3,
+    retry_base_delay_sec: float = 2.0,
+    logger: Optional[logging.Logger] = None,
+) -> Optional[int]:
+    """COUNT(*) of Gaia DR3 sources in a cone.
+
+    With ``xp_only=True`` counts only sources carrying XP continuous
+    spectra (the subset GaiaXPy can synthesize photometry from).
+    Returns None when the count query fails -- diagnostics must not
+    break the catalog build.
+    """
+    xp_clause = "has_xp_continuous = 'True' AND " if xp_only else ""
+    query = f"""
+    SELECT COUNT(*) AS n
+    FROM gaiadr3.gaia_source AS gs
+    WHERE {xp_clause}CONTAINS(
+            POINT('ICRS', gs.ra, gs.dec),
+            CIRCLE('ICRS', {ra_deg}, {dec_deg}, {radius_deg})
+          ) = 1
+    """
+    try:
+        df = launch_gaia_adql_to_pandas(
+            query,
+            max_retries=max_retries,
+            retry_base_delay_sec=retry_base_delay_sec,
+            logger=logger,
+            op_name="Gaia ADQL (cone count)",
+        )
+        if df is None or len(df) == 0:
+            return None
+        return int(df.iloc[0]["n"])
+    except Exception:
+        return None
+
+
+def query_gaia_xp_cone_growing(
+    ra_deg: float,
+    dec_deg: float,
+    radius_deg: float,
+    sql_top_n: int,
+    *,
+    include_bp_rp: bool = True,
+    min_sources: int = 0,
+    max_radius_deg: Optional[float] = None,
+    grow_factor: float = 1.5,
+    pause_before_sec: float = 0.25,
+    pause_after_sec: float = 0.25,
+    max_retries: int = 3,
+    retry_base_delay_sec: float = 2.0,
+    logger: Optional[logging.Logger] = None,
+    op_name: str = "Gaia ADQL (XP sources)",
+) -> Tuple[pd.DataFrame, float]:
+    """
+    Query the XP-source cone, enlarging the radius when too few rows return.
+
+    XP spectra exist only for the brighter Gaia subset, so sparse fields can
+    leave an unusably small catalog at the requested radius. While the count
+    stays below ``min_sources`` the cone is grown by ``grow_factor`` up to
+    ``max_radius_deg``. Growth is disabled when ``min_sources <= 0``,
+    ``grow_factor <= 1``, or ``max_radius_deg <= radius_deg``.
+
+    Returns ``(rows, used_radius_deg)``.
+    """
+    used_radius = float(radius_deg)
+    cap = used_radius if max_radius_deg is None else float(max_radius_deg)
+    cap = max(cap, used_radius)
+    needed = max(0, int(min_sources))
+    factor = float(grow_factor)
+
+    df = pd.DataFrame()
+    # The loop converges because factor > 1 drives used_radius to cap.
+    for _ in range(20):
+        query = gaia_xp_source_query(
+            ra_deg,
+            dec_deg,
+            used_radius,
+            sql_top_n,
+            include_bp_rp=include_bp_rp,
+        )
+        df = launch_gaia_adql_to_pandas(
+            query,
+            pause_before_sec=pause_before_sec,
+            pause_after_sec=pause_after_sec,
+            max_retries=max_retries,
+            retry_base_delay_sec=retry_base_delay_sec,
+            logger=logger,
+            op_name=op_name,
+        )
+        n_rows = len(df)
+        if n_rows >= needed or needed <= 0 or used_radius >= cap or factor <= 1.0:
+            break
+        new_radius = min(used_radius * factor, cap)
+        if new_radius <= used_radius:
+            break
+        if logger is not None:
+            logger.info(
+                "Only %d Gaia XP-spectra sources within %.4f deg; expanding the cone to %.4f deg (cap %.4f deg).",
+                n_rows,
+                used_radius,
+                new_radius,
+                cap,
+            )
+        used_radius = new_radius
+
+    if used_radius > float(radius_deg) and logger is not None:
+        logger.info(
+            "Gaia XP cone expanded %.4f -> %.4f deg; %d sources available.",
+            float(radius_deg),
+            used_radius,
+            len(df),
+        )
+    if needed > 0 and len(df) < needed and logger is not None:
+        # Report the usable fraction explicitly: a sparse XP catalog is
+        # almost always the has_xp_continuous gate (~5-15% of DR3 carry
+        # XP spectra, biased bright), not the cone size -- DS9 shows the
+        # full Gaia population.
+        _n_all = gaia_cone_count(
+            ra_deg,
+            dec_deg,
+            used_radius,
+            xp_only=False,
+            max_retries=max_retries,
+            retry_base_delay_sec=retry_base_delay_sec,
+            logger=logger,
+        )
+        _frac_msg = (
+            f"of {_n_all} total Gaia sources in the cone, only {len(df)} "
+            f"carry XP spectra"
+            if _n_all is not None
+            else f"only {len(df)} sources carry XP spectra"
+        )
+        logger.warning(
+            "Only %d Gaia XP-spectra sources within the maximum %.4f-deg cone "
+            "(wanted >= %d): %s. XP-spectra coverage is the limiter, not the "
+            "cone; for sparse fields consider a deeper survey catalog (e.g. "
+            "'refcat' or 'pan_starrs') for bands it covers natively.",
+            len(df),
+            used_radius,
+            needed,
+            _frac_msg,
+        )
+    return df, used_radius
