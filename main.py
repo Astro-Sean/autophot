@@ -10512,6 +10512,14 @@ def run_photometry():
                         str(lim_cfg.get("recovery_method", "auto")),
                     )
                     detection_snr_limit = lim_cfg.get("detection_limit", None)
+                    if detection_snr_limit is None:
+                        # Match the pipeline's own detection gate so the
+                        # reported limit means "the magnitude at which this
+                        # pipeline flags a detection".
+                        try:
+                            detection_snr_limit = float(detection_limit)
+                        except (TypeError, ValueError):
+                            detection_snr_limit = 3.0
                     # Injection needs a PSF-shaped stamp even for aperture-only
                     # recovery; when no empirical ePSF was built (build failure
                     # or too few PSF stars), substitute an analytic Moffat at
@@ -10703,8 +10711,20 @@ def run_photometry():
                                     image_zeropoint=image_zeropoint,
                                 )
                                 
-                                # Extract the primary limit for backward compatibility (use 3sigma if available, otherwise first)
-                                if 'snr_3.0' in multi_snr_results and multi_snr_results['snr_3.0'].get('valid', False):
+                                # Primary limit matches the detection gate when
+                                # that threshold was evaluated (SNT convention);
+                                # otherwise prefer 3sigma, then the first valid.
+                                _det_key = None
+                                try:
+                                    _det_key = f"snr_{float(detection_limit)}"
+                                except (TypeError, ValueError):
+                                    _det_key = None
+                                if (
+                                    _det_key in multi_snr_results
+                                    and multi_snr_results[_det_key].get('valid', False)
+                                ):
+                                    InjectedLimit = multi_snr_results[_det_key]['limiting_mag']
+                                elif 'snr_3.0' in multi_snr_results and multi_snr_results['snr_3.0'].get('valid', False):
                                     InjectedLimit = multi_snr_results['snr_3.0']['limiting_mag']
                                 elif len(multi_snr_results) > 0:
                                     first_valid = next((v for k, v in multi_snr_results.items() 
@@ -10936,6 +10956,36 @@ def run_photometry():
             }
         )
 
+        # Zeropoint matching the injection recovery method, used by the
+        # multi-SNR limit columns below and the CALIB-file comments further
+        # down.  result['limiting_mag'] is instrumental; downstream consumers
+        # (lightcurve.py) treat limiting_mag_*s2n columns as APPARENT
+        # magnitudes, so they must carry the method-matched zeropoint or NaN --
+        # never the raw instrumental value.
+        try:
+            _lm_rec = str(
+                (input_yaml.get("limiting_magnitude") or {}).get(
+                    "recovery_method", "PSF"
+                )
+            ).strip().upper()
+        except Exception:
+            _lm_rec = "PSF"
+        if _lm_rec in {"AUTO", "DEFAULT", "MATCH_TRANSIENT", "MATCH_TARGET"}:
+            _lm_rec = "AP" if do_aperture_ONLY else "PSF"
+        _lm_prim = "PSF" if _lm_rec in {"PSF", "EMCEE", "MCMC"} else "AP"
+        _lm_alt = "AP" if _lm_prim == "PSF" else "PSF"
+        _lm_zp = np.nan
+        if isinstance(image_zeropoint, dict):
+            for _mkey in (_lm_prim, _lm_alt):
+                _zpv = (image_zeropoint.get(_mkey) or {}).get("zeropoint")
+                try:
+                    _zpv = float(_zpv)
+                except (TypeError, ValueError):
+                    _zpv = np.nan
+                if np.isfinite(_zpv):
+                    _lm_zp = _zpv
+                    break
+
         # Store multi-SNR limiting magnitude results (deferred from earlier computation)
         if _multi_snr_results is not None:
             output['multi_snr_limits'] = _multi_snr_results
@@ -10945,13 +10995,9 @@ def run_photometry():
                     snr = result.get('snr_threshold', np.nan)
                     lim_mag = result.get('limiting_mag', np.nan)
                     if np.isfinite(snr) and np.isfinite(lim_mag):
-                        apparent_mag = lim_mag
-                        if image_zeropoint and len(image_zeropoint) > 0:
-                            first_method = list(image_zeropoint.keys())[0]
-                            if "zeropoint" in image_zeropoint[first_method]:
-                                zp = image_zeropoint[first_method]["zeropoint"]
-                                if np.isfinite(zp):
-                                    apparent_mag = lim_mag + zp
+                        apparent_mag = (
+                            lim_mag + _lm_zp if np.isfinite(_lm_zp) else np.nan
+                        )
                         column_name = f"limiting_mag_{snr:.0f}s2n"
                         output[column_name] = apparent_mag
 
@@ -11760,12 +11806,15 @@ def run_photometry():
                     snr = result.get('snr_threshold', np.nan)
                     lim_mag = result.get('limiting_mag', np.nan)
                     if np.isfinite(snr) and np.isfinite(lim_mag):
-                        apparent_mag = lim_mag
-                        if method in image_zeropoint and "zeropoint" in image_zeropoint[method]:
-                            zp = image_zeropoint[method]["zeropoint"]
-                            if np.isfinite(zp):
-                                apparent_mag = lim_mag + zp
-                        lim_lines.append(f"# limiting_mag_{snr:.0f}S2N: {apparent_mag:.3f}")
+                        apparent_mag = (
+                            lim_mag + _lm_zp if np.isfinite(_lm_zp) else np.nan
+                        )
+                        _mag_str = (
+                            f"{apparent_mag:.3f}"
+                            if np.isfinite(apparent_mag)
+                            else "n/a"
+                        )
+                        lim_lines.append(f"# limiting_mag_{snr:.0f}S2N: {_mag_str}")
             
             if 'comparisons' in multi_snr_results:
                 lim_lines.append("# S/N threshold comparisons:")
@@ -11784,14 +11833,13 @@ def run_photometry():
         elif np.isfinite(InjectedLimit):
             # Fallback for single S/N limiting magnitude (backward compatibility)
             lim_lines = ["# Detection limits"]
-            apparent_mag = InjectedLimit
-            if image_zeropoint and len(image_zeropoint) > 0:
-                first_method = list(image_zeropoint.keys())[0]
-                if "zeropoint" in image_zeropoint[first_method]:
-                    zp = image_zeropoint[first_method]["zeropoint"]
-                    if np.isfinite(zp):
-                        apparent_mag = InjectedLimit + zp
-            lim_lines.append(f"# limiting_mag_3S2N: {apparent_mag:.3f}")
+            apparent_mag = (
+                InjectedLimit + _lm_zp if np.isfinite(_lm_zp) else np.nan
+            )
+            _mag_str = (
+                f"{apparent_mag:.3f}" if np.isfinite(apparent_mag) else "n/a"
+            )
+            lim_lines.append(f"# limiting_mag_3S2N: {_mag_str}")
             zp_lines.extend(lim_lines)
 
         with open(calibration_file, "w") as file:
