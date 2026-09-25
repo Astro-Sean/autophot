@@ -2011,7 +2011,10 @@ def fill_masked_regions_in_fits(
         raise ValueError("No unmasked pixels available for background estimation.")
 
     if apply_sigma_clip:
-        mean, _, std = sigma_clipped_stats(bg_pixels, sigma=sigma)
+        from functions import biweight_sky_sigma
+
+        mean, _, _ = sigma_clipped_stats(bg_pixels, sigma=sigma)
+        std = biweight_sky_sigma(bg_pixels)
     else:
         mean, std = float(np.mean(bg_pixels)), float(np.std(bg_pixels))
 
@@ -3065,11 +3068,13 @@ class Templates:
                 logger.warning("create_image_mask: no finite pixels in image; returning empty mask.")
                 return mask, masked_centres
 
+            from functions import biweight_stdfunc
+
             _, image_median, image_std = sigma_clipped_stats(
                 finite_data,
                 sigma=DEFAULT_SIGMA_CLIP,
                 cenfunc=np.nanmedian,
-                stdfunc="mad_std",
+                stdfunc=biweight_stdfunc,
             )
 
             if not np.isfinite(image_std) or image_std <= 0:
@@ -5646,7 +5651,7 @@ class Templates:
         amplitude is non-positive.  ``NaN`` means "unverifiable" -- the
         caller decides whether such sources are kept.
         """
-        from astropy.stats import mad_std
+        from astropy.stats import biweight_scale
         from limits import _render_epsf_on_cutout
         from photutils.centroids import centroid_2dg
 
@@ -5709,11 +5714,11 @@ class Templates:
                 ring = (xw - h2) ** 2 + (yw - h2) ** 2 > h ** 2
                 ring_pix = wide[ring & np.isfinite(wide)]
                 if ring_pix.size >= 8:
-                    sig0 = float(mad_std(ring_pix, ignore_nan=True))
+                    sig0 = float(biweight_scale(ring_pix, ignore_nan=True))
             if not np.isfinite(sig0) or sig0 <= 0:
                 edge_pix = stamp[valid & (ring_r2 > (0.6 * h) ** 2)]
                 if edge_pix.size >= 6:
-                    sig0 = float(mad_std(edge_pix, ignore_nan=True))
+                    sig0 = float(biweight_scale(edge_pix, ignore_nan=True))
             if not np.isfinite(sig0) or sig0 <= 0:
                 continue
 
@@ -8690,12 +8695,14 @@ class Templates:
                                 _label, float(_sky),
                             )
 
-            # Noise RMS via sigma-clipped stats: a plain std is inflated by
-            # sources, which would bias ZOGY's sn/sr noise terms.
+            # Noise RMS via biweight scale: a plain std is inflated by
+            # sources, which would bias ZOGY's sn/sr noise terms, while
+            # MAD staircases on quantized (compressed) stacks.
+            from functions import biweight_sky_sigma as _rbs
             _sci_finite = science_data[np.isfinite(science_data)]
             _ref_finite = reference_data[np.isfinite(reference_data)]
-            _, _, _sn = _scs(_sci_finite, sigma=3, maxiters=5) if _sci_finite.size > 100 else (0, 0, float(np.std(_sci_finite)) if _sci_finite.size > 0 else 1.0)
-            _, _, _sr = _scs(_ref_finite, sigma=3, maxiters=5) if _ref_finite.size > 100 else (0, 0, float(np.std(_ref_finite)) if _ref_finite.size > 0 else 1.0)
+            _sn = _rbs(_sci_finite) if _sci_finite.size > 100 else (float(np.std(_sci_finite)) if _sci_finite.size > 0 else 1.0)
+            _sr = _rbs(_ref_finite) if _ref_finite.size > 100 else (float(np.std(_ref_finite)) if _ref_finite.size > 0 else 1.0)
             _sn = float(_sn) if _sn and _sn > 0 else 1.0
             _sr = float(_sr) if _sr and _sr > 0 else 1.0
 
@@ -8765,10 +8772,10 @@ class Templates:
             if _use_noise_maps:
                 try:
                     def _local_noise_map(data, scalar_noise, box_size=64):
-                        """Estimate per-pixel noise via local sigma-clipped std
+                        """Estimate per-pixel noise via local biweight scale
                         on a coarse grid, then bilinear upsample."""
                         h, w = data.shape
-                        # Coarse grid: local std in box_size tiles
+                        # Coarse grid: local scale in box_size tiles
                         ny = max(1, h // box_size)
                         nx = max(1, w // box_size)
                         _noise_grid = np.full((ny, nx), scalar_noise)
@@ -8781,9 +8788,7 @@ class Templates:
                                 _tile = data[y0:y1, x0:x1]
                                 _tile_finite = _tile[np.isfinite(_tile)]
                                 if _tile_finite.size > 50:
-                                    _, _, _tile_std = _scs(
-                                        _tile_finite, sigma=3, maxiters=3
-                                    )
+                                    _tile_std = _rbs(_tile_finite)
                                     if _tile_std and _tile_std > 0:
                                         _noise_grid[iy, ix] = float(_tile_std)
                         # Bilinear upsample to full image size

@@ -46,6 +46,7 @@ from scipy.stats import mstats, median_abs_deviation
 
 from astropy.stats import (
     biweight_midvariance,
+    biweight_scale,
     sigma_clipped_stats,
     mad_std,
     biweight_location,
@@ -782,7 +783,7 @@ def _optimum_radius_worker(args):
                 apix = amask.get_values(image)
                 apix = apix[np.isfinite(apix)]
                 if len(apix) >= 10:
-                    local_env_std = float(mad_std(apix))
+                    local_env_std = float(biweight_scale(apix))
         except Exception:
             pass
 
@@ -872,9 +873,12 @@ class Aperture:
         def _winsorized_std(data):
             return float(np.sqrt(mstats.winsorize(data, limits=(0.05, 0.05)).var()))
 
+        # Biweight scale first: matches the pipeline's canonical RMS
+        # estimator (BiweightScaleBackgroundRMS) and, unlike MAD, stays
+        # continuous on heavily quantized data.
         methods = [
+            ("Biweight", lambda d: biweight_scale(d, c=9.0, ignore_nan=True)),
             ("MAD", lambda d: mad_std(d, ignore_nan=True)),
-            ("Biweight", lambda d: np.sqrt(biweight_midvariance(d, c=6.0))),
             ("Percentile", _percentile_std),
             ("Winsorized", _winsorized_std),
             ("SigmaClip", lambda d: sigma_clipped_stats(d, sigma=3, maxiters=5)[2]),
@@ -928,11 +932,11 @@ class Aperture:
         except Exception:
             pass
 
-        # MAD fallback.
+        # Biweight-scale fallback (consistent with the canonical estimator).
         try:
-            ms = mad_std(clean)
+            ms = float(biweight_scale(clean, c=9.0))
             if ms > 0 and np.isfinite(ms):
-                return bkg_lvl, ms, "MAD"
+                return bkg_lvl, ms, "BiweightScale"
         except Exception:
             pass
 

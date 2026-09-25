@@ -2947,10 +2947,10 @@ class PSF:
                     raise ValueError(
                         f"background_rms shape {background_rms.shape} incompatible with data shape {image_e.shape}"
                     )
-        # background_rms from Background2D (MADStdBackgroundRMS) measures the
-        # actual per-pixel scatter, which already includes read noise.  Do NOT
-        # add read_noise^2 again -- that double-counts it and inflates PSF flux
-        # errors, especially for faint sources where RN dominates.
+        # background_rms from Background2D (BiweightScaleBackgroundRMS) measures
+        # the actual per-pixel scatter, which already includes read noise.  Do
+        # NOT add read_noise^2 again -- that double-counts it and inflates PSF
+        # flux errors, especially for faint sources where RN dominates.
         if background_rms is None:
             bkg_error = np.full_like(image_e, float(read_noise))
         else:
@@ -8585,8 +8585,8 @@ class PSF:
                 data_e = np.asarray(ndimage.data, dtype=float)
                 finite_vals = data_e[np.isfinite(data_e)] if data_e.ndim == 2 else np.array([])
                 if len(finite_vals) > 0:
-                    from scipy.stats import median_abs_deviation
-                    _bkg_rms_for_boost = float(median_abs_deviation(finite_vals, scale="normal"))
+                    from astropy.stats import biweight_scale
+                    _bkg_rms_for_boost = float(biweight_scale(finite_vals))
                 else:
                     _bkg_rms_for_boost = 5.0 * _gain_for_bkg
             if not np.isfinite(_bkg_rms_for_boost) or _bkg_rms_for_boost <= 0:
@@ -8628,10 +8628,10 @@ class PSF:
             # so the S/N formula's (bkgrmsval * gain) is correct.
             data_finite = ndimage.data[np.isfinite(ndimage.data)]
             if len(data_finite) > 0:
-                from scipy.stats import median_abs_deviation
-                bkgrmsval = float(median_abs_deviation(data_finite, scale="normal")) / _gain_for_bkg
+                from astropy.stats import biweight_scale
+                bkgrmsval = float(biweight_scale(data_finite)) / _gain_for_bkg
                 log.warning(
-                    "PSF fit: background_rms is NaN; estimated from data MAD = %.3g ADU",
+                    "PSF fit: background_rms is NaN; estimated from data biweight scale = %.3g ADU",
                     bkgrmsval,
                 )
             else:
@@ -8660,8 +8660,8 @@ class PSF:
         C = 1.0 / (4.0 * np.pi * sigma_pix ** 2)
         C = max(C, 1e-6)
         # Per-pixel background variance in e-^2.
-        # background_rms from MADStdBackgroundRMS already includes read noise,
-        # so do NOT add read_noise^2 again -- that double-counts it.
+        # background_rms from BiweightScaleBackgroundRMS already includes read
+        # noise, so do NOT add read_noise^2 again -- that double-counts it.
         bkg_var_e2 = (bkgrmsval * gain) ** 2  # e-^2
         # PSF photometry variance in e-^2 (background + Poisson)
         sigma_fs_sq = bkg_var_e2 / C + np.abs(flux_e_frame)
