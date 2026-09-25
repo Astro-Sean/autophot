@@ -244,8 +244,8 @@ def _ranked_keep_mask(df, values, valid, keep_n, keep_largest):
     Used by the SFFT matching-source filters when a hard quality cut would
     starve the kernel fit: instead of keeping everything, rank candidates
     and retain only the best few.  keep_largest=True ranks descending
-    (e.g. CLASS_STAR, higher is more point-like); False ranks ascending
-    (e.g. elongation, lower is rounder).
+    (e.g. SNR, higher is better); False ranks ascending
+    (e.g. elongation or flux_radius/FWHM, lower is more stellar).
     """
     finite = values[valid]
     if keep_n >= len(finite):
@@ -3801,10 +3801,10 @@ def run_photometry():
 
             # Transfer per-source FWHM and peak_flux from SExtractor (FWHMSources) to catalog sources.
             # peak_flux (FLUX_MAX in ADU) is needed by zeropoint.clean() for saturation/non-linear rejection.
-            # Also transfer SExtractor quality columns (flags, class_star, sharpness, elongation)
+            # Also transfer SExtractor quality columns (flags, sharpness, elongation)
             # so that supplemented PSF candidates can be quality-cut during ePSF build.
             _sex_quality_cols = [
-                "fwhm", "peak_flux", "flags", "class_star", "sharpness",
+                "fwhm", "peak_flux", "flags", "sharpness",
                 "roundness", "a", "b", "mu_max", "flux_radius",
             ]
             if (
@@ -4131,8 +4131,8 @@ def run_photometry():
         #   - Isolation check against ALL known sources (catalogue + detections
         #     + the raw detection table) to avoid blended cutouts corrupting the ePSF
         #   - Carry all useful columns (SNR, flux_AP, threshold, fwhm, flags,
-        #     class_star, sharpness, elongation, peak_flux) so the PSF build can
-        #     apply its full suite of quality cuts.
+        #     flux_radius, sharpness, elongation, peak_flux) so the PSF build
+        #     can apply its full suite of quality cuts.
         _supp_frames = []
         if (
             CatalogSources is not None
@@ -4288,7 +4288,7 @@ def run_photometry():
                 _carry_cols = ["x_pix", "y_pix"]
                 for _c in [
                     "flux_AP", "flux_AP_err", "SNR", "snr", "threshold",
-                    "fwhm", "peak_flux", "maxPixel", "flags", "class_star",
+                    "fwhm", "peak_flux", "maxPixel", "flags",
                     "sharpness", "roundness", "ELONGATION", "a", "b",
                     "mu_max", "flux_radius",
                 ]:
@@ -6011,9 +6011,9 @@ def run_photometry():
 
                     # ------------------------------------------------------------------
                     # Refine SFFT / HOTPANTS priors: keep only isolated, PSF-like stars
-                    # (remove extended objects / galaxies via CLASS_STAR, ellipticity,
-                    # size outliers, and reject crowded stars with close neighbours
-                    # in either image).
+                    # (remove extended objects / galaxies via profile concentration,
+                    # ellipticity, size outliers, and reject crowded stars with
+                    # close neighbours in either image).
                     # ------------------------------------------------------------------
                     ms = MatchingSources.copy()
                     n_before_refine = len(ms)
@@ -6062,13 +6062,13 @@ def run_photometry():
                         except Exception as _cr_err:
                             logging.debug("CR proximity check failed: %s", _cr_err)
 
-                    _has_class_star = "class_star" in ms.columns
+                    _has_flux_radius = "flux_radius" in ms.columns
                     _has_roundness = "roundness" in ms.columns
                     _has_fwhm = any(c in ms.columns for c in ("fwhm", "fwhm_psf", "fwhm_model"))
                     _has_elong = any(c in ms.columns for c in ("ELONGATION", "elongation", "a", "b"))
                     logging.debug(
                         f"Source refinement input: {n_before_refine} sources, "
-                        f"columns present: class_star={_has_class_star}, "
+                        f"columns present: flux_radius={_has_flux_radius}, "
                         f"roundness={_has_roundness}, fwhm={_has_fwhm}, "
                         f"elongation={_has_elong}"
                     )
@@ -6151,96 +6151,105 @@ def run_photometry():
                                         )
                                         ms = ms[_keep]
 
-                        # --- Point-source selection via CLASS_STAR ---
-                        # SExtractor's CLASS_STAR ranges from 0 (extended) to 1
-                        # (point-like).  This filter is ENABLED by default
-                        # (sfft_min_class_star=0.4) to reject galaxies and
-                        # extended sources from the SFFT kernel fit.
-                        # Extended sources have different PSF profiles in the
-                        # science and reference images, making them non-linear
-                        # and biasing the kernel solution.
-                        #
-                        # The threshold of 0.4 is conservative: it rejects
-                        # obvious galaxies (CLASS_STAR < 0.4) while keeping
-                        # marginally classified sources.  SFFT's PostAnomaly
-                        # check provides additional vetting after the fit.
-                        #
-                        # The filter is skipped for undersampled images (FWHM <
-                        # 2.5 px) where SExtractor's CLASS_STAR is unreliable,
-                        # and when it would leave fewer than 5 sources.
-                        if "class_star" in ms.columns:
-                            cs = pd.to_numeric(ms["class_star"], errors="coerce")
-                            cs_finite = cs.notna()
-                            if cs_finite.any():
-                                n_cs = int(cs_finite.sum())
-                                _fwhm_for_cs = float(
-                                    input_yaml.get("science_fwhm", ImageFWHM)
-                                )
-                                _us_thr_cs = float(
-                                    (input_yaml.get("photometry", {}) or {}).get(
-                                        "undersampled_fwhm_threshold", 2.5
+                        # --- Point-source selection via profile concentration ---
+                        # Stellar profiles have a half-light radius ~0.5-0.7x
+                        # their FWHM; galaxies and extended defects are
+                        # systematically larger.  Extended sources have
+                        # different PSF profiles in the science and reference
+                        # images, making them non-linear and biasing the SFFT
+                        # kernel solution.  (This replaces the removed
+                        # SExtractor CLASS_STAR gate, which is uncalibrated on
+                        # some cameras.)
+                        _prof_fr_col = next(
+                            (
+                                c
+                                for c in ("flux_radius", "FLUX_RADIUS", "r50")
+                                if c in ms.columns
+                            ),
+                            None,
+                        )
+                        _prof_fw_col = next(
+                            (
+                                c
+                                for c in ("fwhm", "fwhm_psf", "fwhm_model")
+                                if c in ms.columns
+                            ),
+                            None,
+                        )
+                        if _prof_fr_col is not None and _prof_fw_col is not None:
+                            _prof_fr = pd.to_numeric(ms[_prof_fr_col], errors="coerce")
+                            _prof_fw = pd.to_numeric(ms[_prof_fw_col], errors="coerce")
+                            _prof_ratio = _prof_fr / _prof_fw.where(_prof_fw > 0)
+                            prof_finite = _prof_ratio.notna()
+                            if prof_finite.any():
+                                n_prof = int(prof_finite.sum())
+                                prof_max = float(
+                                    input_yaml["template_subtraction"].get(
+                                        "sfft_max_flux_radius_frac", 0.9
                                     )
                                 )
-                                if _fwhm_for_cs < _us_thr_cs:
-                                    cs_threshold = 0.0
-                                else:
-                                    cs_threshold = float(
+                                if prof_max > 0:
+                                    prof_pass = _prof_ratio <= prof_max
+                                    n_prof_rejected = int(
+                                        (prof_finite & ~prof_pass).sum()
+                                    )
+                                    n_prof_kept = int((prof_finite & prof_pass).sum())
+                                    _prof_rescue_min = int(
                                         input_yaml["template_subtraction"].get(
-                                            "sfft_min_class_star", 0.4
+                                            "sfft_profile_rescue_min", 10
                                         )
                                     )
-                                if cs_threshold > 0:
-                                    cs_pass = cs >= cs_threshold
-                                    n_cs_rejected = int((cs_finite & ~cs_pass).sum())
-                                    n_cs_kept = int((cs_finite & cs_pass).sum())
-                                    _cs_rescue_min = int(
-                                        input_yaml["template_subtraction"].get(
-                                            "sfft_class_star_rescue_min", 10
-                                        )
-                                    )
-                                    # Safety: if the filter would remove ALL or
-                                    # nearly all finite-CLASS_STAR sources, the
-                                    # classifier is uncalibrated for this field
-                                    # - skip it entirely.
-                                    if n_cs_kept < 5 and n_cs_rejected > 0:
+                                    # If the cut would remove all or nearly
+                                    # all sources, the flux_radius column is
+                                    # likely uncalibrated for this field -
+                                    # skip it entirely.
+                                    if n_prof_kept < 5 and n_prof_rejected > 0:
                                         logging.info(
-                                            f"CLASS_STAR filter skipped: only {n_cs_kept} sources "
-                                            f"would survive (need >= 5 for reliable kernel). "
-                                            f"Keeping all {n_cs} sources."
+                                            "Profile filter skipped: only "
+                                            "%d sources would survive\n"
+                                            "    (need >= 5 for reliable "
+                                            "kernel); keeping all %d",
+                                            n_prof_kept, n_prof,
                                         )
                                     elif (
-                                        n_cs_rejected > 0
-                                        and n_cs_kept < _cs_rescue_min
+                                        n_prof_rejected > 0
+                                        and n_prof_kept < _prof_rescue_min
                                     ):
                                         # Ranked rescue: the hard threshold
-                                        # would leave a starved kernel fit.
-                                        # Keep the most point-like candidates
-                                        # instead so SFFT has enough sources.
-                                        _keep_n = min(_cs_rescue_min, n_cs)
+                                        # would starve the kernel fit; keep
+                                        # the most concentrated candidates.
+                                        _keep_n = min(_prof_rescue_min, n_prof)
                                         _keep = _ranked_keep_mask(
-                                            ms, cs, cs_finite,
-                                            _keep_n, keep_largest=True,
+                                            ms, _prof_ratio, prof_finite,
+                                            _keep_n, keep_largest=False,
                                         )
                                         logging.info(
-                                            f"CLASS_STAR filter relaxed:\n"
-                                            f"    threshold {cs_threshold} would\n"
-                                            f"    keep only {n_cs_kept}/{n_cs} sources\n"
-                                            f"    (< {_cs_rescue_min} needed for\n"
-                                            f"    kernel). Keeping the {_keep_n} most\n"
-                                            f"    point-like candidates;\n"
-                                            f"    {int(_keep.sum())} remain."
+                                            "Profile filter relaxed: "
+                                            "threshold %.2f\n"
+                                            "    would keep only %d/%d "
+                                            "sources (< %d needed)\n"
+                                            "    keeping the %d most "
+                                            "concentrated; %d remain",
+                                            prof_max, n_prof_kept, n_prof,
+                                            _prof_rescue_min, _keep_n,
+                                            int(_keep.sum()),
                                         )
                                         ms = ms[_keep]
-                                    elif n_cs_rejected > 0:
+                                    elif n_prof_rejected > 0:
                                         logging.info(
-                                            f"CLASS_STAR filter: removed {n_cs_rejected} extended sources "
-                                            f"(CLASS_STAR < {cs_threshold}, {n_cs_kept}/{n_cs} kept)"
+                                            "Profile filter: removed %d "
+                                            "extended sources\n"
+                                            "    FLUX_RADIUS/FWHM > %.2f, "
+                                            "%d/%d kept",
+                                            n_prof_rejected, prof_max,
+                                            n_prof_kept, n_prof,
                                         )
-                                        ms = ms[cs_pass | ~cs_finite]
+                                        ms = ms[prof_pass | ~prof_finite]
                                 else:
                                     logging.info(
-                                        f"CLASS_STAR filter disabled (sfft_min_class_star=0 or "
-                                        f"undersampled). Keeping all {len(ms)} sources."
+                                        "Profile filter disabled "
+                                        "(sfft_max_flux_radius_frac=0). "
+                                        f"Keeping all {len(ms)} sources."
                                     )
 
                         # --- Ellipticity filter (backup for point-source selection) ---

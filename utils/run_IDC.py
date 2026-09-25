@@ -564,41 +564,6 @@ class ImageDistortionCorrector:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(conv_text)
 
-    @staticmethod
-    def _create_nnw_file(path: str) -> None:
-        """Write SExtractor's stock V1.3 stellarity network; CLASS_STAR needs
-        a local NNW file referenced by STARNNW_NAME."""
-        import re
-
-        nnw_text = r"""
-NNW
-# Neural Network Weights for the SExtractor star/galaxy classifier (V1.3)
-# inputs: 9 for profile parameters + 1 for seeing.
-# outputs: Stellarity index (0.0 to 1.0)
- 3 10 10  1
--1.56604e+00 -2.48265e+00 -1.44564e+00 -1.24675e+00 -9.44913e-01 -5.22453e-01  4.61342e-02  8.31957e-01  2.15505e+00  2.64769e-01
- 3.03477e+00  2.69561e+00  3.16188e+00  3.34497e+00  3.51885e+00  3.65570e+00  3.74856e+00  3.84541e+00  4.22811e+00  3.27734e+00
--3.22480e-01 -2.12804e+00  6.50750e-01 -1.11242e+00 -1.40683e+00 -1.55944e+00 -1.84558e+00 -1.18946e-01  5.52395e-01 -4.36564e-01 -5.30052e+00
- 4.62594e-01 -3.29127e+00  1.10950e+00 -6.01857e-01  1.29492e-01  1.42290e+00  2.90741e+00  2.44058e+00 -9.19118e-01  8.42851e-01 -4.69824e+00
--2.57424e+00  8.96469e-01  8.34775e-01  2.18845e+00  2.46526e+00  8.60878e-02 -6.88080e-01 -1.33623e-02  9.30403e-02  1.64942e+00 -1.01231e+00
- 4.81041e+00  1.53747e+00 -1.12216e+00 -3.16008e+00 -1.67404e+00 -1.75767e+00 -1.29310e+00  5.59549e-01  8.08468e-01 -1.01592e-02 -7.54052e+00
- 1.01933e+01 -2.09484e+01 -1.07426e+00  9.87912e-01  6.05210e-01 -6.04535e-02 -5.87826e-01 -7.94117e-01 -4.89190e-01 -8.12710e-02 -2.07067e+01
--5.31793e+00  7.94240e+00 -4.64165e+00 -4.37436e+00 -1.55417e+00  7.54368e-01  1.09608e+00  1.45967e+00  1.62946e+00 -1.01301e+00  1.13514e-01
- 2.20336e-01  1.70056e+00 -5.20105e-01 -4.28330e-01  1.57258e-03 -3.36502e-01 -8.18568e-02 -7.16163e+00  8.23195e+00 -1.71561e-02 -1.13749e+01
- 3.75075e+00  7.25399e+00 -1.75325e+00 -2.68814e+00 -3.71128e+00 -4.62933e+00 -2.13747e+00 -1.89186e-01  1.29122e+00 -7.49380e-01  6.71712e-01
--8.41923e-01  4.64997e+00  5.65808e-01 -3.08277e-01 -1.01687e+00  1.73127e-01 -8.92130e-01  1.89044e+00 -2.75543e-01 -7.72828e-01  5.36745e-01
--3.65598e+00  7.56997e+00 -3.76373e+00 -1.74542e+00 -1.37540e-01 -5.55400e-01 -1.59195e-01  1.27910e-01  1.91906e+00  1.42119e+00 -4.35502e+00
--1.70059e+00 -3.65695e+00  1.22367e+00 -5.74367e-01 -3.29571e+00  2.46316e+00  5.22353e+00  2.42038e+00  1.22919e+00 -9.22250e-01 -2.32028e+00
- 0.00000e+00
- 1.00000e+00
-"""
-        # Strip the indent added by source formatting; SExtractor expects the
-        # NNW file flush-left.
-        nindent = len(re.split("NNW", nnw_text.split("\n", 1)[1])[0])
-        nnw_text = "\n".join([line[nindent:] for line in nnw_text.split("\n")[1:]])
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(nnw_text)
-
     def _validate_output_dir(
         self, output_dir: Optional[str], prefix: Optional[str] = None
     ) -> str:
@@ -925,8 +890,6 @@ NNW
 
             stem = Path(fits_image).stem
             conv_path = str(Path(output_dir) / f"{stem}_default.conv")
-            nnw_path = str(Path(output_dir) / f"{stem}_default.nnw")
-            self._create_nnw_file(nnw_path)
 
             # Get FWHM: prefer explicit parameter, then header, then default
             # Header FWHM can be stale from previous runs or instrument defaults
@@ -1004,7 +967,6 @@ NNW
                     "SATUR_LEVEL": self.determine_saturation_level(fits_image),
                     "FILTER_NAME": conv_path,
                     "FILTER": "Y",
-                    "STARNNW_NAME": nnw_path,
                     "NTHREADS": self.default_threads,
                     "PIXEL_SCALE": PIXEL_SCALE,
                     "CATALOG_TYPE": "FITS_LDAC",
@@ -1036,7 +998,6 @@ NNW
                 "FWHM_IMAGE",
                 "ELLIPTICITY",
                 "ELONGATION",
-                "CLASS_STAR",
                 "FLAGS",
                 "FLAGS_WEIGHT",
                 "XWIN_IMAGE",
@@ -1353,7 +1314,7 @@ NNW
         compact_fwhm_mult: float = 1.3,
         max_ellipticity: float = 0.6,
         max_flags: int = 1,
-        min_class_star: float = 0.3,
+        max_flux_radius_frac: float = 0.9,
     ) -> Optional[Table]:
         """Return a subset of ``catalog`` containing only compact, point-like sources.
 
@@ -1393,17 +1354,26 @@ NNW
                 good &= fwhm <= _fwhm_max  # reject obvious galaxies
             except Exception:
                 pass
-        if "CLASS_STAR" in catalog.colnames:
+        # Stellar-profile check (replaces CLASS_STAR): a point source's
+        # half-light radius is ~0.5-0.7x its FWHM; extended sources are
+        # systematically larger.  Sources with a noisy FWHM are kept when
+        # their profile concentration is stellar.
+        if "FLUX_RADIUS" in catalog.colnames and "FWHM_IMAGE" in catalog.colnames:
             try:
-                starlike = np.asarray(catalog["CLASS_STAR"], float) >= min_class_star
+                _fr = np.asarray(catalog["FLUX_RADIUS"], float)
+                _fw = np.asarray(catalog["FWHM_IMAGE"], float)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    starlike = (
+                        _fr / np.where(_fw > 0, _fw, np.nan)
+                    ) <= max_flux_radius_frac
             except Exception:
                 pass
 
         # Keep sources that are either compact/round or morphologically star-like.
         # Starlike sources with noisy FWHM measurements are kept if they pass the
-        # loose FWHM cut; compact galaxies with low CLASS_STAR are kept if they are
+        # loose FWHM cut; compact extended sources are kept if they are
         # small and round.
-        # If neither FWHM_IMAGE nor CLASS_STAR is available, skip this filter
+        # If neither FWHM_IMAGE nor FLUX_RADIUS is available, skip this filter
         # (keep all sources) rather than discarding everything.
         if compact.any() or starlike.any():
             good &= compact | starlike

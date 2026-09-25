@@ -238,7 +238,7 @@ pip install -e ".[spalipy,tweakwcs,chi2-shift]"
 
 ## PSF Photometry
 
-AutoPhOT builds an empirical ePSF model from in-frame stars using `photutils` ePSFBuilder. For undersampled images (FWHM < 2.5 px) the oversampling factor is increased automatically. PSF stars are selected from a SExtractor detection run with cuts on saturation, elongation, isolation, FWHM consistency, and CLASS_STAR, plus an FFT-based check for close companions.
+AutoPhOT builds an empirical ePSF model from in-frame stars using `photutils` ePSFBuilder. For undersampled images (FWHM < 2.5 px) the oversampling factor is increased automatically. PSF stars are selected from a SExtractor detection run with cuts on saturation, elongation, isolation, FWHM consistency, and profile concentration (FLUX_RADIUS vs FWHM), plus an FFT-based check for close companions.
 
 ### Fitters
 
