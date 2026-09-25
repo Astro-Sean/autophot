@@ -3572,6 +3572,7 @@ def run_photometry():
         # =============================================================================
         # Aperture Photometry
         # =============================================================================
+        log_status(border_msg("Aperture photometry", body="-"))
 
         #  Measure Aperture Photometry
         aperture_photometry = Aperture(
@@ -3610,11 +3611,19 @@ def run_photometry():
             & (np.isfinite(IsolatedSources["y_pix"]))
         )
         IsolatedSources = IsolatedSources[mask]
-        logging.info("Number of sources: %s", len(IsolatedSources))
+        # STATUS-level so the section shows a result at normal verbosity.
+        log_status(
+            "Aperture photometry: %d isolated stars measured "
+            "(aperture radius %.1f px)",
+            len(IsolatedSources),
+            1.7 * ImageFWHM,
+        )
         # Keep a broader pre-optimum pool for PSF building. Optimum-radius
         # selection is tuned for aperture stability and can become too strict
         # for reliable ePSF construction in sparse/crowded epochs.
         psf_source_pool = IsolatedSources.copy()
+
+        log_status(border_msg("Optimum aperture radius", body="-"))
 
         # Too few isolated stars: cannot build PSF or measure optimum radius; continue with aperture-only.
         min_sources_for_psf = 3
@@ -3699,7 +3708,7 @@ def run_photometry():
             int(np.ceil(optimum_radius * ImageFWHM))
         )
         aperture_radius = float(input_yaml["photometry"]["aperture_radius"])
-        logging.info(
+        log_status(
             "Aperture radius: %.2f [pixels] (optimum_radius=%.2f FWHM%s)",
             aperture_radius,
             optimum_radius,
@@ -3709,6 +3718,7 @@ def run_photometry():
         # =============================================================================
         # Aperture correction (AP -> total flux)
         # =============================================================================
+        log_status(border_msg("Aperture correction", body="-"))
         # Use isolated, well-behaved stars to measure the aperture correction from the
         # science aperture radius to effectively infinite radius via a curve of growth.
         # The correction is stored in input_yaml so zeropoint calibration can place
@@ -3744,18 +3754,18 @@ def run_photometry():
                     input_yaml["aperture_correction_err"] = (
                         float(ap_corr_err) if np.isfinite(ap_corr_err) else 0.0
                     )
-                    logging.info(
+                    log_status(
                         "Aperture correction (AP to total): %.3f +/- %.3f mag (stored for later; "
                         "set apply_aperture_correction: true to apply in pipeline)",
                         input_yaml["aperture_correction"],
                         input_yaml["aperture_correction_err"],
                     )
                 else:
-                    logging.info(
+                    log_status(
                         "Aperture correction not reliable; leaving as 0.0 mag."
                     )
             else:
-                logging.info(
+                log_status(
                     "Too few isolated sources (%s) for aperture correction; "
                     "skipping and leaving correction at 0.0 mag.",
                     "none" if IsolatedSources is None else len(IsolatedSources),
@@ -3769,12 +3779,14 @@ def run_photometry():
         # =============================================================================
         # Catalog Sources
         # =============================================================================
+        log_status(border_msg("Catalog sources", body="-"))
         #  Clean and Measure Catalog Sources
         border = 1 * scale
         width = image.shape[1]
         height = image.shape[0]
         if CatalogSources is not None and len(CatalogSources) > 0:
-            logging.info("Found %s sources in field", len(CatalogSources))
+            n_catalog_total = len(CatalogSources)
+            logging.info("Found %s sources in field", n_catalog_total)
             CatalogSources = Calibrate_Catalog.recenter(
                 CatalogSources, image, boxsize=scale / 2
             )
@@ -3797,6 +3809,11 @@ def run_photometry():
             CatalogSources = CatalogSources[mask]
             CatalogSources = Calibrate_Catalog.downsample_sources_by_position(
                 CatalogSources
+            )
+            log_status(
+                "Catalog sources: %d of %d kept after cleaning",
+                len(CatalogSources),
+                n_catalog_total,
             )
 
             # Transfer per-source FWHM and peak_flux from SExtractor (FWHMSources) to catalog sources.
@@ -4343,6 +4360,12 @@ def run_photometry():
                             len(psf_source_pool),
                         )
 
+        # The banner is printed after the supplement step so the gate sees
+        # the post-supplement do_aperture_ONLY (a replenished pool may have
+        # re-enabled PSF photometry).
+        if not do_aperture_ONLY or prepare_template:
+            log_status(border_msg("PSF model", body="-"))
+
         # By default, build the ePSF from the aligned image to ensure the PSF model
         # matches the data it will be applied to. This avoids PSF shape mismatches when
         # resampling changes pixel scale or introduces distortion.
@@ -4497,8 +4520,26 @@ def run_photometry():
                 PSFSources = None
                 do_aperture_ONLY = True
 
+        # Every attempted build reports its own verdict (STATUS one-liner on
+        # success, warning on failure); a build skipped because the pool is
+        # below the minimum would otherwise leave the section empty.
+        if (
+            (not do_aperture_ONLY or prepare_template)
+            and epsf_model is None
+            and (
+                psf_source_pool is None
+                or len(psf_source_pool) < min_sources_for_psf
+            )
+        ):
+            log_status(
+                "PSF model: none (pool has %d sources; need >= %d)",
+                0 if psf_source_pool is None else len(psf_source_pool),
+                min_sources_for_psf,
+            )
+
         # Log PSF roundness and run PSF fit on catalog when we have an ePSF (from original or current image).
         if not do_aperture_ONLY or prepare_template:
+            log_status(border_msg("PSF photometry on catalog sources", body="-"))
             if PSFSources is not None and "roundness" in PSFSources.columns:
                 roundness = PSFSources["roundness"]
                 from astropy.stats import mad_std
@@ -4512,7 +4553,7 @@ def run_photometry():
                     f"PSF sources roundness: {mean_roundness:.2f} +/- {std_roundness:.2f}"
                 )
             if not epsf_model:
-                logging.info("ePSF not created")
+                log_status("PSF photometry: skipped (no PSF model available)")
                 do_aperture_ONLY = True
                 PSFSources = None
             else:
@@ -4532,6 +4573,26 @@ def run_photometry():
                         background_rms=background_rms,
                         iterative=False,
                         mask=hardware_defects_mask,
+                    )
+                    # Failed fits leave flux_PSF NaN; report the yield so the
+                    # section always shows a result at normal verbosity.
+                    if (
+                        CatalogSources is not None
+                        and "flux_PSF" in CatalogSources.columns
+                    ):
+                        _n_psf_fit = int(
+                            np.isfinite(
+                                pd.to_numeric(
+                                    CatalogSources["flux_PSF"], errors="coerce"
+                                )
+                            ).sum()
+                        )
+                    else:
+                        _n_psf_fit = 0
+                    log_status(
+                        "PSF photometry: %d of %d catalog sources fitted",
+                        _n_psf_fit,
+                        0 if CatalogSources is None else len(CatalogSources),
                     )
                     # Diagnostic plot: WCS catalog position vs PSF fitted position
                     try:
@@ -11908,11 +11969,13 @@ def run_photometry():
         log_status(ascii_kv("PHOTOMETRY", _res_pairs, framed=True), ui=True)
 
         log_status(log_step("Photometry finished"))
+        log_status("")
         log_status(
             "Finished: %s  (%.1f s)",
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end)),
             end - start,
         )
+        log_status("")
         logging.info("")
 
     except Exception as e:
