@@ -141,6 +141,10 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
         # Shared across builders within one build attempt so the bound
         # applies to the total drift, not per-phase drift.
         self._orig_centres = orig_centres if orig_centres is not None else {}
+        # Per-flat-star squared centre movement from the last convergence
+        # check (NaN for fit-failed stars); identifies the sources still
+        # drifting when the build fails to converge.
+        self._last_move = None
 
     def _fit_stars(self, epsf, stars):
         for s in stars.all_stars:
@@ -149,6 +153,8 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
                 self._orig_centres[key] = tuple(s.cutout_center)
         stars = super()._fit_stars(epsf, stars)
         m = self._max_shift_px
+        if m <= 0:
+            return stars
         for s in stars.all_stars:
             if not hasattr(s, "cutout_center"):
                 continue
@@ -161,6 +167,21 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
             if (nx, ny) != (cx, cy):
                 s.cutout_center = (nx, ny)
         return stars
+
+    def _check_convergence(self, stars, centers, fit_failed):
+        res = super()._check_convergence(stars, centers, fit_failed)
+        # res[1] is the squared centre movement over successfully fitted
+        # stars; store it expanded to the flat-star order so the caller
+        # can prune the entries still moving after a non-converged build.
+        try:
+            move = np.full(len(stars.all_stars), np.nan)
+            move[np.logical_not(np.asarray(fit_failed, bool))] = np.asarray(
+                res[1], float
+            )
+            self._last_move = move
+        except Exception:
+            self._last_move = None
+        return res
 
 # ---------------------------------------------------------------------------
 # Local
@@ -352,11 +373,15 @@ def get_smoothing_kernel(
         Explicit odd kernel size on oversampled grid. If None, auto-size to
         ~``size_scale_px`` native pixels (kernel_size ~ scale*oversample).
         Explicit sizes still respect the ``max_fwhm_frac`` footprint cap.
-    kind : {"quartic","quadratic","gaussian","none"}
+    kind : {"quartic","quadratic","gaussian","auto","none"}
         Kernel family.  "quadratic" forces the 2-D quadratic basis (also
         used automatically when the kernel is smaller than 5x5, where a
-        quartic fit is underdetermined).  "none" returns ``None``, which
-        disables smoothing (EPSFBuilder accepts ``smoothing_kernel=None``).
+        quartic fit is underdetermined).  "auto" mirrors the photutils
+        3.1 'auto' option on the installed 3.0 API: a quartic kernel
+        sized to 0.7x the FWHM in oversampled grid points, disabled when
+        that footprint spans fewer than 5 grid points.  "none" returns
+        ``None``, which disables smoothing (EPSFBuilder accepts
+        ``smoothing_kernel=None``).
     size_scale_px : float
         Target kernel footprint in NATIVE pixels.  The Anderson & King (2000)
         kernel is a 5x5 quartic on a 4x-oversampled grid (1.25 px footprint);
@@ -392,6 +417,25 @@ def get_smoothing_kernel(
             scale_px = 1.0
         if not np.isfinite(scale_px) or scale_px <= 0:
             scale_px = 1.0
+        _auto_cells = np.nan
+        if str(kind).strip().lower() == "auto":
+            # photutils 'auto' semantics: a least-squares quartic kernel
+            # whose footprint is 0.7x the ePSF FWHM in oversampled grid
+            # points.  The ePSF is the pixel-integrated PSF, so the image
+            # FWHM is the right proxy for its per-iteration width; fall
+            # back to 'quartic' when the FWHM is unmeasurable.
+            try:
+                _f_auto = float(fwhm)
+            except Exception:
+                _f_auto = np.nan
+            if np.isfinite(_f_auto) and _f_auto > 0:
+                scale_px = 0.7 * _f_auto
+                _auto_cells = scale_px * osamp
+            else:
+                logging.getLogger(__name__).warning(
+                    "psf_smoothing_kernel='auto' needs a finite FWHM; "
+                    "using 'quartic'."
+                )
         try:
             mx = int(size_max)
         except Exception:
@@ -428,6 +472,15 @@ def get_smoothing_kernel(
             kernel_size = cap_cells
 
     k = str(kind).strip().lower()
+    if k == "auto":
+        # photutils skips smoothing entirely when the 0.7xFWHM kernel
+        # would span fewer than 5 oversampled grid points (heavily
+        # undersampled ePSFs); the check uses the raw width, not the
+        # odd-rounded kernel size.
+        _width_cells = float(kernel_size) if explicit_size else _auto_cells
+        if np.isfinite(_width_cells) and _width_cells < 5:
+            return None
+        k = "quartic"
     if k in ("none", "off", "false"):
         # Explicit opt-out: EPSFBuilder accepts smoothing_kernel=None.
         return None
@@ -844,7 +897,13 @@ def _epsf_residual_mad(stars, model, fit_rad_px: float) -> float:
 
 
 def _epsf_usable(model) -> bool:
-    """Whether an ePSF/PSF model holds finite data with positive range."""
+    """Whether an ePSF/PSF model holds finite data with a measurable core.
+
+    A non-converged ePSF built from junk cutouts is a flat noise plate:
+    it passes the finite/range checks yet has no half-max crossing, so
+    the FWHM is unmeasurable.  Such a model is not "degraded" - it is not
+    a PSF at all - so the caller's failure path must treat it as absent.
+    """
     try:
         d = np.asarray(getattr(model, "data", None), dtype=float)
         if d is None or d.size == 0:
@@ -853,7 +912,10 @@ def _epsf_usable(model) -> bool:
         if fin.mean() < 0.5:
             return False
         vals = d[fin]
-        return np.ptp(vals) > 0 and np.nansum(vals) > 0
+        if not (np.ptp(vals) > 0 and np.nansum(vals) > 0):
+            return False
+        osamp = int(np.atleast_1d(getattr(model, "oversampling", 1))[0])
+        return np.isfinite(measure_epsf_fwhm_native(d, osamp))
     except Exception:
         return False
 
@@ -899,7 +961,102 @@ def _moffat_sum_profile(r, params, n_comp):
     return v
 
 
-def _fit_moffat_composite(stars, fwhm, max_components=3):
+def _elliptical_radius(dx, dy, ellipticity):
+    """Radius in the metric that makes an elongated PSF round.
+
+    ``ellipticity`` is ``(q, theta)``: minor/major axis ratio and the
+    PA of the major axis (radians, +x toward +y).  Returns the plain
+    Euclidean radius when ``ellipticity`` is None.
+    """
+    dx = np.asarray(dx, float)
+    dy = np.asarray(dy, float)
+    if ellipticity is None:
+        return np.hypot(dx, dy)
+    q, theta = ellipticity
+    ct, st = np.cos(theta), np.sin(theta)
+    xp = dx * ct + dy * st
+    yp = -dx * st + dy * ct
+    return np.hypot(xp, yp / max(float(q), 0.1))
+
+
+def _ensemble_ellipticity(stars, fwhm):
+    """Shared PSF elongation (axis ratio, position angle) of the star set.
+
+    Bad tracking/defocus leaves every point source elongated along a
+    common direction (a trailed PSF is a streak).  Circular analytic
+    models then misrepresent the image: per-star second moments are
+    measured inside ~1.5 FWHM of the cutout centre, and the ensemble
+    median axis ratio plus the doubled-angle PA coherence decide
+    whether the elongation is systematic enough to apply.  Returns
+    ``(q, theta)`` with ``q = b/a in (0,1]`` and ``theta`` the PA of
+    the major axis (radians, +x toward +y), or ``None`` when the field
+    is round or the PAs are incoherent.
+    """
+    if stars is None or len(stars) == 0:
+        return None
+    fwhm = max(1.0, float(fwhm))
+    qs, thetas, wts = [], [], []
+    for s in stars:
+        data = np.asarray(getattr(s, "data", None), float)
+        if data.ndim != 2 or data.size == 0:
+            continue
+        ny, nx = data.shape
+        cc = getattr(s, "cutout_center", None)
+        cc = (
+            np.asarray(cc, float)
+            if cc is not None
+            else np.array([(nx - 1) / 2.0, (ny - 1) / 2.0])
+        )
+        yy, xx = np.indices(data.shape)
+        dx, dy = xx - cc[0], yy - cc[1]
+        rr = np.hypot(dx, dy)
+        ok = np.isfinite(data) & (rr < 1.5 * fwhm)
+        m = getattr(s, "mask", None)
+        if m is not None:
+            ok &= ~np.asarray(m, bool)
+        w = np.asarray(getattr(s, "weights", None), float)
+        if w.shape == data.shape:
+            ok &= w > 0
+        if int(ok.sum()) < 9:
+            continue
+        v = np.where(ok, np.clip(data, 0.0, None), 0.0)
+        tot = float(v.sum())
+        if not np.isfinite(tot) or tot <= 0:
+            continue
+        mxx = float((v * dx * dx).sum() / tot)
+        myy = float((v * dy * dy).sum() / tot)
+        mxy = float((v * dx * dy).sum() / tot)
+        tr, det = mxx + myy, mxx * myy - mxy * mxy
+        disc = tr * tr / 4.0 - det
+        if not np.isfinite(disc) or disc < 0 or tr <= 0:
+            continue
+        sq = np.sqrt(disc)
+        lam_a, lam_b = 0.5 * tr + sq, max(0.5 * tr - sq, 1e-9)
+        qs.append(np.sqrt(lam_b / lam_a))
+        thetas.append(0.5 * np.arctan2(2.0 * mxy, mxx - myy))
+        wts.append(tot)
+    if len(qs) < 3:
+        return None
+    qs = np.asarray(qs)
+    thetas = np.asarray(thetas)
+    wts = np.asarray(wts)
+    # Double the angle so the 180-degree PA ambiguity is removed before
+    # the coherence/weighted-mean tests.
+    z = wts * np.exp(2j * thetas)
+    coh = float(np.abs(z.sum()) / np.sum(wts))
+    q_med = float(np.median(qs))
+    # Coherence gate: random PAs average |exp(2i*theta)| ~ 1/sqrt(N)
+    # (~0.35 at N=8, p99 ~0.72), while a shared trail direction with
+    # +/-15 deg of per-star scatter stays above ~0.8.  0.7 separates
+    # the two; below it no single PA represents the field and a round
+    # model is the honest fallback.
+    if not np.isfinite(q_med) or q_med > 0.9 or coh < 0.7:
+        return None
+    theta = 0.5 * np.arctan2(z.sum().imag, z.sum().real)
+    return max(q_med, 0.1), float(theta)
+
+
+def _fit_moffat_composite(stars, fwhm, max_components=3, ellipticity=None):
     """Fit a sum of Moffats to the stacked PSF-star cutouts.
 
     A single Moffat cannot represent a real PSF, whose narrow core and
@@ -924,7 +1081,7 @@ def _fit_moffat_composite(stars, fwhm, max_components=3):
         else:
             cc = np.asarray(cc_attr, float)
         yy, xx = np.indices(data.shape)
-        rr = np.hypot(xx - cc[0], yy - cc[1])
+        rr = _elliptical_radius(xx - cc[0], yy - cc[1], ellipticity)
         ok = np.isfinite(data)
         m = getattr(s, "mask", None)
         if m is not None:
@@ -1024,7 +1181,7 @@ def _default_moffat_composite(fwhm, beta):
     return comps
 
 
-def _composite_moffat_psf(components, oversampling, cutout_n):
+def _composite_moffat_psf(components, oversampling, cutout_n, ellipticity=None):
     """ImagePSF stamp from a sum-of-Moffats profile.
 
     Same conventions as ``_analytic_moffat_psf``: the continuous profile
@@ -1038,12 +1195,15 @@ def _composite_moffat_psf(components, oversampling, cutout_n):
     n = int(osamp * cutout_n)
     ctr = (n - 1) / 2.0
     yy, xx = np.indices((n, n))
-    r = np.hypot(xx - ctr, yy - ctr) / osamp
+    # The fitted gammas are intrinsic (de-elongated) radii, so the stamp
+    # is evaluated on the same elliptical metric to restore the true
+    # 2-D shape - a trailed/defocused PSF stays elongated.
+    r = _elliptical_radius(xx - ctr, yy - ctr, ellipticity) / osamp
     data = np.zeros_like(r)
     for amp, gamma, beta in components:
-        data += float(amp) * (
-            1.0 + (r / max(float(gamma), 1e-6)) ** 2
-        ) ** (-float(beta))
+        data += float(amp) * (1.0 + (r / max(float(gamma), 1e-6)) ** 2) ** (
+            -float(beta)
+        )
     data = pixel_integrate_oversampled(data, osamp)
     # pixel_integrate_oversampled only normalises when it convolves; at
     # osamp==1 it returns the raw profile, so normalise unconditionally
@@ -1056,6 +1216,7 @@ def _composite_moffat_psf(components, oversampling, cutout_n):
     stamp._autophot_kind = (
         "analytic-composite" if len(components) > 1 else "analytic-moffat"
     )
+    stamp._autophot_ellipticity = ellipticity
     return stamp
 
 
@@ -1070,16 +1231,35 @@ def _analytic_psf_stamp(
     when the fit fails.
     """
     comps = None
+    ellipticity = None
     if stars is not None and len(stars) > 0:
         try:
+            ellipticity = _ensemble_ellipticity(stars, fwhm)
+        except Exception:
+            ellipticity = None
+        try:
             comps = _fit_moffat_composite(
-                stars, fwhm, max_components=max_components
+                stars,
+                fwhm,
+                max_components=max_components,
+                ellipticity=ellipticity,
             )
         except Exception:
             comps = None
     if comps is None:
         comps = _default_moffat_composite(fwhm, beta)
-    return _composite_moffat_psf(comps, oversampling, cutout_n), comps
+    stamp = _composite_moffat_psf(
+        comps, oversampling, cutout_n, ellipticity=ellipticity
+    )
+    if not _epsf_usable(stamp):
+        # A degenerate composite fit (too few stars to constrain a
+        # core+wing model) renders a flat plate; fall back to the
+        # canonical profile so this path always yields a usable model.
+        comps = _default_moffat_composite(fwhm, beta)
+        stamp = _composite_moffat_psf(
+            comps, oversampling, cutout_n, ellipticity=ellipticity
+        )
+    return stamp, comps
 
 
 def _psf_pair_separation_drop(xy, min_sep_px, dup_px, rank):
@@ -1143,6 +1323,73 @@ def _psf_mask_distances(image, mask, xy):
         yi = np.clip(np.rint(xy[fin, 1]).astype(int), 0, distmap.shape[0] - 1)
         dist[fin] = distmap[yi, xi]
     return dist
+
+
+def _psf_shape_outlier_indices(stars, fwhm, nsigma=4.0, max_frac=0.3, min_keep=4):
+    """Indices of ePSF-star cutouts inconsistent with the ensemble shape.
+
+    A converged ePSF needs self-consistent cutouts: one or two poor
+    sources (miscentered, contaminated, deviant morphology) leave the
+    recentering chasing disagreement, so the build never converges and
+    the model collapses.  Each flux-normalised cutout is scored by the
+    MAD of its residual against the pixel-wise median stack inside
+    ~1.5 FWHM; scores beyond ``nsigma`` of the robust ensemble scatter
+    are returned, worst first, bounded by ``max_frac`` and ``min_keep``.
+    """
+    n = len(stars)
+    if n < max(5, int(min_keep) + 1):
+        return []
+    fwhm = max(1.0, float(fwhm))
+    vs, masks = [], []
+    for s in stars:
+        d = np.asarray(getattr(s, "data", None), float)
+        if d.ndim != 2:
+            return []
+        w = np.asarray(getattr(s, "weights", None), float)
+        m = np.isfinite(d)
+        if np.shape(w) == d.shape:
+            m &= np.isfinite(w) & (w > 0)
+        mk = getattr(s, "mask", None)
+        if mk is not None and np.shape(mk) == d.shape:
+            m &= ~np.asarray(mk, bool)
+        fl = float(getattr(s, "flux", np.nan))
+        if not np.isfinite(fl) or fl <= 0:
+            fl = np.nansum(np.where(m, np.clip(d, 0.0, None), 0.0))
+        if not np.isfinite(fl) or fl <= 0:
+            fl = 1.0
+        vs.append(np.where(np.isfinite(d), d / fl, np.nan))
+        masks.append(m)
+    stack_v = np.stack(vs)
+    stack_m = np.stack(masks)
+    # Template: pixel-wise median over the stars covering each pixel.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        tmpl = np.nanmedian(np.where(stack_m, stack_v, np.nan), axis=0)
+    ny, nx = stack_v.shape[1:]
+    yy, xx = np.indices((ny, nx))
+    win = np.hypot(xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0) < 1.5 * fwhm
+    scores = np.full(n, np.nan)
+    for i in range(n):
+        ok = stack_m[i] & np.isfinite(tmpl) & np.isfinite(stack_v[i]) & win
+        if int(ok.sum()) < 9:
+            continue
+        dev = stack_v[i][ok] - tmpl[ok]
+        scores[i] = 1.4826 * np.median(np.abs(dev - np.median(dev)))
+    fin = np.isfinite(scores)
+    if int(fin.sum()) < 4:
+        return []
+    med = float(np.median(scores[fin]))
+    mad = 1.4826 * float(np.median(np.abs(scores[fin] - med)))
+    # Absolute floor: near-identical stars leave mad ~ 0 and any tiny
+    # deviation would flag.
+    thr = med + max(nsigma * mad, 0.5 * med)
+    cand = [
+        i for i in np.argsort(-scores) if fin[i] and scores[i] > thr
+    ]
+    max_drop = min(max(1, int(np.floor(max_frac * n))), n - int(min_keep))
+    if max_drop <= 0:
+        return []
+    return sorted(cand[:max_drop])
 
 
 def measure_epsf_fwhm_native(epsf_data: np.ndarray, oversampling: int) -> float:
@@ -2866,6 +3113,12 @@ class PSF:
         # sources), "analytic-composite"/"analytic-moffat" (analytic
         # substitution or failure backdoor), or "none".
         self.psf_model_kind = "none"
+        # True/False once an empirical EPSFBuilder run produces a result;
+        # stays None when only an analytic model (or none) was built.
+        # ``psf_converged_relaxed`` marks a verdict accepted at the relaxed
+        # centre-movement bound rather than the strict photutils threshold.
+        self.psf_converged = None
+        self.psf_converged_relaxed = False
 
     # -----------------------------------------------------------------------
     # Centroiding
@@ -3747,13 +4000,21 @@ class PSF:
             # The shape test needs real signal in the core: below the
             # peak-SNR floor the moments are noise-dominated and cannot
             # distinguish a close blend from sky fluctuations.
-            flag_ellip = (
+            _ellip_meas = (
                 gate
                 & (core_tot > 0)
                 & (core_peak_snr >= _core_ellip_snr_min)
                 & np.isfinite(ellip)
-                & (ellip > _core_ellip_max)
             )
+            _ellip_thr = _core_ellip_max
+            if _core_ellip_max > 0 and np.count_nonzero(_ellip_meas) >= 3:
+                _emed = float(np.median(ellip[_ellip_meas]))
+                if _emed > _core_ellip_max:
+                    # Field-wide elongation (trailed/defocused PSF): flag
+                    # only cores more elongated than the shared shape, or
+                    # every real star earns a blend strike.
+                    _ellip_thr = _emed + 0.15
+            flag_ellip = _ellip_meas & (ellip > _ellip_thr)
 
         # Test 0: masked-pixel fraction in annulus (per-star hardware masks).
         # Unlike the flux tests this does not require the >=10-pixel gate:
@@ -4074,27 +4335,63 @@ class PSF:
         log = logging.getLogger(__name__)
         self.psf_model_kind = "none"
         self.n_epsf_stars = None
+        # True/False for the empirical ePSF build; None when no empirical
+        # attempt ran (pure analytic paths) or before the build.
+        self.psf_converged = None
+        self.psf_converged_relaxed = False
 
         # ---- nested helpers ------------------------------------------------
         def _validate_epsfstars(epsfstars_obj, cutout_shape, fit_boxsize):
             cy = (cutout_shape[0] - 1) / 2.0
             cx = (cutout_shape[1] - 1) / 2.0
             lim = 0.45 * (fit_boxsize - 1)
+            # Aligned frames can carry NaN/masked pixels over a large
+            # fraction of the area (chip gaps, resampling), so requiring a
+            # fully-finite stamp discards good stars whose NaNs sit
+            # harmlessly in the outer annulus -- photutils excludes masked
+            # pixels from the ePSF fit anyway.  Validate the core instead:
+            # require a mostly-valid fit-box window and measure a
+            # mask-aware centroid there, storing it back so EPSFBuilder
+            # fits against the measured core centre rather than stale
+            # extraction metadata.
+            nyc, nxc = cutout_shape
+            half = int(np.ceil(fit_boxsize / 2.0))
+            iy0 = max(0, int(np.floor(cy)) - half)
+            iy1 = min(nyc, int(np.ceil(cy)) + half + 1)
+            ix0 = max(0, int(np.floor(cx)) - half)
+            ix1 = min(nxc, int(np.ceil(cx)) + half + 1)
+            yy, xx = np.mgrid[iy0:iy1, ix0:ix1]
             kept = []
             for st in epsfstars_obj:
                 try:
                     data = np.asarray(st.data, float)
-                    if (
-                        data.ndim != 2
-                        or not np.isfinite(data).all()
-                        or np.nansum(data) <= 0
-                    ):
+                    if data.ndim != 2 or np.nansum(data) <= 0:
                         continue
-                    y0, x0 = getattr(st, "cutout_center", (cy, cx))
-                    if not (np.isfinite(y0) and np.isfinite(x0)):
+                    sub = data[iy0:iy1, ix0:ix1].astype(float, copy=True)
+                    _m = getattr(st, "mask", None)
+                    if _m is not None:
+                        sub[np.asarray(_m, dtype=bool)[iy0:iy1, ix0:ix1]] = np.nan
+                    # A core window that is mostly masked/non-finite cannot
+                    # constrain the ePSF core shape; outer-stamp NaNs are
+                    # irrelevant because they never enter the window.
+                    if np.isfinite(sub).mean() < 0.5:
                         continue
-                    if np.hypot(x0 - cx, y0 - cy) > lim:
+                    w = np.clip(sub - np.nanmedian(sub), 0.0, None)
+                    w[~np.isfinite(w)] = 0.0
+                    w_max = float(w.max())
+                    if w_max <= 0:
                         continue
+                    # Isophotal floor so faint neighbour wings inside the
+                    # window cannot pull the centroid.
+                    w = np.where(w > 0.1 * w_max, w, 0.0)
+                    w_tot = float(w.sum())
+                    if w_tot <= 0:
+                        continue
+                    lx = float((xx * w).sum() / w_tot)
+                    ly = float((yy * w).sum() / w_tot)
+                    if np.hypot(lx - cx, ly - cy) > lim:
+                        continue
+                    st.cutout_center = (lx, ly)
                     kept.append(st)
                 except Exception:
                     continue
@@ -4203,6 +4500,12 @@ class PSF:
                 else psfSources.copy()
             )
             log.info("Building ePSF from %s sources", len(df))
+            _xy_in = _locate_columns(df)[:2]
+            if _xy_in[0] is not None and _xy_in[1] is not None:
+                log.debug(
+                    "PSF pool coordinates:\n%s",
+                    df[[_xy_in[0], _xy_in[1]]].to_string(index=False),
+                )
 
             # Exclude saturated and streaky/elongated sources from PSF building.
             # For small candidate pools, apply these cuts adaptively so we do not
@@ -4244,6 +4547,13 @@ class PSF:
                 phot_cfg.get("psf_defect_veto_min_fails", 2)
             )
             df["_psf_veto"] = 0
+            df["_psf_veto_names"] = ""
+
+            def _add_strike(bad_mask, name):
+                # Record the failing check per candidate so the veto log
+                # can report which cuts actually emptied the pool.
+                df["_psf_veto"] += bad_mask.astype(int)
+                df.loc[bad_mask, "_psf_veto_names"] += name + ";"
 
             n_before = len(df)
             # When the starting pool is modest, relax shape/saturation cuts slightly.
@@ -4262,10 +4572,13 @@ class PSF:
                 )
                 if peak_col is not None:
                     sat_cut = saturate_frac * saturate
-                    ok = df[peak_col] < sat_cut
+                    peak_vals = pd.to_numeric(df[peak_col], errors="coerce")
+                    # NaN peak cannot be judged; keep it rather than issue
+                    # a phantom strike to supplement rows missing the column.
+                    ok = (peak_vals < sat_cut) | peak_vals.isna()
                     n_sat = (~ok).sum()
                     if n_sat > 0:
-                        df["_psf_veto"] += (~ok).astype(int)
+                        _add_strike(~ok, "sat")
                         n_keep = int(np.sum(ok))
                         if n_keep >= min_psf_candidates:
                             df = df[ok].copy()
@@ -4295,7 +4608,7 @@ class PSF:
                 psf_flags_max = int(phot_cfg.get("psf_flags_max", 1))
                 flag_vals = pd.to_numeric(df[_flags_col], errors="coerce").fillna(0).astype(int)
                 ok_flags = flag_vals <= psf_flags_max
-                df["_psf_veto"] += (~ok_flags).astype(int)
+                _add_strike(~ok_flags, "flags")
                 n_keep_flags = int(ok_flags.sum())
                 min_keep_flags = max(
                     min_psf_candidates,
@@ -4325,15 +4638,58 @@ class PSF:
             #   ELONGATION, elongation, ELLIPTICITY, ellipticity
             # ellipticity = 1 - b/a, so the cut elongation_max <-> (1 - 1/elong)
             elong_max = float(phot_cfg.get("psf_elongation_max", 1.5))
+            # Field-shared elongation (the image PSF itself is trailed or
+            # defocused): also scales the flux-radius and minor-axis size
+            # floors below, which are otherwise calibrated for round PSFs.
+            _elong_med = np.nan
             elong_col = next(
                 (c for c in ["ELONGATION", "elongation"] if c in df.columns), None
             )
+            # The merged pool mixes frames with disjoint columns: only the
+            # catalogue supplement carries ELONGATION, so derive a/b from
+            # SExtractor's A_IMAGE/B_IMAGE to fill the gaps.
+            _a_el = next((c for c in ("a", "A_IMAGE") if c in df.columns), None)
+            _b_el = next((c for c in ("b", "B_IMAGE") if c in df.columns), None)
+            _elong_vals = (
+                pd.to_numeric(df[elong_col], errors="coerce")
+                if elong_col is not None
+                else None
+            )
+            if _a_el is not None and _b_el is not None:
+                _a_v = pd.to_numeric(df[_a_el], errors="coerce")
+                _b_v = pd.to_numeric(df[_b_el], errors="coerce")
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    _derived = pd.Series(
+                        np.where(
+                            (_b_v > 0) & np.isfinite(_a_v) & np.isfinite(_b_v),
+                            _a_v / _b_v,
+                            np.nan,
+                        ),
+                        index=df.index,
+                    )
+                _elong_vals = (
+                    _derived
+                    if _elong_vals is None
+                    else _elong_vals.fillna(_derived)
+                )
             ellip_col = next(
                 (c for c in ["ELLIPTICITY", "ellipticity"] if c in df.columns), None
-            ) if elong_col is None else None
-            if elong_col is not None and np.isfinite(elong_max) and elong_max > 0:
-                ok_elong = df[elong_col].astype(float) <= elong_max
-                df["_psf_veto"] += (~ok_elong).astype(int)
+            ) if _elong_vals is None else None
+            if _elong_vals is not None and np.isfinite(elong_max) and elong_max > 0:
+                # A field-wide elongated PSF (tracking drift, defocus)
+                # pushes every real star past the absolute cut; flag only
+                # outliers beyond the shared morphology, or the whole
+                # pool earns elong strikes.
+                _elong_thr = elong_max
+                _elong_fin = _elong_vals[np.isfinite(_elong_vals)]
+                if len(_elong_fin) >= 3:
+                    _elong_med = float(np.median(_elong_fin))
+                    if _elong_med > elong_max:
+                        _elong_thr = _elong_med * 1.3
+                # NaN elongation is unmeasurable, not elongated; otherwise
+                # every supplement row missing the column earns a strike.
+                ok_elong = (_elong_vals <= _elong_thr) | _elong_vals.isna()
+                _add_strike(~ok_elong, "elong")
                 n_keep_elong = int(ok_elong.sum())
                 min_keep_elong = max(
                     min_psf_candidates,
@@ -4343,20 +4699,45 @@ class PSF:
                     n_drop_elong = int((~ok_elong).sum())
                     if n_drop_elong > 0:
                         df = df[ok_elong].copy()
+                        if _elong_thr > elong_max:
+                            log.info(
+                                "PSF elongation cut relaxed to %.2f "
+                                "(field median %.2f exceeds configured "
+                                "%.2f - elongated image PSF)",
+                                _elong_thr,
+                                _elong_med,
+                                elong_max,
+                            )
                         log.info(
                             "PSF elongation cut (<= %.2f): removed %d elongated candidates (%d kept)",
-                            elong_max, n_drop_elong, n_keep_elong,
+                            _elong_thr,
+                            n_drop_elong,
+                            n_keep_elong,
                         )
                 else:
                     log.info(
                         "Skipping elongation cut (<= %.2f): would leave only %d candidates (< %d).",
-                        elong_max, n_keep_elong, min_keep_elong,
+                        _elong_thr,
+                        n_keep_elong,
+                        min_keep_elong,
                     )
             elif ellip_col is not None and np.isfinite(elong_max) and elong_max > 0:
                 # Convert elongation_max to ellipticity: e = 1 - 1/elong
                 ellip_max = 1.0 - 1.0 / elong_max
-                ok_ellip = df[ellip_col].astype(float) <= ellip_max
-                df["_psf_veto"] += (~ok_ellip).astype(int)
+                _ellip_vals = pd.to_numeric(df[ellip_col], errors="coerce")
+                _ellip_thr = ellip_max
+                _ellip_fin = _ellip_vals[np.isfinite(_ellip_vals)]
+                _ellip_med = np.nan
+                if len(_ellip_fin) >= 3:
+                    _ellip_med = float(np.median(_ellip_fin))
+                    if _ellip_med < 1.0:
+                        _elong_med = 1.0 / (1.0 - _ellip_med)
+                    if _ellip_med > ellip_max:
+                        # Same field-elongation rescue as the elongation
+                        # cut: 1.3x the median in a/b space.
+                        _ellip_thr = 1.0 - 1.0 / (1.3 / (1.0 - _ellip_med))
+                ok_ellip = (_ellip_vals <= _ellip_thr) | _ellip_vals.isna()
+                _add_strike(~ok_ellip, "ellip")
                 n_keep_ellip = int(ok_ellip.sum())
                 min_keep_ellip = max(
                     min_psf_candidates,
@@ -4366,14 +4747,28 @@ class PSF:
                     n_drop_ellip = int((~ok_ellip).sum())
                     if n_drop_ellip > 0:
                         df = df[ok_ellip].copy()
+                        if _ellip_thr > ellip_max:
+                            log.info(
+                                "PSF ellipticity cut relaxed to %.3f "
+                                "(field median %.3f exceeds configured "
+                                "%.3f - elongated image PSF)",
+                                _ellip_thr,
+                                _ellip_med,
+                                ellip_max,
+                            )
                         log.info(
                             "PSF ellipticity cut (<= %.3f, equiv. elong=%.2f): removed %d elongated candidates (%d kept)",
-                            ellip_max, elong_max, n_drop_ellip, n_keep_ellip,
+                            _ellip_thr,
+                            1.0 / max(1.0 - _ellip_thr, 1e-3),
+                            n_drop_ellip,
+                            n_keep_ellip,
                         )
                 else:
                     log.info(
                         "Skipping ellipticity cut (<= %.3f): would leave only %d candidates (< %d).",
-                        ellip_max, n_keep_ellip, min_keep_ellip,
+                        _ellip_thr,
+                        n_keep_ellip,
+                        min_keep_ellip,
                     )
 
             # ---- FWHM consistency cut ----
@@ -4415,7 +4810,7 @@ class PSF:
                     ok_fwhm = ok_fwhm  # reject NaN FWHM
                 else:
                     ok_fwhm = ok_fwhm_with_nan  # keep NaN FWHM (safety)
-                df["_psf_veto"] += (~ok_fwhm).astype(int)
+                _add_strike(~ok_fwhm, "fwhm")
                 n_keep_fwhm = int(ok_fwhm.sum())
                 if n_keep_fwhm >= min_keep_fwhm:
                     n_drop_fwhm = int((~ok_fwhm).sum())
@@ -4516,10 +4911,15 @@ class PSF:
                     _fr_ref = 3.0
                 _fr_min_frac = float(phot_cfg.get("psf_flux_radius_min_frac", 0.3))
                 _fr_lo = _fr_min_frac * _fr_ref
+                if np.isfinite(_elong_med) and _elong_med > elong_max:
+                    # FLUX_RADIUS is circularised: a field-shared axis
+                    # ratio q = b/a shrinks it by ~sqrt(q) relative to a
+                    # round PSF of the same image FWHM.
+                    _fr_lo = _fr_lo * min(1.0, np.sqrt(1.0 / _elong_med))
                 fr_vals = pd.to_numeric(df[_fr_col], errors="coerce")
                 ok_fr = fr_vals >= _fr_lo
                 ok_fr = ok_fr | fr_vals.isna()  # keep NaN (can't judge)
-                df["_psf_veto"] += (~ok_fr).astype(int)
+                _add_strike(~ok_fr, "fr_min")
                 n_keep_fr = int(ok_fr.sum())
                 min_keep_fr = max(
                     min_psf_candidates,
@@ -4576,7 +4976,7 @@ class PSF:
                         )
                     ok_pk = pd.Series(ratio, index=df.index)
                     ok_pk = (ok_pk <= _pk_ratio_max) | ok_pk.isna()
-                    df["_psf_veto"] += (~ok_pk).astype(int)
+                    _add_strike(~ok_pk, "pk_ap")
                     n_keep_pk = int(ok_pk.sum())
                     min_keep_pk = max(
                         min_psf_candidates,
@@ -4625,9 +5025,16 @@ class PSF:
                     )
                     a_vals = pd.to_numeric(df[_a_col], errors="coerce")
                     b_vals = pd.to_numeric(df[_b_col], errors="coerce")
-                    ok_ab = (a_vals >= _ab_min) & (b_vals >= _ab_min)
+                    _b_min = _ab_min
+                    if np.isfinite(_elong_med) and _elong_med > elong_max:
+                        # Field-shared elongation makes every star's
+                        # minor axis small; a compact defect is small on
+                        # BOTH axes, so the major axis still carries the
+                        # full CR signature while b relaxes with q = b/a.
+                        _b_min = _ab_min * min(1.0, 1.0 / _elong_med)
+                    ok_ab = (a_vals >= _ab_min) & (b_vals >= _b_min)
                     ok_ab = ok_ab | a_vals.isna() | b_vals.isna()
-                    df["_psf_veto"] += (~ok_ab).astype(int)
+                    _add_strike(~ok_ab, "ab_min")
                     n_keep_ab = int(ok_ab.sum())
                     min_keep_ab = max(
                         min_psf_candidates,
@@ -4637,16 +5044,29 @@ class PSF:
                         n_drop_ab = int((~ok_ab).sum())
                         if n_drop_ab > 0:
                             df = df[ok_ab].copy()
+                            if _b_min < _ab_min:
+                                log.info(
+                                    "PSF A/B minor-axis floor relaxed to "
+                                    "%.1f px (field elongation %.1f - "
+                                    "elongated image PSF)",
+                                    _b_min,
+                                    _elong_med,
+                                )
                             log.info(
-                                "PSF A/B size cut (>= %.1f px): removed %d "
+                                "PSF A/B size cut (a >= %.1f, b >= %.1f px): removed %d "
                                 "CR-like candidates (%d kept)",
-                                _ab_min, n_drop_ab, n_keep_ab,
+                                _ab_min,
+                                _b_min,
+                                n_drop_ab,
+                                n_keep_ab,
                             )
                     else:
                         log.info(
                             "Skipping A/B size cut (>= %.1f px): would leave "
                             "only %d candidates (< %d).",
-                            _ab_min, n_keep_ab, min_keep_ab,
+                            _ab_min,
+                            n_keep_ab,
+                            min_keep_ab,
                         )
 
             # ---- Sharpness cut ----
@@ -4661,7 +5081,7 @@ class PSF:
                 sharp_vals = pd.to_numeric(df[_sharp_col], errors="coerce")
                 ok_sharp = sharp_vals <= sharp_max
                 ok_sharp = ok_sharp | sharp_vals.isna()  # keep NaN (can't judge)
-                df["_psf_veto"] += (~ok_sharp).astype(int)
+                _add_strike(~ok_sharp, "sharp")
                 n_keep_sharp = int(ok_sharp.sum())
                 min_keep_sharp = max(
                     min_psf_candidates,
@@ -4681,36 +5101,53 @@ class PSF:
                         sharp_max, n_keep_sharp, min_keep_sharp,
                     )
 
-            # ---- CLASS_STAR cut ----
-            # Prefer star-like sources (SExtractor stellarity index).
-            # Cosmic rays can have high CLASS_STAR (point-like), so this alone
-            # won't reject them, but combined with the FWHM cut above it helps
-            # exclude galaxies and extended defects from the ePSF build.
-            class_star_min = float(phot_cfg.get("psf_class_star_min", 0.4))
-            _cs_col = next(
-                (c for c in ("class_star", "CLASS_STAR") if c in df.columns), None
+            # ---- Profile-concentration cut (replaces CLASS_STAR) ----
+            # SExtractor's CLASS_STAR neural classifier is uncalibrated on
+            # some cameras (all values ~0 or ~1), so stellarity is measured
+            # directly from the profile: a point source's half-light radius
+            # is ~0.5-0.7x its FWHM (Gaussian 0.60, Moffat ~0.55-0.65), while
+            # galaxies and extended defects are systematically larger.
+            # The FLUX_RADIUS lower bound above already rejects CR-like
+            # spikes; this upper bound rejects extended profiles.
+            _fr_col_hi = next(
+                (c for c in ("flux_radius", "FLUX_RADIUS", "r50") if c in df.columns),
+                None,
             )
-            if _cs_col is not None and np.isfinite(class_star_min) and class_star_min > 0:
-                cs_vals = pd.to_numeric(df[_cs_col], errors="coerce")
-                ok_cs = cs_vals >= class_star_min
-                df["_psf_veto"] += (~ok_cs).astype(int)
-                n_keep_cs = int(ok_cs.sum())
-                min_keep_cs = max(
+            _fw_col_hi = next(
+                (c for c in ("fwhm", "FWHM", "fwhm_image") if c in df.columns),
+                None,
+            )
+            fr_max_frac = float(phot_cfg.get("psf_flux_radius_max_frac", 0.9))
+            if (
+                _fr_col_hi is not None
+                and _fw_col_hi is not None
+                and np.isfinite(fr_max_frac)
+                and fr_max_frac > 0
+            ):
+                _fr_hi = pd.to_numeric(df[_fr_col_hi], errors="coerce")
+                _fw_hi = pd.to_numeric(df[_fw_col_hi], errors="coerce")
+                _prof_ratio = _fr_hi / _fw_hi.where(_fw_hi > 0)
+                ok_prof = (_prof_ratio <= fr_max_frac) | _prof_ratio.isna()
+                _add_strike(~ok_prof, "profile")
+                n_keep_prof = int(ok_prof.sum())
+                min_keep_prof = max(
                     min_psf_candidates,
                     int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
                 )
-                if n_keep_cs >= min_keep_cs:
-                    n_drop_cs = int((~ok_cs).sum())
-                    if n_drop_cs > 0:
-                        df = df[ok_cs].copy()
+                if n_keep_prof >= min_keep_prof:
+                    n_drop_prof = int((~ok_prof).sum())
+                    if n_drop_prof > 0:
+                        df = df[ok_prof].copy()
                         log.info(
-                            "PSF CLASS_STAR cut (>= %.2f): removed %d non-stellar candidates (%d kept)",
-                            class_star_min, n_drop_cs, n_keep_cs,
+                            "PSF profile cut (FLUX_RADIUS <= %.2fxFWHM): "
+                            "removed %d extended candidates (%d kept)",
+                            fr_max_frac, n_drop_prof, n_keep_prof,
                         )
                 else:
                     log.info(
-                        "Skipping CLASS_STAR cut (>= %.2f): would leave only %d candidates (< %d).",
-                        class_star_min, n_keep_cs, min_keep_cs,
+                        "Skipping profile cut (FLUX_RADIUS <= %.2fxFWHM): "
+                        "would leave only %d candidates (< %d).",
+                        fr_max_frac, n_keep_prof, min_keep_prof,
                     )
 
             # ---- Neighbour-isolation cut ----
@@ -4767,7 +5204,7 @@ class PSF:
                     pairs = tree.query_ball_point(np.column_stack([xs, ys]), r=iso_r)
                     isolated = np.array([len(p) == 1 for p in pairs])
                     _iso_source = "PSF candidates only"
-                df["_psf_veto"] += (~isolated).astype(int)
+                _add_strike(~isolated, "isolation")
                 n_keep_iso = int(isolated.sum())
                 min_keep_iso = max(
                     min_psf_candidates,
@@ -4804,13 +5241,54 @@ class PSF:
                 _vetoed = df["_psf_veto"] >= _veto_min_fails
                 _n_veto = int(_vetoed.sum())
                 if _n_veto:
+                    _strike_hist = (
+                        df.loc[_vetoed, "_psf_veto_names"]
+                        .str.split(";")
+                        .explode()
+                        .loc[lambda s: s != ""]
+                        .value_counts()
+                    )
                     df = df.loc[~_vetoed].copy()
                     log.info(
                         "PSF defect veto: removed %d candidates failing "
-                        ">= %d quality cuts (%d kept)",
-                        _n_veto, _veto_min_fails, len(df),
+                        ">= %d quality cuts (%d kept); strikes: %s",
+                        _n_veto,
+                        _veto_min_fails,
+                        len(df),
+                        ", ".join(
+                            f"{k}={v}" for k, v in _strike_hist.items()
+                        )
+                        or "none",
                     )
-            df = df.drop(columns=["_psf_veto"], errors="ignore")
+            if len(df) > 0:
+                _dbg_cols = [
+                    c
+                    for c in (
+                        xcol_now,
+                        ycol_now,
+                        "fwhm",
+                        "peak_flux",
+                        "flux_AP",
+                        "snr",
+                        "SNR",
+                    )
+                    if c is not None and c in df.columns
+                ]
+                _keep_dbg = (
+                    df.loc[:, _dbg_cols].copy() if _dbg_cols else None
+                )
+                if _keep_dbg is not None:
+                    _keep_dbg["strikes"] = df["_psf_veto"].values
+                    _keep_dbg["strike_names"] = (
+                        df["_psf_veto_names"].str.rstrip(";").values
+                    )
+                    log.debug(
+                        "PSF candidates surviving quality cuts:\n%s",
+                        _keep_dbg.to_string(index=False),
+                    )
+            df = df.drop(
+                columns=["_psf_veto", "_psf_veto_names"], errors="ignore"
+            )
 
             # ---- Candidate pair-separation cut ----
             # The pool merges entries from several source lists
@@ -5268,6 +5746,78 @@ class PSF:
                 1.1, float(phot_cfg.get("psf_init_moffat_beta", 4.765))
             )
 
+            def _write_failure_model(model):
+                # Early failure returns skip the normal write block below,
+                # but downstream consumers (e.g. the SFFT PSF lookup) still
+                # expect PSF_model_image products from a substituted model.
+                try:
+                    from functions import safe_fits_write
+
+                    _os = int(
+                        np.atleast_1d(getattr(model, "oversampling", oversample))[0]
+                    )
+                    _hdr = fits.Header()
+                    _hdr["OVERSAMP"] = (
+                        _os,
+                        "ePSF oversampling factor (grid px per native px)",
+                    )
+                    _hdr["PSFNPIX"] = (
+                        int(cutout_n),
+                        "ePSF native-pixel cutout size",
+                    )
+                    _hdr["FWHM_PIX"] = (
+                        float(fwhm),
+                        "Image FWHM in native pixels",
+                    )
+                    try:
+                        _mf = measure_epsf_fwhm_native(
+                            np.asarray(model.data, float), _os
+                        )
+                        if np.isfinite(_mf):
+                            _hdr["EPSFFWHM"] = (
+                                float(_mf),
+                                "Measured ePSF FWHM in native pixels",
+                            )
+                    except Exception:
+                        pass
+                    _hdr["NPSFSTAR"] = (0, "Stars used in ePSF build")
+                    _hdr["PSFBUILD"] = (
+                        model._autophot_kind,
+                        "PSF model construction method",
+                    )
+                    if self.psf_converged is not None:
+                        _hdr["PSFCONV"] = (
+                            bool(self.psf_converged),
+                            "Empirical ePSF build converged",
+                        )
+                    _ell = getattr(model, "_autophot_ellipticity", None)
+                    if _ell is not None:
+                        _hdr["PSFELLIP"] = (
+                            float(_ell[0]),
+                            "Measured PSF-star axis ratio b/a (elongated field)",
+                        )
+                        _hdr["PSFPA"] = (
+                            float(np.degrees(_ell[1])),
+                            "Measured PSF major-axis PA, deg (+x toward +y)",
+                        )
+                    safe_fits_write(
+                        os.path.join(write_dir, f"{filename_prefix}_{base}.fits"),
+                        np.asarray(model.data, float),
+                        _hdr,
+                    )
+                    if plot:
+                        self.plot_oversampled_psf(
+                            model,
+                            oversample=_os,
+                            save_path=os.path.join(
+                                write_dir,
+                                f"PSF_Image_{base}{get_plot_ext(self.input_yaml)}",
+                            ),
+                            fwhm_native=fwhm,
+                        )
+                except Exception:
+                    pass
+
             def _analytic_failure_psf(reason, stars=None):
                 if not (_analytic_on_failure or _analytic_fallback):
                     return None
@@ -5297,11 +5847,23 @@ class PSF:
                     model._autophot_kind,
                 )
                 self.psf_model_kind = model._autophot_kind
+                _write_failure_model(model)
+                _conv_txt = (
+                    "n/a (analytic model)"
+                    if self.psf_converged is None
+                    else ("yes" if self.psf_converged else "no")
+                )
+                log.info(
+                    "PSF model: %s | ePSF converged: %s",
+                    self.psf_model_kind,
+                    _conv_txt,
+                )
                 return model
 
             log.debug("Initial sources: %s", len(df))
             if threshold_limit_eff is not None and "threshold" in df.columns:
-                mask_thr = df["threshold"] > threshold_limit_eff
+                _thr_vals = pd.to_numeric(df["threshold"], errors="coerce")
+                mask_thr = (_thr_vals > threshold_limit_eff) | _thr_vals.isna()
                 n_keep_thr = int(np.sum(mask_thr))
                 min_keep_thr = max(
                     min_psf_candidates,
@@ -5318,7 +5880,9 @@ class PSF:
                         phot_cfg.get("psf_threshold_hard_min", 3.0)
                     )
                     if _thr_hard > 0 and _thr_hard < threshold_limit_eff:
-                        _hard = df["threshold"] > _thr_hard
+                        # NaN is unmeasured, not sub-noise; only drop rows
+                        # with a real below-floor value.
+                        _hard = (_thr_vals > _thr_hard) | _thr_vals.isna()
                         _n_hard = int(np.sum(_hard))
                         if 0 < _n_hard < len(df):
                             log.info(
@@ -5352,7 +5916,10 @@ class PSF:
             )
             if _snr_cut_col is not None:
                 _snr_vals = pd.to_numeric(df[_snr_cut_col], errors="coerce")
-                mask_snr = (_snr_vals >= snr_min_eff) & (_snr_vals <= snr_max_eff)
+                mask_snr = (
+                    ((_snr_vals >= snr_min_eff) & (_snr_vals <= snr_max_eff))
+                    | _snr_vals.isna()
+                )
                 n_keep_snr = int(np.sum(mask_snr))
                 min_keep_snr = max(
                     min_psf_candidates,
@@ -5367,7 +5934,7 @@ class PSF:
                         phot_cfg.get("psf_snr_hard_min", 3.0)
                     )
                     if _snr_hard > 0 and _snr_hard < snr_min_eff:
-                        _hard = _snr_vals >= _snr_hard
+                        _hard = (_snr_vals >= _snr_hard) | _snr_vals.isna()
                         _n_hard = int(np.sum(_hard))
                         if 0 < _n_hard < len(df):
                             log.info(
@@ -5527,8 +6094,9 @@ class PSF:
             n_dropped_validate = n_pre_validate - len(epsfstars)
             if n_dropped_validate > 0:
                 log.info(
-                    "PSF-star cutout validation: rejected %d/%d stars with "
-                    "off-centre cutouts (> 0.45*fit_boxsize from centre)",
+                    "PSF-star cutout validation: rejected %d/%d stars "
+                    "(unusable core or centroid > 0.45*fit_boxsize from "
+                    "centre)",
                     n_dropped_validate, n_pre_validate,
                 )
             if len(epsfstars) == 0:
@@ -5600,6 +6168,49 @@ class PSF:
                     )
             elif do_fft and len(epsfstars) < 8:
                 log.info("Skipping FFT rejection (fewer than 8 PSF stars).")
+
+            # ---- Ensemble-shape outlier rejection ----
+            # A converged ePSF needs self-consistent cutouts: one or two
+            # poor sources (miscentered, contaminated, deviant
+            # morphology) leave the recentering chasing disagreement and
+            # the build never converges.  Unlike the FFT metric this
+            # tests the image-domain shape, so it still works on
+            # undersampled and elongated fields where power spectra are
+            # dominated by sampling jitter or the shared trail.
+            if bool(phot_cfg.get("psf_shape_outlier_rejection", True)) and len(
+                epsfstars
+            ) >= int(phot_cfg.get("psf_shape_outlier_min_stars", 6)):
+                try:
+                    _drop_idx = _psf_shape_outlier_indices(
+                        epsfstars,
+                        fwhm,
+                        nsigma=float(phot_cfg.get("psf_shape_outlier_nsigma", 4.0)),
+                        max_frac=float(phot_cfg.get("psf_shape_outlier_max_frac", 0.3)),
+                        min_keep=max(
+                            int(phot_cfg.get("psf_shape_outlier_min_keep", 4)),
+                            min_psf_candidates // 2,
+                        ),
+                    )
+                except Exception as _shape_err:
+                    # A filter failure must never cost the whole build.
+                    log.warning(
+                        "PSF shape-outlier check failed (%s); keeping all stars.",
+                        _shape_err,
+                    )
+                    _drop_idx = []
+                if _drop_idx:
+                    log.info(
+                        "Rejected %d/%d PSF stars as shape outliers "
+                        "(median-stack residual > %.1f sigma of the "
+                        "ensemble scatter).",
+                        len(_drop_idx),
+                        len(epsfstars),
+                        float(phot_cfg.get("psf_shape_outlier_nsigma", 4.0)),
+                    )
+                    _drop_set = set(_drop_idx)
+                    epsfstars = EPSFStars(
+                        [s for i, s in enumerate(epsfstars) if i not in _drop_set]
+                    )
 
             # ---- Adaptive oversampling based on final PSF star count ----
             # Choose the highest factor that still leaves ~min_samples
@@ -5826,6 +6437,17 @@ class PSF:
             _max_shift = float(
                 phot_cfg.get("psf_epsf_max_star_shift_px", 0.5)
             )
+            # Non-converged builds get one rebuild after dropping the
+            # stars still drifting (and any photutils excluded for
+            # repeated fit failures): one or two poor sources can keep
+            # the ensemble from ever settling.  Shares the
+            # shape-outlier removal bounds so the pool cannot starve.
+            _prune_unsettled = bool(phot_cfg.get("psf_prune_unsettled_retry", True))
+            _prune_max_frac = float(phot_cfg.get("psf_prune_unsettled_max_frac", 0.4))
+            _prune_min_keep = max(
+                int(phot_cfg.get("psf_shape_outlier_min_keep", 4)),
+                min_psf_candidates // 2,
+            )
 
             def _attempt_epsf_build(osamp_c):
                 """Run the ePSF build (plus iteration retry) at ``osamp_c``.
@@ -5886,6 +6508,13 @@ class PSF:
                     )
                 if "center_accuracy" not in _bld_params:
                     _kw.pop("center_accuracy", None)
+                # Cap the inner LM iterations of each star fit: well-posed
+                # fits converge in ~10, so 100 (the photutils default) only
+                # wastes cycles on stars that will be excluded anyway.
+                if "fitter_maxiters" in _bld_params:
+                    _kw["fitter_maxiters"] = int(
+                        phot_cfg.get("psf_epsf_fitter_maxiters", 50)
+                    )
                 if "fit_shape" in _bld_params:
                     _kw["fit_shape"] = fit_boxsize
                 else:
@@ -5894,11 +6523,16 @@ class PSF:
                 # an unbounded refit collapses the ensemble onto shared
                 # pixel-phase classes on undersampled data.  All builders
                 # in this attempt share one origin map so the bound is
-                # cumulative across phases and retries.
+                # cumulative across phases and retries.  The subclass is
+                # used even with the bound off (max_shift_px<=0) because
+                # it also records per-star centre movement for the
+                # non-converged prune-retry below.
                 _BuilderCls = EPSFBuilder
                 _bld_extra = {}
                 _shift_orig = {}
-                if _max_shift > 0 and hasattr(EPSFBuilder, "_fit_stars"):
+                if hasattr(EPSFBuilder, "_fit_stars") and hasattr(
+                    EPSFBuilder, "_check_convergence"
+                ):
                     _BuilderCls = _BoundedShiftEPSFBuilder
                     _bld_extra = dict(
                         max_shift_px=_max_shift, orig_centres=_shift_orig
@@ -5946,7 +6580,10 @@ class PSF:
                 # convention, so the same stamp doubles as the analytic
                 # failure backdoor.
                 init_epsf_c = _composite_moffat_psf(
-                    _analytic_comps, osamp_c, cutout_n
+                    _analytic_comps,
+                    osamp_c,
+                    cutout_n,
+                    ellipticity=_analytic_ell,
                 )
                 if osamp_c == oversample:
                     log.debug(
@@ -5961,6 +6598,9 @@ class PSF:
                 epsf_c = fitted_c = None
                 acc_c = float("nan")
                 res = None
+                conv_c = None
+                _res_builder = None
+                _stars_work = epsfstars
                 if _p1_iters > 0:
                     # Coarse phase: wide kernel, settled stars carry over.
                     _kw1 = dict(
@@ -5992,6 +6632,7 @@ class PSF:
                             res = _call_build_epsf(
                                 builder2, res1.fitted_stars, res1.epsf
                             )
+                            _res_builder = builder2
                         except Exception as _p2_exc:
                             log.warning(
                                 "ePSF refine phase raised %s: %s; keeping "
@@ -6000,11 +6641,13 @@ class PSF:
                             )
                         if res is None:
                             res = res1
+                            _res_builder = builder1
                 if res is None:
                     try:
                         res = _call_build_epsf(
                             builder, epsfstars, init_epsf_c
                         )
+                        _res_builder = builder
                     except Exception as _build_exc:
                         log.warning(
                             "ePSF build raised %s: %s",
@@ -6016,6 +6659,8 @@ class PSF:
                 if res is not None and hasattr(res, "epsf"):
                     epsf_c = res.epsf
                     fitted_c = res.fitted_stars
+                    conv_c = bool(getattr(res, "converged", False))
+                    self.psf_converged_relaxed = False
                     acc_c = (
                         float(res.final_center_accuracy)
                         if res.final_center_accuracy is not None
@@ -6026,6 +6671,144 @@ class PSF:
                         "iterations=%d, final_center_accuracy=%.4g px",
                         osamp_c, res.converged, res.iterations, acc_c,
                     )
+                    _n_excl = int(getattr(res, "n_excluded_stars", 0) or 0)
+                    if _n_excl > 0:
+                        log.info(
+                            "ePSF build excluded %d star(s) after repeated "
+                            "fit failures (indices %s)",
+                            _n_excl,
+                            getattr(res, "excluded_star_indices", []),
+                        )
+                    # ---- Non-converged: iteratively prune unsettled ----
+                    # The build converges only when every fitted star's
+                    # centre stops moving; a few poor sources keep
+                    # drifting forever and take the model with them.  Each
+                    # round drops the stars still moving past
+                    # center_accuracy on the last iteration (plus any
+                    # photutils excluded for repeated fit failures) and
+                    # rebuilds on the cleaned pool.  Rounds repeat until
+                    # convergence or the total-removal budget is spent --
+                    # a single pass is often insufficient because the
+                    # next cohort of movers only becomes identifiable
+                    # after the worst offenders are gone.
+                    if _prune_unsettled and not res.converged:
+                        _rounds_max = max(
+                            1,
+                            int(phot_cfg.get("psf_prune_unsettled_rounds", 3)),
+                        )
+                        _budget = min(
+                            max(
+                                1,
+                                int(np.floor(_prune_max_frac * len(_stars_work))),
+                            ),
+                            len(_stars_work) - _prune_min_keep,
+                        )
+                        _work_orig = list(range(len(_stars_work)))
+                        _n_dropped = 0
+                        for _pr in range(_rounds_max):
+                            if (
+                                res is None
+                                or not hasattr(res, "epsf")
+                                or res.converged
+                                or len(_stars_work) <= _prune_min_keep
+                                or _n_dropped >= _budget
+                            ):
+                                break
+                            # Suspect and mover indices are relative to
+                            # the pool that produced ``res`` -- the
+                            # current working pool.
+                            _suspects = []
+                            for _i in getattr(res, "excluded_star_indices", None) or []:
+                                if int(_i) not in _suspects:
+                                    _suspects.append(int(_i))
+                            _mv = getattr(_res_builder, "_last_move", None)
+                            _acc2 = getattr(_res_builder, "center_accuracy_sq", None)
+                            if (
+                                _mv is not None
+                                and _acc2 is not None
+                                and len(_mv) == len(_stars_work)
+                            ):
+                                _mv = np.asarray(_mv, float)
+                                for _i in np.argsort(
+                                    -np.where(np.isfinite(_mv), _mv, -1.0)
+                                ):
+                                    if _mv[_i] >= _acc2 and int(_i) not in _suspects:
+                                        _suspects.append(int(_i))
+                            _remaining = min(
+                                _budget - _n_dropped,
+                                len(_stars_work) - _prune_min_keep,
+                            )
+                            _drop_w = [
+                                i for i in _suspects if 0 <= i < len(_stars_work)
+                            ][: max(0, _remaining)]
+                            if not _drop_w:
+                                break
+                            _drop_set = set(_drop_w)
+                            _pruned = EPSFStars(
+                                [
+                                    s
+                                    for i, s in enumerate(_stars_work)
+                                    if i not in _drop_set
+                                ]
+                            )
+                            _seed_p = epsf_c if _epsf_usable(epsf_c) else init_epsf_c
+                            _drop_orig = sorted(_work_orig[i] for i in _drop_w)
+                            log.info(
+                                "ePSF did not converge; removing %d "
+                                "star(s) that never settled or failed "
+                                "fitting (indices %s) and rebuilding "
+                                "with %d stars",
+                                len(_drop_w),
+                                _drop_orig,
+                                len(_pruned),
+                            )
+                            builder_p = _BuilderCls(**_kw, **_bld_extra)
+                            try:
+                                res_p = _call_build_epsf(builder_p, _pruned, _seed_p)
+                            except Exception as _p_exc:
+                                log.warning(
+                                    "ePSF prune-retry raised %s: %s; "
+                                    "keeping last model.",
+                                    type(_p_exc).__name__,
+                                    _p_exc,
+                                )
+                                break
+                            if res_p is None or not hasattr(res_p, "epsf"):
+                                break
+                            log.info(
+                                "ePSF prune-retry (oversample=x%d): "
+                                "converged=%s, iterations=%d, "
+                                "final_center_accuracy=%.4g px",
+                                osamp_c,
+                                res_p.converged,
+                                res_p.iterations,
+                                (
+                                    float(res_p.final_center_accuracy)
+                                    if res_p.final_center_accuracy
+                                    is not None
+                                    else float("nan")
+                                ),
+                            )
+                            if not (
+                                res_p.converged
+                                or _epsf_usable(res_p.epsf)
+                            ):
+                                # The cleaned build produced nothing
+                                # worth keeping; stop spending budget.
+                                break
+                            res = res_p
+                            _res_builder = builder_p
+                            _stars_work = _pruned
+                            _work_orig = [i for i in _work_orig if i not in _drop_set]
+                            _n_dropped += len(_drop_w)
+                            epsf_c = res_p.epsf
+                            fitted_c = res_p.fitted_stars
+                            conv_c = bool(res_p.converged)
+                            acc_c = (
+                                float(res_p.final_center_accuracy)
+                                if res_p.final_center_accuracy is not None
+                                else float("nan")
+                            )
                     if (
                         adaptive_iters
                         and not res.converged
@@ -6040,13 +6823,12 @@ class PSF:
                         # first-pass model is degenerate -- a bad seed would
                         # just propagate.
                         _retry_iters = max_maxiters - base_maxiters
-                        _seed_r = (
-                            epsf_c if _epsf_usable(epsf_c) else init_epsf_c
-                        )
+                        _seed_r = epsf_c if _epsf_usable(epsf_c) else init_epsf_c
                         log.info(
                             "ePSF did not converge in %d iterations; "
                             "continuing for %d more",
-                            base_maxiters, _retry_iters,
+                            base_maxiters,
+                            _retry_iters,
                         )
                         _kw_retry = dict(
                             _kw,
@@ -6058,7 +6840,7 @@ class PSF:
                         )
                         try:
                             res_r = _call_build_epsf(
-                                builder_retry, epsfstars, _seed_r
+                                builder_retry, _stars_work, _seed_r
                             )
                         except Exception as _retry_exc:
                             # A crashed retry (e.g. the recentering function
@@ -6071,14 +6853,29 @@ class PSF:
                             )
                             res_r = None
                         if res_r is not None and hasattr(res_r, "epsf"):
+                            _n_excl_r = int(getattr(res_r, "n_excluded_stars", 0) or 0)
+                            if _n_excl_r > 0:
+                                log.info(
+                                    "ePSF retry excluded %d star(s) after "
+                                    "repeated fit failures (indices %s)",
+                                    _n_excl_r,
+                                    getattr(res_r, "excluded_star_indices", []),
+                                )
+                            # The retry ran on the current working pool, so
+                            # its builder's per-star movement record is the
+                            # freshest convergence evidence regardless of
+                            # whether the model is kept.
+                            _res_builder = builder_retry
                             if res_r.converged:
                                 log.info(
                                     "ePSF converged after %d total "
                                     "iterations",
                                     base_maxiters + int(res_r.iterations),
                                 )
+                                res = res_r
                                 epsf_c = res_r.epsf
                                 fitted_c = res_r.fitted_stars
+                                conv_c = True
                                 acc_c = (
                                     float(res_r.final_center_accuracy)
                                     if res_r.final_center_accuracy is not None
@@ -6091,13 +6888,47 @@ class PSF:
                                 )
                         elif res_r is not None:
                             epsf_c, fitted_c = res_r
+                            conv_c = True
                     elif not res.converged:
                         log.warning(
                             "ePSF build did NOT converge; PSF model may be "
                             "unreliable."
                         )
+                    # Strict convergence (1e-3 px default) can be
+                    # unreachable when star centroids are S/N-limited:
+                    # well-posed builds plateau at a few milli-pixel
+                    # per-iteration jitter.  If the final-iteration
+                    # movement is already below a relaxed bound the model
+                    # had effectively settled -- accept it and report it
+                    # as such rather than a failed build.
+                    if not conv_c:
+                        _relax_px = float(
+                            phot_cfg.get("psf_center_accuracy_relaxed_px", 0.01)
+                        )
+                        _mv_fin = getattr(_res_builder, "_last_move", None)
+                        _strict_px = float(
+                            np.sqrt(getattr(_res_builder, "center_accuracy_sq", np.nan))
+                        )
+                        if _relax_px > 0 and _mv_fin is not None:
+                            _mm = np.asarray(_mv_fin, float)
+                            _mm = _mm[np.isfinite(_mm)]
+                            if _mm.size and float(np.sqrt(_mm.max())) < _relax_px:
+                                conv_c = True
+                                self.psf_converged_relaxed = True
+                                log.info(
+                                    "ePSF effectively settled: final "
+                                    "centre movement %.4g px < relaxed "
+                                    "bound %.4g px (strict threshold "
+                                    "%.4g px)",
+                                    float(np.sqrt(_mm.max())),
+                                    _relax_px,
+                                    _strict_px,
+                                )
                 elif res is not None:
+                    # Old-photutils tuple result carries no convergence
+                    # flag; a completed build counts as converged.
                     epsf_c, fitted_c = res
+                    conv_c = True
 
                 meas_c = (
                     measure_epsf_fwhm_native(
@@ -6106,7 +6937,7 @@ class PSF:
                     if epsf_c is not None and _epsf_usable(epsf_c)
                     else float("nan")
                 )
-                return epsf_c, fitted_c, acc_c, init_epsf_c, meas_c
+                return epsf_c, fitted_c, acc_c, init_epsf_c, meas_c, conv_c
 
             # On undersampled fields the high-oversampling build can collapse
             # narrow: each star lands only on the gridpoints of its own
@@ -6123,9 +6954,7 @@ class PSF:
             # produces shape-inconsistent stamps that cannot stack into a
             # GriddedPSFModel; a cell that cannot hold the shared factor is
             # filled from a neighbour instead.
-            _freeze_osamp = bool(
-                phot_cfg.get("_psf_freeze_oversample", False)
-            )
+            _freeze_osamp = bool(phot_cfg.get("_psf_freeze_oversample", False))
             if undersampled and oversample > 1 and not _freeze_osamp:
                 # Step down one factor at a time: with the coarse-to-fine
                 # schedule, osamp=3 is often viable where osamp=4 starved,
@@ -6135,18 +6964,30 @@ class PSF:
             # Fit the analytic model once on the final star set: a sum of
             # Moffats captures core-plus-wing structure a single Moffat
             # cannot.  The same components seed every ladder attempt and
-            # serve as the fallback/backdoor model.
+            # serve as the fallback/backdoor model.  Shared elongation
+            # (trailed/defocused fields) is measured once and applied to
+            # both the fit metric and the stamp so the analytic model
+            # keeps the image's true 2-D shape.
+            _analytic_ell = None
+            try:
+                _analytic_ell = _ensemble_ellipticity(epsfstars, fwhm)
+            except Exception:
+                _analytic_ell = None
+            if _analytic_ell is not None:
+                log.info(
+                    "PSF stars are elongated: axis ratio %.2f at PA %.0f deg; "
+                    "the analytic model and ePSF seed will be elongated to match.",
+                    _analytic_ell[0],
+                    np.degrees(_analytic_ell[1]),
+                )
             _analytic_comps = _fit_moffat_composite(
                 epsfstars,
                 fwhm,
-                max_components=int(
-                    phot_cfg.get("psf_analytic_components", 3)
-                ),
+                max_components=int(phot_cfg.get("psf_analytic_components", 3)),
+                ellipticity=_analytic_ell,
             )
             if _analytic_comps is None:
-                _analytic_comps = _default_moffat_composite(
-                    fwhm, moffat_beta
-                )
+                _analytic_comps = _default_moffat_composite(fwhm, moffat_beta)
                 _analytic_fitted = False
             else:
                 _analytic_fitted = True
@@ -6170,9 +7011,10 @@ class PSF:
             # degraded lower-oversampling model is kept.
             _kept_osamp = oversample
             for _osamp_c in _osamp_ladder:
-                epsf_c, fitted_c, acc_c, init_c, meas_c = _attempt_epsf_build(
-                    _osamp_c
+                epsf_c, fitted_c, acc_c, init_c, meas_c, conv_c = (
+                    _attempt_epsf_build(_osamp_c)
                 )
+                self.psf_converged = conv_c
                 if init_epsf is None:
                     init_epsf = init_c
                 # A star centre still wandering by more than ~half a FWHM
@@ -6404,12 +7246,29 @@ class PSF:
                     # A starved build (fewer stars than the candidate
                     # floor) whose measured FWHM misses the band is not a
                     # usable model: the analytic backdoor treats it as a
-                    # build failure even when the opt-in swap is off.
+                    # build failure even when the opt-in swap is off --
+                    # but only when the analytic model actually fits the
+                    # PSF stars better.  Non-Gaussian PSFs (defocused
+                    # top-hats, trailed cores) under-measure half-max FWHM
+                    # while still matching the data; a structurally
+                    # correct ePSF must never be swapped for a Moffat on
+                    # a scalar gate alone.
                     _starved = len(epsfstars) < min_psf_candidates
+                    _emp_worse = True
+                    if _starved and _res_gate:
+                        _stars_ev = (
+                            fitted_stars if fitted_stars is not None else epsfstars
+                        )
+                        _fr = max(3.0, 0.5 * fit_boxsize)
+                        _mad_e = _epsf_residual_mad(_stars_ev, epsf, _fr)
+                        _mad_a = _epsf_residual_mad(_stars_ev, init_epsf, _fr)
+                        if np.isfinite(_mad_e) and np.isfinite(_mad_a) and _mad_a > 0:
+                            _emp_worse = _mad_e > _res_ratio_max * _mad_a
                     if (
                         _starved
                         and _analytic_on_failure
                         and _epsf_usable(init_epsf)
+                        and _emp_worse
                     ):
                         log.warning(
                             "ePSF built from only %d stars has measured "
@@ -6436,6 +7295,22 @@ class PSF:
                         )
                         _epsf_fwhm_meas = measure_epsf_fwhm_native(
                             np.asarray(epsf.data, float), oversample
+                        )
+                    elif _starved and _analytic_on_failure and _epsf_usable(init_epsf):
+                        log.warning(
+                            "ePSF built from only %d stars has measured "
+                            "FWHM %.2f px outside [%.2f, %.2f]x the image "
+                            "FWHM %.2f px, but still fits its PSF stars "
+                            "as well as the analytic composite (residual "
+                            "MAD %.4f vs %.4f) -- keeping the empirical "
+                            "model so the PSF matches the image.",
+                            len(epsfstars),
+                            _epsf_fwhm_meas,
+                            _fwhm_lo,
+                            _fwhm_hi,
+                            fwhm,
+                            _mad_e if np.isfinite(_mad_e) else float("nan"),
+                            _mad_a if np.isfinite(_mad_a) else float("nan"),
                         )
                     else:
                         log.warning(
@@ -6505,7 +7380,10 @@ class PSF:
             # norm_radius).
 
             # ---- ePSF quality diagnostics ----
-            n_epsf_stars = len(epsfstars)
+            # fitted_stars reflects the pool actually built from (after
+            # shape-outlier and non-convergence pruning); fall back to the
+            # extracted count when no empirical build ran.
+            n_epsf_stars = len(fitted_stars if fitted_stars is not None else epsfstars)
             self.n_epsf_stars = int(n_epsf_stars)
             if n_epsf_stars < 20:
                 log.warning(
@@ -6630,13 +7508,31 @@ class PSF:
                     "Measured ePSF FWHM in native pixels",
                 )
             _psf_hdr["NPSFSTAR"] = (int(n_epsf_stars), "Stars used in ePSF build")
-            self.psf_model_kind = (
-                _analytic_kind if _used_analytic_psf else "epsf"
-            )
+            # Record the measured ensemble elongation even when the
+            # empirical model survived: it documents the field shape and
+            # explains any elongated analytic fallback.
+            _ell_tag = _analytic_ell
+            if _ell_tag is None:
+                _ell_tag = getattr(epsf, "_autophot_ellipticity", None)
+            if _ell_tag is not None:
+                _psf_hdr["PSFELLIP"] = (
+                    float(_ell_tag[0]),
+                    "Measured PSF-star axis ratio b/a (elongated field)",
+                )
+                _psf_hdr["PSFPA"] = (
+                    float(np.degrees(_ell_tag[1])),
+                    "Measured PSF major-axis PA, deg (+x toward +y)",
+                )
+            self.psf_model_kind = _analytic_kind if _used_analytic_psf else "epsf"
             _psf_hdr["PSFBUILD"] = (
                 self.psf_model_kind,
                 "PSF model construction method",
             )
+            if self.psf_converged is not None:
+                _psf_hdr["PSFCONV"] = (
+                    bool(self.psf_converged),
+                    "Empirical ePSF build converged",
+                )
             _orig = getattr(epsf, "origin", None)
             if _orig is not None:
                 _psf_hdr["PSFX0"] = (
@@ -6664,6 +7560,27 @@ class PSF:
                     )
                 except Exception as _viz_err:
                     log.warning("PSF visualisation failed: %s", _viz_err)
+
+            # One-line verdict so the run log always states whether the
+            # empirical build settled (analytic models never iterate, so
+            # they report n/a).
+            _conv_txt = (
+                "n/a (analytic model)"
+                if self.psf_converged is None
+                else (
+                    "yes (relaxed)"
+                    if self.psf_converged and self.psf_converged_relaxed
+                    else ("yes" if self.psf_converged else "no")
+                )
+            )
+            log.info(
+                "PSF model: %s | ePSF converged: %s | PSF stars: %d | "
+                "oversample=x%d",
+                self.psf_model_kind,
+                _conv_txt,
+                int(n_epsf_stars),
+                int(oversample),
+            )
 
             return epsf, df
 
@@ -6693,10 +7610,21 @@ class PSF:
                         float(_pcfg.get("psf_init_moffat_beta", 4.765)),
                     )
                     _fb_cut = _odd(max(25, int(np.ceil(6.0 * _fb_fwhm))))
+                    # If the crash happened after star extraction, the
+                    # shared elongation is still recoverable -- a trailed
+                    # field should not get a circular backdoor model.
+                    _fb_ell = None
+                    try:
+                        _fb_stars = locals().get("epsfstars")
+                        if _fb_stars is not None and len(_fb_stars) > 0:
+                            _fb_ell = _ensemble_ellipticity(_fb_stars, _fb_fwhm)
+                    except Exception:
+                        _fb_ell = None
                     _fb_model = _composite_moffat_psf(
                         _default_moffat_composite(_fb_fwhm, _fb_beta),
                         _fb_osamp,
                         _fb_cut,
+                        ellipticity=_fb_ell,
                     )
                     if _epsf_usable(_fb_model):
                         log.warning(
@@ -6708,6 +7636,79 @@ class PSF:
                         )
                         self.psf_model_kind = getattr(
                             _fb_model, "_autophot_kind", "analytic-composite"
+                        )
+                        try:
+                            from functions import safe_fits_write
+
+                            _fb_fpath = str(
+                                self.input_yaml.get("fpath", "image")
+                            )
+                            _fb_dir = str(
+                                self.input_yaml.get("write_dir")
+                                or os.path.dirname(_fb_fpath)
+                                or "."
+                            )
+                            _fb_base = str(
+                                self.input_yaml.get("_psf_base_override")
+                                or os.path.splitext(
+                                    os.path.basename(_fb_fpath)
+                                )[0]
+                                or "image"
+                            )
+                            _fb_hdr = fits.Header()
+                            _fb_hdr["OVERSAMP"] = (
+                                _fb_osamp,
+                                "ePSF oversampling factor (grid px per native px)",
+                            )
+                            _fb_hdr["PSFNPIX"] = (
+                                _fb_cut,
+                                "ePSF native-pixel cutout size",
+                            )
+                            _fb_hdr["FWHM_PIX"] = (
+                                _fb_fwhm,
+                                "Image FWHM in native pixels",
+                            )
+                            _fb_hdr["NPSFSTAR"] = (
+                                0,
+                                "Stars used in ePSF build",
+                            )
+                            _fb_hdr["PSFBUILD"] = (
+                                self.psf_model_kind,
+                                "PSF model construction method",
+                            )
+                            if self.psf_converged is not None:
+                                _fb_hdr["PSFCONV"] = (
+                                    bool(self.psf_converged),
+                                    "Empirical ePSF build converged",
+                                )
+                            if _fb_ell is not None:
+                                _fb_hdr["PSFELLIP"] = (
+                                    float(_fb_ell[0]),
+                                    "Measured PSF-star axis ratio b/a (elongated field)",
+                                )
+                                _fb_hdr["PSFPA"] = (
+                                    float(np.degrees(_fb_ell[1])),
+                                    "Measured PSF major-axis PA, deg (+x toward +y)",
+                                )
+                            safe_fits_write(
+                                os.path.join(
+                                    _fb_dir,
+                                    f"{filename_prefix}_{_fb_base}.fits",
+                                ),
+                                np.asarray(_fb_model.data, float),
+                                _fb_hdr,
+                            )
+                        except Exception:
+                            pass
+                        _conv_txt = (
+                            "n/a (analytic model)"
+                            if self.psf_converged is None
+                            else ("yes" if self.psf_converged else "no")
+                        )
+                        log.info(
+                            "PSF model: %s | ePSF converged: %s",
+                            self.psf_model_kind,
+                            _conv_txt,
                         )
                         return _fb_model, None
             except Exception:
@@ -8929,7 +9930,7 @@ class PSF:
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
                     finder=finder,
-                    maxiters=3,
+                    maxiters=10,
                 )
                 sub_init = init_params[mask]
                 res = psfphot(ndimage, init_params=sub_init)
