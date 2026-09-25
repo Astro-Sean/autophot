@@ -39,7 +39,7 @@ from contextlib import contextmanager
 from astropy.io import fits
 from astropy.time import Time
 from astropy.convolution import Gaussian2DKernel, convolve, interpolate_replace_nans
-from astropy.stats import sigma_clipped_stats, mad_std
+from astropy.stats import sigma_clipped_stats, biweight_scale
 from astropy.cosmology import FlatLambdaCDM
 from astropy.wcs import WCS
 from astropy.nddata import Cutout2D
@@ -1205,6 +1205,41 @@ def convert_to_mjd_astropy(date_string):
     return mjd
 
 
+def biweight_stdfunc(data, axis=None):
+    """biweight_scale wrapped for use as a sigma_clip/sigma_clipped_stats
+    ``stdfunc`` (masked-array aware, NaN tolerant)."""
+    if np.ma.isMaskedArray(data):
+        data = np.asarray(data.filled(np.nan))
+    return biweight_scale(np.asarray(data, dtype=float), axis=axis, ignore_nan=True)
+
+
+def biweight_sky_sigma(data, mask=None):
+    """Sky-noise sigma via the biweight scale (c=9.0), matching photutils'
+    ``BiweightScaleBackgroundRMS`` used for the pipeline RMS map.
+
+    Preferred over ``mad_std`` for pixel noise: on heavily quantized images
+    (stacks stored on a coarse ADU lattice after lossy compression, e.g.
+    PS1 pswarp products) the median absolute deviation snaps to integer
+    multiples of the quantization step, turning the noise map into a
+    staircase with ~10% box-to-box artifacts.  The biweight scale averages
+    squared deviations, stays continuous on quantized data, and tolerates
+    unmasked source flux comparably well.
+    """
+    arr = np.asanyarray(data, dtype=float)
+    if np.ma.isMaskedArray(arr):
+        arr = np.asarray(arr.filled(np.nan))
+    if mask is not None:
+        arr = np.where(np.asarray(mask, dtype=bool), np.nan, arr)
+    try:
+        sig = float(biweight_scale(arr, ignore_nan=True))
+    except Exception:
+        sig = float("nan")
+    if not np.isfinite(sig) or sig <= 0:
+        finite = arr[np.isfinite(arr)]
+        sig = float(np.nanstd(finite)) if finite.size > 1 else float("nan")
+    return sig
+
+
 def get_image_stats(image, sigma=3, maxiters=None):
     """Return sigma-clipped mean, median, and std for *image*."""
     mean_value, median_value, std_value = sigma_clipped_stats(
@@ -1213,7 +1248,7 @@ def get_image_stats(image, sigma=3, maxiters=None):
         maxiters=maxiters,
         # background=sigma,
         cenfunc=np.nanmedian,
-        stdfunc=mad_std,
+        stdfunc=biweight_stdfunc,
     )
 
     return mean_value, median_value, std_value

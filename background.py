@@ -41,7 +41,6 @@ import matplotlib.colors as mcolors
 from astropy.stats import (
     SigmaClip,
     sigma_clipped_stats,
-    mad_std,
     gaussian_fwhm_to_sigma,
 )
 from plotting_utils import (
@@ -64,8 +63,6 @@ from photutils.background import (
     MedianBackground,
     BiweightLocationBackground,
     BiweightScaleBackgroundRMS,
-    MADStdBackgroundRMS,
-    MMMBackground,
 )
 from photutils.background.interpolators import BkgZoomInterpolator, BkgIDWInterpolator
 from photutils.segmentation import detect_threshold, detect_sources
@@ -80,7 +77,15 @@ from scipy.ndimage import (
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # --- Local ---
-from functions import border_msg, log_step, set_size, log_warning_from_exception, STATUS
+from functions import (
+    border_msg,
+    log_step,
+    set_size,
+    log_warning_from_exception,
+    STATUS,
+    biweight_sky_sigma,
+    biweight_stdfunc,
+)
 from wcs import get_wcs
 
 
@@ -616,7 +621,7 @@ class BackgroundSubtractor:
                                 filter_size=3,
                                 sigma_clip=SigmaClip(sigma=3.0, maxiters=5),
                                 bkg_estimator=MedianBackground(),
-                                bkgrms_estimator=MADStdBackgroundRMS(),
+                                bkg_rms_estimator=BiweightScaleBackgroundRMS(),
                                 interpolator=BkgZoomInterpolator(order=1),
                                 exclude_percentile=90.0,
                             )
@@ -758,8 +763,9 @@ class BackgroundSubtractor:
         streak_mask = np.zeros_like(image, dtype=bool)
         half = max(1, int(bleed_half_length))
         # Flux threshold for "still on streak" - lower to catch fainter tails
-        raw_std = np.nanstd(image)
-        sigma = float(raw_std) if np.isfinite(raw_std) else 0.0
+        sigma = biweight_sky_sigma(image)
+        if not np.isfinite(sigma):
+            sigma = 0.0
         background_level = float(np.nanmedian(image)) + 1.5 * sigma
         min_thresh = streak_flux_frac * saturate   # must be above this to be a streak
         max_thresh = 0.35 * saturate               # cap to avoid masking whole bright image
@@ -884,8 +890,9 @@ class BackgroundSubtractor:
         img = np.asarray(image, dtype=float)
         ny, nx = img.shape
         med = float(np.nanmedian(img))
-        # mad_std resists the bright sources this mask is trying to find.
-        sig = float(mad_std(img[np.isfinite(img)])) if np.any(np.isfinite(img)) else 0.0
+        # Biweight scale resists the bright sources this mask is trying to
+        # find and stays continuous on heavily quantized (compressed) images.
+        sig = biweight_sky_sigma(img) if np.any(np.isfinite(img)) else 0.0
         if sig <= 0:
             return np.zeros_like(img, dtype=bool)
         thresh = med + n_sigma * sig
@@ -1001,11 +1008,8 @@ class BackgroundSubtractor:
 
         data = image[finite]
         med = np.nanmedian(data)
-        try:
-            scatter = mad_std(data)
-            if not np.isfinite(scatter) or scatter <= 0:
-                raise ValueError
-        except Exception:
+        scatter = biweight_sky_sigma(data)
+        if not np.isfinite(scatter) or scatter <= 0:
             scatter = np.nanstd(data)
             if not np.isfinite(scatter) or scatter <= 0:
                 scatter = 1.0
@@ -1188,7 +1192,7 @@ class BackgroundSubtractor:
                     filter_size=fs,
                     sigma_clip=SigmaClip(sigma=3.0, maxiters=clip_maxiters),
                     bkg_estimator=BiweightLocationBackground(),
-                    bkgrms_estimator=MADStdBackgroundRMS(),
+                    bkg_rms_estimator=BiweightScaleBackgroundRMS(),
                     interpolator=interp,
                     exclude_percentile=float(exclude_percentile),
                 )
@@ -1251,10 +1255,7 @@ class BackgroundSubtractor:
         # All attempts failed - flat fallback.
         self.logger.warning("All Background2D attempts failed - using global stats")
         gmean, gmed, _ = sigma_clipped_stats(image, sigma=3.0, mask=mask)
-        # mad_std has no `mask` kwarg: NaN-out masked (bad) pixels instead,
-        # preserving sigma_clipped_stats' mask=True -> exclude semantics.
-        _mad_in = np.where(mask, np.nan, image) if mask is not None else image
-        gstd = float(mad_std(_mad_in, ignore_nan=True))
+        gstd = biweight_sky_sigma(image, mask=mask)
         if not np.isfinite(gstd) or gstd <= 0:
             gstd = float(_)
         bkg_surface = np.full_like(image, gmed, dtype=np.float32)
@@ -1440,7 +1441,7 @@ class BackgroundSubtractor:
         _saturate_for_mask = self.config["saturate"]
         if not np.isfinite(_saturate_for_mask) or _saturate_for_mask > 1e8:
             _bkg_med = float(np.nanmedian(image[np.isfinite(image)]))
-            _bkg_std = float(np.nanstd(image[np.isfinite(image)]))
+            _bkg_std = biweight_sky_sigma(image)
             _eff_sat = self._estimate_effective_saturation(
                 image, _bkg_med, _bkg_std
             )
@@ -1566,7 +1567,7 @@ class BackgroundSubtractor:
             sigma=3.0,
             mask=mask,
             cenfunc=np.nanmedian,
-            stdfunc=mad_std,
+            stdfunc=biweight_stdfunc,
             maxiters=stats_maxiters,
         )
         self.logger.debug(
@@ -1872,7 +1873,7 @@ class BackgroundSubtractor:
                 filter_size=filter_size,
                 sigma_clip=SigmaClip(sigma=local_sigma, maxiters=local_sigma_maxiters),
                 bkg_estimator=BiweightLocationBackground(),
-                bkgrms_estimator=MADStdBackgroundRMS(),
+                bkg_rms_estimator=BiweightScaleBackgroundRMS(),
                 interpolator=interp,
                 mask=source_mask,
                 exclude_percentile=local_exclude_percentile,
@@ -1986,10 +1987,9 @@ class BackgroundSubtractor:
                     # Background-like pixels only: finite, unmasked, in annulus.
                     ann_good = ann & (~source_mask) & np.isfinite(corrected_cutout)
                     if np.any(ann_good):
-                        _, _, ann_std = sigma_clipped_stats(
-                            corrected_cutout, sigma=3.0, mask=~ann_good
+                        annulus_std = biweight_sky_sigma(
+                            corrected_cutout, mask=~ann_good
                         )
-                        annulus_std = float(ann_std)
                 except Exception:
                     annulus_std = np.nan
 

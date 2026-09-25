@@ -22,7 +22,7 @@ from typing import Optional, Tuple, List, Dict, Any, Union
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.stats import linregress, median_abs_deviation
+from scipy.stats import linregress
 from scipy.ndimage import gaussian_filter, binary_dilation, label
 from scipy.spatial import cKDTree, distance
 from astropy.io import fits
@@ -34,7 +34,7 @@ from astropy.utils.exceptions import AstropyWarning
 from astropy.table import Table
 from astropy.visualization import ZScaleInterval, ImageNormalize
 from photutils.detection import StarFinder, IRAFStarFinder, DAOStarFinder, find_peaks
-from photutils.background import Background2D, MedianBackground, MADStdBackgroundRMS
+from photutils.background import Background2D, MedianBackground, BiweightScaleBackgroundRMS
 from photutils.utils import circular_footprint
 from photutils.profiles import RadialProfile
 from photutils.segmentation import (
@@ -63,6 +63,7 @@ from functions import (
     pad_ones,
     pix_dist,
     set_size,
+    biweight_sky_sigma,
 )
 
 # --- Logging and Warnings ---
@@ -1039,7 +1040,7 @@ class Find_FWHM:
                     box_size=box,
                     filter_size=3,
                     bkg_estimator=MedianBackground(),
-                    bkgrms_estimator=MADStdBackgroundRMS(),
+                    bkg_rms_estimator=BiweightScaleBackgroundRMS(),
                     sigma_clip=SigmaClip(sigma=3.0, maxiters=5),
                     mask=mask,
                 )
@@ -1336,8 +1337,10 @@ class Find_FWHM:
                 return np.zeros_like(data, dtype=bool), np.nan, np.nan
 
             # --- Background estimation ---
-            if bkg is None or sigma is None:
-                bkg, _, sigma = sigma_clipped_stats(data_finite, sigma=3.0, maxiters=5)
+            if bkg is None:
+                _, bkg, _ = sigma_clipped_stats(data_finite, sigma=3.0, maxiters=5)
+            if sigma is None:
+                sigma = biweight_sky_sigma(data_finite)
             sigma = sigma if np.isfinite(sigma) and sigma > 0 else np.std(data_finite)
             bkg = bkg if np.isfinite(bkg) else np.median(data_finite)
             threshold = bkg + sigma_clip * sigma

@@ -199,7 +199,6 @@ def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> f
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-from astropy.stats import mad_std
 from astropy.nddata import Cutout2D
 from astropy.visualization import ZScaleInterval
 from photutils.detection import DAOStarFinder
@@ -215,6 +214,7 @@ from functions import (
     beta_aperture,
     ascii_kv,
     STATUS,
+    biweight_sky_sigma,
 )
 from aperture import (
     Aperture,
@@ -562,7 +562,7 @@ def _injection_worker(args):
                     rms = np.asarray(background_rms[y1:y2, x1:x2], dtype=float)
                     var = np.maximum(rms * rms, 0.0)
                 else:
-                    sig = float(mad_std(data, ignore_nan=True))
+                    sig = biweight_sky_sigma(data)
                     if not np.isfinite(sig) or sig <= 0:
                         sig = float(np.nanstd(data))
                     var = np.full_like(data, max(sig * sig, 0.0), dtype=float)
@@ -582,9 +582,9 @@ def _injection_worker(args):
                     var = var + (model_adu / gain_e_per_adu)
 
                 # Read noise is already included in background_rms (from
-                # MADStdBackgroundRMS) and in the fallback nanstd.  Do NOT
-                # add it again -- that double-counts it (same fix as BUG 131
-                # in psf.py and aperture.py).
+                # the Background2D biweight-scale RMS) and in the fallback
+                # nanstd.  Do NOT add it again -- that double-counts it
+                # (same fix as BUG 131 in psf.py and aperture.py).
                 _ = bool(lim_cfg.get("psf_snr_include_readnoise", True))  # kept for config compat
 
                 var = np.maximum(var, 1e-30)
@@ -1622,7 +1622,7 @@ class Limits:
             if configured_radius == fwhm:
                 try:
                     from photutils.detection import DAOStarFinder
-                    daofind = DAOStarFinder(fwhm=fwhm, threshold=5.0 * np.nanstd(cutout))
+                    daofind = DAOStarFinder(fwhm=fwhm, threshold=5.0 * biweight_sky_sigma(cutout))
                     sources = daofind(cutout)
                     if sources is not None and len(sources) >= 5:
                         _xcol = "x_centroid" if "x_centroid" in sources.colnames else "xcentroid"
@@ -3702,13 +3702,13 @@ class Limits:
             mag_targets = [m + zp_val for m in inst_targets] if zp_ok else inst_targets
             
             # Background RMS for S/N scaling of the demo injections.
-            from astropy.stats import mad_std
             if background_rms is not None:
                 # Median of the provided RMS map (already source-masked).
                 background_rms_scalar = float(np.nanmedian(background_rms))
             else:
-                # MAD so sources in the cutout do not bias the estimate.
-                background_rms_scalar = float(mad_std(cutout, ignore_nan=True))
+                # Biweight scale so sources in the cutout do not bias the
+                # estimate and quantized data does not staircase it.
+                background_rms_scalar = biweight_sky_sigma(cutout)
 
             raw_os_plot = getattr(epsf_model, "oversampling", 1)
             if isinstance(raw_os_plot, (list, tuple, np.ndarray)):
@@ -4090,7 +4090,7 @@ class Limits:
                             if bkgrms_zoom is not None:
                                 var_s = np.maximum(bkgrms_zoom[y0s:y1s, x0s:x1s] ** 2, 1e-30)
                             else:
-                                sig_s = float(np.nanstd(data_s))
+                                sig_s = biweight_sky_sigma(data_s)
                                 var_s = np.full_like(data_s, max(sig_s ** 2, 1e-30))
                             ok_s = np.isfinite(data_s) & np.isfinite(psf1) & (var_s > 0)
                             snr  = np.nan
