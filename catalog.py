@@ -375,10 +375,9 @@ class Catalog:
         import logging
 
         from autophot_gaia_curves.gaia_archive import (
-            gaia_xp_source_query,
             gaia_xp_sql_top_n,
             generate_source_ids_batched,
-            launch_gaia_adql_to_pandas,
+            query_gaia_xp_cone_growing,
             sort_gaia_table_nearest_to_target,
         )
 
@@ -395,6 +394,9 @@ class Catalog:
         prefetch_factor = int(cat_cfg.get("gaia_nearest_prefetch_factor", 50))
         prefetch_min = int(cat_cfg.get("gaia_nearest_prefetch_min", 200))
         prefetch_max = int(cat_cfg.get("gaia_nearest_prefetch_max", 10000))
+        xp_min_sources = int(cat_cfg.get("gaia_xp_min_sources", 25))
+        xp_max_radius_deg = float(cat_cfg.get("gaia_xp_max_radius_deg", 1.0))
+        xp_grow_factor = float(cat_cfg.get("gaia_xp_grow_factor", 1.5))
 
         sql_top, sort_by_distance = gaia_xp_sql_top_n(
             max_sources,
@@ -404,15 +406,6 @@ class Catalog:
             prefetch_max=prefetch_max,
         )
 
-        # ADQL radius is in degrees; caller passes degrees (e.g. radius_deg).
-        query = gaia_xp_source_query(
-            ra,
-            dec,
-            radius,
-            sql_top,
-            include_bp_rp=True,
-        )
-
         try:
             logger.info(
                 "Querying Gaia DR3 (synthetic photometry, SQL TOP %d -> target %d sources; paced archive: pause %.2fs before/after ADQL)...",
@@ -420,8 +413,15 @@ class Catalog:
                 max_sources,
                 max(query_pause_b, query_pause_a),
             )
-            results = launch_gaia_adql_to_pandas(
-                query,
+            results, used_radius_deg = query_gaia_xp_cone_growing(
+                ra,
+                dec,
+                radius,
+                sql_top,
+                include_bp_rp=True,
+                min_sources=xp_min_sources,
+                max_radius_deg=xp_max_radius_deg,
+                grow_factor=xp_grow_factor,
                 pause_before_sec=query_pause_b,
                 pause_after_sec=query_pause_a,
                 max_retries=archive_retries,
@@ -429,7 +429,11 @@ class Catalog:
                 logger=logger,
                 op_name="Gaia ADQL (XP sources for synthetic photometry)",
             )
-            logger.info("Gaia DR3 query returned %d sources.", len(results))
+            logger.info(
+                "Gaia DR3 query returned %d sources within %.4f deg.",
+                len(results),
+                used_radius_deg,
+            )
 
             if sort_by_distance and not results.empty:
                 logger.info(
@@ -1130,29 +1134,33 @@ class Catalog:
                     logger.info(
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
-                    # Direct API request: the MAST JSON endpoint returns
-                    # string "None" values that need explicit handling below.
+                    # Direct API request: the MAST catalog endpoint returns
+                    # {"info": [column metadata], "data": [row arrays]}; the
+                    # release segment must be dr1/dr2 ('ps1' is rejected), and
+                    # 'mean' is the MeanObjectView (gMeanPSFMag et al.).
                     try:
                         ra = float(target_coords.ra.degree)
                         dec = float(target_coords.dec.degree)
 
-                        url = "https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/ps1/search"
+                        url = "https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/mean"
                         params = {
                             "ra": ra,
                             "dec": dec,
                             "radius": radius_deg,
-                            "pagesize": 10000,
+                            "pagesize": 50000,
                             "format": "json"
                         }
-                        
-                        response = requests.get(url, params=params, timeout=60)
+
+                        response = requests.get(url, params=params, timeout=120)
                         response.raise_for_status()
                         data = response.json()
-                        
-                        if not data:
+
+                        rows = data.get("data") if isinstance(data, dict) else None
+                        if not rows:
                             selectedCatalog = pd.DataFrame()
                         else:
-                            selectedCatalog = pd.DataFrame(data)
+                            col_names = [c["name"] for c in data.get("info", [])]
+                            selectedCatalog = pd.DataFrame(rows, columns=col_names)
                             # Normalize null-like strings to NaN.
                             selectedCatalog = selectedCatalog.replace(
                                 ['None', 'none', 'NONE', 'null', 'NULL', 'nan', 'NaN'], np.nan
@@ -1164,9 +1172,9 @@ class Catalog:
                                         selectedCatalog[col] = pd.to_numeric(selectedCatalog[col], errors='coerce')
                                     except Exception:
                                         pass
-                            
+
                         logger.info("Retrieved %s Pan-STARRS sources", len(selectedCatalog))
-                        
+
                     except Exception as api_exc:
                         logger.warning("Direct Pan-STARRS API failed (%s), using empty catalog", api_exc)
                         selectedCatalog = pd.DataFrame()
@@ -1268,9 +1276,6 @@ class Catalog:
             )
             # Prefer the sources nearest the target when RA/DEC exist.
             if "RA" in selectedCatalog.columns and "DEC" in selectedCatalog.columns:
-                from astropy.coordinates import SkyCoord
-                from astropy import units as u
-                
                 catalog_coords = SkyCoord(
                     ra=selectedCatalog["RA"].values * u.degree,
                     dec=selectedCatalog["DEC"].values * u.degree
