@@ -2466,9 +2466,12 @@ class AutomatedPhotometry:
                             # tqdm redraws its bar on the cursor's current
                             # line; the child process inherits stdout, so a
                             # newline here keeps its first output off the
-                            # bar line.
+                            # bar line.  flush=True commits it before the
+                            # child writes - a buffered print() lands late
+                            # when stdout is piped, gluing "Started:" to the
+                            # bar.
                             if _using_tqdm:
-                                print()
+                                print(flush=True)
                             try:
                                 fname, rc = _run_main_subprocess(
                                     python_executable,
@@ -2493,8 +2496,13 @@ class AutomatedPhotometry:
                                 _log(
                                     f"[{counter + 1}/{len(file_list)}] [ERROR] Problem with file: {file}: {e} | {tb}"
                                 )
+                            # Two blank lines between the [OK]/[ERROR] line
+                            # and the bar redraw - the next iteration's
+                            # "\r" rewrite consumes the line the cursor is
+                            # on, so only printed newlines stay visible.
                             if _using_tqdm:
-                                print()
+                                print(flush=True)
+                                print(flush=True)
                         if len(file_list) > 1:
                             _done_msg = f"Done: {counter}/{len(file_list)} images processed"
                             _log(border_msg(_done_msg) if border_msg else _done_msg)
