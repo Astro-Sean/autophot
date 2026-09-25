@@ -1311,6 +1311,10 @@ class Zeropoint:
                 mad_delta, _max_resid, _med_err,
             )
             inlier_mask_fast = np.abs(delta - _weighted_mean) < 4.0 * np.sqrt(var_perp)
+            if not np.any(inlier_mask_fast):
+                # Near-zero per-source errors can make the 4-sigma gate
+                # reject every point; an empty mask is useless downstream.
+                inlier_mask_fast = np.ones(len(delta), dtype=bool)
             full_mask_fast = np.zeros(n_input, dtype=bool)
             full_mask_fast[np.flatnonzero(finite)[inlier_mask_fast]] = True
             return float(_weighted_mean), float(_weighted_err), full_mask_fast
@@ -1713,6 +1717,19 @@ class Zeropoint:
                 f"({final_mask.sum()}/{len(delta)} inliers, f_out={f_out:.3f}, n_steps={total_steps})"
             )
         
+        # Zero inliers is a model failure, not a data property: in mixture
+        # mode f_out can pin at its 0.5 prior cap so p_inlier <= 0.5 for
+        # every point, and in standard mode a zero clip threshold can do
+        # the same.  Keep all finite points so the joint inlier mask and
+        # diagnostic plots still work.
+        if not np.any(final_mask):
+            logger.warning(
+                "MCMC classified all %s points as outliers; keeping all "
+                "finite points as inliers instead.",
+                len(delta),
+            )
+            final_mask = np.ones(len(delta), dtype=bool)
+
         # BUG 146: Map back to original input length (including non-finite points).
         # Previously used len(x) which is the filtered length, not the original.
         full_mask = np.zeros(n_input, dtype=bool)
@@ -2069,6 +2086,25 @@ class Zeropoint:
                     )
                     zp_std = float(np.sqrt(np.clip(cov[0, 0], 0, np.inf)))
 
+                # A fitter can legally return an all-False inlier mask (the
+                # MCMC mixture when f_out pins at its prior cap, or any
+                # fitter on insufficient finite points).  An empty inlier
+                # set breaks the plotting and filtering below, so fall back
+                # to all finite sources - the same recovery ODR applies
+                # internally.
+                inlier_short = (
+                    np.asarray(inlier_short, dtype=bool)
+                    if inlier_short is not None
+                    else np.zeros(0, dtype=bool)
+                )
+                if inlier_short.size != n_sources or not np.any(inlier_short):
+                    logger.warning(
+                        f"[{flux_type}] {fit_method_this} fit returned no "
+                        f"usable inlier mask (N={n_sources}); treating all "
+                        "finite sources as inliers."
+                    )
+                    inlier_short = np.ones(n_sources, dtype=bool)
+
                 # Small-sample error floor: for N < 5 calibrators, formal ODR/MCMC
                 # errors can be misleadingly small because they don't capture
                 # field-dependent systematics (PSF variation, catalog zero-point
@@ -2164,24 +2200,29 @@ class Zeropoint:
 
                 xs = np.linspace(in_x.min() - 0.5, in_x.max() + 0.5, 200)
                 ys1 = xs + ZP
-                ax.plot(
-                    xs,
-                    ys1,
-                    "--",
-                    color=colors[flux_type],
-                    lw=get_line_width("medium"),
-                    label=(
-                        f"{flux_type} ZP={ZP:.3f} +/- {zp_std:.3f} "
-                        f"(N={n_sources})  (m_cal = m_inst + ZP, slope=1)"
-                    ),
-                )
-                ax.fill_between(
-                    xs,
-                    xs + ZP - zp_std,
-                    xs + ZP + zp_std,
-                    color=colors[flux_type],
-                    alpha=get_alpha("very_light"),
-                )
+                if np.isfinite(ZP) and np.isfinite(zp_std):
+                    ax.plot(
+                        xs,
+                        ys1,
+                        "--",
+                        color=colors[flux_type],
+                        lw=get_line_width("medium"),
+                        label=(
+                            f"{flux_type} ZP={ZP:.3f} +/- {zp_std:.3f} "
+                            f"(N={n_sources})  (m_cal = m_inst + ZP, slope=1)"
+                        ),
+                    )
+                    ax.fill_between(
+                        xs,
+                        xs + ZP - zp_std,
+                        xs + ZP + zp_std,
+                        color=colors[flux_type],
+                        alpha=get_alpha("very_light"),
+                    )
+                    _line_lo = float(np.min(ys1)) - 2.0 * float(zp_std)
+                    _line_hi = float(np.max(ys1)) + 2.0 * float(zp_std)
+                else:
+                    _line_lo, _line_hi = np.inf, -np.inf
 
                 # ---- Diagnostic: free-slope linear fit to quantify slope deviation ----
                 # Fit y = a*x + b (no slope=1 constraint) on the same inliers.
@@ -2253,13 +2294,13 @@ class Zeropoint:
                 global_ymins.append(
                     min(
                         float(m_cal_in.min()) - _em,
-                        float(np.min(ys1)) - 2.0 * float(zp_std),
+                        _line_lo,
                     )
                 )
                 global_ymaxs.append(
                     max(
                         float(m_cal_in.max()) + _em,
-                        float(np.max(ys1)) + 2.0 * float(zp_std),
+                        _line_hi,
                     )
                 )
 
