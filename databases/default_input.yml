@@ -469,7 +469,7 @@ default_input:
     # threshold configuration" block).  Do not add a second copy here -- YAML
     # silently keeps the last value for duplicate keys.
     beta_limit: 0.5 # float --- Legacy beta diagnostic threshold. Injected-source recovery is now gated by S/N only; beta is computed for diagnostics and completeness plots but does not affect the detection decision.
-    detection_limit: null # float|null --- S/N threshold for declaring an injected source recovered in limiting-magnitude experiments. If null, recovery requires S/N >= 3.0. Higher values (e.g., 5.0) match the detection thresholds used by ZTF and LSST automated pipelines. For discovery-style runs, set this to 5.0 to be consistent with photometry.detection_limit.
+    detection_limit: null # float|null --- S/N threshold for declaring an injected source recovered in limiting-magnitude experiments. If null (default), falls back to photometry.detection_limit so the reported limit means "the magnitude at which this pipeline flags a detection". Higher values (e.g., 5.0) match the detection thresholds used by ZTF and LSST automated pipelines.
     completeness_target: 0.5 # float --- Target recovery fraction at the limiting magnitude (Harris 1990 completeness definition; 0.5 = 50% completeness).
     recovery_method: auto # str --- "auto" matches the transient: aperture-only -> AP, PSF path -> PSF. Or set explicitly: PSF, AP, EMCEE/MCMC.
     recovery_use_absolute_snr: false # bool --- If false (default), a source is "recovered" only when the SIGNED S/N >= detection_limit. This is correct for positive-source injection-recovery: a negative flux with high |S/N| is a noise dip, not a detection. Set true only for exotic negative-injection experiments. Independent of recovery_require_positive_flux.
@@ -520,10 +520,11 @@ default_input:
     # The z-score scatter of (measured - true)/sigma over all finite trials
     # measures whether reported flux errors match the empirical scatter;
     # the MAD-based factor is applied to the target's error columns.
-    uncal_from_injections: True # bool --- Collect per-trial (true, measured, err) samples during the limiting-magnitude search and compute the uncertainty calibration. Disabled for AP recovery when no aperture correction is available (aperture flux is not on the total-flux scale).
+    uncal_from_injections: True # bool --- Collect per-trial (true, measured, err) samples during the limiting-magnitude search and compute the uncertainty calibration. True fluxes live on the recovery method's own scale (model amplitude for PSF/EMCEE, aperture rate for AP), so no aperture correction is needed.
     uncal_apply: True # bool --- Apply the calibration factor to the target's reported error columns (flux_err, inst_mag_err, calibrated mag_err quadrature term). False = diagnostics only.
     uncal_min_sources: 30 # int --- Minimum finite injection trials required before the calibration factor may be applied.
     uncal_factor_clip: [0.5, 2.0] # list[float] --- Allowed range for the applied calibration factor; factors outside the range indicate a pathological injection sample and are not applied.
+    recovery_calibrate_snr: True # bool --- If true (and uncal_apply is on), re-evaluate the injection detection flags under errors scaled by the empirical calibration factor and re-solve the limiting magnitude. The real detection flag is decided on calibrated S/N, so an uncalibrated gate would report a limit ~2.5*log10(factor) mag deeper than the pipeline's own detection threshold. The pre-calibration limit is kept in result details as inject_lmag_raw; a failed re-solve reverts to the raw gate.
 
   alignment:
     # reproject_method: "exact" uses exact pixel-area resampling (most geometrically accurate, handles all WCS distortions exactly)

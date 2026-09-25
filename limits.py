@@ -176,21 +176,22 @@ def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> f
     """
     ePSF ``flux`` parameter for instrumental magnitude *m* (cached).
 
-    ``counts_ref`` **must be in e-** (aperture sum of the unit-flux PSF render
-    after multiplying ADU by gain), matching ``Aperture.counts_AP``.  The ePSF
-    model is built from ADU images, so its raw aperture integral is in ADU;
-    the caller is responsible for multiplying by gain before passing here.
+    ``counts_ref`` **must be in e-**: the unit-flux PSF render integrated on
+    the recovery method's flux scale (total integral for PSF/EMCEE recovery,
+    aperture sum for AP recovery), after multiplying ADU by gain.  The ePSF
+    model is built from ADU images, so its raw integrals are in ADU; the
+    caller is responsible for multiplying by gain before passing here.
 
-    ``m`` uses the same e-/s convention as ``mag(flux_AP)``.  The returned
-    value is the dimensionless PSF flux scale factor such that the injected PSF
-    carries exactly ``10^(-0.4*m) * exposure_time`` e- inside the photometry
-    aperture.
+    ``m`` uses the same e-/s convention as ``mag(flux)`` for that method.
+    The returned value is the dimensionless PSF flux scale factor such that
+    the injected PSF carries exactly ``10^(-0.4*m) * exposure_time`` e- on the
+    reference scale (total model flux, or aperture flux, respectively).
     """
     flux_e_per_s = 10.0 ** (-0.4 * m)
-    aperture_e_in_frame = flux_e_per_s * float(exposure_time)
+    ref_e_in_frame = flux_e_per_s * float(exposure_time)
     if counts_ref <= 0 or not np.isfinite(counts_ref):
         return np.nan
-    return aperture_e_in_frame / float(counts_ref)
+    return ref_e_in_frame / float(counts_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +412,41 @@ def _fake_aperture_worker(args):
         0, len(includ_zip), size=(n_trials, aperture_area), endpoint=False
     )
     return np.nansum(cutout_e[includ_zip[idx, 0], includ_zip[idx, 1]], axis=1)
+
+
+def _recovered_detection_flags(flux, err, F_amp, snr_thresh, lim_cfg):
+    """
+    Recompute the ``_injection_worker`` detection gate for scaled errors.
+
+    The worker's gate is ``S/N >= snr_thresh`` plus positivity/error-validity
+    (and the optional flux-ratio) cuts.  Given the per-trial recovered fluxes
+    and errors, this rebuilds the flag under ``err * scale`` without rerunning
+    photometry -- e.g. err scaled by the empirical calibration factor so the
+    injection gate matches the calibrated S/N used by the real detection flag.
+    """
+    flux = np.asarray(flux, dtype=float)
+    err = np.asarray(err, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        snr = np.where(
+            np.isfinite(flux) & np.isfinite(err) & (err > 0),
+            flux / err,
+            np.nan,
+        )
+    ok = np.isfinite(flux) & np.isfinite(err) & (err > 0)
+    if bool(lim_cfg.get("recovery_require_positive_flux", True)):
+        ok = ok & (flux > 0)
+    ratio = lim_cfg.get("recovery_max_flux_ratio", 0.0)
+    try:
+        ratio = float(ratio)
+    except (TypeError, ValueError):
+        ratio = 0.0
+    if ratio > 0 and np.isfinite(F_amp) and float(F_amp) > 0:
+        ok = ok & (np.abs(flux) <= ratio * abs(float(F_amp)))
+    if bool(lim_cfg.get("recovery_use_absolute_snr", False)):
+        snr_gate = np.abs(snr) >= float(snr_thresh)
+    else:
+        snr_gate = np.isfinite(snr) & (snr >= float(snr_thresh))
+    return np.asarray(ok & snr_gate, dtype=bool)
 
 
 def _injection_worker(args):
@@ -1824,6 +1860,28 @@ class Limits:
             # =================================================================
             # PSF calibration: flux=1 -> what instrumental magnitude?
             # =================================================================
+            # Resolve the recovery method here: the flux<->magnitude calibration
+            # below depends on which photometric convention the reported limit
+            # shares (total PSF flux vs aperture flux).
+            recovery_method = str(lim_cfg.get("recovery_method", "PSF")).strip().upper()
+            # "AUTO" is resolved in main.py to AP vs PSF from do_aperture_ONLY; if unset, prefer PSF.
+            if recovery_method in {"AUTO", "DEFAULT", "MATCH_TRANSIENT", "MATCH_TARGET"}:
+                logger.warning(
+                    "limiting_magnitude.recovery_method=%s was not pre-resolved; using PSF. Set recovery_method explicitly or run from main (auto).",
+                    recovery_method,
+                )
+                recovery_method = "PSF"
+            elif recovery_method in {"MCMC", "EMCEE"}:
+                recovery_method = "EMCEE"
+            elif recovery_method in {"PSF", "AP"}:
+                pass
+            else:
+                logger.warning(
+                    "Unknown recovery_method %r; using PSF.",
+                    recovery_method,
+                )
+                recovery_method = "PSF"
+
             # cutout_cx/cutout_cy are the true target position in cutout
             # coordinates (Cutout2D.position_cutout handles partial cutouts).
             cx, cy = cutout_cx, cutout_cy
@@ -1832,17 +1890,38 @@ class Limits:
                 epsf_model, H, W, float(cx), float(cy), 1.0, oversampling
             )
 
-            # Integrate the unit-flux PSF inside the aperture disk WITHOUT local
-            # background subtraction. Aperture.measure() on a pure PSF image
-            # subtracts PSF-wing flux via its annulus estimator, shrinking
-            # counts_ref and biasing flux_for_mag() to inject too much signal
-            # (spuriously shallow limit). Exact pixel-fraction photometry on a
-            # zero-background image avoids this.
-            _psf_ap_obj = CircularAperture(
-                (float(cx), float(cy)), r=float(aperture_radius_local)
-            )
-            _psf_phot = _psf_ap_obj.do_photometry(psf_unit, method="exact")
-            counts_ref_adu = float(_psf_phot[0][0])  # integrated PSF flux in aperture (ADU)
+            if recovery_method in ("PSF", "EMCEE"):
+                # Total-flux convention: inst_mag_psf and the PSF zeropoint are
+                # on the *total* PSF flux scale (model.flux integrates over the
+                # whole profile), so the unit-flux reference is the full
+                # integral of the rendered PSF.  Using the aperture integral
+                # here instead injects every source ~1/encircled-fraction too
+                # bright, making the reported limit spuriously deep.
+                counts_ref_adu = float(np.nansum(psf_unit))
+                if not (np.isfinite(counts_ref_adu) and counts_ref_adu > 0):
+                    logger.warning(
+                        "Total unit-PSF integral not finite; falling back to "
+                        "aperture integral for flux_for_mag calibration."
+                    )
+                    _psf_ap_obj = CircularAperture(
+                        (float(cx), float(cy)), r=float(aperture_radius_local)
+                    )
+                    _psf_phot = _psf_ap_obj.do_photometry(psf_unit, method="exact")
+                    counts_ref_adu = float(_psf_phot[0][0])
+            else:
+                # Aperture convention: inst_mag_ap/zp_ap are on the
+                # aperture-flux scale.  Integrate the unit-flux PSF inside the
+                # aperture disk WITHOUT local background subtraction.
+                # Aperture.measure() on a pure PSF image subtracts PSF-wing
+                # flux via its annulus estimator, shrinking counts_ref and
+                # biasing flux_for_mag() to inject too much signal (spuriously
+                # shallow limit). Exact pixel-fraction photometry on a
+                # zero-background image avoids this.
+                _psf_ap_obj = CircularAperture(
+                    (float(cx), float(cy)), r=float(aperture_radius_local)
+                )
+                _psf_phot = _psf_ap_obj.do_photometry(psf_unit, method="exact")
+                counts_ref_adu = float(_psf_phot[0][0])  # integrated PSF flux in aperture (ADU)
             # Convert to e-: Aperture.measure works on image*gain. Without this,
             # _flux_for_mag_cached divides e- by ADU, so F_amp is gainx too
             # large, every injected source is gainx too bright, and the limit is
@@ -1890,25 +1969,8 @@ class Limits:
             # =================================================================
             # effective_snr_limit was validated above (finite, > 0); pass it to
             # the workers so they never see an unvalidated threshold.
+            # recovery_method was already resolved before the PSF calibration.
             snr_limit = effective_snr_limit
-            recovery_method = str(lim_cfg.get("recovery_method", "PSF")).strip().upper()
-            # "AUTO" is resolved in main.py to AP vs PSF from do_aperture_ONLY; if unset, prefer PSF.
-            if recovery_method in {"AUTO", "DEFAULT", "MATCH_TRANSIENT", "MATCH_TARGET"}:
-                logger.warning(
-                    "limiting_magnitude.recovery_method=%s was not pre-resolved; using PSF. Set recovery_method explicitly or run from main (auto).",
-                    recovery_method,
-                )
-                recovery_method = "PSF"
-            elif recovery_method in {"MCMC", "EMCEE"}:
-                recovery_method = "EMCEE"
-            elif recovery_method in {"PSF", "AP"}:
-                pass
-            else:
-                logger.warning(
-                    "Unknown recovery_method %r; using PSF.",
-                    recovery_method,
-                )
-                recovery_method = "PSF"
             completeness_target = float(lim_cfg.get("completeness_target", 0.5))
             if not np.isfinite(completeness_target):
                 completeness_target = 0.5
@@ -2255,12 +2317,33 @@ class Limits:
                 recovered_fluxes = np.array([r[2] for r in results], dtype=float)
                 recovered_flux_errs = np.array([r[3] for r in results], dtype=float)
 
+                # Calibrated-gate mode: rebuild the detection flag under
+                # errors inflated by the empirical calibration factor so the
+                # injection gate matches the (scaled) S/N used for the real
+                # detection flag.  The raw per-trial flux/err are kept so the
+                # gate can be re-evaluated once the factor is measured.
+                if _gate_err_scale["k"] != 1.0:
+                    det_flags = _recovered_detection_flags(
+                        recovered_fluxes,
+                        recovered_flux_errs * _gate_err_scale["k"],
+                        F,
+                        snr_limit,
+                        lim_cfg,
+                    )
+
                 # Collect (true, measured, err) per trial for the empirical
                 # uncertainty calibration.  All finite trials count, detected
                 # or not: the z-score is scale-free, and restricting to
                 # detections would bias the coverage statistics.
+                # For PSF/EMCEE the recovered flux is the model flux parameter
+                # (total-flux scale), directly comparable to F_amp; for AP the
+                # recovered flux is the aperture rate in e-/s, whose true value
+                # is 10^(-0.4m) by construction of flux_for_mag/counts_ref.
                 if _uncal_collect:
-                    _f_true = float(F) * _uncal_true_scale
+                    if _uncal_method in ("PSF", "EMCEE", "MCMC"):
+                        _f_true = float(F)
+                    else:
+                        _f_true = float(10.0 ** (-0.4 * float(m)))
                     for _rf, _rfe in zip(recovered_fluxes, recovered_flux_errs):
                         if np.isfinite(_rf) and np.isfinite(_rfe) and _rfe > 0:
                             _uncal_rows.append((_f_true, float(_rf), float(_rfe)))
@@ -2291,6 +2374,7 @@ class Limits:
 
                 _trial_cache[cache_key] = (det_rate, beta_med, flux_med, flux_err_med)
                 _flag_cache[cache_key] = det_flags
+                _fe_cache[cache_key] = (float(F), recovered_fluxes, recovered_flux_errs)
                 if return_flags:
                     return det_rate, beta_med, flux_med, flux_err_med, det_flags
                 return det_rate, beta_med, flux_med, flux_err_med
@@ -2300,40 +2384,34 @@ class Limits:
             # =================================================================
             inject_lmag = np.nan
             inject_lmag_err = np.nan
+            inject_lmag_raw = np.nan  # pre-calibration crossing when the S/N gate is scaled
+            _snr_gate_factor = 1.0    # empirical error-scale applied to the detection gate
             bracket_steps: list[tuple] = []
             bisect_steps: list[tuple] = []
             _trial_cache: dict[str, tuple] = {}
             _flag_cache: dict[str, np.ndarray] = {}
+            # Per-magnitude raw trial results so the detection gate can be
+            # re-evaluated under the calibrated error scale without rerunning
+            # photometry: cache_key -> (F_amp, recovered_fluxes, recovered_errs).
+            _fe_cache: dict[str, tuple] = {}
+            # Error-scale factor applied to the detection gate.  Set to the
+            # empirical uncertainty-calibration factor once the search has
+            # collected enough trials to measure it.
+            _gate_err_scale = {"k": 1.0}
 
             # Per-trial (true_flux, measured_flux, measured_err) samples for the
-            # empirical uncertainty calibration.  For PSF/EMCEE recovery the
-            # recovered flux is a total-flux estimate directly comparable to the
-            # injected F_amp; for AP recovery it is an aperture flux, so the
-            # true flux is scaled by the measured aperture fraction.
+            # empirical uncertainty calibration.  The true value lives on the
+            # same scale as the recovered quantity: the model flux parameter
+            # for PSF/EMCEE, the aperture rate (e-/s) for AP.
             _uncal_rows: list[tuple] = []
             _uncal_method = (
                 str(recovery_method).strip().upper()
                 if recovery_method is not None
                 else "AP"
             )
-            _uncal_true_scale = 1.0
-            if _uncal_method not in ("PSF", "EMCEE", "MCMC"):
-                _ap_corr_mag = local_input_yaml.get("aperture_correction", np.nan)
-                try:
-                    _ap_corr_mag = float(_ap_corr_mag)
-                except (TypeError, ValueError):
-                    _ap_corr_mag = np.nan
-                if np.isfinite(_ap_corr_mag):
-                    # aperture_correction = m_total - m_ap < 0, so
-                    # F_ap / F_total = 10^(0.4 * ap_corr).
-                    _uncal_true_scale = 10.0 ** (0.4 * _ap_corr_mag)
-                else:
-                    # No aperture correction: AP flux is not on the total-flux
-                    # scale, so calibration samples would be biased.  Skip.
-                    _uncal_true_scale = np.nan
             _uncal_collect = bool(
                 lim_cfg.get("uncal_from_injections", True)
-            ) and np.isfinite(_uncal_true_scale)
+            )
 
             with _pool_or_serial(
                 n_jobs,
@@ -2527,6 +2605,219 @@ class Limits:
                         float(inject_lmag), float(inject_lmag_err) if np.isfinite(inject_lmag_err) else np.nan, abs(hi_m - lo_m),
                     )
 
+                    # ---- Calibrated detection gate ---------------------------
+                    # The empirical uncertainty calibration inflates the
+                    # reported flux errors by factor k; the real detection
+                    # flag is then decided on calibrated S/N = flux/(err*k).
+                    # Evaluating the injection gate at the raw S/N instead
+                    # would report a limit ~2.5*log10(k) mag deeper than the
+                    # pipeline's own detection threshold.  Rebuild every
+                    # cached flag under err*k (no extra photometry) and
+                    # re-solve the crossing so the limit matches the
+                    # calibrated gate.
+                    _snr_gate_factor = 1.0
+                    try:
+                        if (
+                            np.isfinite(inject_lmag)
+                            and _uncal_collect
+                            and bool(lim_cfg.get("recovery_calibrate_snr", True))
+                            and bool(lim_cfg.get("uncal_apply", True))
+                            and len(_uncal_rows) > 0
+                        ):
+                            from utils.uncertainty_calibration import (
+                                calibrate_uncertainties,
+                            )
+
+                            _cal_arr = np.asarray(_uncal_rows, dtype=float)
+                            _cal_res = calibrate_uncertainties(
+                                _cal_arr[:, 0], _cal_arr[:, 1], _cal_arr[:, 2],
+                                min_sources=int(
+                                    lim_cfg.get("uncal_min_sources", 30)
+                                ),
+                            )
+                            _kc = float(
+                                getattr(_cal_res, "calibration_factor", np.nan)
+                            )
+                            _clip = lim_cfg.get("uncal_factor_clip", [0.5, 2.0])
+                            _c_lo, _c_hi = float(_clip[0]), float(_clip[1])
+                            _cal_ok = (
+                                int(getattr(_cal_res, "n_sources", 0) or 0)
+                                >= int(lim_cfg.get("uncal_min_sources", 30))
+                                and np.isfinite(_kc)
+                                and _c_lo <= _kc <= _c_hi
+                            )
+                            if _cal_ok and not np.isclose(_kc, 1.0):
+                                _snr_gate_factor = _kc
+                    except Exception:
+                        _snr_gate_factor = 1.0
+
+                    if _snr_gate_factor != 1.0:
+                        inject_lmag_raw = float(inject_lmag)
+                        inject_lmag_err_raw = inject_lmag_err
+                        # Snapshot raw state so a failed re-solve can restore it.
+                        _flag_cache_raw = {k: v.copy() for k, v in _flag_cache.items()}
+                        _trial_cache_raw = dict(_trial_cache)
+                        _bisect_len_raw = len(bisect_steps)
+                        _gate_err_scale["k"] = _snr_gate_factor
+                        for _key, (_F, _fl, _fe) in list(_fe_cache.items()):
+                            _nf = _recovered_detection_flags(
+                                _fl,
+                                _fe * _snr_gate_factor,
+                                _F,
+                                snr_limit,
+                                lim_cfg,
+                            )
+                            _flag_cache[_key] = _nf
+                            _r0 = _trial_cache.get(_key)
+                            if _r0 is not None:
+                                _trial_cache[_key] = (
+                                    float(_nf.mean()), _r0[1], _r0[2], _r0[3],
+                                )
+
+                        _c_corr = {
+                            float(kk): float(np.asarray(v, dtype=bool).mean())
+                            for kk, v in _flag_cache.items()
+                        }
+                        _ms = sorted(_c_corr)
+                        _pairs = [
+                            (a, b)
+                            for a, b in zip(_ms, _ms[1:])
+                            if _c_corr[a] >= completeness_target > _c_corr[b]
+                        ]
+                        solved_corrected = False
+                        if _pairs:
+                            lo_m2, hi_m2 = min(
+                                _pairs,
+                                key=lambda ab: abs(
+                                    0.5 * (ab[0] + ab[1]) - inject_lmag_raw
+                                ),
+                            )
+                            for _it in range(10):
+                                if abs(hi_m2 - lo_m2) < 0.02:
+                                    break
+                                mid2 = 0.5 * (lo_m2 + hi_m2)
+                                c2, _, f2, fe2 = run_trials_at_mag(
+                                    mid2, pool=pool
+                                )
+                                bisect_steps.append((mid2, c2, f2, fe2))
+                                if c2 >= completeness_target:
+                                    lo_m2 = mid2
+                                else:
+                                    hi_m2 = mid2
+                            lo_c2 = float(
+                                _flag_cache[f"{lo_m2:.12f}"].mean()
+                            )
+                            hi_c2 = float(
+                                _flag_cache[f"{hi_m2:.12f}"].mean()
+                            )
+                            inject_lmag = 0.5 * (lo_m2 + hi_m2)
+                            inject_lmag_err = np.nan
+                            try:
+                                denom2 = float(hi_c2 - lo_c2)
+                                if np.isfinite(denom2) and abs(denom2) > 0:
+                                    w2 = float(
+                                        np.clip(
+                                            (completeness_target - lo_c2)
+                                            / denom2,
+                                            0.0,
+                                            1.0,
+                                        )
+                                    )
+                                    inject_lmag = float(
+                                        lo_m2 + w2 * (hi_m2 - lo_m2)
+                                    )
+                                    n2 = len(_flag_cache[f"{lo_m2:.12f}"])
+                                    if n2 > 0:
+                                        s_lo = np.sqrt(
+                                            max(lo_c2 * (1 - lo_c2) / n2, 0)
+                                        )
+                                        s_hi = np.sqrt(
+                                            max(hi_c2 * (1 - hi_c2) / n2, 0)
+                                        )
+                                        s_w = np.sqrt(
+                                            ((1.0 - w2) * s_lo / denom2) ** 2
+                                            + (w2 * s_hi / denom2) ** 2
+                                        )
+                                        inject_lmag_err = abs(
+                                            hi_m2 - lo_m2
+                                        ) * s_w
+                            except Exception:
+                                pass
+                            solved_corrected = np.isfinite(inject_lmag)
+                        if not solved_corrected:
+                            # Logistic fit over the corrected flags handles
+                            # non-monotone curves where no adjacent straddle
+                            # exists.
+                            try:
+                                x_c = np.concatenate([
+                                    np.full(len(f), float(m), dtype=float)
+                                    for m, f in _flag_cache.items()
+                                ])
+                                y_c = np.concatenate([
+                                    np.asarray(f, dtype=float)
+                                    for f in _flag_cache.values()
+                                ])
+                                m50_c, s_c = _logistic_completeness_mle(
+                                    x_c, y_c, m_guess=float(inject_lmag_raw)
+                                )
+                                if np.isfinite(m50_c) and np.isfinite(s_c) and s_c > 0:
+                                    inject_lmag = _logistic_m_at_target(
+                                        m50_c, s_c, completeness_target
+                                    )
+                                    inject_lmag_err = np.nan
+                                    solved_corrected = True
+                            except Exception:
+                                pass
+                        if not solved_corrected:
+                            # Could not localize the calibrated crossing:
+                            # revert to the raw gate so the reported limit and
+                            # the cached flags stay consistent.  clear()+update
+                            # also drops entries added by the failed re-solve;
+                            # a plain update() would leave corrected-gate flags
+                            # mixed into the raw-gate curve.
+                            _gate_err_scale["k"] = 1.0
+                            _flag_cache.clear()
+                            _flag_cache.update(_flag_cache_raw)
+                            _trial_cache.clear()
+                            _trial_cache.update(_trial_cache_raw)
+                            del bisect_steps[_bisect_len_raw:]
+                            inject_lmag = inject_lmag_raw
+                            inject_lmag_err = inject_lmag_err_raw
+                            inject_lmag_raw = np.nan
+                            _snr_gate_factor = 1.0
+                            logger.warning(
+                                "Calibrated S/N gate (factor=%.3f) did not "
+                                "bracket the completeness target; reporting "
+                                "the uncalibrated limit %.3f.",
+                                float(_kc),
+                                float(inject_lmag),
+                            )
+                        else:
+                            logger.info(
+                                "    Calibrated S/N gate: error scale=%.3f "
+                                "(effective S/N >= %.2f) -> m50 %.4f -> %.4f",
+                                float(_snr_gate_factor),
+                                float(snr_limit) * _snr_gate_factor,
+                                inject_lmag_raw,
+                                float(inject_lmag),
+                            )
+                            # Step lists carry the completeness column for the
+                            # plot; refresh it from the corrected flags so the
+                            # drawn curve matches the adopted limit.
+                            def _corr_step_c(m, c_old):
+                                _f = _flag_cache.get(f"{float(m):.12f}")
+                                if _f is None:
+                                    return c_old
+                                return float(np.asarray(_f, dtype=bool).mean())
+                            bracket_steps = [
+                                (m, _corr_step_c(m, c), f, fe)
+                                for (m, c, f, fe) in bracket_steps
+                            ]
+                            bisect_steps = [
+                                (m, _corr_step_c(m, c), f, fe)
+                                for (m, c, f, fe) in bisect_steps
+                            ]
+
                     # Optional: fit a smooth logistic completeness curve over
                     # all evaluated magnitudes (cached per-site flags, no extra
                     # photometry). Uses every trial, not just the final two
@@ -2651,6 +2942,7 @@ class Limits:
                             cutout_cx=cutout_cx,
                             cutout_cy=cutout_cy,
                             snr_limit=effective_snr_limit,
+                            snr_gate_factor=_snr_gate_factor,
                         )
                     except Exception as exc:
                         logger.warning(
@@ -2713,13 +3005,19 @@ class Limits:
                     if np.isfinite(inject_lmag_err)
                     else "+/-n/a"
                 )
+                cal_str = ""
+                if _snr_gate_factor != 1.0:
+                    cal_str = (
+                        f"  S/N gate calibrated x{_snr_gate_factor:.3f}"
+                        f" (raw m50={float(inject_lmag_raw):.3f})"
+                    )
                 logger.log(
                     STATUS,
                     "Limiting magnitude: inst=%.3f %s%s  ZP=%s  "
-                    "method=%s  completeness=%.0f%%  trials=%d  [%.1fs]",
+                    "method=%s  completeness=%.0f%%  trials=%d%s  [%.1fs]",
                     float(inject_lmag), err_str, app_str, zp_log,
                     str(recovery_method), 100.0 * completeness_target,
-                    n_trials_total, elapsed,
+                    n_trials_total, cal_str, elapsed,
                 )
             else:
                 logger.info(
@@ -2782,6 +3080,12 @@ class Limits:
                     "zeropoint": zeropoint,
                     "recovery_method": recovery_method,
                     "snr_limit": effective_snr_limit,
+                    "snr_gate_factor": float(_snr_gate_factor),
+                    "inject_lmag_raw": (
+                        float(inject_lmag_raw)
+                        if np.isfinite(inject_lmag_raw)
+                        else np.nan
+                    ),
                     "image_zeropoint": image_zeropoint,
                     # Objects needed for injection cutout inset panels
                     "epsf_model": epsf_model,
@@ -3377,6 +3681,7 @@ class Limits:
         cutout_cx=None,
         cutout_cy=None,
         snr_limit=None,
+        snr_gate_factor=None,
         multi_snr_details=None,
         fig=None,
         gs=None,
@@ -3547,6 +3852,12 @@ class Limits:
                 snr_label = ""
                 if snr_limit is not None:
                     snr_label = f" (S/N $\\geq$ {snr_limit:.0f})"
+                    if (
+                        snr_gate_factor is not None
+                        and np.isfinite(snr_gate_factor)
+                        and not np.isclose(float(snr_gate_factor), 1.0)
+                    ):
+                        snr_label += f" cal $\\times${float(snr_gate_factor):.2f}"
 
                 if bracket_steps:
                     bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in bracket_steps])
@@ -4940,7 +5251,9 @@ class Limits:
                 results[f'snr_{float(snr)}'] = {
                     'limiting_mag': limit,
                     'snr_threshold': snr,
-                    'valid': np.isfinite(limit)
+                    'valid': np.isfinite(limit),
+                    'snr_gate_factor': detail.get('snr_gate_factor', np.nan),
+                    'limiting_mag_raw': detail.get('inject_lmag_raw', np.nan),
                 }
                 logger.info("S/N %s limiting magnitude: %.3f", snr, limit)
             except Exception as e:
