@@ -52,6 +52,7 @@ from scipy.ndimage import (
 from scipy.spatial import cKDTree
 from scipy.fft import fft2, fftshift
 from scipy.optimize import least_squares
+from types import SimpleNamespace
 from typing import Optional, Any
 
 # ---------------------------------------------------------------------------
@@ -135,7 +136,8 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
     to ~0.01 px.
     """
 
-    def __init__(self, *args, max_shift_px=0.5, orig_centres=None, **kwargs):
+    def __init__(self, *args, max_shift_px=0.5, orig_centres=None,
+                 epsf_history=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._max_shift_px = float(max_shift_px)
         # Shared across builders within one build attempt so the bound
@@ -145,6 +147,42 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
         # check (NaN for fit-failed stars); identifies the sources still
         # drifting when the build fails to converge.
         self._last_move = None
+        # Shared per-iteration ePSF list across every builder of one
+        # attempt (coarse/refine/prune/retry): when a late build crashes
+        # the newest completed model can be salvaged instead of losing
+        # the empirical PSF entirely.
+        if epsf_history is not None:
+            self._epsf = epsf_history
+        # The astropy objective is weights*(model - data): a masked pixel
+        # still reads NaN in the cutout data and 0*NaN propagates into
+        # the objective, raising NonFiniteValueError and aborting the
+        # whole build on one bad star.  Drop non-finite inputs from each
+        # star fit where the fitter supports it.
+        _fk = getattr(self, "_fitter_kwargs", None)
+        try:
+            if isinstance(_fk, dict) and "filter_non_finite" in _inspect.signature(
+                self.fitter.__call__
+            ).parameters:
+                _fk["filter_non_finite"] = True
+        except Exception:
+            pass
+
+    def _fit_star(self, epsf, star, *args, **kwargs):
+        # One pathological cutout must not abort the whole build:
+        # photutils only converts benign statuses into fit failures, so
+        # a fitter exception (e.g. NonFiniteValueError from a non-finite
+        # pixel surviving inside the fit region, or a diverging model)
+        # propagates and kills build_epsf.  Report any per-star fit
+        # crash as "fit did not converge"; the normal machinery then
+        # excludes the source after a few iterations while the rest of
+        # the pool still yields a model.
+        try:
+            return super()._fit_star(epsf, star, *args, **kwargs)
+        except Exception:
+            star = copy.copy(star)
+            star._fit_info = None
+            star._fit_error_status = 2
+            return star
 
     def _fit_stars(self, epsf, stars):
         for s in stars.all_stars:
@@ -3615,6 +3653,23 @@ class PSF:
                                 "[robust_extract_stars] Weight/star count mismatch; skipping weights"
                             )
 
+            # A non-finite cutout pixel keeps its NaN in star.data even
+            # though photutils already zeroed its weight, and the
+            # fit objective is weights*(model - data) so 0*NaN still
+            # aborts the whole ePSF build (NonFiniteValueError on
+            # resampled/masked frames).  Zero the non-finite data and
+            # weights in place: masked pixels contribute nothing
+            # downstream.
+            for _st in epsfstars:
+                _bad = ~np.isfinite(np.asarray(_st.data))
+                if _bad.any():
+                    _st.data[_bad] = 0.0
+                _w = getattr(_st, "weights", None)
+                if _w is not None:
+                    _badw = ~np.isfinite(np.asarray(_w))
+                    if _badw.any():
+                        _st.weights[_badw] = 0.0
+
             return epsfstars, stars_tbl
 
         except Exception:
@@ -6530,12 +6585,17 @@ class PSF:
                 _BuilderCls = EPSFBuilder
                 _bld_extra = {}
                 _shift_orig = {}
-                if hasattr(EPSFBuilder, "_fit_stars") and hasattr(
-                    EPSFBuilder, "_check_convergence"
+                _epsf_hist = []
+                if (
+                    hasattr(EPSFBuilder, "_fit_stars")
+                    and hasattr(EPSFBuilder, "_fit_star")
+                    and hasattr(EPSFBuilder, "_check_convergence")
                 ):
                     _BuilderCls = _BoundedShiftEPSFBuilder
                     _bld_extra = dict(
-                        max_shift_px=_max_shift, orig_centres=_shift_orig
+                        max_shift_px=_max_shift,
+                        orig_centres=_shift_orig,
+                        epsf_history=_epsf_hist,
                     )
                 builder = _BuilderCls(**_kw, **_bld_extra)
 
@@ -6654,6 +6714,34 @@ class PSF:
                             type(_build_exc).__name__, _build_exc,
                         )
                         res = None
+                # A crash discards the whole result even when earlier
+                # iterations produced a healthy model.  Salvage the
+                # newest completed ePSF from the shared build history:
+                # a slightly non-settled empirical model is preferable
+                # to the analytic backdoor.  It is reported as
+                # non-converged so the quality gates, prune loop, and
+                # adaptive retry still see it.
+                if res is None and bool(
+                    phot_cfg.get("psf_salvage_partial_epsf", True)
+                ):
+                    for _h in reversed(_epsf_hist):
+                        if _epsf_usable(_h):
+                            res = SimpleNamespace(
+                                epsf=_h,
+                                fitted_stars=_stars_work,
+                                iterations=len(_epsf_hist),
+                                converged=False,
+                                final_center_accuracy=None,
+                                n_excluded_stars=0,
+                                excluded_star_indices=[],
+                            )
+                            _res_builder = builder
+                            log.warning(
+                                "ePSF build crashed; salvaging the last "
+                                "completed iteration's empirical model "
+                                "(converged=no)."
+                            )
+                            break
                 # photutils >=3.0 returns EPSFBuildResult; <3.0 returns
                 # (epsf, fitted_stars).
                 if res is not None and hasattr(res, "epsf"):
@@ -7392,18 +7480,37 @@ class PSF:
                     "selection cuts or increasing psf_min_candidates.",
                     n_epsf_stars,
                 )
-            else:
-                log.log(STATUS, "ePSF built from %d stars", n_epsf_stars)
 
-            # The effective PSF is the pixel-integrated PSF, so for
-            # undersampled data a measurement ~5-10% broader than the
-            # continuous input FWHM is expected.
-            if np.isfinite(_epsf_fwhm_meas):
-                log.info(
-                    "ePSF measured FWHM: %.2f native px (input FWHM %.2f px)",
-                    _epsf_fwhm_meas,
-                    fwhm,
+            # STATUS one-liner naming the kept model (empirical ePSF or
+            # analytic stand-in), the star pool, oversampling, the
+            # convergence verdict, and measured vs image FWHM.  For
+            # undersampled data the effective PSF is pixel-integrated, so
+            # a measured FWHM ~5-10% broader than the input is expected.
+            _model_txt = _analytic_kind if _used_analytic_psf else "epsf"
+            _conv_txt = (
+                "n/a (analytic model)"
+                if self.psf_converged is None
+                else (
+                    "yes (relaxed)"
+                    if self.psf_converged and self.psf_converged_relaxed
+                    else ("yes" if self.psf_converged else "no")
                 )
+            )
+            _fwhm_txt = (
+                f" | measured FWHM {_epsf_fwhm_meas:.2f} px (image {fwhm:.2f} px)"
+                if np.isfinite(_epsf_fwhm_meas)
+                else ""
+            )
+            log.log(
+                STATUS,
+                "PSF model: %s | built from %d stars | oversample=x%d | "
+                "ePSF converged: %s%s",
+                _model_txt,
+                int(n_epsf_stars),
+                int(oversample),
+                _conv_txt,
+                _fwhm_txt,
+            )
 
             # Compute encircled energy at the photometry fit_shape radius.
             # If EE is significantly < 1.0 at fit_shape, the ePSF wings are
@@ -7563,16 +7670,8 @@ class PSF:
 
             # One-line verdict so the run log always states whether the
             # empirical build settled (analytic models never iterate, so
-            # they report n/a).
-            _conv_txt = (
-                "n/a (analytic model)"
-                if self.psf_converged is None
-                else (
-                    "yes (relaxed)"
-                    if self.psf_converged and self.psf_converged_relaxed
-                    else ("yes" if self.psf_converged else "no")
-                )
-            )
+            # they report n/a).  _conv_txt is reused from the STATUS model
+            # summary above - nothing between them changes the verdict.
             log.info(
                 "PSF model: %s | ePSF converged: %s | PSF stars: %d | "
                 "oversample=x%d",
