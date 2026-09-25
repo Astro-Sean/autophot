@@ -4143,8 +4143,13 @@ def run_photometry():
         _grid_requested = bool(
             input_yaml["photometry"].get("psf_spatial_grid", False)
         )
+        # Enrich whenever the pool is below the preferred star count, not
+        # only at the hard minimum: downstream vetting (contamination,
+        # off-centre, defect cuts) typically discards half the candidates,
+        # so a pool just above min_psf_pool starves the ePSF build.
         _pool_starved = (
-            psf_source_pool is not None and len(psf_source_pool) < min_psf_pool
+            psf_source_pool is not None
+            and len(psf_source_pool) < preferred_psf_pool
         )
         if _grid_requested or _pool_starved:
             # The filtered detection table is re-derived on the aligned
