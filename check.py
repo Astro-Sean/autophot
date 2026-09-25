@@ -483,9 +483,14 @@ class FitsInfo:
                 entry["Name"] = f"{tele}+{inst_name}"
                 self.logger.info("Auto-created instrument entry: %s", entry['Name'])
                 sh = self._find_sample_header(headers_cache, correct_files, tele, inst_name)
-                entry["pixel_scale"] = self._derive_pixel_scale(sh)
-                entry["filter_key_0"] = "FILTER"
-                self._confirm_instrument_keywords(entry, sh or {}, tele, inst_name)
+                scale, scale_src = self._derive_pixel_scale(sh)
+                if scale is None:
+                    scale, scale_src = 0.4, "default"
+                entry["pixel_scale"] = scale
+                entry["filter_key_0"] = self._detect_filter_key(sh or {}) or "FILTER"
+                self._confirm_instrument_keywords(
+                    entry, sh or {}, tele, inst_name, scale_src
+                )
         return db
 
     def _find_sample_header(self, headers_cache, correct_files, tele, inst_name):
@@ -502,9 +507,16 @@ class FitsInfo:
 
     @staticmethod
     def _derive_pixel_scale(sample_header):
-        """Derive pixel scale (arcsec/pix) from WCS."""
+        """Derive pixel scale (arcsec/pix) from the header.
+
+        Returns (scale, source) where source is 'WCS', 'CD matrix',
+        'CDELT', or None on failure.  Some products (e.g. pswarp) carry
+        keywords that make astropy reject the whole WCS while the raw
+        CD/CDELT cards are still valid, so simpler representations are
+        tried before giving up.
+        """
         if not sample_header:
-            return 0.4
+            return None, None
         try:
             from wcs import get_wcs as ap_get_wcs
             import astropy.wcs as WCS_mod
@@ -514,10 +526,48 @@ class FitsInfo:
             if scales is not None and len(scales) > 0:
                 cand = float(scales[0]) * 3600.0
                 if np_mod.isfinite(cand) and 0 < cand <= 5:
-                    return cand
+                    return cand, "WCS"
         except Exception:
             pass
-        return 0.4
+        try:
+            if all(k in sample_header for k in ("CD1_1", "CD1_2", "CD2_1", "CD2_2")):
+                det = abs(
+                    float(sample_header["CD1_1"]) * float(sample_header["CD2_2"])
+                    - float(sample_header["CD1_2"]) * float(sample_header["CD2_1"])
+                )
+                cand = det ** 0.5 * 3600.0 if det > 0 else 0.0
+                if 0 < cand <= 5:
+                    return cand, "CD matrix"
+            if "CDELT1" in sample_header:
+                cand = abs(float(sample_header["CDELT1"])) * 3600.0
+                if 0 < cand <= 5:
+                    return cand, "CDELT"
+        except (TypeError, ValueError):
+            pass
+        return None, None
+
+    @staticmethod
+    def _filter_value_usable(value) -> bool:
+        """A filter keyword is only useful if it carries a real value."""
+        v = str(value).strip().lower().replace(" ", "")
+        return bool(v) and v not in AVOID_FILTERS
+
+    def _detect_filter_key(self, header):
+        """Best-guess filter keyword actually present in ``header``.
+
+        Tries known alias names first, then any key containing
+        'filter'.  Returns None when nothing plausible exists.
+        """
+        if not header:
+            return None
+        for alias in KEYWORD_ALIASES.get("FILTER", []):
+            k = _header_key_ci(header, alias)
+            if k is not None and self._filter_value_usable(header[k]):
+                return k
+        for key in header:
+            if "filter" in key.lower() and self._filter_value_usable(header[key]):
+                return str(key)
+        return None
 
     def _extract_filters(self, db, headers_cache, correct_files):
         """Phase 3: Extract and map filter keywords from all valid files."""
@@ -680,6 +730,23 @@ class FitsInfo:
                 nums.append(int(m.group(1)))
         return max(nums) + 1
 
+    @staticmethod
+    def _sorted_filter_key_names(entry):
+        """Return filter_key_N entry names ordered by numeric suffix."""
+        return sorted(
+            (k for k in entry if re.fullmatch(r"filter_key_\d+", k)),
+            key=lambda k: int(k.rsplit("_", 1)[1]),
+        )
+
+    def _dedupe_filter_keys(self, entry):
+        """Drop filter_key_N entries whose header key is already registered."""
+        seen = set()
+        for k in self._sorted_filter_key_names(entry):
+            if entry[k] in seen:
+                del entry[k]
+            else:
+                seen.add(entry[k])
+
     def _find_filter_key(self, header, entry):
         """
         Select best filter keyword from header.
@@ -687,19 +754,22 @@ class FitsInfo:
         Priority: existing filter_key_N -> auto-search for 'filter' in key name
         -> fallback to any short non-empty value -> 'FILTER' default.
         Skips 'open'/'clear' filters. Dynamically registers new filter_key_N entries.
+        Duplicate filter_key_N values (written by earlier scans) are collapsed.
         """
-        fkeys = ["FILTER"] + [k for k in entry if k.startswith("filter_key_")]
+        self._dedupe_filter_keys(entry)
+        # filter_key_N entries map to FITS header keywords; compare those stored
+        # names (not the entry keys) against the header so existing keys are reused.
+        fkeys = ["FILTER"] + [
+            entry[k] for k in self._sorted_filter_key_names(entry)
+        ]
         for fk in fkeys:
-            if fk in header:
-                fval = str(header[fk]).strip().lower().replace(" ", "")
-                if fval not in AVOID_FILTERS:
-                    return fk
+            if fk in header and self._filter_value_usable(header[fk]):
+                return fk
 
         # Auto-search: look for keywords containing "filter"
         for key in header:
             if "filter" in key.lower() and key not in fkeys:
-                fval = str(header[key]).strip().lower().replace(" ", "")
-                if fval not in AVOID_FILTERS:
+                if self._filter_value_usable(header[key]):
                     new_fk = f"filter_key_{self._next_filter_key_num(entry)}"
                     entry[new_fk] = key
                     self.logger.info("Auto-selected filter key: %s -> %s", key, new_fk)
@@ -717,92 +787,198 @@ class FitsInfo:
         self.logger.warning("No suitable filter key found, using 'FILTER' as default")
         return "FILTER"
 
-    def _confirm_instrument_keywords(self, entry, sample_header, tele, inst_name):
+    def _prompt_keyword(self, prompt, default, sample_header):
+        """Ask for a keyword name / numeric value until a usable answer.
+
+        Returns the real header key (case-insensitive match), a float for
+        numeric answers, or "skip".  An absent key is a warning, not a
+        hard error -- headers can differ between files -- so repeating the
+        same unknown name stores it anyway.
+        """
+        prev_bad = None
+        while True:
+            ans = self.ask_question(
+                prompt,
+                default_answer=str(default),
+                expect_answer_type=str,
+                ignore_word="skip",
+            )
+            if ans == "skip":
+                return "skip"
+            try:
+                return float(ans)
+            except (ValueError, TypeError):
+                pass
+            real = _header_key_ci(sample_header, ans) if sample_header else None
+            if real is not None:
+                return real
+            if ans == prev_bad:
+                self.logger.warning(
+                    "Keyword %r not in sample header; storing anyway", ans
+                )
+                return str(ans)
+            prev_bad = ans
+            similar = (
+                self.find_similar_keywords(list(sample_header), ans)
+                if sample_header
+                else []
+            )
+            hint = f"  Similar keys: {', '.join(similar[:5])}" if similar else ""
+            print(
+                f"  Keyword '{ans}' not found in this header.{hint}\n"
+                "  Re-enter, repeat to keep anyway, or 'skip'."
+            )
+
+    @staticmethod
+    def _auto_detect_keyword(sample_header, logical):
+        """Detect an optional keyword in ``sample_header``.
+
+        Returns (detected_key, related_keys).  ``detected_key`` is a key
+        confirmed by the auto_accept table or the alias list (safe to
+        store); ``related_keys`` are the looser substring candidates,
+        offered as the default only when exactly one exists.
+        """
+        auto = auto_accept_header_key(sample_header, logical)
+        if auto is None and sample_header:
+            for a in KEYWORD_ALIASES.get(logical, []):
+                k = _header_key_ci(sample_header, a)
+                if k is not None:
+                    auto = k
+                    break
+        related = []
+        if auto is None and sample_header:
+            related = sorted(
+                {k for k in sample_header if logical.lower() in k.lower()}
+            )
+        return auto, related
+
+    def _confirm_instrument_keywords(
+        self, entry, sample_header, tele, inst_name, scale_source=None
+    ):
         """
         Interactively confirm auto-detected keywords for a newly discovered
         instrument.  Falls back to the auto-detected values on EOF (non-
         interactive pipelines).
 
-        When a standard keyword is not found in the header, the user is shown
-        the available header keys and can either:
-        * pick the correct keyword name,
+        Detected keywords are offered as defaults with a "[found: KEY]"
+        marker; failed detections show the plausible header keys and, when
+        exactly one exists, offer it as the default instead of 'skip'.
+        The user can either:
+        * press Enter to accept the shown default,
+        * type the correct keyword name (validated against the header),
         * enter a numeric value (stored directly, e.g. gain=2.5),
         * or ``skip`` to leave the entry unset.
         """
+        name = f"{tele}+{inst_name}"
         try:
-            # Confirm pixel scale
-            ps = entry.get("pixel_scale", 0.4)
-            confirmed_ps = self.ask_question(
-                f"Confirm pixel scale for {tele}+{inst_name} (arcsec/pix)",
-                default_answer=float(ps),
+            # Pixel scale: show where the value came from so the user can
+            # judge whether Enter is safe.  'skip' keeps the stored value.
+            ps = float(entry.get("pixel_scale", 0.4))
+            if scale_source and scale_source != "default":
+                ps_note = f" [{scale_source}-derived: {ps:.4f}]"
+            else:
+                ps_note = " [WCS read failed - fallback value, please verify]"
+            ans = self.ask_question(
+                f"Pixel scale for {name} (arcsec/pix){ps_note}",
+                default_answer=ps,
                 expect_answer_type=float,
             )
-            entry["pixel_scale"] = float(confirmed_ps)
-
-            # Confirm filter key
-            fk = entry.get("filter_key_0", "FILTER")
-            confirmed_fk = self.ask_question(
-                f"Confirm filter header key for {tele}+{inst_name}",
-                default_answer=str(fk),
-                expect_answer_type=str,
-            )
-            entry["filter_key_0"] = str(confirmed_fk)
-
-            # Confirm optional keywords
-            for logical, info in OPTIONAL_KEYWORDS.items():
-                auto = auto_accept_header_key(sample_header, logical)
-                if auto is None:
-                    aliases = KEYWORD_ALIASES.get(logical, [])
-                    for a in aliases:
-                        if a in sample_header:
-                            auto = a
-                            break
-                default = auto or "skip"
-                units_hint = info.get("units", "")
-                base_prompt = (
-                    f"Confirm {logical} keyword for {tele}+{inst_name}"
-                    + (f" ({units_hint})" if units_hint else "")
-                )
-
-                # If nothing was found, show the user what's in the header
-                if auto is None and sample_header:
-                    # Suggest keys that contain the logical name as substring
-                    related = sorted(
-                        {k for k in sample_header if logical.lower() in k.lower()}
+            if ans != "skip":
+                ans = float(ans)
+                if not (0.005 < ans < 10.0):
+                    self.logger.warning(
+                        "Pixel scale %.4f arcsec/pix looks implausible for %s",
+                        ans, name,
                     )
+                entry["pixel_scale"] = ans
+
+            # Filter key: the stored entry already holds the detected key
+            # when one was found in the header.
+            fk = str(entry.get("filter_key_0", "FILTER"))
+            fk_real = (
+                _header_key_ci(sample_header, fk) if sample_header else None
+            )
+            fk_note = (
+                f" [found in header: {fk_real}]"
+                if fk_real is not None
+                else " [not found in header]"
+            )
+            ans = self._prompt_keyword(
+                f"Filter header key for {name}{fk_note}", fk, sample_header
+            )
+            if isinstance(ans, float):
+                self.logger.warning(
+                    "Ignoring numeric answer %g for filter key; keeping %s",
+                    ans, fk,
+                )
+            elif ans != "skip":
+                entry["filter_key_0"] = str(ans)
+
+            # Optional keywords
+            for logical, info in OPTIONAL_KEYWORDS.items():
+                auto, related = self._auto_detect_keyword(
+                    sample_header, logical
+                )
+                units_hint = info.get("units", "")
+                base_prompt = f"{logical} keyword for {name}" + (
+                    f" ({units_hint})" if units_hint else ""
+                )
+                if auto is not None:
+                    base_prompt += f" [found: {auto}]"
+                    default = auto
+                elif len(related) == 1:
+                    base_prompt += (
+                        "\n  [Auto-detect failed; only plausible key: "
+                        f"{related[0]}]"
+                    )
+                    default = related[0]
+                elif sample_header:
                     related_str = (
-                        f"  Related keys in header: {', '.join(related)}"
+                        f"Related keys in header: {', '.join(related)}"
                         if related
-                        else "  No related keys found in header."
+                        else "No related keys found in header."
                     )
                     base_prompt += (
                         f"\n  [Auto-detect failed] {related_str}\n"
-                        f"  Enter keyword name, a numeric value, or 'skip':"
+                        "  Enter keyword name, a numeric value, or 'skip':"
                     )
-
-                ans = self.ask_question(
-                    base_prompt,
-                    default_answer=str(default),
-                    expect_answer_type=str,
-                    ignore_word="skip",
-                )
+                    default = "skip"
+                else:
+                    default = "skip"
+                ans = self._prompt_keyword(base_prompt, default, sample_header)
                 if ans == "skip":
                     continue
-                # Numeric values are stored directly (e.g. gain=2.5)
-                try:
-                    numeric = float(ans)
-                    entry[logical] = numeric
+                entry[logical] = ans
+                if isinstance(ans, float):
                     self.logger.info(
-                        "Set %s for %s+%s to fixed value %.4f", logical, tele, inst_name, numeric
+                        "Set %s for %s to fixed value %.4f", logical, name, ans
                     )
-                except ValueError:
-                    entry[logical] = str(ans)
 
         except (EOFError, OSError):
+            # The prompt loop aborts on EOF before storing anything, so
+            # populate the auto-detected values here -- the message below
+            # promised them, and previously they were silently dropped.
+            for logical in OPTIONAL_KEYWORDS:
+                if logical in entry:
+                    continue
+                auto, related = self._auto_detect_keyword(
+                    sample_header, logical
+                )
+                pick = auto or (related[0] if len(related) == 1 else None)
+                if pick is not None:
+                    entry[logical] = pick
             self.logger.info(
-                "Non-interactive mode detected; using auto-detected keywords for %s+%s.",
-                tele, inst_name,
+                "Non-interactive mode detected; using auto-detected keywords for %s.",
+                name,
             )
+
+        # One-line recap so a wrong Enter-press is visible in the log.
+        shown = [
+            f"{k}={entry[k]}"
+            for k in ("pixel_scale", "filter_key_0", *OPTIONAL_KEYWORDS)
+            if k in entry
+        ]
+        self.logger.info("Instrument %s parameters: %s", name, ", ".join(shown))
 
     def _load_db(self):
         """Load existing telescope.yml from wdir or return empty dict.
