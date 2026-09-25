@@ -14,6 +14,7 @@ import shutil
 import numpy as np
 import pandas as pd
 import yaml
+from collections import defaultdict
 from functools import reduce
 from typing import List, Dict, Optional, Tuple, Union
 
@@ -1025,6 +1026,8 @@ class Prepare:
         # same mapping to telescope.yml (e.g. many exposures with FILTER='rp'
         # all mapping to 'r').
         seen_filter_mappings: Dict[Tuple[str, str, str], str] = {}
+        # Unmatched filter -> affected files; reported once per filter below.
+        filter_unmatched: Dict[str, List[str]] = defaultdict(list)
 
         tele_key = "TELESCOP"
         inst_key = "INSTRUME"
@@ -1200,16 +1203,7 @@ class Prepare:
                 and filter_name != "no_filter"
                 and not prepare_templates
             ):
-                self.logger.info(
-                    "Filter %s could not be matched to catalog filters (available: %s) for %s",
-                    filter_name,
-                    ", ".join(sorted(available_filters)),
-                    os.path.basename(name),
-                )
-                self.logger.info(
-                    "Solutions: 1) Add filter to custom catalog, 2) Use Gaia custom catalog with transmission curves, 3) Check telescope.yml mapping"
-                )
-                
+                filter_unmatched[filter_name].append(os.path.basename(name))
                 files_removed += 1
                 filters_removed += 1
                 filter_unavailable.append(filter_name)
@@ -1269,6 +1263,21 @@ class Prepare:
                 )
                 seen_filter_mappings[key] = filter_name
 
+        for filt, names in sorted(filter_unmatched.items()):
+            shown = names[:8]
+            more = f", +{len(names) - 8} more" if len(names) > 8 else ""
+            self.logger.info(
+                "Filter %s could not be matched to catalog filters (available: %s) for %d file(s): %s%s",
+                filt,
+                ", ".join(sorted(available_filters)),
+                len(names),
+                ", ".join(shown),
+                more,
+            )
+        if filter_unmatched:
+            self.logger.info(
+                "Solutions: 1) Add filter to custom catalog, 2) Use Gaia custom catalog with transmission curves, 3) Check telescope.yml mapping"
+            )
         if len(filter_unavailable) > 0:
             self.logger.info(
                 "  %d file(s) removed: filter not in catalog (%s).",
