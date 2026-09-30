@@ -1259,6 +1259,19 @@ class BackgroundSubtractor:
                         # Devices were already initialised in this process; the
                         # model still runs wherever TensorFlow placed it.
                         pass
+                else:
+                    # TF's default is to reserve ~all device memory at first
+                    # use.  With several image workers pinned to the same GPU
+                    # (nGPU round-robin), the later processes then die in the
+                    # ROCm/CUDA runtime (hipblaslt 'out of memory' / SIGSEGV).
+                    # Growth mode allocates only what inference needs.
+                    try:
+                        for _gpu in tf.config.list_physical_devices("GPU"):
+                            tf.config.experimental.set_memory_growth(_gpu, True)
+                    except RuntimeError:
+                        # Devices already initialised; allocation policy is
+                        # whatever it was set to then.
+                        pass
             try:
                 tf.get_logger().setLevel("ERROR")
                 import absl.logging
