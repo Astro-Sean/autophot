@@ -14,6 +14,7 @@ should use nCPU=1 when SFFT is enabled to minimise leaks and thread exhaustion.
 import argparse
 import os
 import ast
+import importlib.util
 import logging
 import sys
 import time
@@ -643,6 +644,22 @@ def run_sfft() -> Optional[int]:
             "Default 0.3 (SFFT default). Lower = more permissive."
         ),
     )
+    parser.add_argument(
+        "-backend",
+        type=str,
+        default="numpy",
+        help=(
+            "SFFT compute backend: 'numpy' (CPU, default) or 'cupy' (NVIDIA "
+            "GPU; requires cupy installed and SFFT's Cupy path). Falls back "
+            "to Numpy when cupy is unavailable."
+        ),
+    )
+    parser.add_argument(
+        "-cuda_device",
+        type=str,
+        default="0",
+        help="CUDA device index used when -backend cupy (default 0).",
+    )
     args = parser.parse_args()
 
     # --- Parse Coordinate Lists ---
@@ -1178,9 +1195,43 @@ def run_sfft() -> Optional[int]:
     # - KerHWLimit: (min, max) kernel half-width; SFFT default (2, 20). We use (3, 50) for large FWHM differences.
     # - ForceConv: 'REF'|'SCI'|'AUTO'. REF => DIFF=SCI-conv(REF) (transient keeps science PSF). AUTO picks by seeing.
     # ECP (crowded) expects 'Cupy' (capital C, lowercase py); ESP accepts same.
+    _backend_arg = str(getattr(args, "backend", "numpy")).strip().lower()
     BACKEND_4SUBTRACT = "Numpy"
+    if _backend_arg in ("cupy", "gpu", "cuda"):
+        _cupy_ok = importlib.util.find_spec("cupy") is not None
+        if _cupy_ok:
+            # find_spec only proves the package exists - probe the runtime
+            # so a GPU-less host (driver missing, ROCM_HOME unset, no device
+            # allocated) still falls back to Numpy instead of crashing SFFT.
+            try:
+                import cupy as _cp
 
-    CUDA_DEVICE_4SUBTRACT = "0"
+                _cupy_ok = _cp.cuda.runtime.getDeviceCount() > 0
+            except Exception as _e:
+                _cupy_ok = False
+                log_info(
+                    "WARNING: -backend cupy requested but cupy found no "
+                    f"usable GPU ({_e}); using the Numpy backend."
+                )
+        if _cupy_ok:
+            BACKEND_4SUBTRACT = "Cupy"
+        else:
+            log_info(
+                "WARNING: -backend cupy requested but cupy is not installed "
+                "or has no usable device; using the Numpy backend."
+            )
+    elif _backend_arg != "numpy":
+        log_info(
+            f"WARNING: unrecognised -backend {_backend_arg!r}; using the Numpy backend."
+        )
+
+    CUDA_DEVICE_4SUBTRACT = str(getattr(args, "cuda_device", "0") or "0")
+    _dev_note = (
+        f" (CUDA device {CUDA_DEVICE_4SUBTRACT})"
+        if BACKEND_4SUBTRACT == "Cupy"
+        else ""
+    )
+    log_info(f"SFFT compute backend: {BACKEND_4SUBTRACT}{_dev_note}")
 
     # Use 1 thread for SFFT internals to avoid libgomp/process limits when run
     # as a subprocess or on HPC (avoids "Thread creation failed" and semaphore leaks).

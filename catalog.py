@@ -1363,9 +1363,12 @@ class Catalog:
             catalog_autophot_input_yml = "catalog.yml"
             catalogName = catalogName or self.input_yaml["catalog"]["use_catalog"]
 
+            # catalog.yml uses 'panstarrs' while the normalized internal
+            # catalog name is 'pan_starrs' - translate for the YAML lookup.
+            _yml_name = {"pan_starrs": "panstarrs"}.get(catalogName, catalogName)
             catalog_keywords = AutophotYaml(
                 os.path.join(filepath, "databases", catalog_autophot_input_yml),
-                catalogName,
+                _yml_name,
             ).load()
 
             max_distance = self.input_yaml["catalog"].get(

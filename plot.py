@@ -2478,6 +2478,108 @@ class Plot:
             plt.close(fig)
 
             logger.debug("Saved alignment offset plot: %s", save_path)
+
+            # --- Residual-vector field -------------------------------------
+            # Arrows at each matched science position show (dx, dy); colour
+            # encodes magnitude.  This exposes spatially coherent residuals
+            # (uncorrected edge distortion, local warp) that the dx/dy
+            # scatter plot cannot show.
+            try:
+                _nx = float(sci_header.get("NAXIS1", np.nanmax(sci_x_plot)))
+                _ny = float(sci_header.get("NAXIS2", np.nanmax(sci_y_plot)))
+                _res_mag = np.hypot(dx_plot, dy_plot)
+                # quiver scale = data-px of residual per data-px of arrow; a
+                # median residual draws ~2% of the frame width.
+                _quiv_scale = max(np.nanmedian(_res_mag), 1e-3) / (
+                    0.02 * max(_nx, _ny)
+                )
+                fig2, ax2 = plt.subplots(figsize=set_size(width_pt, aspect=1.0))
+                # Underlay the science image so coherent residual
+                # structure can be tied to detector features (edges,
+                # bad columns, vignetting).  ZScale keeps the sky
+                # mid-gray rather than clipped black so low-residual
+                # (dark) arrows stay readable.
+                _img = fits.getdata(sci_fpath).astype(float)
+                if np.isfinite(_img).any():
+                    from astropy.visualization import (
+                        ImageNormalize,
+                        LinearStretch,
+                        ZScaleInterval,
+                    )
+                    _img_cmap = plt.get_cmap(
+                        PLOT_COLORS.get("image_cmap", "gray")
+                    )
+                    _img_cmap.set_bad(color="none")
+                    ax2.imshow(
+                        _img,
+                        origin="lower",
+                        cmap=_img_cmap,
+                        interpolation=None,
+                        norm=ImageNormalize(
+                            _img,
+                            interval=ZScaleInterval(),
+                            stretch=LinearStretch(),
+                        ),
+                        alpha=0.8,
+                        zorder=1,
+                    )
+                    _ny, _nx = _img.shape
+                _qv = ax2.quiver(
+                    sci_x_plot, sci_y_plot, dx_plot, dy_plot, _res_mag,
+                    cmap=plt.get_cmap(PLOT_COLORS.get("scatter_cmap", "viridis")),
+                    angles="xy", scale_units="xy", scale=_quiv_scale,
+                    width=0.003, edgecolors="white", linewidths=0.4,
+                    zorder=3,
+                )
+                ax2.set_xlim(0, _nx)
+                ax2.set_ylim(0, _ny)
+                ax2.set_xlabel(r"$x$ [px]")
+                ax2.set_ylabel(r"$y$ [px]")
+                ax2.set_aspect("equal", adjustable="box")
+                _cax2 = fig2.add_axes([0.88, 0.12, 0.025, 0.80])
+                _cb2 = fig2.colorbar(_qv, cax=_cax2)
+                _cb2.set_label("residual [px]", fontsize="small")
+                _cb2.ax.tick_params(labelsize="x-small")
+                # Per-quadrant median residual magnitude, annotated on the plot.
+                _qx = float(np.nanmedian(sci_x_plot))
+                _qy = float(np.nanmedian(sci_y_plot))
+                _quad_txt = []
+                for _qlab, _qm in (
+                    ("Q1 TL", (sci_x_plot <= _qx) & (sci_y_plot > _qy)),
+                    ("Q2 TR", (sci_x_plot > _qx) & (sci_y_plot > _qy)),
+                    ("Q3 BL", (sci_x_plot <= _qx) & (sci_y_plot <= _qy)),
+                    ("Q4 BR", (sci_x_plot > _qx) & (sci_y_plot <= _qy)),
+                ):
+                    _qn = int(np.sum(_qm))
+                    if _qn >= 2:
+                        _quad_txt.append(
+                            "%s: %.3f px (n=%d)"
+                            % (_qlab, float(np.nanmedian(_res_mag[_qm])), _qn)
+                        )
+                if _quad_txt:
+                    ax2.text(
+                        0.02, 0.98, "\n".join(_quad_txt),
+                        transform=ax2.transAxes, va="top", ha="left",
+                        fontsize="x-small",
+                        bbox=dict(
+                            facecolor=PLOT_COLORS.get("stats_bbox", "white"),
+                            alpha=0.75, edgecolor="none",
+                        ),
+                    )
+                fig2.subplots_adjust(left=0.12, right=0.80, top=0.95, bottom=0.12)
+                _vec_path = os.path.join(
+                    write_dir,
+                    f"Alignment_Vectors_{base}{get_plot_ext(self.input_yaml)}",
+                )
+                fig2.savefig(
+                    _vec_path, dpi=150,
+                    facecolor=PLOT_COLORS.get("figure_facecolor", "white"),
+                )
+                plt.close(fig2)
+                logger.debug("Saved alignment vector plot: %s", _vec_path)
+            except Exception as _ve:
+                logger.debug("Alignment vector plot failed: %s", _ve)
+
             logger.info(
                 f"Alignment offset:\tmedian=({med_dx:.3f}, {med_dy:.3f}) px, "
                 f"RMS=({rms_dx:.3f}, {rms_dy:.3f}) px, N={n_matched}"

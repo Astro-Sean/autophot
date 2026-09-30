@@ -65,8 +65,9 @@ def _injection_init_shared(
 
 
 def _injection_worker_shared(pos_and_flux):
-    """Pool entry point: only (x, y, F_amp) is pickled per task."""
-    x_inj, y_inj, F_amp = pos_and_flux
+    """Pool entry point: (x, y, F_amp[, expected_flux, seed]) per task."""
+    x_inj, y_inj, F_amp = pos_and_flux[:3]
+    extra = tuple(pos_and_flux[3:])
     return _injection_worker(
         (
             x_inj,
@@ -81,6 +82,7 @@ def _injection_worker_shared(pos_and_flux):
             _INJ_CTX["beta_n"],
             _INJ_CTX["recovery_method"],
         )
+        + extra
     )
 
 
@@ -148,11 +150,20 @@ def _logistic_completeness_mle(mags, detected, m_guess=None):
     try:
         from scipy.optimize import minimize
 
+        # Bounds keep noisy/sparse data from pushing m50 outside the sampled
+        # range or collapsing/inflating the transition width -- a converged
+        # but unconstrained fit can land magnitudes away from the data.
+        x_lo, x_hi = float(np.min(x)), float(np.max(x))
+        bounds = [
+            (x_lo - 1.0, x_hi + 1.0),
+            (np.log(0.01), np.log(5.0)),
+        ]
         best = None
         for s0 in (0.1, 0.3, 1.0):
             r = minimize(
                 nll, np.array([float(m_guess), np.log(s0)]),
-                method="Nelder-Mead",
+                method="L-BFGS-B",
+                bounds=bounds,
             )
             if r.success and np.all(np.isfinite(r.x)) and (
                 best is None or r.fun < best.fun
@@ -160,7 +171,12 @@ def _logistic_completeness_mle(mags, detected, m_guess=None):
                 best = r
         if best is None:
             return np.nan, np.nan
-        return float(best.x[0]), float(np.exp(best.x[1]))
+        m50, s = float(best.x[0]), float(np.exp(best.x[1]))
+        # Reject fits whose crossing lies outside the sampled magnitudes or
+        # whose width is implausibly flat/steep for this data.
+        if not (x_lo <= m50 <= x_hi):
+            return np.nan, np.nan
+        return m50, s
     except Exception:
         return np.nan, np.nan
 
@@ -281,8 +297,13 @@ def _render_epsf_on_cutout(
             ),
             dtype=float,
         )
-    gx_os = np.linspace(0, W - 1, W * osamp)
-    gy_os = np.linspace(0, H - 1, H * osamp)
+    # Subpixel-cell centres inside each detector pixel: pixel i covers
+    # [i - 0.5, i + 0.5), so its osamp sub-cells sit at
+    # i + (k + 0.5)/osamp - 0.5.  np.linspace(0, W-1, W*osamp) is WRONG
+    # here - it spaces samples (W-1)/(W*osamp-1) apart instead of
+    # 1/osamp, stretching the render and shifting the pixel phase.
+    gx_os = (np.arange(W * osamp, dtype=float) + 0.5) / osamp - 0.5
+    gy_os = (np.arange(H * osamp, dtype=float) + 0.5) / osamp - 0.5
     gridx_os, gridy_os = np.meshgrid(gx_os, gy_os)
     psf_os = np.asarray(
         epsf_model.evaluate(
@@ -294,7 +315,12 @@ def _render_epsf_on_cutout(
         ),
         dtype=float,
     )
-    return _downsample_psf_flux_conserving(psf_os, osamp)
+    # evaluate() interpolates the stored data, which by the photutils ePSF
+    # convention sums to prod(oversampling) for flux=1 -- block-summing
+    # therefore yields osamp**2 * flux.  Divide it back out so the render
+    # carries true detector counts: counts_ref and injections then agree
+    # with the osamp<=1 evaluate() path AND with the model flux parameter.
+    return _downsample_psf_flux_conserving(psf_os, osamp) / float(osamp**2)
 
 
 def _analytic_psf_for_injection(fwhm: float, oversampling: int | None = None):
@@ -459,6 +485,11 @@ def _injection_worker(args):
         (x_inj, y_inj, F_amp, cutout, oversampling,
          epsf_model, input_yaml, background_rms,
          snr_limit, beta_n, recovery_method)
+        Optionally followed by (expected_recovered_flux, seed):
+        ``expected_recovered_flux`` is the recovered quantity the flux-ratio
+        gate compares against (the model amplitude for PSF/EMCEE, the
+        aperture rate in e-/s for AP); ``seed`` drives the per-task source
+        Poisson draw and keeps trials reproducible.
 
     Returns
     -------
@@ -480,7 +511,11 @@ def _injection_worker(args):
         snr_limit,
         beta_n,
         recovery_method,
-    ) = args
+    ) = args[:11]
+    # Trailing optional fields: expected recovered flux (unit-consistent
+    # gate reference) and a per-task RNG seed for the source Poisson draw.
+    expected_flux = float(args[11]) if len(args) > 11 else float(F_amp)
+    seed = args[12] if len(args) > 12 else None
 
     try:
         ny, nx = cutout.shape
@@ -517,6 +552,24 @@ def _injection_worker(args):
                 return False, 0.0, np.nan, np.nan, None
             psf_img = np.asarray(psf_img, dtype=float)
             psf_img[invalid] = 0.0
+
+        # Realize the injected source's own shot noise: without it the
+        # completeness transition is artificially sharp because only the
+        # sky noise fluctuates.  The increment keeps the expected value
+        # (poisson(lam) - lam has zero mean), so the deterministic amp
+        # calibration is preserved while bright-source trials scatter
+        # correctly.  Seeded per task for reproducibility.
+        lim_cfg_inj = input_yaml.get("limiting_magnitude") or {}
+        if bool(lim_cfg_inj.get("inject_source_poisson_noise", True)):
+            try:
+                gain_inj = float(resolve_gain_e_per_adu(None, input_yaml))
+            except (TypeError, ValueError):
+                gain_inj = np.nan
+            if np.isfinite(gain_inj) and gain_inj > 0:
+                rng_inj = np.random.default_rng(seed)
+                psf_e = np.clip(psf_img * gain_inj, 0.0, None)
+                psf_img = psf_img + (rng_inj.poisson(psf_e) - psf_e) / gain_inj
+
         new_img = cutout + psf_img
         if np.any(invalid):
             new_img = np.asarray(new_img, dtype=float)
@@ -821,10 +874,10 @@ def _injection_worker(args):
         if (
             max_flux_ratio > 0
             and np.isfinite(recovered_flux)
-            and np.isfinite(F_amp)
-            and F_amp > 0
+            and np.isfinite(expected_flux)
+            and expected_flux > 0
         ):
-            det_flux_consistent = abs(recovered_flux) <= max_flux_ratio * abs(F_amp)
+            det_flux_consistent = abs(recovered_flux) <= max_flux_ratio * abs(expected_flux)
 
         detected = det_snr and det_flux and det_flux_err and det_flux_consistent
         return detected, beta_p, recovered_flux, recovered_flux_err, None
@@ -878,7 +931,7 @@ class Limits:
 
     def get_cutout(
         self, image: np.ndarray, position=None, *, scale_override: float | None = None
-    ) -> np.ndarray | None:
+    ) -> tuple:
         """
         Extract a square cutout centred on the target (or supplied) position.
 
@@ -894,7 +947,11 @@ class Limits:
 
         Returns
         -------
-        ndarray or None
+        tuple of (ndarray or None, float, float)
+            ``(cutout, cx, cy)`` where ``cx, cy`` is the requested position
+            in cutout-local pixel coordinates (``Cutout2D.position_cutout``,
+            handles partial cutouts).  On failure the array is None and the
+            coordinates are NaN.
         """
         logger = logging.getLogger(__name__)
         try:
@@ -1043,6 +1100,15 @@ class Limits:
             # =================================================================
             # Validation
             # =================================================================
+            # background_rms is indexed with full-frame coordinates by
+            # _extract_cutouts; a shape mismatch would silently slice a
+            # misaligned noise map and corrupt the trial S/N gate.
+            if background_rms is not None:
+                if np.shape(background_rms) != np.shape(full_image):
+                    raise ValueError(
+                        "background_rms must match full_image shape; got "
+                        f"{np.shape(background_rms)} vs {np.shape(full_image)}"
+                    )
             if epsf_model is None:
                 # Injection needs a PSF-shaped stamp even for aperture-only
                 # recovery; substitute an analytic Moffat at the measured
@@ -1609,9 +1675,16 @@ class Limits:
                 rr = np.sqrt(frac * (r_max ** 2 - r_min ** 2) + r_min ** 2)
                 theta = indices * golden
                 # Optional sub-pixel jitter for stochastic exploration.
+                # The angular jitter is normalised by the *unjittered*
+                # radius so the radial and angular perturbations stay
+                # independent (a larger radial kick should not also
+                # change the angular scale).
                 if jitter_pix > 0:
+                    th_j = rng.uniform(
+                        -jitter_pix, jitter_pix, n_sites
+                    ) / np.maximum(rr, 1.0)
                     rr = rr + rng.uniform(-jitter_pix, jitter_pix, n_sites)
-                    theta = theta + rng.uniform(-jitter_pix, jitter_pix, n_sites) / np.maximum(rr, 1.0)
+                    theta = theta + th_j
                 x_pix = cx + rr * np.cos(theta)
                 y_pix = cy + rr * np.sin(theta)
                 return pd.DataFrame({"x_pix": x_pix, "y_pix": y_pix})
@@ -1684,9 +1757,18 @@ class Limits:
             phot_cfg_local = local_input_yaml.get("photometry", {})
             aperture_radius_local = float(phot_cfg_local.get("aperture_radius", fwhm))
 
-            # Annulus outer radius (match Aperture.measure defaults) for NaN clearance filtering.
+            # Annulus outer radius (match Aperture.measure defaults) for NaN
+            # clearance filtering.  Aperture.measure reads `crowded_field`
+            # (the `crowded` key belongs to WCS solving, not photometry) --
+            # read the same key so the site-validity annulus matches the
+            # recovery annulus in crowded fields.
             try:
-                crowded_local = bool(phot_cfg_local.get("crowded", False))
+                crowded_local = bool(
+                    phot_cfg_local.get(
+                        "crowded_field",
+                        phot_cfg_local.get("crowded", False),
+                    )
+                )
             except Exception:
                 crowded_local = False
             gap_fwhm = float(
@@ -1910,18 +1992,45 @@ class Limits:
                     counts_ref_adu = float(_psf_phot[0][0])
             else:
                 # Aperture convention: inst_mag_ap/zp_ap are on the
-                # aperture-flux scale.  Integrate the unit-flux PSF inside the
-                # aperture disk WITHOUT local background subtraction.
-                # Aperture.measure() on a pure PSF image subtracts PSF-wing
-                # flux via its annulus estimator, shrinking counts_ref and
-                # biasing flux_for_mag() to inject too much signal (spuriously
-                # shallow limit). Exact pixel-fraction photometry on a
-                # zero-background image avoids this.
-                _psf_ap_obj = CircularAperture(
-                    (float(cx), float(cy)), r=float(aperture_radius_local)
-                )
-                _psf_phot = _psf_ap_obj.do_photometry(psf_unit, method="exact")
-                counts_ref_adu = float(_psf_phot[0][0])  # integrated PSF flux in aperture (ADU)
+                # aperture-flux scale AFTER annulus background subtraction.
+                # The annulus contains real PSF-wing flux, so the recovery
+                # response per unit injected amplitude is the NET signal
+                # (aperture sum minus annulus-estimated background).  Using
+                # the gross aperture integral overstates the response, so
+                # injected sources would recover fainter than the requested
+                # magnitude -- a spuriously shallow limit.  Calibrate with
+                # the same Aperture.measure operator used at recovery, on a
+                # constant background that cancels in the subtraction and
+                # avoids the exact-zero site rejection.
+                counts_ref_adu = np.nan
+                try:
+                    _ap_img = np.asarray(psf_unit, dtype=float) + 100.0
+                    _ap_meas = Aperture(
+                        input_yaml=local_input_yaml, image=_ap_img
+                    ).measure(
+                        sources=pd.DataFrame(
+                            {"x_pix": [float(cx)], "y_pix": [float(cy)]}
+                        ),
+                        plot=False,
+                        background_rms=None,
+                        verbose=0,
+                    )
+                    # counts_AP is integrated e- over the exposure; convert
+                    # back to ADU so the *gain below restores e-.
+                    _counts_e = float(_ap_meas["counts_AP"].iloc[0])
+                    counts_ref_adu = _counts_e / float(_gain_canon)
+                except Exception as _cal_exc:
+                    logger.warning(
+                        "AP calibration via Aperture.measure failed (%s); "
+                        "falling back to gross aperture integral.",
+                        _cal_exc,
+                    )
+                if not (np.isfinite(counts_ref_adu) and counts_ref_adu > 0):
+                    _psf_ap_obj = CircularAperture(
+                        (float(cx), float(cy)), r=float(aperture_radius_local)
+                    )
+                    _psf_phot = _psf_ap_obj.do_photometry(psf_unit, method="exact")
+                    counts_ref_adu = float(_psf_phot[0][0])
             # Convert to e-: Aperture.measure works on image*gain. Without this,
             # _flux_for_mag_cached divides e- by ADU, so F_amp is gainx too
             # large, every injected source is gainx too bright, and the limit is
@@ -1974,7 +2083,16 @@ class Limits:
             completeness_target = float(lim_cfg.get("completeness_target", 0.5))
             if not np.isfinite(completeness_target):
                 completeness_target = 0.5
-            completeness_target = max(0.0, min(1.0, completeness_target))
+            # The bracket requires c_faint < target, impossible at 0; at 1.0
+            # it needs exactly 100% recovery, unreachable with finite trials.
+            if not (0.0 < completeness_target < 1.0):
+                logger.warning(
+                    "completeness_target=%s outside (0, 1); clipping.",
+                    completeness_target,
+                )
+                completeness_target = float(
+                    np.clip(completeness_target, 0.01, 0.99)
+                )
 
             # Option to disable quiet site selection for more representative
             # limiting magnitude.  Default matches default_input.yml (False =
@@ -2211,7 +2329,10 @@ class Limits:
 
             H_final, W_final = cutout.shape
 
-            # Clamp injection radii to the final cutout bounds.
+            # Largest target-centred injection radius that keeps a
+            # 1-FWHM clearance inside the final cutout bounds; used only
+            # for the diagnostic warning below (out-of-bounds sites are
+            # dropped by the bounds filter, not re-generated).
             margin_r = float(np.ceil(fwhm_px))
             max_safe_r = min(
                 cutout_cx - margin_r,
@@ -2219,8 +2340,6 @@ class Limits:
                 cutout_cy - margin_r,
                 H_final - 1 - cutout_cy - margin_r,
             )
-            r_max_eff = min(r_max, max(r_min, float(max_safe_r)))
-            r_base_eff = float(np.clip(r_base, r_min, r_max_eff))
 
             x_pix_arr = injection_df["x_pix"].to_numpy()
             y_pix_arr = injection_df["y_pix"].to_numpy()
@@ -2235,6 +2354,8 @@ class Limits:
             if valid_mask.sum() < 3:
                 logger.warning(
                     f"Too few injection sites within cutout bounds ({int(valid_mask.sum())}/{len(x_pix_arr)}); "
+                    f"max safe injection radius is {float(max_safe_r):.1f} px "
+                    f"(configured r_max={float(r_max):.1f} px) - "
                     "consider increasing cutout size or reducing inject_max_radius_fwhm"
                 )
             x_pix_arr = x_pix_arr[valid_mask]
@@ -2250,6 +2371,11 @@ class Limits:
             # these are the final trial positions.
             _x_inj_all = x_pix_arr
             _y_inj_all = y_pix_arr
+
+            # Base seed for deterministic per-task draws (Poisson source
+            # noise, jitter repetitions).  Drawn from self._rng so the
+            # rng_seed config keeps runs reproducible.
+            _seed_base = int(self._rng.integers(0, 2**31 - 1))
             
             # Default serial; cap workers to avoid HPC fork/resource limits.
             n_jobs = n_jobs if n_jobs is not None else 1
@@ -2269,35 +2395,83 @@ class Limits:
                 _x_inj_all/_y_inj_all are already the final trial positions.
 
                 Per-trial detection flags are retained in ``_flag_cache``
-                (100 bools per magnitude -- negligible) so the post-search
-                logistic fit and site-bootstrap uncertainty need no extra
-                photometry trials.
+                (n_sites x n_reps bools per magnitude -- negligible) so the
+                post-search logistic fit and site-bootstrap uncertainty need
+                no extra photometry trials.
                 """
+                # Repetitions: rep 0 injects at the site position; later reps
+                # take a deterministic sub-pixel offset and an independent
+                # Poisson seed, so each rep is a fresh realization rather
+                # than an identical copy.  All draws are seeded from
+                # _seed_base, preserving rng_seed reproducibility.
+                n_reps = (
+                    max(1, int(redo)) if redo is not None else int(redo_default)
+                )
+
                 # Full precision key: bisection evaluates nearby magnitudes.
+                # Keys stay magnitude-only because downstream code parses
+                # them as floats; a cached entry is only reused when its
+                # flag count matches the requested rep count.
                 cache_key = f"{m:.12f}"
                 if cache_key in _trial_cache:
-                    if not return_flags:
-                        return _trial_cache[cache_key]
-                    if cache_key in _flag_cache:
-                        return (*_trial_cache[cache_key], _flag_cache[cache_key])
+                    _cached_flags = _flag_cache.get(cache_key)
+                    _n_expect = len(_x_inj_all) * n_reps
+                    if (
+                        _cached_flags is not None
+                        and len(_cached_flags) == _n_expect
+                    ):
+                        if not return_flags:
+                            return _trial_cache[cache_key]
+                        return (*_trial_cache[cache_key], _cached_flags)
 
                 F = flux_for_mag(m)
                 x_inj_all = _x_inj_all
                 y_inj_all = _y_inj_all
 
+                # Recovered-quantity reference for the flux-ratio gate, on the
+                # same scale as what the method reports: the ePSF amplitude
+                # for PSF/EMCEE, the aperture rate (e-/s) for AP.
+                if str(recovery_method).strip().upper() == "AP":
+                    expected_flux = float(10.0 ** (-0.4 * float(m)))
+                else:
+                    expected_flux = float(F)
+
+                jitter_pix = float(
+                    lim_cfg.get("injection_jitter_pix", 0.5)
+                )
+                _m_key = int(round(float(m) * 1e6)) & 0x3FFFFFFF
+                task_specs = []
+                for n in range(len(x_inj_all)):
+                    for r in range(n_reps):
+                        task_idx = n * n_reps + r
+                        seed = int(
+                            np.random.SeedSequence(
+                                [_seed_base, _m_key, task_idx]
+                            ).generate_state(1, dtype=np.uint64)[0]
+                        )
+                        x_t = float(x_inj_all[n])
+                        y_t = float(y_inj_all[n])
+                        if r > 0 and jitter_pix > 0:
+                            jr = np.random.default_rng(
+                                np.random.SeedSequence(
+                                    [_seed_base, _m_key, task_idx, 991]
+                                )
+                            )
+                            _ang = jr.uniform(0.0, 2.0 * np.pi)
+                            _rad = jitter_pix * float(np.sqrt(jr.uniform()))
+                            x_t += _rad * np.cos(_ang)
+                            y_t += _rad * np.sin(_ang)
+                        task_specs.append((x_t, y_t, F, expected_flux, seed))
+
                 if pool is not None:
                     # Shared state was broadcast once via the pool initializer;
-                    # only (x, y, F_amp) is pickled per task.
-                    tasks = [
-                        (x_inj_all[n], y_inj_all[n], F)
-                        for n in range(len(x_inj_all))
-                    ]
-                    results = list(pool.map(_injection_worker_shared, tasks))
+                    # only the per-task tuple is pickled.
+                    results = list(pool.map(_injection_worker_shared, task_specs))
                 else:
                     tasks = [
                         (
-                            x_inj_all[n],
-                            y_inj_all[n],
+                            tx,
+                            ty,
                             F,
                             cutout,
                             oversampling,
@@ -2307,8 +2481,10 @@ class Limits:
                             snr_limit,
                             beta_n,
                             recovery_method,
+                            expected,
+                            seed,
                         )
-                        for n in range(len(x_inj_all))
+                        for (tx, ty, _Fa, expected, seed) in task_specs
                     ]
                     results = [_injection_worker(t) for t in tasks]
 
@@ -2326,7 +2502,7 @@ class Limits:
                     det_flags = _recovered_detection_flags(
                         recovered_fluxes,
                         recovered_flux_errs * _gate_err_scale["k"],
-                        F,
+                        expected_flux,
                         snr_limit,
                         lim_cfg,
                     )
@@ -2374,7 +2550,11 @@ class Limits:
 
                 _trial_cache[cache_key] = (det_rate, beta_med, flux_med, flux_err_med)
                 _flag_cache[cache_key] = det_flags
-                _fe_cache[cache_key] = (float(F), recovered_fluxes, recovered_flux_errs)
+                _fe_cache[cache_key] = (
+                    float(expected_flux),
+                    recovered_fluxes,
+                    recovered_flux_errs,
+                )
                 if return_flags:
                     return det_rate, beta_med, flux_med, flux_err_med, det_flags
                 return det_rate, beta_med, flux_med, flux_err_med
@@ -2392,7 +2572,9 @@ class Limits:
             _flag_cache: dict[str, np.ndarray] = {}
             # Per-magnitude raw trial results so the detection gate can be
             # re-evaluated under the calibrated error scale without rerunning
-            # photometry: cache_key -> (F_amp, recovered_fluxes, recovered_errs).
+            # photometry: cache_key -> (expected_flux, recovered_fluxes,
+            # recovered_errs), where expected_flux is on the recovery
+            # method's own scale (model amplitude for PSF/EMCEE, e-/s for AP).
             _fe_cache: dict[str, tuple] = {}
             # Error-scale factor applied to the detection gate.  Set to the
             # empirical uncertainty-calibration factor once the search has
@@ -2895,7 +3077,9 @@ class Limits:
                     # Runs on cached flags; no extra photometry.
                     if np.isfinite(inject_lmag) and len(flag_by_mag) >= 2:
                         err_boot = self._bootstrap_m50_uncertainty(
-                            flag_by_mag, float(completeness_target)
+                            flag_by_mag,
+                            float(completeness_target),
+                            group=int(redo_default),
                         )
                         if np.isfinite(err_boot) and err_boot > 0:
                             # Bootstrap (site resampling) subsumes the binomial
@@ -3443,6 +3627,7 @@ class Limits:
         self,
         flag_by_mag: dict,
         completeness_target: float,
+        group: int = 1,
     ) -> float:
         """
         Site-resample bootstrap for the limiting-magnitude uncertainty.
@@ -3453,6 +3638,12 @@ class Limits:
         ``completeness_target``.  The scatter of the resulting magnitudes is
         the Monte-Carlo error due to *which sites were drawn* -- the dominant
         uncertainty that the two-endpoint interpolation error misses.
+
+        ``group`` is the number of consecutive flag entries belonging to one
+        physical site (the jitter repetitions): those share the local
+        environment and must be resampled together.  Falls back to
+        trial-level resampling when the flag count is not a multiple of
+        ``group``.
 
         Runs entirely on cached flags; no extra photometry trials are needed.
 
@@ -3471,15 +3662,36 @@ class Limits:
         if mags.size < 2 or n_tot == 0 or n_det == 0 or n_det == n_tot:
             return np.nan
 
+        # The same physical sites (in the same order) are injected at every
+        # magnitude, so a hard site is hard at every magnitude.  Resampling
+        # each magnitude independently would discard that correlation and
+        # underestimate the uncertainty -- draw one site-index set shared by
+        # all magnitudes.  Requires identical flag order across mags.
+        if not np.all(n_per == n_per[0]):
+            logger = logging.getLogger(__name__)
+            logger.debug(
+                "m50 bootstrap skipped: flag counts differ across magnitudes"
+            )
+            return np.nan
+        n_sites = int(n_per[0])
+
         p_t = float(np.clip(completeness_target, 1e-6, 1.0 - 1e-6))
         rng = self._rng
+        group = int(group) if group and int(group) > 1 else 1
+        if n_sites % group != 0:
+            group = 1
+        n_groups = n_sites // group
         m_targets = []
         for _ in range(n_boot):
-            # Resample sites (with replacement) within each magnitude bin.
-            y = np.concatenate(
-                [f[rng.integers(0, ni, ni)] for f, ni in zip(flag_sets, n_per)]
+            g_idx = rng.integers(0, n_groups, n_groups)
+            # Expand group indices to consecutive per-trial indices so all
+            # repetitions of a resampled site move together.
+            site_idx = (
+                np.repeat(g_idx * group, group)
+                + np.tile(np.arange(group), n_groups)
             )
-            x = np.repeat(mags, n_per)
+            y = np.concatenate([f[site_idx] for f in flag_sets])
+            x = np.repeat(mags, n_sites)
             m50_b, s_b = _logistic_completeness_mle(x, y)
             if np.isfinite(m50_b) and np.isfinite(s_b) and s_b > 0:
                 m_targets.append(_logistic_m_at_target(m50_b, s_b, p_t))
@@ -5250,6 +5462,7 @@ class Limits:
                 # identical 'snr_3.0'/'snr_5.0' keys for downstream lookups.
                 results[f'snr_{float(snr)}'] = {
                     'limiting_mag': limit,
+                    'limiting_mag_err': detail.get('inject_lmag_err', np.nan),
                     'snr_threshold': snr,
                     'valid': np.isfinite(limit),
                     'snr_gate_factor': detail.get('snr_gate_factor', np.nan),

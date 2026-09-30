@@ -25,6 +25,7 @@ Created on Thu Oct 27 11:27:05 2022
 # =============================================================================
 import gc
 import glob
+import json
 import logging
 import os
 import pathlib
@@ -53,7 +54,11 @@ try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import (
+    binary_dilation,
+    uniform_filter,
+    shift as _ndimage_shift,
+)
 from scipy.optimize import minimize
 from scipy.spatial import cKDTree
 from scipy.stats import median_abs_deviation
@@ -190,6 +195,11 @@ except (ModuleNotFoundError, ImportError):
 
 from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write, cap_console_lines, STATUS
 try:
+    from functions import invalidate_fits_cache
+except ImportError:
+    def invalidate_fits_cache(fpath=None):
+        return None
+try:
     from functions import download_zogy
 except ImportError:
     download_zogy = None
@@ -264,14 +274,29 @@ NO_DATA_SENTINEL = 0.0
 
 
 class AlignmentResult(NamedTuple):
-    """Structured result from an alignment attempt."""
+    """Structured result from an alignment attempt.
+
+    ``success`` is derived from the output paths: every alignment method
+    must produce an aligned template, so a falsy ``template_path`` means
+    the attempt failed.  ``quality`` is 'pass', 'warn', or 'fail' under the
+    shared gate in ``_classify_alignment_quality`` ('fail' also marks
+    unverifiable products when verification was required).
+    """
     science_path: Optional[str]
     template_path: Optional[str]
-    method_used: str
+    method_used: Optional[str]
     median_offset_px: Optional[float]
     rms_px: Optional[float] = None
     p90_px: Optional[float] = None
     coverage_ok: Optional[bool] = None
+    n_matches: Optional[int] = None
+    finite_fraction: Optional[float] = None
+    quality: str = "fail"
+    message: str = ""
+
+    @property
+    def success(self) -> bool:
+        return bool(self.template_path)
 
 
 # PanSTARRS filter names
@@ -497,9 +522,32 @@ def _zogy_subtract(N, R, Pn, Pr, sn, sr, fn=1.0, fr=None,
 
     # Zero out non-overlapping / NaN regions
     if nan_mask is not None:
-        mask_zero = np.asarray(nan_mask, dtype=bool)
+        # Include any non-finite input pixels too: a stray NaN outside the
+        # caller's mask would otherwise poison every output pixel through
+        # the FFTs below.
+        mask_zero = (
+            np.asarray(nan_mask, dtype=bool)
+            | ~np.isfinite(N)
+            | ~np.isfinite(R)
+        )
     else:
-        mask_zero = (R == 0) | (N == 0)
+        # Non-finite pixels must always be masked here: an unmasked NaN
+        # would poison every output pixel through the FFTs below.
+        mask_zero = ~np.isfinite(N) | ~np.isfinite(R)
+        z = (N == 0) | (R == 0)
+        if np.any(z):
+            # Resampling pads uncovered regions with *contiguous* exact
+            # zeros, while a genuine zero-flux pixel (e.g. integer data
+            # minus an integer sky) is isolated.  Only mask zeros
+            # embedded in a mostly-zero neighbourhood so real zeros are
+            # not nulled along with the other image's flux at those
+            # pixels.  The dilation catches the thin partial-zero rim
+            # around a padded block whose 5x5 window is <60% zero.
+            z_neighbour = uniform_filter(
+                z.astype(np.float32), size=5, mode="nearest"
+            )
+            z_block = binary_dilation(z_neighbour > 0.6, iterations=2)
+            mask_zero |= z & z_block
     N = np.where(mask_zero, 0.0, N)
     R = np.where(mask_zero, 0.0, R)
 
@@ -712,13 +760,20 @@ class ReprojectConfig:
     def from_yaml(cls, input_yaml: Dict[str, Any]) -> "ReprojectConfig":
         cfg = input_yaml.get("alignment", {})
         phot_cfg = input_yaml.get("photometry", {}) or {}
+        # reproject accepts an int worker count.  ``parallel=True`` would
+        # claim os.cpu_count() workers inside every image-level worker, so
+        # divide the machine by nCPU to avoid oversubscription.
+        _parallel = cfg.get("reproject_parallel", True)
+        if _parallel is True:
+            _ncpu = max(1, int(input_yaml.get("nCPU", 1) or 1))
+            _parallel = max(1, (os.cpu_count() or 1) // _ncpu)
         return cls(
             method=str(cfg.get("reproject_method", "exact")).lower().strip(),
             roundtrip=bool(cfg.get("reproject_roundtrip_coords", True)),
             interp_order=_normalize_reproject_interp_order(
                 cfg.get("reproject_interp_order", "bicubic")
             ),
-            parallel=bool(cfg.get("reproject_parallel", True)),
+            parallel=_parallel,
             conserve_flux=bool(cfg.get("reproject_adaptive_conserve_flux", False)),
             center_jacobian=bool(cfg.get("reproject_adaptive_center_jacobian", False)),
             undersampled_fwhm_threshold=float(
@@ -964,31 +1019,32 @@ def compute_alignment_rms(
             _ts_cfg = input_yaml.get("template_subtraction", {}) or {}
             _align_thresh = float(_ts_cfg.get("alignment_rms_detect_thresh", 5.0) or 5.0)
 
+        # request centroid errors where available; fakes patched in tests
+        # may still return a 3-tuple, so unpack defensively.
+        def _det_xy_err(data, thresh):
+            _d = _detect_sextractor_sources(
+                data, input_yaml=input_yaml, fwhm_pix=fwhm,
+                thresh=thresh, return_errors=True,
+            )
+            _xy = _d[0]
+            _ex = _d[3] if len(_d) >= 5 else None
+            _ey = _d[4] if len(_d) >= 5 else None
+            return _xy, _ex, _ey
+
+        sci_ex = sci_ey = ref_ex = ref_ey = None
         if sci_xy_override is not None:
             sci_xy = np.asarray(sci_xy_override, float)
             if sci_xy.ndim != 2 or sci_xy.shape[1] != 2 or len(sci_xy) < 5:
                 return None
         else:
-            sci_xy, _, _ = _detect_sextractor_sources(
-                sci_data, input_yaml=input_yaml, fwhm_pix=fwhm,
-                thresh=_align_thresh,
-            )
-        ref_xy, _, _ = _detect_sextractor_sources(
-            ref_data, input_yaml=input_yaml, fwhm_pix=fwhm,
-            thresh=_align_thresh,
-        )
+            sci_xy, sci_ex, sci_ey = _det_xy_err(sci_data, _align_thresh)
+        ref_xy, ref_ex, ref_ey = _det_xy_err(ref_data, _align_thresh)
 
         # Sparse-field fallback: retry at 3.0 when too few sources at thresh.
         if (sci_xy is None or len(sci_xy) < 10) and _align_thresh > 3.0 and sci_xy_override is None:
-            sci_xy, _, _ = _detect_sextractor_sources(
-                sci_data, input_yaml=input_yaml, fwhm_pix=fwhm,
-                thresh=3.0,
-            )
+            sci_xy, sci_ex, sci_ey = _det_xy_err(sci_data, 3.0)
         if (ref_xy is None or len(ref_xy) < 10) and _align_thresh > 3.0:
-            ref_xy, _, _ = _detect_sextractor_sources(
-                ref_data, input_yaml=input_yaml, fwhm_pix=fwhm,
-                thresh=3.0,
-            )
+            ref_xy, ref_ex, ref_ey = _det_xy_err(ref_data, 3.0)
 
         if sci_xy is None or ref_xy is None:
             return None
@@ -1089,15 +1145,72 @@ def compute_alignment_rms(
         median_offset = float(np.sqrt(_med_dx**2 + _med_dy**2))
         p90 = float(np.nanpercentile(d_clipped, 90.0))
         rms = float(np.sqrt(np.mean(d_clipped**2)))
-        logger.log(
-            STATUS,
-            "Alignment RMS:\tmed=%.3f px\n"
-            "                  dx=%.3f, dy=%.3f\n"
-            "                  rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped)\n"
-            "                  max=%.2f px",
-            median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
-            len(d_mut) - len(d_clipped), max_sep,
-        )
+
+        # Error-weighted residuals: combine the SExtractor centroid errors
+        # (quadrature sum of the two catalogs' per-axis sigmas) so faint or
+        # extended sources do not dominate the scatter estimate.  Wrms~1
+        # means the measured residuals match the formal centroid errors.
+        _weighted = None
+        if (
+            sci_ex is not None and sci_ey is not None
+            and ref_ex is not None and ref_ey is not None
+        ):
+            try:
+                _src_idx = np.where(mutual)[0][_mut_idx][_kept_mask]
+                _ref_idx = i_sr[mutual][_mut_idx][_kept_mask]
+                _dx_k = _dx_mut[_kept_mask]
+                _dy_k = _dy_mut[_kept_mask]
+                _sx2 = (
+                    np.asarray(sci_ex, float)[_src_idx] ** 2
+                    + np.asarray(ref_ex, float)[_ref_idx] ** 2
+                )
+                _sy2 = (
+                    np.asarray(sci_ey, float)[_src_idx] ** 2
+                    + np.asarray(ref_ey, float)[_ref_idx] ** 2
+                )
+                _wok = np.isfinite(_sx2) & np.isfinite(_sy2) & (_sx2 > 0) & (_sy2 > 0)
+                if int(np.sum(_wok)) >= 5:
+                    _chi2 = float(np.sum(
+                        _dx_k[_wok] ** 2 / _sx2[_wok]
+                        + _dy_k[_wok] ** 2 / _sy2[_wok]
+                    ))
+                    _dof = max(1, 2 * int(np.sum(_wok)) - 2)
+                    _wrms = float(np.sqrt(np.mean(0.5 * (
+                        _dx_k[_wok] ** 2 / _sx2[_wok]
+                        + _dy_k[_wok] ** 2 / _sy2[_wok]
+                    ))))
+                    _weighted = {
+                        "chi2": _chi2,
+                        "chi2_dof": _chi2 / _dof,
+                        "wrms_norm": _wrms,
+                        "n_weighted": int(np.sum(_wok)),
+                    }
+            except Exception:
+                _weighted = None
+
+        if _weighted is not None:
+            logger.log(
+                STATUS,
+                "Alignment RMS:\tmed=%.3f px\n"
+                "                  dx=%.3f, dy=%.3f\n"
+                "                  rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped)\n"
+                "                  max=%.2f px\n"
+                "                  chi2/dof=%.2f wrms_norm=%.2f (n=%d weighted)",
+                median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
+                len(d_mut) - len(d_clipped), max_sep,
+                _weighted["chi2_dof"], _weighted["wrms_norm"],
+                _weighted["n_weighted"],
+            )
+        else:
+            logger.log(
+                STATUS,
+                "Alignment RMS:\tmed=%.3f px\n"
+                "                  dx=%.3f, dy=%.3f\n"
+                "                  rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped)\n"
+                "                  max=%.2f px",
+                median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
+                len(d_mut) - len(d_clipped), max_sep,
+            )
 
         # Per-quadrant alignment quality.
         # Split the matched sources into 2x2 spatial quadrants and compute
@@ -1109,6 +1222,8 @@ def compute_alignment_rms(
                 sci_xy, ref_xy, i_sr, mutual, _mut_idx,
                 _clip_mask, sci_data.shape,
             )
+            if _weighted is not None:
+                _quadrant_rms.update(_weighted)
             return median_offset, rms, p90, _quadrant_rms
 
         return median_offset, rms, p90
@@ -1229,6 +1344,157 @@ def _compute_per_quadrant_rms(
     return _result
 
 
+# -----------------------------------------------------------------------------
+# Shared alignment-quality policy
+# -----------------------------------------------------------------------------
+
+_P95_KEY_DEPRECATION_WARNED = False
+
+
+def _alignment_gate_thresholds(
+    input_yaml: Optional[Dict[str, Any]],
+    fwhm_pix: float,
+) -> Tuple[float, float, float]:
+    """Return the FWHM-scaled (max_offset, max_rms, max_p90) pixel gates.
+
+    The P90 gate historically lived under the misnamed
+    ``alignment_max_p95_px`` key (it has always gated the 90th percentile of
+    matched separations).  ``alignment_max_p90_px`` is now preferred; the old
+    key is still honoured with a one-time deprecation warning.
+    """
+    global _P95_KEY_DEPRECATION_WARNED
+    ts_cfg = (input_yaml or {}).get("template_subtraction", {}) or {}
+    max_offset = float(ts_cfg.get("alignment_max_offset_px", 0.5))
+    max_rms = float(ts_cfg.get("alignment_max_rms_px", 0.75))
+    if "alignment_max_p90_px" in ts_cfg:
+        max_p90 = float(ts_cfg["alignment_max_p90_px"])
+    else:
+        max_p90 = float(ts_cfg.get("alignment_max_p95_px", 1.5))
+        if "alignment_max_p95_px" in ts_cfg and not _P95_KEY_DEPRECATION_WARNED:
+            logger.warning(
+                "template_subtraction.alignment_max_p95_px is deprecated: "
+                "it gates the P90 statistic, not P95. "
+                "Rename it to alignment_max_p90_px."
+            )
+            _P95_KEY_DEPRECATION_WARNED = True
+    # Scale the gates with FWHM so the same fractional-pixel tolerance
+    # applies to sharp and broad PSFs.
+    scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
+    return max_offset * scale, max_rms * scale, max_p90 * scale
+
+
+def _classify_alignment_quality(
+    median_offset: Optional[float],
+    rms: Optional[float],
+    p90: Optional[float],
+    coverage_ok: Optional[bool],
+    max_offset: float,
+    max_rms: float,
+    max_p90: float,
+) -> Tuple[str, List[str]]:
+    """Classify a measured alignment into 'pass' / 'warn' / 'fail' /
+    'unverified' under one policy shared by every backend.
+
+    - 'fail': any finite metric exceeds its configured gate.
+    - 'unverified': no finite metric was produced (sparse field, detection
+      failure) - the product cannot be confirmed good or bad.
+    - 'warn': metrics pass but matched-source coverage is poor, so the
+      measurement may not represent the whole field.
+    - 'pass': metrics inside gates with adequate coverage.
+    """
+    measured = [
+        v for v in (median_offset, rms, p90)
+        if v is not None and np.isfinite(v)
+    ]
+    if not measured:
+        return "unverified", []
+    reasons = []
+    if median_offset is not None and np.isfinite(median_offset) and median_offset > max_offset:
+        reasons.append("offset=%.3f px (> %.2f px)" % (median_offset, max_offset))
+    if rms is not None and np.isfinite(rms) and rms > max_rms:
+        reasons.append("RMS=%.3f px (> %.2f px)" % (rms, max_rms))
+    if p90 is not None and np.isfinite(p90) and p90 > max_p90:
+        reasons.append("P90=%.3f px (> %.2f px)" % (p90, max_p90))
+    if reasons:
+        return "fail", reasons
+    if coverage_ok is False:
+        return "warn", ["matched-source coverage limited"]
+    return "pass", []
+
+
+def _alignment_gate_accept(
+    quality: str,
+    input_yaml: Optional[Dict[str, Any]],
+) -> bool:
+    """Decide whether an alignment of the given quality may be used.
+
+    'fail' always rejects.  'unverified' and 'warn' are accepted by default
+    (best-available fallback) unless the caller opts into strict mode via
+    ``alignment_require_verification`` / ``alignment_fail_on_poor_coverage``.
+    """
+    ts_cfg = (input_yaml or {}).get("template_subtraction", {}) or {}
+    if quality == "fail":
+        return False
+    if quality == "unverified" and bool(
+        ts_cfg.get("alignment_require_verification", False)
+    ):
+        return False
+    if quality == "warn" and bool(
+        ts_cfg.get("alignment_fail_on_poor_coverage", False)
+    ):
+        return False
+    return True
+
+
+def verify_common_grid(
+    sci_header: fits.Header,
+    tpl_header: fits.Header,
+    shape: Tuple[int, int],
+    tolerance_px: float = 0.05,
+) -> bool:
+    """Check that two headers map the same pixel grid to the same sky.
+
+    Tests the four corners and the image centre: each science pixel is
+    transformed to sky and back through the template WCS.  A residual larger
+    than ``tolerance_px`` at any test point means the aligned products do
+    not share a common grid and subtraction would be invalid.
+
+    Returns True when the grids match.  When either header has no usable
+    WCS the check cannot run and True is returned (unverifiable, not
+    mismatched) so WCS-free pixel-aligned products still subtract.
+    """
+    try:
+        sci_wcs = get_wcs(sci_header)
+        tpl_wcs = get_wcs(tpl_header)
+        if sci_wcs is None or tpl_wcs is None:
+            logger.info(
+                "verify_common_grid: WCS unavailable on one or both headers; "
+                "grid check skipped."
+            )
+            return True
+        ny, nx = shape
+        test_points = np.array(
+            [
+                [0.0, 0.0],
+                [nx - 1.0, 0.0],
+                [0.0, ny - 1.0],
+                [nx - 1.0, ny - 1.0],
+                [(nx - 1.0) / 2.0, (ny - 1.0) / 2.0],
+            ]
+        )
+        for x, y in test_points:
+            ra, dec = sci_wcs.all_pix2world(x, y, 0)
+            xt, yt = tpl_wcs.all_world2pix(ra, dec, 0)
+            if not np.isfinite([xt, yt]).all():
+                return False
+            if np.hypot(xt - x, yt - y) > tolerance_px:
+                return False
+        return True
+    except Exception:
+        logger.debug("verify_common_grid failed", exc_info=True)
+        return True
+
+
 def _wcs_footprints_overlap(
     header1: fits.Header,
     shape1: tuple,
@@ -1238,43 +1504,119 @@ def _wcs_footprints_overlap(
 ) -> bool:
     """Return True when two image WCS footprints overlap on the sky.
 
-    Uses a simple RA/Dec bounding-box intersection of the image corners with
-    a small fractional margin.  Returns False when either WCS is unusable or
-    the boxes are disjoint (the caller then treats the fields as
-    non-overlapping rather than attempting sky-independent matching).
+    Compares the angular separation of the two field centres against the
+    sum of their angular radii (plus a fractional margin).  Unlike an
+    RA/Dec bounding box this is correct for fields crossing RA=0, near the
+    poles, and for rotated footprints.  Returns False when either WCS is
+    unusable (the caller then treats the fields as non-overlapping rather
+    than attempting sky-independent matching).
     """
     try:
-        from astropy.wcs import WCS as _WCS
-
-        def _corners(hdr, shape):
-            ny, nx = shape
-            xs = np.array([0.0, nx - 1.0, 0.0, nx - 1.0])
-            ys = np.array([0.0, 0.0, ny - 1.0, ny - 1.0])
-            ra, dec = _WCS(hdr).all_pix2world(xs, ys, 0)
-            ra = np.asarray(ra, float)
-            dec = np.asarray(dec, float)
-            if not np.all(np.isfinite(ra)) or not np.all(np.isfinite(dec)):
+        def _center_radius(hdr, shape):
+            w = get_wcs(hdr)
+            if w is None:
                 return None
-            return float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max())
+            ny, nx = shape
+            # Headers under test need not carry NAXIS cards; pass the array
+            # shape explicitly so calc_footprint does not require them.
+            corners = w.calc_footprint(axes=(ny, nx))
+            if corners is None or not np.all(np.isfinite(corners)):
+                return None
+            ra_c, dec_c = w.all_pix2world(
+                (nx - 1.0) / 2.0, (ny - 1.0) / 2.0, 0
+            )
+            if not np.isfinite([ra_c, dec_c]).all():
+                return None
+            center = SkyCoord(float(ra_c) * u.deg, float(dec_c) * u.deg)
+            corner_coords = SkyCoord(
+                corners[:, 0] * u.deg, corners[:, 1] * u.deg
+            )
+            radius = float(np.max(center.separation(corner_coords).deg))
+            if not np.isfinite(radius) or radius <= 0:
+                return None
+            return center, radius
 
-        c1 = _corners(header1, shape1)
-        c2 = _corners(header2, shape2)
+        c1 = _center_radius(header1, shape1)
+        c2 = _center_radius(header2, shape2)
         if c1 is None or c2 is None:
             return False
-        ra1, RA1, de1, DE1 = c1
-        ra2, RA2, de2, DE2 = c2
-        mra1 = margin_frac * max(RA1 - ra1, 1e-9)
-        mra2 = margin_frac * max(RA2 - ra2, 1e-9)
-        mde1 = margin_frac * max(DE1 - de1, 1e-9)
-        mde2 = margin_frac * max(DE2 - de2, 1e-9)
-        return bool(
-            (RA1 + mra1 >= ra2 - mra2)
-            and (RA2 + mra2 >= ra1 - mra1)
-            and (DE1 + mde1 >= de2 - mde2)
-            and (DE2 + mde2 >= de1 - mde1)
-        )
+        margin = margin_frac * (c1[1] + c2[1])
+        sep = c1[0].separation(c2[0]).deg
+        return bool(sep <= c1[1] + c2[1] + margin)
     except Exception:
         return False
+
+
+def _atomic_fits_write(fpath: str, data: np.ndarray, header: fits.Header) -> None:
+    """Write FITS via a sibling temp file then ``os.replace``.
+
+    A crash mid-``writeto`` would otherwise leave a truncated file that a
+    later stage could mistake for a valid aligned product.
+    """
+    tmp_path = f"{fpath}.tmp"
+    safe_fits_write(tmp_path, np.asarray(data, dtype=np.float32), header)
+    os.replace(tmp_path, fpath)
+    try:
+        invalidate_fits_cache(fpath)
+    except Exception:
+        pass
+
+
+def _write_alignment_report(
+    attempts: List["AlignmentResult"],
+    out_dir: str,
+    science_fpath: str,
+    template_fpath: str,
+    requested_method: Optional[str] = None,
+) -> None:
+    """Write ``Alignment_<base>.json`` recording every attempted method.
+
+    The report gives each backend's metrics and the shared pass/warn/fail
+    classification so a subtraction's alignment provenance survives even
+    when the log is lost.
+    """
+    try:
+        def _f(v):
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                return None
+            return fv if np.isfinite(fv) else None
+
+        records = [
+            {
+                "method": a.method_used,
+                "success": bool(a.success),
+                "quality": a.quality,
+                "median_offset_px": _f(a.median_offset_px),
+                "rms_px": _f(a.rms_px),
+                "p90_px": _f(a.p90_px),
+                "n_matches": a.n_matches,
+                "coverage_ok": a.coverage_ok,
+                "finite_fraction": _f(a.finite_fraction),
+                "message": a.message or "",
+            }
+            for a in attempts
+            if a is not None
+        ]
+        base = os.path.splitext(os.path.basename(science_fpath))[0]
+        out_path = os.path.join(out_dir, f"Alignment_{base}.json")
+        tmp_path = out_path + ".tmp"
+        with open(tmp_path, "w") as fh:
+            json.dump(
+                {
+                    "science": os.path.basename(science_fpath),
+                    "template": os.path.basename(template_fpath),
+                    "requested_method": requested_method,
+                    "attempts": records,
+                },
+                fh,
+                indent=2,
+            )
+        os.replace(tmp_path, out_path)
+        logger.info("Alignment report written to %s", out_path)
+    except Exception:
+        logger.debug("alignment report write failed", exc_info=True)
 
 
 def _pad_to_shape(image, target_shape, fill=np.nan, mask=None):
@@ -1471,6 +1813,21 @@ def _reproject_template(
         )
         return _FAIL
 
+    _min_overlap = float(
+        (input_yaml or {}).get("template_subtraction", {}).get(
+            "alignment_min_overlap_fraction", 0.0
+        )
+        or 0.0
+    )
+    if n_total and (n_footprint / n_total) < _min_overlap:
+        logger.error(
+            "Reproject footprint coverage %.1f%% below minimum %.1f%%; "
+            "too little overlap for a meaningful subtraction.",
+            100.0 * n_footprint / n_total,
+            100.0 * _min_overlap,
+        )
+        return _FAIL
+
     logger.info("Reproject footprint coverage: %s/%s pixels (%.1f%)", n_footprint, n_total, 100*n_footprint/n_total)
 
     # Mask non-footprint pixels with NaN (preserves chip gaps)
@@ -1540,8 +1897,20 @@ def _reproject_template(
             )
     except Exception:
         pass
-    hdu = fits.PrimaryHDU(to_write, header=hdr)
-    hdu.writeto(output_path, overwrite=True, output_verify="silentfix+ignore")
+    _atomic_fits_write(output_path, to_write, hdr)
+    # The write may have overwritten the staged template in place; refresh any
+    # sibling weight map still on the pre-resampling grid (the reproject
+    # footprint doubles as a coverage weight on the new grid).
+    try:
+        from functions import refresh_sibling_weight_map
+
+        refresh_sibling_weight_map(
+            output_path,
+            weight_data=np.asarray(footprint, dtype=np.float32),
+            logger=logger,
+        )
+    except Exception:
+        pass
 
     logger.info("Reproject alignment succeeded (method=%s).", used_method)
     return AlignmentResult(
@@ -1552,6 +1921,9 @@ def _reproject_template(
         rms_px=rms_offset,
         p90_px=p90_offset,
         coverage_ok=coverage_ok,
+        n_matches=_quad.get("n_matched") if _quad else None,
+        finite_fraction=n_footprint / n_total if n_total else None,
+        quality="pass",
     )
 
 
@@ -1877,6 +2249,182 @@ def deduplicate_points(
         if all(euclidean_distance(pt, k) >= min_sep for k in kept):
             kept.append(pt)
     return kept
+
+
+def _validate_noise_map(
+    path: Optional[str],
+    expected_shape: Tuple[int, int],
+    label: str,
+    ref_wcs=None,
+) -> Optional[str]:
+    """
+    Validate a noise/RMS map against the image grid it will be used with.
+
+    Returns the path when it exists, has the expected shape, contains
+    finite pixels, and (when it carries a WCS) shares the image grid;
+    otherwise returns None and logs a warning.  A mismatched map is worse
+    than no map: backends either reject it with a warning (HOTPANTS) or
+    silently misapply it.
+    """
+    if not path:
+        return None
+    path = str(path)
+    if not os.path.isfile(path):
+        logger.warning("%s noise map missing: %s; ignoring.", label, path)
+        return None
+    try:
+        data = np.asarray(fits.getdata(path), dtype=float)
+    except Exception as e:
+        logger.warning(
+            "%s noise map unreadable (%s): %s; ignoring.", label, path, e
+        )
+        return None
+    if data.shape != tuple(expected_shape):
+        logger.warning(
+            "%s noise-map shape %s does not match image shape %s; "
+            "ignoring map (it was not resampled with the aligned image).",
+            label,
+            data.shape,
+            tuple(expected_shape),
+        )
+        return None
+    if not np.isfinite(data).any():
+        logger.warning("%s noise map has no finite pixels; ignoring.", label)
+        return None
+    if ref_wcs is not None:
+        # A same-shape map can still describe a different pixel grid when
+        # the image was resampled after the map was written (the staged
+        # template weight keeps the pre-alignment template WCS).  When the
+        # map carries no WCS of its own, shape agreement is the only
+        # evidence available, so the map is kept.
+        try:
+            noise_wcs = get_wcs(fits.getheader(path))
+        except Exception:
+            noise_wcs = None
+        if noise_wcs is not None and not _wcs_on_common_grid(
+            ref_wcs, noise_wcs, data.shape
+        ):
+            logger.warning(
+                "%s noise map WCS disagrees with the aligned image grid; "
+                "ignoring map (it was not resampled with the image).",
+                label,
+            )
+            return None
+    return path
+
+
+def _wcs_on_common_grid(
+    wcs_a,
+    wcs_b,
+    shape: Tuple[int, int],
+    tol_px: float = 0.5,
+) -> bool:
+    """
+    Check that two WCS describe the same pixel grid.
+
+    Probes the frame corners and center: a pixel is mapped to sky through
+    *wcs_a* and back to pixels through *wcs_b*.  Both frames share a grid
+    when every probed round trip lands within *tol_px*.
+    """
+    ny, nx = shape
+    pts = [
+        (0.0, 0.0),
+        (nx - 1.0, 0.0),
+        (0.0, ny - 1.0),
+        (nx - 1.0, ny - 1.0),
+        (nx / 2.0, ny / 2.0),
+    ]
+    try:
+        for px, py in pts:
+            ra, dec = wcs_a.all_pix2world(px, py, 0)
+            xb, yb = wcs_b.all_world2pix(ra, dec, 0)
+            if not (np.isfinite(xb) and np.isfinite(yb)):
+                return False
+            if float(np.hypot(xb - px, yb - py)) > tol_px:
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def _ensure_diff_wcs(
+    diff_header,
+    science_header,
+    shape: Tuple[int, int],
+    target_xy: Optional[Tuple[float, float]] = None,
+    tol_px: float = 0.5,
+):
+    """
+    Return a difference-image header guaranteed to carry a WCS consistent
+    with the science pixel grid.
+
+    Backends should copy the science header, but external tools can drop or
+    rewrite WCS.  When the difference WCS is missing or maps sky
+    coordinates to a different pixel position than the science WCS by more
+    than *tol_px* at any probed point, the science WCS is injected: the
+    difference image is defined on the science pixel grid by construction.
+    """
+    try:
+        sci_wcs = get_wcs(science_header)
+        diff_wcs = get_wcs(diff_header)
+    except Exception:
+        return diff_header
+
+    if sci_wcs is None:
+        if diff_wcs is None:
+            logger.warning(
+                "No usable WCS in science or difference header; "
+                "downstream RA/Dec->pixel mapping will fail."
+            )
+        return diff_header
+
+    need_replace = diff_wcs is None
+    worst = np.nan
+    if not need_replace:
+        ny, nx = shape
+        pts = [
+            (0.0, 0.0),
+            (nx - 1.0, 0.0),
+            (0.0, ny - 1.0),
+            (nx - 1.0, ny - 1.0),
+            (nx / 2.0, ny / 2.0),
+        ]
+        if target_xy is not None and len(target_xy) >= 2:
+            pts.append((float(target_xy[0]), float(target_xy[1])))
+        try:
+            worst = 0.0
+            for px, py in pts:
+                ra, dec = sci_wcs.all_pix2world(px, py, 0)
+                xd, yd = diff_wcs.all_world2pix(ra, dec, 0)
+                if not (np.isfinite(xd) and np.isfinite(yd)):
+                    worst = np.inf
+                    break
+                worst = max(worst, float(np.hypot(xd - px, yd - py)))
+        except Exception:
+            need_replace = True
+        if not np.isfinite(worst) or worst > tol_px:
+            need_replace = True
+
+    if need_replace:
+        try:
+            diff_header.update(sci_wcs.to_header(relax=True))
+            if diff_wcs is None:
+                logger.warning(
+                    "Difference image has no usable WCS; "
+                    "replaced with science WCS (same pixel grid)."
+                )
+            else:
+                logger.warning(
+                    "Difference-image WCS disagrees with science grid "
+                    "(worst offset %s px > %.2f); replaced with science WCS.",
+                    f"{worst:.3f}" if np.isfinite(worst) else "non-finite",
+                    tol_px,
+                )
+        except Exception as e:
+            logger.warning(
+                "Could not inject science WCS into difference header: %s", e
+            )
+    return diff_header
 
 
 # =============================================================================
@@ -2690,6 +3238,147 @@ def download_2mass_template(
 
 
 # =============================================================================
+# PSF stamp chi2 workers  (module scope so multiprocessing can pickle them)
+# =============================================================================
+
+# Shared per-worker state broadcast ONCE via Pool(initializer=...) instead of
+# being pickled into every per-source task (image + PSF model can be MBs).
+_STAMP_CTX: dict = {}
+
+
+def _psf_stamp_init_shared(ctx):
+    _STAMP_CTX.clear()
+    _STAMP_CTX.update(ctx)
+
+
+def _psf_stamp_task(i):
+    """Pool entry point: only the source index is pickled per task."""
+    c = _STAMP_CTX
+    return _psf_stamp_eval(c["xs"][i], c["ys"][i], c)
+
+
+def _psf_stamp_eval(x, y, ctx):
+    """Reduced chi^2 of the PSF-model fit on one stamp.
+
+    Returns NaN when the fit cannot be made (off-frame, masked, too few
+    valid pixels, unrenderable model) and +inf for a non-positive fitted
+    amplitude.  ``ctx`` carries the invariants shared across positions
+    (image, mask, PSF model, fit-box geometry, gain).
+    """
+    from astropy.stats import biweight_scale
+    from limits import _render_epsf_on_cutout
+    from photutils.centroids import centroid_2dg
+
+    img = ctx["img"]
+    mask = ctx["mask"]
+    h = ctx["h"]
+    h2 = ctx["h2"]
+    ring = ctx["ring"]
+    ring_r2 = ctx["ring_r2"]
+    gain = ctx["gain"]
+    mff = ctx["model_floor_frac"]
+    osamp = ctx["osamp"]
+    ny, nx = img.shape
+
+    if not (np.isfinite(x) and np.isfinite(y)):
+        return np.nan
+    xi, yi = int(round(x)), int(round(y))
+    if yi - h < 0 or yi + h >= ny or xi - h < 0 or xi + h >= nx:
+        return np.nan
+    stamp = img[yi - h : yi + h + 1, xi - h : xi + h + 1]
+    valid = np.isfinite(stamp)
+    if mask is not None:
+        m = mask[yi - h : yi + h + 1, xi - h : xi + h + 1]
+        valid &= ~np.asarray(m, dtype=bool)
+    if int(valid.sum()) < 12:
+        return np.nan
+
+    # Local sky scatter from a ring outside the fit box.
+    sig0 = np.nan
+    if yi - h2 >= 0 and yi + h2 < ny and xi - h2 >= 0 and xi + h2 < nx:
+        wide = img[yi - h2 : yi + h2 + 1, xi - h2 : xi + h2 + 1]
+        ring_pix = wide[ring & np.isfinite(wide)]
+        if ring_pix.size >= 8:
+            sig0 = float(biweight_scale(ring_pix, ignore_nan=True))
+    if not np.isfinite(sig0) or sig0 <= 0:
+        edge_pix = stamp[valid & (ring_r2 > (0.6 * h) ** 2)]
+        if edge_pix.size >= 6:
+            sig0 = float(biweight_scale(edge_pix, ignore_nan=True))
+    if not np.isfinite(sig0) or sig0 <= 0:
+        return np.nan
+
+    # Re-centre the model on the stamp centroid so a small catalog
+    # position error is not mistaken for a PSF-shape mismatch.
+    lx, ly = x - (xi - h), y - (yi - h)
+    try:
+        _cen = centroid_2dg(np.where(valid, stamp, np.nan))
+        if (
+            _cen is not None
+            and np.isfinite(_cen[0])
+            and np.isfinite(_cen[1])
+            and 0 <= _cen[0] <= 2 * h
+            and 0 <= _cen[1] <= 2 * h
+        ):
+            lx, ly = float(_cen[0]), float(_cen[1])
+    except Exception:
+        pass
+
+    _m = ctx["psf_model"]
+    if ctx["psf_is_gridded"]:
+        try:
+            from psf import epsf_at_position as _epsf_at_pos
+
+            _m = _epsf_at_pos(_m, x, y)
+        except Exception:
+            _m = None
+        if _m is None:
+            return np.nan
+    try:
+        P = np.asarray(
+            _render_epsf_on_cutout(
+                _m, 2 * h + 1, 2 * h + 1, lx, ly, 1.0, osamp
+            ),
+            dtype=float,
+        )
+    except Exception:
+        return np.nan
+    valid &= np.isfinite(P)
+    if int(valid.sum()) < 12:
+        return np.nan
+
+    # WLS fit of stamp = A*P + c.  Two passes: the first uses the
+    # data for the Poisson term, the second the fitted model.
+    d = np.where(valid, stamp, 0.0)
+    Pv = np.where(valid, P, 0.0)
+    A = 0.0
+    chi2_red = np.nan
+    for _pass in range(2):
+        var = sig0 ** 2 + np.clip(A * Pv, 0.0, None) / gain
+        if mff > 0:
+            var = var + (mff * np.abs(A) * Pv) ** 2
+        w = np.where(valid, 1.0 / np.maximum(var, 1e-12), 0.0)
+        Spp = float(np.sum(w * Pv * Pv))
+        Sp = float(np.sum(w * Pv))
+        S = float(np.sum(w))
+        Spd = float(np.sum(w * Pv * d))
+        Sd = float(np.sum(w * d))
+        det = Spp * S - Sp * Sp
+        if not np.isfinite(det) or abs(det) < 1e-20:
+            break
+        A = (S * Spd - Sp * Sd) / det
+        c = (Spp * Sd - Sp * Spd) / det
+        dof = int(valid.sum()) - 2
+        chi2_red = (
+            float(np.sum(w * (d - A * Pv - c) ** 2)) / dof
+            if dof > 0
+            else np.nan
+        )
+    if not np.isfinite(A) or A <= 0:
+        return np.inf
+    return chi2_red
+
+
+# =============================================================================
 # Constrained Slope Regressor
 # =============================================================================
 # Canonical implementation lives in zeropoint.PenalisedSlopeRegressor.
@@ -2808,11 +3497,38 @@ class Templates:
         -------
         (center_y, center_x, top_row, bottom_row, left_col, right_col)
         """
-        non_uniform_rows = ~np.all(img == img[:, 0:1], axis=1)
-        non_uniform_cols = ~np.all(img == img[0:1, :], axis=0)
+        # NaN-aware uniformity test: NaN == NaN is False, so the plain
+        # equality check flagged every NaN-padded row as "data".  A row or
+        # column counts as data-bearing only when its finite pixels span a
+        # range larger than atol; all-NaN, all-zero, and constant-value
+        # padding rows/columns are excluded.  A small tolerance also
+        # absorbs resampling/compression noise in the padding.
+        atol = 1e-8
+        finite = np.isfinite(img)
+        img_f = np.where(finite, img, np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            row_ptp = np.nanmax(img_f, axis=1) - np.nanmin(img_f, axis=1)
+            col_ptp = np.nanmax(img_f, axis=0) - np.nanmin(img_f, axis=0)
+        non_uniform_rows = finite.any(axis=1) & (
+            np.nan_to_num(row_ptp, nan=0.0) > atol
+        )
+        non_uniform_cols = finite.any(axis=0) & (
+            np.nan_to_num(col_ptp, nan=0.0) > atol
+        )
 
         row_idx = np.where(non_uniform_rows)[0]
         col_idx = np.where(non_uniform_cols)[0]
+
+        if row_idx.size == 0 or col_idx.size == 0:
+            # All-uniform or all-invalid image: there is no padding to
+            # find, so report the full frame instead of raising IndexError.
+            ny, nx = img.shape
+            logger.debug(
+                "find_non_uniform_center: image has no non-uniform region; "
+                "using full frame bounds."
+            )
+            return ny / 2.0, nx / 2.0, 0, ny - 1, 0, nx - 1
 
         top, bottom = int(row_idx[0]), int(row_idx[-1])
         left, right = int(col_idx[0]), int(col_idx[-1])
@@ -2983,11 +3699,14 @@ class Templates:
         bright_sources: Optional[pd.DataFrame] = None,
     ) -> Tuple[np.ndarray, List[Tuple[float, float]]]:
         """
-        Build a binary mask flagging problematic sources in *data*.
+        Build a binary mask flagging problematic pixels/sources in *data*.
 
-        Sources are detected via sigma-clipped thresholding and
-        segmentation.  The mask includes:
+        The mask includes:
+          - Saturated pixels (``data >= saturate_frac * sat_lvl``), dilated
+            to cover the bleeding wings.  Runs even when source detection
+            finds nothing.
           - Negative-peak sources (likely artefacts).
+          - Every detected source when ``create_source_mask`` is True.
           - Anomalously large sources (optional, via sigma-clip on area, disabled by default).
           - Sources overlapping known bright-catalog objects (optional, disabled by default).
 
@@ -2997,9 +3716,15 @@ class Templates:
             2-D science image.
         params : MaskParams or None
             Structured parameter set.  If None, falls back to keyword args.
+        create_source_mask : bool
+            If True, mask all detected sources; if False (typical for
+            subtraction inputs), keep unsaturated point sources unmasked so
+            they remain usable for kernel fitting and flux calibration.
         ignore_position : list of (x, y)
-            Positions whose enclosing source should *not* be masked
-            (typically the transient target).
+            Positions whose enclosing mask component should *not* be masked
+            (typically the transient target).  Masked pixels are blanked to
+            NaN in the difference image, so masking the target would erase
+            the transient itself.
         mask_bright_catalog_overlaps : bool
             If True, mask sources overlapping bright catalog objects (default False).
 
@@ -3008,10 +3733,33 @@ class Templates:
         mask : np.ndarray (int)
             Binary mask (1 = masked, 0 = good).
         masked_centres : list of (x, y)
-            Centroids of all masked sources.
+            Centres of all masked components/sources.
         """
         if ignore_position is None:
             ignore_position = []
+
+        # Positions that must stay unmasked (typically the transient target).
+        # A masked footprint containing one of these positions is dropped:
+        # masked regions are blanked to NaN in the difference image, so
+        # masking the target would erase the transient itself.
+        ignore_xy = []
+        for _pos in ignore_position:
+            try:
+                _px, _py = float(_pos[0]), float(_pos[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if np.isfinite(_px) and np.isfinite(_py):
+                ignore_xy.append((_px, _py))
+
+        def _hits_ignore(footprint: np.ndarray) -> bool:
+            if not ignore_xy:
+                return False
+            ny_, nx_ = footprint.shape
+            for _px, _py in ignore_xy:
+                _ix, _iy = int(round(_px)), int(round(_py))
+                if 0 <= _ix < nx_ and 0 <= _iy < ny_ and footprint[_iy, _ix]:
+                    return True
+            return False
 
         # Be strict about the input type for photutils.
         data = np.asarray(data)
@@ -3067,6 +3815,70 @@ class Templates:
             if len(finite_data) == 0:
                 logger.warning("create_image_mask: no finite pixels in image; returning empty mask.")
                 return mask, masked_centres
+
+            # --- Saturation masking ---
+            # Pixels at or above saturate_frac * sat_lvl are non-linear; the
+            # subtraction kernel cannot model them, and their unmasked
+            # footprints leave DIFF ~= SCI artefacts that read as transients.
+            # Dilate to cover the bleeding wings and record the component
+            # centres for downstream residual diagnostics.  This is done
+            # before source detection so saturated fields that fail the
+            # segmentation steps below still get masked.
+            sat_threshold = saturate_frac * sat_lvl
+            if np.isfinite(sat_threshold) and sat_threshold > 0:
+                sat_pixels = np.isfinite(data) & (data >= sat_threshold)
+                if np.any(sat_pixels):
+                    dilate_r = max(
+                        2,
+                        int(
+                            np.ceil(
+                                DEFAULT_FWHM_PADDING_MULTIPLIER * fwhm
+                            )
+                        ),
+                    )
+                    _gy, _gx = np.ogrid[
+                        -dilate_r : dilate_r + 1, -dilate_r : dilate_r + 1
+                    ]
+                    _disk = (_gx ** 2 + _gy ** 2) <= dilate_r ** 2
+                    sat_mask = binary_dilation(sat_pixels, structure=_disk)
+
+                    from scipy.ndimage import (
+                        center_of_mass as _com,
+                        label as _ndi_label,
+                    )
+
+                    _lab, _nlab = _ndi_label(sat_mask)
+
+                    # Drop dilated components that contain an ignore position.
+                    if ignore_xy and _nlab > 0:
+                        _drop = np.zeros(_nlab + 1, dtype=bool)
+                        for _px, _py in ignore_xy:
+                            _ix, _iy = int(round(_px)), int(round(_py))
+                            if (
+                                0 <= _ix < sat_mask.shape[1]
+                                and 0 <= _iy < sat_mask.shape[0]
+                            ):
+                                _drop[_lab[_iy, _ix]] = True
+                        if np.any(_drop[1:]):
+                            sat_mask[_drop[_lab]] = False
+                            _lab, _nlab = _ndi_label(sat_mask)
+
+                    mask[sat_mask] = 1
+                    n_sat = int(np.count_nonzero(sat_mask))
+                    if n_sat > 0:
+                        logger.info(
+                            "create_image_mask: masked %d saturated pixels "
+                            "(>= %.4g ADU, dilate=%d px).",
+                            n_sat, sat_threshold, dilate_r,
+                        )
+                        for _li in range(1, _nlab + 1):
+                            _cy_c, _cx_c = _com(
+                                sat_mask, labels=_lab, index=_li
+                            )
+                            if np.isfinite(_cx_c) and np.isfinite(_cy_c):
+                                masked_centres.append(
+                                    (float(_cx_c), float(_cy_c))
+                                )
 
             from functions import biweight_stdfunc
 
@@ -3149,12 +3961,30 @@ class Templates:
 
             # Mask negative-peak sources (likely artefacts) directly from their
             # segmentation footprints BEFORE removing them from tbl.
+            # Skip footprints containing an ignore position (the target):
+            # masked pixels are blanked in the difference image.
             for bad_src in tbl[is_negative].itertuples(index=False):
                 seg_pixels = seg.data == bad_src.label
+                if _hits_ignore(seg_pixels):
+                    continue
                 mask[seg_pixels] = 1
                 cx = (bad_src.bbox_xmin + bad_src.bbox_xmax) / 2
                 cy = (bad_src.bbox_ymin + bad_src.bbox_ymax) / 2
                 masked_centres.append((float(cx), float(cy)))
+
+            # Optional: mask every detected source (not just artefacts).
+            # Callers that need a pure defect mask pass
+            # create_source_mask=False so point sources remain available
+            # for kernel fitting and flux calibration.
+            if create_source_mask:
+                for src in tbl.itertuples(index=False):
+                    seg_pixels = seg.data == src.label
+                    if _hits_ignore(seg_pixels):
+                        continue
+                    mask[seg_pixels] = 1
+                    cx = (src.bbox_xmin + src.bbox_xmax) / 2
+                    cy = (src.bbox_ymin + src.bbox_ymax) / 2
+                    masked_centres.append((float(cx), float(cy)))
 
             if remove_large_sources:
                 # Handle case where all areas are the same (sigma_clip will fail)
@@ -3292,7 +4122,7 @@ class Templates:
         imageCatalog: Optional[Any] = None,
         center: Optional[Any] = None,
         method: str = "spalipy",
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> AlignmentResult:
         """
         Align science and template images to a common pixel grid.
 
@@ -3310,7 +4140,11 @@ class Templates:
 
         Returns
         -------
-        (science_out, template_out) or (None, None) on failure.
+        AlignmentResult
+            ``result.success`` is False when every method failed - the
+            caller must then disable subtraction rather than subtract the
+            unaligned inputs.  Per-attempt metrics are also written to
+            ``Alignment_<science base>.json`` next to the science image.
         """
         sci_name = Path(scienceFpath).name
         ref_name = Path(templateFpath).name
@@ -3333,21 +4167,122 @@ class Templates:
                     scienceImage.shape,
                     templateImage.shape,
                 )
-                return None, None
+                return AlignmentResult(
+                    None, None, None, None,
+                    message="non-2D input",
+                )
 
+            # input_yaml["fwhm"] still holds the YAML config default at this
+            # point - main.py only writes the measured value after template
+            # subtraction.  The measured FWHM is stamped on the science header;
+            # prefer it so the FWHM-scaled quality gates are calibrated to the
+            # real PSF rather than the 3 px placeholder.
             fwhm_pix = float(self.input_yaml.get("fwhm", 3.0))
+            try:
+                _sci_hdr_fwhm = scienceHeader.get(
+                    "FWHM", scienceHeader.get("fwhm", scienceHeader.get("FWHMPIX"))
+                )
+                if (
+                    _sci_hdr_fwhm is not None
+                    and np.isfinite(float(_sci_hdr_fwhm))
+                    and float(_sci_hdr_fwhm) > 0
+                ):
+                    fwhm_pix = float(_sci_hdr_fwhm)
+            except (TypeError, ValueError):
+                pass
+            _ts_cfg = self.input_yaml.get("template_subtraction", {}) or {}
 
             # Shared by every reproject attempt below.
             reproject_cfg = ReprojectConfig.from_yaml(self.input_yaml)
+
+            # One quality policy for every backend: FWHM-scaled offset/RMS/
+            # P90 gates feeding the shared pass/warn/fail classifier.
+            _gates = _alignment_gate_thresholds(self.input_yaml, fwhm_pix)
+
+            def _fail(method_name, msg=""):
+                return AlignmentResult(
+                    None, None, method_name, None,
+                    quality="fail", message=msg,
+                )
+
+            _attempts: List[AlignmentResult] = []
+
+            def _attempt(fn) -> AlignmentResult:
+                res = fn()
+                _attempts.append(res)
+                return res
+
+            def _finish(result: AlignmentResult) -> AlignmentResult:
+                # Provenance: every attempted backend and its gate outcome is
+                # recorded next to the science image even when the run fails.
+                _write_alignment_report(
+                    _attempts,
+                    str(Path(scienceFpath).parent),
+                    scienceFpath,
+                    templateFpath,
+                    requested_method=str(method),
+                )
+                # Stamp the shared gate classification onto the aligned
+                # template so downstream provenance does not depend on which
+                # backend produced the file.
+                if result.success and result.template_path:
+                    try:
+                        with fits.open(
+                            result.template_path, mode="update", memmap=False
+                        ) as _hdl:
+                            _h = _hdl[0].header
+                            _h["ALIGQUAL"] = (
+                                str(result.quality),
+                                "Alignment quality class (pass/warn/unverified)",
+                            )
+                            if result.n_matches is not None:
+                                _h["ALIGNM"] = (
+                                    int(result.n_matches),
+                                    "Matched alignment sources",
+                                )
+                            _hdl.flush()
+                        invalidate_fits_cache(result.template_path)
+                    except Exception:
+                        logger.debug(
+                            "align: failed to stamp quality header",
+                            exc_info=True,
+                        )
+                return result
+
+            # The science image is untouched by the template-only resampling
+            # methods (reproject/spalipy/chi2_shift/tweakwcs), so its source
+            # catalog is detected once and reused in every post-alignment
+            # quality measurement instead of re-running SExtractor per method.
+            _sci_det_cache: Dict[str, Any] = {"done": False, "xy": None}
+
+            def _science_xy() -> Optional[np.ndarray]:
+                if not _sci_det_cache["done"]:
+                    _sci_det_cache["done"] = True
+                    try:
+                        _thresh = float(
+                            _ts_cfg.get("alignment_rms_detect_thresh", 5.0)
+                            or 5.0
+                        )
+                        _xy, _, _ = _detect_sextractor_sources(
+                            scienceImage,
+                            input_yaml=self.input_yaml,
+                            fwhm_pix=min(max(float(fwhm_pix), 2.0), 8.0),
+                            thresh=_thresh,
+                        )
+                        if _xy is not None and len(_xy) >= 5:
+                            _sci_det_cache["xy"] = _xy
+                    except Exception:
+                        _sci_det_cache["xy"] = None
+                return _sci_det_cache["xy"]
 
             # ------------------------------------------------------------------
             # Strategy helpers
             # ------------------------------------------------------------------
 
-            def _swarp() -> Tuple[Optional[str], Optional[str]]:
+            def _swarp() -> AlignmentResult:
                 if run_IDC is None:
                     logger.info("run_IDC not available; skipping SWarp.")
-                    return None, None
+                    return _fail("swarp", "run_IDC not available")
                 logger.info("Attempting SWarp + SCAMP alignment.")
                 idc = run_IDC.ImageDistortionCorrector(input_yaml=self.input_yaml)
                 
@@ -3377,7 +4312,7 @@ class Templates:
                 )
                 if not res or not res.get("science_aligned"):
                     logger.info("SWarp alignment did not produce aligned outputs.")
-                    return None, None
+                    return _fail("swarp", "no aligned outputs")
                 sci_al = res["science_aligned"]
                 ref_al = res["reference_aligned"]
                 # Extra read just for the RMS diagnostic (not the alignment I/O).
@@ -3386,6 +4321,8 @@ class Templates:
                 _srms = None
                 _sp90 = None
                 _squad_rms = None
+                _squality = "unverified"
+                _sreasons: List[str] = []
                 try:
                     sci_al_data, _ = read_fits(sci_al)
                     ref_al_data, _ = read_fits(ref_al)
@@ -3399,35 +4336,26 @@ class Templates:
                     else:
                         _smed, _srms, _sp90 = _swarp_align[:3] if _swarp_align else (None, None, None)
                         _squad_rms = None
-                    # Quality gate (backup to post_swarp_verify in run_IDC)
-                    if _smed is not None:
-                        quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
-                        max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
-                        max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
-                        max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
-                        _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
-                        max_offset *= _tpl_scale
-                        max_rms *= _tpl_scale
-                        max_p90 *= _tpl_scale
-                        _swarp_reject = (
-                            (_smed is not None and np.isfinite(_smed) and _smed > max_offset)
-                            or (_srms is not None and np.isfinite(_srms) and _srms > max_rms)
-                            or (_sp90 is not None and np.isfinite(_sp90) and _sp90 > max_p90)
+                    # Uniform quality gate (backup to post_swarp_verify in
+                    # run_IDC): same thresholds and pass/warn/fail policy for
+                    # every backend.
+                    _squality, _sreasons = _classify_alignment_quality(
+                        _smed, _srms, _sp90,
+                        _squad_rms.get("coverage_ok") if _squad_rms else None,
+                        *_gates,
+                    )
+                    if _squality == "fail":
+                        logger.warning(
+                            "SCAMP+SWarp alignment rejected: %s. "
+                            "Falling back to next alignment method.",
+                            "; ".join(_sreasons),
                         )
-                        if _swarp_reject:
-                            _reasons = []
-                            if _smed is not None and np.isfinite(_smed) and _smed > max_offset:
-                                _reasons.append("offset=%.3f px (> %.2f px)" % (_smed, max_offset))
-                            if _srms is not None and np.isfinite(_srms) and _srms > max_rms:
-                                _reasons.append("RMS=%.3f px (> %.2f px)" % (_srms, max_rms))
-                            if _sp90 is not None and np.isfinite(_sp90) and _sp90 > max_p90:
-                                _reasons.append("P90=%.3f px (> %.2f px)" % (_sp90, max_p90))
-                            logger.warning(
-                                "SCAMP+SWarp alignment rejected: %s. "
-                                "Falling back to next alignment method.",
-                                "; ".join(_reasons) if _reasons else "unknown",
-                            )
-                            _swarp_ok = False
+                        _swarp_ok = False
+                    elif _squality == "unverified":
+                        logger.warning(
+                            "SCAMP+SWarp alignment could not be independently "
+                            "verified (insufficient matched sources)."
+                        )
                     if _squad_rms is not None and _squad_rms.get("coverage_ok") is False:
                         logger.warning(
                             "SCAMP+SWarp verification: matched sources cover only "
@@ -3439,7 +4367,14 @@ class Templates:
                 except Exception:
                     logger.debug("swarp: quality measurement failed", exc_info=True)
                 if not _swarp_ok:
-                    return None, None
+                    return _fail("swarp", "; ".join(_sreasons))
+                if not _alignment_gate_accept(_squality, self.input_yaml):
+                    logger.warning(
+                        "SCAMP+SWarp alignment rejected: quality=%s "
+                        "(strict verification gate enabled).",
+                        _squality,
+                    )
+                    return _fail("swarp", f"quality={_squality}")
                 method_used = res.get("alignment_method", "scamp_swarp")
                 logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
                 # Store alignment RMS in the aligned reference header for
@@ -3474,18 +4409,29 @@ class Templates:
                     logger.debug("swarp: failed to write quality header", exc_info=True)
                 # Update target coordinates to reflect new WCS after alignment
                 self._update_target_coordinates_after_alignment(sci_al, method_used)
-                return sci_al, ref_al
+                return AlignmentResult(
+                    sci_al, ref_al, method_used, _smed,
+                    rms_px=_srms, p90_px=_sp90,
+                    coverage_ok=(
+                        _squad_rms.get("coverage_ok") if _squad_rms else None
+                    ),
+                    n_matches=(
+                        _squad_rms.get("n_matched") if _squad_rms else None
+                    ),
+                    quality=_squality,
+                    message="; ".join(_sreasons),
+                )
 
-            def _astroalign() -> Tuple[Optional[str], Optional[str]]:
+            def _astroalign() -> AlignmentResult:
                 if run_IDC is None:
                     logger.info("run_IDC not available; skipping AstroAlign.")
-                    return None, None
+                    return _fail("astroalign", "run_IDC not available")
                 logger.info("Attempting AstroAlign.")
                 idc = run_IDC.ImageDistortionCorrector(input_yaml=self.input_yaml)
                 res = idc.align_with_astroalign(scienceFpath, templateFpath)
                 if not res or res.get("rejected") or not res.get("science_aligned"):
                     logger.info("AstroAlign did not produce aligned outputs.")
-                    return None, None
+                    return _fail("astroalign", "no aligned outputs")
                 sci_al = res["science_aligned"]
                 ref_al = res["reference_aligned"]
                 _aa_ok = True
@@ -3493,6 +4439,8 @@ class Templates:
                 _arms = None
                 _ap90 = None
                 _aa_quad = None
+                _aquality = "unverified"
+                _areasons: List[str] = []
                 try:
                     sci_al_data, _ = read_fits(sci_al)
                     ref_al_data, _ = read_fits(ref_al)
@@ -3505,34 +4453,23 @@ class Templates:
                         _amed, _arms, _ap90, _aa_quad = _aa_metrics
                     elif _aa_metrics is not None:
                         _amed, _arms, _ap90 = _aa_metrics[:3]
-                    if _amed is not None:
-                        quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
-                        max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
-                        max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
-                        max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
-                        _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
-                        max_offset *= _tpl_scale
-                        max_rms *= _tpl_scale
-                        max_p90 *= _tpl_scale
-                        _aa_reject = (
-                            (_amed is not None and np.isfinite(_amed) and _amed > max_offset)
-                            or (_arms is not None and np.isfinite(_arms) and _arms > max_rms)
-                            or (_ap90 is not None and np.isfinite(_ap90) and _ap90 > max_p90)
+                    _aquality, _areasons = _classify_alignment_quality(
+                        _amed, _arms, _ap90,
+                        _aa_quad.get("coverage_ok") if _aa_quad else None,
+                        *_gates,
+                    )
+                    if _aquality == "fail":
+                        logger.warning(
+                            "AstroAlign alignment rejected: %s. "
+                            "Falling back to next alignment method.",
+                            "; ".join(_areasons),
                         )
-                        if _aa_reject:
-                            _reasons = []
-                            if _amed is not None and np.isfinite(_amed) and _amed > max_offset:
-                                _reasons.append("offset=%.3f px (> %.2f px)" % (_amed, max_offset))
-                            if _arms is not None and np.isfinite(_arms) and _arms > max_rms:
-                                _reasons.append("RMS=%.3f px (> %.2f px)" % (_arms, max_rms))
-                            if _ap90 is not None and np.isfinite(_ap90) and _ap90 > max_p90:
-                                _reasons.append("P90=%.3f px (> %.2f px)" % (_ap90, max_p90))
-                            logger.warning(
-                                "AstroAlign alignment rejected: %s. "
-                                "Falling back to next alignment method.",
-                                "; ".join(_reasons) if _reasons else "unknown",
-                            )
-                            _aa_ok = False
+                        _aa_ok = False
+                    elif _aquality == "unverified":
+                        logger.warning(
+                            "AstroAlign alignment could not be independently "
+                            "verified (insufficient matched sources)."
+                        )
                     if _aa_quad is not None and _aa_quad.get("coverage_ok") is False:
                         logger.warning(
                             "AstroAlign verification: matched sources cover only "
@@ -3544,7 +4481,14 @@ class Templates:
                 except Exception:
                     logger.debug("astroalign: quality measurement failed", exc_info=True)
                 if not _aa_ok:
-                    return None, None
+                    return _fail("astroalign", "; ".join(_areasons))
+                if not _alignment_gate_accept(_aquality, self.input_yaml):
+                    logger.warning(
+                        "AstroAlign alignment rejected: quality=%s "
+                        "(strict verification gate enabled).",
+                        _aquality,
+                    )
+                    return _fail("astroalign", f"quality={_aquality}")
                 method_used = res.get("alignment_method", "astroalign")
                 logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
                 # Store alignment RMS in the aligned reference header for
@@ -3572,9 +4516,20 @@ class Templates:
                     logger.debug("astroalign: failed to write quality header", exc_info=True)
                 # Update target coordinates to reflect new WCS after alignment
                 self._update_target_coordinates_after_alignment(sci_al, method_used)
-                return sci_al, ref_al
+                return AlignmentResult(
+                    sci_al, ref_al, method_used, _amed,
+                    rms_px=_arms, p90_px=_ap90,
+                    coverage_ok=(
+                        _aa_quad.get("coverage_ok") if _aa_quad else None
+                    ),
+                    n_matches=(
+                        _aa_quad.get("n_matched") if _aa_quad else None
+                    ),
+                    quality=_aquality,
+                    message="; ".join(_areasons),
+                )
 
-            def _reproject() -> Tuple[Optional[str], Optional[str]]:
+            def _reproject() -> AlignmentResult:
                 result = _reproject_template(
                     science_image=scienceImage,
                     science_header=scienceHeader,
@@ -3586,52 +4541,41 @@ class Templates:
                     input_yaml=self.input_yaml,
                 )
                 if result.template_path is None:
-                    return None, None
+                    return result._replace(
+                        method_used="reproject",
+                        quality="fail",
+                        message=result.message or "reproject produced no output",
+                    )
 
-                quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
-                max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
-                max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
-                max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
-                # Scale the gates with FWHM so the same fractional-pixel
-                # tolerance applies to sharp and broad PSFs.
-                _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
-                max_offset *= _tpl_scale
-                max_rms *= _tpl_scale
-                max_p90 *= _tpl_scale
-                _med = result.median_offset_px
-                _rms = result.rms_px
-                _p90 = result.p90_px
-                if _med is None and _rms is None and _p90 is None:
+                _quality, _reasons = _classify_alignment_quality(
+                    result.median_offset_px, result.rms_px, result.p90_px,
+                    result.coverage_ok, *_gates,
+                )
+                if _quality == "unverified":
                     logger.warning(
                         "Reproject alignment quality could not be verified "
                         "(insufficient sources); accepting as best available fallback."
                     )
-                else:
-                    _reject = (
-                        (_med is not None and np.isfinite(_med) and _med > max_offset)
-                        or (_rms is not None and np.isfinite(_rms) and _rms > max_rms)
-                        or (_p90 is not None and np.isfinite(_p90) and _p90 > max_p90)
+                if not _alignment_gate_accept(_quality, self.input_yaml):
+                    logger.warning(
+                        "Reproject alignment rejected: %s. "
+                        "Falling back to next alignment method.",
+                        "; ".join(_reasons) if _reasons else _quality,
                     )
-                    if _reject:
-                        _reasons = []
-                        if _med is not None and np.isfinite(_med) and _med > max_offset:
-                            _reasons.append("offset=%.3f px (> %.2f px)" % (_med, max_offset))
-                        if _rms is not None and np.isfinite(_rms) and _rms > max_rms:
-                            _reasons.append("RMS=%.3f px (> %.2f px)" % (_rms, max_rms))
-                        if _p90 is not None and np.isfinite(_p90) and _p90 > max_p90:
-                            _reasons.append("P90=%.3f px (> %.2f px)" % (_p90, max_p90))
-                        logger.warning(
-                            "Reproject alignment rejected: %s. "
-                            "Falling back to next alignment method.",
-                            "; ".join(_reasons) if _reasons else "unknown",
-                        )
-                        return None, None
+                    return result._replace(
+                        template_path=None, quality=_quality,
+                        message="; ".join(_reasons) or _quality,
+                    )
 
                 # Only the template is resampled; the science WCS is
                 # unchanged, so target coordinates need no update.
-                method_used = "reproject"
+                method_used = result.method_used or "reproject"
                 logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
-                return scienceFpath, result.template_path
+                return result._replace(
+                    science_path=scienceFpath,
+                    quality=_quality,
+                    message="; ".join(_reasons),
+                )
 
             def _check_sub_tile_feasibility(det, shape, sub_tile, min_per_tile=4):
                 """Check if spalipy's sub-tile splitting will have enough sources.
@@ -3682,7 +4626,7 @@ class Templates:
                 except Exception:
                     return sub_tile
 
-            def _spalipy() -> Tuple[Optional[str], Optional[str]]:
+            def _spalipy() -> AlignmentResult:
                 """Align template to science using spalipy (spline-warp registration).
 
                 spalipy uses quad-based asterism matching for an initial affine
@@ -3697,7 +4641,7 @@ class Templates:
                 """
                 if not _HAS_SPALIPY:
                     logger.info("spalipy not installed; skipping spalipy alignment.")
-                    return None, None
+                    return _fail("spalipy", "spalipy not installed")
                 try:
                     from spalipy import Spalipy
 
@@ -3794,13 +4738,13 @@ class Templates:
                     tpl_det = _detect_for_spalipy(templateImage)
                     if sci_det is None or tpl_det is None:
                         logger.info("spalipy: insufficient sources for alignment.")
-                        return None, None
+                        return _fail("spalipy", "insufficient sources")
                     if len(sci_det) < 4 or len(tpl_det) < 4:
                         logger.info(
                             "spalipy: too few sources (sci=%d, tpl=%d; need >=4).",
                             len(sci_det), len(tpl_det),
                         )
-                        return None, None
+                        return _fail("spalipy", "too few sources")
 
                     # --- RA/DEC source matching ---
                     # Detect sources in the science image, convert to RA/DEC
@@ -3887,7 +4831,9 @@ class Templates:
                                     "(%d; need >=4) and footprints do not overlap.",
                                     len(_sci_matched),
                                 )
-                                return None, None
+                                return _fail(
+                                    "spalipy", "too few RA/DEC matches"
+                                )
                         else:
                             sci_det = _sci_matched
                             tpl_det = _tpl_matched
@@ -3944,7 +4890,7 @@ class Templates:
                                 "(sci=%d, tpl=%d; need >=4).",
                                 len(sci_det), len(tpl_det),
                             )
-                            return None, None
+                            return _fail("spalipy", "too few overlapping sources")
 
                     logger.info(
                         "Attempting spalipy alignment (sci=%d sources, tpl=%d sources).",
@@ -4292,7 +5238,7 @@ class Templates:
 
                     if sp.aligned_data is None:
                         logger.info("spalipy did not produce aligned output.")
-                        return None, None
+                        return _fail("spalipy", "no aligned output")
 
                     try:
                         _n_matched = 0
@@ -4326,32 +5272,60 @@ class Templates:
                     if _aligned_nan.any():
                         aligned_template = np.where(_aligned_nan, np.nan, aligned_template)
 
+                    # Sanity gates on the warped product: a degenerate
+                    # spalipy result (wrong shape, mostly empty, or constant)
+                    # must not reach subtraction.
+                    if aligned_template.shape != scienceImage.shape:
+                        logger.warning(
+                            "spalipy output shape %s != science shape %s; "
+                            "rejecting.",
+                            aligned_template.shape, scienceImage.shape,
+                        )
+                        return _fail("spalipy", "output shape mismatch")
+                    _finite_frac = float(np.mean(np.isfinite(aligned_template)))
+                    _min_ff = float(
+                        _ts_cfg.get("alignment_min_finite_fraction", 0.25)
+                    )
+                    _min_px = int(
+                        _ts_cfg.get("alignment_min_valid_pixels", 1000)
+                    )
+                    _valid_px = aligned_template[np.isfinite(aligned_template)]
+                    if _finite_frac < _min_ff or _valid_px.size < _min_px:
+                        logger.warning(
+                            "spalipy output nearly empty (finite=%.1f%%, "
+                            "n=%d < %d); rejecting.",
+                            100.0 * _finite_frac, _valid_px.size, _min_px,
+                        )
+                        return _fail("spalipy", "insufficient finite coverage")
+                    if float(np.nanstd(_valid_px)) <= 0:
+                        logger.warning(
+                            "spalipy output is constant; rejecting."
+                        )
+                        return _fail("spalipy", "degenerate constant output")
+
                     # No post-alignment sub-pixel shift correction: an
                     # empirical shift applied after spalipy's spline-warp can
                     # introduce subtraction dipoles (same reason the SCAMP+SWarp
                     # shift correction was removed).  The quality gate below
                     # measures the actual spalipy output.
 
-                    # Alignment quality measurement (diagnostic only).
+                    # Alignment quality measurement.
                     # Use the pre-matched science sources (sci_det) instead of
                     # re-detecting in the science image.  sci_det was already
                     # RA/DEC matched to the reference, so it contains only real
                     # sources -- no ghost/stacking artifacts that would create
                     # false matches and inflate the RMS.
                     #
-                    # NOTE: spalipy alignments are NOT rejected on the basis of
-                    # a high RMS / offset / P90.  A successful spalipy result is
-                    # accepted even when the measured quality is poor -- the
-                    # metrics are still computed, logged, and written to the
-                    # aligned template header (ALIGMED/ALIGRMS/ALIGP90) so that
-                    # downstream SFFT kernel sizing and photometry provenance
-                    # can expose the degraded alignment.  Spalipy is only
-                    # bypassed when it fails to produce a usable aligned image
-                    # (handled above via `sp.aligned_data is None`).
+                    # spalipy is now held to the same pass/warn/fail gates as
+                    # every other backend: a result with metrics beyond the
+                    # configured limits is rejected so the cascade can fall
+                    # back rather than committing to a poor alignment.
                     _med_off = None
                     _rms_off = None
                     _p90_off = None
                     _quad_rms = None
+                    _sp_quality = "unverified"
+                    _sp_reasons: List[str] = []
                     try:
                         _sci_xy_for_rms = np.column_stack([
                             np.asarray(sci_det["x"], float),
@@ -4372,38 +5346,31 @@ class Templates:
                             "spalipy: alignment RMS median=%.3f px rms=%.3f px.",
                             _med_off, _rms_off,
                         )
-                        # Warn (but do NOT reject) when quality gates are
-                        # exceeded, so the degraded alignment is transparent.
-                        quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
-                        max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
-                        max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
-                        max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
-                        # Scale the gates with FWHM so the same fractional-pixel
-                        # tolerance applies to sharp and broad PSFs.
-                        _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
-                        max_offset *= _tpl_scale
-                        max_rms *= _tpl_scale
-                        max_p90 *= _tpl_scale
-                        _poor = (
-                            (_med_off is not None and np.isfinite(_med_off) and _med_off > max_offset)
-                            or (_rms_off is not None and np.isfinite(_rms_off) and _rms_off > max_rms)
-                            or (_p90_off is not None and np.isfinite(_p90_off) and _p90_off > max_p90)
+                        _sp_quality, _sp_reasons = _classify_alignment_quality(
+                            _med_off, _rms_off, _p90_off,
+                            _quad_rms.get("coverage_ok") if _quad_rms else None,
+                            *_gates,
                         )
-                        if _poor:
-                            _reasons = []
-                            if _med_off is not None and np.isfinite(_med_off) and _med_off > max_offset:
-                                _reasons.append("offset=%.3f px (> %.2f px)" % (_med_off, max_offset))
-                            if _rms_off is not None and np.isfinite(_rms_off) and _rms_off > max_rms:
-                                _reasons.append("RMS=%.3f px (> %.2f px)" % (_rms_off, max_rms))
-                            if _p90_off is not None and np.isfinite(_p90_off) and _p90_off > max_p90:
-                                _reasons.append("P90=%.3f px (> %.2f px)" % (_p90_off, max_p90))
-                            logger.warning(
-                                "spalipy alignment has poor quality (%s) but "
-                                "is being accepted; metrics recorded in header.",
-                                "; ".join(_reasons) if _reasons else "unknown",
-                            )
                     except Exception:
                         logger.debug("spalipy: quality measurement failed", exc_info=True)
+
+                    if not _alignment_gate_accept(_sp_quality, self.input_yaml):
+                        logger.warning(
+                            "spalipy alignment rejected: %s. "
+                            "Falling back to next alignment method.",
+                            "; ".join(_sp_reasons) if _sp_reasons else _sp_quality,
+                        )
+                        return _fail(
+                            "spalipy",
+                            "; ".join(_sp_reasons) or _sp_quality,
+                        )
+                    if _sp_quality != "pass":
+                        logger.warning(
+                            "spalipy alignment quality=%s%s; metrics recorded "
+                            "in header.",
+                            _sp_quality,
+                            (" (%s)" % "; ".join(_sp_reasons)) if _sp_reasons else "",
+                        )
 
                     # Write aligned template under the science WCS.
                     hdr = templateHeader.copy()
@@ -4439,10 +5406,13 @@ class Templates:
                             )
                     except Exception:
                         logger.debug("spalipy: failed to write quality header", exc_info=True)
-                    fits.PrimaryHDU(aligned_template, header=hdr).writeto(
-                        new_templateFpath, overwrite=True,
-                        output_verify="silentfix+ignore",
-                    )
+                    _atomic_fits_write(new_templateFpath, aligned_template, hdr)
+                    try:
+                        from functions import refresh_sibling_weight_map
+
+                        refresh_sibling_weight_map(new_templateFpath)
+                    except Exception:
+                        pass
 
                     # Diagnostic plot: matched sources side-by-side
                     # NOTE: when the template was flipped for reflection
@@ -4502,13 +5472,26 @@ class Templates:
                     method_used = "spalipy"
                     logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
                     # Science image unchanged - no target coordinate update needed
-                    return scienceFpath, new_templateFpath
+                    return AlignmentResult(
+                        scienceFpath, new_templateFpath, method_used,
+                        _med_off,
+                        rms_px=_rms_off, p90_px=_p90_off,
+                        coverage_ok=(
+                            _quad_rms.get("coverage_ok") if _quad_rms else None
+                        ),
+                        n_matches=_n_matched or (
+                            _quad_rms.get("n_matched") if _quad_rms else None
+                        ),
+                        finite_fraction=_finite_frac,
+                        quality=_sp_quality,
+                        message="; ".join(_sp_reasons),
+                    )
 
                 except Exception as _e:
                     log_warning_from_exception(logger, "spalipy alignment failed", _e)
-                    return None, None
+                    return _fail("spalipy", str(_e))
 
-            def _tweakwcs() -> Tuple[Optional[str], Optional[str]]:
+            def _tweakwcs() -> AlignmentResult:
                 """Align template to science using tweakwcs (STScI WCS tweaking).
 
                 tweakwcs computes corrections to WCS objects to minimize mismatch
@@ -4521,10 +5504,10 @@ class Templates:
                 """
                 if not _HAS_TWEAKWCS:
                     logger.info("tweakwcs not installed; skipping tweakwcs alignment.")
-                    return None, None
+                    return _fail("tweakwcs", "tweakwcs not installed")
                 if not _REPROJECT_AVAILABLE:
                     logger.info("reproject not available; tweakwcs requires reproject for resampling.")
-                    return None, None
+                    return _fail("tweakwcs", "reproject not available")
                 try:
                     from tweakwcs.correctors import FITSWCSCorrector
                     from tweakwcs.imalign import align_wcs
@@ -4546,7 +5529,7 @@ class Templates:
                     tpl_cat = _detect_for_tweakwcs(templateImage)
                     if sci_cat is None or tpl_cat is None:
                         logger.info("tweakwcs: insufficient sources for alignment.")
-                        return None, None
+                        return _fail("tweakwcs", "insufficient sources")
 
                     logger.info(
                         "Attempting tweakwcs alignment (sci=%d sources, tpl=%d sources).",
@@ -4613,7 +5596,7 @@ class Templates:
                     fp_mask = footprint.astype(bool)
                     if fp_mask.sum() == 0:
                         logger.info("tweakwcs: zero footprint coverage after reproject.")
-                        return None, None
+                        return _fail("tweakwcs", "zero footprint coverage")
                     aligned_tpl[~fp_mask] = np.nan
 
                     # Compute alignment quality BEFORE writing so the metrics
@@ -4625,44 +5608,31 @@ class Templates:
                     _tp90 = None
                     _tquad = None
                     _tweak_ok = True
+                    _tquality = "unverified"
+                    _treasons: List[str] = []
                     try:
                         _tmetrics = compute_alignment_rms(
                             scienceImage, to_write, fwhm_pix,
                             input_yaml=self.input_yaml,
+                            sci_xy_override=_science_xy(),
                             return_per_quadrant=True,
                         )
                         if _tmetrics is not None and len(_tmetrics) == 4:
                             _tmed, _trms, _tp90, _tquad = _tmetrics
                         elif _tmetrics is not None:
                             _tmed, _trms, _tp90 = _tmetrics[:3]
-                        if _tmed is not None:
-                            quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
-                            max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
-                            max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
-                            max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
-                            _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
-                            max_offset *= _tpl_scale
-                            max_rms *= _tpl_scale
-                            max_p90 *= _tpl_scale
-                            _tweak_reject = (
-                                (_tmed is not None and np.isfinite(_tmed) and _tmed > max_offset)
-                                or (_trms is not None and np.isfinite(_trms) and _trms > max_rms)
-                                or (_tp90 is not None and np.isfinite(_tp90) and _tp90 > max_p90)
+                        _tquality, _treasons = _classify_alignment_quality(
+                            _tmed, _trms, _tp90,
+                            _tquad.get("coverage_ok") if _tquad else None,
+                            *_gates,
+                        )
+                        if _tquality == "fail":
+                            logger.warning(
+                                "tweakwcs alignment rejected: %s. "
+                                "Falling back to next alignment method.",
+                                "; ".join(_treasons),
                             )
-                            if _tweak_reject:
-                                _reasons = []
-                                if _tmed is not None and np.isfinite(_tmed) and _tmed > max_offset:
-                                    _reasons.append("offset=%.3f px (> %.2f px)" % (_tmed, max_offset))
-                                if _trms is not None and np.isfinite(_trms) and _trms > max_rms:
-                                    _reasons.append("RMS=%.3f px (> %.2f px)" % (_trms, max_rms))
-                                if _tp90 is not None and np.isfinite(_tp90) and _tp90 > max_p90:
-                                    _reasons.append("P90=%.3f px (> %.2f px)" % (_tp90, max_p90))
-                                logger.warning(
-                                    "tweakwcs alignment rejected: %s. "
-                                    "Falling back to next alignment method.",
-                                    "; ".join(_reasons) if _reasons else "unknown",
-                                )
-                                _tweak_ok = False
+                            _tweak_ok = False
                         # tweakwcs fits a corrected WCS to the matched sources;
                         # a solution verified only on a clustered subset cannot
                         # be trusted over the full field, so reject it and let
@@ -4683,7 +5653,17 @@ class Templates:
                         logger.debug("tweakwcs: quality measurement failed", exc_info=True)
 
                     if not _tweak_ok:
-                        return None, None
+                        return _fail(
+                            "tweakwcs",
+                            "; ".join(_treasons) or "coverage/quality gate",
+                        )
+                    if not _alignment_gate_accept(_tquality, self.input_yaml):
+                        logger.warning(
+                            "tweakwcs alignment rejected: quality=%s "
+                            "(strict verification gate enabled).",
+                            _tquality,
+                        )
+                        return _fail("tweakwcs", f"quality={_tquality}")
 
                     # Write aligned template with science WCS + quality keywords
                     hdr = templateHeader.copy()
@@ -4702,20 +5682,37 @@ class Templates:
                         hdr["ALIGMETH"] = ("tweakwcs", "Alignment method used")
                     except Exception:
                         pass
-                    fits.PrimaryHDU(to_write, header=hdr).writeto(
-                        new_templateFpath, overwrite=True,
-                        output_verify="silentfix+ignore",
-                    )
+                    _atomic_fits_write(new_templateFpath, to_write, hdr)
+                    try:
+                        from functions import refresh_sibling_weight_map
+
+                        refresh_sibling_weight_map(new_templateFpath)
+                    except Exception:
+                        pass
 
                     method_used = "tweakwcs"
                     logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
-                    return scienceFpath, new_templateFpath
+                    return AlignmentResult(
+                        scienceFpath, new_templateFpath, method_used, _tmed,
+                        rms_px=_trms, p90_px=_tp90,
+                        coverage_ok=(
+                            _tquad.get("coverage_ok") if _tquad else None
+                        ),
+                        n_matches=(
+                            _tquad.get("n_matched") if _tquad else None
+                        ),
+                        finite_fraction=float(
+                            np.count_nonzero(fp_mask) / fp_mask.size
+                        ),
+                        quality=_tquality,
+                        message="; ".join(_treasons),
+                    )
 
                 except Exception as _e:
                     log_warning_from_exception(logger, "tweakwcs alignment failed", _e)
-                    return None, None
+                    return _fail("tweakwcs", str(_e))
 
-            def _chi2_shift() -> Tuple[Optional[str], Optional[str]]:
+            def _chi2_shift() -> AlignmentResult:
                 """Align template to science using chi2_shift cross-correlation.
 
                 Uses the ``image_registration`` package's ``chi2_shift`` which
@@ -4726,26 +5723,53 @@ class Templates:
                 cannot fill.
 
                 Only a translation is computed; the template is shifted and
-                written with the science WCS.
+                written with the science WCS.  A translation-only shift is
+                only meaningful on a shared pixel grid, so mismatched shapes
+                or grossly different WCS grids skip to a resampling fallback
+                instead of being top-left cropped (which would silently
+                assume pixel (0,0) is the same sky position in both images).
                 """
                 if not _HAS_IMGREG:
                     logger.info("image_registration not installed; skipping chi2_shift alignment.")
-                    return None, None
+                    return _fail("chi2_shift", "image_registration not installed")
                 try:
-                    # Replace NaN with 0 for cross-correlation
+                    if scienceImage.shape != templateImage.shape:
+                        logger.info(
+                            "chi2_shift requires a common pixel grid "
+                            "(science %s vs template %s); skipping.",
+                            scienceImage.shape, templateImage.shape,
+                        )
+                        return _fail("chi2_shift", "shape mismatch")
+                    # Loose common-grid check: the two WCSes must share
+                    # scale/orientation/origin within the multi-pixel offset
+                    # chi2_shift exists to correct.
+                    _grid_tol = max(5.0, 2.0 * float(fwhm_pix))
+                    if not verify_common_grid(
+                        scienceHeader, templateHeader, scienceImage.shape,
+                        tolerance_px=_grid_tol,
+                    ):
+                        logger.info(
+                            "chi2_shift: template and science WCS grids differ "
+                            "by more than %.1f px; translation cannot fix a "
+                            "geometric mismatch - skipping.",
+                            _grid_tol,
+                        )
+                        return _fail("chi2_shift", "WCS grids differ")
+
+                    # Zero-fill invalid pixels for the correlation only; the
+                    # validity mask is tracked separately and re-applied to
+                    # the shifted product below so no-data regions (NaN chip
+                    # gaps, SWarp zero padding) can never leak into the
+                    # aligned image as finite values.
+                    _valid_tpl = np.isfinite(templateImage) & (
+                        np.abs(templateImage) >= 1.1e-20
+                    )
                     sci_data = np.where(
                         np.isfinite(scienceImage), scienceImage, 0.0
                     ).astype(np.float64)
                     tpl_data = np.where(
-                        np.isfinite(templateImage), templateImage, 0.0
+                        _valid_tpl, templateImage, 0.0
                     ).astype(np.float64)
-
-                    # chi2_shift needs same shape; crop to intersection if needed
-                    if sci_data.shape != tpl_data.shape:
-                        h = min(sci_data.shape[0], tpl_data.shape[0])
-                        w = min(sci_data.shape[1], tpl_data.shape[1])
-                        sci_data = sci_data[:h, :w]
-                        tpl_data = tpl_data[:h, :w]
 
                     logger.info("Attempting chi2_shift cross-correlation alignment.")
 
@@ -4782,7 +5806,7 @@ class Templates:
                             "Falling back to next alignment method.",
                             total_offset,
                         )
-                        return None, None
+                        return _fail("chi2_shift", f"spurious offset {total_offset:.1f} px")
                     _err_off = float(np.hypot(
                         float(exoff) if exoff is not None else np.nan,
                         float(eyoff) if eyoff is not None else np.nan,
@@ -4795,32 +5819,25 @@ class Templates:
                             "Falling back to next alignment method.",
                             _err_off, _max_err,
                         )
-                        return None, None
+                        return _fail("chi2_shift", f"formal error {_err_off:.2f} px")
 
-                    # Shift the template to match the science image
-                    # shiftnd takes (y_shift, x_shift) - we shift tpl by (-yoff, -xoff)
+                    # Shift the template to match the science image, and shift
+                    # its validity mask separately.  shiftnd takes
+                    # (y_shift, x_shift) - we shift tpl by (-yoff, -xoff).
+                    # The mask uses linear interpolation + a 0.5 threshold so
+                    # the invalid boundary follows the sub-pixel shift; the
+                    # vacated edge (which shiftnd fills by wraparound) gets
+                    # cval=0 and is correctly marked invalid.
                     aligned_tpl = _imgreg_shift.shiftnd(
-                        np.where(np.isfinite(templateImage), templateImage, 0.0),
+                        np.where(_valid_tpl, templateImage, 0.0),
                         (-yoff, -xoff),
                     )
                     aligned_tpl = np.asarray(aligned_tpl, dtype=np.float32)
-
-                    # Ensure output matches science image shape.  shiftnd
-                    # preserves the input (template) shape; if template and
-                    # science differ, crop or pad to the science dimensions so
-                    # the WCS and pixel grid are consistent for subtraction.
-                    _sci_shape = scienceImage.shape
-                    if aligned_tpl.shape != _sci_shape:
-                        logger.info(
-                            "chi2_shift: cropping/padding aligned template "
-                            "from %s to science shape %s.",
-                            aligned_tpl.shape, _sci_shape,
-                        )
-                        _padded = np.full(_sci_shape, np.nan, dtype=np.float32)
-                        _h = min(aligned_tpl.shape[0], _sci_shape[0])
-                        _w = min(aligned_tpl.shape[1], _sci_shape[1])
-                        _padded[:_h, :_w] = aligned_tpl[:_h, :_w]
-                        aligned_tpl = _padded
+                    _aligned_valid = _ndimage_shift(
+                        _valid_tpl.astype(np.float32), (-yoff, -xoff),
+                        order=1, mode="constant", cval=0.0,
+                    )
+                    aligned_tpl[_aligned_valid < 0.5] = np.nan
 
                     # Write with science WCS
                     hdr = templateHeader.copy()
@@ -4830,19 +5847,39 @@ class Templates:
                     hdr["NAXIS1"] = aligned_tpl.shape[1]
                     hdr["NAXIS2"] = aligned_tpl.shape[0]
                     # Store alignment quality in header for downstream SFFT
-                    # kernel sizing and photometry provenance.
+                    # kernel sizing and photometry provenance.  _cmed defaults
+                    # to the applied shift; the post-shift source-match
+                    # residual replaces it when measurable (it is None in the
+                    # source-free fields chi2_shift exists for).
                     _cmed = total_offset
                     _crms = None
                     _cp90 = None
+                    _cquad = None
+                    _cmetrics = None
                     try:
                         _cmetrics = compute_alignment_rms(
                             scienceImage, aligned_tpl, fwhm_pix,
                             input_yaml=self.input_yaml,
+                            sci_xy_override=_science_xy(),
+                            return_per_quadrant=True,
                         )
-                        if _cmetrics is not None:
-                            _cmed, _crms, _cp90 = _cmetrics
+                        if _cmetrics is not None and len(_cmetrics) == 4:
+                            _cmed, _crms, _cp90, _cquad = _cmetrics
+                        elif _cmetrics is not None:
+                            _cmed, _crms, _cp90 = _cmetrics[:3]
                     except Exception:
                         logger.debug("chi2_shift: RMS computation failed", exc_info=True)
+                    if _cmetrics:
+                        _cquality, _creasons = _classify_alignment_quality(
+                            _cmed, _crms, _cp90,
+                            _cquad.get("coverage_ok") if _cquad else None,
+                            *_gates,
+                        )
+                    else:
+                        # chi2_shift exists for source-free fields where no
+                        # match metrics are measurable; unverified is the
+                        # honest classification.
+                        _cquality, _creasons = "unverified", []
                     try:
                         if _cmed is not None and np.isfinite(_cmed):
                             hdr["ALIGMED"] = (float(_cmed), "Alignment median offset (px)")
@@ -4853,148 +5890,169 @@ class Templates:
                         hdr["ALIGMETH"] = ("chi2_shift", "Alignment method used")
                     except Exception:
                         pass
-                    fits.PrimaryHDU(aligned_tpl, header=hdr).writeto(
-                        new_templateFpath, overwrite=True,
-                        output_verify="silentfix+ignore",
-                    )
+                    _atomic_fits_write(new_templateFpath, aligned_tpl, hdr)
+                    try:
+                        from functions import refresh_sibling_weight_map
+
+                        refresh_sibling_weight_map(new_templateFpath)
+                    except Exception:
+                        pass
 
                     method_used = "chi2_shift"
                     logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
-                    return scienceFpath, new_templateFpath
+                    return AlignmentResult(
+                        scienceFpath, new_templateFpath, method_used, _cmed,
+                        rms_px=_crms, p90_px=_cp90,
+                        coverage_ok=(
+                            _cquad.get("coverage_ok") if _cquad else None
+                        ),
+                        n_matches=(
+                            _cquad.get("n_matched") if _cquad else None
+                        ),
+                        finite_fraction=float(np.mean(np.isfinite(aligned_tpl))),
+                        quality=_cquality,
+                        message="; ".join(_creasons),
+                    )
 
                 except Exception as _e:
                     log_warning_from_exception(logger, "chi2_shift alignment failed", _e)
-                    return None, None
+                    return _fail("chi2_shift", str(_e))
 
             # ------------------------------------------------------------------
             # Cascade
             # ------------------------------------------------------------------
             if method == "swarp":
-                out = _swarp()
+                out = _attempt(_swarp)
                 if out[0] and out[1]:
-                    return out
-                out = _reproject()
+                    return _finish(out)
+                out = _attempt(_reproject)
                 if out[0] and out[1]:
-                    return out
-                out = _astroalign()
+                    return _finish(out)
+                out = _attempt(_astroalign)
                 if out[0] and out[1]:
-                    return out
-                out = _chi2_shift()
+                    return _finish(out)
+                out = _attempt(_chi2_shift)
                 if out[0] and out[1]:
-                    return out
+                    return _finish(out)
                 logger.error(
                     "All alignment methods failed (swarp->reproject->astroalign->chi2_shift). "
-                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                    "Skipping template subtraction: aligned inputs are required "
+                    "for a meaningful difference image."
                 )
-                return scienceFpath, templateFpath
+                return _finish(_fail(str(method), "all methods failed"))
 
             if method == "astroalign":
-                out = _astroalign()
+                out = _attempt(_astroalign)
                 if out[0] and out[1]:
-                    return out
-                out = _reproject()
+                    return _finish(out)
+                out = _attempt(_reproject)
                 if out[0] and out[1]:
-                    return out
-                out = _swarp()
+                    return _finish(out)
+                out = _attempt(_swarp)
                 if out[0] and out[1]:
-                    return out
-                out = _chi2_shift()
+                    return _finish(out)
+                out = _attempt(_chi2_shift)
                 if out[0] and out[1]:
-                    return out
+                    return _finish(out)
                 logger.error(
                     "All alignment methods failed (astroalign->reproject->swarp->chi2_shift). "
-                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                    "Skipping template subtraction: aligned inputs are required "
+                    "for a meaningful difference image."
                 )
-                return scienceFpath, templateFpath
+                return _finish(_fail(str(method), "all methods failed"))
 
             if method == "reproject":
                 logger.warning(
                     "alignment_method='reproject' selected. spalipy ('spalipy') is the most robust "
                     "alignment method. Consider switching to spalipy."
                 )
-                out = _reproject()
+                out = _attempt(_reproject)
                 if out[0] and out[1]:
-                    return out
-                out = _swarp()
+                    return _finish(out)
+                out = _attempt(_swarp)
                 if out[0] and out[1]:
-                    return out
-                out = _astroalign()
+                    return _finish(out)
+                out = _attempt(_astroalign)
                 if out[0] and out[1]:
-                    return out
-                out = _chi2_shift()
+                    return _finish(out)
+                out = _attempt(_chi2_shift)
                 if out[0] and out[1]:
-                    return out
+                    return _finish(out)
                 logger.error(
                     "All alignment methods failed (reproject->swarp->astroalign->chi2_shift). "
-                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                    "Skipping template subtraction: aligned inputs are required "
+                    "for a meaningful difference image."
                 )
-                return scienceFpath, templateFpath
+                return _finish(_fail(str(method), "all methods failed"))
 
             if method == "spalipy":
                 # spalipy: spline-warp registration for non-homogeneous distortion.
-                out = _spalipy()
+                out = _attempt(_spalipy)
                 if out[0] and out[1]:
-                    return out
-                out = _swarp()
+                    return _finish(out)
+                out = _attempt(_swarp)
                 if out[0] and out[1]:
-                    return out
-                out = _reproject()
+                    return _finish(out)
+                out = _attempt(_reproject)
                 if out[0] and out[1]:
-                    return out
-                out = _astroalign()
+                    return _finish(out)
+                out = _attempt(_astroalign)
                 if out[0] and out[1]:
-                    return out
-                out = _chi2_shift()
+                    return _finish(out)
+                out = _attempt(_chi2_shift)
                 if out[0] and out[1]:
-                    return out
+                    return _finish(out)
                 logger.error(
                     "All alignment methods failed (spalipy->swarp->reproject->astroalign->chi2_shift). "
-                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                    "Skipping template subtraction: aligned inputs are required "
+                    "for a meaningful difference image."
                 )
-                return scienceFpath, templateFpath
+                return _finish(_fail(str(method), "all methods failed"))
 
             if method == "tweakwcs":
                 # tweakwcs: STScI WCS tweaking + reproject (HST/JWST approach).
-                out = _tweakwcs()
+                out = _attempt(_tweakwcs)
                 if out[0] and out[1]:
-                    return out
-                out = _swarp()
+                    return _finish(out)
+                out = _attempt(_swarp)
                 if out[0] and out[1]:
-                    return out
-                out = _reproject()
+                    return _finish(out)
+                out = _attempt(_reproject)
                 if out[0] and out[1]:
-                    return out
-                out = _astroalign()
+                    return _finish(out)
+                out = _attempt(_astroalign)
                 if out[0] and out[1]:
-                    return out
-                out = _chi2_shift()
+                    return _finish(out)
+                out = _attempt(_chi2_shift)
                 if out[0] and out[1]:
-                    return out
+                    return _finish(out)
                 logger.error(
                     "All alignment methods failed (tweakwcs->swarp->reproject->astroalign->chi2_shift). "
-                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                    "Skipping template subtraction: aligned inputs are required "
+                    "for a meaningful difference image."
                 )
-                return scienceFpath, templateFpath
+                return _finish(_fail(str(method), "all methods failed"))
 
             if method == "chi2_shift":
                 # chi2_shift: cross-correlation for extended-source-dominated fields.
-                out = _chi2_shift()
+                out = _attempt(_chi2_shift)
                 if out[0] and out[1]:
-                    return out
-                out = _swarp()
+                    return _finish(out)
+                out = _attempt(_swarp)
                 if out[0] and out[1]:
-                    return out
-                out = _reproject()
+                    return _finish(out)
+                out = _attempt(_reproject)
                 if out[0] and out[1]:
-                    return out
-                out = _astroalign()
+                    return _finish(out)
+                out = _attempt(_astroalign)
                 if out[0] and out[1]:
-                    return out
+                    return _finish(out)
                 logger.error(
                     "All alignment methods failed (chi2_shift->swarp->reproject->astroalign). "
-                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                    "Skipping template subtraction: aligned inputs are required "
+                    "for a meaningful difference image."
                 )
-                return scienceFpath, templateFpath
+                return _finish(_fail(str(method), "all methods failed"))
 
             # Unknown method: default to spalipy (RA/DEC pre-matching +
             # spline-warp handles non-homogeneous distortion).
@@ -5003,30 +6061,35 @@ class Templates:
                 "(spalipy is the most robust alignment method).",
                 method,
             )
-            out = _spalipy()
+            out = _attempt(_spalipy)
             if out[0] and out[1]:
-                return out
-            out = _swarp()
+                return _finish(out)
+            out = _attempt(_swarp)
             if out[0] and out[1]:
-                return out
-            out = _reproject()
+                return _finish(out)
+            out = _attempt(_reproject)
             if out[0] and out[1]:
-                return out
-            out = _astroalign()
+                return _finish(out)
+            out = _attempt(_astroalign)
             if out[0] and out[1]:
-                return out
-            out = _chi2_shift()
+                return _finish(out)
+            out = _attempt(_chi2_shift)
             if out[0] and out[1]:
-                return out
+                return _finish(out)
             logger.error(
                 "All alignment methods failed. "
-                "Proceeding with original unaligned images; subtraction quality may be poor."
+                "Skipping template subtraction: aligned inputs are required "
+                "for a meaningful difference image."
             )
-            return scienceFpath, templateFpath
+            return _finish(_fail(str(method), "all methods failed"))
 
         except Exception:
             logger.exception("Error during alignment")
-            return None, None
+            return AlignmentResult(
+                None, None, str(method), None,
+                quality="fail",
+                message="unhandled exception in align()",
+            )
 
     def _update_target_coordinates_after_alignment(
         self, aligned_image_path: str, method_name: str
@@ -5633,6 +6696,7 @@ class Templates:
         gain: float = 1.0,
         mask: Optional[np.ndarray] = None,
         model_floor_frac: float = 0.05,
+        n_jobs: int = 1,
     ) -> np.ndarray:
         """
         Reduced chi^2 of a PSF-model fit on a small stamp per position.
@@ -5642,19 +6706,23 @@ class Templates:
         (blends, extended sources, artifacts) rather than centroid error --
         then amplitude and a constant sky offset are fit by weighted least
         squares.  Pixel weights use the local sky MAD plus a Poisson term
-        (``gain`` converts the model amplitude to electrons) and a
-        fractional model-mismatch floor, so bright, well-fit stars are not
-        rejected for sub-percent ePSF inaccuracies.
+        and a fractional model-mismatch floor, so bright, well-fit stars
+        are not rejected for sub-percent ePSF inaccuracies.
+
+        Units: ``image`` must be in ADU and ``gain`` in electrons/ADU
+        (the pipeline convention).  The Poisson term ``A*P/gain`` is then
+        the model source counts converted back to ADU-space variance;
+        passing an electron-space image would underestimate it by gain^2.
 
         Returns ``NaN`` where the fit cannot be made (off-frame, fully
         masked, too few valid pixels) and ``+inf`` where the fitted
         amplitude is non-positive.  ``NaN`` means "unverifiable" -- the
         caller decides whether such sources are kept.
-        """
-        from astropy.stats import biweight_scale
-        from limits import _render_epsf_on_cutout
-        from photutils.centroids import centroid_2dg
 
+        ``n_jobs`` > 1 spreads the per-source fits over a process pool for
+        large position lists; any pool failure falls back to the serial
+        loop.
+        """
         n = 0 if x_pos is None else len(x_pos)
         chi2 = np.full(n, np.nan)
         if (
@@ -5674,9 +6742,8 @@ class Templates:
         h = max(4, int(np.ceil(1.5 * fwhm)))  # ~3xFWHM fit box
         h2 = h + 3  # outer ring supplies the local sky MAD
         yy, xx = np.indices((2 * h + 1, 2 * h + 1))
-        ring_r2 = (xx - h) ** 2 + (yy - h) ** 2
+        wy, wx = np.indices((2 * h2 + 1, 2 * h2 + 1))
         gain = float(gain) if np.isfinite(gain) and gain > 0 else 1.0
-        ny, nx = img.shape
 
         # A GriddedPSFModel must be pinned to the local ePSF at each
         # source's detector position before stamp rendering - the render
@@ -5685,112 +6752,58 @@ class Templates:
         _psf_is_gridded = False
         try:
             from photutils.psf import GriddedPSFModel as _GPM
-            from psf import epsf_at_position as _epsf_at_pos
 
             _psf_is_gridded = isinstance(psf_model, _GPM)
         except Exception:
             _psf_is_gridded = False
 
+        ctx = {
+            "img": img,
+            "mask": mask,
+            "psf_model": psf_model,
+            "psf_is_gridded": _psf_is_gridded,
+            "xs": np.asarray(x_pos, dtype=float),
+            "ys": np.asarray(y_pos, dtype=float),
+            "osamp": osamp,
+            "h": h,
+            "h2": h2,
+            "ring_r2": (xx - h) ** 2 + (yy - h) ** 2,
+            "ring": (wx - h2) ** 2 + (wy - h2) ** 2 > h ** 2,
+            "gain": gain,
+            "model_floor_frac": float(model_floor_frac),
+        }
+
+        try:
+            n_jobs = max(1, int(n_jobs))
+        except Exception:
+            n_jobs = 1
+        # The pool is only worthwhile for large candidate lists; below the
+        # threshold its startup cost exceeds the serial loop's runtime.
+        if n_jobs > 1 and n >= 64:
+            try:
+                from aperture import _resolve_n_jobs
+                from multiprocessing import Pool
+
+                workers = _resolve_n_jobs(n_jobs)
+                if workers > 1:
+                    with Pool(
+                        processes=workers,
+                        initializer=_psf_stamp_init_shared,
+                        initargs=(ctx,),
+                    ) as pool:
+                        vals = pool.map(_psf_stamp_task, range(n))
+                    chi2 = np.asarray(vals, dtype=float)
+                    return chi2
+            except Exception:
+                logger.debug(
+                    "Parallel PSF stamp chi2 failed; using serial path.",
+                    exc_info=True,
+                )
+
         for i in range(n):
-            x, y = float(x_pos[i]), float(y_pos[i])
-            if not (np.isfinite(x) and np.isfinite(y)):
-                continue
-            xi, yi = int(round(x)), int(round(y))
-            if yi - h < 0 or yi + h >= ny or xi - h < 0 or xi + h >= nx:
-                continue
-            stamp = img[yi - h : yi + h + 1, xi - h : xi + h + 1]
-            valid = np.isfinite(stamp)
-            if mask is not None:
-                m = mask[yi - h : yi + h + 1, xi - h : xi + h + 1]
-                valid &= ~np.asarray(m, dtype=bool)
-            if int(valid.sum()) < 12:
-                continue
-
-            # Local sky scatter from a ring outside the fit box.
-            sig0 = np.nan
-            if yi - h2 >= 0 and yi + h2 < ny and xi - h2 >= 0 and xi + h2 < nx:
-                wide = img[yi - h2 : yi + h2 + 1, xi - h2 : xi + h2 + 1]
-                yw, xw = np.indices(wide.shape)
-                ring = (xw - h2) ** 2 + (yw - h2) ** 2 > h ** 2
-                ring_pix = wide[ring & np.isfinite(wide)]
-                if ring_pix.size >= 8:
-                    sig0 = float(biweight_scale(ring_pix, ignore_nan=True))
-            if not np.isfinite(sig0) or sig0 <= 0:
-                edge_pix = stamp[valid & (ring_r2 > (0.6 * h) ** 2)]
-                if edge_pix.size >= 6:
-                    sig0 = float(biweight_scale(edge_pix, ignore_nan=True))
-            if not np.isfinite(sig0) or sig0 <= 0:
-                continue
-
-            # Re-centre the model on the stamp centroid so a small catalog
-            # position error is not mistaken for a PSF-shape mismatch.
-            lx, ly = x - (xi - h), y - (yi - h)
-            try:
-                _cen = centroid_2dg(np.where(valid, stamp, np.nan))
-                if (
-                    _cen is not None
-                    and np.isfinite(_cen[0])
-                    and np.isfinite(_cen[1])
-                    and 0 <= _cen[0] <= 2 * h
-                    and 0 <= _cen[1] <= 2 * h
-                ):
-                    lx, ly = float(_cen[0]), float(_cen[1])
-            except Exception:
-                pass
-
-            _m = psf_model
-            if _psf_is_gridded:
-                try:
-                    _m = _epsf_at_pos(psf_model, x, y)
-                except Exception:
-                    _m = None
-                if _m is None:
-                    continue
-            try:
-                P = np.asarray(
-                    _render_epsf_on_cutout(
-                        _m, 2 * h + 1, 2 * h + 1, lx, ly, 1.0, osamp
-                    ),
-                    dtype=float,
-                )
-            except Exception:
-                continue
-            valid &= np.isfinite(P)
-            if int(valid.sum()) < 12:
-                continue
-
-            # WLS fit of stamp = A*P + c.  Two passes: the first uses the
-            # data for the Poisson term, the second the fitted model.
-            d = np.where(valid, stamp, 0.0)
-            Pv = np.where(valid, P, 0.0)
-            A = 0.0
-            chi2_red = np.nan
-            for _pass in range(2):
-                var = sig0 ** 2 + np.clip(A * Pv, 0.0, None) / gain
-                if model_floor_frac > 0:
-                    var = var + (model_floor_frac * np.abs(A) * Pv) ** 2
-                w = np.where(valid, 1.0 / np.maximum(var, 1e-12), 0.0)
-                Spp = float(np.sum(w * Pv * Pv))
-                Sp = float(np.sum(w * Pv))
-                S = float(np.sum(w))
-                Spd = float(np.sum(w * Pv * d))
-                Sd = float(np.sum(w * d))
-                det = Spp * S - Sp * Sp
-                if not np.isfinite(det) or abs(det) < 1e-20:
-                    break
-                A = (S * Spd - Sp * Sd) / det
-                c = (Spp * Sd - Sp * Spd) / det
-                dof = int(valid.sum()) - 2
-                chi2_red = (
-                    float(np.sum(w * (d - A * Pv - c) ** 2)) / dof
-                    if dof > 0
-                    else np.nan
-                )
-            if not np.isfinite(A) or A <= 0:
-                chi2[i] = np.inf
-                continue
-            chi2[i] = chi2_red
-
+            chi2[i] = _psf_stamp_eval(
+                float(ctx["xs"][i]), float(ctx["ys"][i]), ctx
+            )
         return chi2
 
     def find_flux_consistent_sources(
@@ -6022,6 +7035,9 @@ class Templates:
                 if _pv_chi2_max > 0:
                     _pv_x, _pv_y = self._catalog_xy(catalog_img.loc[indices])
                     _pv_x_t, _pv_y_t = self._catalog_xy(catalog_tpl.loc[indices])
+                    _pv_njobs = int(
+                        (self.input_yaml or {}).get("n_jobs", 1) or 1
+                    )
                     try:
                         psf_chi2_sci = self._psf_stamp_chi2(
                             psf_vetting.get("image_sci"),
@@ -6032,6 +7048,7 @@ class Templates:
                             gain=psf_vetting.get("gain_sci", 1.0),
                             mask=psf_vetting.get("mask_sci"),
                             model_floor_frac=_pv_floor_sci,
+                            n_jobs=_pv_njobs,
                         )
                     except Exception:
                         logger.debug(
@@ -6048,6 +7065,7 @@ class Templates:
                             gain=psf_vetting.get("gain_tpl", 1.0),
                             mask=psf_vetting.get("mask_tpl"),
                             model_floor_frac=_pv_floor_tpl,
+                            n_jobs=_pv_njobs,
                         )
                     except Exception:
                         logger.debug(
@@ -7110,18 +8128,28 @@ class Templates:
         kernel_order : int
             Spatial-variation polynomial order.
         matching_sources : list of (x, y) or None
-            Source positions used for kernel fitting.
+            Kernel-prior positions on the aligned science grid, in
+            **0-based** NumPy pixel coordinates.  The SFFT adapter converts
+            them to 1-based SExtractor coordinates internally.
         masked_sources : list of (x, y) or None
-            Additional positions to exclude from fitting.
+            Positions to ban from kernel fitting, in **1-based**
+            SExtractor/FITS coordinates (the convention ``run_sfft.py``
+            expects for ``XY_PriorBan``).
         stamp_loc : str or None
-            Path to a stamp-selection file (HOTPANTS ``-ssf``).
+            Path to a stamp-selection file (HOTPANTS ``-ssf``, 1-based
+            coordinates).  When None, the HOTPANTS adapter builds one from
+            ``matching_sources`` with the target excluded.
         scienceNoise, templateNoise : str or None
-            Optional external noise-map FITS files.
+            Optional external noise-map FITS files.  They must live on the
+            same pixel grid as the image actually fed to the backend; the
+            template weight map is not resampled by ``align()``, so a
+            mismatched map is dropped with a warning rather than
+            misapplied.  Used by HOTPANTS (``-ini``/``-tni``).
 
         Returns
         -------
-        (differenceFpath, visualization_mask, masked_centers)
-            Paths and arrays, or (None, None, None) on failure.
+        (differenceFpath, visualization_mask, masked_centers, kernel_half_width)
+            Paths and arrays, or (None, None, None, None) on failure.
         """
         if matching_sources is None:
             matching_sources = []
@@ -7152,6 +8180,8 @@ class Templates:
         _sci_clean_path: Optional[str] = None
         _ref_clean_path: Optional[str] = None
         _sci_prepared_path: Optional[str] = None
+        _tpl_sfft_path: Optional[str] = None
+        _diff_part_path: Optional[str] = None
         kernel_half_width: Optional[int] = None
 
         try:
@@ -7163,6 +8193,55 @@ class Templates:
             scienceDir = Path(scienceFpath).parent
             base_name = Path(scienceFpath).name
             differenceFpath = str(scienceDir / f"diff_{base_name}")
+
+            # ---------------------------------------------------------
+            # Pre-subtraction grid validation.
+            # Every backend subtracts pixel-by-pixel, so both inputs must
+            # be 2-D images resampled onto a common grid.  A finite but
+            # wrong-shaped or wrongly-projected template would silently
+            # corrupt the difference image and downstream target
+            # photometry.
+            # ---------------------------------------------------------
+            if scienceImage.ndim != 2 or templateImage.ndim != 2:
+                logger.error(
+                    "Subtraction requires 2-D images; got science ndim=%d, "
+                    "template ndim=%d.",
+                    scienceImage.ndim,
+                    templateImage.ndim,
+                )
+                return None, None, None, None
+            if scienceImage.shape != templateImage.shape:
+                logger.error(
+                    "Science/template shape mismatch %s vs %s; "
+                    "template was not resampled to the science grid.",
+                    scienceImage.shape,
+                    templateImage.shape,
+                )
+                return None, None, None, None
+            _sci_wcs_v = get_wcs(scienceHeader)
+            _tpl_wcs_v = get_wcs(templateHeader)
+            if _sci_wcs_v is None or _tpl_wcs_v is None:
+                logger.error(
+                    "Subtraction requires valid science/template WCS "
+                    "(science=%s, template=%s).",
+                    "ok" if _sci_wcs_v is not None else "missing",
+                    "ok" if _tpl_wcs_v is not None else "missing",
+                )
+                return None, None, None, None
+            _grid_tol = float(
+                self.input_yaml.get("template_subtraction", {}).get(
+                    "common_grid_tol_px", 0.5
+                )
+            )
+            if not _wcs_on_common_grid(
+                _sci_wcs_v, _tpl_wcs_v, scienceImage.shape, tol_px=_grid_tol
+            ):
+                logger.error(
+                    "Science and template do not share a common pixel grid "
+                    "(tolerance %.3f px); refusing to subtract.",
+                    _grid_tol,
+                )
+                return None, None, None, None
 
             def _ensure_prepared_template_path() -> str:
                 nonlocal prepared_template_fpath, template_work_fpath
@@ -7181,87 +8260,16 @@ class Templates:
                     )
                 return template_work_fpath
 
-            # Sky subtraction for SFFT sparse flavor.
-            #
-            # Hu et al. 2022 (Section 3.2): "the input image-pair of sparse-flavor
-            # SFFT is required to be sky subtracted. This requirement is to
-            # simplify the image-masking process so that all the pixels enclosed
-            # in masked regions can be replaced by a constant of zero."
-            #
-            # SFFT's sparse-flavor masking sets non-source regions to zero.  If
-            # images have a non-zero sky background (~1000s of ADU), the zero-masked
-            # regions create artificial step functions at mask boundaries that
-            # corrupt the FFT-based kernel solution.  With sky-subtracted images,
-            # both masked and source regions are near zero, so the step function
-            # is minimal.
-            #
-            # We subtract a sigma-clipped MEDIAN (constant) from each image.  This
-            # is different from BACK_TYPE=AUTO (which uses SExtractor's spatially-
-            # varying background model and was previously tested and rejected due
-            # to residual spatial variations).  A constant median subtraction
-            # removes the DC offset without introducing spatial structure.
-            # BGPolyOrder >= 1 still models any residual spatial background
-            # difference between the two images.
-            #
-            # SFFT's internal photometric scaling (ConstPhotRatio or polynomial)
-            # is unaffected by a constant offset subtraction: the kernel integral
-            # and flux ratio are unchanged when both images are shifted by
-            # constants, because the differential background term absorbs the
-            # difference.
-            ts_cfg_sky = self.input_yaml.get("template_subtraction", {})
-            _sky_subtract = _as_bool(
-                ts_cfg_sky.get("sky_subtract", ts_cfg_sky.get("sfft_sky_subtract", True)),
-                True,
-            )
-            if _sky_subtract:
-                from astropy.stats import sigma_clipped_stats as _scs
-                for _img_label, _img_data, _img_hdr, _is_sci in [
-                    ("science", scienceImage, scienceHeader, True),
-                    ("template", templateImage, templateHeader, False),
-                ]:
-                    _invalid = ~np.isfinite(_img_data) | (np.abs(_img_data) < 1.1e-20)
-                    if _invalid.all():
-                        logger.debug("Sky subtraction skipped for %s: all pixels invalid.", _img_label)
-                        continue
-                    _, _sky_median, _ = _scs(_img_data, mask=_invalid, sigma=3, maxiters=5)
-                    if np.isfinite(_sky_median) and abs(_sky_median) > 1e-10:
-                        _img_data = _img_data - _sky_median
-                        # Restore NaN at invalid/sentinel positions: subtracting
-                        # the median would otherwise turn 0-sentinel pixels
-                        # (SWarp no-coverage, chip gaps) into -median, which
-                        # escapes both the |x|<1.1e-20 sentinel test and the
-                        # ~isfinite test in the mask construction below.
-                        _img_data = np.where(_invalid, np.nan, _img_data)
-                        if _is_sci:
-                            scienceImage = _img_data
-                            # Write sky-subtracted science to a temp file so SFFT
-                            # reads the sky-subtracted version, not the original.
-                            fd, _sci_tmp = tempfile.mkstemp(
-                                prefix="science_skysub_",
-                                suffix=".fits",
-                                dir=str(scienceDir),
-                            )
-                            os.close(fd)
-                            write_fits(_sci_tmp, scienceImage, scienceHeader)
-                            _sci_prepared_path = _sci_tmp
-                            scienceFpath = _sci_tmp
-                            if not os.path.exists(_sci_tmp):
-                                logger.warning(
-                                    "Sky-subtracted science temp file not found after write: %s",
-                                    _sci_tmp,
-                                )
-                                scienceFpath = str(scienceDir / sci_name)
-                            logger.info(
-                                "Science image sky-subtracted (median %.4g ADU removed).",
-                                float(_sky_median),
-                            )
-                        else:
-                            templateImage = _img_data
-                            write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
-                            logger.info(
-                                "Template image sky-subtracted (median %.4g ADU removed).",
-                                float(_sky_median),
-                            )
+            # Sky subtraction is backend-specific:
+            #   - SFFT sparse flavor requires sky-subtracted inputs (Hu et al.
+            #     2022 S3.2: masked regions become zero, so a sky pedestal
+            #     would create step edges at mask boundaries).  Applied inside
+            #     the SFFT branch below, to dedicated temp files, so a
+            #     SFFT -> HOTPANTS fallback never mixes sky-subtracted and
+            #     original inputs.
+            #   - ZOGY subtracts its own sigma-clipped median internally.
+            #   - HOTPANTS models the background itself (-bgo) and must see
+            #     the original images.
 
             # Keep interpolation to the WCS reproject stage only.
 
@@ -7829,22 +8837,19 @@ class Templates:
             if background_defects_mask is not None:
                 background_defects_mask = background_defects_mask.astype(bool)
                 if background_defects_mask.shape != scienceImage.shape:
-                    # Shapes differ after alignment/crop; crop the defects mask to the
-                    # science image extent (top-left origin, clipped to valid overlap)
-                    # rather than silently discarding it.
-                    dm = background_defects_mask
-                    sh, sw = scienceImage.shape
-                    dh, dw = dm.shape
-                    crop_h = min(sh, dh)
-                    crop_w = min(sw, dw)
-                    dm_crop = np.zeros(scienceImage.shape, dtype=bool)
-                    dm_crop[:crop_h, :crop_w] = dm[:crop_h, :crop_w]
-                    background_defects_mask = dm_crop
-                    logger.info(
-                        "Background defects mask shape %s != science shape %s; "
-                        "cropped to overlap region (%dx%d).",
-                        dm.shape, scienceImage.shape, crop_h, crop_w,
+                    # The mask lives on a different pixel grid than the
+                    # aligned science image.  Cropping by array origin would
+                    # silently misplace defects (alignment may shift, crop,
+                    # or resample the frame), so discard it instead: a wrong
+                    # mask is worse than no mask.
+                    logger.warning(
+                        "Background defects mask shape %s != aligned science "
+                        "shape %s; discarding rather than applying an "
+                        "unregistered mask.",
+                        background_defects_mask.shape, scienceImage.shape,
                     )
+                    background_defects_mask = None
+            if background_defects_mask is not None:
                 mask_essential = mask_essential | background_defects_mask
                 logger.info(
                     "Included background defects mask (saturation streaks, satellite trails) in universal mask."
@@ -8152,9 +9157,17 @@ class Templates:
             # =============================================================
             # 5. Run subtraction backend
             # =============================================================
+            # Track which backend actually produced the difference image.
+            # The cascade is linear (zogy -> sfft -> hotpants); each helper
+            # returns "done" on success or the next method to try.  Recorded
+            # in the diff header (SUBALGO/SUBREQ/SUBFALL) for provenance --
+            # the helpers mutate `method`, so without this the metadata can
+            # only record the literal string "done".
+            requested_method = method
+            backend_used: Optional[str] = None
 
             if method == "zogy":
-                method = self._subtract_zogy(
+                _res = self._subtract_zogy(
                     scienceFpath,
                     template_work_fpath,
                     differenceFpath,
@@ -8167,20 +9180,119 @@ class Templates:
                     science_fwhm=science_fwhm,
                     template_fwhm=template_fwhm,
                 )
+                if _res == "done":
+                    backend_used = "zogy"
+                method = _res
 
             if method == "sfft":
+                # SFFT sparse flavor requires sky-subtracted inputs
+                # (Hu et al. 2022 S3.2): its masking replaces non-source
+                # pixels with zero, so a sky pedestal creates step edges at
+                # mask boundaries that corrupt the FFT-based kernel solution.
+                # Applied ONLY here, to dedicated temp files, so a later
+                # HOTPANTS fallback still sees the original images (HOTPANTS
+                # models the background itself via -bgo; ZOGY subtracts its
+                # own median internally).  A shared pre-subtraction
+                # previously left SFFT->HOTPANTS fallbacks mixing original
+                # science with a sky-subtracted template.
+                _sci_sfft_in = str(scienceFpath)
+                _tpl_sfft_in = str(template_work_fpath)
+                ts_cfg_sky = self.input_yaml.get("template_subtraction", {})
+                _sky_subtract = _as_bool(
+                    ts_cfg_sky.get(
+                        "sky_subtract",
+                        ts_cfg_sky.get("sfft_sky_subtract", True),
+                    ),
+                    True,
+                )
+                if _sky_subtract:
+                    from astropy.stats import sigma_clipped_stats as _scs
+                    for _img_label, _img_data, _img_hdr, _is_sci in [
+                        ("science", scienceImage, scienceHeader, True),
+                        ("template", templateImage, templateHeader, False),
+                    ]:
+                        _invalid = ~np.isfinite(_img_data) | (
+                            np.abs(_img_data) < 1.1e-20
+                        )
+                        if _invalid.all():
+                            logger.debug(
+                                "Sky subtraction skipped for %s: all pixels invalid.",
+                                _img_label,
+                            )
+                            continue
+                        _, _sky_median, _ = _scs(
+                            _img_data, mask=_invalid, sigma=3, maxiters=5
+                        )
+                        if not (np.isfinite(_sky_median) and abs(_sky_median) > 1e-10):
+                            continue
+                        _img_data = _img_data - _sky_median
+                        # Restore NaN at invalid/sentinel positions: subtracting
+                        # the median would otherwise turn 0-sentinel pixels
+                        # (SWarp no-coverage, chip gaps) into -median, which
+                        # escapes both the |x|<1.1e-20 sentinel test and the
+                        # ~isfinite test in the mask construction.
+                        _img_data = np.where(_invalid, np.nan, _img_data)
+                        if _is_sci:
+                            scienceImage = _img_data
+                            fd, _sci_tmp = tempfile.mkstemp(
+                                prefix="science_skysub_",
+                                suffix=".fits",
+                                dir=str(scienceDir),
+                            )
+                            os.close(fd)
+                            write_fits(_sci_tmp, scienceImage, scienceHeader)
+                            if os.path.exists(_sci_tmp):
+                                _sci_prepared_path = _sci_tmp
+                                _sci_sfft_in = _sci_tmp
+                            else:
+                                logger.warning(
+                                    "Sky-subtracted science temp file not found after write: %s",
+                                    _sci_tmp,
+                                )
+                            logger.info(
+                                "Science image sky-subtracted for SFFT (median %.4g ADU removed).",
+                                float(_sky_median),
+                            )
+                        else:
+                            templateImage = _img_data
+                            fd, _tpl_tmp = tempfile.mkstemp(
+                                prefix="template_skysub_",
+                                suffix=".fits",
+                                dir=str(scienceDir),
+                            )
+                            os.close(fd)
+                            write_fits(_tpl_tmp, templateImage, templateHeader)
+                            if os.path.exists(_tpl_tmp):
+                                _tpl_sfft_path = _tpl_tmp
+                                _tpl_sfft_in = _tpl_tmp
+                            else:
+                                logger.warning(
+                                    "Sky-subtracted template temp file not found after write: %s",
+                                    _tpl_tmp,
+                                )
+                            logger.info(
+                                "Template image sky-subtracted for SFFT (median %.4g ADU removed).",
+                                float(_sky_median),
+                            )
+
                 # Clean input files to prevent SFFT from modifying originals in-place
                 # (matches HOTPANTS behavior and prevents crosstalk)
-                if not os.path.exists(scienceFpath):
+                if not os.path.exists(_sci_sfft_in):
                     logger.warning(
-                        "scienceFpath does not exist before SFFT clean_fits_nans: %s - "
+                        "SFFT science input does not exist: %s - "
                         "falling back to original science path.",
-                        scienceFpath,
+                        _sci_sfft_in,
                     )
-                    # Walk back to the original science file (stored at function entry)
-                    scienceFpath = str(scienceDir / sci_name)
-                sci_clean = clean_fits_nans(scienceFpath, str(scienceDir))
-                ref_clean = clean_fits_nans(template_work_fpath, str(scienceDir))
+                    _sci_sfft_in = str(scienceDir / sci_name)
+                if not os.path.exists(_tpl_sfft_in):
+                    logger.warning(
+                        "SFFT template input does not exist: %s - "
+                        "falling back to working template path.",
+                        _tpl_sfft_in,
+                    )
+                    _tpl_sfft_in = str(template_work_fpath)
+                sci_clean = clean_fits_nans(_sci_sfft_in, str(scienceDir))
+                ref_clean = clean_fits_nans(_tpl_sfft_in, str(scienceDir))
                 _sci_clean_path = sci_clean
                 _ref_clean_path = ref_clean
                 # Write per-image FWHM into the cleaned FITS headers so that
@@ -8259,7 +9371,7 @@ class Templates:
                             len(_kept_m), _min_keep_m, len(matching_sources),
                         )
 
-                method = self._subtract_sfft(
+                _res = self._subtract_sfft(
                     sci_clean,
                     ref_clean,
                     differenceFpath,
@@ -8279,19 +9391,67 @@ class Templates:
                     science_saturate,
                     template_saturate,
                 )
+                if _res == "done":
+                    backend_used = "sfft"
+                method = _res
 
             if method == "hotpants":
-                # Restore original science path for HOTPANTS: the sky-subtracted
-                # temp file was created for SFFT sparse flavor, but HOTPANTS has
-                # its own background modeling (-bgo) and expects the original
-                # image.  Using the sky-subtracted image can cause DC offset
-                # issues in the HOTPANTS difference image.
-                if _sci_prepared_path and scienceFpath == _sci_prepared_path:
-                    scienceFpath = str(scienceDir / sci_name)
-                    logger.info(
-                        "Restored original science image for HOTPANTS "
-                        "(sky-subtracted temp not needed for HOTPANTS)."
-                    )
+                # HOTPANTS always receives the original science image and the
+                # working template (inpainted if enabled) -- the SFFT-only
+                # sky subtraction above never rewrote either path, so no
+                # restore step is needed and the fallback cannot mix
+                # sky-subtracted and original inputs.
+                #
+                # Per-image masks: the universal mask conflates science-only
+                # defects (hardware mask) with template-side defects.  A
+                # science bad column is not a template defect; HOTPANTS
+                # accepts separate -imi/-tmi maps and rejects a substamp when
+                # either image is masked in its footprint.
+                sci_mask_hp = np.clip(
+                    science_mask_nans.astype(np.int32)
+                    + science_seg_mask.astype(np.int32)
+                    + (
+                        background_defects_mask.astype(np.int32)
+                        if background_defects_mask is not None
+                        else 0
+                    ),
+                    0,
+                    1,
+                )
+                tpl_mask_hp = np.clip(
+                    template_mask_nans.astype(np.int32)
+                    + template_seg_mask.astype(np.int32),
+                    0,
+                    1,
+                )
+                mask_sci_loc = os.path.join(
+                    scienceDir, f"hotpants_mask_sci_{base_name}"
+                )
+                mask_tpl_loc = os.path.join(
+                    scienceDir, f"hotpants_mask_tpl_{base_name}"
+                )
+                save_to_fits(sci_mask_hp.astype(int), mask_sci_loc)
+                save_to_fits(tpl_mask_hp.astype(int), mask_tpl_loc)
+
+                # Noise maps must live on the same pixel grid as the images
+                # actually fed to HOTPANTS.  The science map was built from
+                # the aligned science image; the template weight map (when
+                # present) was never resampled by align(), so a grid mismatch
+                # is detected here and the map is dropped rather than
+                # silently misapplied.
+                sci_noise_v = _validate_noise_map(
+                    scienceNoise,
+                    scienceImage.shape,
+                    "science",
+                    ref_wcs=_sci_wcs_v,
+                )
+                tpl_noise_v = _validate_noise_map(
+                    templateNoise,
+                    templateImage.shape,
+                    "template",
+                    ref_wcs=_tpl_wcs_v,
+                )
+
                 success = self._subtract_hotpants(
                     scienceFpath,
                     template_work_fpath,
@@ -8311,11 +9471,17 @@ class Templates:
                     template_fwhm,
                     kernel_order,
                     stamp_loc,
-                    scienceNoise,
+                    sci_noise_v,
                     sfft_kernel_hw,
+                    templateNoise=tpl_noise_v,
+                    sci_mask_loc=mask_sci_loc,
+                    tpl_mask_loc=mask_tpl_loc,
+                    matching_sources=matching_sources,
+                    target_xy=target_location,
                 )
                 if not success:
                     return None, None, None, None
+                backend_used = "hotpants"
 
             # =============================================================
             # 6. Validate output
@@ -8327,6 +9493,46 @@ class Templates:
                 return None, None, None, None
 
             diff_data, diff_header = read_fits(differenceFpath)
+
+            # The difference image must live on the science pixel grid: the
+            # caller maps target RA/Dec through its WCS for photometry, so a
+            # wrong-shaped or wrongly-projected file must not pass silently.
+            if diff_data.shape != scienceImage.shape:
+                logger.error(
+                    "Difference image shape %s != science shape %s; "
+                    "subtraction output unusable.",
+                    diff_data.shape, scienceImage.shape,
+                )
+                return None, None, None, None
+
+            # WCS validation.  Backends should copy the science header, but
+            # external tools can drop or rewrite WCS.  When the diff WCS is
+            # missing or disagrees with the science grid, inject the science
+            # WCS -- the difference image is defined on the science pixel
+            # grid by construction.
+            diff_header = _ensure_diff_wcs(
+                diff_header,
+                scienceHeader,
+                diff_data.shape,
+                target_xy=target_location[0] if target_location else None,
+            )
+
+            # Backend provenance: which backend produced this file, what was
+            # requested, and how many fallbacks occurred.
+            if backend_used is not None:
+                _cascade = ("zogy", "sfft", "hotpants")
+                try:
+                    _nfallback = max(
+                        0,
+                        _cascade.index(backend_used)
+                        - _cascade.index(requested_method),
+                    )
+                except ValueError:
+                    _nfallback = 0
+                diff_header["SUBALGO"] = backend_used
+                diff_header["SUBREQ"] = requested_method
+                diff_header["SUBFALL"] = int(_nfallback)
+
             # ------------------------------------------------------------------
             # Preserve "no data" regions through subtraction backends.
             #
@@ -8463,7 +9669,7 @@ class Templates:
 
                 # Metadata for provenance
                 _qmeta = {
-                    "algorithm": str(diff_header.get("SUBALGO", method if method == "done" else "unknown")),
+                    "algorithm": str(backend_used or "unknown"),
                     "forceconv": str(diff_header.get("FORCECON", "")),
                     "kernel_order": int(kernel_order),
                     "kernel_half_width": int(kernel_half_width) if kernel_half_width else 0,
@@ -8580,7 +9786,13 @@ class Templates:
                     diff_data[diff_invalid_mask] = np.nan
             except Exception:
                 pass
-            write_fits(differenceFpath, diff_data, diff_header)
+            # Write to a sibling temp file and rename atomically so a crash
+            # mid-write cannot leave a truncated difference image that the
+            # caller would mistake for a valid product.
+            _diff_part_path = f"{differenceFpath}.part"
+            write_fits(_diff_part_path, diff_data, diff_header)
+            os.replace(_diff_part_path, differenceFpath)
+            _diff_part_path = None
 
             # Write quality keywords to the difference image FITS header
             # AFTER the final write_fits so they are not overwritten.
@@ -8613,7 +9825,7 @@ class Templates:
             # Clean up temporary cleaned_ files created by clean_fits_nans.
             # Use the dedicated path variables (not `method`) so cleanup is
             # unconditional even when _subtract_sfft mutates `method` on fallback.
-            for _tmp in (_sci_clean_path, _ref_clean_path, _sci_prepared_path):
+            for _tmp in (_sci_clean_path, _ref_clean_path, _sci_prepared_path, _tpl_sfft_path, _diff_part_path):
                 try:
                     if _tmp and os.path.exists(_tmp):
                         os.remove(_tmp)
@@ -9578,6 +10790,18 @@ class Templates:
                     cmd_local += ["-backphototype", str(back_phototype).upper()]
                 if detect_thresh is not None:
                     cmd_local += ["-detect_thresh", str(float(detect_thresh))]
+
+                # Compute backend: numpy (CPU) or cupy (NVIDIA GPU).
+                # run_sfft.py falls back to Numpy when cupy is missing.
+                _sfft_backend = str(
+                    ts_sub.get("sfft_backend", "numpy")
+                ).strip().lower()
+                cmd_local += ["-backend", _sfft_backend]
+                if _sfft_backend in ("cupy", "gpu", "cuda"):
+                    cmd_local += [
+                        "-cuda_device",
+                        str(ts_sub.get("sfft_cuda_device", "0")),
+                    ]
 
                 # SFFT source-rejection controls.
                 # Default: exclude blended sources (FLAGS & 2) which bias flux scaling.
@@ -10617,6 +11841,11 @@ class Templates:
         stamp_loc,
         scienceNoise,
         scale,
+        templateNoise=None,
+        sci_mask_loc=None,
+        tpl_mask_loc=None,
+        matching_sources=None,
+        target_xy=None,
     ) -> bool:
         """Attempt HOTPANTS subtraction. Returns True on success."""
         logger.info("Starting HOTPANTS subtraction...")
@@ -10751,6 +11980,113 @@ class Templates:
             # Only the lower limits (-il, -tl) are used to exclude negative/low noise.
             ul = 1e30
             mask_abs = os.path.abspath(mask_loc)
+            # Per-image masks (-imi/-tmi) when the caller built them; a
+            # shared mask misattributes science-only defects to the
+            # template and vice versa.
+            imi_abs = (
+                os.path.abspath(sci_mask_loc) if sci_mask_loc else mask_abs
+            )
+            tmi_abs = (
+                os.path.abspath(tpl_mask_loc) if tpl_mask_loc else mask_abs
+            )
+
+            # Stamp positions for the kernel fit.  The target must never be
+            # a stamp position: a bright transient in the kernel solution
+            # biases the flux scale and can self-subtract.  This applies to
+            # the caller-provided file too -- a bright transient can reach
+            # it via the NaN-flux re-addition in main.py.  SFFT achieves the
+            # same exclusion via XY_PriorBan.
+            stamp_arg = None
+            try:
+                _excl_r = max(3.0 * float(science_fwhm), 15.0)
+                _target_ok = target_xy is not None and all(
+                    np.isfinite(float(c)) for c in target_xy[:2]
+                )
+
+                def _drop_target(pts_0b):
+                    if not _target_ok:
+                        return pts_0b
+                    _tx_hp, _ty_hp = (
+                        float(target_xy[0]),
+                        float(target_xy[1]),
+                    )
+                    return [
+                        (x, y)
+                        for x, y in pts_0b
+                        if np.hypot(x - _tx_hp, y - _ty_hp) > _excl_r
+                    ]
+
+                _pts = None
+                _from_file = False
+                if stamp_loc and os.path.isfile(stamp_loc):
+                    # Caller-provided stamp file: 1-based FITS coords.
+                    _raw = []
+                    with open(stamp_loc) as _sf_in:
+                        for _line in _sf_in:
+                            _cols = _line.split()
+                            if len(_cols) < 2:
+                                continue
+                            try:
+                                _raw.append(
+                                    (float(_cols[0]) - 1.0,
+                                     float(_cols[1]) - 1.0)
+                                )
+                            except ValueError:
+                                continue
+                    _kept = _drop_target(_raw)
+                    _n_dropped = len(_raw) - len(_kept)
+                    if _n_dropped > 0:
+                        logger.info(
+                            "HOTPANTS: excluded %d stamp(s) within %.1f px "
+                            "of the target.",
+                            _n_dropped, _excl_r,
+                        )
+                    # Respect the caller's list even when small: it was
+                    # chosen deliberately.
+                    _pts = _kept if _kept else None
+                    _from_file = _pts is not None
+                    if _raw and not _kept:
+                        logger.warning(
+                            "Target exclusion emptied the provided stamp "
+                            "file; falling back to matching sources."
+                        )
+
+                if _pts is None and matching_sources:
+                    _pts = _drop_target(
+                        [
+                            (float(ms[0]), float(ms[1]))
+                            for ms in matching_sources
+                        ]
+                    )
+
+                if _pts is not None:
+                    _pts = deduplicate_points(_pts, min_sep=2.0)
+                _n_min_stamps = 10
+                if _pts and (_from_file or len(_pts) >= _n_min_stamps):
+                    stamp_arg = os.path.join(
+                        str(scienceDir), f"hotpants_stamps_{base_name}"
+                    )
+                    with open(stamp_arg, "w") as _sf:
+                        for x, y in _pts:
+                            # HOTPANTS stamp positions are 1-based
+                            # FITS pixel coordinates.
+                            _sf.write(f"{x + 1.0:.3f} {y + 1.0:.3f}\n")
+                    logger.info(
+                        "HOTPANTS stamp file: %d positions "
+                        "(target excluded).",
+                        len(_pts),
+                    )
+                else:
+                    logger.warning(
+                        "Too few stamp positions after target exclusion; "
+                        "letting HOTPANTS choose substamps."
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Could not build HOTPANTS stamp list: %s", e
+                )
+                stamp_arg = None
+
             timeout_sec = float(ts.get("hotpants_timeout", 100))
             args = [
                 resolved_exe,
@@ -10773,9 +12109,9 @@ class Templates:
                 "-ir",
                 str(science_readnoise),
                 "-imi",
-                mask_abs,
+                imi_abs,
                 "-tmi",
-                mask_abs,
+                tmi_abs,
                 "-n",
                 "i",
                 "-c",
@@ -10797,11 +12133,13 @@ class Templates:
                 "-bgo",
                 str(max(int(ts.get("hotpants_bg_order", 0)), 0)),
             ]
-            if stamp_loc:
-                args += ["-ssf", stamp_loc]
+            if stamp_arg:
+                args += ["-ssf", stamp_arg]
                 args += ["-savexy", str(scienceDir / "used_stamps.region")]
             if scienceNoise:
                 args += ["-ini", str(scienceNoise)]
+            if templateNoise:
+                args += ["-tni", str(templateNoise)]
 
             log_path = scienceDir / f"HOTPANTS_{Path(base_name).stem}.txt"
             with open(log_path, "w") as lf:

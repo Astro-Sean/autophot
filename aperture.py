@@ -40,6 +40,7 @@ from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from multiprocessing import Pool, cpu_count
 from scipy.interpolate import interp1d
+from scipy.ndimage import label as _cc_label
 from scipy.optimize import curve_fit
 import scipy.optimize
 from scipy.stats import mstats, median_abs_deviation
@@ -76,7 +77,10 @@ from functions import (
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NSOURCES = 10  # minimum source count to justify spawning worker processes
+# Minimum source count to justify spawning worker processes: below this,
+# worker startup + shared-state broadcast cost more than serial execution
+# (on spawn platforms the image/masks are pickled once per worker).
+NSOURCES = 50
 MAX_WORKERS_DEFAULT = (
     16  # cap on default n_jobs to avoid exhausting HPC process/thread limits
 )
@@ -420,28 +424,34 @@ def _measure_worker(args):
         ap_mask = aperture_masks[i]
         an_mask = annulus_masks[i]
 
-        def _finite_mask_values(mask_obj, img2d):
+        # The mask weight arrays are invariant across the image/defect/error
+        # lookups below; computing them once avoids rebuilding (and
+        # re-multiplying) them on every call.
+        ap_w = np.asarray(ap_mask.data, dtype=float) > 0
+        an_w = np.asarray(an_mask.data, dtype=float) > 0
+
+        def _finite_mask_values(mask_obj, mask_w, img2d):
             """
             Return pixel values under an ApertureMask, excluding padded bounding-box
             zeros introduced by mask multiplication.
             """
             try:
                 cut = mask_obj.multiply(img2d)
-                w = np.asarray(mask_obj.data, dtype=float)
-                vals = np.asarray(cut, dtype=float)[w > 0]
+                vals = np.asarray(cut, dtype=float)[mask_w]
                 return vals
             except Exception:
                 # Fallback to photutils helper (may include bbox-padding zeros).
                 return mask_obj.get_values(img2d)
 
-        ap_pix = _finite_mask_values(ap_mask, image_e)
-        bkg_pix = _finite_mask_values(an_mask, image_e)
+        ap_pix = _finite_mask_values(ap_mask, ap_w, image_e)
+        bkg_pix = _finite_mask_values(an_mask, an_w, image_e)
 
         # Apply hardware defects mask (trails, streaks, saturation, NaN)
         # so bad pixels are excluded from aperture flux and annulus background.
+        ap_mask_vals = None
         if defects_mask is not None:
-            ap_mask_vals = _finite_mask_values(ap_mask, defects_mask)
-            bkg_mask_vals = _finite_mask_values(an_mask, defects_mask)
+            ap_mask_vals = _finite_mask_values(ap_mask, ap_w, defects_mask)
+            bkg_mask_vals = _finite_mask_values(an_mask, an_w, defects_mask)
             if len(ap_mask_vals) == len(ap_pix):
                 ap_pix = np.where(ap_mask_vals > 0, np.nan, ap_pix)
             if len(bkg_mask_vals) == len(bkg_pix):
@@ -450,11 +460,9 @@ def _measure_worker(args):
         # Optional per-pixel uncertainty (e.g. from Background2D / calc_total_error).
         ap_err_pix = None
         if error is not None:
-            ap_err_pix = _finite_mask_values(ap_mask, error)
-            if defects_mask is not None:
-                ap_err_mask_vals = _finite_mask_values(ap_mask, defects_mask)
-                if len(ap_err_mask_vals) == len(ap_err_pix):
-                    ap_err_pix = np.where(ap_err_mask_vals > 0, np.nan, ap_err_pix)
+            ap_err_pix = _finite_mask_values(ap_mask, ap_w, error)
+            if ap_mask_vals is not None and len(ap_mask_vals) == len(ap_err_pix):
+                ap_err_pix = np.where(ap_mask_vals > 0, np.nan, ap_err_pix)
 
         # Remove NaNs/infs. Do NOT discard exact zeros here: difference images
         # and locally background-subtracted stamps can legitimately contain 0-valued
@@ -466,10 +474,25 @@ def _measure_worker(args):
         if ap_has_nan:
             return {"idx": i, "fail_reason": "aperture_has_nan"}
 
-        # Check for SWarp-padded zero regions in the aperture
-        ap_zero_frac = float(np.mean(ap_pix == 0.0))
-        if ap_zero_frac > 0.5:
-            return {"idx": i, "fail_reason": "aperture_swarp_padding"}
+        # Check for SWarp-padded zero regions in the aperture.  Resampling
+        # pads uncovered image area with one contiguous exact-zero block;
+        # genuine zero-flux pixels on a background-subtracted or
+        # difference image are scattered and isolated.  Rejecting on the
+        # largest *connected* zero region keeps real sources whose
+        # aperture merely contains many true zeros (previously a flat
+        # >50% zero fraction dropped them indistinguishably from
+        # padding).
+        ap_zero2d = np.zeros(ap_w.shape, dtype=bool)
+        ap_zero2d[ap_w] = ap_pix == 0.0
+        if np.any(ap_zero2d):
+            z_lab, _ = _cc_label(ap_zero2d)
+            largest_zero_block = (
+                int(np.max(np.bincount(z_lab.ravel())[1:]))
+                if z_lab.max() > 0
+                else 0
+            )
+            if largest_zero_block > 0.5 * ap_pix.size:
+                return {"idx": i, "fail_reason": "aperture_swarp_padding"}
 
         # TOLERANT CHECK: Annulus can have some NaNs, but needs minimum valid pixels
         # Also filter exact-zero pixels: SWarp pads uncovered regions with 0.0
@@ -575,8 +598,11 @@ def _measure_worker(args):
         if np.isfinite(sqrt_var) and sqrt_var > 0:
             snr = aperture_sum / sqrt_var
         else:
+            # nan means "unmeasured" (variance unavailable), matching the
+            # convention of failed workers whose SNR stays nan; a 0.0 would
+            # claim a measured zero signal.
             sqrt_var = np.nan
-            snr = 0.0
+            snr = np.nan
 
         # Aperture sum is integrated over the exposure in image_e units (e- in frame);
         # flux is the rate in e-/s for use with mag() and PSF outputs (also e-/s).
@@ -721,7 +747,13 @@ def _optimum_radius_worker(args):
             b = max(float(moffat_beta), 1.01)
             alpha = float(fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / b) - 1.0))
             ee = float(np.clip(norm_factor, 1e-6, 1 - 1e-6))
-            r_at_norm = alpha * np.sqrt((1.0 - ee) ** (1.0 / (1.0 - b)) - 1.0)
+            # For b -> 1 the EE radius genuinely diverges ((1-ee)^(1/(1-b))
+            # overflows); the isfinite check below then returns None for
+            # that source.  Suppress the overflow RuntimeWarning.
+            with np.errstate(over="ignore", invalid="ignore"):
+                r_at_norm = alpha * np.sqrt(
+                    (1.0 - ee) ** (1.0 / (1.0 - b)) - 1.0
+                )
         else:
             r_at_norm = cog.calc_radius_at_ee(norm_factor)
         if not np.isfinite(r_at_norm):
@@ -2110,7 +2142,7 @@ class Aperture:
             sources = sources[(sources["SNR"] > snr_min) & (sources["SNR"] < 10000)].copy()
         else:
             logger.info("No SNR column; skipping optimum-radius SNR pre-filter.")
-        sources.reset_index(inplace=True)
+        sources.reset_index(inplace=True, drop=True)
         n_sources = len(sources)
 
         if n_sources == 0:
@@ -2652,9 +2684,10 @@ class Aperture:
         # ---- Optimum scale -------------------------------------------------
         # optimum_radius is in FWHM units; convert to pixels before adding a
         # +2*FWHM margin so PSF-star cutouts retain surrounding context.
+        # The +0.5 keeps the half-integer convention used by every other
+        # optimum_scale return in this function (callers pass it through
+        # odd() to obtain the odd cutout size).
         optimum_scale = max(12, int(np.ceil((optimum_radius + 2.0) * fwhm))) + 0.5
-        if (2 * optimum_scale) % 2 == 0:
-            optimum_scale += 0.5
 
         # ---- Plotting (reuses profiles already in profiles_map) ------------
         if plot:
@@ -2862,6 +2895,7 @@ class Aperture:
         selected = sources.sort_values("flux_AP", ascending=False).head(n_samples)
 
         corrections = []
+        n_out_of_range = 0
         for _, row in selected.iterrows():
             try:
                 xycen = np.array([row["x_pix"], row["y_pix"]])
@@ -2873,6 +2907,7 @@ class Aperture:
                 # ap_size falls outside the measured radii (e.g. ap_size >
                 # max_radius*fwhm -> frac=1 -> correction=0).  Guard instead.
                 if not (cog.radii[0] <= ap_size <= cog.radii[-1]):
+                    n_out_of_range += 1
                     continue
                 frac = np.interp(ap_size, cog.radii, cog.profile)
                 if 0 < frac <= 1:
@@ -2881,6 +2916,17 @@ class Aperture:
                 log_warning_from_exception(logger, "Skipping star", exc)
 
         if not corrections:
+            if n_out_of_range:
+                logger.warning(
+                    "ap_size=%.2f px lies outside the CoG radius grid "
+                    "[%.2f, %.2f] px for %d/%d sampled sources; check "
+                    "ap_size against max_radius*fwhm.",
+                    ap_size,
+                    float(radii[0]),
+                    float(radii[-1]),
+                    n_out_of_range,
+                    len(selected),
+                )
             logger.warning("No valid aperture corrections computed.")
             return np.nan, np.nan
 
