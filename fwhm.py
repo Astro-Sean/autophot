@@ -1895,16 +1895,40 @@ class Find_FWHM:
             return None
 
     def _crowding_filter(self, df: pd.DataFrame, min_sep_pix: float) -> pd.DataFrame:
-        """Drop sources with a neighbor closer than min_sep_pix (KDTree)."""
+        """De-blend close pairs instead of discarding both members.
+
+        For every pair closer than ``min_sep_pix`` (KDTree) the
+        better-ranked member survives - ``peak`` flux when the column
+        exists - so a close pair keeps one source rather than losing
+        both.  This preserves more usable stars in modestly crowded
+        fields; heavily blended measurements still fail the later
+        roundness/sharpness clips.
+        """
         if len(df) < 2:
             return df
         _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
         _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
         xy = np.vstack([df[_xcol].values, df[_ycol].values]).T
         tree = cKDTree(xy)
-        dists, _ = tree.query(xy, k=2)
-        nn = dists[:, 1]
-        keep = nn >= min_sep_pix
+        pairs = tree.query_pairs(min_sep_pix)
+        if not pairs:
+            return df.copy()
+        rank_col = next(
+            (c for c in ("peak", "flux", "threshold") if c in df.columns),
+            None,
+        )
+        if rank_col is not None:
+            rank = pd.to_numeric(df[rank_col], errors="coerce").to_numpy(
+                dtype=float
+            )
+            rank = np.where(np.isfinite(rank), rank, -np.inf)
+        else:
+            # No quality column: keep the earlier (stable) detection.
+            rank = -np.arange(len(df), dtype=float)
+        keep = np.ones(len(df), dtype=bool)
+        for pair in pairs:
+            i, j = pair
+            keep[j if rank[i] >= rank[j] else i] = False
         return df.loc[keep].copy()
 
     def _clip_column(

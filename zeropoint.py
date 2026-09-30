@@ -10,52 +10,48 @@ colour-term estimation) to derive the final photometric zeropoint used by
 the pipeline.
 """
 
+import logging
 # ---------------------------------------------------------------------------
 # Standard library
 # ---------------------------------------------------------------------------
 import os
 import sys
 import time
-import warnings
-import logging
 import traceback
+import warnings
 
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------------
 # Third-party
 # ---------------------------------------------------------------------------
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-
-from astropy.stats import (
-    sigma_clip,
-    sigma_clipped_stats,
-    mad_std,
-)
-from scipy.stats import median_abs_deviation  # single source; avoids duplicate
-
-from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
-from sklearn.linear_model import RANSACRegressor
-
+from astropy.stats import mad_std, sigma_clip, sigma_clipped_stats
 from scipy.optimize import minimize
+from scipy.stats import median_abs_deviation  # single source; avoids duplicate
+from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.linear_model import RANSACRegressor
+from sklearn.utils.validation import check_array, check_is_fitted, check_X_y
+
 # scipy.odr is deprecated since SciPy 1.17 (odrpack is the suggested
 # replacement); silence the import-time warning until the dependency moves.
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", DeprecationWarning)
     from scipy.odr import ODR, Model, RealData
+
 from scipy.special import logsumexp
 
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import log_step, snr_err, set_size, calculate_bins, normalize_photometric_filter_name
-from plotting_utils import (
-    get_color, get_ransac_color, get_marker_size, get_alpha, get_line_width,
-    apply_autophot_mplstyle, ransac_legend_top_outside, ransac_grid, ransac_savefig,
-    get_plot_ext, safe_tight_layout,
-)
+from functions import (calculate_bins, log_step,
+                       normalize_photometric_filter_name, set_size, snr_err)
+from plotting_utils import (apply_autophot_mplstyle, get_alpha, get_color,
+                            get_line_width, get_marker_size, get_plot_ext,
+                            get_ransac_color, ransac_grid,
+                            ransac_legend_top_outside, ransac_savefig,
+                            safe_tight_layout)
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -106,7 +102,12 @@ class PenalisedSlopeRegressor(BaseEstimator, RegressorMixin):
             excess = max(0.0, abs(slope - self.slope_constraint) - self.slope_tolerance)
             return mse + self.penalty_weight * excess
 
-        init = [0.1, np.mean(y) - 0.1 * np.mean(x_flat)]
+        # Start exactly at the constrained slope so the penalty does not
+        # have to drag the iterate back from an arbitrary guess.
+        init = [
+            float(self.slope_constraint),
+            np.mean(y) - float(self.slope_constraint) * np.mean(x_flat),
+        ]
         result = minimize(_loss, init, method="L-BFGS-B")
         self.slope_, self.intercept_ = result.x
         return self
@@ -329,7 +330,7 @@ class Zeropoint:
         color1,
         color2,
         fixed_color_coeffs,  # (intercept, slope) linear / (intercept, slope, quad) quadratic / (breakpoints, slopes, intercept) piecewise
-        color_coeff_errors = None,
+        color_coeff_errors=None,
         fit_mode="polynomial",
         n_segments=1,
     ):
@@ -407,7 +408,9 @@ class Zeropoint:
                 term_color_measure1 = np.abs(slope1) * sigma_color[mask1]
                 if slope1_err is not None:
                     term_color_slope1 = np.abs(slope1_err) * np.abs(color_diff[mask1])
-                    color_corr_err[mask1] = np.sqrt(term_color_measure1**2 + term_color_slope1**2)
+                    color_corr_err[mask1] = np.sqrt(
+                        term_color_measure1**2 + term_color_slope1**2
+                    )
                 else:
                     color_corr_err[mask1] = term_color_measure1
 
@@ -418,10 +421,14 @@ class Zeropoint:
                 # d(correction)/d(slope2)     = color_diff - bp
                 # d(correction)/d(slope1)     = bp
                 # d(correction)/d(bp)         = slope1 - slope2
-                delta_corr[mask2] = delta_mag[mask2] - (slope2 * color_diff[mask2] + (slope1 - slope2) * bp)
+                delta_corr[mask2] = delta_mag[mask2] - (
+                    slope2 * color_diff[mask2] + (slope1 - slope2) * bp
+                )
                 term_color_measure2 = np.abs(slope2) * sigma_color[mask2]
                 if slope2_err is not None:
-                    term_color_slope2 = np.abs(slope2_err) * np.abs(color_diff[mask2] - bp)
+                    term_color_slope2 = np.abs(slope2_err) * np.abs(
+                        color_diff[mask2] - bp
+                    )
                     # Slope1 contributes via the (slope1 - slope2) * bp continuity term
                     term_color_slope1_seg2 = np.abs(slope1_err) * np.abs(bp)
                     # Breakpoint uncertainty contributes via d(correction)/d(bp) = slope1 - slope2
@@ -435,7 +442,9 @@ class Zeropoint:
                 else:
                     color_corr_err[mask2] = term_color_measure2
             else:
-                raise ValueError(f"Unsupported number of segments for piecewise fitting: {n_segments}")
+                raise ValueError(
+                    f"Unsupported number of segments for piecewise fitting: {n_segments}"
+                )
         elif fit_mode == "polynomial":
             if len(fixed_color_coeffs) == 2:
                 # Linear color term
@@ -446,7 +455,9 @@ class Zeropoint:
                     intercept_err, slope_err = color_coeff_errors
                     term_color_measure = abs(slope) * sigma_color
                     term_color_slope = abs(slope_err) * np.abs(color_diff)
-                    color_corr_err = np.sqrt(term_color_measure**2 + term_color_slope**2)
+                    color_corr_err = np.sqrt(
+                        term_color_measure**2 + term_color_slope**2
+                    )
                 else:
                     color_corr_err = abs(slope) * sigma_color
             elif len(fixed_color_coeffs) == 3:
@@ -461,7 +472,9 @@ class Zeropoint:
                     term_color_measure = np.abs(d_correction) * sigma_color
                     term_color_slope = abs(slope_err) * np.abs(color_diff)
                     term_color_quad = abs(quad_err) * color_diff**2
-                    color_corr_err = np.sqrt(term_color_measure**2 + term_color_slope**2 + term_color_quad**2)
+                    color_corr_err = np.sqrt(
+                        term_color_measure**2 + term_color_slope**2 + term_color_quad**2
+                    )
                 else:
                     d_correction = 2 * quad * color_diff + slope
                     color_corr_err = np.abs(d_correction) * sigma_color
@@ -538,7 +551,9 @@ class Zeropoint:
             & (catmag_err > 0)
         )
         if vmask.sum() < 2:
-            logger.warning("%s: only %s valid sources; skipping.", flux_type, vmask.sum())
+            logger.warning(
+                "%s: only %s valid sources; skipping.", flux_type, vmask.sum()
+            )
             return None
 
         return (
@@ -590,12 +605,20 @@ class Zeropoint:
 
             filter_col = self.input_yaml.get("imageFilter")
             filter_col = self._normalize_filter(filter_col)
-            
+
             # Keep only sources measured on THIS image: the sequence catalog
             # can accumulate entries from earlier observations.
             if sources is not None and len(sources) > 0:
-                has_ap = sources["flux_AP"].notna() if "flux_AP" in sources.columns else pd.Series(False, index=sources.index)
-                has_psf = sources["flux_PSF"].notna() if "flux_PSF" in sources.columns else pd.Series(False, index=sources.index)
+                has_ap = (
+                    sources["flux_AP"].notna()
+                    if "flux_AP" in sources.columns
+                    else pd.Series(False, index=sources.index)
+                )
+                has_psf = (
+                    sources["flux_PSF"].notna()
+                    if "flux_PSF" in sources.columns
+                    else pd.Series(False, index=sources.index)
+                )
                 has_any_flux = has_ap | has_psf
                 n_before = len(sources)
                 sources = sources[has_any_flux].copy()
@@ -604,7 +627,29 @@ class Zeropoint:
                     logger.info(
                         f"Filtered {n_before - n_after} sources with no flux measurements (AP or PSF); {n_after} remaining."
                     )
-            
+
+            # Drop sources flagged as overlapping masked defects (flag is set
+            # in main.py from a distance-transform of hardware_defects_mask):
+            # their fluxes can be biased even when the fit converged.  Done
+            # before the filter/threshold branches so it applies on every
+            # path, including magnitude-only cleans.
+            if zp_cfg.get("reject_defect_sources", True) and (
+                "defect_flag" in sources.columns
+            ):
+                _d = (
+                    pd.to_numeric(sources["defect_flag"], errors="coerce")
+                    .fillna(0)
+                    .astype(bool)
+                )
+                n_def = int(_d.sum())
+                if n_def > 0:
+                    sources = sources.loc[~_d].copy()
+                    logger.info(
+                        "Dropped %d defect-overlapping sources; %d remain.",
+                        n_def,
+                        len(sources),
+                    )
+
             if not filter_col:
                 logger.warning(
                     "No input_yaml.imageFilter provided; skipping sequence-star clean filter."
@@ -635,7 +680,9 @@ class Zeropoint:
                     )
                     valid_mags = sources[filter_col].notna()
                     cleaned = sources.loc[valid_mags].copy()
-                    logger.info("%d sources remaining after magnitude-only clean", len(cleaned))
+                    logger.info(
+                        "%d sources remaining after magnitude-only clean", len(cleaned)
+                    )
                     return cleaned
 
             removed_parts: list[str] = []
@@ -680,7 +727,9 @@ class Zeropoint:
                 from main import SATURATE_INTERNAL_FALLBACK
             except ImportError:
                 SATURATE_INTERNAL_FALLBACK = np.inf
-            saturate_level = float(self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK))
+            saturate_level = float(
+                self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK)
+            )
             non_linear_mask = np.zeros(len(sources), dtype=bool)
             saturated_mask = np.zeros(len(sources), dtype=bool)
             # Match the column name fallback pattern used in psf.py build()
@@ -696,7 +745,9 @@ class Zeropoint:
             ):
                 peak_flux = np.asarray(sources[_peak_col], float)
                 finite_peak = np.isfinite(peak_flux)
-                saturated_mask = finite_peak & (peak_flux >= sat_peak_frac * saturate_level)
+                saturated_mask = finite_peak & (
+                    peak_flux >= sat_peak_frac * saturate_level
+                )
                 non_linear_mask = finite_peak & (
                     peak_flux >= nonlin_peak_frac * saturate_level
                 )
@@ -712,7 +763,11 @@ class Zeropoint:
             flags_mask = np.zeros(len(sources), dtype=bool)
             for _flags_col in ("flags", "FLAGS", "flags_normal"):
                 if _flags_col in sources.columns:
-                    _f = pd.to_numeric(sources[_flags_col], errors="coerce").fillna(0).astype(int)
+                    _f = (
+                        pd.to_numeric(sources[_flags_col], errors="coerce")
+                        .fillna(0)
+                        .astype(int)
+                    )
                     flags_mask = flags_mask | (_f > zp_max_flags)
                     break
             n_flags = int(flags_mask.sum())
@@ -733,9 +788,10 @@ class Zeropoint:
                 if _n_fwhm >= 10:
                     _fwhm_good = _fwhm_vals[_fwhm_finite].values
                     _med_fwhm = float(np.nanmedian(_fwhm_good))
-                    _mad_fwhm = float(
-                        median_abs_deviation(_fwhm_good, nan_policy="omit")
-                    ) * 1.4826
+                    _mad_fwhm = (
+                        float(median_abs_deviation(_fwhm_good, nan_policy="omit"))
+                        * 1.4826
+                    )
                     if _mad_fwhm > 1e-6:
                         _fwhm_lo = _med_fwhm - fwhm_sigma * _mad_fwhm
                         _fwhm_hi = _med_fwhm + fwhm_sigma * _mad_fwhm
@@ -748,18 +804,23 @@ class Zeropoint:
                             logger.debug(
                                 "FWHM rejection window: %.1f-sigma outside "
                                 "[%.2f, %.2f] px (median=%.2f px, MAD=%.2f px).",
-                                fwhm_sigma, _fwhm_lo, _fwhm_hi,
-                                _med_fwhm, _mad_fwhm,
+                                fwhm_sigma,
+                                _fwhm_lo,
+                                _fwhm_hi,
+                                _med_fwhm,
+                                _mad_fwhm,
                             )
                     else:
                         logger.debug(
                             "FWHM scatter is zero (all sources same FWHM=%.2f); "
-                            "skipping FWHM-based rejection.", _med_fwhm,
+                            "skipping FWHM-based rejection.",
+                            _med_fwhm,
                         )
                 else:
                     logger.debug(
                         "Only %d sources with valid FWHM; skipping FWHM-based "
-                        "rejection (need >= 10).", _n_fwhm,
+                        "rejection (need >= 10).",
+                        _n_fwhm,
                     )
 
             mask = (
@@ -776,7 +837,9 @@ class Zeropoint:
             detail = f" (removed: {', '.join(removed_parts)})" if removed_parts else ""
             logger.info(
                 "ZP cleaning: %d -> %d sources%s",
-                len(sources), len(cleaned), detail,
+                len(sources),
+                len(cleaned),
+                detail,
             )
             return cleaned
 
@@ -810,7 +873,7 @@ class Zeropoint:
 
         image_filter = self.input_yaml["imageFilter"]
         image_filter = self._normalize_filter(image_filter)
-        
+
         mag_col = sources[image_filter]
         mag_err_col = sources[f"{image_filter}_err"]
 
@@ -922,16 +985,16 @@ class Zeropoint:
     ):
         """
         Orthogonal Distance Regression fit for y = x + ZP (slope=1 constraint).
-        
+
         This properly accounts for errors in both X (m_inst) and Y (m_cal).
         For a line with slope=1, the perpendicular distance is:
             d_perp = (y - x - ZP) / sqrt(2)
-        
+
         The variance in the perpendicular direction is:
             sigma^2_perp = (sigma^2_x + sigma^2_y) / 2
-        
+
         We minimize the weighted sum: chi^2 = Sigma (y_i - x_i - ZP)^2 / (sigma^2_x + sigma^2_y)
-        
+
         Parameters
         ----------
         x, y : array-like
@@ -942,7 +1005,7 @@ class Zeropoint:
             Maximum ODR iterations
         min_points : int
             Minimum points required for fit
-            
+
         Returns
         -------
         (zp, zp_err, inlier_mask) : (float, float, ndarray)
@@ -954,9 +1017,13 @@ class Zeropoint:
         y_err = np.asarray(y_err, float)
         n_input = len(x)
 
-        finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(x_err) & np.isfinite(y_err)
+        finite = (
+            np.isfinite(x) & np.isfinite(y) & np.isfinite(x_err) & np.isfinite(y_err)
+        )
         if finite.sum() < min_points:
-            logger.warning("ODR: insufficient points (%s < %s)", finite.sum(), min_points)
+            logger.warning(
+                "ODR: insufficient points (%s < %s)", finite.sum(), min_points
+            )
             return np.nan, np.nan, np.zeros(n_input, dtype=bool)
 
         x, y = x[finite], y[finite]
@@ -975,15 +1042,17 @@ class Zeropoint:
         if mad_delta < 1e-6:
             mad_delta = np.nanstd(delta)
         _med_var_perp = float(np.median(var_perp))
-        _sys_floor = max(0.0, mad_delta ** 2 - _med_var_perp)
+        _sys_floor = max(0.0, mad_delta**2 - _med_var_perp)
         if _sys_floor > 0:
             var_perp = var_perp + _sys_floor
             logger.debug(
                 "ODR: added systematic floor %.4f mag^2 (sigma=%.4f mag) "
                 "to var_perp (MAD=%.4f)",
-                _sys_floor, np.sqrt(_sys_floor), mad_delta,
+                _sys_floor,
+                np.sqrt(_sys_floor),
+                mad_delta,
             )
-        
+
         # DEBUG: input stats for diagnosing large errors
         logger.debug(
             f"ODR INPUT: n={len(x)}, x_err median={np.nanmedian(x_err):.4f}, "
@@ -991,7 +1060,7 @@ class Zeropoint:
             f"y_err median={np.nanmedian(y_err):.4f}, "
             f"y_err range=[{np.nanmin(y_err):.4f}, {np.nanmax(y_err):.4f}]"
         )
-        
+
         # Iterative outlier rejection: deterministic analogue of RANSAC.
         inlier_mask_local = np.ones(len(delta), dtype=bool)
         zp = np.nanmedian(delta)
@@ -1007,7 +1076,9 @@ class Zeropoint:
 
             residuals = delta - zp_new
             med_res = np.nanmedian(residuals[inlier_mask_local])
-            mad_res = np.nanmedian(np.abs(residuals[inlier_mask_local] - med_res)) * 1.4826
+            mad_res = (
+                np.nanmedian(np.abs(residuals[inlier_mask_local] - med_res)) * 1.4826
+            )
 
             if mad_res < 1e-6:  # identical points: nothing to clip
                 break
@@ -1016,6 +1087,7 @@ class Zeropoint:
             # the median measurement variance so well-measured scatter is not
             # clipped away.
             threshold = 3.0 * np.sqrt(mad_res**2 + np.median(var_perp))
+            prev_mask = inlier_mask_local
             inlier_mask_local = np.abs(residuals) < threshold
 
             n_after = inlier_mask_local.sum()
@@ -1023,17 +1095,26 @@ class Zeropoint:
             if n_after == n_before:
                 logger.debug("ODR converged at iteration %s", iteration + 1)
                 break
-            
+
             if n_after < min_points:
-                logger.warning("ODR: too few inliers after clipping (%s), reverting to iteration %s", n_after, iteration)
-                # Revert to previous iteration using the same (more permissive) threshold
-                inlier_mask_local = np.abs(residuals) < threshold
+                logger.warning(
+                    "ODR: too few inliers after clipping (%s), reverting to iteration %s",
+                    n_after,
+                    iteration,
+                )
+                # Revert to the previous iteration's mask so the fit below
+                # still uses >= min_points sources rather than the too-
+                # strict mask or an unconditional all-points fallback.
+                inlier_mask_local = prev_mask
                 break
-            
+
             zp = zp_new
-        
+
         if inlier_mask_local.sum() < min_points:
-            logger.warning("ODR: insufficient inliers (%s), using all points", inlier_mask_local.sum())
+            logger.warning(
+                "ODR: insufficient inliers (%s), using all points",
+                inlier_mask_local.sum(),
+            )
             inlier_mask_local = np.ones(len(delta), dtype=bool)
 
         delta_in = delta[inlier_mask_local]
@@ -1062,16 +1143,16 @@ class Zeropoint:
             f"var_zp={var_zp:.6f}, zp_err_before_scale={np.sqrt(var_zp):.6f}, "
             f"chi2={chi2:.2f}, dof={dof}, chi2/dof={chi2/max(dof,1):.2f}"
         )
-        
+
         if dof > 0 and chi2 / dof > 1.0:
             scale = np.sqrt(chi2 / dof)
             zp_err *= scale
             logger.debug("ODR DEBUG: scaled zp_err by %.2f -> %.4f", scale, zp_err)
-        
+
         # Map back to original input length (including non-finite points)
         full_mask = np.zeros(n_input, dtype=bool)
         full_mask[np.flatnonzero(finite)[inlier_mask_local]] = True
-        
+
         # Sanity check: ZP error should typically be < 0.1 mag for decent data
         if zp_err > 0.1:
             logger.warning(
@@ -1079,9 +1160,16 @@ class Zeropoint:
                 f"Typical range: 0.001-0.01 mag. Check input errors: "
                 f"x_err median={np.nanmedian(x_err):.3f}, y_err median={np.nanmedian(y_err):.3f}"
             )
-        
-        logger.info("ODR: ZP=%.4f +/- %.4f (%s/%s inliers, chi^2/dof=%.2f)", zp, zp_err, inlier_mask_local.sum(), len(delta), chi2/max(dof,1))
-        
+
+        logger.info(
+            "ODR: ZP=%.4f +/- %.4f (%s/%s inliers, chi^2/dof=%.2f)",
+            zp,
+            zp_err,
+            inlier_mask_local.sum(),
+            len(delta),
+            chi2 / max(dof, 1),
+        )
+
         return zp, zp_err, full_mask
 
     # -----------------------------------------------------------------------
@@ -1144,28 +1232,28 @@ class Zeropoint:
     ):
         """
         MCMC fit for y = x + ZP (slope=1 constraint) with proper X,Y errors.
-        
+
         Uses the emcee ensemble sampler for posterior estimation.
         Following the methodology from:
         https://github.com/nikhil-sarin/2Derrors
-        
+
         Supports two modes:
-        
+
         **robust=True (default):** Gaussian mixture model with in-model outlier
         handling. Each data point is modeled as a mixture of a main component
         (tight Gaussian around ZP with variance = sigma^2_perp) and an outlier
         component (broad Gaussian with variance = sigma^2_perp + V_out).
-        
+
         Parameters: [ZP, f_out]
         - f_out = outlier fraction (prior: uniform [0, 0.5])
         - V_out = outlier variance scale (fixed, default 1.0 mag^2)
-        
+
         Likelihood (mixture):
             L_i = (1-f_out) * N(ZP, sigma^2_perp) + f_out * N(ZP, sigma^2_perp + V_out)
-        
+
         **robust=False:** Single Gaussian likelihood (pre-clip outliers).
             log L = -0.5 * Sigma[(y_i - x_i - ZP)^2 / sigma^2_perp_i] - 0.5 * Sigma log(sigma^2_perp_i)
-        
+
         Parameters
         ----------
         x, y : array-like
@@ -1227,22 +1315,27 @@ class Zeropoint:
         """
         try:
             import emcee
+
             logging.getLogger("emcee.autocorr").setLevel(logging.ERROR)
         except ImportError:
             logger.warning("emcee not available, falling back to ODR")
             return self._odr_slope1_fit(x, y, x_err, y_err, min_points=min_points)
-        
+
         x = np.asarray(x, float)
         y = np.asarray(y, float)
         x_err = np.asarray(x_err, float)
         y_err = np.asarray(y_err, float)
         n_input = len(x)
 
-        finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(x_err) & np.isfinite(y_err)
+        finite = (
+            np.isfinite(x) & np.isfinite(y) & np.isfinite(x_err) & np.isfinite(y_err)
+        )
         if finite.sum() < min_points:
-            logger.warning("MCMC: insufficient points (%s < %s)", finite.sum(), min_points)
+            logger.warning(
+                "MCMC: insufficient points (%s < %s)", finite.sum(), min_points
+            )
             return np.nan, np.nan, np.zeros(n_input, dtype=bool)
-        
+
         x, y = x[finite], y[finite]
         x_err, y_err = x_err[finite], y_err[finite]
 
@@ -1269,7 +1362,9 @@ class Zeropoint:
         if V_out_eff != V_out:
             logger.debug(
                 "MCMC V_out adjusted: %.4f -> %.4f (MAD=%.4f mag)",
-                V_out, V_out_eff, mad_delta,
+                V_out,
+                V_out_eff,
+                mad_delta,
             )
 
         # BUG 147: Add systematic variance floor to var_perp.
@@ -1281,14 +1376,17 @@ class Zeropoint:
         # Add a constant floor so the inlier width matches the observed
         # scatter, preserving relative weighting between sources.
         _med_var_perp = float(np.median(var_perp))
-        _sys_floor = max(0.0, mad_delta ** 2 - _med_var_perp)
+        _sys_floor = max(0.0, mad_delta**2 - _med_var_perp)
         if _sys_floor > 0:
             var_perp = var_perp + _sys_floor
             logger.debug(
                 "MCMC: added systematic floor %.4f mag^2 (sigma=%.4f mag) "
                 "to var_perp (MAD=%.4f, median var_perp=%.6f -> %.6f)",
-                _sys_floor, np.sqrt(_sys_floor), mad_delta,
-                _med_var_perp, float(np.median(var_perp)),
+                _sys_floor,
+                np.sqrt(_sys_floor),
+                mad_delta,
+                _med_var_perp,
+                float(np.median(var_perp)),
             )
 
         # Fast-path: if the data is clean (MAD within expected scatter and
@@ -1308,7 +1406,9 @@ class Zeropoint:
             logger.info(
                 "ZP fast-path: clean data (MAD=%.4f, max_resid=%.4f vs "
                 "med_err=%.4f); weighted mean used instead of MCMC",
-                mad_delta, _max_resid, _med_err,
+                mad_delta,
+                _max_resid,
+                _med_err,
             )
             inlier_mask_fast = np.abs(delta - _weighted_mean) < 4.0 * np.sqrt(var_perp)
             if not np.any(inlier_mask_fast):
@@ -1337,36 +1437,40 @@ class Zeropoint:
                 if f_out < 0.0 or f_out > 0.5:
                     return -np.inf
                 return 0.0
-            
+
             def log_likelihood(theta):
                 zp, f_out = theta
                 resid = delta - zp
-                
+
                 # Main component: tight Gaussian (log-space)
-                logL_main = -0.5 * ((resid**2) / var_perp + np.log(2 * np.pi * var_perp))
-                
+                logL_main = -0.5 * (
+                    (resid**2) / var_perp + np.log(2 * np.pi * var_perp)
+                )
+
                 # Outlier component: broad Gaussian (var_perp + V_out_eff)
                 var_out = var_perp + V_out_eff
                 logL_out = -0.5 * ((resid**2) / var_out + np.log(2 * np.pi * var_out))
-                
+
                 # BUG 143: Use logsumexp for numerically stable mixture likelihood.
                 # The old approach (np.exp then np.log with clip) underflows for
                 # points with large residuals and small var_perp.
                 logL_mix = logsumexp(
-                    np.stack([
-                        np.log1p(-f_out) + logL_main,  # log((1-f_out) * L_main)
-                        np.log(f_out) + logL_out,       # log(f_out * L_out)
-                    ]),
+                    np.stack(
+                        [
+                            np.log1p(-f_out) + logL_main,  # log((1-f_out) * L_main)
+                            np.log(f_out) + logL_out,  # log(f_out * L_out)
+                        ]
+                    ),
                     axis=0,
                 )
                 return np.sum(logL_mix)
-            
+
             def log_probability(theta):
                 lp = log_prior(theta)
                 if not np.isfinite(lp):
                     return -np.inf
                 return lp + log_likelihood(theta)
-            
+
             # Initialize walkers with boundary-aware rejection sampling.
             # The old code used 0.05 +/- 0.02 for f_out, which easily produced
             # negative values that gave log_prior = -inf and stalled walkers.
@@ -1419,8 +1523,10 @@ class Zeropoint:
                 rhat_zp = self._gelman_rubin(chain[:, :, 0])
                 rhat_fout = self._gelman_rubin(chain[:, :, 1])
                 rhat_ok = (
-                    np.isfinite(rhat_zp) and rhat_zp < 1.01
-                    and np.isfinite(rhat_fout) and rhat_fout < 1.01
+                    np.isfinite(rhat_zp)
+                    and rhat_zp < 1.01
+                    and np.isfinite(rhat_fout)
+                    and rhat_fout < 1.01
                 )
 
                 # --- Diagnostic 2: Autocorrelation time ---
@@ -1434,7 +1540,10 @@ class Zeropoint:
                     if np.isfinite(tau_est) and tau_est > 0:
                         if adaptive:
                             new_batch_size = int(min(10 * tau_est, 2000))
-                            if new_batch_size > batch_size and new_batch_size < max_steps - total_steps:
+                            if (
+                                new_batch_size > batch_size
+                                and new_batch_size < max_steps - total_steps
+                            ):
                                 batch_size = new_batch_size
                         tau_ok = total_steps > tau_factor * tau_est
                         if tau_est > 1e-10:
@@ -1451,7 +1560,9 @@ class Zeropoint:
                 posterior_mean = float(np.mean(flat_chain[:, 0]))
                 posterior_stable = False
                 if prev_posterior_mean is not None and np.isfinite(posterior_mean):
-                    posterior_stable = abs(posterior_mean - prev_posterior_mean) < 0.001 * max(mad_delta, 0.01)
+                    posterior_stable = abs(
+                        posterior_mean - prev_posterior_mean
+                    ) < 0.001 * max(mad_delta, 0.01)
                 prev_posterior_mean = posterior_mean
 
                 # --- Combined convergence: require R-hat + at least one other ---
@@ -1497,7 +1608,9 @@ class Zeropoint:
                 logger.debug("[ZP MCMC] acc=%.3f", acc)
 
             if not 0.15 <= acc <= 0.8:
-                logger.warning("[ZP MCMC] Suboptimal acceptance; consider tuning n_walkers")
+                logger.warning(
+                    "[ZP MCMC] Suboptimal acceptance; consider tuning n_walkers"
+                )
 
             # Warn if max_steps reached without convergence (following PSF fitter)
             if not converged and adaptive:
@@ -1538,30 +1651,30 @@ class Zeropoint:
             # chain internally (n_walkers x n_steps x n_params) even after
             # get_chain(); freeing it now prevents accumulation across images.
             del samples, zp_samples, f_out_samples, sampler
-            
+
             # Compute posterior probability of each point being an inlier
             # Use the effective V_out for consistency with the likelihood
             resid = delta - zp
             logL_main = -0.5 * (resid**2 / var_perp + np.log(2 * np.pi * var_perp))
             var_out = var_perp + V_out_eff
             logL_out = -0.5 * (resid**2 / var_out + np.log(2 * np.pi * var_out))
-            
+
             # P(inlier | data) via logsumexp for stability
             logL_inlier = np.log1p(-f_out) + logL_main
             logL_outlier = np.log(f_out) + logL_out
             log_norm = logsumexp(np.stack([logL_inlier, logL_outlier]), axis=0)
             p_inlier = np.exp(logL_inlier - log_norm)
-            
+
             # Inliers: points with high probability of belonging to main component
             inlier_threshold = 0.5
             final_mask = p_inlier > inlier_threshold
-            
+
             logger.info(
                 f"MCMC (robust): ZP={zp:.4f} +/- {zp_err:.4f}, "
                 f"f_out={f_out:.3f} ({final_mask.sum()}/{len(delta)} inliers, "
                 f"n_walkers={n_walkers_eff}, n_steps={total_steps})"
             )
-            
+
         else:
             # ================================================================
             # STANDARD MODE: Single Gaussian with pre-clip outliers
@@ -1574,25 +1687,23 @@ class Zeropoint:
 
             delta_in = delta[inlier_mask]
             var_in = var_perp[inlier_mask]
-            zp_guess = np.average(
-                delta_in, weights=1.0 / np.clip(var_in, 1e-12, None)
-            )
+            zp_guess = np.average(delta_in, weights=1.0 / np.clip(var_in, 1e-12, None))
 
             def log_prior(zp):
                 if abs(zp - zp_guess) < zp_spread:
                     return 0.0
                 return -np.inf
-            
+
             def log_likelihood(zp):
                 resid = delta_in - zp
                 return -0.5 * np.sum((resid**2) / var_in + np.log(2 * np.pi * var_in))
-            
+
             def log_probability(zp):
                 lp = log_prior(zp)
                 if not np.isfinite(lp):
                     return -np.inf
                 return lp + log_likelihood(zp)
-            
+
             n_walkers_eff = min(n_walkers, max(4, len(delta_in) // 2))
             n_walkers_eff = max(n_walkers_eff, 4)
 
@@ -1650,7 +1761,9 @@ class Zeropoint:
                 posterior_mean = float(np.mean(flat_chain[:, 0]))
                 posterior_stable = False
                 if prev_posterior_mean is not None and np.isfinite(posterior_mean):
-                    posterior_stable = abs(posterior_mean - prev_posterior_mean) < 0.001 * max(mad_delta, 0.01)
+                    posterior_stable = abs(
+                        posterior_mean - prev_posterior_mean
+                    ) < 0.001 * max(mad_delta, 0.01)
                 prev_posterior_mean = posterior_mean
 
                 # Convergence: R-hat + one other, or tau + posterior stable
@@ -1711,12 +1824,12 @@ class Zeropoint:
             threshold = outlier_sigma * np.sqrt(mad_res**2 + np.median(var_perp))
             final_mask = np.abs(residuals) < threshold
             f_out = 1.0 - final_mask.mean()
-            
+
             logger.info(
                 f"MCMC (standard): ZP={zp:.4f} +/- {zp_err:.4f} "
                 f"({final_mask.sum()}/{len(delta)} inliers, f_out={f_out:.3f}, n_steps={total_steps})"
             )
-        
+
         # Zero inliers is a model failure, not a data property: in mixture
         # mode f_out can pin at its 0.5 prior cap so p_inlier <= 0.5 for
         # every point, and in standard mode a zero clip threshold can do
@@ -1734,7 +1847,7 @@ class Zeropoint:
         # Previously used len(x) which is the filtered length, not the original.
         full_mask = np.zeros(n_input, dtype=bool)
         full_mask[np.flatnonzero(finite)[final_mask]] = True
-        
+
         return zp, zp_err, full_mask
 
     # -----------------------------------------------------------------------
@@ -1794,7 +1907,13 @@ class Zeropoint:
             & np.isfinite(x_err)
             & (mag_err <= 0.5)
         )
-        x, y, w0, x_err, mag_err = x[finite], y[finite], w0[finite], x_err[finite], mag_err[finite]
+        x, y, w0, x_err, mag_err = (
+            x[finite],
+            y[finite],
+            w0[finite],
+            x_err[finite],
+            mag_err[finite],
+        )
         keep_idx = np.where(finite)[0]
         logger.info("Filtered %s/%s points.", len(x), orig_size)
 
@@ -1802,7 +1921,11 @@ class Zeropoint:
         if len(x) < 3:
             yv = y[np.isfinite(y)]
             ZP = float(np.nanmedian(yv)) if yv.size else np.nan
-            mad0 = float(median_abs_deviation(yv, nan_policy="omit")) if yv.size else np.nan
+            mad0 = (
+                float(median_abs_deviation(yv, nan_policy="omit"))
+                if yv.size
+                else np.nan
+            )
             n0 = int(yv.size)
             zp_se = (1.858 * mad0 / np.sqrt(n0)) if n0 >= 2 else mad0
             # zp_se (MAD/sqrt(N)) already captures measurement noise in the
@@ -1814,10 +1937,14 @@ class Zeropoint:
             else:
                 y_err_finite = mag_err[np.isfinite(y)]
                 x_err_finite = x_err[np.isfinite(y)]
-                mean_var_perp = float(
-                    np.nanmedian(x_err_finite**2 + y_err_finite**2)
-                ) if x_err_finite.size else 0.0
-                total_zp_err = float(np.sqrt(mean_var_perp)) if mean_var_perp > 0 else float(zp_se)
+                mean_var_perp = (
+                    float(np.nanmedian(x_err_finite**2 + y_err_finite**2))
+                    if x_err_finite.size
+                    else 0.0
+                )
+                total_zp_err = (
+                    float(np.sqrt(mean_var_perp)) if mean_var_perp > 0 else float(zp_se)
+                )
             full = np.zeros(orig_size, dtype=bool)
             full[keep_idx] = True
             return ZP, slope, full, np.diag([total_zp_err**2, slope_err**2])
@@ -1833,25 +1960,40 @@ class Zeropoint:
         # delta_mag = m_cat - m_inst, so m_cat = delta_mag + m_inst
         y_cal = y + x
         y_err = mag_err
-        
+
         ZP, zp_std, inlier_mask = self._odr_slope1_fit(
-            x, y_cal, x_err, y_err,
+            x,
+            y_cal,
+            x_err,
+            y_err,
             max_iter=10,  # Iterative sigma clipping
             min_points=ransac_min_samples,
         )
-        
+
         # inlier_mask indexes the finite-filtered arrays; map back to input.
         full_mask = np.zeros(orig_size, dtype=bool)
         full_mask[keep_idx] = inlier_mask
-        
-        logger.info("ODR: %s/%s inliers, ZP=%.4f +/- %.4f", inlier_mask.sum(), len(x), ZP, zp_std)
-        
+
+        logger.info(
+            "ODR: %s/%s inliers, ZP=%.4f +/- %.4f",
+            inlier_mask.sum(),
+            len(x),
+            ZP,
+            zp_std,
+        )
+
         # If ODR fails or rejects too many points, fall back to simple median
         if not np.isfinite(ZP) or inlier_mask.sum() < 2:
-            logger.warning("ODR failed or found too few inliers; falling back to median.")
+            logger.warning(
+                "ODR failed or found too few inliers; falling back to median."
+            )
             yv = y[np.isfinite(y)]
             ZP = float(np.nanmedian(yv)) if yv.size else np.nan
-            mad0 = float(median_abs_deviation(yv, nan_policy="omit")) if yv.size else np.nan
+            mad0 = (
+                float(median_abs_deviation(yv, nan_policy="omit"))
+                if yv.size
+                else np.nan
+            )
             n0 = int(yv.size)
             zp_se = (1.858 * mad0 / np.sqrt(n0)) if n0 >= 2 else mad0
             # zp_se (MAD/sqrt(N)) already captures measurement noise.
@@ -1860,21 +2002,27 @@ class Zeropoint:
             if n0 >= 2 and np.isfinite(zp_se) and zp_se > 0:
                 zp_std = float(zp_se)
             else:
-                mean_var_perp = float(
-                    np.nanmedian(x_err**2 + mag_err**2)
-                ) if x_err.size else 0.0
-                zp_std = float(np.sqrt(mean_var_perp)) if mean_var_perp > 0 else float(zp_se)
+                mean_var_perp = (
+                    float(np.nanmedian(x_err**2 + mag_err**2)) if x_err.size else 0.0
+                )
+                zp_std = (
+                    float(np.sqrt(mean_var_perp)) if mean_var_perp > 0 else float(zp_se)
+                )
             full_mask = np.zeros(orig_size, dtype=bool)
             full_mask[keep_idx] = True
             return ZP, slope, full_mask, np.diag([zp_std**2, slope_err**2])
-        
+
         # If ODR rejects >50% of points, warn but keep the result
         if inlier_mask.sum() < 0.5 * len(x) and len(x) > 10:
-            logger.warning("ODR rejected >50% of points (%s/%s); consider checking data quality", inlier_mask.sum(), len(x))
+            logger.warning(
+                "ODR rejected >50% of points (%s/%s); consider checking data quality",
+                inlier_mask.sum(),
+                len(x),
+            )
 
         # zp_std already includes X-error propagation from ODR; no refit needed.
         cov = np.diag([zp_std**2, slope_err**2])
-        
+
         logger.info("ZP = %.4f +/- %.4f (ODR fit with X,Y errors)", ZP, zp_std)
         return ZP, slope, full_mask, cov
 
@@ -1891,8 +2039,8 @@ class Zeropoint:
         n_jobs: int | None = 1,
         random_state: int = 42,
         min_sources: int = 1,
-        fixed_color_coeffs = None,
-        fixed_color_coeff_errors = None,
+        fixed_color_coeffs=None,
+        fixed_color_coeff_errors=None,
         fit_mode="polynomial",
         n_segments=1,
         fit_method="mcmc",  # "mcmc" (default), "odr", or "ransac"
@@ -1972,10 +2120,10 @@ class Zeropoint:
                 fit_params = self._fallback_zeropoint(catalog, use_filter)
                 return catalog, fit_params
 
-            from plotting_utils import (
-                apply_autophot_mplstyle,
-                set_mag_axes_inverted_xy, ransac_grid, ransac_savefig, get_ransac_color,
-            )
+            from plotting_utils import (apply_autophot_mplstyle,
+                                        get_ransac_color, ransac_grid,
+                                        ransac_savefig,
+                                        set_mag_axes_inverted_xy)
 
             plt.ioff()
             apply_autophot_mplstyle()
@@ -1983,7 +2131,10 @@ class Zeropoint:
             inlier_masks_full = {
                 k: np.zeros(len(clean_catalog), dtype=bool) for k in ["AP", "PSF"]
             }
-            colors = {"AP": get_ransac_color('zeropoint_ap'), "PSF": get_ransac_color('zeropoint_psf')}
+            colors = {
+                "AP": get_ransac_color("zeropoint_ap"),
+                "PSF": get_ransac_color("zeropoint_psf"),
+            }
             labels = {"AP": "Aperture", "PSF": "PSF"}
             global_xmins, global_xmaxs, global_ymins, global_ymaxs = [], [], [], []
 
@@ -2052,9 +2203,9 @@ class Zeropoint:
                     ZP, zp_std, inlier_short = self._mcmc_fit(
                         inst_mag,
                         inst_mag + delta_mag,  # y = m_cal
-                        inst_mag_err,          # x_err
-                        yerr,                  # y_err
-                        adaptive=True,         # Enable adaptive convergence
+                        inst_mag_err,  # x_err
+                        yerr,  # y_err
+                        adaptive=True,  # Enable adaptive convergence
                         n_walkers=int(zp_mcmc_cfg.get("mcmc_n_walkers", 32)),
                         n_burn=int(zp_mcmc_cfg.get("mcmc_n_burn", 500)),
                         n_steps=int(zp_mcmc_cfg.get("mcmc_n_steps", 1000)),
@@ -2062,16 +2213,24 @@ class Zeropoint:
                         tau_factor=float(zp_mcmc_cfg.get("mcmc_tau_factor", 10.0)),
                     )
                     # Build dummy cov matrix for compatibility
-                    cov = np.diag([zp_std**2, 0.0]) if np.isfinite(zp_std) else np.diag([np.nan, 0.0])
+                    cov = (
+                        np.diag([zp_std**2, 0.0])
+                        if np.isfinite(zp_std)
+                        else np.diag([np.nan, 0.0])
+                    )
                 elif fit_method_this.lower() == "odr":
                     ZP, zp_std, inlier_short = self._odr_slope1_fit(
                         inst_mag,
                         inst_mag + delta_mag,  # y = m_cal
-                        inst_mag_err,          # x_err
-                        yerr,                  # y_err
+                        inst_mag_err,  # x_err
+                        yerr,  # y_err
                     )
                     # Build dummy cov matrix for compatibility
-                    cov = np.diag([zp_std**2, 0.0]) if np.isfinite(zp_std) else np.diag([np.nan, 0.0])
+                    cov = (
+                        np.diag([zp_std**2, 0.0])
+                        if np.isfinite(zp_std)
+                        else np.diag([np.nan, 0.0])
+                    )
                 else:
                     # RANSAC path: median-based ZP after outlier rejection.
                     weights = 1.0 / (yerr**2 + 1e-12)
@@ -2110,7 +2269,9 @@ class Zeropoint:
                 # field-dependent systematics (PSF variation, catalog zero-point
                 # offsets, blending).  Apply the same floor as estimate_zeropoint:
                 # 0.02 mag for N=1, decreasing to 0.001 mag for N >= 5.
-                _n_inl = int(np.sum(inlier_short)) if inlier_short is not None else n_sources
+                _n_inl = (
+                    int(np.sum(inlier_short)) if inlier_short is not None else n_sources
+                )
                 if _n_inl < 5 and np.isfinite(zp_std):
                     _zp_floor = max(0.001, 0.02 * max(0, (5 - _n_inl)) / 5.0)
                     if zp_std < _zp_floor:
@@ -2133,8 +2294,15 @@ class Zeropoint:
                 )
                 if has_color_term and fixed_color_coeffs is not None:
                     # Extract slope for backwards compatibility
-                    slope_for_params = fixed_color_coeffs[1] if len(fixed_color_coeffs) >= 2 else 0.0
-                    slope_err_for_params = fixed_color_coeff_errors[1] if fixed_color_coeff_errors is not None and len(fixed_color_coeff_errors) >= 2 else 0.0
+                    slope_for_params = (
+                        fixed_color_coeffs[1] if len(fixed_color_coeffs) >= 2 else 0.0
+                    )
+                    slope_err_for_params = (
+                        fixed_color_coeff_errors[1]
+                        if fixed_color_coeff_errors is not None
+                        and len(fixed_color_coeff_errors) >= 2
+                        else 0.0
+                    )
                     fit_params[flux_type].update(
                         {
                             "color_term": slope_for_params,
@@ -2190,7 +2358,7 @@ class Zeropoint:
                         yerr=m_cal_err[out_mask],
                         fmt="x",
                         ms=get_marker_size("medium"),
-                        color=get_ransac_color('outliers'),
+                        color=get_ransac_color("outliers"),
                         ecolor="lightgrey",
                         alpha=get_alpha("medium"),
                         capsize=get_marker_size("medium") / 4,
@@ -2265,7 +2433,11 @@ class Zeropoint:
                             alpha=0.7,
                             label=f"{labels[flux_type]} free slope={_slope_free:.3f}+/-{_slope_err:.3f}",
                         )
-                        _slope_sig = abs(_dev) / _slope_err if np.isfinite(_slope_err) and _slope_err > 0 else np.inf
+                        _slope_sig = (
+                            abs(_dev) / _slope_err
+                            if np.isfinite(_slope_err) and _slope_err > 0
+                            else np.inf
+                        )
                         if _slope_sig > 3:
                             logger.warning(
                                 f"[{flux_type}] Free-slope fit: slope="
@@ -2286,7 +2458,9 @@ class Zeropoint:
                         fit_params[flux_type]["free_slope_err"] = _slope_err
                         fit_params[flux_type]["free_intercept"] = _intercept_free
                     except Exception as _e:
-                        logger.debug(f"[{flux_type}] Free-slope diagnostic fit failed: {_e}")
+                        logger.debug(
+                            f"[{flux_type}] Free-slope diagnostic fit failed: {_e}"
+                        )
 
                 global_xmins.append(xs[0])
                 global_xmaxs.append(xs[-1])
@@ -2326,7 +2500,9 @@ class Zeropoint:
                     rf" (after colour term{sign}{abs(slope_for_display):.2f} "
                     rf"$(m_{{\mathrm{{cal,{color1}}}}} - m_{{\mathrm{{cal,{color2}}}}})$)"
                 )
-            ax.set_xlabel(rf"Instrumental Magnitude $m_{{\mathrm{{inst,{use_filter}}}}}$ [mag]")
+            ax.set_xlabel(
+                rf"Instrumental Magnitude $m_{{\mathrm{{inst,{use_filter}}}}}$ [mag]"
+            )
             ax.set_ylabel(y_label)
             ransac_grid(ax)
             # Declutter: scatter (inlier/outlier) entries stay in the legend
@@ -2334,14 +2510,21 @@ class Zeropoint:
             # legends -- zeropoints top-left, fitted slopes bottom-right.
             from matplotlib.container import ErrorbarContainer as _EBC
             from matplotlib.lines import Line2D as _L2D
+
             _handles, _labels_leg = ax.get_legend_handles_labels()
             _data_h = [_h for _h in _handles if isinstance(_h, _EBC)]
-            _data_l = [_l for _h, _l in zip(_handles, _labels_leg) if isinstance(_h, _EBC)]
+            _data_l = [
+                _l for _h, _l in zip(_handles, _labels_leg) if isinstance(_h, _EBC)
+            ]
             if _data_h:
                 _leg_top = ax.legend(
-                    _data_h, _data_l,
-                    loc="lower center", bbox_to_anchor=(0.5, 1.0),
-                    frameon=False, ncol=2, fontsize=8,
+                    _data_h,
+                    _data_l,
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 1.0),
+                    frameon=False,
+                    ncol=2,
+                    fontsize=8,
                 )
                 ax.add_artist(_leg_top)
 
@@ -2352,8 +2535,13 @@ class Zeropoint:
                 _zp_err = _fp.get("zeropoint_error", np.nan)
                 if np.isfinite(_zp) and np.isfinite(_zp_err):
                     _zp_h.append(
-                        _L2D([0], [0], color=colors[_ft], ls="--",
-                             lw=get_line_width("medium"))
+                        _L2D(
+                            [0],
+                            [0],
+                            color=colors[_ft],
+                            ls="--",
+                            lw=get_line_width("medium"),
+                        )
                     )
                     _zp_l.append(
                         f"{labels[_ft]} zeropoint (slope = 1) = "
@@ -2363,8 +2551,13 @@ class Zeropoint:
                 _fs_err = _fp.get("free_slope_err", np.nan)
                 if np.isfinite(_fs) and np.isfinite(_fs_err):
                     _slope_h.append(
-                        _L2D([0], [0], color=colors[_ft], ls=":",
-                             lw=get_line_width("thin"))
+                        _L2D(
+                            [0],
+                            [0],
+                            color=colors[_ft],
+                            ls=":",
+                            lw=get_line_width("thin"),
+                        )
                     )
                     _slope_l.append(
                         f"{labels[_ft]} fitted slope = "
@@ -2372,18 +2565,29 @@ class Zeropoint:
                     )
             if _zp_h:
                 _leg_zp = ax.legend(
-                    _zp_h, _zp_l, loc="upper left",
-                    frameon=False, fontsize=8,
+                    _zp_h,
+                    _zp_l,
+                    loc="upper left",
+                    frameon=False,
+                    fontsize=8,
                 )
                 ax.add_artist(_leg_zp)
             if _slope_h:
                 ax.legend(
-                    _slope_h, _slope_l, loc="lower right",
-                    frameon=False, fontsize=8,
+                    _slope_h,
+                    _slope_l,
+                    loc="lower right",
+                    frameon=False,
+                    fontsize=8,
                 )
             set_mag_axes_inverted_xy(ax)
 
-            ransac_savefig(fig, os.path.join(write_dir, f"Zeropoint_{base_name}{get_plot_ext(self.input_yaml)}"))
+            ransac_savefig(
+                fig,
+                os.path.join(
+                    write_dir, f"Zeropoint_{base_name}{get_plot_ext(self.input_yaml)}"
+                ),
+            )
             plt.close(fig)
 
             # Build joint inlier mask only from flux types that actually
@@ -2401,7 +2605,9 @@ class Zeropoint:
                 if n_removed > 0:
                     logger.info(
                         "fit_zeropoint: kept %s/%s sources (OR of AP/PSF inlier masks; %s removed as outliers in both).",
-                        len(clean_catalog), n_before, n_removed,
+                        len(clean_catalog),
+                        n_before,
+                        n_removed,
                     )
             else:
                 logger.warning(
@@ -2431,8 +2637,8 @@ class Zeropoint:
         sigma_clip_sigma: float = 3.5,
         sigma_clip_maxiters: int = 10,
         min_sources: int = 1,
-        fixed_color_coeffs = None,
-        fixed_color_coeff_errors = None,
+        fixed_color_coeffs=None,
+        fixed_color_coeff_errors=None,
         fit_mode="polynomial",
         n_segments=1,
     ):
@@ -2466,13 +2672,27 @@ class Zeropoint:
             logger.info("Estimating zeropoint via sigma clipping.")
 
             try:
-                if catalog is None or getattr(catalog, "empty", False) or len(catalog) == 0:
+                if (
+                    catalog is None
+                    or getattr(catalog, "empty", False)
+                    or len(catalog) == 0
+                ):
                     logger.warning(
                         "estimate_zeropoint: catalog is None/empty; returning NaN zeropoint."
                     )
                     return catalog, {
-                        "AP": {"zeropoint": np.nan, "zeropoint_error": np.nan, "n_sources": 0, "has_color_term": False},
-                        "PSF": {"zeropoint": np.nan, "zeropoint_error": np.nan, "n_sources": 0, "has_color_term": False},
+                        "AP": {
+                            "zeropoint": np.nan,
+                            "zeropoint_error": np.nan,
+                            "n_sources": 0,
+                            "has_color_term": False,
+                        },
+                        "PSF": {
+                            "zeropoint": np.nan,
+                            "zeropoint_error": np.nan,
+                            "n_sources": 0,
+                            "has_color_term": False,
+                        },
                     }
 
                 fpath = self.input_yaml.get("fpath", "")
@@ -2514,7 +2734,10 @@ class Zeropoint:
 
                 apply_autophot_mplstyle()
                 fig_hist, ax_hist = plt.subplots(1, 1, figsize=set_size(540, 1))
-                colors = {"AP": get_ransac_color('zeropoint_hist_ap'), "PSF": get_ransac_color('zeropoint_hist_psf')}
+                colors = {
+                    "AP": get_ransac_color("zeropoint_hist_ap"),
+                    "PSF": get_ransac_color("zeropoint_hist_psf"),
+                }
                 labels_base = {"AP": "Aperture", "PSF": "PSF"}
                 inlier_masks_full = {
                     k: np.zeros(len(clean_catalog), dtype=bool) for k in ["AP", "PSF"]
@@ -2527,7 +2750,9 @@ class Zeropoint:
 
                 # Aperture correction is applied at photometry stage (main.py), not during ZP calculation.
                 # The following is for visualization only: show what the ZP would be with aperture correction.
-                ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
+                ap_corr_mag = float(
+                    self.input_yaml.get("aperture_correction", 0.0) or 0.0
+                )
                 ap_corr_err_mag = float(
                     self.input_yaml.get("aperture_correction_err", 0.0) or 0.0
                 )
@@ -2553,15 +2778,24 @@ class Zeropoint:
                     delta_no_corr_err = delta_mag_err.copy()
 
                     if has_color_term and fixed_color_coeffs is not None:
-                        zp_no_corr = float(np.nanmedian(delta_no_corr[np.isfinite(delta_no_corr)]))
+                        zp_no_corr = float(
+                            np.nanmedian(delta_no_corr[np.isfinite(delta_no_corr)])
+                        )
                         std_no_corr = float(
-                            median_abs_deviation(delta_no_corr[np.isfinite(delta_no_corr)], nan_policy="omit")
+                            median_abs_deviation(
+                                delta_no_corr[np.isfinite(delta_no_corr)],
+                                nan_policy="omit",
+                            )
                         )
                         # Extract slope for logging (second element in tuple)
                         if fit_mode == "piecewise" and n_segments == 2:
                             slope_for_log = fixed_color_coeffs[1][0]  # First slope
                         else:
-                            slope_for_log = fixed_color_coeffs[1] if len(fixed_color_coeffs) >= 2 else 0.0
+                            slope_for_log = (
+                                fixed_color_coeffs[1]
+                                if len(fixed_color_coeffs) >= 2
+                                else 0.0
+                            )
                         logger.info(
                             f"[{flux_type}] Before color correction: ZP={zp_no_corr:.3f}, "
                             f"std={std_no_corr:.3f}, color_term={slope_for_log:.4f}"
@@ -2584,11 +2818,15 @@ class Zeropoint:
                         _c1 = np.asarray(clean_catalog[color1].values, float)[vmask]
                         _c2 = np.asarray(clean_catalog[color2].values, float)[vmask]
                         _color_diff_est = _c1 - _c2
-                        _finite_color_est = _color_diff_est[np.isfinite(_color_diff_est)]
+                        _finite_color_est = _color_diff_est[
+                            np.isfinite(_color_diff_est)
+                        ]
                         if _finite_color_est.size > 0:
                             _median_color_est = float(np.nanmedian(_finite_color_est))
                             _color_scatter_est = float(
-                                median_abs_deviation(_finite_color_est, nan_policy="omit")
+                                median_abs_deviation(
+                                    _finite_color_est, nan_policy="omit"
+                                )
                             )
                         else:
                             _median_color_est = 0.0
@@ -2659,7 +2897,9 @@ class Zeropoint:
                         median_abs_deviation(inlier_deltas, nan_policy="omit")
                     )
                     # SE(median) ~ 1.858 * MAD/sqrt(N) (1.253*sigma/sqrt(N), sigma~1.4826*MAD)
-                    se_median = (1.858 * mad_zp / np.sqrt(n_inl)) if n_inl >= 2 else mad_zp
+                    se_median = (
+                        (1.858 * mad_zp / np.sqrt(n_inl)) if n_inl >= 2 else mad_zp
+                    )
 
                     # Small-sample inflation: for N < 10, MAD-based scatter
                     # estimates are unstable and systematically underestimate the
@@ -2676,7 +2916,11 @@ class Zeropoint:
 
                     # Per-source measurement uncertainty: average of propagated errors
                     # (flux_err + catmag_err + color_corr_err) already in inlier_delta_err
-                    mean_per_source_err = float(np.nanmedian(inlier_delta_err)) if len(inlier_delta_err) > 0 else 0.0
+                    mean_per_source_err = (
+                        float(np.nanmedian(inlier_delta_err))
+                        if len(inlier_delta_err) > 0
+                        else 0.0
+                    )
 
                     # Total zeropoint error: se_median (1.858 * MAD / sqrt(N))
                     # already captures the observed scatter, which includes
@@ -2695,7 +2939,11 @@ class Zeropoint:
                     # Error floor scales with sample size: 0.001 mag for N >= 20,
                     # up to 0.02 mag for N < 5.  The floor prevents misleadingly
                     # small errors when few sources are available.
-                    zp_floor = max(0.001, 0.02 * max(0, (5 - n_inl)) / 5.0) if n_inl < 5 else 0.001
+                    zp_floor = (
+                        max(0.001, 0.02 * max(0, (5 - n_inl)) / 5.0)
+                        if n_inl < 5
+                        else 0.001
+                    )
                     zp_err = max(zp_err, zp_floor)
 
                     if zp_err > 0.05:
@@ -2706,7 +2954,12 @@ class Zeropoint:
 
                     logger.debug(
                         "[%s] ZP error breakdown: SE_median=%.4f, mean_src_err=%.4f, combined=%.4f (N=%d, MAD=%.4f)",
-                        flux_type, se_median, mean_per_source_err, zp_err, n_inl, mad_zp,
+                        flux_type,
+                        se_median,
+                        mean_per_source_err,
+                        zp_err,
+                        n_inl,
+                        mad_zp,
                     )
 
                     zp_params[flux_type].update(
@@ -2721,8 +2974,17 @@ class Zeropoint:
                     )
                     if has_color_term and fixed_color_coeffs is not None:
                         # Extract slope for backwards compatibility
-                        slope_for_params = fixed_color_coeffs[1] if len(fixed_color_coeffs) >= 2 else 0.0
-                        slope_err_for_params = fixed_color_coeff_errors[1] if fixed_color_coeff_errors is not None and len(fixed_color_coeff_errors) >= 2 else 0.0
+                        slope_for_params = (
+                            fixed_color_coeffs[1]
+                            if len(fixed_color_coeffs) >= 2
+                            else 0.0
+                        )
+                        slope_err_for_params = (
+                            fixed_color_coeff_errors[1]
+                            if fixed_color_coeff_errors is not None
+                            and len(fixed_color_coeff_errors) >= 2
+                            else 0.0
+                        )
                         zp_params[flux_type].update(
                             {
                                 "color_term": slope_for_params,
@@ -2843,7 +3105,9 @@ class Zeropoint:
                             xerr_corr = float(zp_err)
                             if np.isfinite(ap_corr_err_mag) and ap_corr_err_mag > 0:
                                 xerr_corr = float(
-                                    np.sqrt(float(zp_err) ** 2 + float(ap_corr_err_mag) ** 2)
+                                    np.sqrt(
+                                        float(zp_err) ** 2 + float(ap_corr_err_mag) ** 2
+                                    )
                                 )
                             ax_hist.hist(
                                 inlier_apcorr,
@@ -2864,7 +3128,11 @@ class Zeropoint:
                             try:
                                 x_corr = float(zp_final - ap_corr_mag)
                                 y_ax = 0.95
-                                if np.isfinite(x_corr) and np.isfinite(xerr_corr) and xerr_corr > 0:
+                                if (
+                                    np.isfinite(x_corr)
+                                    and np.isfinite(xerr_corr)
+                                    and xerr_corr > 0
+                                ):
                                     ax_hist.errorbar(
                                         [x_corr],
                                         [y_ax],
@@ -2893,7 +3161,9 @@ class Zeropoint:
                     if has_color_term and fixed_color_coeffs is not None:
                         dnc = delta_no_corr[np.isfinite(delta_no_corr)]
                         # Track which vmask_finite_idx sources are finite in delta_no_corr
-                        vmask_nc_finite_idx = vmask_finite_idx[np.isfinite(delta_no_corr)]
+                        vmask_nc_finite_idx = vmask_finite_idx[
+                            np.isfinite(delta_no_corr)
+                        ]
 
                         clipped_nc = sigma_clip(
                             dnc,
@@ -2994,9 +3264,7 @@ class Zeropoint:
                 )
                 ax_hist.add_artist(_leg_top)
                 # ZP-value legend: invisible handles so only the text shows.
-                _zp_handles = [
-                    mpatches.Patch(color="none") for _r in _right_labels
-                ]
+                _zp_handles = [mpatches.Patch(color="none") for _r in _right_labels]
                 ax_hist.legend(
                     _zp_handles,
                     _right_labels,
@@ -3008,7 +3276,13 @@ class Zeropoint:
                 )
                 safe_tight_layout(fig_hist)
                 os.makedirs(write_dir, exist_ok=True)
-                ransac_savefig(fig_hist, os.path.join(write_dir, f"Zeropoint_Hist_{base_name}{get_plot_ext(self.input_yaml)}"))
+                ransac_savefig(
+                    fig_hist,
+                    os.path.join(
+                        write_dir,
+                        f"Zeropoint_Hist_{base_name}{get_plot_ext(self.input_yaml)}",
+                    ),
+                )
                 plt.close(fig_hist)
 
                 # Combine inliers only over flux types that actually had
@@ -3046,11 +3320,27 @@ class Zeropoint:
     # Public: colour-term fit
     # -----------------------------------------------------------------------
 
-    def _plot_piecewise_color_term(self, xi, yi, xe, ye, coefficients, coefficient_errors, n_segments, color1, color2, use_filter, inlier_mask=None, overall_method="RANSAC", output_dir=None):
+    def _plot_piecewise_color_term(
+        self,
+        xi,
+        yi,
+        xe,
+        ye,
+        coefficients,
+        coefficient_errors,
+        n_segments,
+        color1,
+        color2,
+        use_filter,
+        inlier_mask=None,
+        overall_method="RANSAC",
+        output_dir=None,
+    ):
         """Generate color term plot for piecewise linear fitting."""
+        import os
+
         import matplotlib.pyplot as plt
         from matplotlib.gridspec import GridSpec
-        import os
 
         plt.ioff()
         apply_autophot_mplstyle()
@@ -3058,10 +3348,10 @@ class Zeropoint:
         # Space for the legend that sits above ax2 (ransac_legend_top_outside).
         fig.subplots_adjust(hspace=0.3)
 
-        inlier_color = get_ransac_color('color_term_piece')
-        outlier_color = get_ransac_color('outliers')
-        fit_color = get_ransac_color('fit')
-        err_color = get_ransac_color('error_band')
+        inlier_color = get_ransac_color("color_term_piece")
+        outlier_color = get_ransac_color("outliers")
+        fit_color = get_ransac_color("fit")
+        err_color = get_ransac_color("error_band")
 
         # Top panel: uncorrected data
         if inlier_mask is not None:
@@ -3073,10 +3363,10 @@ class Zeropoint:
                     xerr=xe[_out_mask_p],
                     yerr=ye[_out_mask_p],
                     fmt="x",
-                    ms=get_marker_size('medium'),
+                    ms=get_marker_size("medium"),
                     color=outlier_color,
                     ecolor="lightgrey",
-                    alpha=get_alpha('medium'),
+                    alpha=get_alpha("medium"),
                     capsize=get_marker_size("medium") / 4,
                     elinewidth=0.5,
                     label=f"Outliers [{_out_mask_p.sum()}]",
@@ -3087,11 +3377,11 @@ class Zeropoint:
                 xerr=xe[inlier_mask],
                 yerr=ye[inlier_mask],
                 fmt="o",
-                ms=get_marker_size('medium'),
+                ms=get_marker_size("medium"),
                 color=inlier_color,
                 ecolor="lightgrey",
-                alpha=get_alpha('dark'),
-                capsize=get_marker_size('medium') / 4,
+                alpha=get_alpha("dark"),
+                capsize=get_marker_size("medium") / 4,
                 elinewidth=0.5,
                 label=f"Inliers [{inlier_mask.sum()}]",
             )
@@ -3102,11 +3392,11 @@ class Zeropoint:
                 xerr=xe,
                 yerr=ye,
                 fmt="o",
-                ms=get_marker_size('medium'),
+                ms=get_marker_size("medium"),
                 color=inlier_color,
                 ecolor="lightgrey",
-                alpha=get_alpha('dark'),
-                capsize=get_marker_size('medium') / 4,
+                alpha=get_alpha("dark"),
+                capsize=get_marker_size("medium") / 4,
                 elinewidth=0.5,
                 label="Data",
             )
@@ -3119,15 +3409,33 @@ class Zeropoint:
 
             if coefficient_errors is not None and len(coefficient_errors) == 3:
                 bp_err = coefficient_errors[0][0] if coefficient_errors[0] else 0.0
-                slope1_err = coefficient_errors[1][0] if len(coefficient_errors[1]) > 0 else 0.0
-                slope2_err = coefficient_errors[1][1] if len(coefficient_errors[1]) > 1 else 0.0
+                slope1_err = (
+                    coefficient_errors[1][0] if len(coefficient_errors[1]) > 0 else 0.0
+                )
+                slope2_err = (
+                    coefficient_errors[1][1] if len(coefficient_errors[1]) > 1 else 0.0
+                )
                 # coefficient_errors[2] may be a tuple with (intercept_err, cov1, cov2) or just intercept_err
                 if isinstance(coefficient_errors[2], tuple):
-                    intercept_err = coefficient_errors[2][0] if len(coefficient_errors[2]) > 0 else 0.0
-                    cov1 = coefficient_errors[2][1] if len(coefficient_errors[2]) > 1 else None
-                    cov2 = coefficient_errors[2][2] if len(coefficient_errors[2]) > 2 else None
+                    intercept_err = (
+                        coefficient_errors[2][0]
+                        if len(coefficient_errors[2]) > 0
+                        else 0.0
+                    )
+                    cov1 = (
+                        coefficient_errors[2][1]
+                        if len(coefficient_errors[2]) > 1
+                        else None
+                    )
+                    cov2 = (
+                        coefficient_errors[2][2]
+                        if len(coefficient_errors[2]) > 2
+                        else None
+                    )
                 else:
-                    intercept_err = coefficient_errors[2] if coefficient_errors[2] else 0.0
+                    intercept_err = (
+                        coefficient_errors[2] if coefficient_errors[2] else 0.0
+                    )
                     cov1 = cov2 = None
             else:
                 bp_err = slope1_err = slope2_err = intercept_err = 0.0
@@ -3142,15 +3450,15 @@ class Zeropoint:
             # Error bands use full covariance propagation:
             # var(y) = x^2*var(slope) + var(intercept) + 2x*cov(slope,intercept)
             y_err = np.zeros_like(x_plot)
-            
+
             x1_seg = x_plot[mask1]
             if cov1 is not None and np.any(np.isfinite(cov1)):
-                var_y1 = (x1_seg**2 * cov1[0, 0] + cov1[1, 1] + 2 * x1_seg * cov1[0, 1])
+                var_y1 = x1_seg**2 * cov1[0, 0] + cov1[1, 1] + 2 * x1_seg * cov1[0, 1]
                 y_err[mask1] = np.sqrt(np.clip(var_y1, 0, None))
             else:
                 # Fallback: no covariance, sum in quadrature
-                y_err[mask1] = np.sqrt((slope1_err * x1_seg)**2 + intercept_err**2)
-            
+                y_err[mask1] = np.sqrt((slope1_err * x1_seg) ** 2 + intercept_err**2)
+
             # Segment 2 error band is evaluated at x relative to the breakpoint.
             x2_seg = x_plot[mask2] - bp
             intercept2 = intercept + slope1 * bp  # Effective intercept at breakpoint
@@ -3159,15 +3467,15 @@ class Zeropoint:
                 var_int2 = cov1[1, 1] + bp**2 * cov1[0, 0] + 2 * bp * cov1[0, 1]
                 int2_err = np.sqrt(max(0, var_int2))
             else:
-                int2_err = np.sqrt(intercept_err**2 + (slope1_err * bp)**2)
-            
+                int2_err = np.sqrt(intercept_err**2 + (slope1_err * bp) ** 2)
+
             if cov2 is not None and np.any(np.isfinite(cov2)):
-                var_y2 = (x2_seg**2 * cov2[0, 0] + cov2[1, 1] + 2 * x2_seg * cov2[0, 1])
+                var_y2 = x2_seg**2 * cov2[0, 0] + cov2[1, 1] + 2 * x2_seg * cov2[0, 1]
                 # Add variance from intercept2 error (independent approximation)
                 var_y2 += int2_err**2
                 y_err[mask2] = np.sqrt(np.clip(var_y2, 0, None))
             else:
-                y_err[mask2] = np.sqrt((slope2_err * x2_seg)**2 + int2_err**2)
+                y_err[mask2] = np.sqrt((slope2_err * x2_seg) ** 2 + int2_err**2)
 
             y_plot_upper = y_plot + y_err
             y_plot_lower = y_plot - y_err
@@ -3179,7 +3487,7 @@ class Zeropoint:
                 y_plot,
                 color=fit_color,
                 linestyle="--",
-                lw=get_line_width('medium'),
+                lw=get_line_width("medium"),
                 label=label_text,
             )
             ax1.fill_between(
@@ -3187,10 +3495,17 @@ class Zeropoint:
                 y_plot_lower,
                 y_plot_upper,
                 color=err_color,
-                alpha=get_alpha('very_light'),
+                alpha=get_alpha("very_light"),
                 label="Error band",
             )
-            ax1.axvline(bp, color=err_color, linestyle=":", lw=get_line_width('thin'), alpha=0.6, label=f"Breakpoint: {bp:.3f}")
+            ax1.axvline(
+                bp,
+                color=err_color,
+                linestyle=":",
+                lw=get_line_width("thin"),
+                alpha=0.6,
+                label=f"Breakpoint: {bp:.3f}",
+            )
 
         ax1.set_xlim(xi.min() - 0.1 * np.ptp(xi), xi.max() + 0.1 * np.ptp(xi))
         ax1.set_ylim(yi.min() - 0.1 * np.ptp(yi), yi.max() + 0.1 * np.ptp(yi))
@@ -3213,11 +3528,13 @@ class Zeropoint:
             mask2 = xi > bp
 
             yi_corrected[mask1] = yi[mask1] - slope1 * xi[mask1]
-            ye_corrected[mask1] = np.sqrt(ye[mask1]**2 + (slope1 * xe[mask1])**2)
+            ye_corrected[mask1] = np.sqrt(ye[mask1] ** 2 + (slope1 * xe[mask1]) ** 2)
 
             # Segment 2 correction includes the (slope1 - slope2)*bp continuity term.
-            yi_corrected[mask2] = yi[mask2] - (slope2 * xi[mask2] + (slope1 - slope2) * bp)
-            ye_corrected[mask2] = np.sqrt(ye[mask2]**2 + (slope2 * xe[mask2])**2)
+            yi_corrected[mask2] = yi[mask2] - (
+                slope2 * xi[mask2] + (slope1 - slope2) * bp
+            )
+            ye_corrected[mask2] = np.sqrt(ye[mask2] ** 2 + (slope2 * xe[mask2]) ** 2)
 
         std_uncorrected = float(median_abs_deviation(yi, nan_policy="omit"))
         std_corrected = float(median_abs_deviation(yi_corrected, nan_policy="omit"))
@@ -3231,10 +3548,10 @@ class Zeropoint:
                     xerr=xe[_out_mask_p2],
                     yerr=ye_corrected[_out_mask_p2],
                     fmt="x",
-                    ms=get_marker_size('medium'),
+                    ms=get_marker_size("medium"),
                     color=outlier_color,
                     ecolor="lightgrey",
-                    alpha=get_alpha('medium'),
+                    alpha=get_alpha("medium"),
                     capsize=get_marker_size("medium") / 4,
                     elinewidth=0.5,
                     label=f"Outliers corrected [{_out_mask_p2.sum()}]",
@@ -3245,11 +3562,11 @@ class Zeropoint:
                 xerr=xe[inlier_mask],
                 yerr=ye_corrected[inlier_mask],
                 fmt="o",
-                ms=get_marker_size('medium'),
+                ms=get_marker_size("medium"),
                 color=inlier_color,
                 ecolor="lightgrey",
-                alpha=get_alpha('dark'),
-                capsize=get_marker_size('medium') / 4,
+                alpha=get_alpha("dark"),
+                capsize=get_marker_size("medium") / 4,
                 elinewidth=0.5,
                 label=f"Corrected inliers [{np.sum(inlier_mask)}]",
             )
@@ -3260,17 +3577,25 @@ class Zeropoint:
                 xerr=xe,
                 yerr=ye_corrected,
                 fmt="o",
-                ms=get_marker_size('medium'),
+                ms=get_marker_size("medium"),
                 color=inlier_color,
                 ecolor="lightgrey",
-                alpha=get_alpha('dark'),
-                capsize=get_marker_size('medium') / 4,
+                alpha=get_alpha("dark"),
+                capsize=get_marker_size("medium") / 4,
                 elinewidth=0.5,
                 label="Corrected data",
             )
 
-        ax2.axhline(np.median(yi_corrected), color=err_color, linestyle=":", lw=get_line_width('thin'), alpha=0.5)
-        ax2.set_xlabel(rf"$m_\mathrm{{cal,{color1}}} - m_\mathrm{{cal,{color2}}}$ [mag]")
+        ax2.axhline(
+            np.median(yi_corrected),
+            color=err_color,
+            linestyle=":",
+            lw=get_line_width("thin"),
+            alpha=0.5,
+        )
+        ax2.set_xlabel(
+            rf"$m_\mathrm{{cal,{color1}}} - m_\mathrm{{cal,{color2}}}$ [mag]"
+        )
         ax2.set_ylabel("Color-Corrected Zeropoint [mag]")
         ransac_grid(ax2)
         ransac_legend_top_outside(ax2, ncol=2)
@@ -3295,7 +3620,10 @@ class Zeropoint:
         else:
             write_dir = output_dir
         base_name = os.path.splitext(os.path.basename(fpath))[0] or "color_term"
-        plot_file = os.path.join(write_dir, f"Color_Term_Piecewise_{base_name}{get_plot_ext(self.input_yaml)}")
+        plot_file = os.path.join(
+            write_dir,
+            f"Color_Term_Piecewise_{base_name}{get_plot_ext(self.input_yaml)}",
+        )
         ransac_savefig(fig, plot_file)
         plt.close(fig)
         logger.debug("fit_color_term: saved piecewise color term plot to %s", plot_file)
@@ -3329,7 +3657,12 @@ class Zeropoint:
             """Fit y = slope*x + intercept with weights = 1/yerr^2.
             Returns (slope, intercept, slope_err, intercept_err, cov)"""
             # Zero or invalid errors would give infinite weights.
-            valid = (yerr_seg > 0) & np.isfinite(yerr_seg) & np.isfinite(x_seg) & np.isfinite(y_seg)
+            valid = (
+                (yerr_seg > 0)
+                & np.isfinite(yerr_seg)
+                & np.isfinite(x_seg)
+                & np.isfinite(y_seg)
+            )
             if valid.sum() < 2:
                 return np.nan, np.nan, np.nan, np.nan, np.full((2, 2), np.nan)
 
@@ -3369,7 +3702,9 @@ class Zeropoint:
 
             return slope, intercept, slope_err, intercept_err, cov
 
-        def sigma_clip_segment(x_seg, y_seg, yerr_seg, sigma=outlier_sigma, max_iter=10):
+        def sigma_clip_segment(
+            x_seg, y_seg, yerr_seg, sigma=outlier_sigma, max_iter=10
+        ):
             """Iterative sigma clipping for a segment."""
             mask = np.ones(len(x_seg), dtype=bool)
             for _ in range(max_iter):
@@ -3402,9 +3737,19 @@ class Zeropoint:
         if n_segments == 2:
             # Need enough points for two fitted segments.
             if len(x) < 8:
-                logger.warning("fit_color_term: insufficient data (%s points) for piecewise fitting, falling back to linear", len(x))
-                slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
-                return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
+                logger.warning(
+                    "fit_color_term: insufficient data (%s points) for piecewise fitting, falling back to linear",
+                    len(x),
+                )
+                slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(
+                    x, y, y_err
+                )
+                return (
+                    ((), (slope,), intercept),
+                    ((), (slope_err,), intercept_err),
+                    np.ones(len(x), dtype=bool),
+                    "WLS",
+                )
 
             # Grid search for the optimal single breakpoint on the full data.
             x_min, x_max = x_sorted.min(), x_sorted.max()
@@ -3426,7 +3771,7 @@ class Zeropoint:
                 if not np.isfinite(slope1):
                     return 1e10
                 resid1 = y1 - (slope1 * x1 + intercept1)
-                chi2_1 = np.sum((resid1 / ye1)**2)
+                chi2_1 = np.sum((resid1 / ye1) ** 2)
 
                 # Segment 2
                 x2, y2, ye2 = x_sorted[mask2], y_sorted[mask2], y_err_sorted[mask2]
@@ -3434,7 +3779,7 @@ class Zeropoint:
                 if not np.isfinite(slope2):
                     return 1e10
                 resid2 = y2 - (slope2 * x2 + intercept2)
-                chi2_2 = np.sum((resid2 / ye2)**2)
+                chi2_2 = np.sum((resid2 / ye2) ** 2)
 
                 return chi2_1 + chi2_2
 
@@ -3450,11 +3795,24 @@ class Zeropoint:
                         best_bp = bp
 
                 optimal_bp = best_bp
-                logger.info("fit_color_term: grid search found optimal breakpoint at %.3f", optimal_bp)
+                logger.info(
+                    "fit_color_term: grid search found optimal breakpoint at %.3f",
+                    optimal_bp,
+                )
             except Exception as exc:
-                logger.warning("fit_color_term: breakpoint optimization failed (%s), falling back to linear", exc)
-                slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
-                return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
+                logger.warning(
+                    "fit_color_term: breakpoint optimization failed (%s), falling back to linear",
+                    exc,
+                )
+                slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(
+                    x, y, y_err
+                )
+                return (
+                    ((), (slope,), intercept),
+                    ((), (slope_err,), intercept_err),
+                    np.ones(len(x), dtype=bool),
+                    "WLS",
+                )
 
             # Each segment gets its own WLS + sigma-clip pass.
             mask1 = x_sorted <= optimal_bp
@@ -3468,7 +3826,11 @@ class Zeropoint:
                 x1[inlier_mask1], y1[inlier_mask1], ye1[inlier_mask1]
             )
             method1 = "WLS"
-            logger.info("fit_color_term: segment 1 WLS: %s/%s inliers", np.sum(inlier_mask1), len(x1))
+            logger.info(
+                "fit_color_term: segment 1 WLS: %s/%s inliers",
+                np.sum(inlier_mask1),
+                len(x1),
+            )
 
             # Segment 2
             x2, y2 = x_sorted[mask2], y_sorted[mask2]
@@ -3478,12 +3840,27 @@ class Zeropoint:
                 x2[inlier_mask2], y2[inlier_mask2], ye2[inlier_mask2]
             )
             method2 = "WLS"
-            logger.info("fit_color_term: segment 2 WLS: %s/%s inliers", np.sum(inlier_mask2), len(x2))
+            logger.info(
+                "fit_color_term: segment 2 WLS: %s/%s inliers",
+                np.sum(inlier_mask2),
+                len(x2),
+            )
 
             if inlier_mask1.sum() < 2 or inlier_mask2.sum() < 2:
-                logger.warning("fit_color_term: insufficient inliers (seg1: %s, seg2: %s), falling back to linear", inlier_mask1.sum(), inlier_mask2.sum())
-                slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
-                return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
+                logger.warning(
+                    "fit_color_term: insufficient inliers (seg1: %s, seg2: %s), falling back to linear",
+                    inlier_mask1.sum(),
+                    inlier_mask2.sum(),
+                )
+                slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(
+                    x, y, y_err
+                )
+                return (
+                    ((), (slope,), intercept),
+                    ((), (slope_err,), intercept_err),
+                    np.ones(len(x), dtype=bool),
+                    "WLS",
+                )
 
             # Coefficients: intercept from segment 1, slopes from both
             coefficients = ((optimal_bp,), (slope1, slope2), intercept1)
@@ -3491,7 +3868,11 @@ class Zeropoint:
             # Error estimates from weighted least squares covariance
             bp_err = x_range * 0.05  # Rough estimate: 5% of range
             # Store intercept_err, cov1, cov2 for proper error propagation in plots
-            coefficient_errors = ((bp_err,), (slope1_err, slope2_err), (intercept1_err, cov1, cov2))
+            coefficient_errors = (
+                (bp_err,),
+                (slope1_err, slope2_err),
+                (intercept1_err, cov1, cov2),
+            )
 
             combined_inlier_mask_sorted = np.zeros(len(x_sorted), dtype=bool)
             combined_inlier_mask_sorted[mask1] = inlier_mask1
@@ -3511,9 +3892,19 @@ class Zeropoint:
             return coefficients, coefficient_errors, inlier_mask, overall_method
         else:
             # For n > 2, fall back to linear
-            logger.warning("fit_color_term: n_segments=%s not yet implemented, falling back to linear", n_segments)
-            slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
-            return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
+            logger.warning(
+                "fit_color_term: n_segments=%s not yet implemented, falling back to linear",
+                n_segments,
+            )
+            slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(
+                x, y, y_err
+            )
+            return (
+                ((), (slope,), intercept),
+                ((), (slope_err,), intercept_err),
+                np.ones(len(x), dtype=bool),
+                "WLS",
+            )
 
     def fit_color_term(self, catalog: pd.DataFrame):
         """
@@ -3548,13 +3939,23 @@ class Zeropoint:
 
             # n_segments > 1 overrides poly_order
             if n_segments > 1:
-                logger.info("fit_color_term: using piecewise linear with %s segments", n_segments)
+                logger.info(
+                    "fit_color_term: using piecewise linear with %s segments",
+                    n_segments,
+                )
                 fit_mode = "piecewise"
             else:
                 if poly_order not in [1, 2]:
-                    logger.warning("fit_color_term: invalid poly_order %s, using 1 (linear)", poly_order)
+                    logger.warning(
+                        "fit_color_term: invalid poly_order %s, using 1 (linear)",
+                        poly_order,
+                    )
                     poly_order = 1
-                logger.info("fit_color_term: using polynomial order %s (%s)", poly_order, 'linear' if poly_order == 1 else 'quadratic')
+                logger.info(
+                    "fit_color_term: using polynomial order %s (%s)",
+                    poly_order,
+                    "linear" if poly_order == 1 else "quadratic",
+                )
                 fit_mode = "polynomial"
 
             zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
@@ -3614,11 +4015,19 @@ class Zeropoint:
             snr = np.abs(flux_ap) / flux_err_safe
             snr_mask = snr >= 5
             n_before_snr = len(x)
-            x, y, x_err, y_err = x[snr_mask], y[snr_mask], x_err[snr_mask], y_err[snr_mask]
+            x, y, x_err, y_err = (
+                x[snr_mask],
+                y[snr_mask],
+                x_err[snr_mask],
+                y_err[snr_mask],
+            )
             flux_ap, flux_err = flux_ap[snr_mask], flux_err[snr_mask]
             n_after_snr = len(x)
             if n_before_snr - n_after_snr > 0:
-                logger.info("fit_color_term: removed %s sources with S/N < 5", n_before_snr - n_after_snr)
+                logger.info(
+                    "fit_color_term: removed %s sources with S/N < 5",
+                    n_before_snr - n_after_snr,
+                )
 
             logger.info(
                 f"fit_color_term: color distribution before filtering: "
@@ -3630,8 +4039,8 @@ class Zeropoint:
             extreme_color_sigma = zp_cfg.get("extreme_color_sigma", 2.5)
 
             if fit_mode == "piecewise":
-                coefficients, coefficient_errors, inlier_mask, overall_method = self._fit_piecewise_linear(
-                    x, y, x_err, y_err, n_segments
+                coefficients, coefficient_errors, inlier_mask, overall_method = (
+                    self._fit_piecewise_linear(x, y, x_err, y_err, n_segments)
                 )
 
                 # If fallback returned linear, switch to polynomial flow
@@ -3647,7 +4056,20 @@ class Zeropoint:
                     x_range = float(np.ptp(x))
 
                     # Plot is saved next to the input file.
-                    self._plot_piecewise_color_term(xi, yi, xe, ye, coefficients, coefficient_errors, n_segments, color1, color2, use_filter, inlier_mask, overall_method)
+                    self._plot_piecewise_color_term(
+                        xi,
+                        yi,
+                        xe,
+                        ye,
+                        coefficients,
+                        coefficient_errors,
+                        n_segments,
+                        color1,
+                        color2,
+                        use_filter,
+                        inlier_mask,
+                        overall_method,
+                    )
 
                     return coefficients, coefficient_errors
             else:
@@ -3656,7 +4078,9 @@ class Zeropoint:
                     try:
                         extreme_color_sigma = float(extreme_color_sigma)
                         if extreme_color_sigma > 0 and len(x) > 10:
-                            color_clipped = sigma_clip(x, sigma=extreme_color_sigma, maxiters=5)
+                            color_clipped = sigma_clip(
+                                x, sigma=extreme_color_sigma, maxiters=5
+                            )
                             n_extreme = np.sum(color_clipped.mask)
                             if n_extreme > 0:
                                 logger.info(
@@ -3670,7 +4094,9 @@ class Zeropoint:
                                     y_err[~color_clipped.mask],
                                 )
                     except Exception as exc:
-                        logger.warning("fit_color_term: extreme color filtering failed: %s", exc)
+                        logger.warning(
+                            "fit_color_term: extreme color filtering failed: %s", exc
+                        )
 
             # 1. Pre-fit sigma clip removes extreme outliers before RANSAC.
             try:
@@ -3680,13 +4106,23 @@ class Zeropoint:
                 pre_clip = sigma_clip(ols_resid_pre, sigma=5, maxiters=3, masked=True)
                 n_pre_outliers = np.sum(pre_clip.mask)
                 if n_pre_outliers > 0:
-                    logger.info("fit_color_term: pre-fit clipping removed %s extreme outliers", n_pre_outliers)
-                    x, y, x_err, y_err = x[~pre_clip.mask], y[~pre_clip.mask], x_err[~pre_clip.mask], y_err[~pre_clip.mask]
+                    logger.info(
+                        "fit_color_term: pre-fit clipping removed %s extreme outliers",
+                        n_pre_outliers,
+                    )
+                    x, y, x_err, y_err = (
+                        x[~pre_clip.mask],
+                        y[~pre_clip.mask],
+                        x_err[~pre_clip.mask],
+                        y_err[~pre_clip.mask],
+                    )
             except Exception as exc:
                 logger.debug("fit_color_term: pre-fit clipping skipped: %s", exc)
 
             _min_sources_cfg = int(zp_cfg.get("min_source_no", 5))
-            min_sources = max(3, _min_sources_cfg)  # Hard floor of 3 for statistical validity
+            min_sources = max(
+                3, _min_sources_cfg
+            )  # Hard floor of 3 for statistical validity
             if _min_sources_cfg < 3:
                 logger.debug(
                     f"fit_color_term: min_source_no={_min_sources_cfg} is below minimum (3); using 3."
@@ -3710,7 +4146,7 @@ class Zeropoint:
                 color_percentiles = np.percentile(x, [0, 25, 50, 75, 100])
                 bin_counts = []
                 for i in range(len(color_percentiles) - 1):
-                    lo, hi = color_percentiles[i], color_percentiles[i+1]
+                    lo, hi = color_percentiles[i], color_percentiles[i + 1]
                     if i == len(color_percentiles) - 2:  # Last bin includes upper edge
                         count = np.sum((x >= lo) & (x <= hi))
                     else:
@@ -3723,7 +4159,9 @@ class Zeropoint:
                         "Results may be unreliable."
                     )
             except Exception as exc:
-                logger.debug("fit_color_term: stratified sampling check skipped: %s", exc)
+                logger.debug(
+                    "fit_color_term: stratified sampling check skipped: %s", exc
+                )
 
             # 3. RANSAC fit with a penalty-constrained slope.
             if poly_order == 1:
@@ -3740,8 +4178,11 @@ class Zeropoint:
                 if len(x) > 100:  # only worthwhile with enough points
                     # Local density from the nearest-neighbor distance.
                     from scipy.spatial import KDTree
+
                     kdtree = KDTree(x[:, None])
-                    distances, _ = kdtree.query(x[:, None], k=2)  # k=1 is the point itself
+                    distances, _ = kdtree.query(
+                        x[:, None], k=2
+                    )  # k=1 is the point itself
                     local_density = 1.0 / (distances[:, 1] + 1e-10)
 
                     density_threshold = np.percentile(local_density, 75)
@@ -3751,14 +4192,36 @@ class Zeropoint:
                         # Halve the dense-region count; keep all sparse points.
                         dense_indices = np.where(dense_mask)[0]
                         rng = np.random.default_rng(42)  # seeded for reproducibility
-                        keep_dense = rng.choice(dense_indices, size=len(dense_indices)//2, replace=False)
+                        keep_dense = rng.choice(
+                            dense_indices, size=len(dense_indices) // 2, replace=False
+                        )
                         sparse_indices = np.where(~dense_mask)[0]
 
-                        downsample_indices = np.concatenate([keep_dense, sparse_indices])
-                        x_orig, y_orig, x_err_orig, y_err_orig = x.copy(), y.copy(), x_err.copy(), y_err.copy()
-                        x, y, x_err, y_err = x_orig[downsample_indices], y_orig[downsample_indices], x_err_orig[downsample_indices], y_err_orig[downsample_indices]
-                        X_poly = np.column_stack([x**2, x]) if poly_order == 2 else x[:, None]
-                        logger.info("fit_color_term: downsampled %s dense points to %s to avoid cluster bias", len(dense_indices), len(keep_dense))
+                        downsample_indices = np.concatenate(
+                            [keep_dense, sparse_indices]
+                        )
+                        x_orig, y_orig, x_err_orig, y_err_orig = (
+                            x.copy(),
+                            y.copy(),
+                            x_err.copy(),
+                            y_err.copy(),
+                        )
+                        x, y, x_err, y_err = (
+                            x_orig[downsample_indices],
+                            y_orig[downsample_indices],
+                            x_err_orig[downsample_indices],
+                            y_err_orig[downsample_indices],
+                        )
+                        X_poly = (
+                            np.column_stack([x**2, x])
+                            if poly_order == 2
+                            else x[:, None]
+                        )
+                        logger.info(
+                            "fit_color_term: downsampled %s dense points to %s to avoid cluster bias",
+                            len(dense_indices),
+                            len(keep_dense),
+                        )
             except Exception as exc:
                 logger.debug("fit_color_term: density downsampling skipped: %s", exc)
 
@@ -3771,7 +4234,9 @@ class Zeropoint:
                 ),
                 residual_threshold=0.15,  # Increased from 0.1 to prevent overfitting
                 max_trials=500,  # Reduced from 2000 for speed
-                min_samples=max(10, int(0.5 * len(x))),  # Increased from 20% to 50% to prevent overfitting
+                min_samples=max(
+                    10, int(0.5 * len(x))
+                ),  # Increased from 20% to 50% to prevent overfitting
                 random_state=42,
             )
             ransac.fit(X_poly, y)
@@ -3779,7 +4244,9 @@ class Zeropoint:
             n_inliers = np.sum(inlier_mask)
 
             if inlier_mask is None or n_inliers < 5:
-                logger.warning("fit_color_term: robust fit failed to find sufficient inliers, using all points")
+                logger.warning(
+                    "fit_color_term: robust fit failed to find sufficient inliers, using all points"
+                )
                 inlier_mask = np.ones(len(x), dtype=bool)
                 n_inliers = len(x)
 
@@ -3789,7 +4256,12 @@ class Zeropoint:
             min_inliers = max(5, int(len(x) * min_inlier_frac))
 
             if n_inliers < min_inliers:
-                logger.warning("fit_color_term: inliers %s < %s (%s%), using sigma-clip fallback", n_inliers, min_inliers, int(100*min_inlier_frac))
+                logger.warning(
+                    "fit_color_term: inliers %s < %s (%s%), using sigma-clip fallback",
+                    n_inliers,
+                    min_inliers,
+                    int(100 * min_inlier_frac),
+                )
                 # Sigma-clip fallback
                 r0 = y - np.nanmedian(y)
                 clipped = sigma_clip(
@@ -3803,7 +4275,9 @@ class Zeropoint:
                 if np.sum(inlier_mask) >= 5:
                     n_inliers = np.sum(inlier_mask)
                 else:
-                    logger.warning("fit_color_term: sigma-clip also found too few inliers, using all points")
+                    logger.warning(
+                        "fit_color_term: sigma-clip also found too few inliers, using all points"
+                    )
                     inlier_mask = np.ones(len(x), dtype=bool)
 
             xi, yi = x[inlier_mask], y[inlier_mask]
@@ -3825,9 +4299,17 @@ class Zeropoint:
                     Model(lambda B, x: B[0] * x + B[1]),
                     beta0=[initial_slope, initial_intercept],
                 ).run()
-                coefficients = (float(odr_out.beta[1]), float(odr_out.beta[0]))  # (intercept, slope)
-                if odr_out.cov_beta is not None and np.all(np.isfinite(odr_out.cov_beta)):
-                    coefficient_errors = (np.sqrt(odr_out.cov_beta[1, 1]), np.sqrt(odr_out.cov_beta[0, 0]))
+                coefficients = (
+                    float(odr_out.beta[1]),
+                    float(odr_out.beta[0]),
+                )  # (intercept, slope)
+                if odr_out.cov_beta is not None and np.all(
+                    np.isfinite(odr_out.cov_beta)
+                ):
+                    coefficient_errors = (
+                        np.sqrt(odr_out.cov_beta[1, 1]),
+                        np.sqrt(odr_out.cov_beta[0, 0]),
+                    )
                 else:
                     coefficient_errors = (np.nan, np.nan)
             else:
@@ -3839,9 +4321,19 @@ class Zeropoint:
                     Model(lambda B, x: B[0] * x**2 + B[1] * x + B[2]),
                     beta0=poly_coeffs,
                 ).run()
-                coefficients = (float(odr_out.beta[2]), float(odr_out.beta[1]), float(odr_out.beta[0]))  # (intercept, slope, quad)
-                if odr_out.cov_beta is not None and np.all(np.isfinite(odr_out.cov_beta)):
-                    coefficient_errors = (np.sqrt(odr_out.cov_beta[2, 2]), np.sqrt(odr_out.cov_beta[1, 1]), np.sqrt(odr_out.cov_beta[0, 0]))
+                coefficients = (
+                    float(odr_out.beta[2]),
+                    float(odr_out.beta[1]),
+                    float(odr_out.beta[0]),
+                )  # (intercept, slope, quad)
+                if odr_out.cov_beta is not None and np.all(
+                    np.isfinite(odr_out.cov_beta)
+                ):
+                    coefficient_errors = (
+                        np.sqrt(odr_out.cov_beta[2, 2]),
+                        np.sqrt(odr_out.cov_beta[1, 1]),
+                        np.sqrt(odr_out.cov_beta[0, 0]),
+                    )
                 else:
                     coefficient_errors = (np.nan, np.nan, np.nan)
 
@@ -3899,12 +4391,7 @@ class Zeropoint:
                     and np.isfinite(_mad_before)
                     and _mad_after < _mad_before
                 )
-                if (
-                    n_in < 10
-                    or not _sig_ok
-                    or not _improves
-                    or abs(_slope) < 0.01
-                ):
+                if n_in < 10 or not _sig_ok or not _improves or abs(_slope) < 0.01:
                     logger.info(
                         "fit_color_term: linear slope %.4f +/- %.4f rejected "
                         "(n_inliers=%d, |slope|/err=%.1f, MAD %.3f -> %.3f); "
@@ -3912,30 +4399,38 @@ class Zeropoint:
                         _slope,
                         _slope_err,
                         n_in,
-                        abs(_slope) / _slope_err
-                        if np.isfinite(_slope_err) and _slope_err > 0
-                        else -1.0,
+                        (
+                            abs(_slope) / _slope_err
+                            if np.isfinite(_slope_err) and _slope_err > 0
+                            else -1.0
+                        ),
                         _mad_before,
                         _mad_after,
                     )
                     return (0.0, 0.0), (0.0, 0.0)
 
-            # Aliases for plotting.
+            # Aliases for plotting.  After a quadratic->linear fallback the
+            # coefficients tuple is 2 elements, so guard the quadratic read
+            # on length, not just on poly_order.
             plot_intercept = coefficients[0]
-            plot_slope = coefficients[1] if poly_order == 1 else coefficients[1]
-            plot_quad = coefficients[2] if poly_order == 2 else 0.0
+            plot_slope = coefficients[1]
+            plot_quad = (
+                coefficients[2] if poly_order == 2 and len(coefficients) > 2 else 0.0
+            )
 
             # ---- Plot ------------------------------------------------------
             plt.ioff()
             apply_autophot_mplstyle()
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(540, 2.0), sharex=True)
+            fig, (ax1, ax2) = plt.subplots(
+                2, 1, figsize=set_size(540, 2.0), sharex=True
+            )
             # Space for the legend that sits above ax2 (ransac_legend_top_outside).
             fig.subplots_adjust(hspace=0.3)
 
-            inlier_color = get_ransac_color('color_term')
-            outlier_color = get_ransac_color('outliers')
-            fit_color = get_ransac_color('fit')
-            err_color = get_ransac_color('error_band')
+            inlier_color = get_ransac_color("color_term")
+            outlier_color = get_ransac_color("outliers")
+            fit_color = get_ransac_color("fit")
+            err_color = get_ransac_color("error_band")
 
             # Top panel: uncorrected data - inliers and outliers
             _out_mask = ~inlier_mask
@@ -3946,10 +4441,10 @@ class Zeropoint:
                     xerr=x_err[_out_mask],
                     yerr=y_err[_out_mask],
                     fmt="x",
-                    ms=get_marker_size('medium'),
+                    ms=get_marker_size("medium"),
                     color=outlier_color,
                     ecolor="lightgrey",
-                    alpha=get_alpha('medium'),
+                    alpha=get_alpha("medium"),
                     capsize=get_marker_size("medium") / 4,
                     elinewidth=0.5,
                     label=f"Outliers [{_out_mask.sum()}]",
@@ -3960,11 +4455,11 @@ class Zeropoint:
                 xerr=xe,
                 yerr=ye,
                 fmt="o",
-                ms=get_marker_size('medium'),
+                ms=get_marker_size("medium"),
                 color=inlier_color,
                 ecolor="lightgrey",
-                alpha=get_alpha('dark'),
-                capsize=get_marker_size('medium') / 4,
+                alpha=get_alpha("dark"),
+                capsize=get_marker_size("medium") / 4,
                 elinewidth=0.5,
                 label=f"Inliers [{np.sum(inlier_mask)}]",
             )
@@ -3972,7 +4467,9 @@ class Zeropoint:
             x_plot = np.linspace(xi.min() * 0.95, xi.max() * 1.05, 200)
             if poly_order == 1:
                 y_plot = plot_intercept + plot_slope * x_plot
-                label_text = f"Linear: slope={plot_slope:.3f} \u00b1 {coefficient_errors[1]:.3f}"
+                label_text = (
+                    f"Linear: slope={plot_slope:.3f} \u00b1 {coefficient_errors[1]:.3f}"
+                )
             else:
                 y_plot = plot_intercept + plot_slope * x_plot + plot_quad * x_plot**2
                 label_text = f"Quad: quad={plot_quad:.3f}, slope={plot_slope:.3f}"
@@ -3982,7 +4479,7 @@ class Zeropoint:
                 y_plot,
                 color=fit_color,
                 linestyle="--",
-                lw=get_line_width('medium'),
+                lw=get_line_width("medium"),
                 label=label_text,
             )
 
@@ -4004,10 +4501,12 @@ class Zeropoint:
             # Bottom panel: color corrected data (should be flat)
             if poly_order == 1:
                 yi_corrected = yi - plot_slope * xi
-                ye_corrected = np.sqrt(ye**2 + (plot_slope * xe)**2)
+                ye_corrected = np.sqrt(ye**2 + (plot_slope * xe) ** 2)
             else:
                 yi_corrected = yi - (plot_quad * xi**2 + plot_slope * xi)
-                ye_corrected = np.sqrt(ye**2 + ((2 * plot_quad * xi + plot_slope) * xe)**2)
+                ye_corrected = np.sqrt(
+                    ye**2 + ((2 * plot_quad * xi + plot_slope) * xe) ** 2
+                )
             std_uncorrected = float(median_abs_deviation(yi, nan_policy="omit"))
             std_corrected = float(median_abs_deviation(yi_corrected, nan_policy="omit"))
 
@@ -4017,30 +4516,34 @@ class Zeropoint:
                 xerr=xe,
                 yerr=ye_corrected,
                 fmt="o",
-                ms=get_marker_size('medium'),
+                ms=get_marker_size("medium"),
                 color=inlier_color,
                 ecolor="lightgrey",
-                alpha=get_alpha('dark'),
-                capsize=get_marker_size('medium') / 4,
+                alpha=get_alpha("dark"),
+                capsize=get_marker_size("medium") / 4,
                 elinewidth=0.5,
                 label=f"Corrected inliers [{np.sum(inlier_mask)}]",
             )
 
             y_plot_corrected = np.full_like(x_plot, plot_intercept)
-            _intercept_err = coefficient_errors[0] if (coefficient_errors and np.isfinite(coefficient_errors[0])) else 0.0
+            _intercept_err = (
+                coefficient_errors[0]
+                if (coefficient_errors and np.isfinite(coefficient_errors[0]))
+                else 0.0
+            )
             ax2.fill_between(
                 x_plot,
                 y_plot_corrected - _intercept_err,
                 y_plot_corrected + _intercept_err,
                 color=err_color,
-                alpha=get_alpha('very_light'),
+                alpha=get_alpha("very_light"),
             )
             ax2.plot(
                 x_plot,
                 y_plot_corrected,
                 color=fit_color,
                 linestyle="-",
-                lw=get_line_width('medium'),
+                lw=get_line_width("medium"),
                 label=f"Flat  (intercept = {plot_intercept:.3f})",
             )
 
@@ -4057,7 +4560,12 @@ class Zeropoint:
             fpath = self.input_yaml.get("fpath", "")
             base_name = os.path.splitext(os.path.basename(fpath))[0] or "color_term"
             write_dir = os.path.dirname(fpath) or "."
-            ransac_savefig(fig, os.path.join(write_dir, f"Color_Term_{base_name}{get_plot_ext(self.input_yaml)}"))
+            ransac_savefig(
+                fig,
+                os.path.join(
+                    write_dir, f"Color_Term_{base_name}{get_plot_ext(self.input_yaml)}"
+                ),
+            )
             plt.close(fig)
 
             return coefficients, coefficient_errors

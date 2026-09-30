@@ -23,8 +23,10 @@ import numpy as np
 
 import os
 import re
+import shutil
 import sys
 import warnings
+from pathlib import Path
 import pandas as pd
 import yaml
 import logging
@@ -3630,3 +3632,90 @@ def safe_fits_write(fpath: str, image: np.ndarray, header: fits.Header, overwrit
 
     # Invalidate any cached entry for this path so subsequent reads see the new file
     invalidate_fits_cache(fpath)
+
+
+def refresh_sibling_weight_map(
+    image_fpath: str,
+    weight_fpath: str = None,
+    weight_data: np.ndarray = None,
+    logger=None,
+) -> None:
+    """Keep ``<image>.weight<ext>`` siblings consistent after in-place resampling.
+
+    Alignment backends can overwrite a staged template or science FITS in place
+    (SWarp ``copyfile``, reproject/AstroAlign writing ``<base>.fits`` over the
+    input), which leaves a ``<stem>.weight.fits`` companion describing the
+    *previous* pixel grid.  SExtractor aborts with "measured frame and weight
+    map have different sizes" when handed such a mismatched MAP_WEIGHT.
+
+    For every existing sibling weight whose shape no longer matches the image:
+
+    1. write ``weight_data`` when given (must be on the new grid), else
+    2. copy ``weight_fpath`` when it exists and matches the new shape
+       (e.g. a resampled weight product from SWarp), else
+    3. write a binary weight map: 1 where the image is finite, else 0
+       (the convention used for the SWarp input weights).
+
+    Weights already matching the image shape, and images with no weight
+    sibling at all, are left untouched - no new convention is created.
+    All failures are non-fatal.
+    """
+    _log = logger if logger is not None else logging.getLogger(__name__)
+    try:
+        p = Path(str(image_fpath))
+        candidates = [
+            p.with_name(p.name + ".weight" + p.suffix),
+            p.with_suffix(".weight.fits"),
+        ]
+        existing = [c for c in dict.fromkeys(candidates) if c.is_file()]
+        if not existing:
+            return
+
+        img_hdr = fits.getheader(str(p))
+        img_shape = (int(img_hdr["NAXIS2"]), int(img_hdr["NAXIS1"]))
+
+        def _shape_of(fits_path):
+            h = fits.getheader(str(fits_path))
+            return (int(h.get("NAXIS2", -1)), int(h.get("NAXIS1", -1)))
+
+        for sibling in existing:
+            try:
+                if _shape_of(sibling) == img_shape:
+                    continue  # already consistent with the new grid
+            except Exception:
+                continue
+
+            replaced = None
+            if weight_data is not None:
+                try:
+                    wd = np.asarray(weight_data, dtype=np.float32)
+                    if wd.shape == img_shape:
+                        safe_fits_write(str(sibling), wd, img_hdr)
+                        replaced = "provided weight array"
+                except Exception:
+                    pass
+            if replaced is None and weight_fpath:
+                try:
+                    wp = Path(str(weight_fpath))
+                    if wp.is_file() and wp.resolve() != sibling.resolve() and _shape_of(wp) == img_shape:
+                        shutil.copyfile(str(wp), str(sibling))
+                        invalidate_fits_cache(str(sibling))
+                        replaced = "resampled weight %s" % wp.name
+                except Exception:
+                    pass
+            if replaced is None:
+                try:
+                    img = np.asarray(fits.getdata(str(p)), dtype=float)
+                    w = np.zeros(img_shape, dtype=np.float32)
+                    w[np.isfinite(img)] = 1.0
+                    safe_fits_write(str(sibling), w, img_hdr)
+                    replaced = "binary finite-pixel mask"
+                except Exception:
+                    continue
+            _log.warning(
+                "Weight map %s was on the pre-resampling grid; replaced with %s "
+                "to match %s (%dx%d).",
+                sibling.name, replaced, p.name, img_shape[1], img_shape[0],
+            )
+    except Exception:
+        return

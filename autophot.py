@@ -615,6 +615,37 @@ def _log_always(message: str) -> None:
         print(message, flush=True)
 
 
+def _child_gpu_env(env: dict, gpu_ordinal: int) -> dict:
+    """Pin a child process to one GPU.
+
+    When the parent already runs under a device mask (e.g. Slurm sets
+    ``CUDA_VISIBLE_DEVICES``/``ROCR_VISIBLE_DEVICES`` for ``--gres=gpu``),
+    ``gpu_ordinal`` indexes into *that* visible set; otherwise it is a
+    physical device index.  All of HIP/ROCR/CUDA visibility vars are set
+    so the choice applies to HIP-runtime consumers (CuPy, TF-ROCm) as
+    well as any NVIDIA-side consumers (TF-CUDA reads
+    CUDA_VISIBLE_DEVICES).
+    """
+    parent_mask = (
+        env.get("HIP_VISIBLE_DEVICES")
+        or env.get("ROCR_VISIBLE_DEVICES")
+        or env.get("CUDA_VISIBLE_DEVICES")
+        or ""
+    ).strip()
+    if parent_mask:
+        ids = [t for t in parent_mask.split(",") if t.strip() != ""]
+        device = ids[gpu_ordinal % len(ids)] if ids else str(gpu_ordinal)
+    else:
+        device = str(gpu_ordinal)
+    for _var in (
+        "HIP_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+        "CUDA_VISIBLE_DEVICES",
+    ):
+        env[_var] = device
+    return env
+
+
 def _run_main_subprocess(
     python_executable: str,
     autophot_exe: str,
@@ -622,6 +653,7 @@ def _run_main_subprocess(
     input_file: str,
     is_template: bool,
     suppress_output: bool = False,
+    gpu_ordinal: Optional[int] = None,
 ) -> Tuple[str, int]:
     """
     Run the low-level photometry pipeline (main.py) on a single FITS file.
@@ -652,6 +684,8 @@ def _run_main_subprocess(
     kwargs = {"check": False, "text": True}
     if suppress_output:
         kwargs.update({"stdout": DEVNULL, "stderr": DEVNULL})
+    if gpu_ordinal is not None:
+        kwargs["env"] = _child_gpu_env(os.environ.copy(), gpu_ordinal)
 
     try:
         result = subprocess.run(args, **kwargs)
@@ -1482,6 +1516,21 @@ class AutomatedPhotometry:
             n_cpu = 1
         if n_cpu < 1:
             n_cpu = 1
+        # How many GPUs to spread image-level workers across (round-robin).
+        # Priority: env AUTOPHOT_NGPU, then config key nGPU, else 1.
+        # nGPU=0 disables pinning (children inherit the ambient device mask).
+        env_ngpu = os.environ.get("AUTOPHOT_NGPU")
+        cfg_ngpu = default_input.get("nGPU")
+        try:
+            n_gpu = (
+                int(env_ngpu)
+                if env_ngpu is not None
+                else int(cfg_ngpu) if cfg_ngpu is not None else 1
+            )
+        except (TypeError, ValueError):
+            n_gpu = 1
+        if n_gpu < 0:
+            n_gpu = 0
         parallel_files = n_cpu > 1
 
         if parallel_files:
@@ -2327,8 +2376,13 @@ class AutomatedPhotometry:
                                     input_file,
                                     True,
                                     suppress_output=True,
+                                    gpu_ordinal=(
+                                        (i % n_gpu) if n_gpu > 0 else None
+                                    ),
                                 ): template
-                                for template in template_file_list
+                                for i, template in enumerate(
+                                    template_file_list
+                                )
                             }
                             total_t = len(futures)
                             done_t = 0
@@ -2405,8 +2459,11 @@ class AutomatedPhotometry:
                                     input_file,
                                     False,
                                     suppress_output=True,
+                                    gpu_ordinal=(
+                                        (i % n_gpu) if n_gpu > 0 else None
+                                    ),
                                 ): str(file)
-                                for file in file_list
+                                for i, file in enumerate(file_list)
                             }
                             total = len(futures)
                             # as_completed delivers results only to this parent

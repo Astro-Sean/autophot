@@ -54,7 +54,7 @@ from concurrent.futures import ThreadPoolExecutor
 import astropy.units as u
 
 sys.path.append(str(Path(__file__).parent.parent))
-from functions import remove_wcs_from_header, log_warning_from_exception, resolve_verbose_level, clean_subprocess_log
+from functions import remove_wcs_from_header, log_warning_from_exception, resolve_verbose_level, clean_subprocess_log, refresh_sibling_weight_map, invalidate_fits_cache
 from wcs import get_wcs, _normalize_projection_codes
 from utils.run_sex import SExtractorWrapper
 
@@ -722,6 +722,29 @@ class ImageDistortionCorrector:
         return v if np.isfinite(v) and v > 0 else 2.0
 
     @staticmethod
+    def _science_header_fwhm(fits_path) -> Optional[float]:
+        """Pipeline-measured science FWHM (px) from a FITS file, or None.
+
+        ``input_yaml['fwhm']`` still holds the YAML config default while
+        template alignment runs (main.py only writes the measured value after
+        subtraction), but the measured FWHM is already stamped on the science
+        header.  Returns None when absent so callers can fall back to the
+        config value.
+        """
+        try:
+            hdr = fits.getheader(str(fits_path))
+            for key in ("FWHMPIX", "FWHM", "fwhm"):
+                v = hdr.get(key)
+                if v is None:
+                    continue
+                v = float(v)
+                if np.isfinite(v) and v > 0:
+                    return v
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
     def _resolve_sextractor() -> Optional[str]:
         """Return the highest-version SExtractor binary, else None."""
         try:
@@ -836,14 +859,18 @@ class ImageDistortionCorrector:
             return satur
 
     # ----------------------------- SExtractor + PSFEx -----------------------------
-    @staticmethod
-    def _guess_map_weight_path(fits_image: str) -> Optional[str]:
+    def _guess_map_weight_path(self, fits_image: str) -> Optional[str]:
         """
         Best-effort MAP_WEIGHT companion for SExtractor alignment.
 
         The photometry pipeline commonly writes ``<stem>.weight<ext>`` next to the
         science image. If present, it lets SExtractor down-weight the NaN /
         no-coverage bands encoded as zeros on mosaics.
+
+        A weight left behind by a pre-resampling version of the image is on the
+        old pixel grid; SExtractor aborts with "measured frame and weight map
+        have different sizes", so candidates whose header shape disagrees with
+        the image are skipped.
         """
         try:
             p = Path(str(fits_image))
@@ -851,9 +878,33 @@ class ImageDistortionCorrector:
                 p.with_name(p.name + ".weight" + p.suffix),  # e.g. foo.fits -> foo.weight.fits
                 p.with_suffix(".weight.fits"),  # legacy
             ]
+            img_shape = None
             for c in candidates:
-                if c.is_file():
-                    return str(c)
+                if not c.is_file():
+                    continue
+                try:
+                    if img_shape is None:
+                        _ih = fits.getheader(str(p))
+                        img_shape = (
+                            int(_ih.get("NAXIS1", -1)),
+                            int(_ih.get("NAXIS2", -1)),
+                        )
+                    _wh = fits.getheader(str(c))
+                    w_shape = (
+                        int(_wh.get("NAXIS1", -2)),
+                        int(_wh.get("NAXIS2", -2)),
+                    )
+                    if w_shape != img_shape:
+                        self.logger.warning(
+                            "Ignoring weight map %s: shape %sx%s does not match "
+                            "image %s (%sx%s) - stale pre-resampling product.",
+                            c.name, w_shape[0], w_shape[1],
+                            p.name, img_shape[0], img_shape[1],
+                        )
+                        continue
+                except Exception:
+                    pass
+                return str(c)
         except Exception:
             return None
         return None
@@ -976,6 +1027,27 @@ class ImageDistortionCorrector:
 
             # Optional MAP_WEIGHT (0/1 or continuous) down-weights masked mosaic pixels.
             wpath = str(weight_path) if weight_path else ""
+            if wpath and os.path.isfile(wpath):
+                # A weight on a different grid (e.g. left over from a
+                # pre-resampling version of the image) makes SExtractor abort
+                # with "measured frame and weight map have different sizes".
+                try:
+                    _wh = fits.getheader(wpath)
+                    if (
+                        int(_wh.get("NAXIS1", -1)) != int(header.get("NAXIS1", -2))
+                        or int(_wh.get("NAXIS2", -1)) != int(header.get("NAXIS2", -2))
+                    ):
+                        self.logger.warning(
+                            "Ignoring weight map %s: shape %sx%s does not match "
+                            "image %s (%sx%s).",
+                            Path(wpath).name,
+                            _wh.get("NAXIS1"), _wh.get("NAXIS2"),
+                            Path(fits_image).name,
+                            header.get("NAXIS1"), header.get("NAXIS2"),
+                        )
+                        wpath = ""
+                except Exception:
+                    pass
             if wpath and os.path.isfile(wpath):
                 final_config["WEIGHT_TYPE"] = "MAP_WEIGHT"
                 final_config["WEIGHT_IMAGE"] = wpath
@@ -3107,6 +3179,12 @@ class ImageDistortionCorrector:
                 "COMBINE_TYPE": "MEDIAN",
             }
 
+            # SWarp run results (set only in the resampling branches) - kept in
+            # scope so the resampled weight products can refresh stale sibling
+            # weight maps when the aligned outputs overwrite the originals.
+            swarp_res_sci = None
+            swarp_res_ref = None
+
             if resample_mode == "wcs_only":
                 # Skip SWarp resampling - apply SCAMP WCS correction to header only
                 self.logger.info("Skipping SWarp resampling (WCS-only alignment for template subtraction)")
@@ -3699,8 +3777,13 @@ class ImageDistortionCorrector:
             max_acceptable_rms = float(
                 align_cfg.get("alignment_max_rms_px", 0.75)
             )
+            # True P95 tail statistic; prefer the dedicated p95 key but fall
+            # back to the renamed alignment_max_p90_px threshold (stricter).
             max_acceptable_p95 = float(
-                align_cfg.get("alignment_max_p95_px", 1.5)
+                align_cfg.get(
+                    "alignment_max_p95_px",
+                    align_cfg.get("alignment_max_p90_px", 1.5),
+                )
             )
             _min_n_for_percentile = int(
                 align_cfg.get("alignment_min_sources_for_field_gate", 20)
@@ -3724,9 +3807,12 @@ class ImageDistortionCorrector:
                 )
                 _p95 = alignment_metadata.get("p95_offset", 0.0)
                 _local_offset_max = alignment_metadata.get("local_offset_max", 0.0)
+                # FWHM-scaled like every other threshold above: a coherent
+                # local warp that is fatal for a 3-px PSF is a small fraction
+                # of the PSF on a well-sampled image.
                 _local_offset_limit = float(
                     align_cfg.get("alignment_max_local_offset_px", 0.5)
-                )
+                ) * _fwhm_scale
                 _n_match = alignment_metadata.get("n_matched", 0)
 
                 # Sparse-field: use adaptive minimum for offset gate.
@@ -3884,8 +3970,14 @@ class ImageDistortionCorrector:
                         _last_resort_ref = output_dir / f"swarp_last_resort_{Path(reference_image).name}"
                         shutil.copy2(str(aligned_sci), str(_last_resort_sci))
                         shutil.copy2(str(aligned_ref), str(_last_resort_ref))
-                        _ref_backup = output_dir / f"._ref_backup_{Path(reference_image).name}"
-                        _sci_backup = output_dir / f"._sci_backup_{Path(science_image).name}"
+                        # Backups go in a subdirectory: reproject names its
+                        # output after the input filename, so a backup inside
+                        # output_dir would be overwritten by the aligned
+                        # product and the originals would be lost.
+                        _backup_dir = output_dir / "._align_backup"
+                        _backup_dir.mkdir(parents=True, exist_ok=True)
+                        _ref_backup = _backup_dir / f"._ref_backup_{Path(reference_image).name}"
+                        _sci_backup = _backup_dir / f"._sci_backup_{Path(science_image).name}"
                         shutil.copy2(reference_image, str(_ref_backup))
                         shutil.copy2(science_image, str(_sci_backup))
                         _swarp_last_resort = {
@@ -3905,6 +3997,24 @@ class ImageDistortionCorrector:
                             str(_sci_backup), str(_ref_backup), output_dir=output_dir
                         )
                         if _reproj_result and not _reproj_result.get("rejected") and _reproj_result.get("science_aligned"):
+                            # The aligned product was named after the backup
+                            # filename; move it to the conventional in-place
+                            # path before deleting the backups.
+                            _res_ref = _reproj_result.get("reference_aligned")
+                            try:
+                                if _res_ref and os.path.isfile(_res_ref) and os.path.abspath(str(_res_ref)) != os.path.abspath(str(reference_image)):
+                                    shutil.copy2(str(_res_ref), str(reference_image))
+                                    invalidate_fits_cache(str(reference_image))
+                                _reproj_result["reference_aligned"] = str(reference_image)
+                            except Exception:
+                                pass
+                            for _tmp in [_ref_backup, _sci_backup, _res_ref]:
+                                try:
+                                    if _tmp and os.path.exists(_tmp) and os.path.abspath(str(_tmp)) != os.path.abspath(str(_reproj_result.get("reference_aligned"))):
+                                        os.remove(_tmp)
+                                except OSError:
+                                    pass
+                            shutil.rmtree(str(_backup_dir), ignore_errors=True)
                             _reproj_result["science_aligned"] = science_image
                             return _reproj_result
                         # Save reproject rejected result to persistent path
@@ -3930,6 +4040,23 @@ class ImageDistortionCorrector:
                             str(_sci_backup), str(_ref_backup), output_dir
                         )
                         if _aa_result and not _aa_result.get("rejected") and _aa_result.get("science_aligned"):
+                            # Same backup-filename collision as reproject:
+                            # the aligned product is named after _ref_backup.
+                            _res_ref = _aa_result.get("reference_aligned")
+                            try:
+                                if _res_ref and os.path.isfile(_res_ref) and os.path.abspath(str(_res_ref)) != os.path.abspath(str(reference_image)):
+                                    shutil.copy2(str(_res_ref), str(reference_image))
+                                    invalidate_fits_cache(str(reference_image))
+                                _aa_result["reference_aligned"] = str(reference_image)
+                            except Exception:
+                                pass
+                            for _tmp in [_ref_backup, _sci_backup, _res_ref]:
+                                try:
+                                    if _tmp and os.path.exists(_tmp) and os.path.abspath(str(_tmp)) != os.path.abspath(str(_aa_result.get("reference_aligned"))):
+                                        os.remove(_tmp)
+                                except OSError:
+                                    pass
+                            shutil.rmtree(str(_backup_dir), ignore_errors=True)
                             _aa_result["science_aligned"] = science_image
                             return _aa_result
                         # Save AstroAlign rejected result to persistent path
@@ -3990,6 +4117,7 @@ class ImageDistortionCorrector:
                                         os.remove(_tmp)
                                 except OSError:
                                     pass
+                            shutil.rmtree(str(_backup_dir), ignore_errors=True)
                             return None
                         # Prefer the candidate with the smallest worst-case offset
                         # (reject_max); if tied, use RMS and then P95. A single star
@@ -4009,6 +4137,7 @@ class ImageDistortionCorrector:
                                     os.remove(_tmp)
                             except OSError:
                                 pass
+                        shutil.rmtree(str(_backup_dir), ignore_errors=True)
                         self.logger.warning(
                             "All alignment methods rejected; accepting best result: %s\n"
                             "  offset=%.2f px RMS=%.2f px P95=%.2f px (%d matches)\n"
@@ -4323,6 +4452,15 @@ class ImageDistortionCorrector:
                     "Saved aligned reference image to: %s",
                     aligned_reference_fpath,
                 )
+                refresh_sibling_weight_map(
+                    str(aligned_reference_fpath),
+                    weight_fpath=(
+                        (swarp_res_ref or {}).get("weight_image")
+                        if isinstance(swarp_res_ref, dict)
+                        else None
+                    ),
+                    logger=self.logger,
+                )
             except Exception as e:
                 self.logger.warning(
                     "Could not save aligned reference image %s: %s",
@@ -4336,6 +4474,16 @@ class ImageDistortionCorrector:
                     "Overwrote science image with aligned version: %s",
                     aligned_science_fpath,
                 )
+                if str(aligned_sci) != str(aligned_science_fpath):
+                    refresh_sibling_weight_map(
+                        str(aligned_science_fpath),
+                        weight_fpath=(
+                            (swarp_res_sci or {}).get("weight_image")
+                            if isinstance(swarp_res_sci, dict)
+                            else None
+                        ),
+                        logger=self.logger,
+                    )
             except Exception as e:
                 self.logger.warning(
                     "Could not overwrite science image %s: %s",
@@ -4449,8 +4597,12 @@ class ImageDistortionCorrector:
                 _reproj_refine_dir = Path(output_dir) / "reproject_wcs_refine"
                 _reproj_refine_dir.mkdir(parents=True, exist_ok=True)
 
+                # input_yaml["fwhm"] is still the config default here (the
+                # measured value is only written back after subtraction); the
+                # measured FWHM lives on the science header.
                 _refine_fwhm = max(
-                    float(self.input_yaml.get("fwhm", 3.0)) if hasattr(self, "input_yaml") else 3.0,
+                    self._science_header_fwhm(science_image)
+                    or (float(self.input_yaml.get("fwhm", 3.0)) if hasattr(self, "input_yaml") else 3.0),
                     2.5,
                 )
                 with ThreadPoolExecutor(max_workers=2) as _pool:
@@ -4676,7 +4828,11 @@ class ImageDistortionCorrector:
             interp_order_norm = _interp_map.get(interp_order, "bilinear")
 
             # Bicubic/biquadratic ring on undersampled PSFs - downgrade to bilinear
-            _fwhm = float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
+            # input_yaml["fwhm"] is still the config default during alignment;
+            # the measured FWHM lives on the science header.
+            _fwhm = self._science_header_fwhm(science_image) or (
+                float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
+            )
             _us_thresh_reproj = float(
                 (iy.get("photometry", {}) or {}).get(
                     "undersampled_fwhm_threshold", 2.5
@@ -4776,6 +4932,15 @@ class ImageDistortionCorrector:
             aligned_reference_fpath = output_dir / f"{base_ref}{ext_ref}"
             from functions import safe_fits_write
             safe_fits_write(str(aligned_reference_fpath), aligned_ref, out_header)
+            # The write may have overwritten the original template in place;
+            # a sibling weight map still on the old grid must be refreshed.
+            refresh_sibling_weight_map(
+                str(aligned_reference_fpath),
+                weight_data=np.asarray(footprint, dtype=np.float32)
+                if footprint is not None
+                else None,
+                logger=self.logger,
+            )
             self.logger.info(
                 "Alignment via WCS reproject succeeded (method=%s, coverage=%.1f%%).",
                 used_method, 100.0 * n_footprint / n_total,
@@ -4790,7 +4955,8 @@ class ImageDistortionCorrector:
                 from scipy.spatial import cKDTree
 
                 _reproj_fwhm_est = max(
-                    float(self.input_yaml.get("fwhm", 3.0)) if hasattr(self, "input_yaml") else 3.0,
+                    self._science_header_fwhm(science_image)
+                    or (float(self.input_yaml.get("fwhm", 3.0)) if hasattr(self, "input_yaml") else 3.0),
                     2.5,
                 )
                 # Use the actual PSF FWHM for detection; keep the tolerance FWHM
@@ -4968,13 +5134,21 @@ class ImageDistortionCorrector:
                             quality_cfg.get("alignment_max_rms_px", 0.75)
                         )
                         _max_p95 = float(
-                            quality_cfg.get("alignment_max_p95_px", 1.5)
+                            quality_cfg.get(
+                                "alignment_max_p95_px",
+                                quality_cfg.get("alignment_max_p90_px", 1.5),
+                            )
                         )
                         _reproj_min_n = int(
                             quality_cfg.get("alignment_min_sources_for_field_gate", 20)
                         )
-                        # FWHM-adaptive thresholds for fallback gates
-                        _reproj_fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                        # FWHM-adaptive thresholds for fallback gates; use the
+                        # measured header FWHM (input_yaml["fwhm"] is still the
+                        # config default at this stage).
+                        _reproj_fwhm = (
+                            self._science_header_fwhm(science_image)
+                            or float(self.input_yaml.get("fwhm", 3.0))
+                        )
                         _reproj_scale = max(0.5, min(3.0, _reproj_fwhm / 3.0))
                         _max_off *= _reproj_scale
                         _max_rms *= _reproj_scale
@@ -5807,7 +5981,11 @@ class ImageDistortionCorrector:
             # Bicubic/biquadratic introduce ringing artifacts when the PSF is
             # undersampled (FWHM < 2.5 px).  Bilinear is safer in that regime.
             iy = getattr(self, "input_yaml", None) or {}
-            _fwhm = float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
+            # input_yaml["fwhm"] is still the config default during alignment;
+            # the measured FWHM lives on the science header.
+            _fwhm = self._science_header_fwhm(sci_image_path) or (
+                float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
+            )
             if _fwhm > 0 and _fwhm < 2.5 and interp_order_norm in ("bicubic", "biquadratic"):
                 self.logger.info(
                     "Undersampled image (FWHM=%.2f px < 2.5) - downgrading %s to bilinear "
@@ -6032,10 +6210,16 @@ class ImageDistortionCorrector:
         # BUG 115: Backup reference_image before calling reproject - reproject
         # writes to output_dir/{base_ref}.{ext} which can be the same path as
         # reference_image.  Without backup, AstroAlign reads reproject's output.
+        # The backups live in a subdirectory: reproject names its output after
+        # the input filename, so a backup inside output_dir would be overwritten
+        # by the aligned product and reference_aligned would dangle once the
+        # backups are removed.
         _output_dir = Path(output_dir) if output_dir is not None else Path(science_image).parent
-        _ref_backup = _output_dir / f"._ref_backup_{Path(reference_image).name}"
-        _sci_backup = _output_dir / f"._sci_backup_{Path(science_image).name}"
+        _backup_dir = _output_dir / "._align_backup"
+        _ref_backup = _backup_dir / f"._ref_backup_{Path(reference_image).name}"
+        _sci_backup = _backup_dir / f"._sci_backup_{Path(science_image).name}"
         try:
+            _backup_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(reference_image, str(_ref_backup))
             shutil.copy2(science_image, str(_sci_backup))
         except Exception:
@@ -6060,12 +6244,24 @@ class ImageDistortionCorrector:
                 except Exception:
                     pass
         if result is not None and not result.get("rejected") and result.get("reference_aligned"):
-            for _tmp in [_ref_backup, _sci_backup]:
+            _res_ref = result.get("reference_aligned")
+            # Move the aligned product onto the conventional in-place path so
+            # the returned path is stable and backup cleanup cannot invalidate
+            # it (reproject named it after the backup filename).
+            try:
+                if _res_ref and os.path.abspath(str(_res_ref)) != os.path.abspath(str(reference_image)):
+                    shutil.copy2(str(_res_ref), str(reference_image))
+                    invalidate_fits_cache(str(reference_image))
+                    result["reference_aligned"] = str(reference_image)
+            except Exception:
+                pass
+            for _tmp in [_ref_backup, _sci_backup, _res_ref]:
                 try:
-                    if _tmp and os.path.exists(_tmp):
+                    if _tmp and os.path.exists(_tmp) and os.path.abspath(str(_tmp)) != os.path.abspath(str(result.get("reference_aligned"))):
                         os.remove(_tmp)
                 except OSError:
                     pass
+            shutil.rmtree(str(_backup_dir), ignore_errors=True)
             # Reproject does not modify the science image; fix the returned
             # path to point at the original science_image, not the backup
             # (which has just been deleted).
@@ -6078,15 +6274,33 @@ class ImageDistortionCorrector:
             str(_ref_backup) if _ref_backup else reference_image,
             output_dir,
         )
+        if aa_result is not None and not aa_result.get("rejected") and aa_result.get("science_aligned"):
+            # AstroAlign names its aligned product after the backup filename;
+            # move it to the conventional in-place path before cleanup.
+            _res_ref = aa_result.get("reference_aligned")
+            try:
+                if _res_ref and os.path.isfile(_res_ref) and os.path.abspath(str(_res_ref)) != os.path.abspath(str(reference_image)):
+                    shutil.copy2(str(_res_ref), str(reference_image))
+                    invalidate_fits_cache(str(reference_image))
+                aa_result["reference_aligned"] = str(reference_image)
+            except Exception:
+                pass
+            for _tmp in [_ref_backup, _sci_backup, _res_ref]:
+                try:
+                    if _tmp and os.path.exists(_tmp) and os.path.abspath(str(_tmp)) != os.path.abspath(str(aa_result.get("reference_aligned"))):
+                        os.remove(_tmp)
+                except OSError:
+                    pass
+            shutil.rmtree(str(_backup_dir), ignore_errors=True)
+            aa_result["science_aligned"] = science_image
+            return aa_result
         for _tmp in [_ref_backup, _sci_backup]:
             try:
                 if _tmp and os.path.exists(_tmp):
                     os.remove(_tmp)
             except OSError:
                 pass
-        if aa_result is not None and not aa_result.get("rejected") and aa_result.get("science_aligned"):
-            aa_result["science_aligned"] = science_image
-            return aa_result
+        shutil.rmtree(str(_backup_dir), ignore_errors=True)
         return None
 
     # ------------------------------ AstroAlign path ------------------------------
@@ -6428,6 +6642,12 @@ class ImageDistortionCorrector:
             from functions import copy_wcs_from_header as _copy_wcs2
             _copy_wcs2(sci_head, out_hdr)
             _save_aligned_image(aligned_ref_img, out_hdr, aligned_reference_fpath)
+            # The write may have overwritten the original template in place;
+            # refresh any sibling weight map still on the old grid.
+            refresh_sibling_weight_map(
+                str(aligned_reference_fpath),
+                logger=self.logger,
+            )
             alignment_verified = False
             try:
                 if use_aafitrans:
@@ -6450,7 +6670,12 @@ class ImageDistortionCorrector:
 
                 _aa_max_off = float(ts.get("alignment_max_offset_px", 0.5))
                 _aa_max_rms = float(ts.get("alignment_max_rms_px", 0.75))
-                _aa_max_p95 = float(ts.get("alignment_max_p95_px", 1.5))
+                _aa_max_p95 = float(
+                    ts.get(
+                        "alignment_max_p95_px",
+                        ts.get("alignment_max_p90_px", 1.5),
+                    )
+                )
                 _aa_min_n = int(ts.get("alignment_min_sources_for_field_gate", 20))
                 # FWHM-adaptive thresholds: use the measured image FWHM instead
                 # of a generic config default.

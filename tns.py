@@ -203,10 +203,11 @@ def get_coords_simbad(target_name):
 def _ra_deg_to_hms(ra_deg):
     """Convert RA in degrees to HH:MM:SS string."""
     try:
-        from astropy.coordinates import SkyCoord
+        from astropy.coordinates import Longitude
         import astropy.units as u
-        sc = SkyCoord(ra=ra_deg * u.deg, dec=0 * u.deg)
-        return sc.ra.to_string(unit=u.hour, sep=":", pad=True, precision=2)
+        return Longitude(ra_deg * u.deg).to_string(
+            unit=u.hourangle, sep=":", pad=True, precision=2
+        )
     except Exception:
         return str(ra_deg)
 
@@ -214,9 +215,10 @@ def _ra_deg_to_hms(ra_deg):
 def _dec_deg_to_dms(dec_deg):
     """Convert Dec in degrees to DD:MM:SS string."""
     try:
-        from astropy.coordinates import SkyCoord
+        from astropy.coordinates import Latitude
         import astropy.units as u
-        sc = SkyCoord(ra=0 * u.deg, dec=dec_deg * u.deg)
-        return sc.dec.to_string(unit=u.deg, sep=":", pad=True, precision=2)
+        return Latitude(dec_deg * u.deg).to_string(
+            unit=u.deg, sep=":", pad=True, precision=2, alwayssign=True
+        )
     except Exception:
         return str(dec_deg)

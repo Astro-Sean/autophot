@@ -26,7 +26,6 @@ from astropy.wcs import WCS
 from astropy.utils.exceptions import AstropyWarning
 import astropy.units as u
 from astropy.coordinates import SkyCoord
-from astropy.wcs.utils import fit_wcs_from_points
 from astropy.table import Table
 
 # --- Local Imports (optional) ---
@@ -232,31 +231,49 @@ def table_to_ldac(table, header=None, writeto=None) -> fits.HDUList:
 
 
 # --- WCS cache -------------------------------------------------------------
-# Keyed by the critical WCS keywords so repeated get_wcs() calls on an
-# unchanged header skip re-parsing SIP/TPV distortion coefficients and
+# Keyed by every WCS-relevant card in the header so repeated get_wcs() calls
+# on an unchanged header skip re-parsing SIP/TPV distortion coefficients and
 # re-validating the WCS. A changed keyword yields a different key, so stale
 # entries are simply never matched.
+# Module-level WCS cache.  The pipeline parallelises with processes, not
+# threads, so each worker holds its own copy; there is no locking here.
 _WCS_CACHE = {}
 _WCS_CACHE_MAX = 32
 
-# Keywords that define the WCS transformation. If any of these change, the
-# cached WCS is stale and must not be reused.
-_WCS_KEY_KEYWORDS = (
-    "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
-    "CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2",
-    "CDELT1", "CDELT2", "CROTA2",
-    "CD1_1", "CD1_2", "CD2_1", "CD2_2",
-    "PC1_1", "PC1_2", "PC2_1", "PC2_2",
-    "EQUINOX", "RADESYS",
+# Header-key prefixes that feed the WCS transform.  The key must include the
+# distortion families (SIP A_/B_/AP_/BP_ polynomials and *_ORDER cards, TPV
+# PVi_j, TNX/D_/DP_ polynomials) - a fixed list of linear terms would let a
+# post-SCAMP header that differs only in distortion coefficients reuse a WCS
+# built from the pre-refinement solution.
+_WCS_KEY_PREFIXES = (
+    "CRPIX", "CRVAL", "CTYPE", "CUNIT",
+    "CDELT", "CROTA", "CD", "PC", "PV",
+    "LONPOLE", "LATPOLE", "LONGPOLE",
+    "EQUINOX", "RADESYS", "RADECSYS", "RADYSYS",
+    "WCSAXES", "WCSNAME", "PROJP",
+    "LTV", "LTM", "SIP", "TNX",
 )
+
+# SIP / polynomial distortion coefficient keys are stems (A_ORDER, A_0_0,
+# B_1_2, AP_2_0, D_1_1, DP_0_3, ...).  startswith() covers every order/index.
+_WCS_KEY_STEMS = ("A_", "B_", "AP_", "BP_", "D_", "DP_")
 
 
 def _wcs_cache_key(header):
-    """Build a hashable cache key from the critical WCS keywords in *header*."""
+    """Build a hashable cache key from every WCS-relevant card in *header*."""
     try:
-        return tuple(
-            (kw, header.get(kw)) for kw in _WCS_KEY_KEYWORDS
-        )
+        cards = []
+        for key in header.keys():
+            key_str = str(key).upper()
+            if key_str in ("", "COMMENT", "HISTORY"):
+                continue
+            if key_str.startswith(_WCS_KEY_PREFIXES) or key_str.startswith(
+                _WCS_KEY_STEMS
+            ):
+                value = header.get(key)
+                # repr() keeps array/record values hashable and unambiguous.
+                cards.append((key_str, repr(value)))
+        return tuple(sorted(cards))
     except Exception:
         return None
 
@@ -282,13 +299,18 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
         logger.warning("get_wcs: header is None")
         return None
 
-    # Cache key = tuple of critical WCS keyword values; an unchanged header
-    # skips re-parsing SIP/TPV coefficients.
+    # Cache key = every WCS-relevant card (including distortion terms); an
+    # unchanged header skips re-parsing SIP/TPV coefficients.
     cache_key = _wcs_cache_key(header)
     if cache_key is not None:
         cached = _WCS_CACHE.get(cache_key)
         if cached is not None:
-            return cached
+            # Callers can mutate a returned WCS in place; hand out a copy so
+            # the cached object stays pristine for later callers.
+            try:
+                return cached.deepcopy()
+            except Exception:
+                return cached
 
     try:
         # Normalise CTYPE first so the WCS() constructor always receives a
@@ -340,7 +362,12 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
         if cache_key is not None:
             if len(_WCS_CACHE) >= _WCS_CACHE_MAX:
                 _WCS_CACHE.pop(next(iter(_WCS_CACHE)))
-            _WCS_CACHE[cache_key] = wcs
+            # Store a pristine copy: the caller may mutate the returned WCS,
+            # and cache hits must never observe that mutation.
+            try:
+                _WCS_CACHE[cache_key] = wcs.deepcopy()
+            except Exception:
+                _WCS_CACHE[cache_key] = wcs
         return wcs
 
     except Exception as e:
@@ -646,47 +673,6 @@ def _extract_corr_points_from_solve_field(
         x, y, ra, dec = x[idx], y[idx], ra[idx], dec[idx]
 
     return x, y, ra, dec
-
-
-def _choose_xy_shift_for_fit_wcs(
-    initial_wcs: WCS,
-    x_m: np.ndarray,
-    y_m: np.ndarray,
-    ra_m: np.ndarray,
-    dec_m: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """
-    Determine whether matched x/y are likely 0-based or FITS 1-based.
-
-    `fit_wcs_from_points` expects FITS convention (1-based). We compare angular
-    residuals to the initial solve-field WCS under two hypotheses:
-      H1: x/y already FITS-like      -> use (x, y)
-      H0: x/y are 0-based centroids  -> use (x+1, y+1)
-    and choose the lower-median-separation case.
-    """
-    try:
-        sky_true = SkyCoord(ra=ra_m * u.deg, dec=dec_m * u.deg, frame="icrs")
-
-        # Assume x/y are FITS-like (1-based) for all_pix2world origin=1
-        ra1, dec1 = initial_wcs.all_pix2world(x_m, y_m, 1)
-        sky1 = SkyCoord(ra=np.asarray(ra1) * u.deg, dec=np.asarray(dec1) * u.deg, frame="icrs")
-        med_sep_1based = float(np.nanmedian(sky1.separation(sky_true).to(u.arcsec).value))
-
-        # Assume x/y are 0-based -> convert to FITS-like by +1
-        x0 = x_m + 1.0
-        y0 = y_m + 1.0
-        ra0, dec0 = initial_wcs.all_pix2world(x0, y0, 1)
-        sky0 = SkyCoord(ra=np.asarray(ra0) * u.deg, dec=np.asarray(dec0) * u.deg, frame="icrs")
-        med_sep_0based = float(np.nanmedian(sky0.separation(sky_true).to(u.arcsec).value))
-
-        if np.isfinite(med_sep_0based) and np.isfinite(med_sep_1based):
-            if med_sep_0based + 1e-6 < med_sep_1based:
-                return x0, y0, 1.0
-            return x_m, y_m, 0.0
-    except Exception:
-        pass
-    # Conservative fallback: do not shift
-    return x_m, y_m, 0.0
 
 
 def _wcs_match_separation_stats_arcsec(
