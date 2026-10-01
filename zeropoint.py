@@ -780,47 +780,53 @@ class Zeropoint:
             # identify the stellar locus and reject outliers in both
             # directions (too broad = extended/blended, too narrow = CR/hot pixel).
             fwhm_sigma = float(zp_cfg.get("fwhm_reject_sigma", 3.0))
+            fwhm_min_src = int(zp_cfg.get("fwhm_reject_min_sources", 4))
+            fwhm_min_keep = int(zp_cfg.get("fwhm_reject_min_keep", 3))
             fwhm_mask = np.zeros(len(sources), dtype=bool)
             if fwhm_sigma > 0 and "fwhm" in sources.columns:
                 _fwhm_vals = pd.to_numeric(sources["fwhm"], errors="coerce")
                 _fwhm_finite = np.isfinite(_fwhm_vals) & (_fwhm_vals > 0)
                 _n_fwhm = int(_fwhm_finite.sum())
-                if _n_fwhm >= 10:
-                    _fwhm_good = _fwhm_vals[_fwhm_finite].values
-                    _med_fwhm = float(np.nanmedian(_fwhm_good))
-                    _mad_fwhm = (
-                        float(median_abs_deviation(_fwhm_good, nan_policy="omit"))
-                        * 1.4826
+                if _n_fwhm >= fwhm_min_src:
+                    from functions import fwhm_outlier_clip
+
+                    fwhm_mask, _med_fwhm, _sig_eff = fwhm_outlier_clip(
+                        _fwhm_vals.to_numpy(dtype=float), sigma=fwhm_sigma
                     )
-                    if _mad_fwhm > 1e-6:
-                        _fwhm_lo = _med_fwhm - fwhm_sigma * _mad_fwhm
-                        _fwhm_hi = _med_fwhm + fwhm_sigma * _mad_fwhm
-                        fwhm_mask = _fwhm_finite & (
-                            (_fwhm_vals < _fwhm_lo) | (_fwhm_vals > _fwhm_hi)
-                        )
-                        n_fwhm_rej = int(fwhm_mask.sum())
-                        if n_fwhm_rej > 0:
-                            removed_parts.append(f"{n_fwhm_rej} FWHM-outlier")
-                            logger.debug(
-                                "FWHM rejection window: %.1f-sigma outside "
-                                "[%.2f, %.2f] px (median=%.2f px, MAD=%.2f px).",
-                                fwhm_sigma,
-                                _fwhm_lo,
-                                _fwhm_hi,
-                                _med_fwhm,
-                                _mad_fwhm,
-                            )
-                    else:
+                    n_fwhm_rej = int(fwhm_mask.sum())
+                    # Keep-floor: never let the clip starve the fit;
+                    # a sparse inlier set still fits a zeropoint.
+                    if (
+                        n_fwhm_rej > 0
+                        and len(sources) - n_fwhm_rej < fwhm_min_keep
+                    ):
                         logger.debug(
-                            "FWHM scatter is zero (all sources same FWHM=%.2f); "
-                            "skipping FWHM-based rejection.",
+                            "Skipping FWHM rejection: would leave %d "
+                            "calibrators (< %d).",
+                            len(sources) - n_fwhm_rej,
+                            fwhm_min_keep,
+                        )
+                        fwhm_mask = np.zeros(len(sources), dtype=bool)
+                        n_fwhm_rej = 0
+                    if n_fwhm_rej > 0:
+                        _fwhm_lo = _med_fwhm - fwhm_sigma * _sig_eff
+                        _fwhm_hi = _med_fwhm + fwhm_sigma * _sig_eff
+                        removed_parts.append(f"{n_fwhm_rej} FWHM-outlier")
+                        logger.debug(
+                            "FWHM rejection window: %.1f-sigma outside "
+                            "[%.2f, %.2f] px (median=%.2f px, sigma_eff=%.2f px).",
+                            fwhm_sigma,
+                            _fwhm_lo,
+                            _fwhm_hi,
                             _med_fwhm,
+                            _sig_eff,
                         )
                 else:
                     logger.debug(
                         "Only %d sources with valid FWHM; skipping FWHM-based "
-                        "rejection (need >= 10).",
+                        "rejection (need >= %d).",
                         _n_fwhm,
+                        fwhm_min_src,
                     )
 
             mask = (
@@ -2400,6 +2406,7 @@ class Zeropoint:
                 _in_xe = np.asarray(inst_mag_err[inlier_short], float)
                 _in_ye = np.asarray(in_e, float)
                 _w = 1.0 / np.clip(_in_xe**2 + _in_ye**2, 1e-12, None)
+                _ys_free = None
                 _fit_ok = (
                     np.isfinite(_in_x).all()
                     and np.isfinite(_in_y).all()
@@ -2408,10 +2415,15 @@ class Zeropoint:
                 )
                 if _fit_ok:
                     _A = np.vstack([_in_x, np.ones_like(_in_x)]).T
-                    _W = np.diag(_w)
+                    # Whiten by sqrt(w): lstsq(W@A, W@y) instead applies the
+                    # inverse-variance weights twice (effective 1/sigma^4),
+                    # so the line tracks only the few brightest calibrators.
+                    _sqrt_w = np.sqrt(_w)
                     try:
                         _coef, _resid, _rank, _sv = np.linalg.lstsq(
-                            _W @ _A, _W @ _in_y, rcond=None
+                            _sqrt_w[:, None] * _A,
+                            _sqrt_w * _in_y,
+                            rcond=None,
                         )
                         _slope_free, _intercept_free = float(_coef[0]), float(_coef[1])
                         # Covariance: (A^T W A)^-1 * sigma^2_resid
@@ -2436,9 +2448,9 @@ class Zeropoint:
                         _slope_sig = (
                             abs(_dev) / _slope_err
                             if np.isfinite(_slope_err) and _slope_err > 0
-                            else np.inf
+                            else np.nan
                         )
-                        if _slope_sig > 3:
+                        if np.isfinite(_slope_sig) and _slope_sig > 3:
                             logger.warning(
                                 f"[{flux_type}] Free-slope fit: slope="
                                 f"{_slope_free:.4f}+/-{_slope_err:.4f}\n"
@@ -2452,7 +2464,12 @@ class Zeropoint:
                             logger.debug(
                                 f"[{flux_type}] Free-slope fit: slope={_slope_free:.4f}+/-{_slope_err:.4f} "
                                 f"(deviation from 1: {_dev:+.4f}, {_slope_sig:.1f} sigma) -- "
-                                f"slope=1 assumption is valid."
+                                + (
+                                    "slope=1 assumption is valid."
+                                    if np.isfinite(_slope_sig)
+                                    else "slope uncertainty unmeasurable; "
+                                    "cannot assess the slope=1 assumption."
+                                )
                             )
                         fit_params[flux_type]["free_slope"] = _slope_free
                         fit_params[flux_type]["free_slope_err"] = _slope_err
@@ -2465,18 +2482,21 @@ class Zeropoint:
                 global_xmins.append(xs[0])
                 global_xmaxs.append(xs[-1])
                 _em = float(np.nanmean(in_e)) if np.size(in_e) else 0.0
-                global_ymins.append(
-                    min(
-                        float(m_cal_in.min()) - _em,
-                        _line_lo,
-                    )
-                )
-                global_ymaxs.append(
-                    max(
-                        float(m_cal_in.max()) + _em,
-                        _line_hi,
-                    )
-                )
+                _ymin_cands = [
+                    float(m_cal_in.min()) - _em,
+                    _line_lo,
+                ]
+                _ymax_cands = [
+                    float(m_cal_in.max()) + _em,
+                    _line_hi,
+                ]
+                if _ys_free is not None:
+                    # A deviating free-slope line would otherwise clip
+                    # at the axes and look like it tracks the points.
+                    _ymin_cands.append(float(np.min(_ys_free)))
+                    _ymax_cands.append(float(np.max(_ys_free)))
+                global_ymins.append(min(_ymin_cands))
+                global_ymaxs.append(max(_ymax_cands))
 
                 full_mask = np.zeros(len(clean_catalog), dtype=bool)
                 full_mask[np.flatnonzero(vmask)] = inlier_short
