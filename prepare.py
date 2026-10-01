@@ -55,6 +55,10 @@ class Prepare:
             default_input (Dict): Configuration dictionary for the AutoPHOT pipeline.
         """
         self.input_yaml = default_input
+        # Absolute path -> resolved band for every file that passed
+        # check_filters(); consumed by the catalog optimizer to attach a
+        # band to each image footprint.
+        self.file_filter_map: Dict[str, str] = {}
         logging.basicConfig(
             level=logging.INFO,
             format="%(message)s",
@@ -500,6 +504,12 @@ class Prepare:
         selected_catalog_resolved = _resolve_catalog_for_filter(
             selected_catalog, self.input_yaml.get("imageFilter")
         )
+        if str(selected_catalog_resolved).strip().lower() == "auto":
+            # "auto" is resolved into a per-band mapping during the catalog
+            # pre-fetch (Catalog.find_optimized_catalog); until then every
+            # supported band is eligible so check_filters keeps all science
+            # images.
+            return sorted(set(SUPPORTED_PHOTOMETRIC_FILTERS))
         catalog_input = AutophotYaml(catalog_yml_path, selected_catalog_resolved).load()
 
         if self.input_yaml["catalog"].get("build_catalog", False):
@@ -1241,6 +1251,7 @@ class Prepare:
 
             filter_available.append(filter_name)
             out_flist.append(name)
+            self.file_filter_map[os.path.abspath(name)] = filter_name
 
             # If this telescope/instrument had a header filter value not in telescope.yml,
             # add it once per run and remember the mapping so repeated occurrences of the
