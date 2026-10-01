@@ -321,8 +321,9 @@ class RemoveCosmicRays:
         objlim: float = 10.0,
         dilate_factor: float = 1.0,
         dilate_iterations: int = 2,
+        defect_margin_px: float = 2.0,
         plot: bool = True,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Remove cosmic rays via astroscrappy or ccdproc.cosmicray_lacosmic, protecting bright/saturated/NaN pixels through ``inmask``.
 
@@ -338,10 +339,19 @@ class RemoveCosmicRays:
             sigclip: Detection threshold for cosmic rays (default: 7.0).
             sigfrac: Fraction of pixels used for detection (default: 0.3).
             objlim: Object detection threshold (default: 10.0).
+            dilate_factor: Dilation radius as fraction of FWHM for the
+                source-exclusion mask (default: 1.0).
+            dilate_iterations: Dilation iterations for the source-exclusion
+                mask (default: 2).
+            defect_margin_px: Fixed pixel margin around flagged pixels for the
+                defect mask (default: 2.0).  The defect mask marks pixels that
+                are not real data and is used for subtraction/aperture masks;
+                the much larger dilated mask is a source-exclusion halo.
             plot: If True, plot a side-by-side comparison (default: True).
 
         Returns:
-            Tuple of (cleaned image, processed cosmic ray mask) as numpy arrays.
+            Tuple of (cleaned image, dilated exclusion mask, defect mask)
+            as numpy arrays.
         """
         self.logger.info("Starting cosmic ray removal")
 
@@ -362,7 +372,8 @@ class RemoveCosmicRays:
         # --- Input Validation ---
         if not isinstance(self.image, np.ndarray):
             self.logger.error("Input image must be a numpy array")
-            return self.image, np.zeros_like(self.image, dtype=bool)
+            _empty = np.zeros_like(self.image, dtype=bool)
+            return self.image, _empty, _empty
 
         # --- Read Noise Handling ---
         if readnoise is None:
@@ -520,6 +531,17 @@ class RemoveCosmicRays:
                 fill_holes=True,
             )
 
+            # Defect mask for pixel-invalidation paths (subtraction,
+            # aperture masks): flagged pixels plus a small fixed margin for
+            # repair bleed.  The FWHM-scale processed_mask is a
+            # source-exclusion halo; most of its area is valid data and must
+            # not be nulled in the difference image.
+            defect_mask = np.asarray(cr_mask, dtype=bool).copy()
+            _margin = int(np.ceil(max(0.0, float(defect_margin_px))))
+            if _margin > 0 and np.any(defect_mask):
+                defect_mask = binary_dilation(defect_mask, structure=disk(_margin))
+                defect_mask = binary_fill_holes(defect_mask)
+
             # --- Log Results ---
             n_cr_raw = np.count_nonzero(cr_mask)
             n_cr = np.count_nonzero(processed_mask)
@@ -532,7 +554,8 @@ class RemoveCosmicRays:
                 )
             self.logger.debug(
                 f"Detected {n_cr_raw:,} CR pixels, dilated to {n_cr:,} "
-                f"({cr_fraction:.2%} of image for source exclusion)"
+                f"({cr_fraction:.2%} of image for source exclusion; "
+                f"defect mask: {int(np.count_nonzero(defect_mask)):,} px)"
             )
 
             # --- Plot Comparison ---
@@ -557,13 +580,14 @@ class RemoveCosmicRays:
                 "Parameters used for cosmic ray removal",
             )
 
-            # --- Return the cleaned image and processed mask ---
+            # --- Return the cleaned image and masks ---
             # Restore NaNs (chip gaps) after cosmic ray removal
             clean_image[nan_mask] = np.nan
-            return clean_image, processed_mask
+            return clean_image, processed_mask, defect_mask
 
         # --- Error Handling ---
         except Exception as e:
             self.logger.error("Cosmic ray removal failed: %s", e)
             self.header["CRSTATUS"] = ("failed", "Cosmic ray removal failed")
-            return self.image, np.zeros_like(self.image, dtype=bool)
+            _empty = np.zeros_like(self.image, dtype=bool)
+            return self.image, _empty, _empty
