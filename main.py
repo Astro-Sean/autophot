@@ -4374,11 +4374,12 @@ def run_photometry():
                         _ax.scatter(
                             _cat_xy[0][~_c_rej],
                             _cat_xy[1][~_c_rej],
-                            s=20,
-                            alpha=0.5,
-                            edgecolors="none",
+                            s=60,
+                            alpha=0.9,
                             marker="s",
-                            c=get_plot_color("fwhm_catalog"),
+                            facecolors="white",
+                            edgecolors=get_plot_color("fwhm_catalog"),
+                            linewidths=0.8,
                             zorder=1,
                             label=f"Catalog [{int((~_c_rej).sum())}]",
                         )
@@ -9425,9 +9426,53 @@ def run_photometry():
                     "(FWHM=%.2f px). ePSF matches directly - no adjustment needed.",
                     _zogy_sci_fwhm,
                 )
+                # Prefer the exact diff PSF written by _subtract_zogy: it
+                # is the stamp the subtraction actually used, which may be
+                # a star-stack/Moffat substitute when the saved ePSF was
+                # rejected as degenerate.  Only ZOGY writes the card.
+                _diffpsf_path = (
+                    str(header.get("DIFFPSF", "")).strip()
+                    if str(header.get("FORCECON", "")).strip().upper() == "ZOGY"
+                    else ""
+                )
+                if _diffpsf_path and os.path.isfile(_diffpsf_path):
+                    try:
+                        from photutils.psf import ImagePSF
+
+                        _psf_stamp = np.asarray(
+                            fits.getdata(_diffpsf_path), dtype=float
+                        )
+                        _psf_h, _psf_w = _psf_stamp.shape
+                        epsf_model = ImagePSF(
+                            data=_psf_stamp,
+                            flux=1.0,
+                            x_0=float(_psf_w // 2),
+                            y_0=float(_psf_h // 2),
+                            oversampling=1,
+                        )
+                        # CONVD=REF means the diff PSF IS the science PSF
+                        # (possibly repaired) -- when the science ePSF
+                        # build failed it is also the right model for any
+                        # later refit on the science image.
+                        if _epsf_science is None:
+                            _epsf_science = epsf_model
+                        do_aperture_ONLY = False
+                        logging.info(
+                            "ZOGY CONVD=REF: using subtraction PSF stamp "
+                            "from %s (%dx%d px) for photometry.",
+                            _diffpsf_path, _psf_h, _psf_w,
+                        )
+                    except Exception as _e:
+                        logging.warning(
+                            "ZOGY CONVD=REF: failed to load DIFFPSF stamp "
+                            "(%s); falling back to the science ePSF.", _e,
+                        )
+                        _diffpsf_path = ""
+                else:
+                    _diffpsf_path = ""
                 # If science ePSF build failed (sparse field), load the
                 # PSF model file built by the ZOGY PSF builder.
-                if epsf_model is None:
+                if epsf_model is None and not _diffpsf_path:
                     _sci_psf_base = f"PSF_model_image_{os.path.splitext(os.path.basename(science_path_original))[0]}.fits"
                     # Gridded-PSF runs keep model FITS under PSF_MODELS/;
                     # the plain layout writes them next to the outputs.
@@ -9530,6 +9575,42 @@ def run_photometry():
                             _sci_fwhm_hdr,
                             _ref_fwhm_hdr,
                         )
+
+                    # ZOGY CONVD=SCI: the diff carries the exact reference
+                    # stamp the subtraction used (possibly a repaired
+                    # substitute) -- prefer DIFFPSF over the science ePSF,
+                    # which does not describe the diff image here.
+                    if (
+                        str(header.get("FORCECON", "")).strip().upper()
+                        == "ZOGY"
+                    ):
+                        _zdiffpsf = str(header.get("DIFFPSF", "")).strip()
+                        if _zdiffpsf and os.path.isfile(_zdiffpsf):
+                            try:
+                                from photutils.psf import ImagePSF
+
+                                _zstamp = np.asarray(
+                                    fits.getdata(_zdiffpsf), dtype=float
+                                )
+                                _zh, _zw = _zstamp.shape
+                                epsf_model = ImagePSF(
+                                    data=_zstamp,
+                                    flux=1.0,
+                                    x_0=float(_zw // 2),
+                                    y_0=float(_zh // 2),
+                                    oversampling=1,
+                                )
+                                do_aperture_ONLY = False
+                                logging.info(
+                                    "ZOGY CONVD=SCI: using subtraction PSF "
+                                    "stamp from %s (%dx%d px) for photometry.",
+                                    _zdiffpsf, _zh, _zw,
+                                )
+                            except Exception as _e:
+                                logging.warning(
+                                    "ZOGY CONVD=SCI: failed to load DIFFPSF "
+                                    "stamp (%s); keeping science ePSF.", _e,
+                                )
 
                     # --- Update gain from diff header for correct flux calibration ---
                     # SFFT writes GAIN_DIFF = GAIN_SCI / FSCAL to the diff header
