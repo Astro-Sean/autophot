@@ -941,10 +941,12 @@ def run_sfft() -> Optional[int]:
     # Use consistent fallback values with main.py
     try:
         from main import SATURATE_INTERNAL_FALLBACK, SATURATE_FITS_FALLBACK
+        from functions import SATURATE_SENTINEL_MIN
     except ImportError:
         # Fallback if main module not available
         SATURATE_INTERNAL_FALLBACK = np.inf
         SATURATE_FITS_FALLBACK = 1e30
+        SATURATE_SENTINEL_MIN = 1e8
 
     def _ensure_gain_saturate(
         fits_path: str, gain: Optional[float], saturate: Optional[float], label: str
@@ -1004,8 +1006,15 @@ def run_sfft() -> Optional[int]:
         if args.saturate_ref is not None
         else hdr_ref.get("SATURATE", hdr_ref.get("saturate"))
     )
+    # Sentinel-scale values (>= SATURATE_SENTINEL_MIN) are stored "no limit"
+    # markers, not detector levels; pass the sentinel convention through so
+    # SFFT does not treat them as a physical ceiling.
     sat_sci = _float_or_default(sat_sci_raw, SATURATE_FITS_FALLBACK)
+    if np.isfinite(sat_sci) and sat_sci >= SATURATE_SENTINEL_MIN:
+        sat_sci = SATURATE_FITS_FALLBACK
     sat_ref = _float_or_default(sat_ref_raw, SATURATE_FITS_FALLBACK)
+    if np.isfinite(sat_ref) and sat_ref >= SATURATE_SENTINEL_MIN:
+        sat_ref = SATURATE_FITS_FALLBACK
 
     _ensure_gain_saturate(FITS_SCI, gain_sci, sat_sci, "Science")
     _ensure_gain_saturate(FITS_REF, gain_ref, sat_ref, "Reference")
