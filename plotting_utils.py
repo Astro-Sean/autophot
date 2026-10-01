@@ -119,6 +119,8 @@ PLOT_COLORS = {
     # --- Scatter / offset plots ---
     'scatter_primary':  '#005CAB',  # RPTH medium blue - fallback scatter when no color-coding
     'scatter_cmap':     'viridis',  # Colormap for distance-colored scatter
+    'quiver_cmap':      'autumn_r', # Residual-vector arrows - warm palette contrasts with the grey image underlay
+    'distortion_cmap':  'inferno',  # Smoothed residual-magnitude surface in the alignment-vectors panel
     'error_bar':        '#8C9B97',  # Deep cool gray - error bars on offset plots
     'zero_line':        '#E31B23',  # RPTH red - zero reference lines on offset plots
     'median_line':      '#D9A020',  # Deep yellow - median offset lines
@@ -128,6 +130,7 @@ PLOT_COLORS = {
     # --- Per-plot single-colour markers (distinct RPTH-family hues so each
     #     diagnostic figure has its own recognisable accent) ---
     'fwhm_scatter':     '#5B9BD5',  # Sky blue - FWHM vs instrumental mag
+    'fwhm_catalog':     '#2CA02C',  # Green - catalog background layer in FWHM vs instrumental mag
     'fwhm_rejected':    '#E31B23',  # RPTH red - FWHM-rejected markers
     'sfft_scatter':     '#4E857B',  # Sage - SFFT_Matching scatter
     'hist_primary':     '#005CAB',  # Medium blue - single-colour histograms
