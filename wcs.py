@@ -1517,6 +1517,11 @@ class WCSSolver:
                 # SExtractor rejects inf/NaN SATUR_LEVEL values
                 if not np.isfinite(satur_float) or satur_float <= 0:
                     satur_float = 1e7
+                # Sentinel-scale placeholders (1e10/1e30 "no limit" markers)
+                # are not detector levels; use the same no-limit stand-in as a
+                # missing key instead of capping to a bogus 65535.
+                elif satur_float >= 1e8:
+                    satur_float = 1e7
                 # Cap at 65535 (16-bit unsigned max); header values like 1e30
                 # trigger "SATUR_LEVEL keyword out of range" in SExtractor.
                 max_saturation = 65535
