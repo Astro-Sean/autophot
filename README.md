@@ -297,6 +297,7 @@ Limiting magnitudes are measured by injecting artificial sources into the image 
 | TIC | `tic` | TESS Input Catalog |
 | Custom CSV | `custom` | Set `catalog.catalog_custom_fpath` |
 | Gaia + custom curves | `gaia_custom` | User-provided transmission curves |
+| Auto-select | `auto` | Picks the best catalog per band (see below) |
 
 Different catalogs can be assigned to different filter groups in one run:
 
@@ -310,6 +311,15 @@ catalog:
 ```
 
 Mapping keys are flexible: single bands (`u`), family groups (`UBVRI`, `JHK`), mixed sets (`uRI` = u + R + I), and separator-delimited lists (`u, RI`) all work. Case is exact (`r` is SDSS r, `R` is Johnson-Cousins R), so write `BVRI` not `bvri`. An invalid key falls back to `default` with a warning.
+
+To let AutoPhOT choose the best catalog per band, set `use_catalog: auto`:
+
+```yaml
+catalog:
+  use_catalog: auto
+```
+
+Before per-image processing begins, the optimizer scans every image footprint (WCS + resolved filter), downloads each feasible catalog once, and keeps whichever backend returns the most usable calibrators per band - sources that land on the detector and carry a finite magnitude inside the zeropoint bright/faint window (`zeropoint.bright_mag_limit`/`faint_mag_limit`). The winner per band maximizes the worst-case per-image count, so the least-covered image still gets the most calibrators available. The resolved per-filter mapping is written into the run's `input.yaml`, a per-image coverage table is saved to `<wdir>/catalog_queries/<target>_optimized_catalog_coverage.csv`, and a coverage map - one panel per band, image footprints drawn in the band's lightcurve color, catalog sources with a unique marker+color per backend - is saved alongside it as `<target>_optimized_catalog_coverage.png`. Catalogs that need credentials or files you haven't configured (e.g. RefCAT2 without MAST CasJobs credentials) are skipped automatically, as are catalogs that don't cover the field. Gaia is excluded from the scan by default - repeated bulk cone queries overload the Gaia archive servers - though it remains available as the single-catalog fallback (`use_catalog: gaia`). The resolved mapping is cached at `<wdir>/catalog_queries/<target>_optimized_catalog.yml`, so a stopped-and-restarted run reuses it without re-scanning (the file is regenerated if required bands are missing from the cache; delete it to force a fresh scan).
 
 For non-standard filters, provide transmission curve files and use `gaia_custom`:
 
