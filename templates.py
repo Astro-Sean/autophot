@@ -404,10 +404,10 @@ def _zogy_matched_aperture_scale(
     positions shared by both images cancels the PSF difference: encircled
     energy within ~2 FWHM is nearly complete for both.
 
-    Returns NaN when fewer than 3 usable ratios survive, so callers can
-    fall back to the pixel-ratio estimator.
+    Returns NaN when no usable ratio survives, so callers can fall back
+    to the pixel-ratio estimator.
     """
-    if positions is None or len(positions) < 3:
+    if positions is None or len(positions) == 0:
         return np.nan
     try:
         fwhm = float(fwhm)
@@ -424,11 +424,11 @@ def _zogy_matched_aperture_scale(
     for pos in positions:
         try:
             x, y = float(pos[0]), float(pos[1])
-        except (TypeError, IndexError, ValueError):
+        except (TypeError, IndexError, ValueError, KeyError):
             continue
         if not (np.isfinite(x) and np.isfinite(y)):
             continue
-        xi, yi = int(round(x)), int(round(y))
+        xi, yi = round(x), round(y)
         if xi - half < 0 or yi - half < 0 or xi + half >= w or yi + half >= h:
             continue
         c_sci = science[yi - half : yi + half + 1, xi - half : xi + half + 1]
@@ -457,11 +457,20 @@ def _zogy_matched_aperture_scale(
             continue
         sky_sci = float(np.median(c_sci[ann]))
         sky_ref = float(np.median(c_ref[ann]))
+        std_sci = 1.4826 * float(np.median(np.abs(c_sci[ann] - sky_sci)))
+        std_ref = 1.4826 * float(np.median(np.abs(c_ref[ann] - sky_ref)))
         f_sci = float(np.sum(c_sci[ap] - sky_sci))
         f_ref = float(np.sum(c_ref[ap] - sky_ref))
+        # A matched position can be blank sky in one frame (e.g. a cosmic
+        # ray detected only in the science image); its aperture sum is then
+        # annulus noise and the ratio is garbage.  Require a real aperture
+        # detection on both sides.
+        n_ap = np.sqrt(float(ap.sum()))
+        if f_sci < 5.0 * std_sci * n_ap or f_ref < 5.0 * std_ref * n_ap:
+            continue
         if f_sci > 0 and f_ref > 0:
             ratios.append(f_sci / f_ref)
-    if len(ratios) < 3:
+    if len(ratios) < 1:
         return np.nan
     ratios = np.asarray(ratios)
     med = float(np.median(ratios))
@@ -480,22 +489,26 @@ def _zogy_star_psf(
     image: np.ndarray,
     positions,
     guess_fwhm: float = 8.0,
+    saturate: float = np.nan,
 ):
     """Median-stacked native PSF stamp + FWHM from matched star cutouts.
 
     Bright matched sources measure the *actual* field PSF directly --
     independent of ePSF convergence or the header/SExtractor FWHM (both
     under-measure broad plateau PSFs on resampled frames).  Cutouts are
-    stacked at integer positions; the ~0.3 px smearing is acceptable for
-    the >=6 px PSFs here.
+    stacked at integer positions; the sub-pixel smearing (~0.3 px worst
+    case) slightly broadens the stack -- acceptable for PSFs of several
+    pixels.
 
-    Returns ``(stamp, fwhm)``: an odd-sized unit-normalized azimuthal
-    stamp built from the median radial profile, and the profile's
-    interpolated half-maximum crossing FWHM.  ``(None, nan)`` when fewer
-    than 3 usable stars remain.
+    Returns ``(stamp, fwhm, kept_positions)``: an odd-sized unit-
+    normalized azimuthal stamp built from the median radial profile, the
+    profile's interpolated half-maximum crossing FWHM, and the positions
+    that survived the per-star consistency filter (cosmic rays and hot
+    pixels masquerading as matched sources must not collapse the stack).
+    ``(None, nan, None)`` when no cutout survives the consistency filter.
     """
-    if positions is None or len(positions) < 3:
-        return None, float("nan")
+    if positions is None or len(positions) < 1:
+        return None, float("nan"), None
     try:
         guess = float(guess_fwhm)
     except (TypeError, ValueError):
@@ -507,14 +520,15 @@ def _zogy_star_psf(
     sky_r_in = half - int(np.ceil(0.5 * guess)) - 1
     radii = np.arange(0.0, half - 1, 0.5)
     profs = []
+    kept_pos = []
     for pos in positions:
         try:
             x, y = float(pos[0]), float(pos[1])
-        except (TypeError, IndexError, ValueError):
+        except (TypeError, IndexError, ValueError, KeyError):
             continue
         if not (np.isfinite(x) and np.isfinite(y)):
             continue
-        xi, yi = int(round(x)), int(round(y))
+        xi, yi = round(x), round(y)
         if xi - half < 0 or yi - half < 0 or xi + half >= w or yi + half >= h:
             continue
         c = image[yi - half : yi + half + 1, xi - half : xi + half + 1]
@@ -526,20 +540,73 @@ def _zogy_star_psf(
         if sky_m.sum() < 20:
             continue
         sky = float(np.nanmedian(c[sky_m]))
+        sky_std = 1.4826 * float(np.nanmedian(np.abs(c[sky_m] - sky)))
+        if not np.isfinite(sky_std) or sky_std < 0:
+            sky_std = 0.0
         peak = float(c[half, half]) - sky
-        if not np.isfinite(peak) or peak <= 0:
+        # A matched science position can land on blank sky in the other
+        # frame (e.g. a cosmic ray); its noise "profile" then measures a
+        # garbage width and can still slip through the FWHM window.
+        if not np.isfinite(peak) or peak <= 0 or peak < 10.0 * sky_std:
             continue
-        prof = np.array(
-            [
-                np.nanmedian(c[np.isfinite(c) & (r >= ri - 0.5) & (r < ri + 0.5)])
-                - sky
-                for ri in radii
-            ]
-        ) / peak
+        # A saturated star has a clipped core whose flat-topped profile
+        # reads wider than the true PSF -- it would inflate the stack.
+        if np.isfinite(saturate) and saturate > 0:
+            _cp = float(np.nanmax(c))
+            if np.isfinite(_cp) and _cp >= 0.9 * saturate:
+                continue
+        with warnings.catch_warnings():
+            # Empty radial bins (all-NaN cutout corners, gaps past the
+            # cutout edge) are expected; nanmedian of an empty slice is
+            # NaN, which is what the code wants, but it warns.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            prof = np.array(
+                [
+                    np.nanmedian(
+                        c[np.isfinite(c) & (r >= ri - 0.5) & (r < ri + 0.5)]
+                    )
+                    - sky
+                    for ri in radii
+                ]
+            ) / peak
         profs.append(prof)
-    if len(profs) < 3:
-        return None, float("nan")
-    med = np.nanmedian(np.asarray(profs), axis=0)
+        kept_pos.append((x, y))
+    if len(profs) < 1:
+        return None, float("nan"), None
+    profs = np.asarray(profs)
+
+    def _prof_fwhm(p):
+        # Per-star width, anchored on the guess: a matched-source list
+        # can be dominated by cosmic-ray spikes (~1-3 px), which would
+        # otherwise form the "consistent" ensemble and exclude real stars.
+        i = np.nonzero(p < 0.5)[0]
+        if i.size == 0 or i[0] == 0:
+            return np.nan
+        j = int(i[0])
+        frac = (p[j - 1] - 0.5) / (p[j - 1] - p[j] + 1e-30)
+        return 2.0 * (radii[j - 1] + frac * 0.5)
+
+    indiv = np.array([_prof_fwhm(p) for p in profs])
+    near = np.isfinite(indiv) & (indiv > 0.45 * guess) & (indiv < 1.8 * guess)
+    logger.debug(
+        "ZOGY star-stack: %d cutouts measured (guess %.2f px), "
+        "%d inside [%.2f, %.2f] px; per-star FWHMs: %s",
+        len(profs),
+        guess,
+        int(near.sum()),
+        0.45 * guess,
+        1.8 * guess,
+        ", ".join(f"{f:.2f}" if np.isfinite(f) else "nan" for f in indiv),
+    )
+    if near.sum() < 1:
+        # No cutout looks like the expected stellar width -- the position
+        # list is dominated by spikes/galaxies; no stack.  A single
+        # survivor is still used: one bright-star cutout is a far better
+        # PSF than a blind analytic guess.
+        return None, float("nan"), None
+    profs = profs[near]
+    kept_pos = [p for p, k in zip(kept_pos, near) if k]
+    med = np.nanmedian(profs, axis=0)
     # Half-maximum crossing with linear interpolation.
     i = np.nonzero(med < 0.5)[0]
     if i.size == 0 or i[0] == 0:
@@ -556,8 +623,8 @@ def _zogy_star_psf(
     stamp = np.interp(rr, radii, med, left=med[0], right=0.0)
     total = float(stamp.sum())
     if not np.isfinite(total) or total <= 0:
-        return None, float("nan")
-    return stamp / total, fwhm
+        return None, float("nan"), None
+    return stamp / total, fwhm, kept_pos
 
 
 def _load_psf_stamp_native(fpath: str) -> np.ndarray:
@@ -664,7 +731,10 @@ def _measure_stamp_fwhm(stamp: np.ndarray) -> float:
     p0, p1 = float(prof[j]), float(prof[i])
     if not p1 < p0:
         return float("nan")
-    r_cross = 0.5 * (j + (half - p0) / (p1 - p0) * (i - j))
+    # Floor binning puts bin k over r in [0.5k, 0.5k+0.5), so each profile
+    # value is evaluated at the bin centre (+0.25 px) -- skipping the
+    # offset under-measures every FWHM by ~0.5 px.
+    r_cross = 0.5 * (j + (half - p0) / (p1 - p0) * (i - j)) + 0.25
     return 2.0 * r_cross
 
 
@@ -689,11 +759,14 @@ def _zogy_wiener_kernel(source_psf, target_psf):
     src_hat = np.fft.fft2(source_psf)
     src_abs2 = np.abs(src_hat) ** 2
     eps_w = 1e-2 * float(np.max(src_abs2))
-    kernel = np.real(
-        np.fft.ifft2(
-            np.fft.fft2(target_psf) * np.conj(src_hat) / (src_abs2 + eps_w)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        kernel = np.real(
+            np.fft.ifft2(
+                np.fft.fft2(target_psf)
+                * np.conj(src_hat)
+                / (src_abs2 + eps_w)
+            )
         )
-    )
     ksum = float(np.sum(kernel))
     if not np.isfinite(ksum) or abs(ksum) <= 1e-30:
         return kernel, np.inf
@@ -10183,6 +10256,45 @@ class Templates:
             _sn = float(_sn) if _sn and _sn > 0 else 1.0
             _sr = float(_sr) if _sr and _sr > 0 else 1.0
 
+            # Sanitise the measured FWHMs once: they drive the star-stack
+            # window, the PSF plausibility gate, the forceconv resolution,
+            # and several header cards -- a NaN/None would otherwise poison
+            # all of them.
+            def _fwhm_val(v):
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    return 0.0
+                return f if np.isfinite(f) and f > 0 else 0.0
+
+            _fs_f = _fwhm_val(science_fwhm)
+            _ft_f = _fwhm_val(template_fwhm)
+
+            # Field PSF measured directly off the bright matched stars.  It
+            # is the most truthful width available to this routine: header/
+            # SExtractor FWHMs under-measure broad plateau PSFs on resampled
+            # frames, and non-converged ePSFs can be outright garbage.
+            # The filtered positions also feed the aperture flux-scale
+            # estimate so spikes cannot poison it.
+            _star_sci_stamp, _star_sci_f, _star_pos = _zogy_star_psf(
+                science_data, matching_sources, _fs_f or 8.0,
+                saturate=science_saturate,
+            )
+            _star_ref_stamp, _star_ref_f, _star_ref_pos = _zogy_star_psf(
+                reference_data, matching_sources, _ft_f or 8.0,
+                saturate=template_saturate,
+            )
+            # Either validated list beats the raw one: matched-source
+            # catalogs can carry cosmic-ray spikes that are blank sky in
+            # the other frame.
+            _scale_pos = (
+                _star_pos
+                if _star_pos is not None
+                else _star_ref_pos
+                if _star_ref_pos is not None
+                else matching_sources
+            )
+
             # -----------------------------------------------------------------
             # Flux-scale matching: ZOGY requires both images in the same flux
             # units (fn = fr).  When exposure times differ (e.g. 330s sci vs
@@ -10196,19 +10308,20 @@ class Templates:
             # per-pixel ratios).  Fallback: median ratio of bright source
             # pixels, then EXPTIME ratio.
             # -----------------------------------------------------------------
-            def _fwhm_safe(v):
-                try:
-                    f = float(v)
-                except (TypeError, ValueError):
-                    return 0.0
-                return f if np.isfinite(f) and f > 0 else 0.0
-
             _flux_scale_src = "none"
+            _ap_fwhm = max(
+                _star_sci_f
+                if np.isfinite(_star_sci_f) and _star_sci_f > 0
+                else _fs_f,
+                _star_ref_f
+                if np.isfinite(_star_ref_f) and _star_ref_f > 0
+                else _ft_f,
+            )
             _flux_scale = _zogy_matched_aperture_scale(
                 science_data,
                 reference_data,
-                matching_sources,
-                max(_fwhm_safe(science_fwhm), _fwhm_safe(template_fwhm)),
+                _scale_pos,
+                _ap_fwhm,
                 sat_sci=science_saturate,
                 sat_ref=template_saturate,
             )
@@ -10371,20 +10484,6 @@ class Templates:
                 )
                 reference_psf_data = reference_psf_data / _pr_sum
 
-            # Sanitise the measured FWHMs once: they drive the PSF
-            # plausibility gate, the forceconv resolution, the
-            # pre-convolution gate, and several header cards -- a NaN/None
-            # would otherwise poison all of them.
-            def _fwhm_val(v):
-                try:
-                    f = float(v)
-                except (TypeError, ValueError):
-                    return 0.0
-                return f if np.isfinite(f) and f > 0 else 0.0
-
-            _fs_f = _fwhm_val(science_fwhm)
-            _ft_f = _fwhm_val(template_fwhm)
-
             # -----------------------------------------------------------------
             # PSF plausibility gate.  A degenerate ePSF (few stars, no
             # convergence) can carry a wildly wrong width -- 1.7 px against
@@ -10392,16 +10491,10 @@ class Templates:
             # direction into a sharpening kernel and produces the dipole
             # residuals seen as oversubtraction.  Bright matched sources
             # measure the field PSF directly; a stamp more than ~25% off
-            # that width (or with a large negative-pixel fraction) is
+            # that width (or carrying substantial negative mass) is
             # replaced by the star-stacked stamp, or by an analytic Moffat
             # at the best available width when no stack exists.
             # -----------------------------------------------------------------
-            _star_sci_stamp, _star_sci_f = _zogy_star_psf(
-                science_data, matching_sources, _fs_f or 8.0
-            )
-            _star_ref_stamp, _star_ref_f = _zogy_star_psf(
-                reference_data, matching_sources, _ft_f or 8.0
-            )
 
             def _moffat_stamp(fwhm):
                 n = 2 * int(np.ceil(3.0 * fwhm)) + 1
@@ -10415,11 +10508,21 @@ class Templates:
 
             def _repair_stamp(stamp, star_stamp, star_f, img_f, tag):
                 sf = _measure_stamp_fwhm(stamp)
-                neg_frac = (
-                    float(np.mean(stamp < 0)) if stamp.size else 0.0
+                # Negative mass is the signature of a sick stamp: ePSF
+                # outskirts hover at +-noise and can collectively carry more
+                # flux than the PSF itself, and the kernel built from such a
+                # stamp inherits the ringing.  Healthy stamps sit at ~0.
+                _tot = float(np.nansum(stamp))
+                neg_mass = (
+                    float(-np.nansum(stamp[stamp < 0]) / _tot)
+                    if stamp.size and abs(_tot) > 1e-30
+                    else np.inf
                 )
                 unsanitary = (
-                    not np.isfinite(sf) or sf < 1.0 or neg_frac > 0.15
+                    not np.isfinite(sf)
+                    or sf < 1.0
+                    or not np.isfinite(neg_mass)
+                    or neg_mass > 0.25
                 )
                 sub, ref_f, sub_tag = None, 0.0, ""
                 if np.isfinite(star_f) and star_f > 0:
@@ -10443,29 +10546,40 @@ class Templates:
                     if bad:
                         logger.warning(
                             "ZOGY %s PSF stamp looks degenerate (FWHM %.2f, "
-                            "%.0f%% negative pixels) but no substitute is "
+                            "neg mass %.2f) but no substitute is "
                             "available; keeping it.",
                             tag, sf if np.isfinite(sf) else -1.0,
-                            100.0 * neg_frac,
+                            neg_mass if np.isfinite(neg_mass) else -1.0,
                         )
-                    return stamp
+                    return stamp, sf
                 logger.warning(
                     "ZOGY %s PSF stamp rejected (FWHM %.2f vs reference "
-                    "%.2f px, %.0f%% negative pixels); substituting a %s "
+                    "%.2f px, neg mass %.2f); substituting a %s "
                     "stamp for the subtraction inputs.",
                     tag, sf if np.isfinite(sf) else -1.0, ref_f,
-                    100.0 * neg_frac, sub_tag,
+                    neg_mass, sub_tag,
                 )
-                return sub
+                return sub, ref_f
 
-            science_psf_data = _repair_stamp(
+            science_psf_data, _fwhm_s_psf = _repair_stamp(
                 science_psf_data, _star_sci_stamp, _star_sci_f, _fs_f,
                 "science",
             )
-            reference_psf_data = _repair_stamp(
+            reference_psf_data, _fwhm_t_psf = _repair_stamp(
                 reference_psf_data, _star_ref_stamp, _star_ref_f, _ft_f,
                 "template",
             )
+            # Effective PSF widths drive the AUTO direction choice.  The
+            # star-stack width is measured on the real field stars and is
+            # the most truthful value when it exists -- even when the saved
+            # stamp was kept (agreement within tolerance), the stack's
+            # width is the better ordering statistic.
+            if np.isfinite(_star_sci_f) and _star_sci_f > 0:
+                _fwhm_s_psf = _star_sci_f
+            if np.isfinite(_star_ref_f) and _star_ref_f > 0:
+                _fwhm_t_psf = _star_ref_f
+            _fwhm_s_psf = _fwhm_val(_fwhm_s_psf) or _fs_f
+            _fwhm_t_psf = _fwhm_val(_fwhm_t_psf) or _ft_f
 
             # Pad PSFs to the image shape (ZOGY requires same-shape FFTs)
             _psf_sci = _pad_psf_to_image(science_psf_data, science_data.shape)
@@ -10565,7 +10679,11 @@ class Templates:
                 try:
                     _k, _neg = _zogy_wiener_kernel(_src, _tgt)
                     _neg_by_dir[_dirn] = _neg
-                    _kernel_by_dir[_dirn] = _k
+                    # A non-finite kernel (degenerate PSF, NaN stamp)
+                    # would poison every pixel of the convolved image;
+                    # record the probe result but never reuse it.
+                    if np.isfinite(_k).all():
+                        _kernel_by_dir[_dirn] = _k
                 except Exception as _e:
                     logger.info(
                         "ZOGY: %s-direction kernel probe failed (%s).",
@@ -10575,37 +10693,36 @@ class Templates:
             if _zogy_fc_cfg == "AUTO" and len(_neg_by_dir) == 2:
                 _neg_ref = _neg_by_dir["REF"]
                 _neg_sci = _neg_by_dir["SCI"]
-                _neg_hi = max(_neg_ref, _neg_sci)
-                if (
-                    _neg_ref <= _ZOGY_KERNEL_NEG_TOL
-                    and _neg_sci <= _ZOGY_KERNEL_NEG_TOL
-                ) or abs(_neg_ref - _neg_sci) < 0.1 * _neg_hi:
-                    # Both benign, or indistinguishable: defer to the
-                    # measured FWHM ordering (keeps the REF convention on
-                    # ties).
+                _ref_ok = _neg_ref <= _ZOGY_KERNEL_NEG_TOL
+                _sci_ok = _neg_sci <= _ZOGY_KERNEL_NEG_TOL
+                if _ref_ok != _sci_ok:
+                    # Exactly one kernel is a clean smoother -- trust the
+                    # probe over any width estimate.
+                    _zogy_forceconv = "REF" if _ref_ok else "SCI"
+                    _zogy_fc_note = (
+                        f"AUTO->{_zogy_forceconv}: kernel probe picked "
+                        "the smoothing direction "
+                        f"(neg mass REF={_neg_ref:.3f}, "
+                        f"SCI={_neg_sci:.3f})"
+                    )
+                else:
+                    # Both clean, or both carry sidelobes (PSF-shape
+                    # mismatch rather than a width inversion): defer to
+                    # the effective-PSF width ordering, which is the
+                    # truthful direction after stamp repair.
                     (
                         _zogy_forceconv,
                         _zogy_fc_deconvolves,
                         _zogy_fc_note,
                     ) = _select_forceconv(
-                        "AUTO", _fs_f, _ft_f,
+                        "AUTO", _fwhm_s_psf, _fwhm_t_psf,
                         auto_tol=float(
                             ts_cfg.get("sfft_forceconv_auto_tol", 0.05) or 0.05
                         ),
                     )
-                elif _neg_ref <= _neg_sci:
-                    _zogy_forceconv = "REF"
-                    _zogy_fc_note = (
-                        "AUTO->REF: kernel probe picked the smoothing "
-                        f"direction (neg mass REF={_neg_ref:.3f}, "
-                        f"SCI={_neg_sci:.3f})"
-                    )
-                else:
-                    _zogy_forceconv = "SCI"
-                    _zogy_fc_note = (
-                        "AUTO->SCI: kernel probe picked the smoothing "
-                        f"direction (neg mass SCI={_neg_sci:.3f}, "
-                        f"REF={_neg_ref:.3f})"
+                    _zogy_fc_note += (
+                        f" [kernel neg mass REF={_neg_ref:.3f}, "
+                        f"SCI={_neg_sci:.3f}]"
                     )
             else:
                 (
@@ -10614,8 +10731,8 @@ class Templates:
                     _zogy_fc_note,
                 ) = _select_forceconv(
                     _zogy_fc_cfg,
-                    _fs_f,
-                    _ft_f,
+                    _fwhm_s_psf,
+                    _fwhm_t_psf,
                     auto_tol=float(
                         ts_cfg.get("sfft_forceconv_auto_tol", 0.05) or 0.05
                     ),
@@ -10628,8 +10745,10 @@ class Templates:
                     _neg_by_dir[_zogy_forceconv] > _ZOGY_KERNEL_NEG_TOL
                 )
             logger.info(
-                "ZOGY forceconv=%s (cfg=%s, FWHM: sci=%.2f ref=%.2f; %s).",
-                _zogy_forceconv, _zogy_fc_cfg, _fs_f, _ft_f, _zogy_fc_note,
+                "ZOGY forceconv=%s (cfg=%s, eff FWHM: sci=%.2f ref=%.2f, "
+                "image FWHM: %.2f/%.2f; %s).",
+                _zogy_forceconv, _zogy_fc_cfg, _fwhm_s_psf, _fwhm_t_psf,
+                _fs_f, _ft_f, _zogy_fc_note,
             )
             if _zogy_fc_deconvolves:
                 _neg_msg = ""
@@ -10638,18 +10757,18 @@ class Templates:
                         f"  Kernel negative mass: {_neg_by_dir[_zogy_forceconv]:.2f}."
                     )
                 logger.warning(
-                    "ZOGY forceconv=%s requires deconvolution: the convolved\n"
-                    "    image (FWHM=%.2f) is broader than the target (%.2f).\n"
-                    "    The Wiener-regularised kernel must remove width,\n"
-                    "    producing negative sidelobes that leave dipole\n"
-                    "    residuals at bright sources.%s",
+                    "ZOGY forceconv=%s requires deconvolution or a strong\n"
+                    "    shape fix: the Wiener kernel (convolved %.2f px ->\n"
+                    "    target %.2f px) carries substantial negative mass,\n"
+                    "    and its sidelobes leave dipole residuals at bright\n"
+                    "    sources.%s",
                     _zogy_forceconv,
-                    _ft_f if _zogy_forceconv == "REF" else _fs_f,
-                    _fs_f if _zogy_forceconv == "REF" else _ft_f,
+                    _fwhm_t_psf if _zogy_forceconv == "REF" else _fwhm_s_psf,
+                    _fwhm_s_psf if _zogy_forceconv == "REF" else _fwhm_t_psf,
                     _neg_msg,
                 )
 
-            if _zogy_forceconv in ("REF", "SCI") and _fs_f and _ft_f:
+            if _zogy_forceconv in ("REF", "SCI") and _fwhm_s_psf and _fwhm_t_psf:
                 try:
                     # Reuse the probed kernel when available; the direction
                     # was already decided from its negative mass.
@@ -10660,6 +10779,8 @@ class Templates:
                             _psf_ref if _zogy_forceconv == "REF" else _psf_sci,
                             _psf_sci if _zogy_forceconv == "REF" else _psf_ref,
                         )
+                    if not np.isfinite(_conv_kernel).all():
+                        raise ValueError("non-finite matching kernel")
 
                     # Convolution noise propagation: for white pixel noise,
                     # convolving with kernel k scales the per-pixel RMS by
@@ -10693,7 +10814,7 @@ class Templates:
                             "ZOGY: convolved reference to science PSF "
                             "(FWHM %.2f -> %.2f px, Wiener eps=%.2g). "
                             "Reference noise scaled by sqrt(sum k^2)=%.3f.",
-                            _ft_f, _fs_f, _eps_wiener,
+                            _fwhm_t_psf, _fwhm_s_psf, _eps_wiener,
                             _conv_noise_factor,
                         )
                     else:
@@ -10713,7 +10834,7 @@ class Templates:
                             "ZOGY: convolved science to reference PSF "
                             "(FWHM %.2f -> %.2f px, Wiener eps=%.2g). "
                             "Science noise scaled by sqrt(sum k^2)=%.3f.",
-                            _fs_f, _ft_f, _eps_wiener,
+                            _fwhm_s_psf, _fwhm_t_psf, _eps_wiener,
                             _conv_noise_factor,
                         )
                 except Exception as _conv_e:
@@ -10765,78 +10886,112 @@ class Templates:
             # difference image has that image's PSF, not the geometric mean.
             _zogy_hdr = scienceHeader.copy()
             _zogy_hdr["FORCECON"] = "ZOGY"
-            _zogy_hdr["FWHM_SCI"] = _fs_f
-            _zogy_hdr["FWHM_REF"] = _ft_f
+            _zogy_hdr["FWHM_SCI"] = _fwhm_s_psf
+            _zogy_hdr["FWHM_REF"] = _fwhm_t_psf
             if _zogy_convolved == "REF":
                 # Reference was convolved to science PSF -> diff has science PSF
                 _zogy_hdr["CONVD"] = "REF"
-                _zogy_hdr["FWHM"] = _fs_f
-                _zogy_hdr["DIFFFWHM"] = _fs_f
+                _zogy_hdr["FWHM"] = _fwhm_s_psf
+                _zogy_hdr["DIFFFWHM"] = _fwhm_s_psf
+                _diff_stamp_src = science_psf_data
             elif _zogy_convolved == "SCI":
                 # Science was convolved to reference PSF -> diff has reference PSF
                 _zogy_hdr["CONVD"] = "SCI"
-                _zogy_hdr["FWHM"] = _ft_f
-                _zogy_hdr["DIFFFWHM"] = _ft_f
+                _zogy_hdr["FWHM"] = _fwhm_t_psf
+                _zogy_hdr["DIFFFWHM"] = _fwhm_t_psf
+                _diff_stamp_src = reference_psf_data
             else:
                 # Standard ZOGY: geometric mean PSF
                 _zogy_hdr["CONVD"] = "ZOGY"
                 _zogy_fwhm = 0.0
-                if _fs_f and _ft_f:
-                    _zogy_fwhm = np.sqrt(_fs_f * _ft_f)
+                if _fwhm_s_psf and _fwhm_t_psf:
+                    _zogy_fwhm = np.sqrt(_fwhm_s_psf * _fwhm_t_psf)
                     _zogy_hdr["FWHM"] = _zogy_fwhm
                     _zogy_hdr["DIFFFWHM"] = _zogy_fwhm
+                _diff_stamp_src = None
 
-                # Extract a centered PSF stamp from P_D and write to FITS
-                # so main.py can build an ImagePSF for photometry.
-                try:
+            # Write the PSF the difference image actually has so main.py
+            # can build an ImagePSF for photometry.  For the pre-convolved
+            # paths this is the (possibly repaired) target stamp; for
+            # canonical ZOGY it is extracted from P_D.  The upstream ePSF
+            # file cannot be trusted here -- stamp repair may have
+            # replaced it.
+            try:
+                _diffpsf_path = os.path.join(
+                    os.path.dirname(str(differenceFpath)),
+                    f"diff_psf_{os.path.splitext(os.path.basename(str(differenceFpath)))[0]}.fits",
+                )
+                if _diff_stamp_src is not None:
+                    _psf_stamp = np.asarray(_diff_stamp_src, dtype=float)
+                    _zogy_stamp_fwhm = float(
+                        _zogy_hdr.get("DIFFFWHM", 0.0)
+                    )
+                else:
                     _pd = np.asarray(_P_D, dtype=float)
                     _ny, _nx = _pd.shape
                     # P_D from ifft2 has the PSF peak at [0,0] (FFT origin).
                     # fftshift moves it to the center of the full array.
                     _pd = np.fft.fftshift(_pd)
+                    _zogy_fwhm = float(_zogy_fwhm)
                     # Stamp size: ~5x FWHM or 25px, whichever is larger
-                    _stamp_hw = max(int(np.ceil(5.0 * _zogy_fwhm)), 25) if _zogy_fwhm else 25
+                    _stamp_hw = (
+                        max(int(np.ceil(5.0 * _zogy_fwhm)), 25)
+                        if _zogy_fwhm
+                        else 25
+                    )
                     _stamp_hw = min(_stamp_hw, _ny // 2, _nx // 2)
                     _cy, _cx = _ny // 2, _nx // 2
                     _psf_stamp = _pd[
                         _cy - _stamp_hw: _cy + _stamp_hw + 1,
                         _cx - _stamp_hw: _cx + _stamp_hw + 1,
                     ]
-                    # Normalize to unit sum
-                    _ps_sum = float(np.nansum(_psf_stamp))
-                    if _ps_sum > 0:
-                        _psf_stamp = _psf_stamp / _ps_sum
                     # Measure the FWHM on P_D itself rather than trusting the
                     # Gaussian geometric mean: the diff PSF departs from
                     # sqrt(Fn*Fr) for non-Gaussian PSFs, and DIFFFWHM drives
                     # the caller's aperture rescale.
                     _meas_fwhm = _measure_stamp_fwhm(_psf_stamp)
+                    _zogy_stamp_fwhm = _zogy_fwhm
                     if np.isfinite(_meas_fwhm) and _meas_fwhm > 0:
-                        if _zogy_fwhm and abs(_meas_fwhm - _zogy_fwhm) / _zogy_fwhm > 0.15:
+                        if (
+                            _zogy_fwhm
+                            and abs(_meas_fwhm - _zogy_fwhm) / _zogy_fwhm > 0.15
+                        ):
                             logger.info(
                                 "ZOGY: measured P_D FWHM %.2f px differs from "
                                 "geometric-mean %.2f px; using measured value.",
                                 _meas_fwhm, _zogy_fwhm,
                             )
-                        _zogy_fwhm = float(_meas_fwhm)
-                        _zogy_hdr["FWHM"] = _zogy_fwhm
-                        _zogy_hdr["DIFFFWHM"] = _zogy_fwhm
-                    _diffpsf_path = os.path.join(
-                        os.path.dirname(str(differenceFpath)),
-                        f"diff_psf_{os.path.splitext(os.path.basename(str(differenceFpath)))[0]}.fits",
+                        _zogy_stamp_fwhm = float(_meas_fwhm)
+                        _zogy_hdr["FWHM"] = _zogy_stamp_fwhm
+                        _zogy_hdr["DIFFFWHM"] = _zogy_stamp_fwhm
+                # A kept ePSF stamp can carry NaN outskirts; ImagePSF
+                # downstream cannot digest them.
+                if not np.isfinite(_psf_stamp).all():
+                    _psf_stamp = np.nan_to_num(
+                        _psf_stamp, nan=0.0, posinf=0.0, neginf=0.0
                     )
-                    _psf_hdr = fits.Header()
-                    _psf_hdr["FWHM"] = _zogy_fwhm if _zogy_fwhm else 0.0
-                    _psf_hdr["ORIGIN"] = "ZOGY"
-                    write_fits(_diffpsf_path, _psf_stamp, _psf_hdr)
-                    _zogy_hdr["DIFFPSF"] = _diffpsf_path
-                    logger.info(
-                        "ZOGY: wrote difference-image PSF stamp (%dx%d px, FWHM=%.2f) to %s",
-                        _psf_stamp.shape[0], _psf_stamp.shape[1],
-                        float(_zogy_fwhm) if _zogy_fwhm else 0.0, _diffpsf_path,
-                    )
-                except Exception as _psf_e:
-                    logger.warning("ZOGY: failed to write diff PSF stamp: %s", _psf_e)
+                # Normalize to unit sum
+                _ps_sum = float(np.nansum(_psf_stamp))
+                if _ps_sum > 0:
+                    _psf_stamp = _psf_stamp / _ps_sum
+                _psf_hdr = fits.Header()
+                _psf_hdr["FWHM"] = (
+                    _zogy_stamp_fwhm if _zogy_stamp_fwhm else 0.0
+                )
+                _psf_hdr["ORIGIN"] = "ZOGY"
+                write_fits(_diffpsf_path, _psf_stamp, _psf_hdr)
+                _zogy_hdr["DIFFPSF"] = _diffpsf_path
+                logger.info(
+                    "ZOGY: wrote difference-image PSF stamp (%dx%d px, "
+                    "FWHM=%.2f) to %s",
+                    _psf_stamp.shape[0], _psf_stamp.shape[1],
+                    float(_zogy_stamp_fwhm) if _zogy_stamp_fwhm else 0.0,
+                    _diffpsf_path,
+                )
+            except Exception as _psf_e:
+                logger.warning(
+                    "ZOGY: failed to write diff PSF stamp: %s", _psf_e
+                )
             if _as_bool(ts_cfg.get("zogy_write_score_images", False), False):
                 # S/Scorr are ZOGY's matched-filter detection maps and the
                 # only products that use the per-pixel noise maps; D itself
