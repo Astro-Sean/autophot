@@ -54,10 +54,17 @@ from scipy.special import erf, erfinv
 from skimage.measure import moments
 
 from photutils.background import Background2D, MedianBackground
+from photutils.centroids import centroid_2dg, centroid_com, centroid_sources
 from photutils.segmentation import detect_sources, SourceCatalog, make_2dgaussian_kernel
 from photutils.aperture import RectangularAperture
 
 logger = logging.getLogger(__name__)
+
+# Sentinel floor for SATURATE placeholders: real detectors saturate below
+# ~1e6 ADU, while "no limit" markers are written as 1e10-1e30 by this
+# pipeline and some upstream tools.  Readers use this to recognise a stored
+# sentinel instead of treating it as a physical ceiling.
+SATURATE_SENTINEL_MIN = 1e8
 
 # --- FITS I/O cache ---------------------------------------------------------
 # mtime+size keyed cache so repeated get_header / get_image_and_header calls
@@ -1681,6 +1688,9 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "ZTF_g": "g",
                 "ZTF_r": "r",
                 "ZTF_i": "i",
+                "ZTFg": "g",
+                "ZTFr": "r",
+                "ZTFi": "i",
                 "ztf_g": "g",
                 "ztf_r": "r",
                 "ztf_i": "i",
@@ -1699,6 +1709,9 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "ZTF_g": "g",
                 "ZTF_r": "r",
                 "ZTF_i": "i",
+                "ZTFg": "g",
+                "ZTFr": "r",
+                "ZTFi": "i",
                 "ztf_g": "g",
                 "ztf_r": "r",
                 "ztf_i": "i",
@@ -1901,7 +1914,6 @@ def download_zogy(wdir, update=False, repo_url="https://github.com/pmvreeswijk/Z
     """
     import io
     import zipfile
-    import tempfile
     import shutil
 
     logger = logging.getLogger(__name__)
@@ -1933,14 +1945,12 @@ def download_zogy(wdir, update=False, repo_url="https://github.com/pmvreeswijk/Z
     except Exception as req_err:
         logger.warning("requests-based download failed (%s); trying urllib fallback.", req_err)
         try:
-            from urllib.request import urlretrieve
+            from urllib.request import urlopen
 
-            tmp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-            tmp_zip.close()
-            urlretrieve(archive_url, tmp_zip.name)
-            with open(tmp_zip.name, "rb") as f:
-                zip_bytes = io.BytesIO(f.read())
-            os.unlink(tmp_zip.name)
+            # urlretrieve has no timeout and can hang forever on a
+            # black-holed connection, stalling the subtraction path.
+            with urlopen(archive_url, timeout=120) as _resp:
+                zip_bytes = io.BytesIO(_resp.read())
         except Exception as url_err:
             logger.error("Failed to download ZOGY: %s", url_err)
             return None
@@ -2221,6 +2231,272 @@ class AutophotYaml:
         data_new = {os.path.basename(target_name.replace(".yml", "")): data}
         with open(fname, "w") as outfile:
             yaml.dump(data_new, outfile, default_flow_style=False)
+
+
+# --- Input-config validation -----------------------------------------------
+#
+# The pipeline is driven by a plain YAML mapping; an unrecognised key was
+# historically ignored, so a typo silently ran with the default value (and
+# several dispatch options silently map a bad value to a fallback).  The
+# helpers below compare a user-supplied config against the shipped schema and
+# report entries the pipeline can never read.
+
+# Sections AutomatedPhotometry.load() creates when the shipped file lacks
+# them.  They carry no schema keys but appear in generated input.yaml files,
+# so they must be part of the accepted schema (their children still check
+# against the empty mapping, i.e. any key under them is unknown).
+_CONFIG_LOADED_SECTIONS = (
+    "preprocessing",
+    "photometry",
+    "templates",
+    "wcs",
+    "catalog",
+    "cosmic_rays",
+    "fitting",
+    "source_detection",
+    "limiting_magnitude",
+    "alignment",
+    "template_subtraction",
+    "background",
+    "zeropoint",
+    "error",
+    "psf",
+    "target_photometry",
+)
+
+# Top-level keys that carry runtime-injected data, not user options.
+_CONFIG_DATA_KEYS = frozenset({"variable_sources"})
+
+# Renamed keys still honoured at point of use; warn rather than reject.
+_CONFIG_DEPRECATED_KEYS = {
+    "photometry.psf_contam_asymmetry_frac": "photometry.psf_contam_asymmetry_sigma",
+    "photometry.psf_contam_radial_reversal_frac": (
+        "photometry.psf_contam_radial_reversal_sigma"
+    ),
+    "template_subtraction.sfft_sky_subtract": "template_subtraction.sky_subtract",
+    "template_subtraction.zogy_sky_subtract": "template_subtraction.sky_subtract",
+    "template_subtraction.sfft_forceconv": "template_subtraction.forceconv",
+    "template_subtraction.zogy_forceconv": "template_subtraction.forceconv",
+    "template_subtraction.alignment_max_p95_px": (
+        "template_subtraction.alignment_max_p90_px"
+    ),
+}
+
+# Options whose values come from a fixed dispatch set.  Comparisons are
+# case-insensitive.  A bad value otherwise degrades silently (forceconv maps
+# to REF) or to a mid-run warning (finder, alignment_method).
+_CONFIG_ENUM_VALUES = {
+    "template_subtraction.method": {"sfft", "hotpants", "zogy"},
+    "template_subtraction.forceconv": {"auto", "ref", "sci"},
+    "template_subtraction.zogy_nan_fill": {"median", "zero"},
+    "template_subtraction.alignment_method": {
+        "spalipy",
+        "swarp",
+        "reproject",
+        "astroalign",
+        "tweakwcs",
+        "chi2_shift",
+    },
+    "alignment.reproject_method": {"exact", "adaptive", "interp"},
+    "wcs.solver": {"astrometry", "astrometry.net", "scamp"},
+    "source_detection.finder": {
+        "dao",
+        "daofind",
+        "daostarfinder",
+        "iraf",
+        "starfind",
+        "irafstarfinder",
+    },
+    "zeropoint.fit_method": {"mcmc", "odr", "ransac"},
+    "limiting_magnitude.recovery_method": {
+        "auto",
+        "psf",
+        "ap",
+        "emcee",
+        "mcmc",
+    },
+    "limiting_magnitude.completeness_solver": {
+        "bisect",
+        "logistic_mle",
+        "logistic_emcee",
+    },
+    "catalog.use_catalog": {
+        "gaia",
+        "gaia_custom",
+        "auto",
+        "pan_starrs",
+        "panstarrs",
+        "sdss",
+        "legacy",
+        "apass",
+        "2mass",
+        "refcat",
+        "tic",
+        "skymapper",
+        "custom",
+    },
+}
+
+_CONFIG_SCHEMA_CACHE = None
+
+
+def load_default_input_schema() -> dict:
+    """Return the accepted config-key schema: databases/default_input.yml plus
+    the empty sections AutomatedPhotometry.load() creates, so a generated
+    input.yaml round-trips validation cleanly.  Cached; do not mutate."""
+    global _CONFIG_SCHEMA_CACHE
+    if _CONFIG_SCHEMA_CACHE is not None:
+        return _CONFIG_SCHEMA_CACHE
+    path = Path(__file__).resolve().parent / "databases" / "default_input.yml"
+    with open(path, "r") as f:
+        schema = yaml.safe_load(f) or {}
+    schema = schema.get("default_input", schema)
+    for _k in _CONFIG_LOADED_SECTIONS:
+        schema.setdefault(_k, {})
+    _CONFIG_SCHEMA_CACHE = schema
+    return schema
+
+
+def config_schema_key_paths(schema=None) -> list:
+    """Flatten the schema to a list of dotted key paths (for suggestions)."""
+    schema = load_default_input_schema() if schema is None else schema
+    out = []
+
+    def _walk(node, prefix):
+        for key, val in node.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            out.append(path)
+            if isinstance(val, dict):
+                _walk(val, path)
+
+    _walk(schema, "")
+    return out
+
+
+def find_unknown_config_keys(config, schema=None):
+    """Return ``(unknown, deprecated)`` sorted lists of dotted key paths in
+    *config*.
+
+    ``unknown``: keys absent from the schema (typos, stale names, a scalar
+    where a section mapping is expected).  ``deprecated``: renamed keys still
+    honoured at point of use.  ``_``-prefixed keys are runtime slots injected
+    by the pipeline and are skipped at any level.
+    """
+    schema = load_default_input_schema() if schema is None else schema
+    unknown, deprecated = [], []
+
+    def _walk(cfg, sch, prefix):
+        for key, val in cfg.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if str(key).startswith("_"):
+                continue
+            if not prefix and key in _CONFIG_DATA_KEYS:
+                continue
+            if not isinstance(sch, dict) or key not in sch:
+                if path in _CONFIG_DEPRECATED_KEYS:
+                    deprecated.append(path)
+                else:
+                    unknown.append(path)
+                continue
+            sch_val = sch[key]
+            if isinstance(val, dict) and isinstance(sch_val, dict):
+                _walk(val, sch_val, path)
+            elif (
+                val is not None
+                and isinstance(sch_val, dict)
+                and sch_val
+                and not isinstance(val, dict)
+            ):
+                # A scalar where a section mapping is expected; null is
+                # 'unset' and stays legal.
+                unknown.append(f"{path} (expects a mapping of options)")
+
+    if isinstance(config, dict):
+        _walk(config, schema, "")
+    else:
+        unknown.append("<root> (input is not a YAML mapping)")
+    return sorted(unknown), sorted(deprecated)
+
+
+def find_invalid_config_values(config):
+    """Return ``[(path, value, allowed)]`` for enum-valued options carrying an
+    unrecognised value.  None/absent values skip (pipeline defaults apply); a
+    mapping value (``catalog.use_catalog`` band mapping) validates its values."""
+    bad = []
+    for path, allowed in _CONFIG_ENUM_VALUES.items():
+        node = config
+        for part in path.split("."):
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            node = node[part]
+        if node is None:
+            continue
+        if isinstance(node, dict):
+            vals = list(node.values())
+        elif isinstance(node, (list, tuple)):
+            vals = list(node)
+        else:
+            vals = [node]
+        for v in vals:
+            if v is None:
+                continue
+            if str(v).strip().lower() not in allowed:
+                bad.append((path, v, sorted(allowed)))
+    return bad
+
+
+def check_input_config(config, schema=None) -> dict:
+    """Validate a user-supplied config mapping against the shipped schema.
+
+    Returns a report dict::
+
+        {"unknown":     [dotted paths the pipeline cannot read],
+         "deprecated":  [(path, current key name)],
+         "bad_values":  [(path, value, allowed set)]}
+    """
+    schema = load_default_input_schema() if schema is None else schema
+    unknown, deprecated = find_unknown_config_keys(config, schema)
+    return {
+        "unknown": unknown,
+        "deprecated": [(p, _CONFIG_DEPRECATED_KEYS[p]) for p in deprecated],
+        "bad_values": find_invalid_config_values(config),
+    }
+
+
+def strict_config_enabled() -> bool:
+    """AUTOPHOT_STRICT_CONFIG env toggle (default on): strict = hard-fail on
+    unaccepted parameters; off = warn only."""
+    raw = str(os.environ.get("AUTOPHOT_STRICT_CONFIG", "1"))
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def format_config_errors(report: dict, source: str = "configuration") -> str:
+    """Render a ``check_input_config`` report; empty report -> empty string.
+    Unknown keys get a close-match suggestion from the schema."""
+    from difflib import get_close_matches
+
+    lines = []
+    for path, value, allowed in report.get("bad_values", []):
+        lines.append(
+            f"  - {path}: invalid value {value!r} "
+            f"(accepted: {', '.join(allowed)})"
+        )
+    schema_paths = None
+    for path in report.get("unknown", []):
+        if schema_paths is None:
+            schema_paths = config_schema_key_paths()
+        close = get_close_matches(path.split(" ", 1)[0], schema_paths, n=1, cutoff=0.6)
+        hint = f"  (did you mean {close[0]!r}?)" if close else ""
+        lines.append(f"  - {path}: not an accepted option{hint}")
+    if not lines:
+        return ""
+    return (
+        f"Unaccepted parameter(s) found in {source}:\n"
+        + "\n".join(lines)
+        + "\nRemove or fix them, or set AUTOPHOT_STRICT_CONFIG=0 to downgrade "
+        "this to a warning."
+    )
 
 
 def get_header(fpath):
@@ -3719,3 +3995,89 @@ def refresh_sibling_weight_map(
             )
     except Exception:
         return
+
+
+def _keep_floor_cut(current_mask, bad_mask, metric, min_keep):
+    """Apply a boolean cut bounded by a keep-floor on the surviving pool.
+
+    Removes every ``bad_mask`` row still alive in ``current_mask`` when enough
+    rows would remain; otherwise removes only the worst-ranked flagged rows
+    (highest ``metric``, NaN treated as worst) so at least ``min_keep`` rows
+    survive.  Because the floor is evaluated against the accumulated mask,
+    successive cuts cannot combine to starve the pool.
+
+    Returns ``(new_mask, n_removed, n_flagged)``.
+    """
+    current_mask = np.asarray(current_mask, dtype=bool)
+    cand = np.asarray(bad_mask, dtype=bool) & current_mask
+    n_flagged = int(cand.sum())
+    if n_flagged == 0:
+        return current_mask, 0, 0
+    if int((current_mask & ~cand).sum()) >= min_keep:
+        return current_mask & ~cand, n_flagged, n_flagged
+    room = int(current_mask.sum()) - min_keep
+    if room <= 0:
+        return current_mask, 0, n_flagged
+    idx = np.flatnonzero(cand)
+    vals = np.nan_to_num(np.asarray(metric, dtype=float)[idx], nan=np.inf)
+    order = idx[np.argsort(-vals, kind="stable")]
+    drop = order[: min(room, len(order))]
+    new_mask = current_mask.copy()
+    new_mask[drop] = False
+    return new_mask, int(len(drop)), n_flagged
+
+
+def _bounded_centroid(img, x, y, box, wander_max):
+    """Centroid at (x, y), accepted only within wander_max px of the seed.
+
+    A centroid landing far from its seed is a centroiding failure (the fit
+    latched onto a neighbour, a mask edge, or noise), not a real position.
+    Bounding the accepted drift makes a wandering centroid equivalent to a
+    failed fit, so the caller keeps the source at its seed position instead
+    of trusting a corrupted one.  Returns (nan, nan) when neither centroid
+    function produces a bounded result.
+    """
+    for func in (centroid_2dg, centroid_com):
+        try:
+            x_c, y_c = centroid_sources(
+                img, [x], [y], box_size=box, centroid_func=func
+            )
+            x_f, y_f = float(x_c[0]), float(y_c[0])
+            if (
+                np.isfinite(x_f)
+                and np.isfinite(y_f)
+                and abs(x_f - x) <= wander_max
+                and abs(y_f - y) <= wander_max
+            ):
+                return x_f, y_f
+        except Exception:
+            pass
+    return np.nan, np.nan
+
+
+def fwhm_outlier_clip(values, sigma=3.0, rel_floor=0.10):
+    """MAD sigma-clip on per-source FWHM values.
+
+    Returns ``(outlier_mask, median, sigma_eff)`` where ``outlier_mask``
+    is True for entries whose FWHM lies outside ``median +/- sigma *
+    sigma_eff``.  ``sigma_eff`` is the MAD-scaled scatter floored at
+    ``rel_floor`` x median: without the floor a defect-dominated pool
+    (MAD collapsing onto the majority locus) flags the genuine stellar
+    side as outliers, and even on clean pools the band should never be
+    tighter than the irreducible per-source FWHM measurement scatter.
+    Non-finite and non-positive entries are kept (not marked): callers
+    decide how to vet unmeasurable sizes.
+    """
+    vals = np.asarray(values, dtype=float)
+    finite = np.isfinite(vals) & (vals > 0)
+    if (
+        int(finite.sum()) == 0
+        or not np.isfinite(sigma)
+        or sigma <= 0
+    ):
+        return np.zeros(len(vals), dtype=bool), np.nan, np.nan
+    med = float(np.median(vals[finite]))
+    mad = float(np.median(np.abs(vals[finite] - med))) * 1.4826
+    sig_eff = max(mad, rel_floor * med)
+    outlier = finite & (np.abs(vals - med) > sigma * sig_eff)
+    return outlier, med, sig_eff
