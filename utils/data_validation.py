@@ -244,10 +244,22 @@ def validate_image(
 
     # ---- 6. Saturation ----
     if saturate is None and header is not None:
+        try:
+            from functions import SATURATE_SENTINEL_MIN
+        except ImportError:
+            SATURATE_SENTINEL_MIN = 1e8
         for key in ("SATURATE", "SATLEVEL", "MAXLIN"):
             if key in header:
-                saturate = float(header[key])
-                break
+                try:
+                    candidate = float(header[key])
+                except (TypeError, ValueError):
+                    continue
+                # Sentinel-scale values are stored "no limit" markers, not
+                # detector levels; treat as a missing key so the caller gets
+                # the honest warning below rather than a bogus level.
+                if np.isfinite(candidate) and candidate < SATURATE_SENTINEL_MIN:
+                    saturate = candidate
+                    break
     if saturate is None or not np.isfinite(saturate) or saturate <= 0:
         report.add_warning(
             VAL_MISSING_SATURATE,
