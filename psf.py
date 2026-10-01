@@ -11,6 +11,7 @@ autophot pipeline.
 # ---------------------------------------------------------------------------
 # Standard library
 # ---------------------------------------------------------------------------
+import hashlib
 import inspect
 import itertools
 import logging
@@ -187,7 +188,7 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
     to ~0.01 px.
     """
 
-    def __init__(self, *args, max_shift_px=0.5, orig_centres=None,
+    def __init__(self, *args, max_shift_px=1.0, orig_centres=None,
                  epsf_history=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._max_shift_px = float(max_shift_px)
@@ -961,17 +962,27 @@ def _select_adaptive_oversample(
     thin sampling could be handled by the smoothing kernel alone does
     not hold on real data, so the factor is chosen to keep the median
     functional rather than maximise grid resolution.
+
+    Returns ``(oversample, understaffed)``: ``understaffed`` is True when
+    the star pool is too thin for the chosen factor to give ~min_samples
+    residuals per gridpoint, so the caller can flag the resulting ePSF as
+    low-confidence instead of treating a 1x fallback as healthy.
     """
     log = logging.getLogger(__name__)
     n_final = int(n_stars)
     hard_min = int(phot_cfg.get("psf_oversample_hard_min_stars", 5))
     if n_final < hard_min:
+        # N < ~5 is also below what a 1x ePSF needs to be reliable: the
+        # caller must know the ensemble itself is understaffed, not just
+        # that oversampling was declined.
         log.warning(
             "Adaptive oversampling: only %d PSF stars (< %d threshold); "
-            "keeping oversample=1x. Undersampled ePSF may be biased.",
+            "keeping oversample=1x. The 1x ePSF built from this pool is "
+            "likely noise-dominated - treat downstream PSF photometry as "
+            "low-confidence.",
             n_final, hard_min,
         )
-        return 1
+        return 1, True
     if min_samples is None:
         min_samples = float(
             phot_cfg.get("psf_oversample_min_samples_per_pixel", 3.0)
@@ -992,7 +1003,9 @@ def _select_adaptive_oversample(
         n_final, oversample, n_final / float(oversample) ** 2,
         min_os, max_os, min_samples,
     )
-    return oversample
+    return oversample, n_final < int(
+        np.ceil(min_samples * oversample * oversample)
+    )
 
 
 def pixel_integrate_oversampled(data: np.ndarray, oversampling: int) -> np.ndarray:
@@ -1312,7 +1325,10 @@ def _fit_moffat_composite(stars, fwhm, max_components=3, ellipticity=None):
                 method="trf",
                 max_nfev=4000,
             )
-        except Exception:
+        except Exception as _exc:
+            logger.debug(
+                "Moffat composite fit failed for %d components: %s", k, _exc
+            )
             continue
         if not sol.success or not np.isfinite(sol.x).all():
             continue
@@ -1410,7 +1426,10 @@ def _analytic_psf_stamp(
     if stars is not None and len(stars) > 0:
         try:
             ellipticity = _ensemble_ellipticity(stars, fwhm)
-        except Exception:
+        except Exception as _exc:
+            logger.debug(
+                "Ensemble ellipticity failed in stamp seed: %s", _exc
+            )
             ellipticity = None
         try:
             comps = _fit_moffat_composite(
@@ -1419,7 +1438,10 @@ def _analytic_psf_stamp(
                 max_components=max_components,
                 ellipticity=ellipticity,
             )
-        except Exception:
+        except Exception as _exc:
+            logger.debug(
+                "Moffat composite fit failed in stamp seed: %s", _exc
+            )
             comps = None
     if comps is None:
         comps = _default_moffat_composite(fwhm, beta)
@@ -1547,7 +1569,10 @@ def _psf_shape_outlier_indices(
     the model collapses.  Each flux-normalised cutout is scored by the
     MAD of its residual against the pixel-wise median stack inside
     ~1.5 FWHM; scores beyond ``nsigma`` of the robust ensemble scatter
-    are returned, worst first, bounded by ``max_frac`` and ``min_keep``.
+    are returned, bounded by ``max_frac`` and ``min_keep``.  The clip
+    iterates: the template and scatter are rebuilt from survivors after
+    each pass, so second-tier deviants that hide below a junk-inflated
+    threshold are caught once the worst offenders are removed.
 
     ``abs_fwhm_floor`` adds an ensemble-independent criterion: a cutout
     whose own measured FWHM is below ``abs_fwhm_floor * fwhm`` is a
@@ -1582,31 +1607,9 @@ def _psf_shape_outlier_indices(
         masks.append(m)
     stack_v = np.stack(vs)
     stack_m = np.stack(masks)
-    # Template: pixel-wise median over the stars covering each pixel.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        tmpl = np.nanmedian(np.where(stack_m, stack_v, np.nan), axis=0)
     ny, nx = stack_v.shape[1:]
     yy, xx = np.indices((ny, nx))
     win = np.hypot(xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0) < 1.5 * fwhm
-    scores = np.full(n, np.nan)
-    for i in range(n):
-        ok = stack_m[i] & np.isfinite(tmpl) & np.isfinite(stack_v[i]) & win
-        if int(ok.sum()) < 9:
-            continue
-        dev = stack_v[i][ok] - tmpl[ok]
-        scores[i] = 1.4826 * np.median(np.abs(dev - np.median(dev)))
-    fin = np.isfinite(scores)
-    if int(fin.sum()) < 4:
-        return []
-    med = float(np.median(scores[fin]))
-    mad = 1.4826 * float(np.median(np.abs(scores[fin] - med)))
-    # Absolute floor: near-identical stars leave mad ~ 0 and any tiny
-    # deviation would flag.
-    thr = med + max(nsigma * mad, 0.5 * med)
-    cand = [
-        i for i in np.argsort(-scores) if fin[i] and scores[i] > thr
-    ]
     keep_cap = n - int(min_keep)
     if keep_cap <= 0:
         return []
@@ -1620,12 +1623,95 @@ def _psf_shape_outlier_indices(
             mf = measure_epsf_fwhm_native(vs[i], 1)
             if np.isfinite(mf) and mf < abs_fwhm_floor * fwhm:
                 abs_bad.append(i)
-    max_drop = min(max(1, int(np.floor(max_frac * n))), keep_cap)
+    max_drop_total = min(max(1, int(np.floor(max_frac * n))), keep_cap)
     drop = list(abs_bad[:keep_cap])
-    seen = set(drop)
-    drop += [
-        i for i in cand[:max_drop] if i not in seen
-    ][: max(0, keep_cap - len(drop))]
+    alive = np.ones(n, dtype=bool)
+    if drop:
+        alive[drop] = False
+    n_rel_dropped = 0
+    # Stars kept only via keep-floor pixel masking (contamination check)
+    # carry an off-nominal core by construction; they are still scored,
+    # but never anchor the "good star" template.
+    _tmpl_ok = np.array(
+        [not getattr(s, "_autophot_maskkept", False) for s in stars]
+    )
+    # Iterative sigma-clip: a single pass leaves the ensemble MAD inflated
+    # by the deviants themselves, so second-tier outliers hide below the
+    # threshold.  Rebuilding the median stack from survivors each round
+    # tightens the threshold until no new outlier appears.  Budgets are
+    # cumulative across rounds.
+    med_floor = np.inf
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for _ in range(5):
+            idx = np.flatnonzero(alive)
+            if idx.size < max(5, int(min_keep) + 1):
+                break
+            if len(drop) >= keep_cap or n_rel_dropped >= max_drop_total:
+                break
+            tmpl_sel = alive & _tmpl_ok
+            if not tmpl_sel.any():
+                tmpl_sel = alive
+            tmpl = np.nanmedian(
+                np.where(stack_m[tmpl_sel], stack_v[tmpl_sel], np.nan), axis=0
+            )
+            # Per-star pixel noise in flux-normalised units: the residual
+            # of a faint star against the (bright-star) median template is
+            # dominated by its own shot noise, so an unnormalised score
+            # flags the faintest pool members regardless of shape.
+            ann_noise = np.full(n, np.nan)
+            _ann_m = (
+                np.hypot(xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0)
+                > 2.0 * fwhm
+            )
+            for i in idx:
+                av = stack_v[i][stack_m[i] & _ann_m]
+                av = av[np.isfinite(av)]
+                if av.size < 9:
+                    continue
+                _am = np.median(av)
+                ann_noise[i] = 1.4826 * np.median(np.abs(av - _am))
+            scores = np.full(n, np.nan)
+            for i in idx:
+                ok = (
+                    stack_m[i]
+                    & np.isfinite(tmpl)
+                    & np.isfinite(stack_v[i])
+                    & win
+                )
+                if int(ok.sum()) < 9:
+                    continue
+                if not np.isfinite(ann_noise[i]) or ann_noise[i] <= 0:
+                    continue
+                dev = stack_v[i][ok] - tmpl[ok]
+                scores[i] = (
+                    1.4826 * np.median(np.abs(dev - np.median(dev)))
+                ) / ann_noise[i]
+            fin = np.isfinite(scores) & alive
+            if int(fin.sum()) < 4:
+                break
+            med = float(np.median(scores[fin]))
+            mad = 1.4826 * float(np.median(np.abs(scores[fin] - med)))
+            # Absolute floor: near-identical stars leave mad ~ 0 and any
+            # tiny deviation would flag.  The floor tracks the tightest
+            # ensemble median seen so far rather than the live one, so a
+            # contaminant that keeps the survivor median inflated cannot
+            # grow its own tolerance round over round.
+            med_floor = min(med_floor, med)
+            thr = med + max(nsigma * mad, med_floor)
+            budget = min(
+                max_drop_total - n_rel_dropped, keep_cap - len(drop)
+            )
+            cand = [
+                i
+                for i in np.argsort(-scores)
+                if fin[i] and scores[i] > thr
+            ][:budget]
+            if not cand:
+                break
+            drop.extend(cand)
+            alive[cand] = False
+            n_rel_dropped += len(cand)
     return sorted(drop)
 
 
@@ -2514,21 +2600,23 @@ class Covariance:
 
 
 def _arr_fingerprint(a):
-    """Cheap NaN-safe content fingerprint for eval-context matching.
+    """NaN-safe content fingerprint for eval-context matching.
 
-    ``None`` passes through unchanged; arrays reduce to shape plus two
-    moment sums so a pickled copy in a multiprocessing worker still
-    matches the context built in the parent.
+    ``None`` passes through unchanged; arrays hash their C-contiguous
+    float64 bytes, so a pickled copy in a multiprocessing worker still
+    matches the context built in the parent.  The old two-moment
+    fingerprint (shape + sum + sum-of-squares) collided on permutations
+    and on arrays differing only where weight==0, which would have
+    silently reused a stale inv_var/log_const for an entire MCMC run.
     """
     if a is None:
         return None
-    arr = np.asarray(a, float)
+    arr = np.ascontiguousarray(np.asarray(a, float))
     if arr.size == 0:
-        return (arr.shape, 0.0, 0.0)
+        return (arr.shape, "")
     return (
         arr.shape,
-        float(np.nansum(arr)),
-        float(np.nansum(arr * arr)),
+        hashlib.sha1(arr.tobytes()).hexdigest(),
     )
 
 
@@ -3453,20 +3541,38 @@ class PoissonLikelihoodFitter:
                 nv_safe = np.clip(nv, 1e-30, None)
                 d2lnL_dnbar2 = d2lnL_dnbar2 - 1.0 / nv_safe
         
-        # Numerical derivatives of model w.r.t. parameters
-        # Use relative epsilon for parameters with very different scales
-        # (e.g. x_0 ~ 500, flux ~ 10000)
+        # Numerical derivatives of model w.r.t. parameters.  Central
+        # differences (second-order) rather than forward: the forward
+        # 1e-8-relative step was dominated by float round-off for near-zero
+        # parameters and its truncation error propagated straight into the
+        # Hessian, i.e. into the reported parameter errors.  Steps are
+        # per-type: positions get a fixed sub-pixel step (meaningful even
+        # at x_0=0), flux-like params get a relative step floored at a
+        # fraction of the brightest pixel.
         n_params = len(params)
         dmodel_dparams = []
+        _pix_scale = max(1.0, float(np.nanmax(np.abs(n_i))))
 
         try:
             for i in range(n_params):
-                eps_i = max(1e-8, 1e-8 * abs(params[i]))
+                name = param_names[i] if i < len(param_names) else ""
+                if name in ("x_0", "y_0"):
+                    eps_i = 1e-3
+                elif "flux" in name:
+                    eps_i = max(1e-4 * abs(params[i]), 1e-6 * _pix_scale)
+                else:
+                    eps_i = max(1e-6, 1e-4 * abs(params[i]))
                 params_plus = params.copy()
                 params_plus[i] += eps_i
                 model.parameters = params_plus
                 model_plus = model(x, y)
-                dmodel_dparams.append((model_plus - model_0) / eps_i)
+                params_minus = params.copy()
+                params_minus[i] -= eps_i
+                model.parameters = params_minus
+                model_minus = model(x, y)
+                dmodel_dparams.append(
+                    (model_plus - model_minus) / (2.0 * eps_i)
+                )
         finally:
             # Always restore original parameters, even if exception occurs
             model.parameters = params
@@ -3732,15 +3838,18 @@ class PSF:
         self.image = image
         self.header = header
         # Provenance of the last build(): "epsf" (empirical, from image
-        # sources), "analytic-composite"/"analytic-moffat" (analytic
-        # substitution or failure backdoor), or "none".
+        # sources), "gridded-epsf-NxM" (spatially varying empirical), or
+        # "none".  The photometry PSF is always built from field sources;
+        # a failed build returns None (aperture-only) rather than
+        # substituting an analytic model.
         self.psf_model_kind = "none"
         # True/False once an empirical EPSFBuilder run produces a result;
-        # stays None when only an analytic model (or none) was built.
+        # stays None when no empirical attempt ran (or none was built).
         # ``psf_converged_relaxed`` marks a verdict accepted at the relaxed
         # centre-movement bound rather than the strict photutils threshold.
         self.psf_converged = None
         self.psf_converged_relaxed = False
+        self.psf_ensemble_understaffed = False
 
     # -----------------------------------------------------------------------
     # Centroiding
@@ -4453,6 +4562,13 @@ class PSF:
         _hotpix_max_peak_frac = float(
             phot_cfg.get("psf_contam_hotpix_max_peak_frac", 0.65)
         )
+        _cog_enabled = bool(phot_cfg.get("psf_contam_cog_check", True))
+        _cog_sigma = float(phot_cfg.get("psf_contam_cog_sigma", 5.0))
+        _cog_max_dev = float(phot_cfg.get("psf_contam_cog_max_dev", 0.30))
+        _cog_moffat_dev = float(
+            phot_cfg.get("psf_contam_cog_moffat_max_dev", 0.15)
+        )
+        _cog_snr_min = float(phot_cfg.get("psf_contam_cog_snr_min", 15.0))
 
         core_mask = _rr < ann_inner
         near_center = _rr < max(1.0, 0.5 * fwhm_eff)
@@ -4722,6 +4838,171 @@ class PSF:
                     & (peak_fracs > _hotpix_max_peak_frac)
                 )
 
+            # Test 10: curve of growth.  Enclosed flux in concentric
+            # apertures normalised by the plateau flux removes the
+            # brightness scale, so all genuine point sources share one
+            # growth curve: defect spikes saturate early, and extended or
+            # wing-contaminated sources rise late.  A cutout is flagged
+            # when its curve is an outlier against the ensemble of clean
+            # stars OR lies outside a family of plausible Moffat
+            # encircled-energy profiles -- the second condition keeps the
+            # test working when the pool is dominated by non-stellar
+            # cutouts.
+            flag_cog = np.zeros(n_stars, dtype=bool)
+            cog_dev = np.full(n_stars, np.nan)
+            if _cog_enabled:
+                cog_radii = np.array(
+                    [0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0]
+                ) * fwhm_eff
+                cog_radii = cog_radii[
+                    (cog_radii >= 1.5) & (cog_radii <= ann_outer - 1.0)
+                ]
+                if cog_radii.size >= 3:
+                    n_rad = cog_radii.size
+                    cog_flux = np.full((n_stars, n_rad), np.nan)
+                    sub = data_clean - bg_level[:, None, None]
+                    for k, r in enumerate(cog_radii):
+                        apm = _rr < r
+                        n_ap = float(np.sum(apm))
+                        n_fin = np.sum(apm[None] & finite_stack, axis=(1, 2))
+                        cog_flux[:, k] = np.where(
+                            n_fin >= 0.7 * n_ap,
+                            np.nansum(sub[:, apm], axis=1),
+                            np.nan,
+                        )
+                    # Normalise by the plateau (max enclosed flux), not the
+                    # outermost aperture: for a faint star the large outer
+                    # aperture is noise-dominated and a negative pixel-sum
+                    # fluctuation would shrink the denominator and inflate
+                    # every inner EE fraction.
+                    cog_max = np.nanmax(cog_flux, axis=1)
+                    cog_norm = cog_flux / np.where(
+                        cog_max > 0, cog_max, np.nan
+                    )[:, None]
+                    cog_valid = np.count_nonzero(
+                        np.isfinite(cog_norm), axis=1
+                    ) >= 3
+                    # The EE fractions are only meaningful with real
+                    # signal in the core; below the S/N floor the plateau
+                    # estimate is dominated by aperture-noise selection
+                    # bias and noise spikes look like growth-curve
+                    # outliers.  The gate uses the quieter of the annulus
+                    # and edge-ring MADs: a diffuse blob inflates the
+                    # annulus MAD with its own wings and would otherwise
+                    # evade the very test meant to catch it.
+                    _edge_std = 1.4826 * np.nanmedian(
+                        np.abs(edge_pix - edge_med[:, None]), axis=1
+                    )
+                    _pix_noise = np.maximum(
+                        np.minimum(
+                            ann_std,
+                            np.where(
+                                np.isfinite(_edge_std) & (_edge_std > 0),
+                                _edge_std,
+                                ann_std,
+                            ),
+                        ),
+                        1e-10,
+                    )
+                    _cog_peak_snr = (
+                        np.nanmax(data_clean[:, near_center], axis=1)
+                        - bg_level
+                    ) / _pix_noise
+                    cog_valid &= _cog_peak_snr >= _cog_snr_min
+                    # Per-aperture EE-fraction noise: background-limited
+                    # aperture noise over the star's plateau flux.  Keeps
+                    # low-S/N curves from tripping the deviation
+                    # thresholds on shot noise alone.
+                    cog_err = _pix_noise[:, None] * np.sqrt(
+                        np.pi * cog_radii[None, :] ** 2
+                    ) / np.abs(cog_max[:, None])
+                    # Absolute reference: Moffat EE family spanning the
+                    # plausible beta range and an asymmetric FWHM slack
+                    # for measurement error and core ellipticity (a junk
+                    # pool biases fwhm_eff low, so allow more slack
+                    # upward).
+                    env_lo = np.full(n_rad, np.inf)
+                    env_hi = np.full(n_rad, -np.inf)
+                    for _b in (2.5, 3.5, 5.0, 7.0):
+                        for _f in (0.75, 1.0, 1.4):
+                            _rd = (0.5 * _f * fwhm_eff) / np.sqrt(
+                                2.0 ** (1.0 / _b) - 1.0
+                            )
+                            _ee = 1.0 - (
+                                1.0 + (cog_radii / _rd) ** 2
+                            ) ** (1.0 - _b)
+                            env_lo = np.minimum(env_lo, _ee)
+                            env_hi = np.maximum(env_hi, _ee)
+                    dev_mof = np.maximum(
+                        cog_norm - env_hi[None] - 3.0 * cog_err,
+                        env_lo[None] - cog_norm - 3.0 * cog_err,
+                    )
+                    max_mof = np.nanmax(
+                        np.where(np.isfinite(dev_mof), dev_mof, 0.0), axis=1
+                    )
+                    flag_cog |= cog_valid & (max_mof > _cog_moffat_dev)
+                    # Ensemble reference restricted to Moffat-consistent
+                    # cutouts: in a pool dominated by spikes or galaxies a
+                    # plain median converges on the junk curve and would
+                    # flag the real stars instead.
+                    dev_abs = np.full((n_stars, n_rad), np.nan)
+                    max_abs = np.full(n_stars, np.nan)
+                    ref_sel = (
+                        cog_valid
+                        & (max_mof <= _cog_moffat_dev)
+                        & ~(
+                            flag_asym | flag_edge | flag_border
+                            | flag_border_max | flag_reversal | flag_second
+                            | flag_row | flag_col | flag_diag
+                            | flag_ann_peak | flag_flux | flag_ellip
+                            | flag_hotpix
+                        )
+                    )
+                    if np.count_nonzero(ref_sel) < 3:
+                        # The ensemble CoG test has collapsed to the
+                        # generic Moffat envelope only - in a
+                        # defect-dominated pool that is exactly when the
+                        # stronger star-vs-star comparison is needed, so
+                        # surface the degradation rather than losing it.
+                        log.info(
+                            "[contamination] ensemble CoG reference has "
+                            "only %d clean comparators (<3); CoG test falls "
+                            "back to the Moffat-envelope check alone.",
+                            int(np.count_nonzero(ref_sel)),
+                        )
+                    if np.count_nonzero(ref_sel) >= 3:
+                        cog_med = np.nanmedian(cog_norm[ref_sel], axis=0)
+                        cog_mad = 1.4826 * np.nanmedian(
+                            np.abs(cog_norm[ref_sel] - cog_med[None]), axis=0
+                        )
+                        # A zero MAD on near-identical profiles would flag
+                        # sub-percent EE scatter; floor it at a level real
+                        # stars always share.
+                        cog_scale = np.maximum(cog_mad, 0.04)
+                        dev_abs = np.abs(cog_norm - cog_med[None])
+                        dev_sig = dev_abs / np.sqrt(
+                            cog_scale[None] ** 2 + (3.0 * cog_err) ** 2
+                        )
+                        max_abs = np.nanmax(
+                            np.where(np.isfinite(dev_abs), dev_abs, -np.inf),
+                            axis=1,
+                        )
+                        max_sig = np.nanmax(
+                            np.where(np.isfinite(dev_sig), dev_sig, -np.inf),
+                            axis=1,
+                        )
+                        flag_cog |= cog_valid & (
+                            (max_sig > _cog_sigma) | (max_abs > _cog_max_dev)
+                        )
+                    cog_dev = np.where(
+                        cog_valid,
+                        np.fmax(
+                            np.where(np.isfinite(max_abs), max_abs, 0.0),
+                            max_mof,
+                        ),
+                        np.nan,
+                    )
+
         # Test 0: masked-pixel fraction in annulus (per-star hardware masks).
         # Unlike the flux tests this does not require the >=10-pixel gate:
         # a heavily masked cutout is bad regardless of flux statistics.
@@ -4782,11 +5063,14 @@ class PSF:
             reasons_by_star[i].append(
                 f"hot_pixel_cluster={peak_fracs[i]:.2f}"
             )
+        for i in np.flatnonzero(flag_cog):
+            reasons_by_star[i].append(f"cog_dev={cog_dev[i]:.2f}")
 
         reject_flags |= (
             flag_asym | flag_edge | flag_border | flag_border_max
             | flag_reversal | flag_second | flag_row | flag_col | flag_diag
             | flag_ann_peak | flag_flux | flag_ellip | flag_hotpix
+            | flag_cog
         )
         reject_reasons = [
             f"  star {i}: {', '.join(reasons_by_star[i])}"
@@ -4829,18 +5113,37 @@ class PSF:
         core_reject = np.zeros(n_stars, dtype=bool)
         if _core_reject_enabled:
             core_reject = flag_second & (second_dist < _mask_inner)
-        unrepairable = hw_reject | core_reject
+        # Curve-of-growth failures are unrepairable for the same reason a
+        # close secondary peak is: the defect is the core profile itself,
+        # not localisable pixels annulus masking could blank.
+        _cog_always_reject = bool(
+            phot_cfg.get("psf_contam_cog_always_reject", True)
+        )
+        cog_reject = flag_cog if _cog_always_reject else np.zeros(
+            n_stars, dtype=bool
+        )
+        unrepairable = hw_reject | core_reject | cog_reject
 
         # Always apply hardware-defect and core-contamination rejections
         keep_idx = np.where(~unrepairable)[0]
         n_hw_rejected = int(hw_reject.sum())
         n_core_rejected = int((core_reject & ~hw_reject).sum())
+        n_cog_rejected = int(
+            (cog_reject & ~(hw_reject | core_reject)).sum()
+        )
         if n_core_rejected > 0:
             log.info(
                 "[contamination] Rejected %d core-contaminated cutouts "
                 "(secondary peak < %.0fpx): masking cannot repair "
                 "a detected neighbour inside the fit region.",
                 n_core_rejected, _mask_inner,
+            )
+        if n_cog_rejected > 0:
+            log.info(
+                "[contamination] Rejected %d cutouts on curve-of-growth "
+                "deviation: a non-stellar core profile cannot be "
+                "repaired by masking.",
+                n_cog_rejected,
             )
 
         # For remaining flux-based rejections, apply min_keep_frac safety net
@@ -4888,6 +5191,18 @@ class PSF:
                         & finite_stack[i]
                         & (all_data[i] > med + _mask_sigma * std)
                     )
+                # The flux tests flag pixels at r >= 2*fwhm; for deeply
+                # undersampled PSFs the repair band can start outside
+                # that, leaving flagged pixels unmasked.  Clamp the band
+                # to the first flagged radius (still never the core).
+                _ann_first = max(1, int(np.ceil(2.0 * fwhm_eff)))
+                if _mask_inner > _ann_first:
+                    log.debug(
+                        "[contamination] mask repair inner radius %.1f "
+                        "exceeds flagged annulus start %d; clamping.",
+                        _mask_inner, _ann_first,
+                    )
+                    _mask_inner = _ann_first
                 contam &= _rr >= _mask_inner  # never mask the core
                 if contam.any():
                     # weights/mask are created by robust_extract_stars for
@@ -4903,6 +5218,10 @@ class PSF:
                         )
                     star.weights[contam] = 0.0
                     star.mask[contam] = True
+                    # Flag for downstream consumers (e.g. the shape-outlier
+                    # pass): this star passed only via keep-floor masking,
+                    # so it must not anchor the "good star" template.
+                    star._autophot_maskkept = True
                     # Drop cached lazyproperties so the residual stack sees
                     # the updated mask.
                     for attr in ("_xyidx_centered", "_data_values_normalized"):
@@ -4912,12 +5231,12 @@ class PSF:
             log.info(
                 "[contamination] Would reject %d/%d cutouts total "
                 "(%d hardware-defect, %d core-unrepairable, "
-                "%d flux-based). Keep-floor bound "
+                "%d growth-curve, %d flux-based). Keep-floor bound "
                 "(%d would remain < %d min): keeping the %d flux-flagged "
                 "cutouts but masking %d contaminating annulus pixels "
                 "in %d of them (cores retained).",
                 n_rejected, n_stars, n_hw_rejected, n_core_rejected,
-                n_flux_rejected,
+                n_cog_rejected, n_flux_rejected,
                 n_after_hw - n_flux_rejected, min_keep_flux,
                 n_flux_rejected, n_pix_masked, n_masked_stars,
             )
@@ -4930,7 +5249,7 @@ class PSF:
                 "radial_reversal": flag_reversal,
                 "secondary_peak": flag_second, "streak": flag_row | flag_col | flag_diag,
                 "annulus_peak": flag_ann_peak, "flux_excess": flag_flux,
-                "core_ellipticity": flag_ellip,
+                "core_ellipticity": flag_ellip, "cog": flag_cog,
             }
             log.debug(
                 "[contamination] mask-keep flag breakdown: %s",
@@ -4949,9 +5268,12 @@ class PSF:
 
         log.info(
             "[contamination] Rejected %d/%d PSF-star cutouts "
-            "(%d hardware-defect, %d core-unrepairable, %d flux-based)",
+            "(%d hardware-defect, %d core-unrepairable, %d growth-curve, "
+            "%d flux-based)",
             n_final_rejected, n_stars, n_hw_rejected, n_core_rejected,
-            n_final_rejected - n_hw_rejected - n_core_rejected,
+            n_cog_rejected,
+            n_final_rejected - n_hw_rejected - n_core_rejected
+            - n_cog_rejected,
         )
         for r in reject_reasons:
             log.debug(r)
@@ -5054,15 +5376,19 @@ class PSF:
         (epsf, df) or (None, None) on failure
         """
         if SNR_limit is None:
-            SNR_limit = [5, 1e6]
+            SNR_limit = [10, 1e6]
 
         log = logging.getLogger(__name__)
         self.psf_model_kind = "none"
         self.n_epsf_stars = None
         # True/False for the empirical ePSF build; None when no empirical
-        # attempt ran (pure analytic paths) or before the build.
+        # attempt ran or before the build.
         self.psf_converged = None
         self.psf_converged_relaxed = False
+        # Set when the surviving star pool is too thin for even a 1x ePSF
+        # to be reliable - the build still runs, but the caller should
+        # treat the model as low-confidence.
+        self.psf_ensemble_understaffed = False
 
         # ---- nested helpers ------------------------------------------------
         def _validate_epsfstars(epsfstars_obj, cutout_shape, fit_boxsize):
@@ -5120,7 +5446,8 @@ class PSF:
                     # Do NOT overwrite st.cutout_center: the extraction
                     # centroid is more accurate than this isophotal COM.
                     kept.append(st)
-                except Exception:
+                except Exception as _exc:
+                    log.debug("Isophotal COM check failed for a star: %s", _exc)
                     continue
             return EPSFStars(kept) if kept else EPSFStars([])
 
@@ -5276,23 +5603,66 @@ class PSF:
             df["_psf_veto"] = 0
             df["_psf_veto_names"] = ""
 
+            # Pool size at the START of the vetting cascade: the keep
+            # floors and the majority-fail strike exemption are anchored
+            # to this, not the live len(df) -- against a shrinking base,
+            # each cut's keep fraction quietly compounds (N cuts that may
+            # each drop ~40% can starve the pool far below the intended
+            # floor) and a defect minority can become a majority of the
+            # late-stage pool and stop accruing strikes.
+            n_before = len(df)
+
+            # Scope of the majority-fail strike exemption inside
+            # _add_strike: on crowded or undersampled fields the
+            # compactness measures misfire at field level (crowding
+            # inflates FLAGS, few-pixel PSFs shrink FLUX_RADIUS/A_IMAGE),
+            # so a majority-fail cut there is a field property, not a
+            # defect signal.  On a sparse, well-sampled image a
+            # majority-fail COMPACTNESS cut instead marks a
+            # defect-dominated pool -- resampled hot-pixel/CR clusters
+            # sit at star-like FWHM and only the concentration measures
+            # see them.  Those strikes must count or the veto can never
+            # reach a junk pool (observed: GROND g field, ePSF built from
+            # resampled defect clusters after fr_min/pk_ap were both
+            # majority-fail exempted).
+            _crowded_vet = bool(phot_cfg.get("crowded_field", False))
+            try:
+                _fwhm_vet = float(self.input_yaml.get("fwhm", np.nan))
+            except (TypeError, ValueError):
+                _fwhm_vet = np.nan
+            _undersampled_vet = np.isfinite(_fwhm_vet) and _fwhm_vet <= float(
+                phot_cfg.get("undersampled_fwhm_threshold", 2.5)
+            )
+            _COMPACT_STRIKES = frozenset({"fr_min", "pk_ap", "ab_min"})
+
             def _add_strike(bad_mask, name):
                 # Record the failing check per candidate so the veto log
                 # can report which cuts actually emptied the pool.  A cut
-                # that fails the majority of the current pool is measuring
-                # a field-level property (undersampled FLUX_RADIUS,
-                # crowded-field FLAGS), not defective sources -- counting
-                # those failures lets a few co-misfiring cuts hand every
-                # survivor >= min_fails strikes and veto the whole pool
-                # (observed: 45/45 ZTF candidates dropped via
-                # flags+fr_min+ab_min, all majority-fail cuts).
+                # that fails the majority of the ORIGINAL pool is usually
+                # measuring a field-level property (undersampled
+                # FLUX_RADIUS, crowded-field FLAGS), not defective
+                # sources -- counting those failures lets a few
+                # co-misfiring cuts hand every survivor >= min_fails
+                # strikes and veto the whole pool (observed: 45/45 ZTF
+                # candidates dropped via flags+fr_min+ab_min, all
+                # majority-fail cuts).
+                # Compactness strikes escape the exemption on fields that
+                # can support them, except when literally every current
+                # candidate fails -- a 100% failure is always a misfire.
                 n_bad = int(np.asarray(bad_mask).sum())
-                if n_bad == 0 or n_bad >= 0.5 * len(df):
+                if n_bad == 0:
                     return
+                if n_bad >= 0.5 * n_before:
+                    if (
+                        name not in _COMPACT_STRIKES
+                        or _crowded_vet
+                        or _undersampled_vet
+                        or n_bad >= len(bad_mask)
+                    ):
+                        return
                 df["_psf_veto"] += bad_mask.astype(int)
                 df.loc[bad_mask, "_psf_veto_names"] += name + ";"
 
-            n_before = len(df)
             # When the starting pool is modest, relax shape/saturation cuts slightly.
             if n_before <= max(2 * min_psf_candidates, 20):
                 saturate_frac = max(saturate_frac, 0.97)
@@ -5349,7 +5719,7 @@ class PSF:
                 n_keep_flags = int(ok_flags.sum())
                 min_keep_flags = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_flags >= min_keep_flags:
                     n_drop_flags = int((~ok_flags).sum())
@@ -5430,7 +5800,7 @@ class PSF:
                 n_keep_elong = int(ok_elong.sum())
                 min_keep_elong = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_elong >= min_keep_elong:
                     n_drop_elong = int((~ok_elong).sum())
@@ -5478,7 +5848,7 @@ class PSF:
                 n_keep_ellip = int(ok_ellip.sum())
                 min_keep_ellip = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_ellip >= min_keep_ellip:
                     n_drop_ellip = int((~ok_ellip).sum())
@@ -5540,7 +5910,7 @@ class PSF:
                 n_keep_no_nan = int(ok_fwhm.sum())
                 min_keep_fwhm = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 # Prefer rejecting NaN FWHM sources, but keep them if needed
                 if n_keep_no_nan >= min_keep_fwhm:
@@ -5625,19 +5995,36 @@ class PSF:
                             3.5 if _undersampled_clip else 2.5,
                         )
                     )
-                    clipped = _sigma_clip(
-                        finite_fwhm.values, sigma=_clip_sigma, maxiters=3, cenfunc="median",
+                    # MAD-based clip via fwhm_outlier_clip: plain std is
+                    # inflated by the outliers themselves and absorbs them,
+                    # while an unfloored MAD collapses onto the majority
+                    # locus on defect-dominated pools and would flag the
+                    # real stellar side - the helper floors the scatter at
+                    # 10% of the median to avoid both failure modes.
+                    from functions import fwhm_outlier_clip
+
+                    _rej_clip, _clip_med, _clip_eff = fwhm_outlier_clip(
+                        src_fwhm.to_numpy(dtype=float), sigma=_clip_sigma
                     )
-                    ok_clip = ~clipped.mask
-                    # Build mask aligned to original df
-                    ok_fwhm_clip = np.ones(len(df), dtype=bool)
-                    finite_idx = np.where(np.isfinite(src_fwhm.values))[0]
-                    ok_fwhm_clip[finite_idx] = ok_clip
+                    ok_fwhm_clip = ~_rej_clip
+                    # Same veto hookup as every other cut: a source that
+                    # is an FWHM outlier AND fails elsewhere is a defect,
+                    # not an unlucky star -- previously this cut was
+                    # invisible to the multi-fail veto.
+                    _add_strike(~ok_fwhm_clip, "fwhm_clip")
                     n_drop_clip = int((~ok_fwhm_clip).sum())
                     n_keep_clip = int(ok_fwhm_clip.sum())
+                    # Evidence-based cut, so its floor is a small absolute
+                    # count rather than the target pool size: FWHM outliers
+                    # (galaxies, blends) reaching the ePSF build do more harm
+                    # than a smaller clean pool, and a starved pool is
+                    # recoverable via the supplement path.  Tying the floor
+                    # to psf_min_candidates made the clip dead below it -
+                    # observed on GROND_g_TDP6_cor_ana_8_MJD61230_30707 where
+                    # a 26 px FWHM galaxy survived into the build.
                     min_keep_clip = max(
-                        min_psf_candidates,
-                        int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                        3,
+                        int(phot_cfg.get("psf_fwhm_clip_min_keep", 4)),
                     )
                     if n_drop_clip > 0:
                         if n_keep_clip >= min_keep_clip:
@@ -5648,7 +6035,7 @@ class PSF:
                                 _clip_sigma,
                                 ", undersampled" if _undersampled_clip else "",
                                 n_drop_clip, n_keep_clip,
-                                float(np.nanmedian(finite_fwhm[~clipped.mask])),
+                                _clip_med,
                             )
                         else:
                             log.info(
@@ -5686,7 +6073,7 @@ class PSF:
                 n_keep_fr = int(ok_fr.sum())
                 min_keep_fr = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_fr >= min_keep_fr:
                     n_drop_fr = int((~ok_fr).sum())
@@ -5736,6 +6123,24 @@ class PSF:
                 )
                 if _pk_ratio_max > 0:
                     pk_vals = pd.to_numeric(df[_pk_col], errors="coerce")
+                    # flux_AP is an e-/s rate on aperture-measured rows
+                    # (measure() convention) but raw FLUX_AUTO in image
+                    # units on detection-table supplements, while
+                    # peak_flux/FLUX_MAX is always image units -- the
+                    # naive ratio is inflated by exposure_time/gain on
+                    # measured rows and flags every real star (observed:
+                    # raw ratios ~50-75 on a GROND field whose true
+                    # ratios were ~0.2-0.3).  maxPixel (peak e-/s) is
+                    # written only on measured rows, so preferring it
+                    # keeps numerator and denominator in the same unit
+                    # per row.
+                    if "maxPixel" in df.columns:
+                        _mx_vals = pd.to_numeric(
+                            df["maxPixel"], errors="coerce"
+                        )
+                        pk_vals = _mx_vals.where(
+                            np.isfinite(_mx_vals), pk_vals
+                        )
                     ap_vals = pd.to_numeric(df[_ap_col], errors="coerce")
                     with np.errstate(divide="ignore", invalid="ignore"):
                         ratio = np.where(
@@ -5748,7 +6153,7 @@ class PSF:
                     n_keep_pk = int(ok_pk.sum())
                     min_keep_pk = max(
                         min_psf_candidates,
-                        int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                        int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                     )
                     if n_keep_pk >= min_keep_pk:
                         n_drop_pk = int((~ok_pk).sum())
@@ -5806,7 +6211,7 @@ class PSF:
                     n_keep_ab = int(ok_ab.sum())
                     min_keep_ab = max(
                         min_psf_candidates,
-                        int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                        int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                     )
                     if n_keep_ab >= min_keep_ab:
                         n_drop_ab = int((~ok_ab).sum())
@@ -5853,7 +6258,7 @@ class PSF:
                 n_keep_sharp = int(ok_sharp.sum())
                 min_keep_sharp = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_sharp >= min_keep_sharp:
                     n_drop_sharp = int((~ok_sharp).sum())
@@ -5900,7 +6305,7 @@ class PSF:
                 n_keep_prof = int(ok_prof.sum())
                 min_keep_prof = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_prof >= min_keep_prof:
                     n_drop_prof = int((~ok_prof).sum())
@@ -5976,7 +6381,7 @@ class PSF:
                 n_keep_iso = int(isolated.sum())
                 min_keep_iso = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_iso >= min_keep_iso:
                     n_drop_iso = int((~isolated).sum())
@@ -6002,11 +6407,12 @@ class PSF:
             # compact defect (cosmic ray, hot pixel, bad-column blob)
             # survive by dodging each cut individually.  A candidate
             # failing several independent quality cuts is a defect, not
-            # a star: veto it unconditionally.  Strikes only come from
-            # cuts that failed a minority of the pool (see _add_strike),
-            # so this fires on defect subsets, not on field-wide
-            # misfires like undersampled FLUX_RADIUS or crowded-field
-            # FLAGS.
+            # a star: veto it unconditionally.  Majority-fail cuts only
+            # contribute strikes for compactness measures on
+            # non-crowded, well-sampled fields (see _add_strike), so this
+            # fires on defect subsets and defect-dominated pools, not on
+            # field-wide misfires like undersampled FLUX_RADIUS or
+            # crowded-field FLAGS.
             if _veto_min_fails > 0:
                 _vetoed = df["_psf_veto"] >= _veto_min_fails
                 _n_veto = int(_vetoed.sum())
@@ -6154,7 +6560,7 @@ class PSF:
                     _n_keep_prox = int((~_prox_hit).sum())
                     _min_keep_prox = max(
                         min_psf_candidates,
-                        int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                        int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                     )
                     if _n_keep_prox >= _min_keep_prox:
                         if _prox_hit.any():
@@ -6208,7 +6614,7 @@ class PSF:
                             int(
                                 np.ceil(
                                     min_keep_frac_after_cut
-                                    * max(1, len(df))
+                                    * max(1, n_before)
                                 )
                             ),
                         )
@@ -6634,133 +7040,11 @@ class PSF:
                 )
                 fit_boxsize = _fit_boxsize_clamped
 
-            # Opt-in only: analytic substitution of a usable empirical
-            # model is never silent (see psf_model_kind / PSFBUILD).
-            _analytic_fallback = bool(
-                phot_cfg.get("psf_analytic_fallback", False)
-            )
-            # Failure backdoor: when the empirical build cannot produce
-            # any usable model at all, an analytic composite-Moffat keeps
-            # PSF photometry alive.  This never swaps a usable
-            # empirical model -- that swap stays behind
-            # psf_analytic_fallback.
-            _analytic_on_failure = bool(
-                phot_cfg.get("psf_analytic_fallback_on_failure", True)
-            )
-
-            def _write_failure_model(model):
-                # Early failure returns skip the normal write block below,
-                # but downstream consumers (e.g. the SFFT PSF lookup) still
-                # expect PSF_model_image products from a substituted model.
-                try:
-                    from functions import safe_fits_write
-
-                    _os = int(
-                        np.atleast_1d(getattr(model, "oversampling", oversample))[0]
-                    )
-                    _hdr = fits.Header()
-                    _hdr["OVERSAMP"] = (
-                        _os,
-                        "ePSF oversampling factor (grid px per native px)",
-                    )
-                    _hdr["PSFNPIX"] = (
-                        int(cutout_n),
-                        "ePSF native-pixel cutout size",
-                    )
-                    _hdr["FWHM_PIX"] = (
-                        float(fwhm),
-                        "Image FWHM in native pixels",
-                    )
-                    try:
-                        _mf = measure_epsf_fwhm_native(
-                            np.asarray(model.data, float), _os
-                        )
-                        if np.isfinite(_mf):
-                            _hdr["EPSFFWHM"] = (
-                                float(_mf),
-                                "Measured ePSF FWHM in native pixels",
-                            )
-                    except Exception:
-                        pass
-                    _hdr["NPSFSTAR"] = (0, "Stars used in ePSF build")
-                    _hdr["PSFBUILD"] = (
-                        model._autophot_kind,
-                        "PSF model construction method",
-                    )
-                    if self.psf_converged is not None:
-                        _hdr["PSFCONV"] = (
-                            bool(self.psf_converged),
-                            "Empirical ePSF build converged",
-                        )
-                    _ell = getattr(model, "_autophot_ellipticity", None)
-                    if _ell is not None:
-                        _hdr["PSFELLIP"] = (
-                            float(_ell[0]),
-                            "Measured PSF-star axis ratio b/a (elongated field)",
-                        )
-                        _hdr["PSFPA"] = (
-                            float(np.degrees(_ell[1])),
-                            "Measured PSF major-axis PA, deg (+x toward +y)",
-                        )
-                    safe_fits_write(
-                        os.path.join(write_dir, f"{filename_prefix}_{base}.fits"),
-                        np.asarray(model.data, float),
-                        _hdr,
-                    )
-                    if plot:
-                        self.plot_oversampled_psf(
-                            model,
-                            oversample=_os,
-                            save_path=os.path.join(
-                                write_dir,
-                                f"PSF_Image_{base}{get_plot_ext(self.input_yaml)}",
-                            ),
-                            fwhm_native=fwhm,
-                        )
-                except Exception:
-                    pass
-
-            def _analytic_failure_psf(reason, stars=None):
-                if not (_analytic_on_failure or _analytic_fallback):
-                    return None
-                try:
-                    model, comps = _analytic_psf_stamp(
-                        fwhm,
-                        oversample,
-                        cutout_n,
-                        moffat_beta,
-                        stars=stars,
-                        max_components=int(
-                            phot_cfg.get("psf_analytic_components", 3)
-                        ),
-                    )
-                except Exception:
-                    return None
-                if not _epsf_usable(model):
-                    return None
-                log.warning(
-                    "ePSF unavailable (%s); using analytic composite-Moffat "
-                    "PSF (%d components, FWHM=%.2f px) as the failure "
-                    "backdoor (psf_analytic_fallback_on_failure). "
-                    "Recorded as psf_model='%s'.",
-                    reason,
-                    len(comps),
-                    fwhm,
-                    model._autophot_kind,
-                )
-                self.psf_model_kind = model._autophot_kind
-                _write_failure_model(model)
-                _conv_txt = (
-                    "n/a (analytic model)"
-                    if self.psf_converged is None
-                    else ("yes" if self.psf_converged else "no")
-                )
-                log.info(
-                    "PSF model: %s | ePSF converged: %s",
-                    self.psf_model_kind,
-                    _conv_txt,
-                )
-                return model
+            # The photometry PSF is always empirical: the composite-Moffat
+            # model fitted below seeds the ePSF iteration and serves as the
+            # residual diagnostic, but it is never substituted for the
+            # delivered model.  A build that produces no usable empirical
+            # model returns None (aperture-only photometry downstream).
 
             log.debug("Initial sources: %s", len(df))
             if threshold_limit_eff is not None and "threshold" in df.columns:
@@ -6769,7 +7053,7 @@ class PSF:
                 n_keep_thr = int(np.sum(mask_thr))
                 min_keep_thr = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_thr >= min_keep_thr:
                     df = df[mask_thr]
@@ -6812,71 +7096,67 @@ class PSF:
                             n_keep_thr,
                             min_keep_thr,
                         )
-            _snr_cut_col = next(
-                (c for c in ("SNR", "snr", "signal_to_noise", "flux_snr") if c in df.columns),
-                None,
-            )
-            if _snr_cut_col is not None:
-                _snr_vals = pd.to_numeric(df[_snr_cut_col], errors="coerce")
-                mask_snr = (
-                    ((_snr_vals >= snr_min_eff) & (_snr_vals <= snr_max_eff))
-                    | _snr_vals.isna()
+            _snr_cols = [
+                c
+                for c in ("SNR", "snr", "signal_to_noise", "flux_snr")
+                if c in df.columns
+            ]
+            if _snr_cols:
+                # Coalesce across the alias columns: supplemented sources
+                # can carry "snr" while "SNR" is NaN -- a first-match column
+                # pick lets NaN rows bypass the cut entirely.  Rows still
+                # NaN after coalescing have no measured S/N and cannot meet
+                # the guarantee, so they fail rather than pass through.
+                _snr_vals = None
+                for _c in _snr_cols:
+                    _v = pd.to_numeric(df[_c], errors="coerce")
+                    _snr_vals = (
+                        _v if _snr_vals is None else _snr_vals.fillna(_v)
+                    )
+                mask_snr = (_snr_vals >= snr_min_eff) & (
+                    _snr_vals <= snr_max_eff
                 )
                 n_keep_snr = int(np.sum(mask_snr))
                 min_keep_snr = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_snr >= min_keep_snr:
                     df = df[mask_snr]
                 else:
-                    # Same keep-floor guard as the threshold cut: the
-                    # relaxed pool must not admit sub-noise detections.
-                    _snr_hard = float(
-                        phot_cfg.get("psf_snr_hard_min", 3.0)
+                    log.info(
+                        "Skipping strict SNR cut ([%s, %s]): would leave %d candidates (< required %d); hard floor still applies.",
+                        snr_min_eff,
+                        snr_max_eff,
+                        n_keep_snr,
+                        min_keep_snr,
                     )
-                    if _snr_hard > 0 and _snr_hard < snr_min_eff:
-                        _hard = (_snr_vals >= _snr_hard) | _snr_vals.isna()
-                        _n_hard = int(np.sum(_hard))
-                        if 0 < _n_hard < len(df):
-                            log.info(
-                                "Keep-floor SNR cut at %.1f: dropping %d "
-                                "sub-noise candidates (strict cut [%s, %s] "
-                                "would leave %d < required %d).",
-                                _snr_hard,
-                                len(df) - _n_hard,
-                                snr_min_eff,
-                                snr_max_eff,
-                                n_keep_snr,
-                                min_keep_snr,
-                            )
-                            df = df[_hard]
-                        else:
-                            log.info(
-                                "Skipping strict SNR cut ([%s, %s]): would leave %d candidates (< required %d).",
-                                snr_min_eff,
-                                snr_max_eff,
-                                n_keep_snr,
-                                min_keep_snr,
-                            )
-                    else:
+                # Absolute floor: applies even when the strict cut was
+                # relaxed (sparse pool) or disabled (undersampled mode), so
+                # no sub-floor source ever reaches the ePSF build.  A pool
+                # emptied here falls through to the analytic-PSF path.
+                _snr_hard = float(phot_cfg.get("psf_snr_hard_min", 10.0))
+                if _snr_hard > 0 and len(df) > 0:
+                    _cur_snr = _snr_vals.loc[df.index]
+                    _hard = _cur_snr >= _snr_hard
+                    _n_drop = int((~_hard).sum())
+                    if _n_drop:
                         log.info(
-                            "Skipping strict SNR cut ([%s, %s]): would leave %d candidates (< required %d).",
-                            snr_min_eff,
-                            snr_max_eff,
-                            n_keep_snr,
-                            min_keep_snr,
+                            "Hard SNR floor (>= %.1f): dropping %d candidates.",
+                            _snr_hard,
+                            _n_drop,
                         )
+                        df = df[_hard]
             log.debug("Sources after cuts: %s", len(df))
 
             if len(df) == 0:
                 log.error("No PSF candidates after filtering.")
-                return _analytic_failure_psf("no PSF candidates after filtering"), df
+                return None, df
 
             xcol, ycol, snrcol, thrcol = _locate_columns(df)
             if xcol is None or ycol is None:
                 log.error("Required coordinate columns not found.")
-                return _analytic_failure_psf("no coordinate columns"), df
+                return None, df
 
             # Optionally pre-select the highest-quality candidates (by SNR /
             # threshold / flux) before enforcing spatial uniformity, so that
@@ -6982,9 +7262,7 @@ class PSF:
 
             if len(epsfstars) == 0:
                 log.error("All PSF-star candidates rejected.")
-                return _analytic_failure_psf(
-                    "all PSF-star candidates rejected", stars=epsfstars
-                ), df
+                return None, df
 
             # Reject cutouts whose extracted centre is too far from the
             # cutout's geometric centre (bad centroid/extraction that slipped
@@ -7003,10 +7281,7 @@ class PSF:
                 )
             if len(epsfstars) == 0:
                 log.error("All PSF-star candidates rejected by cutout validation.")
-                return _analytic_failure_psf(
-                    "all PSF-star candidates rejected by cutout validation",
-                    stars=epsfstars,
-                ), df
+                return None, df
 
             # Optional: remove pathological PSF-star cutouts (blends, cosmic
             # rays) via power-spectrum comparison; uses MAD + median deviation.
@@ -7158,7 +7433,11 @@ class PSF:
             # builds are noise-dominated in the wings (see
             # _select_adaptive_oversample).
             if _adaptive_oversample_enabled:
-                oversample = _select_adaptive_oversample(len(epsfstars), phot_cfg)
+                oversample, _thin = _select_adaptive_oversample(
+                    len(epsfstars), phot_cfg
+                )
+                if _thin:
+                    self.psf_ensemble_understaffed = True
             elif undersampled and oversample < 3:
                 log.warning(
                     "Undersampled image (FWHM=%.2f px) built at %dx "
@@ -7352,6 +7631,18 @@ class PSF:
 
             _fwhm_lo = float(phot_cfg.get("psf_epsf_fwhm_min_frac", 0.85))
             _fwhm_hi = float(phot_cfg.get("psf_epsf_fwhm_max_frac", 1.5))
+            # Non-converged models inside this band but outside
+            # [fwhm_min, fwhm_max] are marginal misses -- thin clean
+            # pools land there as readily as defect stacks, so the
+            # residual gate below arbitrates.  Outside it the discard
+            # is unconditional: ~0.5x readings are resampled-defect
+            # stacks, not stars.
+            _fwhm_rej_lo = float(
+                phot_cfg.get("psf_epsf_fwhm_discard_min_frac", 0.6)
+            )
+            _fwhm_rej_hi = float(
+                phot_cfg.get("psf_epsf_fwhm_discard_max_frac", 2.0)
+            )
             # A real PSF is positive; only noise and resampling ringing
             # produce negative flux.  A large negative-flux fraction on a
             # raw build means the residual median is noise-drawn (too few
@@ -7378,7 +7669,7 @@ class PSF:
             # Bound on cumulative star-centre drift in the shift refit;
             # keeps phase classes populated on undersampled builds.
             _max_shift = float(
-                phot_cfg.get("psf_epsf_max_star_shift_px", 0.5)
+                phot_cfg.get("psf_epsf_max_star_shift_px", 1.0)
             )
             # Non-converged builds get one rebuild after dropping the
             # stars still drifting (and any photutils excluded for
@@ -7532,8 +7823,7 @@ class PSF:
 
                 # Initialise ePSF from the analytic model.  The helper
                 # applies the pixel response and the photutils flux
-                # convention, so the same stamp doubles as the analytic
-                # failure backdoor.  psf_use_analytic_init=False seeds the
+                # convention.  psf_use_analytic_init=False seeds the
                 # build from scratch instead -- a wrong analytic seed can
                 # pull the empirical solution toward the model shape, and
                 # disabling it is the clean A/B test for that.
@@ -7620,10 +7910,9 @@ class PSF:
                 # A crash discards the whole result even when earlier
                 # iterations produced a healthy model.  Salvage the
                 # newest completed ePSF from the shared build history:
-                # a slightly non-settled empirical model is preferable
-                # to the analytic backdoor.  It is reported as
-                # non-converged so the quality gates, prune loop, and
-                # adaptive retry still see it.
+                # a slightly non-settled empirical model is still usable.
+                # It is reported as non-converged so the quality gates,
+                # prune loop, and adaptive retry still see it.
                 if res is None and bool(
                     phot_cfg.get("psf_salvage_partial_epsf", True)
                 ):
@@ -7955,14 +8244,15 @@ class PSF:
             # Fit the analytic model once on the final star set: a sum of
             # Moffats captures core-plus-wing structure a single Moffat
             # cannot.  The same components seed every ladder attempt and
-            # serve as the fallback/backdoor model.  Shared elongation
+            # serve as the residual-accuracy diagnostic.  Shared elongation
             # (trailed/defocused fields) is measured once and applied to
             # both the fit metric and the stamp so the analytic model
             # keeps the image's true 2-D shape.
             _analytic_ell = None
             try:
                 _analytic_ell = _ensemble_ellipticity(epsfstars, fwhm)
-            except Exception:
+            except Exception as _exc:
+                log.debug("Ensemble ellipticity estimate failed: %s", _exc)
                 _analytic_ell = None
             if _analytic_ell is not None:
                 log.info(
@@ -7992,7 +8282,6 @@ class PSF:
             epsf = fitted_stars = None
             _final_acc = float("nan")
             _epsf_fwhm_meas = float("nan")
-            init_epsf = None
             # Analytic init on the accepted rung's grid, for the residual
             # accuracy gate below.
             init_kept = None
@@ -8001,13 +8290,16 @@ class PSF:
             # oversampled plot) scale by ``oversample``, which is wrong if a
             # degraded lower-oversampling model is kept.
             _kept_osamp = oversample
+            # Quality flags for the attempt that produced the kept model
+            # (the loop-local _acc_bad/_neg_bad always describe the LAST
+            # attempt, which may differ from the kept one).
+            _kept_acc_bad = False
+            _kept_neg_bad = False
             for _osamp_c in _osamp_ladder:
                 epsf_c, fitted_c, acc_c, init_c, meas_c, conv_c = (
                     _attempt_epsf_build(_osamp_c)
                 )
                 self.psf_converged = conv_c
-                if init_epsf is None:
-                    init_epsf = init_c
                 # A star centre still wandering by more than ~half a FWHM
                 # on the final iteration is unregistered -- the stacked
                 # ePSF is built from misaligned cutouts (blocky core,
@@ -8102,20 +8394,19 @@ class PSF:
                     _final_acc = acc_c
                     _epsf_fwhm_meas = meas_c
                     _kept_osamp = _osamp_c
+                    init_kept = init_c
+                    _kept_acc_bad = _acc_bad
+                    _kept_neg_bad = _neg_bad
             oversample = _kept_osamp
 
-            _used_analytic_psf = False
-            _analytic_kind = "analytic-moffat"
             # Residual accuracy gate on the accepted empirical model: a
             # build can pass every shape gate yet still represent the
             # stars worse than the pixel-integrated analytic model (the
             # ePSF is fitted to these stars, so it has every advantage --
             # measured: degraded production stamps fit 3-16x worse than
             # the analytic model while good builds sit at ~parity).  The
-            # comparison
-            # always runs as a diagnostic; the swap to the analytic model
-            # only happens when the user explicitly opts in via
-            # psf_analytic_fallback.
+            # comparison runs as a diagnostic only; the delivered PSF is
+            # always the empirical model built from the image's own stars.
             if (
                 _good
                 and _res_gate
@@ -8144,179 +8435,149 @@ class PSF:
                         _mad_emp, _mad_ana, _fit_rad, len(_stars_eval),
                     )
                     if _mad_emp > _res_ratio_max * _mad_ana:
-                        if _analytic_fallback:
-                            log.warning(
-                                "Empirical ePSF fits the PSF stars %.2fx worse "
-                                "than the analytic composite (residual MAD %.4f vs "
-                                "%.4f) -- the empirical model is degraded; using "
-                                "the analytic model.",
-                                _mad_emp / _mad_ana, _mad_emp, _mad_ana,
-                            )
-                            epsf = init_kept
-                            fitted_stars = epsfstars
-                            _used_analytic_psf = True
-                            _analytic_kind = getattr(
-                                init_kept, "_autophot_kind", "analytic-moffat"
-                            )
-                            oversample = int(
-                                np.atleast_1d(
-                                    getattr(init_kept, "oversampling", oversample)
-                                )[0]
-                            )
-                            _epsf_fwhm_meas = measure_epsf_fwhm_native(
-                                np.asarray(epsf.data, float), oversample
-                            )
-                        else:
-                            log.warning(
-                                "Empirical ePSF fits the PSF stars %.2fx worse "
-                                "than the analytic composite (residual MAD %.4f vs "
-                                "%.4f) -- the empirical model is degraded, but "
-                                "keeping it since psf_analytic_fallback is "
-                                "disabled (the PSF model stays based on the "
-                                "image sources).",
-                                _mad_emp / _mad_ana, _mad_emp, _mad_ana,
-                            )
+                        log.warning(
+                            "Empirical ePSF fits the PSF stars %.2fx worse "
+                            "than the analytic composite (residual MAD %.4f vs "
+                            "%.4f) -- the empirical model is degraded, but it "
+                            "is still the model built from the image's own "
+                            "stars, so it is kept.",
+                            _mad_emp / _mad_ana, _mad_emp, _mad_ana,
+                        )
 
-            if not _good and not _used_analytic_psf:
-                # Re-evaluate the final candidate's flags for the message
-                _acc_bad = np.isfinite(_final_acc) and _final_acc > max(
-                    1.0, 0.5 * fwhm
-                )
+            if not _good:
                 _fwhm_bad = np.isfinite(_epsf_fwhm_meas) and (
                     _epsf_fwhm_meas < _fwhm_lo * fwhm
                     or _epsf_fwhm_meas > _fwhm_hi * fwhm
                 )
-                _emp_usable = _epsf_usable(epsf)
-                if (
-                    _emp_usable
-                    and _analytic_fallback
-                    and _epsf_usable(init_epsf)
-                ):
-                    if _fwhm_bad:
-                        log.warning(
-                            "ePSF measured FWHM %.2f px is outside "
-                            "[%.2f, %.2f]x the image FWHM %.2f px -- the "
-                            "empirical model is degraded; falling back to "
-                            "analytic.",
-                            _epsf_fwhm_meas,
-                            _fwhm_lo,
-                            _fwhm_hi,
-                            fwhm,
-                        )
-                    log.warning(
-                        "ePSF model %s (final_center_accuracy=%.3g px); falling back to "
-                        "analytic composite-Moffat PSF (FWHM=%.2f px). PSF photometry, "
-                        "the PSF zeropoint, and limiting-magnitude injection will use "
-                        "this analytic model.",
-                        "is degenerate" if epsf is not None else "unavailable",
-                        _final_acc, fwhm,
-                    )
-                    epsf = init_epsf
-                    fitted_stars = epsfstars
-                    _used_analytic_psf = True
-                    _analytic_kind = getattr(
-                        init_epsf, "_autophot_kind", "analytic-moffat"
-                    )
-                    # The analytic init is defined on the primary
-                    # (first-attempt) oversampled grid.
-                    oversample = int(
-                        np.atleast_1d(getattr(init_epsf, "oversampling", oversample))[0]
-                    )
-                    _epsf_fwhm_meas = measure_epsf_fwhm_native(
-                        np.asarray(epsf.data, float), oversample
-                    )
-                elif not _emp_usable:
-                    _backdoor = _analytic_failure_psf(
-                        "ePSF build produced no usable model",
-                        stars=epsfstars,
-                    )
-                    if _backdoor is None:
-                        log.error("ePSF build produced no usable model.")
-                    return _backdoor, df
+                if not _epsf_usable(epsf):
+                    log.error("ePSF build produced no usable model.")
+                    return None, df
                 elif _fwhm_bad:
-                    # A starved build (fewer stars than the candidate
-                    # floor) whose measured FWHM misses the band is not a
-                    # usable model: the analytic backdoor treats it as a
-                    # build failure even when the opt-in swap is off --
-                    # but only when the analytic model actually fits the
-                    # PSF stars better.  Non-Gaussian PSFs (defocused
-                    # top-hats, trailed cores) under-measure half-max FWHM
-                    # while still matching the data; a structurally
-                    # correct ePSF must never be swapped for a Moffat on
-                    # a scalar gate alone.
-                    _starved = len(epsfstars) < min_psf_candidates
-                    _emp_worse = True
-                    if _starved and _res_gate:
-                        _stars_ev = (
-                            fitted_stars if fitted_stars is not None else epsfstars
+                    if not bool(self.psf_converged):
+                        # Two independent failure signals agree: the fit
+                        # never settled AND the model's FWHM misses the
+                        # image-FWHM band.  For a GROSS miss (outside
+                        # [discard_min, discard_max]x) that is a defect
+                        # stack (hot-pixel/CR-dominated pool) or noise,
+                        # not a degraded star ensemble -- observed ePSFs
+                        # built from resampled defect clusters read
+                        # ~0.5x the image FWHM and produce garbage
+                        # photometry.  A MARGINAL miss is ambiguous:
+                        # thin-but-clean pools also drift a few tenths
+                        # of the band edge without settling.  Arbitrate
+                        # with the residual gate -- a defect stack fits
+                        # its own members far worse than the analytic
+                        # composite; a clean thin pool does not.
+                        _gross = (
+                            _epsf_fwhm_meas < _fwhm_rej_lo * fwhm
+                            or _epsf_fwhm_meas > _fwhm_rej_hi * fwhm
                         )
-                        _fr = max(3.0, 0.5 * fit_boxsize)
-                        _mad_e = _epsf_residual_mad(_stars_ev, epsf, _fr)
-                        _mad_a = _epsf_residual_mad(_stars_ev, init_epsf, _fr)
-                        if np.isfinite(_mad_e) and np.isfinite(_mad_a) and _mad_a > 0:
-                            _emp_worse = _mad_e > _res_ratio_max * _mad_a
-                    if (
-                        _starved
-                        and _analytic_on_failure
-                        and _epsf_usable(init_epsf)
-                        and _emp_worse
-                    ):
-                        log.warning(
-                            "ePSF built from only %d stars has measured "
-                            "FWHM %.2f px outside [%.2f, %.2f]x the image "
-                            "FWHM %.2f px -- a starved empirical model is "
-                            "untrustworthy; using the analytic composite "
-                            "PSF (psf_analytic_fallback_on_failure).",
-                            len(epsfstars),
-                            _epsf_fwhm_meas,
-                            _fwhm_lo,
-                            _fwhm_hi,
-                            fwhm,
-                        )
-                        epsf = init_epsf
-                        fitted_stars = epsfstars
-                        _used_analytic_psf = True
-                        _analytic_kind = getattr(
-                            init_epsf, "_autophot_kind", "analytic-moffat"
-                        )
-                        oversample = int(
-                            np.atleast_1d(
-                                getattr(init_epsf, "oversampling", oversample)
-                            )[0]
-                        )
-                        _epsf_fwhm_meas = measure_epsf_fwhm_native(
-                            np.asarray(epsf.data, float), oversample
-                        )
-                    elif _starved and _analytic_on_failure and _epsf_usable(init_epsf):
-                        log.warning(
-                            "ePSF built from only %d stars has measured "
-                            "FWHM %.2f px outside [%.2f, %.2f]x the image "
-                            "FWHM %.2f px, but still fits its PSF stars "
-                            "as well as the analytic composite (residual "
-                            "MAD %.4f vs %.4f) -- keeping the empirical "
-                            "model so the PSF matches the image.",
-                            len(epsfstars),
-                            _epsf_fwhm_meas,
-                            _fwhm_lo,
-                            _fwhm_hi,
-                            fwhm,
-                            _mad_e if np.isfinite(_mad_e) else float("nan"),
-                            _mad_a if np.isfinite(_mad_a) else float("nan"),
-                        )
+                        _rescue = False
+                        if _gross:
+                            _fwhm_verdict = (
+                                f"FWHM miss is gross (outside "
+                                f"[{_fwhm_rej_lo:.2f}, "
+                                f"{_fwhm_rej_hi:.2f}]x)"
+                            )
+                        elif _kept_acc_bad or _kept_neg_bad:
+                            _fwhm_verdict = (
+                                "build also failed the centre-accuracy "
+                                "or negative-flux gates"
+                            )
+                        elif not _res_gate:
+                            _fwhm_verdict = "residual gate is disabled"
+                        elif init_kept is None or not _epsf_usable(
+                            init_kept
+                        ):
+                            _fwhm_verdict = (
+                                "no usable analytic seed to compare "
+                                "against"
+                            )
+                        else:
+                            _stars_eval = (
+                                fitted_stars
+                                if fitted_stars is not None
+                                else epsfstars
+                            )
+                            _fit_rad = max(3.0, 0.5 * fit_boxsize)
+                            _mad_emp = _epsf_residual_mad(
+                                _stars_eval, epsf, _fit_rad
+                            )
+                            _mad_ana = _epsf_residual_mad(
+                                _stars_eval, init_kept, _fit_rad
+                            )
+                            if (
+                                np.isfinite(_mad_emp)
+                                and np.isfinite(_mad_ana)
+                                and _mad_ana > 0
+                            ):
+                                _rescue = _mad_emp <= (
+                                    _res_ratio_max * _mad_ana
+                                )
+                                _fwhm_verdict = (
+                                    f"residual MAD {_mad_emp:.4f} vs "
+                                    f"analytic {_mad_ana:.4f} "
+                                    f"(limit {_res_ratio_max:.2f}x)"
+                                )
+                            else:
+                                _fwhm_verdict = (
+                                    "residual comparison unmeasurable"
+                                )
+                        if _rescue:
+                            # A non-converged model that fits its own
+                            # stars no worse than the analytic seed is a
+                            # thin-but-clean pool, not a defect stack.
+                            log.warning(
+                                "ePSF measured FWHM %.2f px is outside "
+                                "[%.2f, %.2f]x the image FWHM %.2f px "
+                                "and the build never converged, but the "
+                                "empirical model fits its own stars at "
+                                "least as well as the analytic seed "
+                                "(%s) -- keeping the degraded model.",
+                                _epsf_fwhm_meas,
+                                _fwhm_lo,
+                                _fwhm_hi,
+                                fwhm,
+                                _fwhm_verdict,
+                            )
+                        else:
+                            # Returning None drops the field to
+                            # aperture-only photometry; no synthetic
+                            # model is substituted.
+                            log.warning(
+                                "ePSF measured FWHM %.2f px is outside "
+                                "[%.2f, %.2f]x the image FWHM %.2f px "
+                                "and the build never converged (%s) -- "
+                                "discarding the empirical model and "
+                                "falling back to aperture-only "
+                                "photometry.",
+                                _epsf_fwhm_meas,
+                                _fwhm_lo,
+                                _fwhm_hi,
+                                fwhm,
+                                _fwhm_verdict,
+                            )
+                            return None, df
                     else:
+                        # A measured FWHM outside [min_frac, max_frac]x the
+                        # image FWHM marks a degraded model (noise-broadened,
+                        # centroid-smeared, defect-dominated).  Non-Gaussian
+                        # PSFs (defocused top-hats, trailed cores) can also
+                        # miss the half-max band while still matching the
+                        # data; the photometric model stays what the stars
+                        # converged to either way.
                         log.warning(
                             "ePSF measured FWHM %.2f px is outside "
-                            "[%.2f, %.2f]x the image FWHM %.2f px but "
-                            "psf_analytic_fallback is disabled -- keeping the "
-                            "degraded empirical model.",
+                            "[%.2f, %.2f]x the image FWHM %.2f px -- keeping "
+                            "the degraded empirical model (the PSF is always "
+                            "built from the image's own stars).",
                             _epsf_fwhm_meas, _fwhm_lo, _fwhm_hi, fwhm,
                         )
                 else:
                     log.warning(
                         "ePSF build did not pass the quality gates "
                         "(final_center_accuracy=%.3g px, measured FWHM=%.3g px) "
-                        "but psf_analytic_fallback is disabled -- keeping the "
-                        "degraded empirical model.",
+                        "-- keeping the degraded empirical model.",
                         _final_acc,
                         _epsf_fwhm_meas,
                     )
@@ -8332,9 +8593,7 @@ class PSF:
             # flattening beyond 3.5*FWHM), which can bias the encircled
             # energy and symmetrise real ellipticity.  Default off: the
             # photometric model should be what the stars converged to.
-            if not _used_analytic_psf and bool(
-                phot_cfg.get("psf_epsf_wing_smooth", False)
-            ):
+            if bool(phot_cfg.get("psf_epsf_wing_smooth", False)):
                 try:
                     epsf.data[:] = clean_epsf_stamp(
                         np.asarray(epsf.data, float),
@@ -8389,14 +8648,14 @@ class PSF:
                     n_epsf_stars,
                 )
 
-            # STATUS one-liner naming the kept model (empirical ePSF or
-            # analytic stand-in), the star pool, oversampling, the
-            # convergence verdict, and measured vs image FWHM.  For
-            # undersampled data the effective PSF is pixel-integrated, so
-            # a measured FWHM ~5-10% broader than the input is expected.
-            _model_txt = _analytic_kind if _used_analytic_psf else "epsf"
+            # STATUS one-liner naming the kept model (empirical ePSF), the
+            # star pool, oversampling, the convergence verdict, and
+            # measured vs image FWHM.  For undersampled data the effective
+            # PSF is pixel-integrated, so a measured FWHM ~5-10% broader
+            # than the input is expected.
+            _model_txt = "epsf"
             _conv_txt = (
-                "n/a (analytic model)"
+                "unknown"
                 if self.psf_converged is None
                 else (
                     "yes (relaxed)"
@@ -8538,7 +8797,7 @@ class PSF:
                     float(np.degrees(_ell_tag[1])),
                     "Measured PSF major-axis PA, deg (+x toward +y)",
                 )
-            self.psf_model_kind = _analytic_kind if _used_analytic_psf else "epsf"
+            self.psf_model_kind = "epsf"
             _psf_hdr["PSFBUILD"] = (
                 self.psf_model_kind,
                 "PSF model construction method",
@@ -8577,9 +8836,9 @@ class PSF:
                     log.warning("PSF visualisation failed: %s", _viz_err)
 
             # One-line verdict so the run log always states whether the
-            # empirical build settled (analytic models never iterate, so
-            # they report n/a).  _conv_txt is reused from the STATUS model
-            # summary above - nothing between them changes the verdict.
+            # empirical build settled.  _conv_txt is reused from the
+            # STATUS model summary above - nothing between them changes
+            # the verdict.
             log.info(
                 "PSF model: %s | ePSF converged: %s | PSF stars: %d | "
                 "oversample=x%d",
@@ -8593,133 +8852,8 @@ class PSF:
 
         except Exception as exc:
             log.error("[build] Fatal: %s\n%s", exc, traceback.format_exc())
-            # Best-effort failure backdoor: derive the composite from
-            # config since build locals may not exist at this point.
-            try:
-                _pcfg = self.input_yaml.get("photometry", {}) or {}
-                _fb_allowed = bool(
-                    _pcfg.get("psf_analytic_fallback_on_failure", True)
-                ) or bool(_pcfg.get("psf_analytic_fallback", False))
-                if _fb_allowed:
-                    _fb_fwhm = float(self.input_yaml.get("fwhm", 3.0))
-                    _fb_osamp = max(1, int(_pcfg.get("psf_oversample", 1)))
-                    _fb_auto = bool(
-                        _pcfg.get("oversample_psf", False)
-                    ) or bool(
-                        _pcfg.get("psf_auto_oversample_undersampled", True)
-                    )
-                    if _fb_auto and _fb_fwhm <= float(
-                        _pcfg.get("undersampled_fwhm_threshold", 2.5)
-                    ):
-                        _fb_osamp = max(_fb_osamp, 4)
-                    _fb_beta = max(
-                        1.1,
-                        float(_pcfg.get("psf_init_moffat_beta", 4.765)),
-                    )
-                    _fb_cut = _odd(max(25, int(np.ceil(6.0 * _fb_fwhm))))
-                    # If the crash happened after star extraction, the
-                    # shared elongation is still recoverable -- a trailed
-                    # field should not get a circular backdoor model.
-                    _fb_ell = None
-                    try:
-                        _fb_stars = locals().get("epsfstars")
-                        if _fb_stars is not None and len(_fb_stars) > 0:
-                            _fb_ell = _ensemble_ellipticity(_fb_stars, _fb_fwhm)
-                    except Exception:
-                        _fb_ell = None
-                    _fb_model = _composite_moffat_psf(
-                        _default_moffat_composite(_fb_fwhm, _fb_beta),
-                        _fb_osamp,
-                        _fb_cut,
-                        ellipticity=_fb_ell,
-                    )
-                    if _epsf_usable(_fb_model):
-                        log.warning(
-                            "ePSF build crashed; using analytic composite-"
-                            "Moffat PSF (FWHM=%.2f px) as the failure "
-                            "backdoor (psf_analytic_fallback_on_failure). "
-                            "Recorded as psf_model='analytic-composite'.",
-                            _fb_fwhm,
-                        )
-                        self.psf_model_kind = getattr(
-                            _fb_model, "_autophot_kind", "analytic-composite"
-                        )
-                        try:
-                            from functions import safe_fits_write
-
-                            _fb_fpath = str(
-                                self.input_yaml.get("fpath", "image")
-                            )
-                            _fb_dir = str(
-                                self.input_yaml.get("write_dir")
-                                or os.path.dirname(_fb_fpath)
-                                or "."
-                            )
-                            _fb_base = str(
-                                self.input_yaml.get("_psf_base_override")
-                                or os.path.splitext(
-                                    os.path.basename(_fb_fpath)
-                                )[0]
-                                or "image"
-                            )
-                            _fb_hdr = fits.Header()
-                            _fb_hdr["OVERSAMP"] = (
-                                _fb_osamp,
-                                "ePSF oversampling factor (grid px per native px)",
-                            )
-                            _fb_hdr["PSFNPIX"] = (
-                                _fb_cut,
-                                "ePSF native-pixel cutout size",
-                            )
-                            _fb_hdr["FWHM_PIX"] = (
-                                _fb_fwhm,
-                                "Image FWHM in native pixels",
-                            )
-                            _fb_hdr["NPSFSTAR"] = (
-                                0,
-                                "Stars used in ePSF build",
-                            )
-                            _fb_hdr["PSFBUILD"] = (
-                                self.psf_model_kind,
-                                "PSF model construction method",
-                            )
-                            if self.psf_converged is not None:
-                                _fb_hdr["PSFCONV"] = (
-                                    bool(self.psf_converged),
-                                    "Empirical ePSF build converged",
-                                )
-                            if _fb_ell is not None:
-                                _fb_hdr["PSFELLIP"] = (
-                                    float(_fb_ell[0]),
-                                    "Measured PSF-star axis ratio b/a (elongated field)",
-                                )
-                                _fb_hdr["PSFPA"] = (
-                                    float(np.degrees(_fb_ell[1])),
-                                    "Measured PSF major-axis PA, deg (+x toward +y)",
-                                )
-                            safe_fits_write(
-                                os.path.join(
-                                    _fb_dir,
-                                    f"{filename_prefix}_{_fb_base}.fits",
-                                ),
-                                np.asarray(_fb_model.data, float),
-                                _fb_hdr,
-                            )
-                        except Exception:
-                            pass
-                        _conv_txt = (
-                            "n/a (analytic model)"
-                            if self.psf_converged is None
-                            else ("yes" if self.psf_converged else "no")
-                        )
-                        log.info(
-                            "PSF model: %s | ePSF converged: %s",
-                            self.psf_model_kind,
-                            _conv_txt,
-                        )
-                        return _fb_model, None
-            except Exception:
-                pass
+            # No analytic substitution: a crashed build reports no model
+            # and the caller falls back to aperture-only photometry.
             return None, None
 
     # -----------------------------------------------------------------------
@@ -9150,19 +9284,17 @@ class PSF:
                     int(cnt[populated].min() * _survival),
                     phot_cfg,
                     min_samples=_grid_min_samp,
-                )
+                )[0]
             )
 
         base = str(self.input_yaml.get("base", "image"))
         cell_phot = dict(phot_cfg)
         cell_phot.update(
             # A per-cell build is itself a complete single-ePSF build:
-            # recursion and analytic substitution are both disabled so a
-            # failed cell reports failure (fill/fail decides) rather than
-            # silently returning an analytic model.
+            # recursion is disabled so a failed cell reports failure
+            # (fill/fail decides) rather than recursing into the grid
+            # path again.
             psf_spatial_grid=False,
-            psf_analytic_fallback=False,
-            psf_analytic_fallback_on_failure=False,
             oversample_psf=False,
             psf_auto_oversample_undersampled=False,
             psf_oversample=osamp_fixed,
@@ -9353,7 +9485,14 @@ class PSF:
             _cons_max = float(
                 phot_cfg.get("psf_grid_cell_consistency_max", 1.6)
             )
-            if _cons_max > 1.0 and len(cell_models) >= 3:
+            # Require >=5 built cells: at 3-4 cells the ensemble median is
+            # whichever 2 happen to agree, so a genuinely varying field -
+            # the case the grid exists to capture - would have its most
+            # different cell demoted to a neighbour copy.
+            _cons_min_cells = int(
+                phot_cfg.get("psf_grid_cell_consistency_min_cells", 5)
+            )
+            if _cons_max > 1.0 and len(cell_models) >= _cons_min_cells:
                 _sharp_med = float(
                     np.median([cell_stats[k][0] for k in cell_models])
                 )
@@ -10859,6 +10998,11 @@ class PSF:
                 emcee_s2n,
             )
         elif is_target_fit and emcee_s2n > 0 and len(init_params) > 1:
+            # Multi-target fits always take the single-call branch below
+            # (photutils needs all sources together to assign group_id),
+            # and that branch re-decides MCMC via np.any(psf_snr < s2n).
+            # use_emcee_tiered here exists only to instantiate
+            # emcee_fitter so that branch has it available.
             use_emcee_tiered = True
 
         # Fitter selection: Poisson likelihood (Fermilab) or traditional LSQ.
@@ -11383,7 +11527,11 @@ class PSF:
             all_mask = np.ones(len(init_params), dtype=bool)
             # Decide fitter: use MCMC if any target has SNR below threshold,
             # otherwise LSQ.  This keeps simultaneous fitting while still
-            # benefiting from MCMC for faint targets.
+            # benefiting from MCMC for faint targets.  The criterion here
+            # (any target below s2n) intentionally differs from the
+            # single-target path (the one target's own SNR) - do not
+            # "unify" them; a bright primary with a faint companion needs
+            # MCMC for the companion's constraints.
             _any_low_snr = np.any(psf_snr < emcee_s2n) if emcee_s2n > 0 else False
             use_emcee_all = _any_low_snr and emcee_fitter is not None
             tier_fitter_all = emcee_fitter if use_emcee_all else lsq_fitter
@@ -11464,7 +11612,29 @@ class PSF:
             flux_fit_arr = np.asarray(
                 self._first_present(combined, ["flux_fit", "flux"], unit=u.electron), float
             )
-            significant_negative_fit = np.isfinite(flux_fit_arr) & (flux_fit_arr < 0)
+            flux_fit_err_arr = np.asarray(
+                self._first_present(
+                    combined,
+                    ["flux_fit_err", "flux_err", "flux_uncertainty"],
+                    unit=u.electron,
+                ),
+                float,
+            )
+            # Gate on the documented SNR <= -3: a marginal negative churn
+            # (e.g. flux_fit = -0.001 from noise) used to trigger a full
+            # second fit on the inverted image.  Rows without a usable
+            # error fall back to the raw sign check so the trigger stays
+            # functional when errors were never reported.
+            _has_ferr = np.isfinite(flux_fit_err_arr) & (flux_fit_err_arr > 0)
+            _neg_snr = np.full(len(combined), np.nan)
+            np.divide(
+                flux_fit_arr, flux_fit_err_arr, out=_neg_snr, where=_has_ferr
+            )
+            significant_negative_fit = (
+                np.isfinite(flux_fit_arr)
+                & (flux_fit_arr < 0)
+                & np.where(_has_ferr, _neg_snr <= -3.0, True)
+            )
 
             # Bootstrap-flux fallback: build a per-row mask aligned to idx_out.
             # _bootstrap_flux_e is indexed by idx_keep; map it to idx_out.
