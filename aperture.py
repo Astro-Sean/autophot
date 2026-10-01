@@ -14,7 +14,7 @@ aperture-correction factors used to calibrate the photometry.
 import os
 import logging
 import warnings
-import multiprocessing
+import functools
 
 # Safeguard: force BLAS/OpenMP to 1 thread before importing numpy (avoids exhausting
 # process/thread limits when using multiprocessing on HPC; OpenBLAS often defaults to 128).
@@ -41,8 +41,6 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from multiprocessing import Pool, cpu_count
 from scipy.interpolate import interp1d
 from scipy.ndimage import label as _cc_label
-from scipy.optimize import curve_fit
-import scipy.optimize
 from scipy.stats import mstats, median_abs_deviation
 
 from astropy.stats import (
@@ -86,6 +84,70 @@ MAX_WORKERS_DEFAULT = (
 )
 
 
+def _resolve_positive_scalar(value, input_yaml, yaml_key, label, unit):
+    """Resolve ``label`` from an explicit value or ``input_yaml[yaml_key]``.
+
+    The value must be finite and > 0 in ``unit``; raises ``ValueError``
+    otherwise.  Shared by the exposure-time and gain resolvers so their
+    validation cannot drift apart.
+    """
+    if value is not None:
+        try:
+            v = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid {label} argument: {value!r}") from exc
+        if np.isfinite(v) and v > 0:
+            return v
+        raise ValueError(f"{label} must be finite and > 0 {unit}, got {value!r}")
+    raw = input_yaml.get(yaml_key)
+    if raw is None:
+        raise ValueError(
+            f"{label} is required: pass it to measure(), or set "
+            f"input_yaml[{yaml_key!r}] (normally set from the FITS header "
+            "before running photometry)."
+        )
+    try:
+        v = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"input_yaml[{yaml_key!r}] is not numeric: {raw!r}"
+        ) from exc
+    if not np.isfinite(v) or v <= 0:
+        raise ValueError(
+            f"input_yaml[{yaml_key!r}] must be finite and > 0 {unit}, got {raw!r}"
+        )
+    return v
+
+
+def _positive_scalar_from_header(header, preferred_keys, fallback_keys, label, hint):
+    """Return ``(value, key_used)`` for the first finite, >0 keyword found."""
+    keys = []
+    if preferred_keys is not None:
+        for k in preferred_keys:
+            if not k or k == "not_given_by_user":
+                continue
+            if k not in keys:
+                keys.append(k)
+    for alt in fallback_keys:
+        if alt not in keys:
+            keys.append(alt)
+    for key in keys:
+        if key not in header:
+            continue
+        raw = header[key]
+        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(val) and val > 0:
+            return val, key
+    raise ValueError(
+        f"No valid {label} in FITS header; tried keys {keys[:12]!r}. {hint}"
+    )
+
+
 def resolve_exposure_time_seconds(exposure_time, input_yaml: dict) -> float:
     """
     Return a valid exposure time in seconds.
@@ -103,30 +165,9 @@ def resolve_exposure_time_seconds(exposure_time, input_yaml: dict) -> float:
     ValueError
         If no finite exposure > 0 s is available.
     """
-    if exposure_time is not None:
-        try:
-            et = float(exposure_time)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid exposure_time argument: {exposure_time!r}") from exc
-        if np.isfinite(et) and et > 0:
-            return et
-        raise ValueError(f"exposure_time must be finite and > 0 s, got {exposure_time!r}")
-    raw = input_yaml.get("exposure_time")
-    if raw is None:
-        raise ValueError(
-            "exposure_time is required: pass it to measure(), or set "
-            "input_yaml['exposure_time'] (normally from the FITS EXPTIME header "
-            "before running photometry)."
-        )
-    try:
-        et = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"input_yaml['exposure_time'] is not numeric: {raw!r}") from exc
-    if not np.isfinite(et) or et <= 0:
-        raise ValueError(
-            f"input_yaml['exposure_time'] must be finite and > 0 s, got {raw!r}"
-        )
-    return et
+    return _resolve_positive_scalar(
+        exposure_time, input_yaml, "exposure_time", "exposure_time", "s"
+    )
 
 
 def exposure_seconds_from_header(header, preferred_keys=None):
@@ -150,39 +191,20 @@ def exposure_seconds_from_header(header, preferred_keys=None):
     ValueError
         If no usable exposure keyword is found.
     """
-    keys = []
-    if preferred_keys is not None:
-        for k in preferred_keys:
-            if not k or k == "not_given_by_user":
-                continue
-            if k not in keys:
-                keys.append(k)
-    for alt in (
-        "EXPTIME",
-        "EXPOSURE",
-        "TEXP",
-        "EXPTIME0",
-        "TEXPTIME",
-        "INTTIME",
-        "EXPTIM",
-    ):
-        if alt not in keys:
-            keys.append(alt)
-    for key in keys:
-        if key not in header:
-            continue
-        raw = header[key]
-        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
-            continue
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(val) and val > 0:
-            return val, key
-    raise ValueError(
-        "No valid exposure time in FITS header; tried keys "
-        f"{keys[:12]!r}. Add EXPTIME or EXPOSURE (seconds)."
+    return _positive_scalar_from_header(
+        header,
+        preferred_keys,
+        (
+            "EXPTIME",
+            "EXPOSURE",
+            "TEXP",
+            "EXPTIME0",
+            "TEXPTIME",
+            "INTTIME",
+            "EXPTIM",
+        ),
+        "exposure time",
+        "Add EXPTIME or EXPOSURE (seconds).",
     )
 
 
@@ -203,30 +225,9 @@ def resolve_gain_e_per_adu(gain, input_yaml: dict) -> float:
     ValueError
         If no finite gain > 0 e-/ADU is available.
     """
-    if gain is not None:
-        try:
-            g = float(gain)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid gain argument: {gain!r}") from exc
-        if np.isfinite(g) and g > 0:
-            return g
-        raise ValueError(f"gain must be finite and > 0 e-/ADU, got {gain!r}")
-    raw = input_yaml.get("gain")
-    if raw is None:
-        raise ValueError(
-            "gain is required: pass it to measure(), or set "
-            "input_yaml['gain'] (normally from the FITS GAIN header before "
-            "running photometry)."
-        )
-    try:
-        g = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"input_yaml['gain'] is not numeric: {raw!r}") from exc
-    if not np.isfinite(g) or g <= 0:
-        raise ValueError(
-            f"input_yaml['gain'] must be finite and > 0 e-/ADU, got {raw!r}"
-        )
-    return g
+    return _resolve_positive_scalar(
+        gain, input_yaml, "gain", "gain", "e-/ADU"
+    )
 
 
 def gain_e_per_adu_from_header(header, preferred_keys=None):
@@ -250,51 +251,75 @@ def gain_e_per_adu_from_header(header, preferred_keys=None):
     ValueError
         If no usable gain keyword is found.
     """
-    keys = []
-    if preferred_keys is not None:
-        for k in preferred_keys:
-            if not k or k == "not_given_by_user":
-                continue
-            if k not in keys:
-                keys.append(k)
     # Pan-STARRS / PS1 hierarchy cards (see utils/fix_panstarrs_headers.py).
-    for alt in (
-        "GAIN",
-        "gain",
-        "EGAIN",
-        "CONADU",
-        "CELL.GAIN",
-        "DET.GAIN",
-    ):
-        if alt not in keys:
-            keys.append(alt)
-    for key in keys:
-        if key not in header:
-            continue
-        raw = header[key]
-        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
-            continue
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(val) and val > 0:
-            return val, key
-    raise ValueError(
-        "No valid detector gain (e-/ADU) in FITS header; tried keys "
-        f"{keys[:12]!r}. Add GAIN or the instrument-specific keyword."
+    return _positive_scalar_from_header(
+        header,
+        preferred_keys,
+        (
+            "GAIN",
+            "gain",
+            "EGAIN",
+            "CONADU",
+            "CELL.GAIN",
+            "DET.GAIN",
+        ),
+        "detector gain (e-/ADU)",
+        "Add GAIN or the instrument-specific keyword.",
     )
+
+
+def _scale_from_radius(radius_fwhm, fwhm, min_scale=7, pad=0.0):
+    """Cutout scale (half-size) for a radius given in FWHM units.
+
+    Centralised so every return path in ``measure_optimum_radius`` derives
+    the scale from the radius actually being returned, instead of reusing
+    a value computed once from the fallback radius.
+    """
+    return max(min_scale, int(np.ceil((radius_fwhm + pad) * fwhm))) + 0.5
 
 
 def _resolve_n_jobs(n_jobs, half_cpus=False):
     """Resolve and cap worker count for multiprocessing (safeguards HPC process/thread limits).
 
-    ``n_jobs is None`` defaults to 1 (serial). ``half_cpus`` is kept for call-site compatibility
-    and is ignored.
+    ``n_jobs is None`` defaults to 1 (serial).  The result is capped by
+    ``MAX_WORKERS_DEFAULT`` (halved when ``half_cpus`` is set) and by the
+    number of cores actually available to this process - under cgroup
+    CPU limits (containers, Slurm allocations) ``sched_getaffinity``
+    reports the allowed set rather than the machine total.
     """
+    try:
+        n_cpu = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        try:
+            n_cpu = cpu_count()
+        except NotImplementedError:
+            n_cpu = 1
+    cap = MAX_WORKERS_DEFAULT // 2 if half_cpus else MAX_WORKERS_DEFAULT
+    cap = max(1, min(cap, n_cpu))
     if n_jobs is None:
         return 1
-    return min(MAX_WORKERS_DEFAULT, max(1, int(n_jobs)))
+    return min(cap, max(1, int(n_jobs)))
+
+
+def _scoped_quiet(fn):
+    """Suppress noisy warnings/options for the duration of ``fn`` only.
+
+    ``warnings.filterwarnings`` and ``pd.options`` mutate *process-global*
+    state; calling them at the top of a long-running method would silence
+    RuntimeWarnings for every later caller in the process.  The context
+    managers here restore the previous state on exit.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with warnings.catch_warnings(), pd.option_context(
+            "mode.chained_assignment", None
+        ):
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            warnings.simplefilter("ignore", category=FutureWarning)
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 # ===========================================================================
@@ -439,8 +464,11 @@ def _measure_worker(args):
                 cut = mask_obj.multiply(img2d)
                 vals = np.asarray(cut, dtype=float)[mask_w]
                 return vals
-            except Exception:
+            except Exception as exc:
                 # Fallback to photutils helper (may include bbox-padding zeros).
+                logging.getLogger(__name__).debug(
+                    "ApertureMask.multiply failed; using get_values: %s", exc
+                )
                 return mask_obj.get_values(img2d)
 
         ap_pix = _finite_mask_values(ap_mask, ap_w, image_e)
@@ -454,8 +482,23 @@ def _measure_worker(args):
             bkg_mask_vals = _finite_mask_values(an_mask, an_w, defects_mask)
             if len(ap_mask_vals) == len(ap_pix):
                 ap_pix = np.where(ap_mask_vals > 0, np.nan, ap_pix)
+            else:
+                # Length mismatch means the get_values fallback path ran
+                # for one frame but not the other; without a log bad
+                # pixels would silently enter the aperture sum.
+                logging.getLogger(__name__).debug(
+                    "Source %d: defects-mask/aperture length mismatch (%d vs %d); "
+                    "defects mask not applied to the aperture.",
+                    i, len(ap_mask_vals), len(ap_pix),
+                )
             if len(bkg_mask_vals) == len(bkg_pix):
                 bkg_pix = np.where(bkg_mask_vals > 0, np.nan, bkg_pix)
+            else:
+                logging.getLogger(__name__).debug(
+                    "Source %d: defects-mask/annulus length mismatch (%d vs %d); "
+                    "defects mask not applied to the annulus.",
+                    i, len(bkg_mask_vals), len(bkg_pix),
+                )
 
         # Optional per-pixel uncertainty (e.g. from Background2D / calc_total_error).
         ap_err_pix = None
@@ -516,6 +559,17 @@ def _measure_worker(args):
         if ap_pix.size == 0:
             return {"idx": i, "fail_reason": "empty_aperture"}
 
+        # Sigma-clip the annulus before the median/MAD: a bright neighbour
+        # or cosmic-ray cluster in a thin annulus can still bias a plain
+        # median.  The clip is deliberately mild (4 sigma) so real sky
+        # structure is retained; it runs AFTER the minimum-valid-pixel
+        # check so that floor counts the uncut sample.
+        _bkg_clipped = sigma_clip(
+            bkg_pix, sigma=4.0, maxiters=3, masked=False
+        )
+        if _bkg_clipped.size >= 10:
+            bkg_pix = _bkg_clipped
+
         # Median background with MAD scatter: resistant to outliers, handles negatives cleanly.
         bkg_value = np.median(bkg_pix)
         bkg_value_used = (
@@ -575,6 +629,20 @@ def _measure_worker(args):
             _ase = row.get("aperture_sum_err", np.nan)
             if np.isfinite(_ase) and _ase > 0:
                 sqrt_var = float(_ase)
+                # Cross-check against the center-mask per-pixel sum.  If
+                # the error map had NaN holes inside the exact-aperture
+                # footprint, photutils treats them as zero contribution
+                # and aperture_sum_err underestimates by a large factor.
+                # The center-mask sum drops fractional edge pixels, so it
+                # should be SMALLER than _ase; flag only a >3x excess.
+                if ap_err_pix is not None:
+                    _chk = ap_err_pix[np.isfinite(ap_err_pix)]
+                    if _chk.size:
+                        _alt = float(
+                            np.sqrt(np.nansum(_chk.astype(float) ** 2))
+                        )
+                        if np.isfinite(_alt) and _alt > 3.0 * sqrt_var:
+                            sqrt_var = _alt
         if not np.isfinite(sqrt_var) and ap_err_pix is not None:
             # error array is in electrons; propagate by summing variances.
             # Use only finite values to avoid contamination from bad pixels
@@ -587,10 +655,12 @@ def _measure_worker(args):
         if not np.isfinite(sqrt_var):
             # Fallback variance: |source| + area * sigma_sky^2
             # empirical_std is the MAD-based per-pixel scatter from the
-            # annulus, which already includes read noise.  Do NOT add
-            # read_noise_sq again -- that double-counts it.
+            # annulus, which already includes read noise, so read_noise_sq
+            # is used only as a FLOOR -- an unusually quiet or sparse
+            # annulus should never imply less noise than read noise alone.
+            # Do NOT add it on top; that would double-count.
             source_flux = abs(aperture_sum)
-            sky_var = max(empirical_std**2, 0.0)  # No artificial floor; use measured background
+            sky_var = max(empirical_std**2, read_noise_sq)
             total_var = source_flux + effective_area * sky_var
             if total_var > 0 and np.isfinite(total_var):
                 sqrt_var = np.sqrt(total_var)
@@ -736,10 +806,28 @@ def _optimum_radius_worker(args):
         cog = CurveOfGrowth(
             image, xycen, radii, error=error, mask=mask, method="subpixel"
         )
-        cog.normalize()
-
-        norm_profile = cog.profile
-        norm_profile_err = cog.profile_error
+        # Normalize by the median of the outermost ~0.5 FWHM of profile
+        # bins rather than the profile maximum (photutils' normalize()):
+        # a single contaminated, masked or truncated outer annulus
+        # inflates/collapses one bin, and using it as the denominator
+        # biases the EE radius of an otherwise clean star.
+        raw_profile = np.asarray(cog.profile, dtype=float)
+        raw_error = np.asarray(cog.profile_error, dtype=float)
+        if len(cog.radii) < 5:
+            # A handful of bins cannot support a stable EE inversion or a
+            # meaningful normalisation median - reject pathological grids.
+            return None
+        _step = (
+            float(np.nanmedian(np.diff(cog.radii)))
+            if len(cog.radii) > 1
+            else 0.1
+        )
+        _n_norm = max(3, int(round(0.5 * fwhm / max(_step, 1e-6))))
+        _denom = float(np.nanmedian(raw_profile[-_n_norm:]))
+        if not np.isfinite(_denom) or _denom <= 0:
+            return None
+        norm_profile = raw_profile / _denom
+        norm_profile_err = raw_error / _denom
 
         if use_moffat_cog:
             # Analytic encircled-energy inversion for a circular Moffat profile:
@@ -755,7 +843,22 @@ def _optimum_radius_worker(args):
                     (1.0 - ee) ** (1.0 / (1.0 - b)) - 1.0
                 )
         else:
-            r_at_norm = cog.calc_radius_at_ee(norm_factor)
+            # Invert the profile on its monotonically-enforced form; a
+            # CoG can only grow with radius, so dips are lifted to the
+            # running maximum and the EE fraction takes its first
+            # crossing (same role as photutils' calc_radius_at_ee, which
+            # trims to the monotonic region and inverts with PCHIP).
+            _ok = np.isfinite(norm_profile)
+            if _ok.sum() >= 2:
+                _pmono = np.maximum.accumulate(norm_profile[_ok])
+                if norm_factor <= _pmono[-1]:
+                    r_at_norm = float(
+                        np.interp(norm_factor, _pmono, cog.radii[_ok])
+                    )
+                else:
+                    r_at_norm = float("nan")
+            else:
+                r_at_norm = float("nan")
         if not np.isfinite(r_at_norm):
             return None
 
@@ -816,8 +919,10 @@ def _optimum_radius_worker(args):
                 apix = apix[np.isfinite(apix)]
                 if len(apix) >= 10:
                     local_env_std = float(biweight_scale(apix))
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug(
+                "Source %s: local_env_std estimation failed: %s", idx, exc
+            )
 
         return {
             "idx": idx,
@@ -987,6 +1092,7 @@ class Aperture:
     # Aperture photometry
     # -----------------------------------------------------------------------
 
+    @_scoped_quiet
     def measure(
         self,
         sources: pd.DataFrame,
@@ -1026,10 +1132,6 @@ class Aperture:
         :class:`Aperture` (integrated e- in frame, and e-/s, respectively, when
         the pipeline uses ``image * gain`` as in this implementation).
         """
-        warnings.filterwarnings("ignore", category=RuntimeWarning)
-        warnings.filterwarnings("ignore", category=FutureWarning)
-        pd.options.mode.chained_assignment = None
-
         logger = logging.getLogger(__name__)
         if verbose is None:
             verbose = (self.input_yaml or {}).get("global_verbose_level", 1)
@@ -1130,11 +1232,9 @@ class Aperture:
             # difference images: negative pixels are noise fluctuations with
             # no source photons.  Do NOT wrap with abs() or maximum(,0) -- that
             # would add spurious Poisson noise for negative pixels.
-            image_e_pois = np.where(
-                np.isfinite(image_e), image_e, np.nan
-            )
+            # image_e was already NaN-cleaned above.
             error = calc_total_error(
-                image_e_pois, _bkg_rms * gain, effective_gain=1
+                image_e, _bkg_rms * gain, effective_gain=1
             )
         else:
             error = None
@@ -1155,6 +1255,15 @@ class Aperture:
                 n_dropped,
             )
         sources = sources[valid_mask].reset_index(drop=True)
+        if mask is not None:
+            mask = np.asarray(mask)
+            # ``mask`` is passed BOTH to aperture_photometry (soft exclusion
+            # from the flux sum) and to the workers as a hard defects veto -
+            # a mis-shaped array would silently do neither correctly.
+            if mask.shape != self.image.shape:
+                raise ValueError(
+                    f"mask shape {mask.shape} != image shape {self.image.shape}"
+                )
         if sources.empty:
             if verbose:
                 logger.warning("No valid sources within image bounds.")
@@ -1183,25 +1292,42 @@ class Aperture:
         # only the source index is pickled per task (image/masks/phot can be
         # tens of MB -- pickling them per task dominates runtime otherwise).
         if len(sources) >= NSOURCES:
-            with Pool(
-                processes=n_jobs,
-                initializer=_measure_init_shared,
-                initargs=(
-                    aperture_masks,
-                    annulus_masks,
-                    image_e,
-                    error,
-                    read_noise_sq,
-                    inv_exp_time,
-                    area,
-                    phot,
-                    gain,
-                    enforce_nonnegative_local_bkg,
-                    verbose,
-                    mask,
-                ),
-            ) as pool:
-                results = pool.map(_measure_worker_shared, range(len(sources)))
+            # Bounded chunksize keeps imbalanced per-source costs from
+            # serialising onto one worker; a dead worker otherwise raises
+            # an opaque BrokenProcessPool with no run context.
+            chunksize = max(1, len(sources) // (4 * n_jobs))
+            try:
+                with Pool(
+                    processes=n_jobs,
+                    initializer=_measure_init_shared,
+                    initargs=(
+                        aperture_masks,
+                        annulus_masks,
+                        image_e,
+                        error,
+                        read_noise_sq,
+                        inv_exp_time,
+                        area,
+                        phot,
+                        gain,
+                        enforce_nonnegative_local_bkg,
+                        verbose,
+                        mask,
+                    ),
+                ) as pool:
+                    results = pool.map(
+                        _measure_worker_shared,
+                        range(len(sources)),
+                        chunksize=chunksize,
+                    )
+            except Exception:
+                logger.error(
+                    "Aperture photometry worker pool failed "
+                    "(n_jobs=%d, n_sources=%d)",
+                    n_jobs,
+                    len(sources),
+                )
+                raise
         else:
             args_list = [
                 (
@@ -2105,6 +2231,16 @@ class Aperture:
         logger = logging.getLogger(__name__)
         phot_cfg = self.input_yaml.get("photometry", {}) or {}
 
+        def _cfg(key, default, lo, hi):
+            """Validated photometry.* knob: fail fast on non-finite, clip to [lo, hi]."""
+            v = float(phot_cfg.get(key, default))
+            if not np.isfinite(v):
+                raise ValueError(
+                    f"photometry.{key} must be finite, got "
+                    f"{phot_cfg.get(key)!r}"
+                )
+            return max(lo, min(hi, v))
+
         if not {"x_pix", "y_pix"}.issubset(sources.columns):
             raise ValueError(
                 "sources must contain 'x_pix' and 'y_pix' columns."
@@ -2115,10 +2251,10 @@ class Aperture:
         # dense regions.  This radius is in FWHM units and can be overridden
         # by `photometry.crowded_optimum_radius_fwhm` in the config.
         if crowded:
-            fixed_radius = float(phot_cfg.get("crowded_optimum_radius_fwhm", 1.5))
+            fixed_radius = _cfg("crowded_optimum_radius_fwhm", 1.5, 0.5, 5.0)
             fwhm = float(self.input_yaml["fwhm"])
             optimum_radius = fixed_radius
-            optimum_scale = max(7, int(np.ceil(fixed_radius * fwhm))) + 0.5
+            optimum_scale = _scale_from_radius(fixed_radius, fwhm)
             logger.info(
                 "Crowded field: skipping data-driven optimum-radius search; using fixed aperture radius of %.2f FWHM (%.2f pixels).",
                 optimum_radius,
@@ -2130,8 +2266,8 @@ class Aperture:
         # larger default fallback radius.
         fallback_radius = 1.7
         optimum_radius = fallback_radius
-        optimum_scale = (
-            max(7, int(np.ceil(fallback_radius * self.input_yaml["fwhm"]))) + 0.5
+        optimum_scale = _scale_from_radius(
+            fallback_radius, self.input_yaml["fwhm"]
         )
 
         # ---- SNR pre-filter (slightly relaxed for crowded) ------------------------------------------------
@@ -2200,6 +2336,16 @@ class Aperture:
                 phot_cfg.get("psf_init_moffat_beta", 4.765),
             )
         )
+        if use_moffat_cog and (not np.isfinite(moffat_beta) or moffat_beta <= 1.0):
+            # beta <= 1 makes the Moffat wings integral diverge; the worker
+            # clamps silently, so warn here once per call rather than
+            # per source inside the pool.
+            logger.warning(
+                "optimum_radius_moffat_beta=%.4g is invalid for a Moffat "
+                "profile (requires beta > 1); per-source values are clamped "
+                "to 1.01.",
+                moffat_beta,
+            )
         logger.info(
             "Optimum-radius CoG mode: %s (moffat_beta=%g)",
             "moffat" if use_moffat_cog else "empirical",
@@ -2229,28 +2375,39 @@ class Aperture:
         else:
             # Broadcast image/error/radii once per worker; only (idx, x, y) is
             # pickled per task.
-            with Pool(
-                processes=n_jobs,
-                initializer=_optimum_radius_init_shared,
-                initargs=(
-                    fwhm,
-                    radii,
-                    self.image,
-                    error,
-                    norm_factor,
-                    stability_threshold,
-                    use_moffat_cog,
-                    moffat_beta,
-                    mask,
-                ),
-            ) as pool:
-                results = pool.map(
-                    _optimum_radius_worker_shared,
-                    [
-                        (idx, row["x_pix"], row["y_pix"])
-                        for idx, row in sources.iterrows()
-                    ],
+            chunksize = max(1, len(sources) // (4 * n_jobs))
+            try:
+                with Pool(
+                    processes=n_jobs,
+                    initializer=_optimum_radius_init_shared,
+                    initargs=(
+                        fwhm,
+                        radii,
+                        self.image,
+                        error,
+                        norm_factor,
+                        stability_threshold,
+                        use_moffat_cog,
+                        moffat_beta,
+                        mask,
+                    ),
+                ) as pool:
+                    results = pool.map(
+                        _optimum_radius_worker_shared,
+                        [
+                            (idx, row["x_pix"], row["y_pix"])
+                            for idx, row in sources.iterrows()
+                        ],
+                        chunksize=chunksize,
+                    )
+            except Exception:
+                logger.error(
+                    "Optimum-radius worker pool failed "
+                    "(n_jobs=%d, n_sources=%d)",
+                    n_jobs,
+                    len(sources),
                 )
+                raise
 
         # ---- Collect results -----------------------------------------------
         # KEY OPTIMISATION: profiles are already in `results`; no second Pool
@@ -2333,12 +2490,10 @@ class Aperture:
         )
         # Concentration gate to reject very broad sources:
         # require a minimum enclosed-flux fraction within a fixed core radius.
-        core_radius_fwhm = float(
-            phot_cfg.get("optimum_radius_core_radius_fwhm", 1.7)
+        core_radius_fwhm = _cfg(
+            "optimum_radius_core_radius_fwhm", 1.7, 0.5, float(max_radius)
         )
-        core_flux_min = float(phot_cfg.get("optimum_radius_core_flux_min", 0.5))
-        core_radius_fwhm = max(0.5, min(float(max_radius), core_radius_fwhm))
-        core_flux_min = max(0.05, min(0.95, core_flux_min))
+        core_flux_min = _cfg("optimum_radius_core_flux_min", 0.5, 0.05, 0.95)
         radii_fwhm_arr = radii / fwhm
         core_pass_mask = np.zeros(len(sources), dtype=bool)
         for idx in range(len(sources)):
@@ -2370,10 +2525,10 @@ class Aperture:
 
         # Ensure a minimum stable pool: rescue high-SNR, near-global-radius stars
         # when adaptive stability is still too strict.
-        min_keep_abs = int(phot_cfg.get("optimum_radius_min_keep_abs", 8))
-        min_keep_frac = float(phot_cfg.get("optimum_radius_min_keep_frac", 0.25))
-        min_keep_abs = max(3, min_keep_abs)
-        min_keep_frac = max(0.05, min(0.9, min_keep_frac))
+        min_keep_abs = int(
+            _cfg("optimum_radius_min_keep_abs", 8, 3, 10000)
+        )
+        min_keep_frac = _cfg("optimum_radius_min_keep_frac", 0.25, 0.05, 0.9)
         min_keep = min(n_sources, max(min_keep_abs, int(np.ceil(min_keep_frac * n_sources))))
 
         if np.count_nonzero(stable_mask) < min_keep:
@@ -2412,12 +2567,10 @@ class Aperture:
                         "No globally stable sources; using median of preliminary radii (crowded): %.2f FWHM",
                         fallback_from_data,
                     )
-                    optimum_scale = (
-                        max(
-                            12,
-                            int(np.ceil(fallback_from_data * self.input_yaml["fwhm"])),
-                        )
-                        + 0.5
+                    optimum_scale = _scale_from_radius(
+                        fallback_from_data,
+                        self.input_yaml["fwhm"],
+                        min_scale=12,
                     )
                     return sources.iloc[[]], fallback_from_data, optimum_scale
             logger.warning("No globally stable sources. Using default.")
@@ -2479,14 +2632,21 @@ class Aperture:
         # Gentle final screen: prioritize rejecting positive-tail contamination.
         # Do not strongly penalize broad (still-rising) but otherwise smooth profiles.
         beyond_final = (radii / fwhm) > optimum_radius
+        # Snapshot the post-clip pool: the rescue below may only restore
+        # sources the noisy tail screen rejected, never sources the radius
+        # clip already removed as outliers.
+        pre_tail_indices = final_indices.copy()
         if beyond_final.any():
             tail_excess_vals = []
             tail_min_vals = []
             tail_by_idx = {}
-            outer_start_fwhm = float(
-                phot_cfg.get("optimum_radius_outer_start_fwhm", 2.2)
+            outer_start_fwhm = _cfg(
+                "optimum_radius_outer_start_fwhm", 2.2, 0.5, float(max_radius)
             )
             outer_start_fwhm = max(optimum_radius + 0.1, outer_start_fwhm)
+            # Keep a minimum tail span: nanstd/gradient on fewer than ~5
+            # bins is noise, not a flatness measurement.
+            outer_start_fwhm = min(outer_start_fwhm, max_radius - 0.5)
             outer_radii_mask = (radii / fwhm) >= outer_start_fwhm
             for i in final_indices:
                 prof = profiles_map.get(i)
@@ -2528,24 +2688,22 @@ class Aperture:
                 adaptive_min_tail = float(np.nanpercentile(np.asarray(tail_min_vals, float), 5) - 0.1)
                 min_tail_flux_final = min(min_tail_flux, adaptive_min_tail)
             # Outer tail should be flat/negligible (no bright source contamination).
-            outer_std_max = float(phot_cfg.get("optimum_radius_outer_std_max", 0.05))
-            outer_slope_abs_max = float(
-                phot_cfg.get("optimum_radius_outer_slope_abs_max", 0.03)
+            outer_std_max = _cfg("optimum_radius_outer_std_max", 0.05, 0.005, 1.0)
+            outer_slope_abs_max = _cfg(
+                "optimum_radius_outer_slope_abs_max", 0.03, 0.001, 1.0
             )
             # Undersampled data: the normalised CoG is derived from only a
             # handful of pixels per radius step, so outer-tail statistics are
             # intrinsically noisier; relax the flatness tolerances to avoid
             # discarding genuine stars on a noise-dominated diagnostic.
-            _us_thr = float(phot_cfg.get("undersampled_fwhm_threshold", 2.5))
+            _us_thr = _cfg("undersampled_fwhm_threshold", 2.5, 0.5, 50.0)
             if float(fwhm) <= _us_thr:
-                _tail_relax = float(
-                    phot_cfg.get("optimum_radius_undersampled_tail_relax", 2.5)
+                _tail_relax = _cfg(
+                    "optimum_radius_undersampled_tail_relax", 2.5, 1.0, 10.0
                 )
-                outer_std_max *= max(1.0, _tail_relax)
-                outer_slope_abs_max *= max(1.0, _tail_relax)
+                outer_std_max *= _tail_relax
+                outer_slope_abs_max *= _tail_relax
                 tail_excess_limit_final += 0.5 * (_tail_relax - 1.0)
-            outer_std_max = max(0.005, outer_std_max)
-            outer_slope_abs_max = max(0.001, outer_slope_abs_max)
 
             n_pre_tail_screen = len(final_indices)
             still_ok = []
@@ -2589,9 +2747,17 @@ class Aperture:
                         )
                     )
                 # Enforce minimum retention after final tail screen.
+                # Rescue only tail-screen rejects: re-admitting radius-clip
+                # outliers here would silently undo the outlier rejection
+                # (observed: a broad galaxy-like profile re-entered a 5-star
+                # pool when min_keep equalled the pool size).
                 if len(final_indices) < min_keep:
                     fallback_candidates = sources.loc[
-                        kept_indices[np.isin(kept_indices, np.where(core_pass_mask)[0])]
+                        pre_tail_indices[
+                            np.isin(
+                                pre_tail_indices, np.where(core_pass_mask)[0]
+                            )
+                        ]
                     ].copy()
                     if not fallback_candidates.empty:
                         snr_vals = np.asarray(
@@ -2637,24 +2803,30 @@ class Aperture:
                     # Use non-parametric smoothed median profile instead of
                     # parametric model for better representation of the true
                     # curve of growth (handles complex PSF shapes: core + wings).
-                    from scipy.interpolate import make_interp_spline
-                    
+                    from scipy.interpolate import PchipInterpolator
+
                     # Fine grid for smooth plotting
                     fine_r = np.linspace(0, radii[-1], 500)
-                    
-                    # Smooth the median profile using a smoothing spline.
-                    # Use a small smoothing factor to avoid overfitting but
-                    # reduce noise from the discrete radii sampling.
+
+                    # Resample the median profile with PCHIP: unlike an
+                    # unconstrained cubic spline it cannot ring or overshoot
+                    # between the CoG sample points, so the EE crossing is
+                    # found on the data, not on spline artefacts.  The clip +
+                    # running maximum then enforce the physical [0,1],
+                    # non-decreasing curve.
                     try:
-                        # Use 3rd order spline with moderate smoothing
-                        tck = make_interp_spline(
-                            radii, mean_profile, k=3,
-                        )
-                        fine_profile = tck(fine_r)
-                        # Clip to valid range [0, 1]
-                        fine_profile = np.clip(fine_profile, 0.0, 1.0)
-                        # Ensure monotonic (non-decreasing)
-                        fine_profile = np.maximum.accumulate(fine_profile)
+                        ok_bins = np.isfinite(mean_profile) & np.isfinite(radii)
+                        if np.count_nonzero(ok_bins) >= 3:
+                            fine_profile = PchipInterpolator(
+                                radii[ok_bins], mean_profile[ok_bins]
+                            )(fine_r)
+                            fine_profile = np.clip(fine_profile, 0.0, 1.0)
+                            fine_profile = np.maximum.accumulate(fine_profile)
+                        else:
+                            fine_profile = np.clip(
+                                np.interp(fine_r, radii, mean_profile), 0.0, 1.0
+                            )
+                            fine_profile = np.maximum.accumulate(fine_profile)
                     except Exception:
                         # Fallback to linear interpolation
                         fine_profile = np.interp(fine_r, radii, mean_profile)
@@ -2687,7 +2859,9 @@ class Aperture:
         # The +0.5 keeps the half-integer convention used by every other
         # optimum_scale return in this function (callers pass it through
         # odd() to obtain the odd cutout size).
-        optimum_scale = max(12, int(np.ceil((optimum_radius + 2.0) * fwhm))) + 0.5
+        optimum_scale = _scale_from_radius(
+            optimum_radius, fwhm, min_scale=12, pad=2.0
+        )
 
         # ---- Plotting (reuses profiles already in profiles_map) ------------
         if plot:
@@ -2892,7 +3066,47 @@ class Aperture:
         else:
             error = None
 
-        selected = sources.sort_values("flux_AP", ascending=False).head(n_samples)
+        # Quality gate before ranking by flux: the brightest stars are
+        # disproportionately likely to be saturated, blended, or flagged -
+        # exactly the ones that bias the correction toward zero.  Gates are
+        # conditional on the columns being present (IsolatedSources carries
+        # them post-measure; raw tables may not).
+        quality = sources.copy()
+        if "fail_reason" in quality.columns:
+            quality = quality[quality["fail_reason"].fillna("") == ""]
+        if "SNR" in quality.columns:
+            quality = quality[quality["SNR"] > 20]
+        if "stable_beyond_global" in quality.columns:
+            quality = quality[quality["stable_beyond_global"].fillna(True)]
+        sat_level = self.input_yaml.get("saturate")
+        # maxPixel is in e-/s; saturate is in ADU - convert before comparing.
+        if (
+            sat_level is not None
+            and np.isfinite(sat_level)
+            and "maxPixel" in quality.columns
+        ):
+            _exptime = self.input_yaml.get("exposure_time")
+            if _exptime is not None and np.isfinite(_exptime) and _exptime > 0:
+                peak_adu = quality["maxPixel"] * float(_exptime) / gain
+                quality = quality[
+                    ~np.isfinite(peak_adu) | (peak_adu < 0.9 * float(sat_level))
+                ]
+        if len(quality) < 5:
+            logger.warning(
+                "Quality filtering left only %d sources for aperture "
+                "correction; falling back to unfiltered bright-star list.",
+                len(quality),
+            )
+            quality = sources
+
+        selected = quality.sort_values("flux_AP", ascending=False).head(n_samples)
+        if len(selected) < max(5, n_samples // 2):
+            logger.warning(
+                "Aperture correction computed from only %d/%d requested stars "
+                "after quality cuts.",
+                len(selected),
+                n_samples,
+            )
 
         corrections = []
         n_out_of_range = 0
