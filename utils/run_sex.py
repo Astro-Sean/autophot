@@ -1240,6 +1240,21 @@ class SExtractorWrapper:
                 # SExtractor rejects inf/NaN or non-positive SATUR_LEVEL values
                 if not np.isfinite(saturation) or saturation <= 0:
                     saturation = 60000
+                # A placeholder-scale value (1e10/1e30 "no limit" sentinels)
+                # is not a detector level; treating it as such would cap it to
+                # 65535 and wrongly flag bright-but-unsaturated pixels on
+                # frames whose true ceiling is unknown.  Use the same default
+                # as a missing key instead.
+                try:
+                    from functions import SATURATE_SENTINEL_MIN
+                except ImportError:
+                    SATURATE_SENTINEL_MIN = 1e8
+                if saturation >= SATURATE_SENTINEL_MIN:
+                    logger.info(
+                        "SATURATE=%s is a no-limit placeholder; using default %d for SExtractor",
+                        saturation_raw, 60000,
+                    )
+                    saturation = 60000
                 # Cap at reasonable maximum (65535 = max for 16-bit unsigned)
                 # Header values like 1e30 cause "SATUR_LEVEL keyword out of range"
                 max_saturation = 65535
