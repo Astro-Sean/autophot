@@ -2493,7 +2493,14 @@ class Plot:
                 _quiv_scale = max(np.nanmedian(_res_mag), 1e-3) / (
                     0.02 * max(_nx, _ny)
                 )
-                fig2, ax2 = plt.subplots(figsize=set_size(width_pt, aspect=1.0))
+                # Two panels: residual vectors (left) and the smoothed
+                # distortion surface (right).  The figure is twice the
+                # single-panel width so each axes keeps the size a
+                # one-panel figure had.
+                _fs2 = set_size(width_pt, aspect=1.0)
+                fig2, (ax2, ax3) = plt.subplots(
+                    1, 2, figsize=(_fs2[0] * 2.0, _fs2[1])
+                )
                 # Underlay the science image so coherent residual
                 # structure can be tied to detector features (edges,
                 # bad columns, vignetting).  ZScale keeps the sky
@@ -2526,9 +2533,9 @@ class Plot:
                     _ny, _nx = _img.shape
                 _qv = ax2.quiver(
                     sci_x_plot, sci_y_plot, dx_plot, dy_plot, _res_mag,
-                    cmap=plt.get_cmap(PLOT_COLORS.get("scatter_cmap", "viridis")),
+                    cmap=plt.get_cmap(PLOT_COLORS.get("quiver_cmap", "autumn_r")),
                     angles="xy", scale_units="xy", scale=_quiv_scale,
-                    width=0.003, edgecolors="white", linewidths=0.4,
+                    width=0.003, edgecolors="black", linewidths=0.4,
                     zorder=3,
                 )
                 ax2.set_xlim(0, _nx)
@@ -2536,13 +2543,43 @@ class Plot:
                 ax2.set_xlabel(r"$x$ [px]")
                 ax2.set_ylabel(r"$y$ [px]")
                 ax2.set_aspect("equal", adjustable="box")
-                _cax2 = fig2.add_axes([0.88, 0.12, 0.025, 0.80])
+                # Anchor the colorbar to the axes so it matches the plot
+                # height exactly (the aspect-equal axes is shorter than
+                # the figure for non-square frames).
+                from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+                _cax2 = make_axes_locatable(ax2).append_axes(
+                    "right", size="4%", pad=0.08
+                )
                 _cb2 = fig2.colorbar(_qv, cax=_cax2)
                 _cb2.set_label("residual [px]", fontsize="small")
                 _cb2.ax.tick_params(labelsize="x-small")
                 # Per-quadrant median residual magnitude, annotated on the plot.
                 _qx = float(np.nanmedian(sci_x_plot))
                 _qy = float(np.nanmedian(sci_y_plot))
+                # Dashed squares delimit the median-split quadrants the
+                # Q1-Q4 stats refer to.
+                from matplotlib.patches import Rectangle
+
+                for (_qx0, _qx1), (_qy0, _qy1) in (
+                    ((0.0, _qx), (_qy, _ny)),
+                    ((_qx, _nx), (_qy, _ny)),
+                    ((0.0, _qx), (0.0, _qy)),
+                    ((_qx, _nx), (0.0, _qy)),
+                ):
+                    ax2.add_patch(
+                        plt.Rectangle(
+                            (_qx0, _qy0),
+                            _qx1 - _qx0,
+                            _qy1 - _qy0,
+                            fill=False,
+                            edgecolor="white",
+                            linewidth=0.9,
+                            linestyle="--",
+                            alpha=0.7,
+                            zorder=2,
+                        )
+                    )
                 _quad_txt = []
                 for _qlab, _qm in (
                     ("Q1 TL", (sci_x_plot <= _qx) & (sci_y_plot > _qy)),
@@ -2566,7 +2603,120 @@ class Plot:
                             alpha=0.75, edgecolor="none",
                         ),
                     )
-                fig2.subplots_adjust(left=0.12, right=0.80, top=0.95, bottom=0.12)
+
+                # --- Smoothed distortion surface (right panel) ---------
+                # RBF-interpolate the residual components onto a grid:
+                # colour encodes the smoothed residual magnitude, sparse
+                # arrows show the smoothed direction field.  Grid cells
+                # farther than the typical source spacing from any match
+                # are masked -- extrapolated surface there would be pure
+                # invention.
+                ax3.set_xlim(0, _nx)
+                ax3.set_ylim(0, _ny)
+                ax3.set_xlabel(r"$x$ [px]")
+                ax3.set_yticklabels([])
+                ax3.set_aspect("equal", adjustable="box")
+                if len(sci_x_plot) >= 6:
+                    try:
+                        from scipy.interpolate import RBFInterpolator
+                        from scipy.spatial import cKDTree
+
+                        _ng = 200
+                        _gx = np.linspace(0, _nx, _ng)
+                        _gy = np.linspace(0, _ny, _ng)
+                        _gxx, _gyy = np.meshgrid(_gx, _gy)
+                        _gpts = np.column_stack(
+                            [_gxx.ravel(), _gyy.ravel()]
+                        )
+                        _pts = np.column_stack([sci_x_plot, sci_y_plot])
+                        # Smoothing ~ the RMS residual: real spatial
+                        # structure survives, per-source noise is damped.
+                        _sm = float(np.nanmedian(_res_mag)) ** 2
+                        _rbf_x = RBFInterpolator(
+                            _pts, dx_plot, kernel="thin_plate_spline",
+                            smoothing=_sm,
+                        )
+                        _rbf_y = RBFInterpolator(
+                            _pts, dy_plot, kernel="thin_plate_spline",
+                            smoothing=_sm,
+                        )
+                        _du = _rbf_x(_gpts).reshape(_gxx.shape)
+                        _dv = _rbf_y(_gpts).reshape(_gxx.shape)
+                        _dmag = np.clip(np.hypot(_du, _dv), 0.0, None)
+                        # Mask extrapolation beyond the sampled region.
+                        _nn = cKDTree(_pts)
+                        _sep = np.sqrt(
+                            _nx * _ny / max(len(_pts), 1)
+                        )
+                        _dist, _ = _nn.query(_gpts)
+                        _cov = _dist.reshape(_gxx.shape) <= 1.5 * _sep
+                        _dmag = np.where(_cov, _dmag, np.nan)
+                        _sf_cmap = plt.get_cmap(
+                            PLOT_COLORS.get("distortion_cmap", "inferno")
+                        )
+                        _sf_cmap.set_bad(color="none")
+                        _sf = ax3.imshow(
+                            _dmag,
+                            origin="lower",
+                            cmap=_sf_cmap,
+                            interpolation="bilinear",
+                            extent=[0, _nx, 0, _ny],
+                            alpha=0.85,
+                            zorder=2,
+                        )
+                        _cax3 = make_axes_locatable(ax3).append_axes(
+                            "right", size="4%", pad=0.08
+                        )
+                        _cb3 = fig2.colorbar(_sf, cax=_cax3)
+                        _cb3.set_label("residual [px]", fontsize="small")
+                        _cb3.ax.tick_params(labelsize="x-small")
+                        # Smoothed direction field on a coarse grid, only
+                        # where data coverage exists.
+                        _nc = 15
+                        _cx = np.linspace(
+                            0.5 * _nx / _nc, _nx - 0.5 * _nx / _nc, _nc
+                        )
+                        _cy = np.linspace(
+                            0.5 * _ny / _nc, _ny - 0.5 * _ny / _nc, _nc
+                        )
+                        _cxx, _cyy = np.meshgrid(_cx, _cy)
+                        _cpts = np.column_stack(
+                            [_cxx.ravel(), _cyy.ravel()]
+                        )
+                        _cdist, _ = _nn.query(_cpts)
+                        _ccov = _cdist <= 1.5 * _sep
+                        _cu = _rbf_x(_cpts)
+                        _cv = _rbf_y(_cpts)
+                        ax3.quiver(
+                            _cxx.ravel()[_ccov], _cyy.ravel()[_ccov],
+                            _cu[_ccov], _cv[_ccov],
+                            color="white", edgecolors="black",
+                            linewidths=0.3,
+                            angles="xy", scale_units="xy",
+                            scale=_quiv_scale,
+                            width=0.004, alpha=0.9, zorder=3,
+                        )
+                    except Exception as _surf_err:
+                        logger.debug(
+                            "Distortion surface failed: %s", _surf_err
+                        )
+                        ax3.text(
+                            0.5, 0.5,
+                            "distortion surface unavailable",
+                            transform=ax3.transAxes, ha="center",
+                            va="center", fontsize="x-small",
+                        )
+                else:
+                    ax3.text(
+                        0.5, 0.5,
+                        "too few matched sources",
+                        transform=ax3.transAxes, ha="center", va="center",
+                        fontsize="x-small",
+                    )
+                fig2.subplots_adjust(
+                    left=0.08, right=0.98, top=0.98, bottom=0.11,
+                    wspace=0.05,
+                )
                 _vec_path = os.path.join(
                     write_dir,
                     f"Alignment_Vectors_{base}{get_plot_ext(self.input_yaml)}",
@@ -2574,6 +2724,8 @@ class Plot:
                 fig2.savefig(
                     _vec_path, dpi=150,
                     facecolor=PLOT_COLORS.get("figure_facecolor", "white"),
+                    bbox_inches="tight",
+                    pad_inches=0.05,
                 )
                 plt.close(fig2)
                 logger.debug("Saved alignment vector plot: %s", _vec_path)
