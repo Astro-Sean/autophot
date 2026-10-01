@@ -621,10 +621,9 @@ def _child_gpu_env(env: dict, gpu_ordinal: int) -> dict:
     When the parent already runs under a device mask (e.g. Slurm sets
     ``CUDA_VISIBLE_DEVICES``/``ROCR_VISIBLE_DEVICES`` for ``--gres=gpu``),
     ``gpu_ordinal`` indexes into *that* visible set; otherwise it is a
-    physical device index.  All of HIP/ROCR/CUDA visibility vars are set
-    so the choice applies to HIP-runtime consumers (CuPy, TF-ROCm) as
-    well as any NVIDIA-side consumers (TF-CUDA reads
-    CUDA_VISIBLE_DEVICES).
+    physical device index.  ROCR/CUDA visibility vars are set so the
+    choice applies to HIP-runtime consumers (CuPy, TF-ROCm) as well as
+    any NVIDIA-side consumers (TF-CUDA reads CUDA_VISIBLE_DEVICES).
     """
     parent_mask = (
         env.get("HIP_VISIBLE_DEVICES")
@@ -638,11 +637,16 @@ def _child_gpu_env(env: dict, gpu_ordinal: int) -> dict:
     else:
         device = str(gpu_ordinal)
     for _var in (
-        "HIP_VISIBLE_DEVICES",
         "ROCR_VISIBLE_DEVICES",
         "CUDA_VISIBLE_DEVICES",
     ):
         env[_var] = device
+    # HIP_VISIBLE_DEVICES indexes the *post-ROCR-filtered* set: after
+    # ROCR narrows visibility to a single device, that device is HIP
+    # index 0.  Writing the physical id would double-filter - ROCR
+    # renumbers the survivor to 0, then HIP selects an out-of-range
+    # index -> hipErrorNoDevice, silently falling back to CPU.
+    env["HIP_VISIBLE_DEVICES"] = "0"
     return env
 
 
@@ -692,6 +696,45 @@ def _run_main_subprocess(
         return filename, result.returncode
     except Exception:
         return filename, 1
+
+
+def _scan_image_footprints(file_list, band_map=None):
+    """
+    Build per-image descriptors for ``Catalog.find_optimized_catalog``.
+
+    Each entry carries ``path``, ``band`` (resolved by check_filters, else
+    None), ``wcs`` (astropy WCS or None), and ``shape`` ((ny, nx) or None).
+    Header reads are cached by get_header; a missing/failed WCS leaves
+    wcs=None so the optimizer falls back to field-level counts.
+    """
+    from functions import get_header as _get_header
+    from wcs import get_wcs as _get_wcs
+
+    band_map = band_map or {}
+    infos = []
+    for fpath in file_list or []:
+        info = {"path": fpath, "band": None, "wcs": None, "shape": None}
+        try:
+            hdr = _get_header(fpath)
+            if hdr is not None:
+                info["wcs"] = _get_wcs(hdr, silent=True)
+                nx, ny = hdr.get("NAXIS1"), hdr.get("NAXIS2")
+                if nx and ny:
+                    info["shape"] = (int(ny), int(nx))
+                    if info["wcs"] is not None:
+                        # clean() uses array_shape to size its angular
+                        # pre-filter when target coords are absent.
+                        try:
+                            info["wcs"].array_shape = info["shape"]
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        info["band"] = band_map.get(os.path.abspath(fpath)) or band_map.get(
+            fpath
+        )
+        infos.append(info)
+    return infos
 
 
 # =============================================================================
@@ -1601,7 +1644,23 @@ class AutomatedPhotometry:
             "y",
             "on",
         }
-        if strict_validation:
+        try:
+            from functions import check_input_config, format_config_errors
+        except Exception:
+            check_input_config = format_config_errors = None
+        if check_input_config is not None:
+            _report = check_input_config(default_input)
+            for _dep_key, _dep_new in _report["deprecated"]:
+                _log_always(
+                    f"[WARNING] Deprecated config key {_dep_key}: "
+                    f"rename to {_dep_new} (still honoured)."
+                )
+            _errs = format_config_errors(_report, source="driver configuration")
+            if _errs:
+                if strict_validation:
+                    raise KeyError(_errs)
+                _log_always(f"[WARNING] {_errs}")
+        elif strict_validation:
             schema = _get_default_input_schema()
             unknown_paths = _find_unknown_config_paths(default_input, schema)
             if unknown_paths:
@@ -2209,6 +2268,145 @@ class AutomatedPhotometry:
                     from catalog import Catalog as _Catalog
                     _cat = _Catalog(input_yaml=backup_yaml)
                     _use_cat = backup_yaml.get("catalog", {}).get("use_catalog")
+
+                    _available_catalogs = [
+                        "gaia", "pan_starrs", "sdss", "apass",
+                        "2mass", "legacy", "refcat", "skymapper",
+                    ]
+                    _target_coords = SkyCoord(
+                        backup_yaml["target_ra"],
+                        backup_yaml["target_dec"],
+                        unit=(u.deg, u.deg), frame="icrs",
+                    )
+
+                    # "auto": scan every image footprint, download all
+                    # feasible catalogs once, and keep the best backend
+                    # per band as a use_catalog mapping.  The resolved
+                    # mapping is cached next to the catalog CSVs so a
+                    # restarted run skips the scan entirely; delete the
+                    # file to force a fresh optimization.
+                    if (
+                        isinstance(_use_cat, str)
+                        and _use_cat.strip().lower() == "auto"
+                    ):
+                        _opt_cache = os.path.join(
+                            backup_yaml["wdir"],
+                            "catalog_queries",
+                            f"{backup_yaml.get('target_name', 'target')}"
+                            "_optimized_catalog.yml",
+                        )
+                        _use_cat = None
+                        if os.path.exists(_opt_cache):
+                            try:
+                                with open(_opt_cache) as _fh:
+                                    _cached = yaml.safe_load(_fh) or {}
+                                _cached_map = _cached.get("use_catalog")
+                                if isinstance(_cached_map, dict) and _cached_map:
+                                    _need = {
+                                        str(b) for b in required_filters
+                                    }
+                                    _have = {
+                                        str(k) for k in _cached_map
+                                    }
+                                    if _need <= _have or "default" in _cached_map:
+                                        _use_cat = _cached_map
+                                        _log(
+                                            f"  Reusing cached catalog "
+                                            f"selection: {_opt_cache} "
+                                            f"(bands={_cached.get('bands')}, "
+                                            f"images={_cached.get('n_images')})"
+                                        )
+                                    else:
+                                        _log(
+                                            f"  Cached catalog selection "
+                                            f"misses bands "
+                                            f"{sorted(_need - _have)}; "
+                                            f"re-optimizing."
+                                        )
+                            except Exception as _ce:
+                                _log(
+                                    f"  [WARNING] Could not read cached "
+                                    f"catalog selection ({_ce}); "
+                                    f"re-optimizing."
+                                )
+                        if _use_cat is None:
+                            try:
+                                _image_infos = _scan_image_footprints(
+                                    file_list,
+                                    getattr(prepare_db, "file_filter_map", {}),
+                                )
+                                _opt = _cat.find_optimized_catalog(
+                                    target_coords=_target_coords,
+                                    images=_image_infos,
+                                    bands=required_filters,
+                                    target_name=backup_yaml.get(
+                                        "target_name", "target"
+                                    ),
+                                    outdir=new_output_dir,
+                                )
+                                _use_cat = _opt.get("use_catalog") or "gaia"
+                                # Winners, report and plot paths are already
+                                # logged by find_optimized_catalog - only the
+                                # resolved mapping and a compact skip summary
+                                # belong here.
+                                _log(f"  Resolved use_catalog: {_use_cat}")
+                                if _opt.get("skipped"):
+                                    _log(
+                                        "  Skipped: "
+                                        + "; ".join(
+                                            f"{k} ({str(v).splitlines()[0]})"
+                                            for k, v in _opt["skipped"].items()
+                                        )
+                                    )
+                                if isinstance(_use_cat, dict):
+                                    try:
+                                        Path(
+                                            os.path.dirname(_opt_cache)
+                                        ).mkdir(parents=True, exist_ok=True)
+                                        with open(_opt_cache, "w") as _fh:
+                                            yaml.safe_dump(
+                                                {
+                                                    "use_catalog": {
+                                                        str(k): str(v)
+                                                        for k, v in _use_cat.items()
+                                                    },
+                                                    "bands": [
+                                                        str(b)
+                                                        for b in required_filters
+                                                    ],
+                                                    "n_images": len(
+                                                        _image_infos
+                                                    ),
+                                                    "target_ra": float(
+                                                        backup_yaml["target_ra"]
+                                                    ),
+                                                    "target_dec": float(
+                                                        backup_yaml["target_dec"]
+                                                    ),
+                                                },
+                                                _fh,
+                                                sort_keys=True,
+                                            )
+                                        _log(
+                                            f"  Cached optimized catalog "
+                                            f"selection: {_opt_cache}"
+                                        )
+                                    except Exception as _we:
+                                        _log(
+                                            f"  [WARNING] Could not cache "
+                                            f"optimized catalog selection "
+                                            f"({_we})"
+                                        )
+                            except Exception as _oe:
+                                _log(
+                                    f"  [WARNING] Catalog optimization failed "
+                                    f"({_oe}); falling back to 'gaia'."
+                                )
+                                _use_cat = "gaia"
+                        backup_yaml.setdefault("catalog", {})[
+                            "use_catalog"
+                        ] = _use_cat
+
                     if isinstance(_use_cat, dict):
                         _unique_cats = sorted(set(
                             v for v in _use_cat.values()
@@ -2218,11 +2416,6 @@ class AutomatedPhotometry:
                         _unique_cats = [str(_use_cat).strip()]
                     else:
                         _unique_cats = []
-
-                    _available_catalogs = [
-                        "gaia", "pan_starrs", "sdss", "apass",
-                        "2mass", "legacy", "refcat", "skymapper",
-                    ]
 
                     if not _unique_cats:
                         _log(
@@ -2242,11 +2435,6 @@ class AutomatedPhotometry:
                         )
                         _log("")
                         sys.exit(0)
-                    _target_coords = SkyCoord(
-                        backup_yaml["target_ra"],
-                        backup_yaml["target_dec"],
-                        unit=(u.deg, u.deg), frame="icrs",
-                    )
                     # Auto-select GaiaXPy photometric systems based on required filters.
                     # SDSS_Std covers u,g,r,i,z; JKC_Std covers U,B,V,R,I.
                     # Only request the systems needed to avoid unnecessary archive queries.
