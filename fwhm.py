@@ -23,7 +23,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.stats import linregress
-from scipy.ndimage import gaussian_filter, binary_dilation, label
+from scipy.ndimage import (
+    gaussian_filter,
+    binary_dilation,
+    label,
+    maximum_filter,
+)
 from scipy.spatial import cKDTree, distance
 from astropy.io import fits
 from astropy.nddata import Cutout2D
@@ -131,14 +136,19 @@ class Find_FWHM:
             # the calibrated rejection; these only keep out pathological
             # morphology.
             if fwhm_px < 2.0:
-                return dict(sharplo=0.1, sharphi=1.6, roundlo=-1.0, roundhi=1.0)
+                # Roundness stays a real (if generous) cut: +-1.0 is the
+                # statistic's natural range, i.e. no cut at all, and
+                # undersampled data is exactly where CR tracks and bad
+                # columns need the asymmetry screen.
+                return dict(sharplo=0.1, sharphi=1.6, roundlo=-0.7, roundhi=0.7)
             elif fwhm_px < 3.0:
                 return dict(sharplo=0.15, sharphi=1.4, roundlo=-0.9, roundhi=0.9)
             else:
                 return dict(sharplo=0.15, sharphi=1.3, roundlo=-0.8, roundhi=0.8)
         if fwhm_px < 2.0:
-            # Undersampled: broader PSF tolerance, allow more ellipticity
-            return dict(sharplo=0.2, sharphi=1.5, roundlo=-1.0, roundhi=1.0)
+            # Undersampled: broader PSF tolerance, allow more ellipticity.
+            # Roundness still cuts: +-1.0 would disable it entirely.
+            return dict(sharplo=0.2, sharphi=1.5, roundlo=-0.7, roundhi=0.7)
         elif fwhm_px < 3.0:
             # Critically sampled: moderate tolerance
             return dict(sharplo=0.4, sharphi=1.2, roundlo=-0.6, roundhi=0.6)
@@ -253,7 +263,12 @@ class Find_FWHM:
         return df
 
     def _bright_psf_shape(
-        self, image: np.ndarray, df: pd.DataFrame, half: int, n_max: int = 25
+        self,
+        image: np.ndarray,
+        df: pd.DataFrame,
+        half: int,
+        n_max: int = 25,
+        saturate: float = np.inf,
     ) -> Optional[Tuple[float, float, float]]:
         """Estimate the stellar PSF size and elongation from bright
         detections.
@@ -267,6 +282,11 @@ class Find_FWHM:
         give a kernel estimate that is insensitive to a junk-dominated
         source count.
 
+        ``saturate`` excludes near-saturated peaks from the bright
+        sample: a saturated star's moments are dominated by blooming
+        (elongated, inflated FWHM) and would bias the kernel before the
+        later cleaning cuts ever see it.
+
         Returns (major-axis FWHM px, minor/major ratio, major-axis
         position angle in degrees CCW from +x), or None when too few
         cutouts yield usable moments.
@@ -274,7 +294,9 @@ class Find_FWHM:
         _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
         _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
         peaks = df["peak"].values.astype(float)
-        order = np.argsort(peaks)[::-1][:n_max]
+        peak_ok = np.isfinite(peaks) & (peaks < 0.98 * saturate)
+        order = np.argsort(np.where(peak_ok, peaks, -np.inf))[::-1]
+        order = order[peak_ok[order]][:n_max]
         xs = df[_xcol].values.astype(float)
         ys = df[_ycol].values.astype(float)
         fwhm_maj, ratios, thetas = [], [], []
@@ -433,16 +455,16 @@ class Find_FWHM:
         from astropy.visualization import ZScaleInterval, ImageNormalize
 
         mean, median, std = sigma_clipped_stats(image, sigma=3.0)
-        threshold = detect_threshold(image, nsigma=3)
-        segment_map = detect_sources(image, threshold, npixels=npixels)
-        if segment_map is None or segment_map.nlabels == 0:
+        threshold = detect_threshold(image, n_sigma=3)
+        segment_map = detect_sources(image, threshold, n_pixels=npixels)
+        if segment_map is None or segment_map.n_labels == 0:
             self.logger.info("Segmentation found no sources; returning empty table.")
             return coordinates_df.iloc[[]].copy()
         try:
             deblended_map = deblend_sources(
                 image,
                 segment_map,
-                npixels=npixels,
+                n_pixels=npixels,
                 contrast=contrast,
                 mode="exponential",
                 progress_bar=False,
@@ -602,6 +624,44 @@ class Find_FWHM:
                 raise KeyError(f"Missing required columns: {missing}")
 
             df = catalog.copy()
+
+            # The ellipticity quality cut below is dead code unless a
+            # column of that exact name exists: the SExtractor catalog
+            # renames ELLIPTICITY to "roundness" for legacy downstream
+            # use, and the pythonic FWHM path carries "elongation".
+            # Reconstruct e = 1 - b/a so the cut engages on every path.
+            if "ellipticity" not in df.columns:
+                _a = next(
+                    (c for c in ("a", "A_IMAGE") if c in df.columns), None
+                )
+                _b = next(
+                    (c for c in ("b", "B_IMAGE") if c in df.columns), None
+                )
+                _elo = next(
+                    (
+                        c
+                        for c in ("elongation", "ELONGATION")
+                        if c in df.columns
+                    ),
+                    None,
+                )
+                if _a is not None and _b is not None:
+                    _av = pd.to_numeric(df[_a], errors="coerce")
+                    _bv = pd.to_numeric(df[_b], errors="coerce")
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        df["ellipticity"] = np.where(
+                            (_av > 0) & np.isfinite(_av) & np.isfinite(_bv),
+                            1.0 - _bv / _av,
+                            np.nan,
+                        )
+                elif _elo is not None:
+                    _ev = pd.to_numeric(df[_elo], errors="coerce")
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        df["ellipticity"] = np.where(
+                            np.isfinite(_ev) & (_ev > 0),
+                            1.0 - 1.0 / _ev,
+                            np.nan,
+                        )
 
             # --- Quality cuts ---
             m0 = np.isfinite(df["flux_AP"].values) & (df["flux_AP"].values > 0)
@@ -1305,7 +1365,7 @@ class Find_FWHM:
                         df["s2n"] = df["peak"] / std_safe
                 else:
                     df["s2n"] = df["peak"] / std_safe
-                fwhm_list = []
+                fwhm_list, elong_list, chi2_list = [], [], []
                 half = int(max(default_scale, np.ceil(scale_multiplier * fwhm / 2)))
                 for i in range(len(df)):
                     cut = Cutout2D(
@@ -1316,11 +1376,23 @@ class Find_FWHM:
                         fill_value=np.nan,
                     ).data
                     fit = self._fit_gaussian_2d(cut)
-                    if fit is not None and all(np.isfinite(v) for v in fit):
-                        fwhm_list.append(float(np.mean(fit)))
+                    if fit is not None:
+                        fwhm_list.append(fit["fwhm"])
+                        elong_list.append(fit["elongation"])
+                        chi2_list.append(fit["chi2_red"])
                     else:
                         fwhm_list.append(np.nan)
+                        elong_list.append(np.nan)
+                        chi2_list.append(np.nan)
                 df["fwhm"] = np.array(fwhm_list, dtype=float)
+                df["elongation"] = np.array(elong_list, dtype=float)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    df["ellipticity"] = np.where(
+                        np.isfinite(df["elongation"]) & (df["elongation"] > 0),
+                        1.0 - 1.0 / df["elongation"].values.astype(float),
+                        np.nan,
+                    )
+                df["fit_chi2_red"] = np.array(chi2_list, dtype=float)
 
                 # Same elite-subset estimate as the auto path: the
                 # near-threshold population is dominated by sub-stellar
@@ -1439,6 +1511,7 @@ class Find_FWHM:
                     _shape = self._bright_psf_shape(
                         image, df,
                         half=int(np.clip(3 * fwhm_fp, 20, 25)),
+                        saturate=saturate,
                     )
                     if _shape is not None:
                         _f_new, _r_new, _t_new = _shape
@@ -1513,6 +1586,88 @@ class Find_FWHM:
                 for col in [c for c in ["roundness", "sharpness"] if c in df.columns]:
                     df = self._clip_column(df, col, sigma=5.0, maxiters=5)
 
+                # --- Cleaning: minimum connected area ---
+                # Both finders are peak + local-shape based; neither
+                # requires a minimum number of contiguous pixels above
+                # threshold (SExtractor's DETECT_MINAREA equivalent), so
+                # a single hot pixel inside the shape bands survives
+                # them.  Requiring the centroid pixel to sit on a real
+                # segment removes isolated single-sample defects without
+                # touching true PSFs, which always span more than a
+                # pixel above a modest threshold.
+                min_seg_pix = int(src_cfg.get("min_segment_npixels", 3))
+                if min_seg_pix > 1 and len(df) > 0:
+                    try:
+                        _seg_thr = detect_threshold(
+                            image - bkg, n_sigma=1.5, mask=mask
+                        )
+                        _segm = detect_sources(
+                            image - bkg,
+                            _seg_thr,
+                            n_pixels=min_seg_pix,
+                            mask=mask,
+                        )
+                    except Exception:
+                        _segm = None
+                    if _segm is not None:
+                        _xi = np.clip(
+                            np.rint(df[_xcol].values.astype(float)).astype(int),
+                            0, nx - 1,
+                        )
+                        _yi = np.clip(
+                            np.rint(df[_ycol].values.astype(float)).astype(int),
+                            0, ny - 1,
+                        )
+                        _has_seg = np.asarray(_segm.data[_yi, _xi] > 0)
+                        _n_noseg = int((~_has_seg).sum())
+                        if _n_noseg:
+                            self.logger.info(
+                                "Dropped %d detections with no >= %d px "
+                                "segment (single-pixel defects)",
+                                _n_noseg, min_seg_pix,
+                            )
+                            df = df[_has_seg]
+
+                # --- Cleaning: segmentation-based isolation ---
+                # Point-distance crowding cannot see a detection sitting
+                # on extended galaxy light; comparing against every
+                # deblended segment's centre of mass catches sources in
+                # structured regions.
+                if src_cfg.get("segment_isolation", True) and len(df) > 0:
+                    try:
+                        _df_iso = df.copy()
+                        _df_iso["x_pix"] = df[_xcol].astype(float).values
+                        _df_iso["y_pix"] = df[_ycol].astype(float).values
+                        _iso_sep = float(
+                            src_cfg.get("segment_isolation_min_sep", 0.0) or 0.0
+                        )
+                        if _iso_sep <= 0:
+                            _iso_sep = max(10.0, 2.0 * fwhm_fp)
+                        _df_iso = self.isolated_via_segmentation(
+                            image,
+                            _df_iso,
+                            fwhm=fwhm_fp,
+                            min_distance=_iso_sep,
+                            plot=False,
+                        )
+                        if len(_df_iso) >= 3 or len(df) < 3:
+                            if len(_df_iso) < len(df):
+                                self.logger.info(
+                                    "Segmentation isolation: %d -> %d "
+                                    "detections", len(df), len(_df_iso),
+                                )
+                            df = _df_iso
+                        else:
+                            self.logger.info(
+                                "Segmentation isolation skipped: would "
+                                "leave %d detections (< 3)",
+                                len(_df_iso),
+                            )
+                    except Exception as _iso_exc:
+                        self.logger.debug(
+                            "Segmentation isolation skipped: %s", _iso_exc
+                        )
+
             if len(df) == 0:
                 self.logger.warning("All detections rejected by cleaning")
                 self.logger.info("Elapsed: %.3f s", time.time() - t0)
@@ -1535,15 +1690,20 @@ class Find_FWHM:
                 else None
             )
             _s2n_r = max(1, int(round(0.3 * fwhm_fp)))
+            elong_meas, chi2_meas = [], []
             for i in range(len(df)):
                 cut = Cutout2D(
                     image, (_xs[i], _ys[i]), 2 * half, mode="partial", fill_value=np.nan
                 ).data
                 fit = self._fit_gaussian_2d(cut)
-                if fit is not None and all(np.isfinite(v) for v in fit):
-                    fwhm_meas.append(float(np.mean(fit)))
+                if fit is not None:
+                    fwhm_meas.append(fit["fwhm"])
+                    elong_meas.append(fit["elongation"])
+                    chi2_meas.append(fit["chi2_red"])
                 else:
                     fwhm_meas.append(np.nan)
+                    elong_meas.append(np.nan)
+                    chi2_meas.append(np.nan)
                 if _dao_signif is not None:
                     # Centroid can sit ~1 px off the convolved peak;
                     # sample the local max within a small window.
@@ -1568,18 +1728,106 @@ class Find_FWHM:
                     # compare against the smoothed noise scale.
                     s2n_list.append(_peaks[i] / max(std_smooth, 1e-12))
             df["fwhm"] = np.asarray(fwhm_meas, dtype=float)
+            df["elongation"] = np.asarray(elong_meas, dtype=float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                df["ellipticity"] = np.where(
+                    np.isfinite(df["elongation"]) & (df["elongation"] > 0),
+                    1.0 - 1.0 / df["elongation"].values.astype(float),
+                    np.nan,
+                )
+            df["fit_chi2_red"] = np.asarray(chi2_meas, dtype=float)
             df["s2n"] = np.asarray(s2n_list, dtype=float)
             df["x_pix"] = df[_xcol].astype(float)
             df["y_pix"] = df[_ycol].astype(float)
 
             if not no_clean:
-                df = df[np.isfinite(df["fwhm"])]
+                # Absolute FWHM floor: a detection narrower than ~1
+                # native pixel cannot be a resolved point source on any
+                # plausible optical system - it is a hot pixel or CR,
+                # regardless of where it sits relative to the population
+                # median (the sigma-clips below are relative and cannot
+                # catch a defect-dominated pool).
+                abs_floor_px = float(src_cfg.get("fwhm_abs_floor_px", 0.8))
+                df = df[
+                    np.isfinite(df["fwhm"]) & (df["fwhm"] >= abs_floor_px)
+                ]
                 if len(df) == 0:
                     self.logger.warning("No finite FWHM fits")
                     self.logger.info("Elapsed: %.3f s", time.time() - t0)
                     return np.nan, pd.DataFrame(), float(max(scale, default_scale))
+
+                # --- Cleaning: elongation ---
+                # The anisotropic Gaussian fit makes galaxies, trails
+                # and blends visible; the scalar Moffat FWHM is
+                # azimuthally averaged and blind to them.
+                elong_max = float(src_cfg.get("elongation_max", 1.6))
+                _el = df["elongation"].values.astype(float)
+                _el_fin = _el[np.isfinite(_el)]
+                _el_thr = elong_max
+                if _el_fin.size >= 3:
+                    _el_med = float(np.median(_el_fin))
+                    # Field-wide elongated PSF (tracking drift, defocus):
+                    # flag only outliers beyond the shared morphology,
+                    # same convention as the psf.py pool cut.
+                    if _el_med > _el_thr:
+                        _el_thr = 1.3 * _el_med
+                # Faint detections have noise-dominated axis ratios; the
+                # cut only trusts the fit where it is measurable.
+                _el_s2n_min = float(src_cfg.get("elongation_s2n_min", 5.0))
+                _bad_elong = (
+                    np.isfinite(_el)
+                    & (_el > _el_thr)
+                    & (df["s2n"].values >= _el_s2n_min)
+                )
+                if _bad_elong.any():
+                    self.logger.info(
+                        "Elongation cut (a/b > %.2f, s2n >= %.0f): removed "
+                        "%d elongated detections",
+                        _el_thr,
+                        _el_s2n_min,
+                        int(_bad_elong.sum()),
+                    )
+                    df = df[~_bad_elong].copy()
+
+                # --- Cleaning: goodness of fit ---
+                # A galaxy's Sersic-like profile or a blended pair can
+                # still converge to *some* FWHM; reject cutouts the
+                # Gaussian fit describes poorly.
+                chi2_max = float(src_cfg.get("chi2_red_max", 5.0))
+                _chi2 = df["fit_chi2_red"].values.astype(float)
+                _bad_chi2 = np.isfinite(_chi2) & (_chi2 > chi2_max)
+                if _bad_chi2.any():
+                    self.logger.info(
+                        "Fit-quality cut (chi2_red > %.1f): removed %d "
+                        "poorly-fit detections",
+                        chi2_max,
+                        int(_bad_chi2.sum()),
+                    )
+                    df = df[~_bad_chi2].copy()
+
                 df = self._clip_column(df, "fwhm", sigma=5.0, maxiters=8)
                 df = df[df["s2n"] >= 3.0]
+
+                # Defect-dominance diagnostic: if a large fraction of the
+                # surviving pool sits just above the absolute floor, the
+                # "stars" are likely compact defects rather than a
+                # genuinely small PSF.
+                if len(df) > 0:
+                    _near_floor = float(
+                        np.mean(df["fwhm"] < 1.2 * abs_floor_px)
+                    )
+                    _dom_frac = float(
+                        src_cfg.get("defect_dominance_frac", 0.4)
+                    )
+                    if _near_floor > _dom_frac:
+                        self.logger.warning(
+                            "FWHM source pool may be defect-dominated: "
+                            "%.0f%% of candidates sit within 20%% of the "
+                            "absolute floor (%.2f px). Consider enabling "
+                            "cosmic-ray removal before FWHM measurement.",
+                            100 * _near_floor,
+                            abs_floor_px,
+                        )
 
             if len(df) == 0:
                 self.logger.warning("No sources after final quality cuts")
@@ -1825,22 +2073,42 @@ class Find_FWHM:
         """Vectorized pixel distance from one point to arrays of points."""
         return np.hypot(xs - x0, ys - y0)
 
-    def _fit_gaussian_2d(self, cutout: np.ndarray) -> Optional[Tuple[float, float]]:
+    def _fit_gaussian_2d(self, cutout: np.ndarray) -> Optional[Dict[str, float]]:
         """
-        Estimate FWHM from a small cutout.
+        Estimate FWHM and shape diagnostics from a small cutout.
 
-        Primary method (photutils >=3.0): fit a Moffat profile to the radial
-        profile using RadialProfile.moffat_fwhm - more accurate for PSF wings.
-        Fallback: fit a 2D Gaussian via LevMarLSQFitter.
+        The scalar FWHM comes from a Moffat fit to the azimuthally
+        averaged radial profile (photutils >=3.0,
+        ``RadialProfile.moffat_fwhm``), which tracks PSF wings better
+        than a Gaussian but is isotropic by construction.  An
+        anisotropic 2D Gaussian is therefore always fit as well: its
+        per-axis FWHMs give the axis ratio used downstream to reject
+        galaxies, trails, and blends, and its reduced chi-square flags
+        poorly-fit (non-PSF) cutouts.
+
+        Returns a dict with keys ``fwhm``, ``fwhm_x``, ``fwhm_y``,
+        ``elongation`` (a/b >= 1), and ``chi2_red``; ``elongation`` and
+        ``chi2_red`` are NaN when the Gaussian diagnostic fails.
+        Returns None when the cutout is unusable or shows a second
+        local maximum away from the centroid (a blend contaminates
+        every estimator).
         """
         data = np.array(cutout, dtype=float)
-        if not np.isfinite(data).any():
+        finite = np.isfinite(data)
+        if not finite.any():
             return None
-        mean, med, std = sigma_clipped_stats(data, sigma=3.0)
+        # Partial cutouts carry NaN fill at the frame edge; run the
+        # statistics on the finite pixels only so the fill cannot bias
+        # the sky level or scatter.
+        _, med, std = sigma_clipped_stats(data[finite], sigma=3.0)
+        if not np.isfinite(std) or std <= 0:
+            std = float(mad_std(data[finite]))
+        if not np.isfinite(std) or std <= 0:
+            std = 1.0
         data = data - med
         ny, nx = data.shape
-        total = np.abs(data).sum()
-        if total <= 0:
+        total = float(np.abs(data[finite]).sum())
+        if not np.isfinite(total) or total <= 0:
             return None
         y_arr, x_arr = np.mgrid[0:ny, 0:nx]
         # Centroid weights: positive part of the background-subtracted data.
@@ -1848,51 +2116,96 @@ class Find_FWHM:
         # toward the cutout centre on faint sources; positive weights are the
         # standard choice.  Fall back to |data| when nothing is positive
         # (e.g. negative-residual cutouts on difference images).
-        w_pos = np.clip(data, 0.0, None)
+        w_pos = np.where(finite, np.clip(data, 0.0, None), 0.0)
         w_tot = float(w_pos.sum())
-        if w_tot > 0 and np.isfinite(w_tot):
+        if w_tot > 0:
             w_cen = w_pos
             w_sum = w_tot
         else:
-            w_cen = np.abs(data)
+            w_cen = np.where(finite, np.abs(data), 0.0)
             w_sum = total
         x0 = (x_arr * w_cen).sum() / w_sum
         y0 = (y_arr * w_cen).sum() / w_sum
 
-        # --- Primary: Moffat radial profile fit (photutils 3.0) ---
+        # Blend veto: a second local maximum well away from the
+        # centroid contaminates every estimator below.  Counted as
+        # connected components so a flat-topped bright core (a plateau
+        # of equal-value local maxima) counts once, not once per pixel.
+        loc_max = (data == maximum_filter(data, size=3)) & finite
+        rr0 = np.hypot(x_arr - x0, y_arr - y0)
+        peak_val = float(np.nanmax(data))
+        secondary = loc_max & (rr0 > 1.5) & (data > 0.3 * peak_val)
+        if label(secondary)[1] > 1:
+            return None
+
+        # --- Anisotropic 2D Gaussian (shape diagnostics) ---
+        # Fit on the finite pixels only: LevMarLSQFitter has no NaN
+        # handling and would fail outright on a partial cutout.
+        fwhm_x = fwhm_y = chi2_red = np.nan
+        try:
+            amp0 = peak_val if np.isfinite(peak_val) else 1.0
+            sig0 = max(1.0, 0.5 * min(nx, ny) / 6.0)
+            g0 = models.Gaussian2D(
+                amplitude=amp0,
+                x_mean=x0,
+                y_mean=y0,
+                x_stddev=sig0,
+                y_stddev=sig0,
+                theta=0.0,
+            )
+            fitter = fitting.LevMarLSQFitter()
+            with np.errstate(invalid="ignore", divide="ignore"):
+                g = fitter(g0, x_arr[finite], y_arr[finite], data[finite])
+            # Position-drift veto: on blended or asymmetric cutouts the
+            # LM fit can walk several pixels onto a neighbour's wing
+            # before settling.
+            drift = np.hypot(
+                g.x_mean.value - nx / 2.0, g.y_mean.value - ny / 2.0
+            )
+            if drift > 0.4 * min(nx, ny):
+                return None
+            fwhm_x = 2.354820045 * abs(float(g.x_stddev.value))
+            fwhm_y = 2.354820045 * abs(float(g.y_stddev.value))
+            resid = data[finite] - g(x_arr[finite], y_arr[finite])
+            dof = max(1, int(finite.sum()) - g.parameters.size)
+            chi2_red = float(np.sum((resid / std) ** 2) / dof)
+        except Exception:
+            pass
+
+        # --- Scalar FWHM: Moffat radial-profile fit (photutils 3.0) ---
+        moffat_fwhm = np.nan
         try:
             xycen = np.array([x0, y0])
             max_r = 0.5 * min(nx, ny)
             edge_radii = np.arange(0, max_r + 1, 0.5)
-            rp = RadialProfile(data, xycen, edge_radii, mask=~np.isfinite(data))
-            moffat_fwhm = rp.moffat_fwhm
-            if np.isfinite(moffat_fwhm) and moffat_fwhm > 0:
-                return float(moffat_fwhm), float(moffat_fwhm)
+            rp = RadialProfile(data, xycen, edge_radii, mask=~finite)
+            mf = rp.moffat_fwhm
+            if np.isfinite(mf) and mf > 0:
+                moffat_fwhm = float(mf)
         except Exception:
             pass
 
-        # --- Fallback: 2D Gaussian fit ---
-        amp0 = np.nanmax(data)
-        sig0 = max(1.0, 0.5 * min(nx, ny) / 6.0)
-        g0 = models.Gaussian2D(
-            amplitude=amp0,
-            x_mean=x0,
-            y_mean=y0,
-            x_stddev=sig0,
-            y_stddev=sig0,
-            theta=0.0,
-        )
-        fitter = fitting.LevMarLSQFitter()
-        try:
-            with np.errstate(invalid="ignore", divide="ignore"):
-                g = fitter(g0, x_arr, y_arr, data)
-            fwhm_x = 2.354820045 * float(abs(g.x_stddev.value))
-            fwhm_y = 2.354820045 * float(abs(g.y_stddev.value))
-            if not np.isfinite(fwhm_x) or not np.isfinite(fwhm_y):
-                return None
-            return fwhm_x, fwhm_y
-        except Exception:
+        if np.isfinite(moffat_fwhm):
+            fwhm_scalar = moffat_fwhm
+        elif np.isfinite(fwhm_x) and np.isfinite(fwhm_y):
+            fwhm_scalar = 0.5 * (fwhm_x + fwhm_y)
+        else:
             return None
+        if (
+            np.isfinite(fwhm_x)
+            and np.isfinite(fwhm_y)
+            and min(fwhm_x, fwhm_y) > 0
+        ):
+            elong = max(fwhm_x, fwhm_y) / min(fwhm_x, fwhm_y)
+        else:
+            elong = np.nan
+        return {
+            "fwhm": float(fwhm_scalar),
+            "fwhm_x": float(fwhm_x),
+            "fwhm_y": float(fwhm_y),
+            "elongation": float(elong),
+            "chi2_red": float(chi2_red),
+        }
 
     def _crowding_filter(self, df: pd.DataFrame, min_sep_pix: float) -> pd.DataFrame:
         """De-blend close pairs instead of discarding both members.
