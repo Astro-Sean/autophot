@@ -102,10 +102,25 @@ from scipy.spatial import cKDTree
 SATURATE_INTERNAL_FALLBACK = np.inf
 SATURATE_FITS_FALLBACK = 1e10
 
+AUTOPHOT_VERSION = "unknown"
 try:
     AUTOPHOT_VERSION = _pkg_version("autophot")
 except Exception:
-    AUTOPHOT_VERSION = "unknown"
+    pass
+try:
+    # When running from a source checkout (clone or editable install) the
+    # adjacent pyproject.toml describes the code actually executing - the
+    # installed-dist lookup above would report a stale or missing version.
+    _pyproject = Path(__file__).resolve().parent / "pyproject.toml"
+    if _pyproject.is_file():
+        import tomllib
+
+        with open(_pyproject, "rb") as _fh:
+            _src_version = tomllib.load(_fh).get("project", {}).get("version")
+        if _src_version:
+            AUTOPHOT_VERSION = str(_src_version)
+except Exception:
+    pass
 
 # Local Modules
 from aperture import (Aperture, exposure_seconds_from_header,
@@ -113,18 +128,21 @@ from aperture import (Aperture, exposure_seconds_from_header,
 from background import BackgroundSubtractor
 from catalog import Catalog, cross_match_sources
 from cosmic import RemoveCosmicRays
-from functions import (STATUS, VERBOSE_LEVELS, AutophotYaml,
-                       ColoredLevelFormatter, ConsoleLevelFilter,
-                       PlainFormatter, SuppressStdout, ascii_kv, ascii_table,
-                       beta_aperture, beta_psf, border_msg, compact_status,
+from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
+                       AutophotYaml, ColoredLevelFormatter, ConsoleLevelFilter,
+                       PlainFormatter, SuppressStdout, _bounded_centroid,
+                       _keep_floor_cut, ascii_kv, ascii_table,
+                       beta_aperture, beta_psf, border_msg,
+                       check_input_config, compact_status,
                        convert_to_mjd_astropy, dict_to_string_with_hashtag,
-                       flux_upper_limit, get_header, get_image,
-                       get_image_and_header, get_instrument_config,
+                       flux_upper_limit, format_config_errors, get_header,
+                       get_image, get_image_and_header, get_instrument_config,
                        load_telescope_config, log_exception, log_status,
                        log_step, log_warning_from_exception, metrics_table,
                        normalize_target_name, odd, pix_dist, quadrature_add,
                        resolve_verbose_level, safe_fits_write,
-                       silence_noisy_loggers, verbose_to_console_level)
+                       silence_noisy_loggers, strict_config_enabled,
+                       verbose_to_console_level)
 from fwhm import Find_FWHM
 from limits import BETA_APERTURE_SIGMA_N, Limits, _analytic_psf_for_injection
 from plot import Plot
@@ -294,6 +312,46 @@ def _header_numeric_value(cfg_value, header):
         return float(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _write_analytic_psf_stamp(out_path, fwhm_px, input_yaml, n_stars=0):
+    """Write a native-resolution analytic PSF stamp FITS for ZOGY.
+
+    Used when the empirical ePSF build produced no model file.  ZOGY
+    only needs a plausible PSF for its Fourier matched filter, so a
+    composite-Moffat at the measured FWHM is a better fallback than
+    dropping to SFFT on a starved field.  The stamp carries OVERSAMP=1
+    so ``_load_psf_stamp_native`` reads it back unchanged, and the
+    PSFBUILD provenance key marks it as analytic (photometry's
+    empirical-only policy does not apply to subtraction PSFs).
+    """
+    from psf import _analytic_psf_stamp
+
+    beta = max(
+        1.1,
+        float(
+            (input_yaml.get("photometry") or {}).get(
+                "psf_init_moffat_beta", 4.765
+            )
+        ),
+    )
+    fwhm_px = max(1.0, float(fwhm_px))
+    cutout_n = int(2 * np.ceil(6.0 * fwhm_px) + 1)
+    stamp, _comps = _analytic_psf_stamp(
+        fwhm_px, 1, cutout_n, beta, stars=None
+    )
+    data = np.asarray(stamp.data, dtype=float)
+    hdr = fits.Header()
+    hdr["OVERSAMP"] = (1, "PSF oversampling factor (native grid)")
+    hdr["PSFNPIX"] = (int(cutout_n), "native-pixel cutout size")
+    hdr["FWHM_PIX"] = (float(fwhm_px), "Image FWHM in native pixels")
+    hdr["NPSFSTAR"] = (int(n_stars), "Stars used in ePSF build")
+    hdr["PSFBUILD"] = (
+        "analytic-composite",
+        "PSF model construction method",
+    )
+    safe_fits_write(out_path, data, hdr)
+    return out_path
 
 
 def _trim_nan_boundaries(
@@ -637,6 +695,38 @@ def run_photometry():
             str(input_yaml_loc),
         )
         raise SystemExit(2)
+
+    # Fail fast on unaccepted options.  An unrecognised key used to be
+    # ignored silently (a typo ran with the default), and several dispatch
+    # options map a bad value to a fallback without any message
+    # (forceconv -> REF, wcs.solver -> astrometry).  Runtime-injected slots
+    # (``_``-prefixed keys, ``variable_sources``) and renamed-but-honoured
+    # keys are exempt; everything else aborts before any work starts.
+    try:
+        _cfg_report = check_input_config(input_yaml)
+    except Exception as _cfg_exc:
+        # An unloadable schema must not block the run.
+        logging.getLogger(__name__).warning(
+            "Config validation skipped: %s", _cfg_exc
+        )
+        _cfg_report = None
+    if _cfg_report is not None:
+        for _dep_key, _dep_new in _cfg_report["deprecated"]:
+            logging.getLogger(__name__).warning(
+                "Deprecated config key %s in %s: rename to %s "
+                "(still honoured).",
+                _dep_key,
+                input_yaml_loc,
+                _dep_new,
+            )
+        _cfg_errs = format_config_errors(
+            _cfg_report, source=str(input_yaml_loc)
+        )
+        if _cfg_errs:
+            if strict_config_enabled():
+                logging.getLogger(__name__).error("%s", _cfg_errs)
+                raise SystemExit(2)
+            logging.getLogger(__name__).warning("%s", _cfg_errs)
 
     # CLI verbosity flags override the YAML setting.  The resolved 0-3
     # value is written back so every sub-component sees a consistent level.
@@ -1300,6 +1390,17 @@ def run_photometry():
             logging.warning(
                 f"SATURATE keyword has invalid value '{saturate}' (not a number); "
                 f"falling back to no saturation limit."
+            )
+            saturate = SATURATE_INTERNAL_FALLBACK
+
+        # A finite value this large is a stored "no limit" placeholder (the
+        # FITS sentinel this pipeline writes, or an upstream 1e30), not a real
+        # detector level.  Map it to the internal no-limit so SExtractor and
+        # masking do not treat it as a physical threshold.
+        if np.isfinite(saturate) and saturate >= SATURATE_SENTINEL_MIN:
+            logging.info(
+                f"SATURATE value {saturate:g} is a no-limit placeholder, not a "
+                f"detector level; proceeding without saturation checks."
             )
             saturate = SATURATE_INTERNAL_FALLBACK
 
@@ -2426,6 +2527,7 @@ def run_photometry():
         # Removes cosmic rays from the image if enabled. Skipped if header has
         # CRAY_RMD or CRSTATUS indicating prior cleaning (see default_input.yml).
         cosmic_rays_mask = np.zeros(image.shape, dtype=bool)
+        cosmic_rays_defect_mask = np.zeros(image.shape, dtype=bool)
         _cr_status = header.get("CRSTATUS")
         _cr_status = (
             _cr_status[0] if isinstance(_cr_status, tuple) else _cr_status
@@ -2449,7 +2551,8 @@ def run_photometry():
             _cr_objlim = float(_cr_cfg.get("cr_objlim", 10.0))
             _cr_dilate_factor = float(_cr_cfg.get("cr_dilate_factor", 1.0))
             _cr_dilate_iters = int(_cr_cfg.get("cr_dilate_iterations", 2))
-            image, cosmic_rays_mask = RemoveCosmicRays(
+            _cr_defect_margin = float(_cr_cfg.get("cr_defect_margin_px", 2.0))
+            image, cosmic_rays_mask, cosmic_rays_defect_mask = RemoveCosmicRays(
                 input_yaml=input_yaml,
                 fpath=fpath,
                 image=image,
@@ -2467,6 +2570,7 @@ def run_photometry():
                 objlim=_cr_objlim,
                 dilate_factor=_cr_dilate_factor,
                 dilate_iterations=_cr_dilate_iters,
+                defect_margin_px=_cr_defect_margin,
                 plot=_cr_plot,
             )
             # Persist the CR-cleaned image immediately so the CRAY_RMD header
@@ -2754,24 +2858,28 @@ def run_photometry():
         maximask_spike_mask = result.get("maximask_spike_mask")
         del result
 
-        # OR cosmic ray mask into hardware defects mask so that all downstream
-        # photometry (aperture, PSF fitting, ePSF build) automatically masks
-        # CR-contaminated pixels.  Without this, residual CR pixels inside
-        # apertures or PSF stamps contaminate flux measurements.
-        if cosmic_rays_mask is not None and np.any(cosmic_rays_mask):
-            if hardware_defects_mask.shape == cosmic_rays_mask.shape:
-                hardware_defects_mask = hardware_defects_mask | cosmic_rays_mask
+        # OR the cosmic-ray defect mask (flagged pixels + small margin) into
+        # the hardware defects mask so that downstream photometry (aperture,
+        # PSF fitting, ePSF build) and the subtraction mask treat interpolated
+        # pixels as invalid.  The FWHM-scale dilated cosmic_rays_mask is a
+        # source-exclusion halo, not a pixel-invalid mask: it is applied
+        # separately via distance checks, and most of its area is real data
+        # that must not be nulled in the difference image.
+        if cosmic_rays_defect_mask is not None and np.any(cosmic_rays_defect_mask):
+            if hardware_defects_mask.shape == cosmic_rays_defect_mask.shape:
+                hardware_defects_mask = hardware_defects_mask | cosmic_rays_defect_mask
                 logging.info(
-                    "Combined cosmic ray mask (%d px) into hardware defects mask "
-                    "(%d px total masked).",
-                    int(np.sum(cosmic_rays_mask)),
+                    "Combined cosmic ray defect mask (%d px) into hardware "
+                    "defects mask (%d px total masked; exclusion halo %d px).",
+                    int(np.sum(cosmic_rays_defect_mask)),
                     int(np.sum(hardware_defects_mask)),
+                    int(np.sum(cosmic_rays_mask)),
                 )
             else:
                 logging.warning(
-                    "Cosmic ray mask shape %s != hardware defects mask shape %s; "
-                    "skipping CR mask propagation to photometry.",
-                    cosmic_rays_mask.shape,
+                    "Cosmic ray defect mask shape %s != hardware defects mask "
+                    "shape %s; skipping CR mask propagation to photometry.",
+                    cosmic_rays_defect_mask.shape,
                     hardware_defects_mask.shape,
                 )
 
@@ -3235,10 +3343,16 @@ def run_photometry():
             maximask_spike_mask = result.get("maximask_spike_mask")
             del result
 
-            # Re-apply cosmic ray mask to the new hardware defects mask.
-            if cosmic_rays_mask is not None and np.any(cosmic_rays_mask):
-                if hardware_defects_mask.shape == cosmic_rays_mask.shape:
-                    hardware_defects_mask = hardware_defects_mask | cosmic_rays_mask
+            # Re-apply cosmic ray defect mask to the new hardware defects
+            # mask.  The dilated exclusion halo stays in cosmic_rays_mask.
+            if (
+                cosmic_rays_defect_mask is not None
+                and np.any(cosmic_rays_defect_mask)
+            ):
+                if hardware_defects_mask.shape == cosmic_rays_defect_mask.shape:
+                    hardware_defects_mask = (
+                        hardware_defects_mask | cosmic_rays_defect_mask
+                    )
 
         # Weight-map filename convention: '.weight' inserted before the suffix.
         base, ext = os.path.splitext(fpath)
@@ -3819,6 +3933,13 @@ def run_photometry():
             input_yaml=input_yaml,
             image=image,
         )
+        # measure() overwrites flux_AP (the SExtractor FLUX_AUTO) with an
+        # e-/s rate through a 1.7xFWHM aperture; the catalog is measured at
+        # the optimum radius, so the same star ends up at different
+        # magnitudes per frame.  Preserve FLUX_AUTO under a separate name so
+        # the FWHM-vs-InstMag diagnostic can put both on one scale.
+        if "flux_AP" in IsolatedSources.columns:
+            IsolatedSources["flux_SEx"] = IsolatedSources["flux_AP"]
         IsolatedSources = aperture_photometry.measure(
             sources=IsolatedSources,
             plot=False,
@@ -4097,6 +4218,18 @@ def run_photometry():
                             CatalogSources.loc[match_ok, _sqc] = FWHMSources.iloc[
                                 idxs[match_ok]
                             ][_sqc].values
+                    # Carry the matched detection's FLUX_AUTO under a
+                    # separate name: flux_AP is aperture-measured at a
+                    # different radius per frame (optimum radius here, 1.7
+                    # x FWHM on the PSF pool), which offsets the same star
+                    # in the FWHM-vs-InstMag diagnostic.  flux_SEx gives
+                    # both populations a common flux scale; flux_AP itself
+                    # is untouched (the zeropoint fit needs it).
+                    if "flux_AP" in FWHMSources.columns:
+                        CatalogSources["flux_SEx"] = np.nan
+                        CatalogSources.loc[match_ok, "flux_SEx"] = FWHMSources.iloc[
+                            idxs[match_ok]
+                        ]["flux_AP"].values
                     # Compute elongation from a/b if both available
                     if "a" in CatalogSources.columns and "b" in CatalogSources.columns:
                         _a = pd.to_numeric(CatalogSources["a"], errors="coerce")
@@ -4120,161 +4253,15 @@ def run_photometry():
                     for _sqc in _sex_quality_cols:
                         if _sqc not in CatalogSources.columns:
                             CatalogSources[_sqc] = np.nan
+                    if "flux_SEx" not in CatalogSources.columns:
+                        CatalogSources["flux_SEx"] = np.nan
             else:
                 for _sqc in _sex_quality_cols:
                     if _sqc not in CatalogSources.columns:
                         CatalogSources[_sqc] = np.nan
+                if "flux_SEx" not in CatalogSources.columns:
+                    CatalogSources["flux_SEx"] = np.nan
 
-            # ---- Diagnostic plot: FWHM vs instrumental magnitude ----
-            try:
-                _fwhm_col = CatalogSources.get("fwhm")
-                _flux_col = CatalogSources.get("flux_AP")
-                if (
-                    _fwhm_col is not None
-                    and _flux_col is not None
-                    and len(CatalogSources) > 0
-                ):
-                    _fwhm_vals = np.asarray(_fwhm_col, dtype=float)
-                    _flux_vals = np.asarray(_flux_col, dtype=float)
-                    _valid = (
-                        np.isfinite(_fwhm_vals)
-                        & np.isfinite(_flux_vals)
-                        & (_flux_vals > 0)
-                        & (_fwhm_vals > 0)
-                    )
-                    if np.sum(_valid) >= 3:
-                        import matplotlib
-
-                        matplotlib.use("Agg", force=True)
-                        import matplotlib.pyplot as plt
-                        from scipy.stats import median_abs_deviation
-
-                        from functions import set_size
-
-                        _inst_mag = -2.5 * np.log10(_flux_vals[_valid])
-                        _fwhm_plot = _fwhm_vals[_valid]
-
-                        # Apply the same FWHM sigma-clipping as zeropoint.clean()
-                        _zp_cfg = input_yaml.get("zeropoint", {}) or {}
-                        _fwhm_sigma = float(_zp_cfg.get("fwhm_reject_sigma", 3.0))
-                        _fwhm_rejected = np.zeros(len(_fwhm_plot), dtype=bool)
-                        _fwhm_lo = _fwhm_hi = np.nan
-                        if _fwhm_sigma > 0 and len(_fwhm_plot) >= 10:
-                            _med_fwhm = float(np.nanmedian(_fwhm_plot))
-                            _mad_fwhm = (
-                                float(
-                                    median_abs_deviation(_fwhm_plot, nan_policy="omit")
-                                )
-                                * 1.4826
-                            )
-                            if _mad_fwhm > 1e-6:
-                                _fwhm_lo = _med_fwhm - _fwhm_sigma * _mad_fwhm
-                                _fwhm_hi = _med_fwhm + _fwhm_sigma * _mad_fwhm
-                                _fwhm_rejected = (_fwhm_plot < _fwhm_lo) | (
-                                    _fwhm_plot > _fwhm_hi
-                                )
-
-                        from plotting_utils import (apply_autophot_mplstyle,
-                                                    get_plot_color,
-                                                    get_plot_ext,
-                                                    safe_tight_layout)
-
-                        apply_autophot_mplstyle()
-                        plt.ioff()
-                        _fig, _ax = plt.subplots(figsize=set_size(540, 1))
-
-                        # Plot kept sources (blue) and rejected sources (red)
-                        _kept = ~_fwhm_rejected
-                        _n_kept = int(_kept.sum())
-                        _n_rej = int(_fwhm_rejected.sum())
-
-                        if _n_kept > 0:
-                            _ax.scatter(
-                                _inst_mag[_kept],
-                                _fwhm_plot[_kept],
-                                s=20,
-                                alpha=0.6,
-                                edgecolors="none",
-                                c=get_plot_color("fwhm_scatter"),
-                                label=f"Kept [{_n_kept}]",
-                            )
-                        if _n_rej > 0:
-                            _ax.scatter(
-                                _inst_mag[_fwhm_rejected],
-                                _fwhm_plot[_fwhm_rejected],
-                                s=30,
-                                alpha=0.8,
-                                c=get_plot_color("fwhm_rejected"),
-                                marker="x",
-                                label=f"FWHM rejected [{_n_rej}]",
-                            )
-
-                        _med_fwhm = float(np.nanmedian(_fwhm_plot))
-                        _ax.axhline(
-                            _med_fwhm,
-                            color=get_plot_color("fwhm_rejected"),
-                            ls="--",
-                            lw=1.0,
-                            label=f"Median FWHM = {_med_fwhm:.2f} px",
-                        )
-
-                        if np.isfinite(_fwhm_lo) and np.isfinite(_fwhm_hi):
-                            _ax.axhspan(
-                                _fwhm_lo,
-                                _fwhm_hi,
-                                color=get_plot_color("fwhm_scatter"),
-                                alpha=0.08,
-                            )
-                            _ax.axhline(
-                                _fwhm_lo,
-                                color="grey",
-                                ls=":",
-                                lw=0.8,
-                            )
-                            _ax.axhline(
-                                _fwhm_hi,
-                                color="grey",
-                                ls=":",
-                                lw=0.8,
-                                label=f"$\\pm{_fwhm_sigma:.0f}\\sigma$ band "
-                                f"[{_fwhm_lo:.2f}, {_fwhm_hi:.2f}] px",
-                            )
-
-                        _ax.set_xlabel(
-                            r"Instrumental magnitude $m_\mathrm{inst}$ [mag]"
-                        )
-                        _ax.set_ylabel("FWHM [pixels]")
-                        _ax.invert_xaxis()
-                        _ax.legend(loc="best", frameon=False, fontsize=8)
-                        # Ensure y-axis spans at least 1 pixel and has >= 1px buffer
-                        # beyond the 3sigma boundary edges
-                        _ymin_auto, _ymax_auto = _ax.get_ylim()
-                        _ylo = _ymin_auto
-                        _yhi = _ymax_auto
-                        if np.isfinite(_fwhm_lo):
-                            _ylo = min(_ylo, _fwhm_lo - 1.0)
-                        if np.isfinite(_fwhm_hi):
-                            _yhi = max(_yhi, _fwhm_hi + 1.0)
-                        if _yhi - _ylo < 1.0:
-                            _ymid = (_yhi + _ylo) / 2.0
-                            _ylo, _yhi = _ymid - 0.5, _ymid + 0.5
-                        _ax.set_ylim(_ylo, _yhi)
-                        safe_tight_layout(_fig)
-
-                        _plot_path = os.path.join(
-                            os.path.dirname(fpath),
-                            f"FWHM_vs_InstMag_{os.path.splitext(os.path.basename(fpath))[0]}{get_plot_ext(input_yaml)}",
-                        )
-                        _fig.savefig(
-                            _plot_path, dpi=150, bbox_inches="tight", facecolor="white"
-                        )
-                        plt.close(_fig)
-                        logging.info(
-                            "Saved FWHM vs instrumental magnitude plot: %s",
-                            os.path.basename(_plot_path),
-                        )
-            except Exception as _e:
-                logging.debug("FWHM vs inst_mag plot failed: %s", _e)
         else:
             logging.warning(
                 "No catalog sources available for photometric calibration; proceeding without catalog-based calibration."
@@ -4304,134 +4291,204 @@ def run_photometry():
         # =============================================================================
         # Build PSF Model
         # =============================================================================
-        # Diagnostic plot: FWHM vs instrumental magnitude for PSF source pool
-        try:
-            _psf_fwhm = psf_source_pool.get("fwhm")
-            _psf_flux = psf_source_pool.get("flux_AP")
+        # Diagnostic plot: FWHM vs instrumental magnitude - the full
+        # calibrator catalog in green with the PSF source pool overlaid, so
+        # outliers in either population are visible against the same sigma
+        # band (one merged figure; previously two separate files).
+        def _fwhm_mag_xy(_frame):
+            """(inst_mag, fwhm) arrays for rows with usable measurements."""
             if (
-                _psf_fwhm is not None
-                and _psf_flux is not None
-                and len(psf_source_pool) > 0
+                _frame is None
+                or len(_frame) == 0
+                or "fwhm" not in _frame.columns
+                or "flux_AP" not in _frame.columns
             ):
-                _pfwhm = np.asarray(_psf_fwhm, dtype=float)
-                _pflux = np.asarray(_psf_flux, dtype=float)
-                _pvalid = (
-                    np.isfinite(_pfwhm)
-                    & np.isfinite(_pflux)
-                    & (_pflux > 0)
-                    & (_pfwhm > 0)
+                return None
+            _fw = np.asarray(_frame["fwhm"], dtype=float)
+            _fl = np.asarray(_frame["flux_AP"], dtype=float)
+            # flux_AP is measured through different apertures per frame
+            # (optimum radius for the catalog, 1.7xFWHM for the pool), so
+            # the same star sits at different magnitudes in each.  flux_SEx
+            # carries SExtractor FLUX_AUTO for both populations; prefer it
+            # per row so they share one flux scale.
+            if "flux_SEx" in _frame.columns:
+                _fs = np.asarray(_frame["flux_SEx"], dtype=float)
+                _fl = np.where(np.isfinite(_fs) & (_fs > 0), _fs, _fl)
+            _ok = np.isfinite(_fw) & np.isfinite(_fl) & (_fl > 0) & (_fw > 0)
+            if np.count_nonzero(_ok) < 3:
+                return None
+            return -2.5 * np.log10(_fl[_ok]), _fw[_ok]
+
+        try:
+            _cat_xy = _fwhm_mag_xy(CatalogSources)
+            _pool_xy = _fwhm_mag_xy(psf_source_pool)
+            if _cat_xy is not None or _pool_xy is not None:
+                import matplotlib
+
+                matplotlib.use("Agg", force=True)
+                import matplotlib.pyplot as plt
+                from scipy.stats import median_abs_deviation
+
+                from functions import set_size
+                from plotting_utils import (
+                    apply_autophot_mplstyle,
+                    get_plot_color,
+                    get_plot_ext,
+                    safe_tight_layout,
                 )
-                if np.sum(_pvalid) >= 3:
-                    import matplotlib
 
-                    matplotlib.use("Agg", force=True)
-                    import matplotlib.pyplot as plt
-                    from scipy.stats import median_abs_deviation
+                apply_autophot_mplstyle()
+                plt.ioff()
+                _fig, _ax = plt.subplots(figsize=set_size(540, 1))
 
-                    from functions import set_size
-
-                    _pinst = -2.5 * np.log10(_pflux[_pvalid])
-                    _pfwhm_plot = _pfwhm[_pvalid]
-
-                    _zp_cfg = input_yaml.get("zeropoint", {}) or {}
-                    _fwhm_sigma = float(_zp_cfg.get("fwhm_reject_sigma", 3.0))
-                    _prej = np.zeros(len(_pfwhm_plot), dtype=bool)
-                    _plo = _phi = np.nan
-                    if _fwhm_sigma > 0 and len(_pfwhm_plot) >= 10:
-                        _pmed = float(np.nanmedian(_pfwhm_plot))
-                        _pmad = (
-                            float(median_abs_deviation(_pfwhm_plot, nan_policy="omit"))
-                            * 1.4826
+                # The sigma band is anchored on the catalog when available
+                # (the larger, representative population), else the pool.
+                # Small-N friendly: a median/MAD band is still informative
+                # on a handful of sources, so the gate matches the
+                # zeropoint clean() engage threshold.
+                _zp_cfg = input_yaml.get("zeropoint", {}) or {}
+                _fwhm_sigma = float(_zp_cfg.get("fwhm_reject_sigma", 3.0))
+                _fwhm_min_n = int(_zp_cfg.get("fwhm_reject_min_sources", 4))
+                _ref_fwhm = _cat_xy[1] if _cat_xy is not None else _pool_xy[1]
+                _fwhm_med = float(np.nanmedian(_ref_fwhm))
+                _fwhm_mad = np.nan
+                _fwhm_lo = _fwhm_hi = np.nan
+                if len(_ref_fwhm) >= _fwhm_min_n:
+                    _fwhm_mad = (
+                        float(
+                            median_abs_deviation(_ref_fwhm, nan_policy="omit")
                         )
-                        if _pmad > 1e-6:
-                            _plo = _pmed - _fwhm_sigma * _pmad
-                            _phi = _pmed + _fwhm_sigma * _pmad
-                            _prej = (_pfwhm_plot < _plo) | (_pfwhm_plot > _phi)
+                        * 1.4826
+                    )
+                    if _fwhm_mad > 1e-6 and _fwhm_sigma > 0:
+                        _fwhm_lo = _fwhm_med - _fwhm_sigma * _fwhm_mad
+                        _fwhm_hi = _fwhm_med + _fwhm_sigma * _fwhm_mad
 
-                    from plotting_utils import (apply_autophot_mplstyle,
-                                                get_plot_color, get_plot_ext,
-                                                safe_tight_layout)
-
-                    apply_autophot_mplstyle()
-                    plt.ioff()
-                    _pfig, _pax = plt.subplots(figsize=set_size(540, 1))
-
-                    _pkept = ~_prej
-                    if _pkept.sum() > 0:
-                        _pax.scatter(
-                            _pinst[_pkept],
-                            _pfwhm_plot[_pkept],
+                if _cat_xy is not None:
+                    _c_rej = (
+                        (_cat_xy[1] < _fwhm_lo) | (_cat_xy[1] > _fwhm_hi)
+                        if np.isfinite(_fwhm_lo)
+                        else np.zeros(len(_cat_xy[1]), dtype=bool)
+                    )
+                    if (~_c_rej).sum() > 0:
+                        _ax.scatter(
+                            _cat_xy[0][~_c_rej],
+                            _cat_xy[1][~_c_rej],
                             s=20,
-                            alpha=0.6,
+                            alpha=0.5,
                             edgecolors="none",
-                            c=get_plot_color("fwhm_scatter"),
-                            label=f"Kept [{int(_pkept.sum())}]",
+                            marker="s",
+                            c=get_plot_color("fwhm_catalog"),
+                            zorder=1,
+                            label=f"Catalog [{int((~_c_rej).sum())}]",
                         )
-                    if _prej.sum() > 0:
-                        _pax.scatter(
-                            _pinst[_prej],
-                            _pfwhm_plot[_prej],
+                    if _c_rej.any():
+                        _ax.scatter(
+                            _cat_xy[0][_c_rej],
+                            _cat_xy[1][_c_rej],
                             s=30,
                             alpha=0.8,
                             c=get_plot_color("fwhm_rejected"),
                             marker="x",
-                            label=f"FWHM rejected [{int(_prej.sum())}]",
+                            zorder=2,
+                            label=f"Catalog FWHM rejected [{int(_c_rej.sum())}]",
+                        )
+                if _pool_xy is not None:
+                    _p_rej = (
+                        (_pool_xy[1] < _fwhm_lo) | (_pool_xy[1] > _fwhm_hi)
+                        if np.isfinite(_fwhm_lo)
+                        else np.zeros(len(_pool_xy[1]), dtype=bool)
+                    )
+                    if (~_p_rej).sum() > 0:
+                        _ax.scatter(
+                            _pool_xy[0][~_p_rej],
+                            _pool_xy[1][~_p_rej],
+                            s=45,
+                            alpha=0.9,
+                            edgecolors="k",
+                            linewidths=0.3,
+                            c=get_plot_color("fwhm_scatter"),
+                            zorder=3,
+                            label=f"PSF pool [{int((~_p_rej).sum())}]",
+                        )
+                    if _p_rej.any():
+                        _ax.scatter(
+                            _pool_xy[0][_p_rej],
+                            _pool_xy[1][_p_rej],
+                            s=60,
+                            alpha=0.9,
+                            c=get_plot_color("fwhm_rejected"),
+                            marker="X",
+                            zorder=4,
+                            label=f"PSF pool FWHM outlier [{int(_p_rej.sum())}]",
                         )
 
-                    _pmed = float(np.nanmedian(_pfwhm_plot))
-                    _pax.axhline(
-                        _pmed,
-                        color=get_plot_color("fwhm_rejected"),
-                        ls="--",
-                        lw=1.0,
-                        label=f"Median FWHM = {_pmed:.2f} px",
+                _ax.axhline(
+                    _fwhm_med,
+                    color=get_plot_color("fwhm_rejected"),
+                    ls="--",
+                    lw=1.0,
+                    label=f"Median FWHM = {_fwhm_med:.2f} px",
+                )
+                if np.isfinite(_fwhm_mad) and _fwhm_mad > 1e-6:
+                    _ax.axhspan(
+                        _fwhm_med - _fwhm_mad,
+                        _fwhm_med + _fwhm_mad,
+                        color=get_plot_color("fwhm_scatter"),
+                        alpha=0.15,
+                        label=(
+                            f"$\\pm1\\sigma$ band "
+                            f"[{_fwhm_med - _fwhm_mad:.2f}, "
+                            f"{_fwhm_med + _fwhm_mad:.2f}] px"
+                        ),
                     )
-                    if np.isfinite(_plo) and np.isfinite(_phi):
-                        _pax.axhspan(
-                            _plo, _phi, color=get_plot_color("fwhm_scatter"), alpha=0.08
-                        )
-                        _pax.axhline(_plo, color="grey", ls=":", lw=0.8)
-                        _pax.axhline(
-                            _phi,
-                            color="grey",
-                            ls=":",
-                            lw=0.8,
-                            label=f"$\\pm{_fwhm_sigma:.0f}\\sigma$ band "
-                            f"[{_plo:.2f}, {_phi:.2f}] px",
-                        )
+                if np.isfinite(_fwhm_lo) and np.isfinite(_fwhm_hi):
+                    _ax.axhline(_fwhm_lo, color="grey", ls=":", lw=0.8)
+                    _ax.axhline(
+                        _fwhm_hi,
+                        color="grey",
+                        ls=":",
+                        lw=0.8,
+                        label=f"$\\pm{_fwhm_sigma:.0f}\\sigma$ reject "
+                        f"[{_fwhm_lo:.2f}, {_fwhm_hi:.2f}] px",
+                    )
 
-                    _pax.set_xlabel(r"Instrumental magnitude $m_\mathrm{inst}$ [mag]")
-                    _pax.set_ylabel("FWHM [pixels]")
-                    _pax.invert_xaxis()
-                    _pax.legend(loc="best", frameon=False, fontsize=8)
-                    # Ensure y-axis spans at least 1 pixel and has >= 1px buffer
-                    # beyond the 3sigma boundary edges
-                    _pymin_auto, _pymax_auto = _pax.get_ylim()
-                    _pylo = _pymin_auto
-                    _pyhi = _pymax_auto
-                    if np.isfinite(_plo):
-                        _pylo = min(_pylo, _plo - 1.0)
-                    if np.isfinite(_phi):
-                        _pyhi = max(_pyhi, _phi + 1.0)
-                    if _pyhi - _pylo < 1.0:
-                        _pymid = (_pyhi + _pylo) / 2.0
-                        _pylo, _pyhi = _pymid - 0.5, _pymid + 0.5
-                    _pax.set_ylim(_pylo, _pyhi)
-                    safe_tight_layout(_pfig)
-                    _plot_path_psf = os.path.join(
-                        os.path.dirname(fpath),
-                        f"FWHM_vs_InstMag_PSFPool_{os.path.splitext(os.path.basename(fpath))[0]}{get_plot_ext(input_yaml)}",
-                    )
-                    _pfig.savefig(
-                        _plot_path_psf, dpi=150, bbox_inches="tight", facecolor="white"
-                    )
-                    plt.close(_pfig)
-                    logging.info(
-                        "Saved PSF pool FWHM vs inst_mag plot: %s",
-                        os.path.basename(_plot_path_psf),
-                    )
+                _ax.set_xlabel(r"Instrumental magnitude $m_\mathrm{inst}$ [mag]")
+                _ax.set_ylabel("FWHM [pixels]")
+                _ax.invert_xaxis()
+                _ax.legend(loc="best", frameon=False, fontsize=8)
+                # Ensure y-axis spans at least 1 pixel and has >= 1px buffer
+                # beyond the sigma-band boundary edges
+                _ymin_auto, _ymax_auto = _ax.get_ylim()
+                _ylo = _ymin_auto
+                _yhi = _ymax_auto
+                if np.isfinite(_fwhm_mad):
+                    _ylo = min(_ylo, _fwhm_med - _fwhm_mad - 0.5)
+                    _yhi = max(_yhi, _fwhm_med + _fwhm_mad + 0.5)
+                if np.isfinite(_fwhm_lo):
+                    _ylo = min(_ylo, _fwhm_lo - 1.0)
+                if np.isfinite(_fwhm_hi):
+                    _yhi = max(_yhi, _fwhm_hi + 1.0)
+                if _yhi - _ylo < 1.0:
+                    _ymid = (_yhi + _ylo) / 2.0
+                    _ylo, _yhi = _ymid - 0.5, _ymid + 0.5
+                _ax.set_ylim(_ylo, _yhi)
+                safe_tight_layout(_fig)
+
+                _plot_path = os.path.join(
+                    os.path.dirname(fpath),
+                    f"FWHM_vs_InstMag_{os.path.splitext(os.path.basename(fpath))[0]}{get_plot_ext(input_yaml)}",
+                )
+                _fig.savefig(
+                    _plot_path, dpi=150, bbox_inches="tight", facecolor="white"
+                )
+                plt.close(_fig)
+                logging.info(
+                    "Saved FWHM vs instrumental magnitude plot: %s",
+                    os.path.basename(_plot_path),
+                )
         except Exception as _e:
-            logging.debug("PSF pool FWHM vs inst_mag plot failed: %s", _e)
+            logging.debug("FWHM vs inst_mag plot failed: %s", _e)
 
         # =============================================================================
         # Supplement PSF pool from catalog AND detection-table sources
@@ -4450,7 +4507,7 @@ def run_photometry():
         #
         # Quality filtering:
         #   - finite coords, positive flux, inside the image border
-        #   - SNR >= psf_snr_min (default 5) to exclude low-S/N sources
+        #   - SNR >= psf_snr_min (default 10) to exclude low-S/N sources
         #   - Isolation check against ALL known sources (catalogue + detections
         #     + the raw detection table) to avoid blended cutouts corrupting the ePSF
         #   - Carry all useful columns (SNR, flux_AP, threshold, fwhm, flags,
@@ -4497,7 +4554,7 @@ def run_photometry():
             and _supp_frames
             and (_pool_starved or _grid_requested)
         ):
-            _psf_snr_min = float(phot_cfg.get("psf_snr_min", 5.0))
+            _psf_snr_min = float(phot_cfg.get("psf_snr_min", 10.0))
             _psf_iso_fwhm = float(phot_cfg.get("psf_isolation_radius_fwhm", 3.0))
             _hdr_fwhm = input_yaml.get("fwhm", 3.0)
             _iso_radius = _psf_iso_fwhm * float(_hdr_fwhm) if _hdr_fwhm > 0 else 15.0
@@ -4511,6 +4568,18 @@ def run_photometry():
             # (their flux contribution is handled by per-cutout masking at
             # build time).  Positions are deduplicated at ~1 px so a source
             # present in several frames counts once.
+            # Coalesce the S/N aliases consistently: "SNR" (AutoPhOT
+            # aperture S/N) preferred, "snr" (SExtractor SNR_WIN) filling
+            # gaps.  A first-match column pick can grab a NaN-heavy column
+            # while a valid alias sits alongside.
+            def _coalesce_snr(f):
+                s = None
+                for _sc in ("SNR", "snr", "signal_to_noise", "flux_snr"):
+                    if _sc in f.columns:
+                        _v = pd.to_numeric(f[_sc], errors="coerce")
+                        s = _v if s is None else s.fillna(_v)
+                return s
+
             _nb_rows = []
             for _f in _supp_frames:
                 _nb_rows.append(_f[1])
@@ -4524,20 +4593,15 @@ def run_photometry():
             _nb = pd.concat(
                 [
                     f[["x_pix", "y_pix"]].assign(
-                        _snr=pd.to_numeric(
-                            (
-                                f["snr"]
-                                if "snr" in f.columns
-                                else (
-                                    f["SNR"]
-                                    if "SNR" in f.columns
-                                    else pd.Series(np.nan, index=f.index)
-                                )
-                            ),
-                            errors="coerce",
+                        _snr=(
+                            s
+                            if s is not None
+                            else pd.Series(np.nan, index=f.index)
                         )
                     )
-                    for f in _nb_rows
+                    for f, s in (
+                        (f, _coalesce_snr(f)) for f in _nb_rows
+                    )
                 ],
                 ignore_index=True,
             )
@@ -4554,6 +4618,33 @@ def run_photometry():
 
             _all_tree = cKDTree(_nb_xy) if len(_nb_xy) > 0 else None
 
+            # Distance map to the nearest masked defect pixel.  The core
+            # pool excludes sources within psf_defect_exclusion_fwhm x FWHM
+            # of masked pixels (interpolated CRs, saturation, streaks, NaN);
+            # supplement candidates get the same exclusion so a source
+            # sitting on or beside a defect never reaches the pool via the
+            # supplement path.
+            _supp_def_dist = None
+            _supp_def_r = (
+                float(phot_cfg.get("psf_defect_exclusion_fwhm", 2.0))
+                * float(_hdr_fwhm)
+                if np.isfinite(_hdr_fwhm) and _hdr_fwhm > 0
+                else 0.0
+            )
+            if _supp_def_r > 0:
+                _bad_px_s = np.zeros((height, width), dtype=bool)
+                for _m in (cosmic_rays_mask, hardware_defects_mask):
+                    if (
+                        _m is not None
+                        and np.ndim(_m) == 2
+                        and np.shape(_m) == (height, width)
+                    ):
+                        _bad_px_s |= np.asarray(_m, dtype=bool)
+                if np.any(_bad_px_s):
+                    from scipy.ndimage import distance_transform_edt
+
+                    _supp_def_dist = distance_transform_edt(~_bad_px_s)
+
             for _fname, _frame in _supp_frames:
                 # Start with basic validity: finite coords, positive flux,
                 # inside the image border (cutouts cannot extend past it).
@@ -4568,15 +4659,11 @@ def run_photometry():
                     & (_frame["y_pix"] < height - border)
                 ].copy()
 
-                # SNR cut: "SNR" (aperture) or "snr" (catalog/detection) column
-                _snr_col = (
-                    "SNR"
-                    if "SNR" in _cand.columns
-                    else ("snr" if "snr" in _cand.columns else None)
-                )
-                if _snr_col is not None:
-                    _snr_vals = pd.to_numeric(_cand[_snr_col], errors="coerce")
-                    _snr_ok = _snr_vals >= _psf_snr_min
+                # SNR cut on the coalesced series: "SNR" (aperture S/N)
+                # preferred, "snr" (SNR_WIN) filling gaps.
+                _snr_ser = _coalesce_snr(_cand)
+                if _snr_ser is not None:
+                    _snr_ok = _snr_ser >= _psf_snr_min
                     _n_low_snr = int((~_snr_ok).sum())
                     if _n_low_snr > 0:
                         logging.info(
@@ -4586,6 +4673,180 @@ def run_photometry():
                             _psf_snr_min,
                         )
                         _cand = _cand.loc[_snr_ok].copy()
+                        _snr_ser = _snr_ser.loc[_cand.index]
+
+                # Hard FWHM sanity gate on supplement candidates.  The
+                # build's FWHM-consistency cut is keep-floor protected, so
+                # in starved pools junk added here (hot pixels well below,
+                # galaxies well above the image FWHM) survives it, drags the
+                # pool-median FWHM off the true value, and fails the cutout
+                # checks anyway.  Supplements are additions, so gate them
+                # unconditionally; NaN fwhm stays (catalog frames lack the
+                # column - those get cutout-level vetting in PSF.build()).
+                _fwhm_col_s = next(
+                    (c for c in ("fwhm", "FWHM") if c in _cand.columns), None
+                )
+                if (
+                    _fwhm_col_s is not None
+                    and np.isfinite(_hdr_fwhm)
+                    and _hdr_fwhm > 0
+                ):
+                    _fv_s = pd.to_numeric(_cand[_fwhm_col_s], errors="coerce")
+                    _fv_lo = float(
+                        phot_cfg.get("psf_supplement_fwhm_min_frac", 0.5)
+                    )
+                    _fv_hi = float(
+                        phot_cfg.get("psf_supplement_fwhm_max_frac", 2.5)
+                    )
+                    _fwhm_ok = _fv_s.isna() | _fv_s.between(
+                        _fv_lo * _hdr_fwhm, _fv_hi * _hdr_fwhm,
+                        inclusive="both",
+                    )
+                    _n_bad_fwhm = int((~_fwhm_ok).sum())
+                    if _n_bad_fwhm > 0:
+                        logging.info(
+                            "PSF supplement (%s): excluding %d FWHM outliers "
+                            "(outside [%.1f, %.1f] x image FWHM %.2f px).",
+                            _fname,
+                            _n_bad_fwhm,
+                            _fv_lo,
+                            _fv_hi,
+                            float(_hdr_fwhm),
+                        )
+                        _cand = _cand.loc[_fwhm_ok].copy()
+                        if _snr_ser is not None:
+                            _snr_ser = _snr_ser.loc[_cand.index]
+
+                # SExtractor-quality gates on supplement candidates.  The
+                # raw-detection frame bypasses the filtering the detection
+                # wrapper already applied, so its rejected sources (blends,
+                # saturated, sharp spikes) would otherwise be re-admitted
+                # unvetted.  Bounds mirror the relaxed detection-side cuts;
+                # NaN values stay (catalog frames lack these columns and
+                # get cutout-level vetting in PSF.build()).
+                if "flags" in _cand.columns:
+                    _fl_s = pd.to_numeric(_cand["flags"], errors="coerce")
+                    _fl_ok = _fl_s.isna() | (_fl_s <= 2)
+                    _n_flags = int((~_fl_ok).sum())
+                    if _n_flags > 0:
+                        logging.info(
+                            "PSF supplement (%s): excluding %d flagged "
+                            "sources (FLAGS > 2).",
+                            _fname,
+                            _n_flags,
+                        )
+                        _cand = _cand.loc[_fl_ok].copy()
+                        if _snr_ser is not None:
+                            _snr_ser = _snr_ser.loc[_cand.index]
+
+                if "sharpness" in _cand.columns:
+                    _sh_s = pd.to_numeric(_cand["sharpness"], errors="coerce")
+                    _sh_ok = _sh_s.isna() | _sh_s.between(
+                        0.1, 1.2, inclusive="both"
+                    )
+                    _n_sharp = int((~_sh_ok).sum())
+                    if _n_sharp > 0:
+                        logging.info(
+                            "PSF supplement (%s): excluding %d sources with "
+                            "anomalous SHARPNESS (outside [0.1, 1.2]).",
+                            _fname,
+                            _n_sharp,
+                        )
+                        _cand = _cand.loc[_sh_ok].copy()
+                        if _snr_ser is not None:
+                            _snr_ser = _snr_ser.loc[_cand.index]
+
+                # Peak-concentration gate: hot pixels and CR spikes put most
+                # flux in 1-2 pixels (peak/flux_AP -> 1.0); real stars are
+                # bounded by ~5x the Gaussian expectation for the image
+                # FWHM.  Same adaptive cap as the build cut (incl. the 0.80
+                # hard ceiling) but unconditional - these are additions.
+                _pk_col_s = next(
+                    (
+                        c
+                        for c in ("peak_flux", "FLUX_MAX", "peak")
+                        if c in _cand.columns
+                    ),
+                    None,
+                )
+                if (
+                    _pk_col_s is not None
+                    and np.isfinite(_hdr_fwhm)
+                    and _hdr_fwhm > 0
+                ):
+                    _pk_exp_s = 1.0 / (
+                        2.0 * np.pi * (float(_hdr_fwhm) / 2.355) ** 2
+                    )
+                    _pk_max_s = min(
+                        0.80,
+                        max(
+                            float(
+                                phot_cfg.get("psf_peak_to_aperture_ratio_max", 0.0)
+                            ),
+                            min(0.5, 5.0 * _pk_exp_s),
+                        ),
+                    )
+                    _pk_s = pd.to_numeric(_cand[_pk_col_s], errors="coerce")
+                    # flux_AP is an e-/s rate on measured frames
+                    # (catalog) but FLUX_AUTO in image units on
+                    # detection tables, while peak_flux/FLUX_MAX is
+                    # always image units.  maxPixel (peak e-/s) exists
+                    # only on measured rows, so preferring it keeps the
+                    # ratio unit-consistent per row.
+                    if "maxPixel" in _cand.columns:
+                        _mx_s = pd.to_numeric(
+                            _cand["maxPixel"], errors="coerce"
+                        )
+                        _pk_s = _mx_s.where(np.isfinite(_mx_s), _pk_s)
+                    _ap_s = pd.to_numeric(_cand["flux_AP"], errors="coerce")
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        _pk_ratio_s = np.where(
+                            (_ap_s > 0)
+                            & np.isfinite(_pk_s)
+                            & np.isfinite(_ap_s),
+                            _pk_s / _ap_s,
+                            np.nan,
+                        )
+                    _pk_ok_s = pd.Series(_pk_ratio_s, index=_cand.index)
+                    _pk_ok_s = _pk_ok_s.isna() | (_pk_ok_s <= _pk_max_s)
+                    _n_peaky = int((~_pk_ok_s).sum())
+                    if _n_peaky > 0:
+                        logging.info(
+                            "PSF supplement (%s): excluding %d peaky "
+                            "non-stellar sources (peak/flux > %.3f; hot "
+                            "pixels/CR spikes).",
+                            _fname,
+                            _n_peaky,
+                            _pk_max_s,
+                        )
+                        _cand = _cand.loc[_pk_ok_s].copy()
+                        if _snr_ser is not None:
+                            _snr_ser = _snr_ser.loc[_cand.index]
+
+                # Defect-proximity exclusion, same radius as the core pool:
+                # a supplement source this close to a masked pixel has a
+                # contaminated stamp that would only ever enter via the
+                # build's keep-floor masking path.
+                if _supp_def_dist is not None and len(_cand) > 0:
+                    _cx_s = np.clip(
+                        np.rint(_cand["x_pix"]).astype(int), 0, width - 1
+                    )
+                    _cy_s = np.clip(
+                        np.rint(_cand["y_pix"]).astype(int), 0, height - 1
+                    )
+                    _def_ok = _supp_def_dist[_cy_s, _cx_s] > _supp_def_r
+                    _n_def = int((~_def_ok).sum())
+                    if _n_def > 0:
+                        logging.info(
+                            "PSF supplement (%s): excluding %d sources within "
+                            "%.1f px of masked defect pixels.",
+                            _fname,
+                            _n_def,
+                            _supp_def_r,
+                        )
+                        _cand = _cand.loc[_def_ok].copy()
+                        if _snr_ser is not None:
+                            _snr_ser = _snr_ser.loc[_cand.index]
 
                 # Isolation: reject sources with a neighbour within iso_radius
                 # in the densest available source list.  Sources closer than
@@ -4642,10 +4903,49 @@ def run_photometry():
                     "b",
                     "mu_max",
                     "flux_radius",
+                    "RA",
+                    "DEC",
                 ]:
                     if _c in _cand.columns:
                         _carry_cols.append(_c)
                 _supplement = _cand[_carry_cols].copy()
+
+                # Fill missing sky coords from the aligned-image WCS.  The
+                # matching stage refreshes x_pix/y_pix from RA/DEC via
+                # all_world2pix; supplement rows without RA/DEC turn into
+                # NaN there and are dropped wholesale, defeating the point
+                # of supplementing (observed: 24/27 pool sources removed).
+                if imageWCS is not None:
+                    if "RA" not in _supplement.columns:
+                        _supplement["RA"] = np.nan
+                    if "DEC" not in _supplement.columns:
+                        _supplement["DEC"] = np.nan
+                    _ra_s = pd.to_numeric(_supplement["RA"], errors="coerce")
+                    _dec_s = pd.to_numeric(_supplement["DEC"], errors="coerce")
+                    _need_rd = ~np.isfinite(_ra_s) | ~np.isfinite(_dec_s)
+                    if _need_rd.any():
+                        try:
+                            _rr_s, _dd_s = imageWCS.all_pix2world(
+                                _supplement.loc[_need_rd, "x_pix"].to_numpy(
+                                    dtype=float
+                                ),
+                                _supplement.loc[_need_rd, "y_pix"].to_numpy(
+                                    dtype=float
+                                ),
+                                0,
+                            )
+                            _supplement.loc[_need_rd, "RA"] = np.asarray(
+                                _rr_s, dtype=float
+                            )
+                            _supplement.loc[_need_rd, "DEC"] = np.asarray(
+                                _dd_s, dtype=float
+                            )
+                        except Exception:
+                            logging.debug(
+                                "PSF supplement: could not derive RA/DEC "
+                                "from pixel coords via image WCS.",
+                                exc_info=True,
+                            )
 
                 # Avoid duplicates: skip supplements within 2 px of a pooled source.
                 _existing_xy = (
@@ -4659,15 +4959,18 @@ def run_photometry():
                     _tree = cKDTree(_existing_xy)
                     _dups, _ = _tree.query(_supplement_xy, k=1)
                     _is_new = _dups > 2.0
+                _supp_snr = (
+                    _snr_ser.loc[_supplement.index].to_numpy(dtype=float)
+                    if _snr_ser is not None
+                    else None
+                )
                 _supplement = _supplement.loc[_is_new].reset_index(drop=True)
+                if _supp_snr is not None:
+                    _supp_snr = _supp_snr[_is_new]
 
                 # Bound pathological pools: keep the highest-SNR additions.
-                if len(_supplement) > _supp_max_add and _snr_col is not None:
-                    _ord = np.argsort(
-                        pd.to_numeric(_supplement[_snr_col], errors="coerce").to_numpy(
-                            dtype=float
-                        )
-                    )[::-1]
+                if len(_supplement) > _supp_max_add and _supp_snr is not None:
+                    _ord = np.argsort(_supp_snr)[::-1]
                     _supplement = _supplement.iloc[_ord[:_supp_max_add]]
                 if len(_supplement) > 0:
                     psf_source_pool = pd.concat(
@@ -4691,6 +4994,59 @@ def run_photometry():
                             len(psf_source_pool),
                         )
 
+        # Sigma-clip the pool on FWHM once, post-supplement, so every
+        # downstream consumer (ePSF build, SFFT matched-source list) sees
+        # the same clean sample: extended galaxies and blends must not
+        # anchor the PSF model or the kernel fit.  NaN/absent FWHM rows
+        # are kept - they get cutout-level vetting in PSF.build().
+        if (
+            psf_source_pool is not None
+            and len(psf_source_pool) >= 5
+            and "fwhm" in psf_source_pool.columns
+        ):
+            try:
+                from functions import fwhm_outlier_clip
+
+                _pool_fwhm = pd.to_numeric(
+                    psf_source_pool["fwhm"], errors="coerce"
+                ).to_numpy(dtype=float)
+                _fw_ok = np.isfinite(_pool_fwhm) & (_pool_fwhm > 0)
+                if int(_fw_ok.sum()) >= 5:
+                    _clip_sig = float(
+                        phot_cfg.get("psf_fwhm_clip_sigma", 2.5)
+                    )
+                    _rej, _pool_med, _ = fwhm_outlier_clip(
+                        _pool_fwhm, sigma=_clip_sig
+                    )
+                    _n_rej = int(_rej.sum())
+                    _min_keep = max(
+                        3,
+                        int(phot_cfg.get("psf_fwhm_clip_min_keep", 4)),
+                    )
+                    if _n_rej > 0:
+                        if len(psf_source_pool) - _n_rej >= _min_keep:
+                            psf_source_pool = psf_source_pool.iloc[
+                                np.flatnonzero(~_rej)
+                            ].reset_index(drop=True)
+                            logging.info(
+                                "PSF pool FWHM sigma-clip (%.1f sigma): "
+                                "removed %d extended/CR-like outliers "
+                                "(%d kept, median FWHM=%.2f px).",
+                                _clip_sig,
+                                _n_rej,
+                                len(psf_source_pool),
+                                _pool_med,
+                            )
+                        else:
+                            logging.debug(
+                                "Skipping PSF pool FWHM clip: would leave "
+                                "%d sources (< %d).",
+                                len(psf_source_pool) - _n_rej,
+                                _min_keep,
+                            )
+            except Exception as _clip_err:
+                logging.debug("PSF pool FWHM clip failed: %s", _clip_err)
+
         # The banner is printed after the supplement step so the gate sees
         # the post-supplement do_aperture_ONLY (a replenished pool may have
         # re-enabled PSF photometry).
@@ -4704,9 +5060,8 @@ def run_photometry():
         # artifacts in the PSF model itself), set psf_build_from_aligned=False.
         epsf_model = None
         # Provenance of the PSF model actually used: "epsf" (built from
-        # image sources), "analytic-composite"/"analytic-moffat" (analytic
-        # substitution), or "none". Written to the Output CSV so an
-        # analytic substitution is never silent in the data products.
+        # image sources) or "none" (aperture-only). Written to the Output
+        # CSV so model provenance is never silent in the data products.
         psf_model_kind = "none"
         PSFSources = None
         build_from_aligned = bool(phot_cfg.get("psf_build_from_aligned", True))
@@ -5776,11 +6131,36 @@ def run_photometry():
                 and (ra_vals is not None)
                 and (dec_vals is not None)
             ):
-                x_pix, y_pix = imageWCS.all_world2pix(
-                    ra_vals.values, dec_vals.values, wcs_origin
+                # Refresh only rows with finite RA/DEC.  Pool-supplement
+                # rows can carry valid x_pix/y_pix with missing sky coords;
+                # all_world2pix(NaN) returns NaN and the finite filter below
+                # would discard them wholesale.
+                _ra_num = pd.to_numeric(ra_vals, errors="coerce")
+                _dec_num = pd.to_numeric(dec_vals, errors="coerce")
+                _rd_ok = (
+                    np.isfinite(_ra_num.to_numpy(dtype=float))
+                    & np.isfinite(_dec_num.to_numpy(dtype=float))
                 )
-                merged_sources["x_pix"] = x_pix
-                merged_sources["y_pix"] = y_pix
+                if {"x_pix", "y_pix"}.issubset(merged_sources.columns):
+                    _x_src, _y_src = "x_pix", "y_pix"
+                else:
+                    _x_src, _y_src = "x_coord", "y_coord"
+                _x_new = pd.to_numeric(
+                    merged_sources[_x_src], errors="coerce"
+                ).to_numpy(dtype=float)
+                _y_new = pd.to_numeric(
+                    merged_sources[_y_src], errors="coerce"
+                ).to_numpy(dtype=float)
+                if _rd_ok.any():
+                    _wx, _wy = imageWCS.all_world2pix(
+                        _ra_num.to_numpy(dtype=float)[_rd_ok],
+                        _dec_num.to_numpy(dtype=float)[_rd_ok],
+                        wcs_origin,
+                    )
+                    _x_new[_rd_ok] = np.asarray(_wx, dtype=float)
+                    _y_new[_rd_ok] = np.asarray(_wy, dtype=float)
+                merged_sources["x_pix"] = _x_new
+                merged_sources["y_pix"] = _y_new
             else:
                 merged_sources["x_pix"] = merged_sources.get(
                     "x_pix", merged_sources.get("x_coord")
@@ -6062,6 +6442,24 @@ def run_photometry():
                     )
                 )
 
+                # A centroid that lands far from its seed is a centroiding
+                # failure (the fit latched onto a neighbour, a mask edge, or
+                # noise), not a real position.  Unbounded, a garbage-but-finite
+                # centroid both moves x_pix/y_pix off the source and produces a
+                # spurious science-vs-template offset that rejects a usable
+                # prior.  Bound the accepted drift to ~half a FWHM so a
+                # wandering centroid is treated like a failed fit (NaN): the
+                # source is kept at its seed position instead of rejected.
+                _wander_max = max(
+                    2.5,
+                    float(
+                        (input_yaml.get("photometry", {}) or {}).get(
+                            "centroid_max_wander_fwhm", 0.5
+                        )
+                    )
+                    * float(ImageFWHM),
+                )
+
                 # Centroid each source in both science and template images.
                 # Measuring centroid-to-centroid offsets removes SExtractor
                 # windowed-centroid noise from the alignment measurement.
@@ -6074,62 +6472,16 @@ def run_photometry():
                     box = max(
                         int(np.ceil(ImageFWHM)) * 2 + 1, 7
                     )  # Ensure box size is odd and large enough
-                    # Centroid on template
-                    try:
-                        x_c, y_c = centroid_sources(
-                            template_image,
-                            [center_x],
-                            [center_y],
-                            box_size=box,
-                            centroid_func=centroid_2dg,
-                        )
-                        if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
-                            template_sources.at[idx, "x_centroid"] = float(x_c[0])
-                            template_sources.at[idx, "y_centroid"] = float(y_c[0])
-                        else:
-                            raise ValueError("non-finite centroid")
-                    except Exception:
-                        try:
-                            x_c, y_c = centroid_sources(
-                                template_image,
-                                [center_x],
-                                [center_y],
-                                box_size=box,
-                                centroid_func=centroid_com,
-                            )
-                            if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
-                                template_sources.at[idx, "x_centroid"] = float(x_c[0])
-                                template_sources.at[idx, "y_centroid"] = float(y_c[0])
-                        except Exception:
-                            pass
-                    # Centroid on science
-                    try:
-                        x_c, y_c = centroid_sources(
-                            image,
-                            [center_x],
-                            [center_y],
-                            box_size=box,
-                            centroid_func=centroid_2dg,
-                        )
-                        if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
-                            image_sources.at[idx, "x_centroid"] = float(x_c[0])
-                            image_sources.at[idx, "y_centroid"] = float(y_c[0])
-                        else:
-                            raise ValueError("non-finite centroid")
-                    except Exception:
-                        try:
-                            x_c, y_c = centroid_sources(
-                                image,
-                                [center_x],
-                                [center_y],
-                                box_size=box,
-                                centroid_func=centroid_com,
-                            )
-                            if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
-                                image_sources.at[idx, "x_centroid"] = float(x_c[0])
-                                image_sources.at[idx, "y_centroid"] = float(y_c[0])
-                        except Exception:
-                            pass
+                    x_t, y_t = _bounded_centroid(
+                        template_image, center_x, center_y, box, _wander_max
+                    )
+                    template_sources.at[idx, "x_centroid"] = x_t
+                    template_sources.at[idx, "y_centroid"] = y_t
+                    x_s, y_s = _bounded_centroid(
+                        image, center_x, center_y, box, _wander_max
+                    )
+                    image_sources.at[idx, "x_centroid"] = x_s
+                    image_sources.at[idx, "y_centroid"] = y_s
 
                 dx = image_sources["x_centroid"] - template_sources["x_centroid"]
                 dy = image_sources["y_centroid"] - template_sources["y_centroid"]
@@ -7377,6 +7729,41 @@ def run_photometry():
                         # (_ts_cfg_refine is already defined above, before the
                         # stamp contamination check.)
                         _psf_quality_mask = np.ones(len(ms), dtype=bool)
+                        # Keep-floor shared by all four cuts.  Each cut used to
+                        # check "enough left" against the un-cut count, so cuts
+                        # could combine to strip far below the floor (e.g. qfit
+                        # and chi2 each removing 3 from 8 -> 2).  The floor now
+                        # applies to the accumulated mask and cuts degrade
+                        # gracefully: once the floor is hit, only the
+                        # worst-ranked flags are removed.
+                        _psq_min_keep = max(
+                            1,
+                            int(_ts_cfg_refine.get("sfft_psf_quality_min_keep", 5)),
+                        )
+
+                        def _psf_quality_cut(bad, metric, label):
+                            """Apply one PSF-quality cut bounded by the floor."""
+                            nonlocal _psf_quality_mask
+                            _psf_quality_mask, n_removed, n_flagged = _keep_floor_cut(
+                                _psf_quality_mask, bad, metric, _psq_min_keep
+                            )
+                            if n_flagged == 0:
+                                return
+                            if n_removed == n_flagged:
+                                logging.info(
+                                    f"PSF {label} cut: removed {n_removed} sources"
+                                )
+                            elif n_removed > 0:
+                                logging.info(
+                                    f"PSF {label} cut: removed {n_removed} of "
+                                    f"{n_flagged} flagged (min_keep={_psq_min_keep} "
+                                    f"kept the best-ranked {n_flagged - n_removed})."
+                                )
+                            else:
+                                logging.info(
+                                    f"PSF {label} cut skipped: {n_flagged} flagged "
+                                    f"but pool is at min_keep={_psq_min_keep}."
+                                )
 
                         # cfit cut (concentration/shape)
                         # cfit measures how well the source profile matches the
@@ -7387,21 +7774,11 @@ def run_photometry():
                             _cfit = pd.to_numeric(ms["cfit"], errors="coerce").values
                             _cfit_max = float(_ts_cfg_refine.get("sfft_max_cfit", 5.0))
                             if _cfit_max > 0:
-                                _cfit_bad = np.isfinite(_cfit) & (_cfit > _cfit_max)
-                                _n_cfit_bad = int(_cfit_bad.sum())
-                                if (
-                                    _n_cfit_bad > 0
-                                    and (~_cfit_bad | ~np.isfinite(_cfit)).sum() >= 5
-                                ):
-                                    _psf_quality_mask &= ~_cfit_bad
-                                    logging.info(
-                                        f"PSF cfit cut: removed {_n_cfit_bad} sources (cfit > {_cfit_max})"
-                                    )
-                                elif _n_cfit_bad > 0:
-                                    logging.info(
-                                        f"PSF cfit cut skipped: would remove {_n_cfit_bad} "
-                                        f"sources leaving too few."
-                                    )
+                                _psf_quality_cut(
+                                    np.isfinite(_cfit) & (_cfit > _cfit_max),
+                                    _cfit,
+                                    f"cfit (>{_cfit_max})",
+                                )
 
                         # qfit cut (goodness-of-fit)
                         # qfit is the ratio of residual RMS to source flux.
@@ -7412,21 +7789,11 @@ def run_photometry():
                             _qfit = pd.to_numeric(ms["qfit"], errors="coerce").values
                             _qfit_max = float(_ts_cfg_refine.get("sfft_max_qfit", 1.0))
                             if _qfit_max > 0:
-                                _qfit_bad = np.isfinite(_qfit) & (_qfit > _qfit_max)
-                                _n_qfit_bad = int(_qfit_bad.sum())
-                                if (
-                                    _n_qfit_bad > 0
-                                    and (~_qfit_bad | ~np.isfinite(_qfit)).sum() >= 5
-                                ):
-                                    _psf_quality_mask &= ~_qfit_bad
-                                    logging.info(
-                                        f"PSF qfit cut: removed {_n_qfit_bad} sources (qfit > {_qfit_max})"
-                                    )
-                                elif _n_qfit_bad > 0:
-                                    logging.info(
-                                        f"PSF qfit cut skipped: would remove {_n_qfit_bad} "
-                                        f"sources leaving too few."
-                                    )
+                                _psf_quality_cut(
+                                    np.isfinite(_qfit) & (_qfit > _qfit_max),
+                                    _qfit,
+                                    f"qfit (>{_qfit_max})",
+                                )
 
                         # reduced chi-squared cut
                         if "reduced_chi2" in ms.columns:
@@ -7437,21 +7804,11 @@ def run_photometry():
                                 _ts_cfg_refine.get("sfft_max_reduced_chi2", 10.0)
                             )
                             if _chi2_max > 0:
-                                _chi2_bad = np.isfinite(_chi2) & (_chi2 > _chi2_max)
-                                _n_chi2_bad = int(_chi2_bad.sum())
-                                if (
-                                    _n_chi2_bad > 0
-                                    and (~_chi2_bad | ~np.isfinite(_chi2)).sum() >= 5
-                                ):
-                                    _psf_quality_mask &= ~_chi2_bad
-                                    logging.info(
-                                        f"PSF chi2 cut: removed {_n_chi2_bad} sources (reduced_chi2 > {_chi2_max})"
-                                    )
-                                elif _n_chi2_bad > 0:
-                                    logging.info(
-                                        f"PSF chi2 cut skipped: would remove {_n_chi2_bad} "
-                                        f"sources leaving too few."
-                                    )
+                                _psf_quality_cut(
+                                    np.isfinite(_chi2) & (_chi2 > _chi2_max),
+                                    _chi2,
+                                    f"chi2 (>{_chi2_max})",
+                                )
 
                         # PSF fit flags cut
                         if "flags" in ms.columns:
@@ -7465,18 +7822,11 @@ def run_photometry():
                                 _ts_cfg_refine.get("sfft_max_psf_flags", -1)
                             )
                             if _flags_max >= 0:
-                                _flags_bad = _flags > _flags_max
-                                _n_flags_bad = int(_flags_bad.sum())
-                                if _n_flags_bad > 0 and (~_flags_bad).sum() >= 5:
-                                    _psf_quality_mask &= ~_flags_bad
-                                    logging.info(
-                                        f"PSF flags cut: removed {_n_flags_bad} sources (flags > {_flags_max})"
-                                    )
-                                elif _n_flags_bad > 0:
-                                    logging.info(
-                                        f"PSF flags cut skipped: would remove {_n_flags_bad} "
-                                        f"sources leaving too few."
-                                    )
+                                _psf_quality_cut(
+                                    _flags > _flags_max,
+                                    _flags,
+                                    f"flags (>{_flags_max})",
+                                )
 
                         if _psf_quality_mask.sum() < len(ms):
                             ms = ms[_psf_quality_mask]
@@ -7657,13 +8007,38 @@ def run_photometry():
                                                     _max_dev = max(_max_dev, _dev)
                                     _combined_metrics[_i] = _max_dev
 
-                                _fft_keep = np.ones(len(ms), dtype=bool)
-                                for _i in range(len(ms)):
-                                    if not _all_valid[_i]:
-                                        _fft_keep[_i] = False
-                                    elif np.isfinite(_combined_metrics[_i]):
-                                        if _combined_metrics[_i] >= _fft_n_sigma:
-                                            _fft_keep[_i] = False
+                                # Two-tier rejection: severe outliers
+                                # (>= 1.5x sigma) are genuine defects and are
+                                # removed unconditionally; marginal outliers
+                                # (sigma..1.5x) and unverifiable sources
+                                # (invalid cutout) are removed only while the
+                                # keep-floor permits, worst-ranked first.  A
+                                # sparse field used to lose its last usable
+                                # priors to borderline FFT flags because the
+                                # strict threshold applied whenever >=3 rows
+                                # survived.
+                                _relaxed = _fft_n_sigma * 1.5
+                                _fft_dev = np.where(
+                                    np.isfinite(_combined_metrics),
+                                    _combined_metrics,
+                                    -np.inf,
+                                )
+                                _fft_severe = _all_valid & (_fft_dev >= _relaxed)
+                                _fft_soft = (~_all_valid) | (
+                                    _all_valid
+                                    & (_fft_dev >= _fft_n_sigma)
+                                    & ~_fft_severe
+                                )
+                                # Unverifiable rows rank worst for partial removal.
+                                _fft_rank = np.where(~_all_valid, np.inf, _fft_dev)
+                                _fft_floor = max(_fft_min_keep, _psq_min_keep)
+                                _fft_keep, _n_soft_removed, _n_soft_flagged = (
+                                    _keep_floor_cut(
+                                        ~_fft_severe, _fft_soft, _fft_rank,
+                                        _fft_floor,
+                                    )
+                                )
+                                _n_severe = int(_fft_severe.sum())
 
                                 _n_fft_rej = int((~_fft_keep).sum())
                                 _n_fft_keep = int(_fft_keep.sum())
@@ -7699,49 +8074,27 @@ def run_photometry():
                                             ", ".join(_reasons),
                                         )
 
-                                if _n_fft_rej > 0 and _n_fft_keep >= _fft_min_keep:
+                                if _n_fft_rej > 0:
                                     logging.info(
                                         f"SFFT FFT rejection: removed\n"
-                                        f"    {_n_fft_rej} sources (power-spectrum\n"
-                                        f"    outlier > {_fft_n_sigma} sigma in\n"
-                                        f"    {_img_labels_str}, cutout_r=\n"
-                                        f"    {_fft_cutout_r} px, kept=\n"
+                                        f"    {_n_fft_rej} sources "
+                                        f"({_n_severe} severe >= "
+                                        f"{_relaxed:.1f} sigma, "
+                                        f"{_n_soft_removed} of "
+                                        f"{_n_soft_flagged} marginal/invalid "
+                                        f"above {_fft_n_sigma} sigma; "
+                                        f"min_keep={_fft_floor}, "
+                                        f"cutout_r={_fft_cutout_r} px, "
+                                        f"images={_img_labels_str}, kept=\n"
                                         f"    {_n_fft_keep}/{len(ms)})."
                                     )
                                     ms = ms[_fft_keep]
-                                elif _n_fft_rej > 0:
-                                    # Rejection would leave < _fft_min_keep; retry at 1.5x sigma.
-                                    _relaxed = _fft_n_sigma * 1.5
-                                    _fft_keep_relaxed = np.ones(len(ms), dtype=bool)
-                                    for _i in range(len(ms)):
-                                        if not _all_valid[_i]:
-                                            _fft_keep_relaxed[_i] = False
-                                        elif (
-                                            np.isfinite(_combined_metrics[_i])
-                                            and _combined_metrics[_i] >= _relaxed
-                                        ):
-                                            _fft_keep_relaxed[_i] = False
-                                    _n_keep_relaxed = int(_fft_keep_relaxed.sum())
-                                    if (
-                                        _n_keep_relaxed >= _fft_min_keep
-                                        and _n_keep_relaxed > _n_fft_keep
-                                    ):
-                                        logging.info(
-                                            f"SFFT FFT rejection (relaxed "
-                                            f"{_relaxed:.1f} sigma, images="
-                                            f"{_img_labels_str}): removed "
-                                            f"{int((~_fft_keep_relaxed).sum())} "
-                                            f"sources (kept="
-                                            f"{_n_keep_relaxed}/{len(ms)})."
-                                        )
-                                        ms = ms[_fft_keep_relaxed]
-                                    else:
-                                        logging.info(
-                                            f"SFFT FFT rejection skipped: would "
-                                            f"leave {_n_fft_keep} sources "
-                                            f"(< {_fft_min_keep} minimum). "
-                                            f"Keeping all {len(ms)} sources."
-                                        )
+                                elif _n_severe > 0 or _n_soft_flagged > 0:
+                                    logging.info(
+                                        f"SFFT FFT rejection skipped: floor "
+                                        f"{_fft_floor} reached; keeping all "
+                                        f"{len(ms)} sources."
+                                    )
                                 elif len(ms) >= 4:
                                     _n_valid = int(_all_valid.sum())
                                     if _n_valid < 4:
@@ -7786,7 +8139,10 @@ def run_photometry():
 
                     # For ZOGY: same stars for both PSFs; keep native pixel convention
                     if (
-                        "zogy" in input_yaml["template_subtraction"]["method"]
+                        "zogy"
+                        in str(
+                            input_yaml["template_subtraction"].get("method", "")
+                        ).lower()
                         and not MatchingSources.empty
                     ):
                         df_zogy_science = MatchingSources[["x_pix", "y_pix"]].copy()
@@ -7889,19 +8245,35 @@ def run_photometry():
                 masked_sources = []
 
             #  ZOGY Method: build science and template PSF.
-            # Science PSF from science image (matched stars). Template PSF: either from
-            # independently selected stars on the reference (better) or same matched stars.
+            # The template PSF is best built from stars selected
+            # independently on the (usually deeper) reference - that
+            # selection needs no matched sources, so a sparse matched pool
+            # must not gate the whole block.  The science PSF uses the
+            # matched stars when enough exist; otherwise the photometry
+            # ePSF written earlier (PSF_model_image_<base>) is picked up
+            # by _pick_psf() in subtract().
             if (
-                "zogy" in input_yaml["template_subtraction"]["method"]
-                and df_zogy_science is not None
-                and df_zogy_template is not None
-                and len(df_zogy_science) >= 5
+                "zogy"
+                in str(
+                    input_yaml["template_subtraction"].get("method", "")
+                ).lower()
             ):
-                template_image, template_header = get_image_and_header(templateFpath)
-                use_independent_template_psf = input_yaml["template_subtraction"].get(
-                    "zogy_template_psf_independent", True
+                _zogy_min_stars = max(
+                    1,
+                    int(
+                        input_yaml["template_subtraction"].get(
+                            "zogy_min_psf_stars", 3
+                        )
+                        or 3
+                    ),
                 )
-                df_zogy_template_build = df_zogy_template
+                template_image, template_header = get_image_and_header(
+                    templateFpath
+                )
+                use_independent_template_psf = input_yaml[
+                    "template_subtraction"
+                ].get("zogy_template_psf_independent", True)
+                df_zogy_template_indep = None
                 if use_independent_template_psf:
                     try:
                         (
@@ -7916,65 +8288,215 @@ def run_photometry():
                         ).filter_isolated_sources(
                             template_fwhm_sources, min_distance=template_scale
                         )
-                        if len(template_isolated) >= 5:
-                            template_isolated = Catalog(input_yaml=input_yaml).recenter(
+                        if len(template_isolated) >= _zogy_min_stars:
+                            template_isolated = Catalog(
+                                input_yaml=input_yaml
+                            ).recenter(
                                 template_isolated,
                                 template_image,
                                 boxsize=template_scale,
                                 error=None,
                             )
                             xcol = (
-                                "x_pix" if "x_pix" in template_isolated.columns else "x"
+                                "x_pix"
+                                if "x_pix" in template_isolated.columns
+                                else "x"
                             )
                             ycol = (
-                                "y_pix" if "y_pix" in template_isolated.columns else "y"
+                                "y_pix"
+                                if "y_pix" in template_isolated.columns
+                                else "y"
                             )
-                            df_zogy_template_build = template_isolated[
+                            df_zogy_template_indep = template_isolated[
                                 [xcol, ycol]
                             ].copy()
-                            df_zogy_template_build.columns = ["x_pix", "y_pix"]
-                            logging.info(
-                                "Building ZOGY template PSF from %d stars selected on reference (zogy_template_psf_independent=True).",
-                                len(df_zogy_template_build),
-                            )
+                            df_zogy_template_indep.columns = ["x_pix", "y_pix"]
                         else:
                             logging.info(
-                                "Only %d isolated stars on reference; using matched stars for template PSF.",
+                                "Only %d isolated stars on reference.",
                                 len(template_isolated),
                             )
                     except Exception as e:
                         log_warning_from_exception(
                             logging.getLogger(),
-                            "Independent template PSF star selection failed; using matched stars",
+                            "Independent template PSF star selection failed",
                             e,
                         )
-                if not use_independent_template_psf:
+                n_matched_t = (
+                    0 if df_zogy_template is None else len(df_zogy_template)
+                )
+                # Prefer independently selected stars (vetted isolated on
+                # the reference); fall back to matched positions, then to
+                # a thin independent pool when the matched pool is smaller.
+                if (
+                    df_zogy_template_indep is not None
+                    and len(df_zogy_template_indep) >= 5
+                ):
+                    df_zogy_template_build = df_zogy_template_indep
                     logging.info(
-                        "Building ZOGY PSFs from %d same stars (science + template).",
-                        len(df_zogy_science),
+                        "Building ZOGY template PSF from %d stars selected "
+                        "on reference "
+                        "(zogy_template_psf_independent=True).",
+                        len(df_zogy_template_build),
                     )
-                # Science PSF from science image (matched stars)
-                PSF(
-                    image=image,
-                    input_yaml=input_yaml,
-                    header=header,
-                ).build(
-                    psfSources=df_zogy_science,
-                    mask=hardware_defects_mask,
-                    background_rms=background_rms,
-                    filename_prefix="PSF_model_image",
+                elif n_matched_t >= _zogy_min_stars:
+                    df_zogy_template_build = df_zogy_template
+                    logging.info(
+                        "Building ZOGY template PSF from %d "
+                        "science-matched stars.",
+                        n_matched_t,
+                    )
+                elif df_zogy_template_indep is not None:
+                    df_zogy_template_build = df_zogy_template_indep
+                    logging.info(
+                        "Building ZOGY template PSF from only %d isolated "
+                        "reference stars (matched pool: %d).",
+                        len(df_zogy_template_build),
+                        n_matched_t,
+                    )
+                else:
+                    df_zogy_template_build = None
+                    logging.warning(
+                        "ZOGY: too few stars for a template PSF "
+                        "(independent=%d, matched=%d); ZOGY will fall "
+                        "back to SFFT.",
+                        0
+                        if df_zogy_template_indep is None
+                        else len(df_zogy_template_indep),
+                        n_matched_t,
+                    )
+                # PSF.build names its output from the image fpath base
+                # (the preprocessed *_APT name), not input_yaml["base"].
+                _psf_base = str(
+                    input_yaml.get("_psf_base_override")
+                    or os.path.basename(input_yaml["fpath"]).split(".")[0]
                 )
-                # Template PSF from template image (independent or matched stars)
-                PSF(
-                    image=template_image,
-                    input_yaml=input_yaml,
-                    header=template_header,
-                ).build(
-                    psfSources=df_zogy_template_build,
-                    mask=None,
-                    make_template_psf=True,
-                    filename_prefix="PSF_model_template",
+                _tpl_psf_file = os.path.join(
+                    write_dir,
+                    f"PSF_model_template_{_psf_base}.fits",
                 )
+                if df_zogy_template_build is not None:
+                    try:
+                        PSF(
+                            image=template_image,
+                            input_yaml=input_yaml,
+                            header=template_header,
+                        ).build(
+                            psfSources=df_zogy_template_build,
+                            mask=None,
+                            make_template_psf=True,
+                            filename_prefix="PSF_model_template",
+                        )
+                    except Exception as e:
+                        log_warning_from_exception(
+                            logging.getLogger(),
+                            "ZOGY template PSF build failed",
+                            e,
+                        )
+                if not os.path.exists(_tpl_psf_file):
+                    # The ePSF build can produce no model on starved
+                    # fields (non-converged + out-of-band FWHM, too few
+                    # settled stars).  ZOGY only needs a plausible PSF
+                    # for its matched filter - write an analytic
+                    # composite-Moffat stamp rather than falling to SFFT.
+                    try:
+                        _tpl_fwhm_fb = float(template_fwhm)
+                        if not np.isfinite(_tpl_fwhm_fb) or _tpl_fwhm_fb <= 0:
+                            _tpl_fwhm_fb = float(ImageFWHM)
+                        if not np.isfinite(_tpl_fwhm_fb) or _tpl_fwhm_fb <= 0:
+                            _tpl_fwhm_fb = 5.0
+                        _write_analytic_psf_stamp(
+                            _tpl_psf_file,
+                            _tpl_fwhm_fb,
+                            input_yaml,
+                            n_stars=0
+                            if df_zogy_template_build is None
+                            else len(df_zogy_template_build),
+                        )
+                        logging.warning(
+                            "ZOGY: template ePSF build produced no model; "
+                            "wrote analytic Moffat PSF stamp "
+                            "(FWHM %.2f px) so ZOGY can still run.",
+                            _tpl_fwhm_fb,
+                        )
+                    except Exception as e:
+                        log_warning_from_exception(
+                            logging.getLogger(),
+                            "ZOGY analytic template-PSF fallback failed; "
+                            "ZOGY will fall back to SFFT",
+                            e,
+                        )
+                # Science PSF: a dedicated matched-star build needs >=5
+                # stars.  Below that the photometry ePSF written earlier
+                # (built from the full vetted pool) is the better model
+                # and is picked up by _pick_psf(); a small matched-star
+                # build only runs as a last resort when no photometry
+                # ePSF file exists.
+                n_matched_s = (
+                    0 if df_zogy_science is None else len(df_zogy_science)
+                )
+                _sci_psf_file = os.path.join(
+                    write_dir,
+                    f"PSF_model_image_{_psf_base}.fits",
+                )
+                _epsf_on_disk = [
+                    p
+                    for p in Path(write_dir).glob("PSF_model_image*.fits")
+                    if "_cell" not in p.name
+                ]
+                if n_matched_s >= 5 or (
+                    n_matched_s >= _zogy_min_stars and not _epsf_on_disk
+                ):
+                    try:
+                        PSF(
+                            image=image,
+                            input_yaml=input_yaml,
+                            header=header,
+                        ).build(
+                            psfSources=df_zogy_science,
+                            mask=hardware_defects_mask,
+                            background_rms=background_rms,
+                            filename_prefix="PSF_model_image",
+                        )
+                    except Exception as e:
+                        log_warning_from_exception(
+                            logging.getLogger(),
+                            "ZOGY science PSF build failed",
+                            e,
+                        )
+                if not _epsf_on_disk and not os.path.exists(_sci_psf_file):
+                    try:
+                        _sci_fwhm_fb = float(ImageFWHM)
+                        if not np.isfinite(_sci_fwhm_fb) or _sci_fwhm_fb <= 0:
+                            _sci_fwhm_fb = 5.0
+                        _write_analytic_psf_stamp(
+                            _sci_psf_file,
+                            _sci_fwhm_fb,
+                            input_yaml,
+                            n_stars=n_matched_s,
+                        )
+                        logging.warning(
+                            "ZOGY: no science ePSF available; wrote "
+                            "analytic Moffat PSF stamp (FWHM %.2f px) so "
+                            "ZOGY can still run.",
+                            _sci_fwhm_fb,
+                        )
+                    except Exception as e:
+                        log_warning_from_exception(
+                            logging.getLogger(),
+                            "ZOGY analytic science-PSF fallback failed; "
+                            "ZOGY will fall back to SFFT",
+                            e,
+                        )
+                elif n_matched_s < 5:
+                    logging.info(
+                        "ZOGY: %d matched sources; %s for the science PSF.",
+                        n_matched_s,
+                        "reusing the photometry ePSF"
+                        if _epsf_on_disk
+                        else "no usable PSF source - ZOGY will fall back "
+                        "to SFFT",
+                    )
 
             try:
                 sfft_matched_sources = os.path.join(
@@ -12291,9 +12813,8 @@ def run_photometry():
                 if not do_aperture_ONLY and "fwhm_psf" in TargetPosition.columns
                 else np.nan
             ),
-            # Which PSF model was used: epsf / analytic-composite /
-            # analytic-moffat / none. Empirical is the default; analytic
-            # only via explicit opt-in or a total empirical failure.
+            # Which PSF model was used: epsf / none. The photometry PSF is
+            # always built from sources in the field.
             "psf_model": psf_model_kind,
             "separation": separation if "separation" in locals() else np.nan,
             "beta": target_beta,
@@ -12325,6 +12846,7 @@ def run_photometry():
                 "zp_ap_err": np.nan,
                 "zp_psf": np.nan,
                 "zp_psf_err": np.nan,
+                "zp_ref": "",
             }
         )
 
@@ -12917,6 +13439,19 @@ def run_photometry():
                 except Exception:
                     pass
 
+        # Calibration provenance: band-qualified catalog backend that
+        # supplied the zeropoint calibrators (e.g. "pan_starrs_r"), so
+        # epochs that used different catalogs are identifiable in the
+        # merged lightcurve. "combined" marks build_catalog merges.
+        _zp_ref_cat = ""
+        if input_yaml["catalog"].get("build_catalog", False):
+            _zp_ref_cat = "combined"
+        elif "selected_catalog_name" in locals() and selected_catalog_name:
+            _zp_ref_cat = str(selected_catalog_name)
+        output["zp_ref"] = (
+            f"{_zp_ref_cat}_{image_filter}" if _zp_ref_cat else ""
+        )
+
         # Color-term provenance for the post-processing transient
         # correction: the index the term applies to and the calibrator
         # median color the zeropoint is anchored to.
@@ -13036,6 +13571,7 @@ def run_photometry():
             "zp_ap",
             "zp_ap_err",
             "zp_ap_nsrc",
+            "zp_ref",
             # PSF / seeing
             "target_fwhm",
             "fwhm_psf",
@@ -13152,6 +13688,7 @@ def run_photometry():
                     "zp_ap_err": np.nan,
                     "zp_psf": np.nan,
                     "zp_psf_err": np.nan,
+                    "zp_ref": output.get("zp_ref", ""),
                 }
 
                 if _at_row is not None:
