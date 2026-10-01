@@ -97,17 +97,26 @@ _RED_OVERLAY_CMAP = _make_red_overlay_cmap(alpha=0.5)
 _MM_TF_MODEL_CACHE: dict = {}
 
 # MaxiMask classes (Paillassa, Bertin & Bouy 2020, arXiv:1907.08298)
-# unioned into the hardware-defects mask by default.  Restricted to the
-# three classes the heuristic detectors handle poorly (cosmic-ray
-# masking comes from MaxiMask when it is active) plus saturated pixels
-# and diffraction spikes.  Column/trail/pixel classes stay available via
-# ``background.maximask_classes`` but are already covered by the
-# heuristic masks; BG/BBG are scene content and FR/NEB describe sky
-# structure, so they are never suitable as defects.
+# unioned into the hardware-defects mask by default.  All true defect
+# and artifact classes are included - the CNN catches faint instances
+# the heuristic column/trail masks miss, and the union is free because
+# the model computes all classes in one pass.  Cosmic rays are
+# deliberately absent: astroscrappy (``cosmic_rays.remove_cmrays``) is
+# the single CR detector, and its mask is unioned into
+# ``hardware_defects_mask`` downstream in main.py (add "CR" back for
+# MaxiMask CR flagging).  BG/BBG are scene content and FR/NEB describe
+# sky structure and real signal, so they are never suitable as
+# defects.
 MAXIMASK_DEFECT_CLASSES = (
-    "CR",
+    "HCL",
+    "DCL",
+    "HP",
+    "DP",
+    "P",
+    "TRL",
     "SAT",
     "SP",
+    "OV",
 )
 
 # Full names for the 14 MaxiMask classes (Paillassa et al. 2020,
