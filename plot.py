@@ -2380,19 +2380,25 @@ class Plot:
             if pixel_scale is not None and pixel_scale > 0:
                 _min_lim = max(_min_lim, 1.0 / pixel_scale)
 
-            # Symmetric square axes with (0,0) at centre
+            # Symmetric square axes with (0,0) at centre.  The range follows
+            # the point cloud plus the typical error bar: a single large ERR
+            # on a faint source (allowed up to FWHM by the filter above)
+            # would otherwise stretch the limits until the points shrink to
+            # a speck.  Outlier bars clip at the frame edge instead.
+            _err_pad = 0.0
             if has_errors:
-                _lim = max(
-                    np.nanmax(np.abs(dx_plot + dx_err_plot)),
-                    np.nanmax(np.abs(dy_plot + dy_err_plot)),
-                    _min_lim,
-                ) * 1.1
-            else:
-                _lim = max(
+                _err_pad = float(
+                    np.nanmedian(np.hypot(dx_err_plot, dy_err_plot))
+                )
+            _lim = (
+                max(
                     np.nanmax(np.abs(dx_plot)),
                     np.nanmax(np.abs(dy_plot)),
                     _min_lim,
-                ) * 1.1
+                )
+                * 1.15
+                + _err_pad
+            )
             ax.set_xlim(-_lim, _lim)
             ax.set_ylim(-_lim, _lim)
             ax.axhline(0, color=PLOT_COLORS.get('zero_line', '#FF0000'), lw=0.8, ls="--", alpha=0.5, zorder=1)
@@ -2435,7 +2441,7 @@ class Plot:
 
             # --- Colorbar (manually positioned to avoid twin axis overlap) ---
             if _sc_obj is not None:
-                _cax = fig.add_axes([0.88, 0.12, 0.025, 0.80])
+                _cax = fig.add_axes([0.86, 0.12, 0.025, 0.80])
                 cbar = fig.colorbar(_sc_obj, cax=_cax)
                 cbar.set_label("Distance from target [px]", fontsize="small")
                 cbar.ax.tick_params(labelsize="x-small")
@@ -2471,8 +2477,8 @@ class Plot:
             # Right margin: only reserve space when a colorbar or the
             # arcsec twin-axis labels actually need it.
             _has_twin = pixel_scale is not None and pixel_scale > 0
-            _right = 0.78 if _sc_obj is not None else (0.86 if _has_twin else 0.95)
-            fig.subplots_adjust(left=0.12, right=_right, top=0.92, bottom=0.12)
+            _right = 0.81 if _sc_obj is not None else (0.88 if _has_twin else 0.95)
+            fig.subplots_adjust(left=0.10, right=_right, top=0.93, bottom=0.12)
 
             fig.savefig(save_path, dpi=150, facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
@@ -2494,10 +2500,18 @@ class Plot:
                     0.02 * max(_nx, _ny)
                 )
                 # Two panels: residual vectors (left) and the smoothed
-                # distortion surface (right).  The figure is twice the
-                # single-panel width so each axes keeps the size a
-                # one-panel figure had.
-                _fs2 = set_size(width_pt, aspect=1.0)
+                # distortion surface (right).  Both panels are aspect-equal,
+                # so the figure height must follow the image aspect: a
+                # fixed golden-ratio height letterboxes each axes inside
+                # its cell and the dead strips stack into a wide gap
+                # between the panels.  The 1.55 factor covers the golden
+                # ratio plus the colorbar/margin allowance per cell.
+                _panel_ar = (
+                    _ny / _nx
+                    if np.isfinite(_nx) and np.isfinite(_ny) and _nx > 0
+                    else 1.0
+                )
+                _fs2 = set_size(width_pt, aspect=1.55 * _panel_ar)
                 fig2, (ax2, ax3) = plt.subplots(
                     1, 2, figsize=(_fs2[0] * 2.0, _fs2[1])
                 )
