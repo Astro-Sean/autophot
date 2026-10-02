@@ -202,6 +202,7 @@ def exposure_seconds_from_header(header, preferred_keys=None):
             "TEXPTIME",
             "INTTIME",
             "EXPTIM",
+            "ESO DET TELE INT",
         ),
         "exposure time",
         "Add EXPTIME or EXPOSURE (seconds).",

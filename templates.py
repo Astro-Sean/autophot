@@ -599,6 +599,48 @@ def _zogy_star_psf(
         ", ".join(f"{f:.2f}" if np.isfinite(f) else "nan" for f in indiv),
     )
     if near.sum() < 1:
+        # Rescue pass: when the guess FWHM is wrong (a mis-measured image
+        # FWHM can be off by ~2x on sparse junk-rich fields) the window
+        # excludes every real star.  If the finite per-star widths instead
+        # form a dominant tight clump at a plausible seeing width, trust
+        # the clump over the guess.  The >=2.5 px floor keeps consistent
+        # CR-spike ensembles (~1-2 px) from passing as stars.
+        _fin = np.isfinite(indiv) & (indiv > 0)
+        if _fin.sum() >= 3:
+            _med_f = float(np.median(indiv[_fin]))
+            _sig_f = max(
+                1.4826 * float(np.median(np.abs(indiv[_fin] - _med_f))),
+                0.15 * _med_f,
+            )
+            _clump = _fin & (np.abs(indiv - _med_f) < 2.5 * _sig_f)
+            _clump_med = (
+                float(np.median(indiv[_clump])) if _clump.any() else 0.0
+            )
+            # The clump itself must be tight: a scattered ensemble whose
+            # median happens to sit far from the guess is junk, not a
+            # mis-guessed stellar locus - a bad substitute stamp would do
+            # more harm than no stack at all.
+            _clump_sig = (
+                1.4826
+                * float(np.median(np.abs(indiv[_clump] - _clump_med)))
+                if _clump.any()
+                else np.inf
+            )
+            if (
+                _clump.sum() >= max(3, int(np.ceil(0.6 * _fin.sum())))
+                and _clump_med >= 2.5
+                and np.isfinite(_clump_sig)
+                and _clump_sig <= 0.25 * _clump_med
+            ):
+                logger.debug(
+                    "ZOGY star-stack: no cutout inside [%.2f, %.2f] px "
+                    "around the %.2f px guess, but %d/%d FWHMs clump at "
+                    "%.2f px; re-anchored on the ensemble.",
+                    0.45 * guess, 1.8 * guess, guess,
+                    int(_clump.sum()), int(_fin.sum()), _clump_med,
+                )
+                near = _clump
+    if near.sum() < 1:
         # No cutout looks like the expected stellar width -- the position
         # list is dominated by spikes/galaxies; no stack.  A single
         # survivor is still used: one bright-star cutout is a far better

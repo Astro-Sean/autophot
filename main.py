@@ -6148,10 +6148,10 @@ def run_photometry():
                     _x_src, _y_src = "x_coord", "y_coord"
                 _x_new = pd.to_numeric(
                     merged_sources[_x_src], errors="coerce"
-                ).to_numpy(dtype=float)
+                ).to_numpy(dtype=float, copy=True)
                 _y_new = pd.to_numeric(
                     merged_sources[_y_src], errors="coerce"
-                ).to_numpy(dtype=float)
+                ).to_numpy(dtype=float, copy=True)
                 if _rd_ok.any():
                     _wx, _wy = imageWCS.all_world2pix(
                         _ra_num.to_numpy(dtype=float)[_rd_ok],

@@ -30,7 +30,12 @@ from astropy.stats import sigma_clip
 from astropy.table import Table
 from scipy.spatial import cKDTree
 
-from functions import log_step, log_warning_from_exception, STATUS
+from functions import (
+    STATUS,
+    fwhm_outlier_clip,
+    log_step,
+    log_warning_from_exception,
+)
 from wcs import get_wcs
 
 logger = logging.getLogger(__name__)
@@ -300,6 +305,10 @@ class SExtractorWrapper:
         self.config = config
         # FWHM uncertainty (SE of median), set by calculate_robust_fwhm().
         self.fwhm_err = np.nan
+        # FWHM estimated inside filter_sextractor_sources from the
+        # quality-filtered bright-source subset; run() prefers it over a
+        # pooled median that faint/junk sources drag low on sparse fields.
+        self.last_fwhm_est = np.nan
         # sextractor_nthreads may live top-level or under wcs.* in the YAML.
         _wcs_cfg = config.get("wcs") or {}
         try:
@@ -451,14 +460,30 @@ class SExtractorWrapper:
         # clipping is too aggressive and can remove real outliers that are
         # actually the dominant population.
         _sigma = 2.5 if len(fwhm_values) < 20 else 3.0
-        clipped = sigma_clip(fwhm_values, sigma=_sigma, maxiters=n_iterations)
-        fwhm_value = float(np.ma.median(clipped))
+        # MAD-based clip floored at 10% of the median: the std that
+        # sigma_clip measures is inflated by the very outliers it should
+        # remove, so on contaminated pools (a few galaxies among bright
+        # stars) the outliers survive and drag the median.  The floor also
+        # prevents a defect-dominated MAD collapse from flagging the real
+        # stellar locus.
+        _out_mask, _med, _sig_eff = fwhm_outlier_clip(
+            fwhm_values, sigma=_sigma
+        )
+        if np.isfinite(_med):
+            _in = fwhm_values[~_out_mask]
+            fwhm_value = float(np.median(_in)) if _in.size else _med
+            _n_clipped = int(_in.size)
+        else:
+            clipped = sigma_clip(
+                fwhm_values, sigma=_sigma, maxiters=n_iterations
+            )
+            fwhm_value = float(np.ma.median(clipped))
+            _n_clipped = int(np.ma.count(clipped))
+            _in = np.asarray(clipped)
         # FWHM uncertainty: SE of the median (1.858 * MAD / sqrt(N)).
         # Stored on the instance for callers that need it.
-        _clipped_arr = np.asarray(clipped)
-        _n_clipped = int(np.ma.count(clipped))
         if _n_clipped >= 2:
-            _fwhm_mad = float(np.ma.median(np.abs(_clipped_arr - fwhm_value)))
+            _fwhm_mad = float(np.median(np.abs(_in - fwhm_value)))
             self.fwhm_err = float(1.858 * _fwhm_mad / np.sqrt(_n_clipped))
         else:
             self.fwhm_err = np.nan
@@ -647,6 +672,9 @@ class SExtractorWrapper:
         """
 
         start = time.time()
+        # Reset so a stale estimate from a previous call is never reused
+        # when this call returns early.
+        self.last_fwhm_est = np.nan
         if sources.empty:
             logger.warning("SExtractor catalog is empty. Skipping filtering.")
             return sources
@@ -872,6 +900,18 @@ class SExtractorWrapper:
                 f"Estimated FWHM: {fwhm_est:.2f} pixels (sigma = {fwhm_std:.2f} pixels, "
                 f"from {len(fwhm_sources)} sources, SNR >= {fwhm_snr_min if len(high_snr) >= 5 else 3.0})"
             )
+
+        # Record the estimate actually used here (bright-source subset when
+        # possible) so run() can prefer it over a clipped median of the full
+        # filtered pool - that median collapses onto faint, noise-truncated
+        # sources on sparse junk-rich fields (observed 4.18 px where the
+        # true PSF was ~7.8 px on a sparse GROND field).
+        try:
+            self.last_fwhm_est = (
+                float(fwhm_est) if fwhm_est is not None else float("nan")
+            )
+        except (TypeError, ValueError):
+            self.last_fwhm_est = float("nan")
 
         # --- Step 5: Drop sources near masked positions ---
         if (
@@ -1738,8 +1778,17 @@ class SExtractorWrapper:
                 logger.warning("[ERROR] All sources filtered out")
                 return 0.0, None, default_scale
 
-            fwhm_values = sources["fwhm"].values
-            fwhm = self.calculate_robust_fwhm(fwhm_values)
+            # Prefer the FWHM estimated inside filter_sextractor_sources:
+            # it is measured on the bright (SNR >= 10) subset after the
+            # point-source prefilters, while a clipped median over the
+            # whole filtered pool collapses onto faint/junk sources on
+            # sparse fields.
+            _filt_fwhm = self.last_fwhm_est
+            if np.isfinite(_filt_fwhm) and _filt_fwhm > 0:
+                fwhm = float(_filt_fwhm)
+            else:
+                fwhm_values = sources["fwhm"].values
+                fwhm = self.calculate_robust_fwhm(fwhm_values)
             scale_multiplier = scale_multiplier_from_config(self.config)
             # Legacy behavior: `default_scale` is a hard floor when the
             # FWHM-based scale is too small.
