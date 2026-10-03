@@ -2562,10 +2562,14 @@ class BackgroundSubtractor:
             bkg_surface_local = np.full_like(cutout, local_med, dtype=float)
 
         # ---- Guard against negative "bowls" around the target ----
-        # Even with the core masked, interpolation can overshoot near the masked
-        # region and produce an artificial negative bowl/ring after subtraction.
-        # To stabilize targeted photometry, flatten the background model in the
-        # central region to match an outlier-resistant local ring level outside the exclusion.
+        # The masked core is excluded from the mesh fit, so the model under it
+        # is pure interpolation; cubic interpolation can overshoot there and
+        # carve an artificial bowl/ring into the subtracted image.  Keep the
+        # interpolated surface (it integrates smoothly underneath the mask)
+        # but clip the central region to the plausible range of a reference
+        # ring just outside the exclusion.  Clipping only bounds overshoot;
+        # flattening to the ring level (the old approach) left a visible
+        # plateau bump at the target position.
         if exclude_inner_radius and exclude_inner_radius > 0:
             try:
                 cy = float(y0 - y_min)
@@ -2582,15 +2586,23 @@ class BackgroundSubtractor:
                 ring_ref &= ~source_mask
                 ring_ref &= np.isfinite(bkg_surface_local) & np.isfinite(cutout)
 
-                # Flatten the model inside this radius. This is where "bowls"
-                # are visually obvious and most damaging for PSF/aperture fits.
                 r_flat = rin + ring_width
                 flat_region = rr <= float(r_flat)
 
                 if np.any(flat_region) and np.any(ring_ref):
-                    ring_level = float(np.nanmedian(bkg_surface_local[ring_ref]))
+                    ring_vals = bkg_surface_local[ring_ref]
+                    ring_level = float(np.nanmedian(ring_vals))
+                    ring_mad = 1.4826 * float(
+                        np.nanmedian(np.abs(ring_vals - ring_level))
+                    )
                     bkg_surface_local = np.asarray(bkg_surface_local, dtype=float)
-                    bkg_surface_local[flat_region] = ring_level
+                    inner = bkg_surface_local[flat_region]
+                    inner = np.where(np.isfinite(inner), inner, ring_level)
+                    bkg_surface_local[flat_region] = np.clip(
+                        inner,
+                        ring_level - 3.0 * ring_mad,
+                        ring_level + 3.0 * ring_mad,
+                    )
             except Exception as e:
                 self.logger.debug(
                     "Local background flat-region correction skipped: %s", e
