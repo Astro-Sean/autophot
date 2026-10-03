@@ -2537,6 +2537,7 @@ def run_photometry():
         # CRAY_RMD or CRSTATUS indicating prior cleaning (see default_input.yml).
         cosmic_rays_mask = np.zeros(image.shape, dtype=bool)
         cosmic_rays_defect_mask = np.zeros(image.shape, dtype=bool)
+        _cr_protect_positions: list = []
         _cr_status = header.get("CRSTATUS")
         _cr_status = (
             _cr_status[0] if isinstance(_cr_status, tuple) else _cr_status
@@ -2561,6 +2562,76 @@ def run_photometry():
             _cr_dilate_factor = float(_cr_cfg.get("cr_dilate_factor", 1.0))
             _cr_dilate_iters = int(_cr_cfg.get("cr_dilate_iterations", 2))
             _cr_defect_margin = float(_cr_cfg.get("cr_defect_margin_px", 2.0))
+            # A failed FWHM measurement must not disable CR cleaning:
+            # int(ceil(3*nan)) inside remove() would raise and the whole
+            # step would abort.  Fall back to the module default.
+            _cr_psf_fwhm = (
+                float(ImageFWHM) if np.isfinite(ImageFWHM) else 3.0
+            )
+            # Positions that must survive CR cleaning: the target plus any
+            # resolved additional targets.  An isolated point source on an
+            # undersampled image reads as a CR cluster; flagging it erases
+            # flux via median interpolation and seeds the defect mask that
+            # nulls it in the difference image.
+            if _cr_cfg.get("cr_protect_target", True):
+                try:
+                    _cr_wcs = (
+                        imageWCS
+                        if imageWCS is not None
+                        else get_wcs(header, silent=True)
+                    )
+                except Exception:
+                    _cr_wcs = None
+                try:
+                    _cr_tx = input_yaml.get("target_x_pix")
+                    _cr_ty = input_yaml.get("target_y_pix")
+                    if _cr_tx is not None and _cr_ty is not None:
+                        _cr_protect_positions.append(
+                            (float(_cr_tx), float(_cr_ty))
+                        )
+                except (TypeError, ValueError):
+                    pass
+                if not _cr_protect_positions and _cr_wcs is not None:
+                    try:
+                        _cr_tx, _cr_ty = _cr_wcs.all_world2pix(
+                            float(input_yaml["target_ra"]),
+                            float(input_yaml["target_dec"]),
+                            0,
+                        )
+                        if np.isfinite(_cr_tx) and np.isfinite(_cr_ty):
+                            _cr_protect_positions.append(
+                                (float(_cr_tx), float(_cr_ty))
+                            )
+                    except Exception:
+                        pass
+                if _cr_wcs is not None:
+                    for _at in (
+                        input_yaml.get("_additional_targets_resolved") or []
+                    ):
+                        try:
+                            _ax, _ay = _cr_wcs.all_world2pix(
+                                float(_at["ra"]), float(_at["dec"]), 0
+                            )
+                            if np.isfinite(_ax) and np.isfinite(_ay):
+                                _cr_protect_positions.append(
+                                    (float(_ax), float(_ay))
+                                )
+                        except Exception:
+                            continue
+                if not _cr_protect_positions:
+                    logging.warning(
+                        "cr_protect_target is enabled but no target pixel "
+                        "position could be resolved for this image; CR "
+                        "protection is inactive - a point-source target can "
+                        "still be flagged as a cosmic ray."
+                    )
+            # Floor: an undersampled source (< ~1.5 px FWHM) still needs a
+            # disk that covers its flaggable core.
+            _cr_protect_radius_px = max(
+                3.0,
+                float(_cr_cfg.get("cr_protect_target_radius_fwhm", 2.0))
+                * _cr_psf_fwhm,
+            )
             image, cosmic_rays_mask, cosmic_rays_defect_mask = RemoveCosmicRays(
                 input_yaml=input_yaml,
                 fpath=fpath,
@@ -2573,15 +2644,55 @@ def run_photometry():
                 gain=gain,
                 readnoise=readnoise,
                 satlevel=saturate,
-                psf_fwhm=ImageFWHM,
+                psf_fwhm=_cr_psf_fwhm,
                 sigclip=_cr_sigclip,
                 sigfrac=_cr_sigfrac,
                 objlim=_cr_objlim,
                 dilate_factor=_cr_dilate_factor,
                 dilate_iterations=_cr_dilate_iters,
                 defect_margin_px=_cr_defect_margin,
+                protect_positions=_cr_protect_positions,
+                protect_radius_px=_cr_protect_radius_px,
                 plot=_cr_plot,
             )
+            # A compact flagged blob sitting exactly on a known source is a
+            # suspect flag, not a data hole (e.g. a flag just outside the
+            # protected disk whose defect margin still reaches the target).
+            # Drop it so the defect mask cannot null the target's pixels.
+            # Both the compactness extent and the area cap scale with the
+            # image FWHM: a mis-flagged source footprint grows with the
+            # PSF, while a real elongated defect (column, trail) crossing
+            # the position is kept by the extent check.
+            if _cr_protect_positions and np.any(cosmic_rays_defect_mask):
+                from functions import drop_mask_components_at_positions
+
+                _cr_rescue_extent = (
+                    float(_cr_cfg.get("cr_defect_target_extent_fwhm", 2.5))
+                    * _cr_psf_fwhm
+                    + _cr_defect_margin
+                )
+                _cr_rescue_max_area = max(
+                    int(
+                        _cr_cfg.get("cr_defect_target_component_max_px", 150)
+                    ),
+                    int(np.ceil(np.pi * _cr_rescue_extent**2)),
+                )
+                cosmic_rays_defect_mask, _dropped_cr = (
+                    drop_mask_components_at_positions(
+                        cosmic_rays_defect_mask,
+                        _cr_protect_positions,
+                        max_area_px=_cr_rescue_max_area,
+                        max_extent_px=_cr_rescue_extent,
+                        reference_image=image,
+                    )
+                )
+                if _dropped_cr:
+                    logging.warning(
+                        "Dropped %d small CR-defect component(s) covering a "
+                        "target position - suspect flag, not a data hole; "
+                        "those pixels stay usable for photometry.",
+                        len(_dropped_cr),
+                    )
             # Persist the CR-cleaned image immediately so the CRAY_RMD header
             # keyword and cleaned data survive a pipeline crash before the
             # next FITS write (which is after the second background pass).

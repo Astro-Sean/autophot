@@ -1162,6 +1162,116 @@ def pad_ones(mask, padding):
     return expanded_mask
 
 
+def drop_mask_components_at_positions(
+    mask,
+    positions,
+    max_area_px=150,
+    max_extent_px=None,
+    reference_image=None,
+):
+    """
+    Drop small connected components of *mask* that cover a listed position.
+
+    A compact defect blob sitting exactly on a known source (e.g. a
+    transient misread as a cosmic ray) is a suspect flag, not a real data
+    hole.  Components larger than ``max_area_px`` (chip gaps, trails,
+    columns, bleed) are kept - those are genuine defects wherever they
+    fall.  ``max_extent_px`` adds a compactness check: every pixel of the
+    component must lie within that distance of the position, so an
+    elongated defect (dead column, trail) that merely crosses the
+    position is never dropped even when its area is small.  When
+    ``reference_image`` is given, a component is dropped only if the
+    image pixel at the position is finite: a flag covering real data is
+    suspect, while a flag covering genuinely missing data is harmless to
+    keep (the pixel is invalid either way).
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        2-D boolean/int mask (True/1 = masked).
+    positions : iterable of (x, y)
+        Pixel positions to protect.  Non-finite and out-of-frame
+        positions are skipped.
+    max_area_px : int
+        Maximum component area in pixels eligible for removal.
+    max_extent_px : float or None
+        Optional maximum allowed distance (pixels) between the position
+        and any pixel of its component.  None disables the extent check.
+    reference_image : np.ndarray or None
+        Optional image on the same grid; the component is dropped only
+        when ``reference_image`` is finite at the position.
+
+    Returns
+    -------
+    (mask, dropped) : (np.ndarray, list of (x, y))
+        The mask with eligible components removed (a copy when anything
+        changed) and the list of positions whose components were dropped.
+    """
+    from scipy.ndimage import label as _ndi_label
+
+    mask = np.asarray(mask)
+    if mask.ndim != 2 or not np.any(mask):
+        return mask, []
+
+    if max_extent_px is not None:
+        try:
+            max_extent_px = float(max_extent_px)
+        except (TypeError, ValueError):
+            max_extent_px = None
+        if max_extent_px is not None and (
+            not np.isfinite(max_extent_px) or max_extent_px <= 0
+        ):
+            max_extent_px = None
+
+    valid = []
+    for pos in positions or []:
+        try:
+            px, py = float(pos[0]), float(pos[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if not (np.isfinite(px) and np.isfinite(py)):
+            continue
+        ix, iy = int(round(px)), int(round(py))
+        if 0 <= ix < mask.shape[1] and 0 <= iy < mask.shape[0]:
+            valid.append((px, py, ix, iy))
+    if not valid:
+        return mask, []
+
+    lab, n_lab = _ndi_label(np.asarray(mask, dtype=bool))
+    if n_lab == 0:
+        return mask, []
+    areas = np.bincount(lab.ravel(), minlength=n_lab + 1)
+
+    to_drop = np.zeros(n_lab + 1, dtype=bool)
+    dropped = []
+    for px, py, ix, iy in valid:
+        comp = lab[iy, ix]
+        if comp == 0:
+            continue
+        if areas[comp] > max_area_px:
+            continue
+        if max_extent_px is not None:
+            ys, xs = np.nonzero(lab == comp)
+            furthest = np.sqrt(
+                np.max((xs - px) ** 2 + (ys - py) ** 2)
+            )
+            if furthest > max_extent_px:
+                continue
+        if reference_image is not None and not np.isfinite(
+            np.asarray(reference_image)[iy, ix]
+        ):
+            continue
+        if not to_drop[comp]:
+            to_drop[comp] = True
+            dropped.append((px, py))
+
+    if not dropped:
+        return mask, []
+    out = mask.copy()
+    out[to_drop[lab]] = False
+    return out, dropped
+
+
 def set_size(width, aspect=1, fraction=1):
     """
      Function to generate size of figures produced by AutoPhot. To specify the dimensions of a figure in matplotlib we use the figsize argument. However, the figsize argument takes inputs in inches and we have the width of our document in pts. To set the figure size we construct a function to convert from pts to inches and to determine an aesthetic figure height using the golden ratio. The golden ratio is given by:

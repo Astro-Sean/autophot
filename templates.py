@@ -9273,6 +9273,93 @@ class Templates:
                     )
                     background_defects_mask = None
             if background_defects_mask is not None:
+                # A compact defect component sitting exactly on a known
+                # target is a suspect flag, not a data hole (e.g. an
+                # isolated point source read as a cosmic-ray cluster whose
+                # flag blob lands in the defects mask).  Drop only small
+                # components whose target pixel is finite in the science
+                # image; real holes (NaN/sentinel) stay masked.
+                _defect_rescue_xy = []
+                for _pos in target_location or []:
+                    try:
+                        _px, _py = float(_pos[0]), float(_pos[1])
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    if np.isfinite(_px) and np.isfinite(_py):
+                        _defect_rescue_xy.append((_px, _py))
+                _defect_sci_wcs = get_wcs(scienceHeader)
+                if _defect_sci_wcs is not None:
+                    for _at in (
+                        self.input_yaml.get("_additional_targets_resolved")
+                        or []
+                    ):
+                        try:
+                            _ax, _ay = _defect_sci_wcs.all_world2pix(
+                                float(_at["ra"]), float(_at["dec"]), 0
+                            )
+                            if np.isfinite(_ax) and np.isfinite(_ay):
+                                _defect_rescue_xy.append(
+                                    (float(_ax), float(_ay))
+                                )
+                        except Exception:
+                            continue
+                if _defect_rescue_xy:
+                    from functions import drop_mask_components_at_positions
+
+                    # Both the compactness extent and the area cap scale
+                    # with the science FWHM: a false-flag footprint grows
+                    # with the PSF, while a real elongated defect (column,
+                    # trail, streak) crossing the position is kept by the
+                    # extent check.
+                    _cr_cfg = self.input_yaml.get("cosmic_rays", {})
+                    try:
+                        _rescue_fwhm = float(science_fwhm)
+                    except (TypeError, ValueError):
+                        _rescue_fwhm = np.nan
+                    if np.isfinite(_rescue_fwhm) and _rescue_fwhm > 0:
+                        _defect_rescue_extent = (
+                            float(
+                                _cr_cfg.get(
+                                    "cr_defect_target_extent_fwhm", 2.5
+                                )
+                            )
+                            * _rescue_fwhm
+                            + 2.0
+                        )
+                        _defect_rescue_max = max(
+                            int(
+                                _cr_cfg.get(
+                                    "cr_defect_target_component_max_px", 150
+                                )
+                            ),
+                            int(
+                                np.ceil(np.pi * _defect_rescue_extent**2)
+                            ),
+                        )
+                    else:
+                        _defect_rescue_extent = None
+                        _defect_rescue_max = int(
+                            _cr_cfg.get(
+                                "cr_defect_target_component_max_px", 150
+                            )
+                        )
+                    background_defects_mask, _dropped_defect = (
+                        drop_mask_components_at_positions(
+                            background_defects_mask,
+                            _defect_rescue_xy,
+                            max_area_px=_defect_rescue_max,
+                            max_extent_px=_defect_rescue_extent,
+                            reference_image=scienceImage,
+                        )
+                    )
+                    if _dropped_defect:
+                        logger.warning(
+                            "Dropped %d small defect component(s) covering a "
+                            "target position - suspect flag, not a data hole; "
+                            "those pixels stay usable for subtraction and "
+                            "photometry.",
+                            len(_dropped_defect),
+                        )
                 mask_essential = mask_essential | background_defects_mask
                 logger.info(
                     "Included background defects mask (saturation streaks, satellite trails) in universal mask."
