@@ -1816,6 +1816,7 @@ class Aperture:
                 ax_main.legend(
                     handles=_legend_handles, loc="upper left",
                     frameon=False, fontsize=7, ncol=_leg_ncol,
+                    labelcolor="white",
                 )
 
         from plotting_utils import get_plot_ext
