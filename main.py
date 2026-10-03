@@ -2388,8 +2388,15 @@ def run_photometry():
             float(_fwhm_err) if np.isfinite(_fwhm_err) else float("nan")
         )
 
-        # Filter sources near NaN/masked regions to improve FWHM accuracy
-        if FWHMSources is not None and len(FWHMSources) > 0:
+        # Filter sources near NaN/masked regions to improve FWHM accuracy.
+        # A non-finite ImageFWHM makes the 2xFWHM radius meaningless --
+        # `> 2*nan` is False everywhere and would silently drop every
+        # source -- so skip the cut entirely in that case.
+        if (
+            FWHMSources is not None
+            and len(FWHMSources) > 0
+            and np.isfinite(ImageFWHM)
+        ):
             nan_mask = np.isnan(image)
             if np.any(nan_mask):
                 from scipy.ndimage import distance_transform_edt
@@ -2473,7 +2480,9 @@ def run_photometry():
             undersampled_thr,
         )
 
-        header["fwhm"] = ImageFWHM
+        # Only write FWHM to header if it's finite (FITS headers reject NaN)
+        if np.isfinite(ImageFWHM):
+            header["fwhm"] = ImageFWHM
 
         # Set WCS profile to "crowded" from initial FWHM/background when crowded_auto is True.
         # Uses source count and density from the same run that produced ImageFWHM/FWHMSources.
@@ -2713,9 +2722,14 @@ def run_photometry():
             xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
             pixel_scale = float(xy_pixel_scales[0] * 3600.0)
 
-        # dx/dy: allowed PSF centroid wander during fitting.
-        input_yaml["dx"] = np.ceil(ImageFWHM)
-        input_yaml["dy"] = np.ceil(ImageFWHM)
+        # dx/dy: allowed PSF centroid wander during fitting.  Fall back when
+        # the measurement failed -- np.ceil(nan) would store NaN into the
+        # config and poison every downstream use.
+        _wander_fwhm = (
+            float(ImageFWHM) if np.isfinite(ImageFWHM) else 3.0
+        )
+        input_yaml["dx"] = np.ceil(_wander_fwhm)
+        input_yaml["dy"] = np.ceil(_wander_fwhm)
 
         input_yaml["pixel_scale"] = pixel_scale
 
@@ -5716,7 +5730,7 @@ def run_photometry():
 
             safe_fits_write(os.path.join(cur_dir, newBasename), image, header)
             logging.info("\n\nEnd of %s template calibration\n\n", imageFilter)
-            return 1
+            return 0
 
         # =============================================================================
         # Template Subtraction
@@ -10705,6 +10719,15 @@ def run_photometry():
             except Exception:
                 pass
             bg_remover = BackgroundSubtractor(input_yaml)
+            # Reuse the diff-image RMS map already corrected by VSCALE and
+            # the kernel-noise factor; recomputing it here runs a full-image
+            # source-mask + Background2D pass that costs ~20 s on 3 MP frames.
+            _pre_rms = (
+                background_rms
+                if isinstance(background_rms, np.ndarray)
+                and np.shape(background_rms) == np.shape(image)
+                else None
+            )
             # Use a slightly larger exclusion radius around the target so that
             # extended host light is not pulled into the local background model.
             image, bkg_map, background_rms, nn_meta = bg_remover.remove_local_surface(
@@ -10714,6 +10737,7 @@ def run_photometry():
                 box_half_size=int(25 * ImageFWHM),
                 fwhm_pixels=ImageFWHM,
                 exclude_inner_radius=2.0 * ImageFWHM,
+                precomputed_rms=_pre_rms,
             )
             try:
                 local_cutout_nonneg_lift = float(nn_meta.get("lift", 0.0) or 0.0)
@@ -14314,9 +14338,12 @@ def run_photometry():
             end - start,
             _mem_str,
         )
+        # Non-zero status so batch mode (_run_main_subprocess) counts this
+        # image as failed rather than OK: returning None would exit 0.
+        return 1
 
-    return None
+    return 0
 
 
 if __name__ == "__main__":
-    run_photometry()
+    raise SystemExit(run_photometry())

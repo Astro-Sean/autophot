@@ -2725,19 +2725,22 @@ class BackgroundSubtractor:
         # would include residual background structure (e.g. from imperfect
         # SFFT subtraction near host galaxies) as "noise", overestimating
         # flux errors and underestimating SNR for the target.
-        full_mask = self._make_source_mask(
-            image_sub,
-            nsigma=3,
-            npixels=5,
-            fwhm_pixels=fwhm_pixels,
-            dilate_factor=3.0,
-            n_iterations=2,
-            dilate_iterations=2,  # Use 2 iterations for RMS estimation (less aggressive)
-            initial_mask=~np.isfinite(image_sub) | (image_sub == 0.0),
-        )
         if precomputed_rms is not None:
             bkg_rms_full = precomputed_rms
         else:
+            # The source mask only feeds the Background2D RMS estimate;
+            # skip the full-image detection pass when the caller supplied
+            # an RMS map.
+            full_mask = self._make_source_mask(
+                image_sub,
+                nsigma=3,
+                npixels=5,
+                fwhm_pixels=fwhm_pixels,
+                dilate_factor=3.0,
+                n_iterations=2,
+                dilate_iterations=2,  # Use 2 iterations for RMS estimation (less aggressive)
+                initial_mask=~np.isfinite(image_sub) | (image_sub == 0.0),
+            )
             box_size_full, filter_size_full, _ = self._compute_box_sizes(
                 image_sub, full_mask, fwhm_pixels
             )

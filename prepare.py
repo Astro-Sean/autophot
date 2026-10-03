@@ -35,6 +35,8 @@ from functions import (
     log_step,
     log_warning_from_exception,
     ascii_table,
+    ascii_kv,
+    border_msg,
 )
 from check import FitsInfo
 from tns import get_coords, get_coords_simbad
@@ -207,6 +209,7 @@ class Prepare:
 
                     valid_files.append(filepath)
         restart = self.input_yaml.get("restart", True)
+        self.logger.info(border_msg("Scanning FITS files"))
         self.logger.info(
             "Restart = %s -> %s",
             restart,
@@ -274,7 +277,7 @@ class Prepare:
         }
         WCS_REQUIRED = ["CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CTYPE1", "CTYPE2"]
 
-        self.logger.info(log_step(f"FITS header validation: {len(flist)} files"))
+        self.logger.info(border_msg(f"FITS header validation: {len(flist)} files"))
 
         # Check if telescope.yml provides a numeric gain for any instrument,
         # in which case missing GAIN header keyword is not a warning.
@@ -647,30 +650,73 @@ class Prepare:
         transient_path = tns_dir / f"{target_name}.yml"
 
         def _log_tns_summary(tns_data: Dict, source: str) -> None:
-            """Log a concise TNS summary each time coordinates are used."""
+            """Log a TNS summary table each time coordinates are used."""
             try:
                 objname = tns_data.get("objname", target_name)
                 prefix = str(tns_data.get("name_prefix", "") or "").strip()
                 display_name = f"{prefix}{objname}" if prefix else str(objname)
-                ra_val = tns_data.get("radeg", tns_data.get("ra"))
-                dec_val = tns_data.get("decdeg", tns_data.get("dec"))
-                obj_type = tns_data.get("type", tns_data.get("object_type", "unknown"))
-                if ra_val is not None and dec_val is not None:
-                    self.logger.info(
-                        "TNS info (%s): %s  RA=%.6f  Dec=%.6f  Type=%s",
-                        source,
-                        display_name,
-                        float(ra_val),
-                        float(dec_val),
-                        obj_type,
-                    )
+
+                # TNS returns object_type as {"id": ..., "name": "SN IIn"};
+                # SIMBAD/manual fallbacks may carry a plain string in "type".
+                obj_type = tns_data.get("object_type", tns_data.get("type"))
+                if isinstance(obj_type, dict):
+                    obj_type = obj_type.get("name", "unknown")
+                elif obj_type is None:
+                    obj_type = "unknown"
                 else:
-                    self.logger.info(
-                        "TNS info (%s): %s  Type=%s",
-                        source,
-                        display_name,
-                        obj_type,
+                    obj_type = str(obj_type)
+
+                pairs = [
+                    ("Name", display_name),
+                    ("Source", source),
+                    ("Type", obj_type),
+                ]
+                # Prefer decimal degrees; ra/dec keys may hold sexagesimal
+                # strings which cannot be floated - try/except covers both.
+                try:
+                    ra_deg = float(tns_data.get("radeg"))
+                    dec_deg = float(tns_data.get("decdeg"))
+                except (TypeError, ValueError):
+                    try:
+                        ra_deg = float(tns_data.get("ra"))
+                        dec_deg = float(tns_data.get("dec"))
+                    except (TypeError, ValueError):
+                        ra_deg = dec_deg = None
+                if ra_deg is not None and dec_deg is not None:
+                    pairs.append(
+                        ("RA / Dec", f"{ra_deg:.6f} / {dec_deg:.6f} deg")
                     )
+                    ra_hms = tns_data.get("ra")
+                    dec_dms = tns_data.get("dec")
+                    if (
+                        isinstance(ra_hms, str)
+                        and isinstance(dec_dms, str)
+                        and ":" in ra_hms
+                        and ":" in dec_dms
+                    ):
+                        pairs.append(("RA / Dec (hms)", f"{ra_hms} / {dec_dms}"))
+                redshift = tns_data.get("redshift") or tns_data.get("host_redshift")
+                if redshift is not None:
+                    pairs.append(("Redshift", str(redshift)))
+                if tns_data.get("discoverydate"):
+                    pairs.append(("Discovered", str(tns_data["discoverydate"])))
+                if tns_data.get("discoverymag") is not None:
+                    filt = tns_data.get("discmagfilter") or {}
+                    filt_name = filt.get("name", "") if isinstance(filt, dict) else ""
+                    pairs.append(
+                        (
+                            "Disc. mag",
+                            f"{tns_data['discoverymag']}"
+                            + (f" ({filt_name})" if filt_name else ""),
+                        )
+                    )
+                internal = tns_data.get("internal_names")
+                if internal:
+                    # TNS internal_names is a comma list with empty slots.
+                    ids = [s.strip() for s in str(internal).split(",") if s.strip()]
+                    if ids:
+                        pairs.append(("Internal IDs", ", ".join(ids)))
+                self.logger.info(ascii_kv(f"TNS info ({source})", pairs, width=80))
             except Exception:
                 self.logger.info("TNS info (%s): %s", source, str(target_name))
 
@@ -1046,7 +1092,7 @@ class Prepare:
         # Images must carry TELESCOP and INSTRUME to be mapped.
         tele_autophot_input = load_telescope_config(self.input_yaml["wdir"])
 
-        self.logger.info(log_step("Filter check"))
+        self.logger.info(border_msg("Filter check"))
         self.logger.info(
             "Checking %d image(s). Catalog bands: %s\n",
             len(flist),
@@ -1319,7 +1365,7 @@ class Prepare:
         Returns:
             List[str]: List of valid template file paths.
         """
-        self.logger.info(log_step("Find template files"))
+        self.logger.info(border_msg("Find template files"))
         template_list = []
 
         if self.input_yaml["fits_dir"].endswith("/"):

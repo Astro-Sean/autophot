@@ -554,7 +554,7 @@ default_input:
     scale_growth_factor: 1.5 # float --- If no quiet injection sites are found, multiply runtime `scale` by this factor and retry (up to scale_growth_max_px).
     scale_growth_max_px: 600 # int --- Maximum runtime `scale` (pixels) allowed during limiting-magnitude quiet-site retries.
     injection_n_sites: 25 # int --- Legacy: Number of quiet injection sites around the target used for injection/recovery trials. Prefer inject_final_n_sites.
-    inject_final_n_sites: 100 # int --- Target number of final injection sites after filtering and spatial selection (default 100, clamped 10-500). Sites are distributed uniformly around the target via farthest-point sampling.
+    inject_final_n_sites: 4 # int --- Target number of final injection sites after filtering and spatial selection (default 4, clamped 4-500). Sites are distributed uniformly around the target via farthest-point sampling.
     inject_candidate_n_sites: 0 # int --- Candidate pool size before filtering (0 = auto-size to 3x final count, min 150, max 5000). Larger pools improve quiet-site ranking but increase measurement cost.
     injection_jitter_repetitions: 3 # int --- Sub-pixel jitter repetitions per site per magnitude (more = smoother completeness curve; slower).
     injection_jitter_pix: 0.5 # float --- Radius (pixels) of the uniform sub-pixel offset applied to jitter repetitions 2..N (rep 1 uses the nominal site position).

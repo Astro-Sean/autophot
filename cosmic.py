@@ -377,8 +377,19 @@ class RemoveCosmicRays:
 
         # --- Read Noise Handling ---
         if readnoise is None:
-            readnoise = float(self.header.get("RDNOISE", 6.5))
-        if readnoise < 0.0:
+            # A junk-string RDNOISE (MaxIm-style writers store text in
+            # numeric keys) must not abort the whole CR step.
+            try:
+                readnoise = float(self.header.get("RDNOISE", 6.5))
+            except (TypeError, ValueError):
+                self.logger.warning(
+                    "Invalid RDNOISE header value %r; using 6.5.",
+                    self.header.get("RDNOISE"),
+                )
+                readnoise = 6.5
+        if not np.isfinite(readnoise):
+            readnoise = 6.5
+        elif readnoise < 0.0:
             readnoise = 0.0
 
         # --- Masking ---

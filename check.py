@@ -19,6 +19,7 @@ from functions import (
     STATUS,
     log_step,
     AutophotYaml,
+    border_msg,
     cap_console_lines,
     concatenate_csv_files,
     print_progress_bar,
@@ -209,7 +210,7 @@ class FitsInfo:
                 ", ".join(sorted(set(dropped_filters))),
             )
 
-        self.logger.info("Initialized: %s files", len(self.flist))
+        self.logger.info("Queued: %d files", len(self.flist))
         # Global (cross-instrument) filter mapping cache. This prevents repetitive
         # prompts when scanning large heterogeneous datasets.
         self._global_filter_map: dict[str, str] = {}
@@ -429,7 +430,7 @@ class FitsInfo:
 
     def check(self):
         """Main pipeline: classify files, setup telescope DB, extract filters."""
-        self.logger.log(STATUS, log_step(f"File check: {len(self.flist)} FITS"))
+        self.logger.log(STATUS, border_msg(f"File check: {len(self.flist)} FITS"))
 
         headers_cache = {f: h for f in self.flist if (h := get_header(f))}
 
@@ -451,7 +452,7 @@ class FitsInfo:
 
     def _classify_files(self, headers_cache):
         """Phase 1: Classify files by TELESCOP/INSTRUME presence."""
-        self.logger.log(STATUS, log_step("Headers (basic)"))
+        self.logger.log(STATUS, border_msg("Headers", body="-"))
         incorrect, correct = [], []
         tele_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
         for fname in tqdm(self.flist) if len(self.flist) > 1 else self.flist:
@@ -571,7 +572,7 @@ class FitsInfo:
 
     def _extract_filters(self, db, headers_cache, correct_files):
         """Phase 3: Extract and map filter keywords from all valid files."""
-        self.logger.log(STATUS, log_step(f"Filters: {len(correct_files)} files"))
+        self.logger.log(STATUS, border_msg(f"Filters: {len(correct_files)} files", body="-"))
         for fname in tqdm(correct_files) if len(correct_files) > 1 else correct_files:
             header = headers_cache.get(fname)
             if not header:
@@ -620,8 +621,10 @@ class FitsInfo:
             try:
                 self._remember_mapping(db, header_value, mapping)
                 self._save_db(db)
-            except Exception:
-                pass
+            except Exception as _db_exc:
+                self.logger.debug(
+                    "Could not persist keyword mapping: %s", _db_exc
+                )
             return mapping
 
         self.logger.info("%s suggests: %r -> %r", source.capitalize(), header_value, mapping)
@@ -636,8 +639,10 @@ class FitsInfo:
             try:
                 self._remember_mapping(db, header_value, mapping)
                 self._save_db(db)
-            except Exception:
-                pass
+            except Exception as _db_exc:
+                self.logger.debug(
+                    "Could not persist keyword mapping: %s", _db_exc
+                )
             return mapping
 
         self.logger.info("Rejected %s mapping for %r", source, header_value)
@@ -700,23 +705,29 @@ class FitsInfo:
                 try:
                     self._remember_mapping(db, header_value, default)
                     self._save_db(db)
-                except Exception:
-                    pass
+                except Exception as _db_exc:
+                    self.logger.debug(
+                        "Could not persist keyword mapping: %s", _db_exc
+                    )
                 return default
             if ans in self.available_filters:
                 try:
                     self._remember_mapping(db, header_value, ans)
                     self._save_db(db)
-                except Exception:
-                    pass
+                except Exception as _db_exc:
+                    self.logger.debug(
+                        "Could not persist keyword mapping: %s", _db_exc
+                    )
                 return ans
             for b in self.available_filters:
                 if b.lower() == ans:
                     try:
                         self._remember_mapping(db, header_value, b)
                         self._save_db(db)
-                    except Exception:
-                        pass
+                    except Exception as _db_exc:
+                        self.logger.debug(
+                            "Could not persist keyword mapping: %s", _db_exc
+                        )
                     return b
             print(f"  Invalid. Choose one of {opts_str}, or '{default}'.")
 
