@@ -2267,7 +2267,11 @@ _CONFIG_LOADED_SECTIONS = (
 )
 
 # Top-level keys that carry runtime-injected data, not user options.
-_CONFIG_DATA_KEYS = frozenset({"variable_sources"})
+# ``name_prefix``/``objname`` come from the TNS resolution (autophot.py) and
+# are read back by plot.py/limits.py for display names; ``variable_sources``
+# is the SIMBAD enrichment payload.  All three land in the generated
+# input.yaml, so they must round-trip validation.
+_CONFIG_DATA_KEYS = frozenset({"variable_sources", "name_prefix", "objname"})
 
 # Renamed keys still honoured at point of use; warn rather than reject.
 _CONFIG_DEPRECATED_KEYS = {

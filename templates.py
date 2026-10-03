@@ -5291,8 +5291,13 @@ class Templates:
                                     _n_sci_before, len(sci_det),
                                     _n_tpl_before, len(tpl_det),
                                 )
-                        except Exception:
-                            pass  # WCS filtering is best-effort
+                        except Exception as _wcs_filt_exc:
+                            # WCS filtering is best-effort, but a broken
+                            # transform should still be diagnosable.
+                            logger.debug(
+                                "spalipy: WCS overlap filter skipped: %s",
+                                _wcs_filt_exc,
+                            )
 
                         if len(sci_det) < 4 or len(tpl_det) < 4:
                             logger.info(
@@ -5334,8 +5339,12 @@ class Templates:
                             _tpl_img = np.fliplr(templateImage).copy()
                             _tpl_det = tpl_det.copy()
                             _tpl_det["x"] = (templateImage.shape[1] - 1) - tpl_det["x"]
-                    except Exception:
-                        pass
+                    except Exception as _refl_exc:
+                        # Reflection check is best-effort, but a broken
+                        # WCS read should still be diagnosable.
+                        logger.debug(
+                            "spalipy: reflection check skipped: %s", _refl_exc
+                        )
 
                     # Replace NaNs with median - spalipy can't handle NaNs.
                     _tpl_nan = ~np.isfinite(_tpl_img)

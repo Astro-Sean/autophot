@@ -485,6 +485,10 @@ def _find_unknown_config_paths(
 
     for key, value in config.items():
         path = f"{prefix}.{key}" if prefix else str(key)
+        if str(key).startswith("_"):
+            continue
+        if not prefix and key in {"variable_sources", "name_prefix", "objname"}:
+            continue
         if key not in schema:
             unknown.append(path)
             continue
@@ -2020,11 +2024,11 @@ class AutomatedPhotometry:
                 for f in available_filters
                 if "_err" not in f and f not in ["RA", "DEC"]
             ]
-            _log(f"Available filters: {filt_list}")
+            _log(f"Available filters: {', '.join(sorted(filt_list))}")
 
             # Optional: Enrich target metadata from TNS
             try:
-                _log(log_step("TNS check"))
+                _log(border_msg("TNS check") if border_msg else log_step("TNS check"))
                 tns_coords = prepare_db.check_tns()
                 default_input.update(
                     {
@@ -2683,17 +2687,29 @@ class AutomatedPhotometry:
                         gc.collect()
                     else:
                         _log(log_step("Reduce/calibrate template files"))
+                        failed_templates = []
                         for template in print_progress_bar(
                             template_file_list, title="Template files calibrated"
                         ):
-                            _run_main_subprocess(
+                            fname, rc = _run_main_subprocess(
                                 python_executable,
                                 autophot_exe,
                                 template,
                                 input_file,
                                 True,
                             )
+                            if rc != 0:
+                                failed_templates.append(fname)
+                                _log_always(
+                                    f"[TEMPLATE FAIL] {fname} (exit code {rc})"
+                                )
                             gc.collect()
+                        if failed_templates:
+                            _log_always(
+                                f"[WARNING] {len(failed_templates)}/"
+                                f"{len(template_file_list)} template files "
+                                "failed - see per-image logs."
+                            )
 
                 # Reduce science frames
                 _log("")
@@ -2814,7 +2830,13 @@ class AutomatedPhotometry:
                                     break
                                 gc.collect()
                                 counter += 1
-                                _log(f"[{counter}/{len(file_list)}] [OK]    {str(file)}")
+                                if rc == 0:
+                                    _log(f"[{counter}/{len(file_list)}] [OK]    {str(file)}")
+                                else:
+                                    _log(
+                                        f"[{counter}/{len(file_list)}] [FAIL]  {str(file)} "
+                                        f"(exit code {rc})"
+                                    )
                             except Exception as e:
                                 import traceback
 

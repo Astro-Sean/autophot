@@ -2566,8 +2566,12 @@ class WCSSolver:
                                                         "zero SIP",
                                                         _lower,
                                                     )
-                                            except Exception:
-                                                pass
+                                            except Exception as _sip_hdr_exc:
+                                                logger.debug(
+                                                    "Could not inspect WCS header "
+                                                    "after tweak-order retry: %s",
+                                                    _sip_hdr_exc,
+                                                )
                                         else:
                                             logger.warning(
                                                 "No solution with tweak order %d",
@@ -2630,15 +2634,22 @@ class WCSSolver:
                                                                 "distortion fitting",
                                                                 _lower_nsigma,
                                                             )
-                                                    except Exception:
-                                                        pass
+                                                    except Exception as _ns_hdr_exc:
+                                                        logger.debug(
+                                                            "Could not inspect WCS header "
+                                                            "after nsigma retry: %s",
+                                                            _ns_hdr_exc,
+                                                        )
                                                 else:
                                                     logger.warning(
                                                         "No solution with nsigma=%s",
                                                         _lower_nsigma,
                                                     )
-                                        except Exception:
-                                            pass
+                                        except Exception as _ns_solve_exc:
+                                            logger.debug(
+                                                "nsigma retry block failed: %s",
+                                                _ns_solve_exc,
+                                            )
                             except Exception as _sip_err:
                                 logger.debug(
                                     "SIP zero-check failed (non-fatal): %s", _sip_err
@@ -2739,8 +2750,12 @@ class WCSSolver:
                                                             _lower,
                                                         )
                                                         break
-                                                except Exception:
-                                                    pass
+                                                except Exception as _sip_hdr_exc:
+                                                    logger.debug(
+                                                        "Could not inspect WCS header "
+                                                        "after SIP-overfit retry: %s",
+                                                        _sip_hdr_exc,
+                                                    )
                                             else:
                                                 logger.warning(
                                                     "No solution with tweak order %d",
