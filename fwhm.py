@@ -63,6 +63,7 @@ from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 
 # --- Local Imports ---
 from functions import (
+    fwhm_outlier_clip,
     get_normalized_histogram,
     log_step,
     pad_ones,
@@ -515,7 +516,7 @@ class Find_FWHM:
             norm = ImageNormalize(image, interval=zscale)
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.3))
             cmap = plt.get_cmap("gray").copy()
-            cmap.set_bad(color="none")
+            cmap = cmap.with_extremes(bad="none")
             ax.imshow(image, cmap=cmap, origin="lower", norm=norm)
             overlay_mask_hatch(ax, ~np.isfinite(np.asarray(image)))
             ax.contour(
@@ -1216,16 +1217,12 @@ class Find_FWHM:
         if source.empty:
             logger.warning("Input DataFrame is empty; nothing to clean.")
             return source
-        data = np.vstack([source["fwhmx"].values, source["fwhmy"].values])
-        clipped = sigma_clip(
-            data,
-            sigma=sigma,
-            maxiters=maxiters,
-            cenfunc=np.nanmedian,
-            stdfunc=mad_std,
-            axis=1,
-        )
-        combined_mask = np.any(clipped.mask, axis=0)
+        # Floored-MAD clip per axis: an iterative unfloored MAD clip can
+        # collapse onto a defect-dominated majority locus and flag the
+        # real stars.
+        _rej_x, _, _ = fwhm_outlier_clip(source["fwhmx"].values, sigma=sigma)
+        _rej_y, _, _ = fwhm_outlier_clip(source["fwhmy"].values, sigma=sigma)
+        combined_mask = _rej_x | _rej_y
         num_outliers = np.count_nonzero(combined_mask)
         self.logger.info(
             f"Removed {num_outliers} outliers out of {len(source)} sources"
@@ -1338,8 +1335,8 @@ class Find_FWHM:
                 )
                 tbl = finder(image - med, mask=mask)
                 if tbl is None or len(tbl) == 0:
-                    self.logger.info(
-                        "No sources found with provided parameters", "warning"
+                    self.logger.warning(
+                        "No sources found with provided parameters"
                     )
                     return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
@@ -1496,7 +1493,17 @@ class Find_FWHM:
                         # retry at a smaller scale before giving up.
                         fwhm_fp *= 0.5
                         continue
-                    self.logger.warning("No sources in first pass")
+                    if df is not None and len(df) > 0:
+                        # Kernel refinement emptied the catalog; keep the
+                        # earlier detections rather than discarding them.
+                        self.logger.info(
+                            "Detection empty at refined FWHM %.1f px; "
+                            "keeping %d sources from the previous pass",
+                            fwhm_fp,
+                            len(df),
+                        )
+                        break
+                    self.logger.warning("No sources detected")
                     self.logger.info("Elapsed: %.3f s", time.time() - t0)
                     return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
@@ -1551,6 +1558,12 @@ class Find_FWHM:
                 & (df[_ycol] > edge)
                 & (df[_ycol] < ny - edge)
             ]
+            if len(df) == 0 and 2 * edge >= min(nx, ny):
+                self.logger.warning(
+                    "Edge margin (%d px) covers the frame (%dx%d); "
+                    "all detections rejected",
+                    edge, nx, ny,
+                )
 
             if not no_clean:
                 # --- Cleaning: mask proximity ---
@@ -1607,7 +1620,10 @@ class Find_FWHM:
                             n_pixels=min_seg_pix,
                             mask=mask,
                         )
-                    except Exception:
+                    except Exception as _seg_exc:
+                        self.logger.debug(
+                            "Min-segment cleaning skipped: %s", _seg_exc
+                        )
                         _segm = None
                     if _segm is not None:
                         _xi = np.clip(
@@ -1805,7 +1821,14 @@ class Find_FWHM:
                     )
                     df = df[~_bad_chi2].copy()
 
-                df = self._clip_column(df, "fwhm", sigma=5.0, maxiters=8)
+                # MAD-clip on fitted FWHM via the floored helper: an
+                # unfloored MAD collapses onto the majority locus on
+                # defect-dominated pools and would flag the real stars.
+                _fwhm_rej, _, _ = fwhm_outlier_clip(
+                    df["fwhm"].to_numpy(dtype=float), sigma=5.0
+                )
+                if _fwhm_rej.any():
+                    df = df[~_fwhm_rej]
                 df = df[df["s2n"] >= 3.0]
 
                 # Defect-dominance diagnostic: if a large fraction of the

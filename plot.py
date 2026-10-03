@@ -259,7 +259,7 @@ class Plot:
                 img_data = images[title]
                 # Grayscale keeps colored markers readable.
                 cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                cmap.set_bad(color="none")
+                cmap = cmap.with_extremes(bad="none")
                 ax.imshow(
                     img_data,
                     origin="lower",
@@ -496,7 +496,7 @@ class Plot:
 
                     ax_inset = inset_axes(ax, width="30%", height="30%", loc=inset_loc)
                     cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                    cmap.set_bad(color="none")
+                    cmap = cmap.with_extremes(bad="none")
                     ax_inset.imshow(
                         img_data,
                         origin="lower",
@@ -787,7 +787,7 @@ class Plot:
         seg_drawn = False
 
         cmap_vir = plt.get_cmap(PLOT_COLORS.get('image_cmap_alt', 'viridis')).copy()
-        cmap_vir.set_bad(color="none")
+        cmap_vir = cmap_vir.with_extremes(bad="none")
         axes[0].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
@@ -1025,7 +1025,7 @@ class Plot:
                 image, interval=ZScaleInterval(), stretch=LinearStretch()
             )
             cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray'))
-            cmap.set_bad(color="none")
+            cmap = cmap.with_extremes(bad="none")
             im = ax1.imshow(
                 image,
                 origin="lower",
@@ -2530,7 +2530,7 @@ class Plot:
                     _img_cmap = plt.get_cmap(
                         PLOT_COLORS.get("image_cmap", "gray")
                     )
-                    _img_cmap.set_bad(color="none")
+                    _img_cmap = _img_cmap.with_extremes(bad="none")
                     ax2.imshow(
                         _img,
                         origin="lower",
@@ -2668,7 +2668,7 @@ class Plot:
                         _sf_cmap = plt.get_cmap(
                             PLOT_COLORS.get("distortion_cmap", "inferno")
                         )
-                        _sf_cmap.set_bad(color="none")
+                        _sf_cmap = _sf_cmap.with_extremes(bad="none")
                         _sf = ax3.imshow(
                             _dmag,
                             origin="lower",
@@ -2848,7 +2848,7 @@ class Plot:
             )
 
             cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-            cmap.set_bad(color="none")
+            cmap = cmap.with_extremes(bad="none")
 
             for i, (ax, img, title) in enumerate([
                 (ax1, sci_image, "Science"),

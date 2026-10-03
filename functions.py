@@ -2058,8 +2058,10 @@ def compute_target_crowding(
     except Exception as exc:
         return {"ok": False, "reason": f"photutils.segmentation unavailable: {exc}"}
 
-    threshold = detect_threshold(cut, nsigma=nsigma, background=med, error=sigma)
-    segm = detect_sources(cut, threshold, npixels=npixels)
+    threshold = detect_threshold(
+        cut, n_sigma=nsigma, background=med, error=sigma
+    )
+    segm = detect_sources(cut, threshold, n_pixels=npixels)
     if segm is None:
         return {
             "ok": True,
@@ -2078,7 +2080,7 @@ def compute_target_crowding(
             segm = deblend_sources(
                 cut,
                 segm,
-                npixels=npixels,
+                n_pixels=npixels,
                 nlevels=int(deblend_nlevels),
                 contrast=float(deblend_contrast),
                 progress_bar=False,
@@ -4040,7 +4042,12 @@ def _bounded_centroid(img, x, y, box, wander_max):
     for func in (centroid_2dg, centroid_com):
         try:
             x_c, y_c = centroid_sources(
-                img, [x], [y], box_size=box, centroid_func=func
+                img,
+                [x],
+                [y],
+                box_size=box,
+                centroid_func=func,
+                mask=~np.isfinite(img),
             )
             x_f, y_f = float(x_c[0]), float(y_c[0])
             if (

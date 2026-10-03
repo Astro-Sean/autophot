@@ -1637,12 +1637,16 @@ class Zeropoint:
             zp_samples = samples[:, 0]
             f_out_samples = samples[:, 1]
 
-            # Warn on low effective sample size (floor raised 100 -> 200).
-            n_eff = len(zp_samples) / tau_max if tau_max >= 1 else len(zp_samples)
+            # Warn on low effective sample size.  ESS is the *unthinned*
+            # chain length over tau - thinning by tau/2 already removes the
+            # autocorrelation, so dividing the thinned count by tau again
+            # underestimates ESS by ~thin/2.
+            _n_raw = len(sampler.get_chain(flat=True))
+            n_eff = _n_raw / tau_max if tau_max >= 1 else _n_raw
             if n_eff < 200:
                 logger.warning(
                     f"ZP MCMC low ESS: n_eff ~ {n_eff:.0f} "
-                    f"(chain {len(zp_samples)}, tau ~ {tau_max:.1f})"
+                    f"(chain {_n_raw}, tau ~ {tau_max:.1f})"
                 )
 
             # Percentile-based error (16/50/84) to capture asymmetry
@@ -1814,11 +1818,15 @@ class Zeropoint:
             zp_err_hi = zp_p84 - zp
             zp_err = max(zp_err_lo, zp_err_hi)  # Conservative symmetric error
 
-            n_eff = len(samples) / tau_max if tau_max >= 1 else len(samples)
+            # ESS on the unthinned chain - thinning already removed the
+            # autocorrelation, so dividing the thinned count by tau again
+            # underestimates ESS by ~thin/2.
+            _n_raw = len(sampler.get_chain(flat=True))
+            n_eff = _n_raw / tau_max if tau_max >= 1 else _n_raw
             if n_eff < 200:  # ESS floor raised 100 -> 200 for reliability
                 logger.warning(
                     f"ZP MCMC (standard) low ESS: n_eff ~ {n_eff:.0f} "
-                    f"(chain {len(samples)}, tau ~ {tau_max:.1f})"
+                    f"(chain {_n_raw}, tau ~ {tau_max:.1f})"
                 )
             del samples, sampler
 
@@ -2323,12 +2331,7 @@ class Zeropoint:
                 # Per-method ZP/err/N/slope are rendered as a table by the
                 # caller (see the "Zeropoint" ascii_table in main.py).
 
-                if zp_std > 0.05:
-                    logger.warning(
-                        f"[{flux_type}] ZP error is large ({zp_std:.3f} mag, N={n_sources}). "
-                        f"Target photometry from this epoch may have significant systematic uncertainty."
-                    )
-                elif n_sources < 5:
+                if n_sources < 5:
                     logger.warning(
                         f"[{flux_type}] Very few calibrator sources (N={n_sources}); "
                         f"ZP may be unreliable. Target photometry scatter likely."
@@ -2965,12 +2968,6 @@ class Zeropoint:
                         else 0.001
                     )
                     zp_err = max(zp_err, zp_floor)
-
-                    if zp_err > 0.05:
-                        logger.warning(
-                            f"[{flux_type}] ZP error is large ({zp_err:.3f} mag, N={n_inl}). "
-                            f"Target photometry from this epoch may have significant systematic uncertainty."
-                        )
 
                     logger.debug(
                         "[%s] ZP error breakdown: SE_median=%.4f, mean_src_err=%.4f, combined=%.4f (N=%d, MAD=%.4f)",

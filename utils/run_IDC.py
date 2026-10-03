@@ -632,7 +632,7 @@ class ImageDistortionCorrector:
             except Exception:
                 pass
             try:
-                cmap.set_bad(color="none")
+                cmap = cmap.with_extremes(bad="none")
             except Exception:
                 pass
             im = ax.imshow(
@@ -8079,7 +8079,7 @@ class ImageDistortionCorrector:
             except Exception:
                 pass
             try:
-                cmap_img.set_bad(color="none")
+                cmap_img = cmap_img.with_extremes(bad="none")
             except Exception:
                 pass
             im1 = ax1.imshow(

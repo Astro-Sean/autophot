@@ -1067,16 +1067,16 @@ class Aperture:
                         return bkg_lvl, emp_std, "Biweight"
                     if verbose:
                         logger.debug("Biweight ratio outside range: %.2f", ratio)
-        except Exception:
-            pass
+        except Exception as _est_exc:
+            logger.debug("Biweight midvariance failed: %s", _est_exc)
 
         # Biweight-scale fallback (consistent with the canonical estimator).
         try:
             ms = float(biweight_scale(clean, c=9.0))
             if ms > 0 and np.isfinite(ms):
                 return bkg_lvl, ms, "BiweightScale"
-        except Exception:
-            pass
+        except Exception as _est_exc:
+            logger.debug("Biweight scale failed: %s", _est_exc)
 
         # Percentile fallback.
         try:
@@ -1084,8 +1084,8 @@ class Aperture:
             ps = 0.5 * (p84 - p16)
             if ps > 0:
                 return bkg_lvl, ps, "Percentile"
-        except Exception:
-            pass
+        except Exception as _est_exc:
+            logger.debug("Percentile fallback failed: %s", _est_exc)
 
         return bkg_lvl, np.nan, "Failed"
 
@@ -1644,7 +1644,7 @@ class Aperture:
                 )
                 norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
                 cmap = plt.get_cmap("viridis").copy()
-                cmap.set_bad(color="none")
+                cmap = cmap.with_extremes(bad="none")
                 zmask = ~np.isfinite(zoom_image)
                 zoom_disp = np.ma.array(zoom_image, mask=zmask)
                 ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="equal")
@@ -1668,7 +1668,7 @@ class Aperture:
 
             norm = ImageNormalize(vmin=vmin_shared, vmax=vmax_shared)
             cmap = plt.get_cmap("viridis").copy()
-            cmap.set_bad(color="none")
+            cmap = cmap.with_extremes(bad="none")
             zmask = ~np.isfinite(zoom_image)
             if plot_zero_as_nan:
                 zmask |= (np.asarray(zoom_image, dtype=float) == 0.0)
@@ -1922,7 +1922,7 @@ class Aperture:
             )
             norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
             cmap = plt.get_cmap("viridis").copy()
-            cmap.set_bad(color="none")
+            cmap = cmap.with_extremes(bad="none")
             # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
             zmask = ~np.isfinite(zoom_image)
             zoom_disp = np.ma.array(zoom_image, mask=zmask)
@@ -1979,7 +1979,7 @@ class Aperture:
 
         norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
         cmap = plt.get_cmap("viridis").copy()
-        cmap.set_bad(color="none")
+        cmap = cmap.with_extremes(bad="none")
         plot_zero_as_nan = bool(
             (self.input_yaml.get("plotting") or {}).get("plot_zero_as_nan", True)
         )

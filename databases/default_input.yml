@@ -791,8 +791,8 @@ default_input:
     mesh_scale_min: 4.0 # float --- Minimum background mesh scale (in FWHM units unless otherwise specified).
     mesh_scale_max: 10.0 # float --- Maximum background mesh scale (in FWHM units unless otherwise specified).
     mesh_filter_size_mesh_units: 3 # int --- Background smoothing filter size expressed in mesh-cell units.
-    global_interpolator: zoom # str --- Background2D interpolator ("zoom" fast; "idw" slower, can help pathological gradients).
-    global_interp_order: 3 # int --- Order for zoom interpolator (0 nearest, 1 linear, 3 cubic).
+    global_interpolator: zoom # str --- Deprecated/no-op under photutils>=3, which always resizes the mesh with a cubic spline zoom.
+    global_interp_order: 3 # int --- Deprecated/no-op under photutils>=3 (interpolator order is fixed cubic).
     global_sigma_clip_maxiters: 6 # int --- SigmaClip max iterations per mesh cell (lower = faster; use 10+ if noisy).
     # NOTE: global_mask_edge_flatten is automatically disabled when fast_mode=True unless explicitly set to True.
     global_mask_edge_flatten: True # bool --- If True, damp Background2D interpolation overshoot near masked regions by replacing a thin band around mask edges with a smooth estimate from nearby unmasked pixels.
@@ -832,8 +832,8 @@ default_input:
     local_box_size: null # int|null --- Optional explicit local background box size (pixels). If null, use adaptive sizing.
     local_filter_size: null # int|null --- Optional explicit local Background2D filter size (pixels). If null, use computed value (capped by local_filter_size_max).
     local_filter_size_max: 3 # int --- Maximum allowed filter size when adaptively increasing filter size.
-    local_interpolator: zoom # str --- Background2D interpolator method (e.g. zoom).
-    local_interp_order: 1 # int --- Interpolator order (e.g. 0 nearest, 1 linear).
+    local_interpolator: zoom # str --- Deprecated/no-op under photutils>=3, which always resizes the mesh with a cubic spline zoom.
+    local_interp_order: 1 # int --- Deprecated/no-op under photutils>=3 (interpolator order is fixed cubic).
     local_source_mask_nsigma: 5.0 # float --- Sigma threshold for masking sources during local background estimation.
     local_source_mask_npixels: 7 # int --- Minimum connected pixels for source mask creation.
     local_source_mask_iterations: 2 # int --- Number of mask/estimate iterations for local background.

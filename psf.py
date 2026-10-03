@@ -76,6 +76,7 @@ from typing import Optional, Any
 import astropy.units as u
 from astropy.io import fits
 from astropy.nddata import NDData, StdDevUncertainty
+from astropy.utils.exceptions import AstropyUserWarning
 from astropy.stats import SigmaClip, mad_std, sigma_clipped_stats
 from astropy.table import QTable, Table
 from astropy.visualization import ImageNormalize, LinearStretch, ZScaleInterval
@@ -4066,17 +4067,23 @@ class PSF:
                 else:
                     weightmap = np.ones_like(ndimage.data, dtype=float)
 
+            # Non-finite pixels must be masked explicitly - otherwise each
+            # centroid_sources call warns that it auto-masked them.
+            _cen_mask = ~np.isfinite(np.asarray(ndimage.data))
+
             # --- Pass 1: initial centroid with larger box ---
             try:
                 x_c1, y_c1 = centroid_sources(
-                    ndimage.data, x, y, box_size=cen_box_1, centroid_func=cen_func
+                    ndimage.data, x, y, box_size=cen_box_1,
+                    centroid_func=cen_func, mask=_cen_mask,
                 )
             except Exception as exc:
                 log.warning(
                     f"[robust_extract_stars] Pass 1 centroiding failed ({exc}); using COM"
                 )
                 x_c1, y_c1 = centroid_sources(
-                    ndimage.data, x, y, box_size=cen_box_1, centroid_func=centroid_com
+                    ndimage.data, x, y, box_size=cen_box_1,
+                    centroid_func=centroid_com, mask=_cen_mask,
                 )
 
             # --- Pass 2: refine with smaller box centered on pass-1 result ---
@@ -4089,6 +4096,7 @@ class PSF:
                         ndimage.data,
                         x_c1[good1], y_c1[good1],
                         box_size=cen_box_2, centroid_func=cen_func,
+                        mask=_cen_mask,
                     )
                     x_c2[good1] = x_r
                     y_c2[good1] = y_r
@@ -8928,7 +8936,7 @@ class PSF:
             try:
                 _cmap = plt.get_cmap(cmap).copy() if isinstance(cmap, str) else cmap
                 _cmap = _cmap.copy() if hasattr(_cmap, "copy") else _cmap
-                _cmap.set_bad(color="none")
+                _cmap = _cmap.with_extremes(bad="none")
             except Exception:
                 _cmap = cmap
 
@@ -9811,7 +9819,7 @@ class PSF:
         apply_autophot_mplstyle()
         plt.ioff()
         cmap = plt.get_cmap("viridis").copy()
-        cmap.set_bad(color="none")
+        cmap = cmap.with_extremes(bad="none")
 
         data_cube = np.asarray(gridded.data, dtype=float)
         _img_arr = (
@@ -9917,7 +9925,7 @@ class PSF:
             cmap_img = plt.get_cmap(
                 PLOT_COLORS.get("image_cmap", "gray")
             ).copy()
-            cmap_img.set_bad(color="none")
+            cmap_img = cmap_img.with_extremes(bad="none")
             try:
                 vmin_i, vmax_i = ZScaleInterval().get_limits(img)
                 norm_i = ImageNormalize(vmin=vmin_i, vmax=vmax_i)
@@ -10073,7 +10081,7 @@ class PSF:
 
         # Individual normalization per star (not global) for better visibility
         cmap_vir = plt.get_cmap("viridis").copy()
-        cmap_vir.set_bad(color="none")
+        cmap_vir = cmap_vir.with_extremes(bad="none")
         for i in range(num_stars):
             row, col = divmod(i, ncols)
             ax = fig.add_subplot(left_sub[row, col])
@@ -10151,7 +10159,7 @@ class PSF:
         # 2D ePSF image (right side, top of right subgrid)
         ax_right = fig.add_subplot(right_sub[0, 0])
         cmap_vir = plt.get_cmap("viridis").copy()
-        cmap_vir.set_bad(color="none")
+        cmap_vir = cmap_vir.with_extremes(bad="none")
         im = ax_right.imshow(
             np.ma.array(psf_model_plot, mask=~np.isfinite(psf_model_plot)),
             origin="lower",
@@ -11226,10 +11234,19 @@ class PSF:
                             _mask_indices = np.where(mask)[0]
                             mask[_mask_indices[_fully_masked]] = False
 
-                res = psfphot(nd_for_fit, init_params=sub_init)
+                # photutils emits a generic AstropyUserWarning when any fit
+                # is flagged non-converged; we replace it below with a
+                # counted warning decoded from the flags column.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r".*may not have converged.*",
+                        category=AstropyUserWarning,
+                    )
+                    res = psfphot(nd_for_fit, init_params=sub_init)
             else:
                 finder = DAOStarFinder(
-                    np.nanmedian(detect_threshold(ndimage.data, nsigma=3.0))
+                    np.nanmedian(detect_threshold(ndimage.data, n_sigma=3.0))
                     * u.electron,
                     fwhm,
                 )
@@ -11247,7 +11264,13 @@ class PSF:
                     maxiters=10,
                 )
                 sub_init = init_params[mask]
-                res = psfphot(ndimage, init_params=sub_init)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r".*may not have converged.*",
+                        category=AstropyUserWarning,
+                    )
+                    res = psfphot(ndimage, init_params=sub_init)
 
                 # Match back to input positions via KD-tree.
                 sub_init = sub_init.to_pandas()
@@ -11296,6 +11319,12 @@ class PSF:
                             unique_issues.add(issue)
                     if unique_issues:
                         log.debug("PSF fit flags: %s", ", ".join(sorted(unique_issues)))
+                    if any(8 & v for v in nonzero_flags):
+                        log.warning(
+                            "PSF fit: %d source(s) may not have converged "
+                            "(no_convergence flag).",
+                            int(np.sum([bool(8 & v) for v in nonzero_flags])),
+                        )
                     if any(2048 & v for v in nonzero_flags):
                         log.warning(
                             "PSF fit: %d source(s) have non-finite local background "
@@ -12258,14 +12287,30 @@ class PSF:
             _ok_err = valid_flux & (abs_flux > 0)
             mag_err[_ok_err] = (2.5 / np.log(10.0)) * (flux_err_arr[_ok_err] / abs_flux[_ok_err])
             updated[inst_err_col] = mag_err
-            if np.any(~valid_flux & np.isfinite(flux_arr) & (abs_flux > 0)):
-                _n_rejected = int(np.sum(~valid_flux & np.isfinite(flux_arr) & (abs_flux > 0)))
+            _rejected = ~valid_flux & np.isfinite(flux_arr) & (abs_flux > 0)
+            if np.any(_rejected):
+                # Split the cause: a negative flux means the fit inverted,
+                # while a finite positive flux failing _snr >= 0.01 means
+                # the fit produced a huge flux_err (non-convergence), so a
+                # "near-zero flux" label would misdescribe bright sources.
+                _rej_flux = flux_arr[_rejected]
+                _rej_snr = _snr[_rejected]
+                _n_neg = int((~allow_negative_updated[_rejected] & (_rej_flux <= 0)).sum())
+                _n_lowsnr = int(
+                    ((~np.isfinite(_rej_snr)) | (_rej_snr < 0.01)).sum()
+                )
+                _causes = []
+                if _n_neg:
+                    _causes.append(f"{_n_neg} negative-flux")
+                if _n_lowsnr:
+                    _causes.append(f"{_n_lowsnr} low-SNR/non-converged")
                 log.warning(
-                    "PSF instrumental magnitude set to NaN for %d source(s) with "
-                    "near-zero or negative flux (failed fit); flux=%.2e to %.2e e/s.",
-                    _n_rejected,
-                    float(np.nanmin(abs_flux[~valid_flux & (abs_flux > 0)])),
-                    float(np.nanmax(abs_flux[~valid_flux & (abs_flux > 0)])),
+                    "PSF instrumental magnitude set to NaN for %d source(s) "
+                    "(%s); flux=%.2e to %.2e e/s.",
+                    int(_rejected.sum()),
+                    ", ".join(_causes) or "failed fits",
+                    float(np.nanmin(abs_flux[_rejected])),
+                    float(np.nanmax(abs_flux[_rejected])),
                 )
             # Instrumental mag from difference-image PSF before invert (|F|); only filled when invert replaced fit
             inst_normal = f"inst_{image_filter}_PSF_normal"
@@ -12767,7 +12812,7 @@ class PSF:
                         _cutout, interval=ZScaleInterval(), stretch=LinearStretch()
                     )
                 _cmap = plt.get_cmap("viridis").copy()
-                _cmap.set_bad(color="none")
+                _cmap = _cmap.with_extremes(bad="none")
                 _im = _ax.imshow(
                     np.ma.array(first_image, mask=~np.isfinite(first_image)),
                     origin="lower",
@@ -12930,7 +12975,7 @@ class PSF:
                         cutout2, interval=ZScaleInterval(), stretch=LinearStretch()
                     )
                 cmap_vir = plt.get_cmap("viridis").copy()
-                cmap_vir.set_bad(color="none")
+                cmap_vir = cmap_vir.with_extremes(bad="none")
                 im2 = ax2.imshow(
                 np.ma.array(second_image, mask=~np.isfinite(second_image)),
                 origin="lower",
@@ -13010,7 +13055,7 @@ class PSF:
                     epsf.data, interval=ZScaleInterval(), stretch=LinearStretch()
                 )
                 cmap_vir = plt.get_cmap("viridis").copy()
-                cmap_vir.set_bad(color="none")
+                cmap_vir = cmap_vir.with_extremes(bad="none")
                 im3 = ax3.imshow(
                 np.ma.array(epsf.data, mask=~np.isfinite(epsf.data)),
                 origin="lower",

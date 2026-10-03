@@ -12,8 +12,8 @@ Key design choices
    that catches extended wings and faint field sources.
 3. **Large smoothing filter** -- scales as ``box_size // 2`` for a genuinely
    smooth mesh.
-4. **BkgZoomInterpolator** -- spline-based zoom replaces the default
-   piecewise interpolator for a continuous surface.
+4. **Cubic spline zoom** -- photutils>=3 always resizes the background
+   mesh with a cubic spline, giving a continuous surface.
 5. **Aggressive dilation** -- ``dilate_factor=3``, 3 iterations to fully
    exclude PSF halos.
 6. **Saturation masking** -- pixels near saturation are masked before
@@ -63,8 +63,7 @@ from astropy.visualization import ZScaleInterval
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from photutils.background import (Background2D, BiweightLocationBackground,
                                   BiweightScaleBackgroundRMS, MedianBackground)
-from photutils.background.interpolators import (BkgIDWInterpolator,
-                                                BkgZoomInterpolator)
+
 from photutils.segmentation import detect_sources, detect_threshold
 from scipy.ndimage import binary_dilation, find_objects, gaussian_filter
 from scipy.ndimage import label as ndi_label
@@ -472,9 +471,8 @@ class BackgroundSubtractor:
           this is a median filter applied to the *mesh grid*, so filter_size=3
           means a 3x3 box neighbourhood.  Values much larger than 5 flatten
           the surface to a constant.
-        * The BkgZoomInterpolator (set in _estimate_background) handles the
-          smooth interpolation between mesh nodes - the filter_size just
-          suppresses box-to-box noise in the mesh.
+        * photutils>=3 always resizes the mesh with a cubic spline zoom -
+          the filter_size just suppresses box-to-box noise in the mesh.
         """
         shape = image.shape
 
@@ -688,7 +686,7 @@ class BackgroundSubtractor:
                     except Exception:
                         work = residual
 
-                threshold = detect_threshold(work, nsigma=nsigma, mask=mask)
+                threshold = detect_threshold(work, n_sigma=nsigma, mask=mask)
 
                 # Use a small Gaussian filter kernel to suppress pixel noise
                 # before segmentation.  Newer versions of photutils expect
@@ -697,7 +695,7 @@ class BackgroundSubtractor:
                 segm = detect_sources(
                     work,
                     threshold=threshold,
-                    npixels=npixels,
+                    n_pixels=npixels,
                     connectivity=8,
                 )
                 if segm is None:
@@ -776,7 +774,6 @@ class BackgroundSubtractor:
                                 sigma_clip=SigmaClip(sigma=3.0, maxiters=5),
                                 bkg_estimator=MedianBackground(),
                                 bkg_rms_estimator=BiweightScaleBackgroundRMS(),
-                                interpolator=BkgZoomInterpolator(order=1),
                                 exclude_percentile=90.0,
                             )
                             residual = image - np.asarray(bkg.background, dtype=float)
@@ -1656,9 +1653,10 @@ class BackgroundSubtractor:
         """
         Fit a smooth sky-background surface with photutils Background2D.
 
-        Uses BiweightLocation (resists outlier boxes) and BkgZoomInterpolator
-        (smooth spline).  On failure, retries with progressively larger boxes
-        before falling back to a flat global-median surface.
+        Uses BiweightLocation (resists outlier boxes) and photutils's cubic
+        spline zoom (the only interpolator photutils>=3 supports).  On
+        failure, retries with progressively larger boxes before falling
+        back to a flat global-median surface.
         """
         # Try the requested box size, then progressively larger ones.
         attempts = [
@@ -1677,25 +1675,25 @@ class BackgroundSubtractor:
             else {}
         )
         fast_mode = bool(cfg_bkg.get("fast_mode", False))
+        # photutils>=3 deprecated the Background2D interpolator kwarg and
+        # always resizes the mesh with a cubic spline zoom; the
+        # global_interpolator / global_interp_order config keys no longer
+        # have an effect.
         global_interpolator = (
             str(cfg_bkg.get("global_interpolator", "zoom")).strip().lower()
         )
-        if fast_mode and global_interpolator == "idw":
-            global_interpolator = "zoom"
+        if global_interpolator != "zoom":
             self.logger.debug(
-                "Background: fast_mode=True - using zoom interpolator (IDW is slow on large images)."
+                "Background: global_interpolator=%r ignored - photutils>=3 "
+                "always uses cubic zoom.",
+                global_interpolator,
             )
-        global_interp_order = int(cfg_bkg.get("global_interp_order", 3))
         clip_maxiters = int(cfg_bkg.get("global_sigma_clip_maxiters", 10))
         if fast_mode:
             clip_maxiters = min(clip_maxiters, 5)
         clip_maxiters = max(1, clip_maxiters)
         for i, (bs, fs, m) in enumerate(attempts):
             try:
-                if global_interpolator == "idw":
-                    interp = BkgIDWInterpolator()
-                else:
-                    interp = BkgZoomInterpolator(order=max(0, int(global_interp_order)))
                 bkg = Background2D(
                     image,
                     mask=m,
@@ -1704,7 +1702,6 @@ class BackgroundSubtractor:
                     sigma_clip=SigmaClip(sigma=3.0, maxiters=clip_maxiters),
                     bkg_estimator=BiweightLocationBackground(),
                     bkg_rms_estimator=BiweightScaleBackgroundRMS(),
-                    interpolator=interp,
                     exclude_percentile=float(exclude_percentile),
                 )
 
@@ -2432,8 +2429,14 @@ class BackgroundSubtractor:
                 local_sigma_maxiters,
             )
         local_filter_size_max = bcfg.get("local_filter_size_max", 3)
+        # photutils>=3 ignores the interpolator kwarg (always cubic zoom).
         local_interpolator = str(bcfg.get("local_interpolator", "zoom")).strip().lower()
-        local_interp_order = int(bcfg.get("local_interp_order", 1))
+        if local_interpolator != "zoom":
+            self.logger.debug(
+                "Local background: local_interpolator=%r ignored - "
+                "photutils>=3 always uses cubic zoom.",
+                local_interpolator,
+            )
         # Allow background mesh override directly (finest control).
         local_box_size_override = bcfg.get("local_box_size", None)
         local_filter_size_override = bcfg.get("local_filter_size", None)
@@ -2540,11 +2543,6 @@ class BackgroundSubtractor:
 
         # ---- Fit background on cutout ----
         try:
-            if local_interpolator == "idw":
-                interp = BkgIDWInterpolator()
-            else:
-                # Zoom interpolator with low order keeps the surface less smoothed than the default cubic.
-                interp = BkgZoomInterpolator(order=max(0, int(local_interp_order)))
             bkg = Background2D(
                 cutout,
                 box_size=box_size,
@@ -2552,7 +2550,6 @@ class BackgroundSubtractor:
                 sigma_clip=SigmaClip(sigma=local_sigma, maxiters=local_sigma_maxiters),
                 bkg_estimator=BiweightLocationBackground(),
                 bkg_rms_estimator=BiweightScaleBackgroundRMS(),
-                interpolator=interp,
                 mask=source_mask,
                 exclude_percentile=local_exclude_percentile,
             )
@@ -2818,7 +2815,7 @@ class BackgroundSubtractor:
 
         vmin, vmax = self._safe_zlimits(data, interval)
         cmap = plt.get_cmap("gray").copy()
-        cmap.set_bad(color="none")
+        cmap = cmap.with_extremes(bad="none")
         ax.imshow(
             data,
             origin="lower",
@@ -2907,7 +2904,7 @@ class BackgroundSubtractor:
             vmin, vmax = self._safe_zlimits(data, interval)
             # Non-finite regions get a transparent fill plus a hatch overlay.
             cmap = plt.get_cmap("gray").copy()
-            cmap.set_bad(color="none")
+            cmap = cmap.with_extremes(bad="none")
 
             im = ax.imshow(
                 data,

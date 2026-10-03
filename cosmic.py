@@ -252,7 +252,7 @@ class RemoveCosmicRays:
         # Mask CR pixels so they show as the "bad" colour (red) in the colormap
         original_masked = np.ma.array(original, mask=cr_mask)
         cmap_orig = plt.get_cmap("gray").copy()
-        cmap_orig.set_bad(color="none")
+        cmap_orig = cmap_orig.with_extremes(bad="none")
         im0 = axes[0].imshow(
             original_masked,
             cmap=cmap_orig,
@@ -270,7 +270,7 @@ class RemoveCosmicRays:
 
         # --- Right panel: cleaned image ---
         cmap_clean = plt.get_cmap("gray").copy()
-        cmap_clean.set_bad(color="none")
+        cmap_clean = cmap_clean.with_extremes(bad="none")
         im1 = axes[1].imshow(
             cleaned,
             cmap=cmap_clean,

@@ -6038,6 +6038,11 @@ def run_photometry():
                 if bool(input_yaml.get("undersampled_mode", False))
                 else centroid_com
             )
+            # Explicitly masking non-finite pixels keeps centroid_sources
+            # from warning on every call that it auto-masked them.
+            _nonfinite_mask = (
+                ~np.isfinite(image) if image is not None else None
+            )
             # The median of a multi-member cluster can sit off-peak between
             # blended detections; re-centroid on the image.
             for label in merged_sources.index:
@@ -6091,6 +6096,7 @@ def run_photometry():
                         [center_y],
                         box_size=box,
                         centroid_func=centroid_func,
+                        mask=_nonfinite_mask,
                     )
                     if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
                         merged_sources.at[label, "x_pix"] = float(x_c[0])
@@ -6106,6 +6112,7 @@ def run_photometry():
                         [center_y],
                         box_size=box,
                         centroid_func=centroid_com,
+                        mask=_nonfinite_mask,
                     )
                     if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
                         merged_sources.at[label, "x_pix"] = float(x_c[0])
@@ -6292,8 +6299,10 @@ def run_photometry():
                         f"({proximity_threshold:.1f} px) - only {n_kept} sources survived at previous threshold."
                     )
 
-                excluded_sources = matched_df[min_distances <= proximity_threshold]
-                matched_df = matched_df[min_distances > proximity_threshold]
+                _excl_mask = min_distances <= proximity_threshold
+                excluded_sources = matched_df[_excl_mask]
+                _excl_dist = min_distances[_excl_mask]
+                matched_df = matched_df[~_excl_mask]
 
                 if not excluded_sources.empty:
                     logging.info(
@@ -6336,7 +6345,16 @@ def run_photometry():
                             .values,
                         ]
                     )
-                    _usable = _sci_finite & _tpl_finite
+                    # Prefer sources whose whole aperture is clear of masked
+                    # pixels (distance-to-mask > aperture radius); sources
+                    # kept on a finite center alone are already known to have
+                    # NaN inside the aperture and will fail with
+                    # aperture_has_nan.  Only fall back to them when the
+                    # clean-aperture tier leaves too few sources.
+                    _aperture_clean = _excl_dist > _ap_r
+                    _usable = _sci_finite & _tpl_finite & _aperture_clean
+                    if int(_usable.sum()) < min_sources_needed:
+                        _usable = _sci_finite & _tpl_finite
                     _n_nan_center = int((~_usable).sum())
                     matched_df = excluded_sources[_usable].copy()
                     excluded_sources = excluded_sources[~_usable]
@@ -6345,9 +6363,9 @@ def run_photometry():
                             f"Proximity filter excluded all\n"
                             f"    {len(excluded_sources) + _n_nan_center} sources.\n"
                             f"    Relaxed filter: removed {_n_nan_center}\n"
-                            f"    sources with NaN center pixel in\n"
+                            f"    sources with NaN in aperture/center in\n"
                             f"    science/template, kept {len(matched_df)}\n"
-                            f"    with valid centers."
+                            f"    with usable pixels."
                         )
                     else:
                         logging.warning(
@@ -9825,7 +9843,7 @@ def run_photometry():
                                         apply_autophot_mplstyle()
                                         _zs = ZScaleInterval()
                                         _cmap_v = plt.get_cmap("viridis").copy()
-                                        _cmap_v.set_bad(color="none")
+                                        _cmap_v = _cmap_v.with_extremes(bad="none")
 
                                         _fig, _axes = plt.subplots(
                                             1, 3, figsize=(15, 5)
@@ -10029,7 +10047,7 @@ def run_photometry():
                                     apply_autophot_mplstyle()
                                     _zs = ZScaleInterval()
                                     _cmap_v = plt.get_cmap("viridis").copy()
-                                    _cmap_v.set_bad(color="none")
+                                    _cmap_v = _cmap_v.with_extremes(bad="none")
 
                                     _fig, _axes = plt.subplots(1, 3, figsize=(15, 5))
                                     _fig.suptitle(
@@ -10351,7 +10369,7 @@ def run_photometry():
                             apply_autophot_mplstyle()
                             _zs_r = ZScaleInterval()
                             _cmap_vr = plt.get_cmap("viridis").copy()
-                            _cmap_vr.set_bad(color="none")
+                            _cmap_vr = _cmap_vr.with_extremes(bad="none")
 
                             _fig_r, _axes_r = plt.subplots(1, 3, figsize=(15, 5))
                             _fig_r.suptitle(
