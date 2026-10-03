@@ -698,26 +698,47 @@ def _run_main_subprocess(
         return filename, 1
 
 
-def _scan_image_footprints(file_list, band_map=None):
+def _positive_scale(value):
+    """True when *value* parses to a positive pixel scale."""
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _scan_image_footprints(file_list, band_map=None, pixscale_fallback=None):
     """
     Build per-image descriptors for ``Catalog.find_optimized_catalog``.
 
     Each entry carries ``path``, ``band`` (resolved by check_filters, else
-    None), ``wcs`` (astropy WCS or None), and ``shape`` ((ny, nx) or None).
-    Header reads are cached by get_header; a missing/failed WCS leaves
-    wcs=None so the optimizer falls back to field-level counts.
+    None), ``wcs`` (astropy WCS or None), ``shape`` ((ny, nx) or None),
+    and ``pixscale`` (arcsec/pix or None) so footprint sizing still works
+    on images with no usable WCS.  Header reads are cached by get_header;
+    a missing/failed WCS leaves wcs=None so the optimizer falls back to
+    field-level counts.
     """
     from functions import get_header as _get_header
     from wcs import get_wcs as _get_wcs
+    from catalog import _pixscale_arcsec
 
     band_map = band_map or {}
     infos = []
     for fpath in file_list or []:
-        info = {"path": fpath, "band": None, "wcs": None, "shape": None}
+        info = {
+            "path": fpath,
+            "band": None,
+            "wcs": None,
+            "shape": None,
+            "pixscale": pixscale_fallback,
+        }
         try:
             hdr = _get_header(fpath)
             if hdr is not None:
                 info["wcs"] = _get_wcs(hdr, silent=True)
+                if info["wcs"] is None:
+                    info["pixscale"] = (
+                        _pixscale_arcsec(hdr) or pixscale_fallback
+                    )
                 nx, ny = hdr.get("NAXIS1"), hdr.get("NAXIS2")
                 if nx and ny:
                     info["shape"] = (int(ny), int(nx))
@@ -2265,7 +2286,10 @@ class AutomatedPhotometry:
                 # main.py will find the cached CSV and skip re-downloading.
                 _log(border_msg("Reference Photometric Catalog") if border_msg else log_step("Reference photometric catalog (pre-download)"))
                 try:
-                    from catalog import Catalog as _Catalog
+                    from catalog import (
+                        Catalog as _Catalog,
+                        _catalog_cone_radius_arcmin,
+                    )
                     _cat = _Catalog(input_yaml=backup_yaml)
                     _use_cat = backup_yaml.get("catalog", {}).get("use_catalog")
 
@@ -2278,6 +2302,19 @@ class AutomatedPhotometry:
                         backup_yaml["target_dec"],
                         unit=(u.deg, u.deg), frame="icrs",
                     )
+
+                    # Configured pixel scale (arcsec/pix) - lets footprint
+                    # sizing work on images whose headers carry no WCS.
+                    _cfg_scale = backup_yaml.get("pixel_scale") or (
+                        backup_yaml.get("wcs") or {}
+                    ).get("pixel_scale_arcsec") or (
+                        backup_yaml.get("wcs") or {}
+                    ).get("pixel_scale")
+
+                    # Image footprint descriptors - filled by the optimizer
+                    # scan, or lazily before the pre-fetch so the catalog
+                    # cone can be sized to cover the detectors.
+                    _image_infos = None
 
                     # "auto": scan every image footprint, download all
                     # feasible catalogs once, and keep the best backend
@@ -2334,6 +2371,7 @@ class AutomatedPhotometry:
                                 _image_infos = _scan_image_footprints(
                                     file_list,
                                     getattr(prepare_db, "file_filter_map", {}),
+                                    pixscale_fallback=_cfg_scale,
                                 )
                                 _opt = _cat.find_optimized_catalog(
                                     target_coords=_target_coords,
@@ -2464,6 +2502,47 @@ class AutomatedPhotometry:
                         backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = []
                         _log(f"  Skipping GaiaXPy (catalog {_unique_cats} does not require Gaia XP spectra).")
 
+                    # One cone per catalog must cover the union of image
+                    # footprints - a fixed 10 arcmin radius centred on the
+                    # target leaves the corners of wide fields empty, and
+                    # over-sizes the cone on narrow fields.
+                    if _image_infos is None:
+                        try:
+                            _image_infos = _scan_image_footprints(
+                                file_list,
+                                getattr(prepare_db, "file_filter_map", {}),
+                                pixscale_fallback=_cfg_scale,
+                            )
+                        except Exception:
+                            _image_infos = []
+                    _prefetch_radius = _catalog_cone_radius_arcmin(
+                        _image_infos, _target_coords, default_arcmin=10.0
+                    )
+                    # Only persist when a footprint was actually measured:
+                    # leaving the key unset lets main.py re-size the cone
+                    # per image after its WCS solve.
+                    _measured = any(
+                        (i.get("shape") is not None)
+                        and (
+                            i.get("wcs") is not None
+                            or _positive_scale(i.get("pixscale"))
+                        )
+                        for i in _image_infos
+                    )
+                    if _measured:
+                        backup_yaml.setdefault("catalog", {})[
+                            "catalog_query_radius_arcmin"
+                        ] = _prefetch_radius
+                        _log(
+                            f"  Catalog query radius: {_prefetch_radius:.1f} "
+                            "arcmin (sized to image footprints)"
+                        )
+                    else:
+                        _log(
+                            "  Catalog query radius: 10.0 arcmin default "
+                            "(no WCS or pixel scale available)"
+                        )
+
                     for _cat_name in _unique_cats:
                         try:
                             if backup_yaml.get("catalog", {}).get("build_catalog", False):
@@ -2472,6 +2551,7 @@ class AutomatedPhotometry:
                                     target_coords=_target_coords,
                                     catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
                                     max_separation=5,
+                                    radius=_prefetch_radius,
                                 )
                             else:
                                 _resolved = _cat._require_catalog_selected(_cat_name)
@@ -2483,6 +2563,7 @@ class AutomatedPhotometry:
                                     catalog_custom_fpath=backup_yaml.get("catalog", {}).get(
                                         "catalog_custom_fpath", None
                                     ),
+                                    radius=_prefetch_radius,
                                 )
                         except RuntimeError as _ce:
                             if "0 sources" in str(_ce):

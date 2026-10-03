@@ -469,8 +469,15 @@ def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
     keep_mask = dist_nearest > match_radius_pix
 
     removed_indices = np.where(~keep_mask)[0].tolist()
+    # OTYPE_opt is not guaranteed on every catalog - the drop must still
+    # happen when the column is absent.
+    has_otype = "OTYPE_opt" in variable_catalog.columns
     for i in removed_indices:
-        otype = variable_catalog.iloc[idx_nearest[i]]["OTYPE_opt"]
+        otype = (
+            variable_catalog.iloc[idx_nearest[i]]["OTYPE_opt"]
+            if has_otype
+            else "unknown"
+        )
         logger.debug(
             f"Removing source at index {i} (x={x_given[i]:.2f}, y={y_given[i]:.2f}) due to match with variable source [{otype}]"
         )
@@ -529,6 +536,351 @@ def _skycoord_dedup_keep_one(catalog_df, sep_threshold_arcsec=0.1):
     # threshold AND has a lower index (meaning j is the "first" copy to keep).
     drop = (sep2 <= thr) & (idx_match < np.arange(len(catalog_df)))
     return catalog_df[~drop].reset_index(drop=True)
+
+
+# =============================================================================
+# Spatial coverage helpers
+# =============================================================================
+
+# (catalog, rounded field, rounded radius) keys already warned about for
+# partial sky coverage.  Module-level because main.py builds a fresh
+# Catalog per image - an instance set would repeat the same warning for
+# every frame in the stack.
+_COVERAGE_WARNED_KEYS = set()
+
+# Column-name spellings used by the remote backends (checked in order).
+_RA_COL_CANDIDATES = ("ra", "raicrs", "raj2000", "ramean", "radeg")
+_DEC_COL_CANDIDATES = ("dec", "de", "deicrs", "dej2000", "decmean", "decdeg")
+
+
+def _catalog_radec(df):
+    """
+    Return (ra_deg, dec_deg) float arrays for a raw catalog table, or
+    (None, None) when no RA/DEC pair is found.
+
+    Works on pre-clean() frames, where coordinate columns carry each
+    service's native names (RA_ICRS/DE_ICRS, raMean/decMean, ra/dec, ...).
+    """
+    if df is None or len(df) == 0:
+        return None, None
+    norm = {
+        str(c).lower().replace("_", "").replace(" ", ""): c
+        for c in df.columns
+    }
+    ra_col = next(
+        (norm[k] for k in _RA_COL_CANDIDATES if k in norm), None
+    )
+    dec_col = next(
+        (norm[k] for k in _DEC_COL_CANDIDATES if k in norm), None
+    )
+    if ra_col is None or dec_col is None:
+        return None, None
+    ra = pd.to_numeric(df[ra_col], errors="coerce").to_numpy(dtype=float)
+    dec = pd.to_numeric(df[dec_col], errors="coerce").to_numpy(dtype=float)
+    return ra, dec
+
+
+def _sky_uniform_subsample(df, nmax, center_ra=None):
+    """
+    Cap a catalog at ``nmax`` rows while preserving sky coverage.
+
+    Row caps that keep "the N nearest to the field centre" hollow out the
+    edges of the FOV (distance-ordered TOP-N queries do this silently).
+    This instead bins the footprint into a grid and keeps a per-cell
+    quota, then tops up from the leftovers.
+    """
+    if df is None or nmax is None or len(df) <= nmax:
+        return df
+    ra, dec = _catalog_radec(df)
+    if ra is None:
+        return df.head(int(nmax))
+
+    if center_ra is None:
+        center_ra = float(np.nanmean(ra))
+    dec0 = float(np.nanmean(dec))
+    x = (_unwrap_ra_near(ra, center_ra) - center_ra) * np.cos(
+        np.radians(dec0)
+    )
+    y = dec - dec0
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not finite.any():
+        return df.head(int(nmax))
+
+    nmax = int(nmax)
+    n_bins = max(2, int(np.sqrt(nmax)))
+    per_cell = max(1, nmax // (n_bins**2))
+    x_edges = np.linspace(x[finite].min(), x[finite].max(), n_bins + 1)
+    y_edges = np.linspace(y[finite].min(), y[finite].max(), n_bins + 1)
+
+    xi = np.clip(np.digitize(x, x_edges) - 1, 0, n_bins - 1)
+    yi = np.clip(np.digitize(y, y_edges) - 1, 0, n_bins - 1)
+    # Non-finite coordinates get a sentinel cell so they can only be
+    # picked up by the top-up below, not displace real coverage.
+    cell_id = np.where(finite, yi * n_bins + xi, n_bins**2)
+
+    # Keep up to per_cell rows per occupied cell, in the catalog's own row
+    # order (distance-sorted inputs keep their nearest-to-centre members).
+    order = np.argsort(cell_id, kind="stable")
+    cell_sorted = cell_id[order]
+    starts = np.searchsorted(cell_sorted, np.arange(n_bins**2 + 1))
+    picked = []
+    for cid in range(n_bins**2):
+        cell_rows = order[starts[cid] : starts[cid + 1]]
+        if cell_rows.size:
+            picked.extend(cell_rows[:per_cell].tolist())
+
+    if len(picked) < nmax:
+        rest = np.setdiff1d(np.arange(len(df)), np.asarray(picked))
+        picked.extend(rest[: nmax - len(picked)].tolist())
+    return df.iloc[np.asarray(picked[:nmax])]
+
+
+def _field_coverage_fraction(
+    ra_deg, dec_deg, center_ra, center_dec, radius_deg
+):
+    """
+    Fraction of the query disk populated by at least one source.
+
+    The disk is divided into a grid whose cell count scales with the
+    number of in-disk sources, so the metric is meaningful for sparse
+    (2MASS) and dense (Pan-STARRS) catalogs alike.  A survey boundary
+    crossing the field (e.g. SDSS covering only half a cone) reads as a
+    fraction well below 1.
+
+    Returns NaN when the catalog or the query region is empty.
+    """
+    if radius_deg is None or radius_deg <= 0:
+        return np.nan
+    ra = np.asarray(ra_deg, dtype=float)
+    dec = np.asarray(dec_deg, dtype=float)
+    ok = np.isfinite(ra) & np.isfinite(dec)
+    if not ok.any():
+        return np.nan
+    x = (_unwrap_ra_near(ra[ok], center_ra) - center_ra) * np.cos(
+        np.radians(center_dec)
+    )
+    y = dec[ok] - center_dec
+    inside = (x**2 + y**2) <= radius_deg**2
+    n_in = int(inside.sum())
+    if n_in == 0:
+        return 0.0
+
+    n_side = int(np.clip(round(np.sqrt(n_in / 3.0)), 4, 12))
+    edges = np.linspace(-radius_deg, radius_deg, n_side + 1)
+    ctr = 0.5 * (edges[:-1] + edges[1:])
+    in_disk = (ctr[:, None] ** 2 + ctr[None, :] ** 2) <= radius_deg**2
+    if not in_disk.any():
+        return np.nan
+
+    xi = np.clip(np.digitize(x[inside], edges) - 1, 0, n_side - 1)
+    yi = np.clip(np.digitize(y[inside], edges) - 1, 0, n_side - 1)
+    occupied = np.zeros((n_side, n_side), dtype=bool)
+    occupied[yi, xi] = True
+    return float((occupied & in_disk).sum() / in_disk.sum())
+
+
+_PIXSCALE_KEYS = (
+    "PIXSCALE",
+    "PIXSCAL1",
+    "SCALE",
+    "SECPIX",
+    "SECPIX1",
+)
+
+
+def _pixscale_arcsec(header):
+    """
+    Pixel scale (arcsec/pix) from common header cards, or None.
+
+    Explicit scale keywords are tried first; the CD matrix and CDELT are
+    worth a look even when astropy rejects the full WCS - some products
+    carry a mixed SIP/TPV card set whose WCS fails to build while the raw
+    linear cards are still valid.
+    """
+    if header is None:
+        return None
+    try:
+        for key in _PIXSCALE_KEYS:
+            val = header.get(key)
+            if val is None:
+                continue
+            try:
+                scale = abs(float(val))
+            except (TypeError, ValueError):
+                continue
+            if 0.0 < scale <= 30.0:
+                return scale
+        if all(k in header for k in ("CD1_1", "CD1_2", "CD2_1", "CD2_2")):
+            det = abs(
+                float(header["CD1_1"]) * float(header["CD2_2"])
+                - float(header["CD1_2"]) * float(header["CD2_1"])
+            )
+            scale = det**0.5 * 3600.0
+            if 0.0 < scale <= 30.0:
+                return scale
+        for key in ("CDELT1", "CDELT2"):
+            if key in header:
+                scale = abs(float(header[key])) * 3600.0
+                if 0.0 < scale <= 30.0:
+                    return scale
+    except Exception:
+        pass
+    return None
+
+
+def _footprint_radius_arcmin(image_infos, target_coords, margin=1.1):
+    """
+    Cone radius (arcmin) centred on ``target_coords`` that covers the
+    corners of every image footprint.  Returns None when no image carries
+    a usable WCS/shape, so callers can keep their default radius.
+
+    An image without a usable WCS falls back to its detector
+    half-diagonal at the ``pixscale`` entry (arcsec/pix) - that assumes a
+    near-centred target, which is the best available estimate when no
+    WCS exists; the coverage diagnostic flags fields where it falls
+    short.
+    """
+    max_sep = 0.0
+    for img in image_infos or []:
+        shape_i = img.get("shape")
+        if shape_i is None:
+            continue
+        try:
+            ny, nx = shape_i
+            sep_i = None
+            wcs_i = img.get("wcs")
+            if wcs_i is not None:
+                try:
+                    cra, cde = wcs_i.all_pix2world(
+                        [0.0, nx - 1.0, nx - 1.0, 0.0],
+                        [0.0, 0.0, ny - 1.0, ny - 1.0],
+                        0,
+                    )
+                    corners = SkyCoord(
+                        np.asarray(cra, dtype=float).ravel() * u.deg,
+                        np.asarray(cde, dtype=float).ravel() * u.deg,
+                    )
+                    sep = target_coords.separation(corners).arcmin
+                    if np.isfinite(sep).any():
+                        sep_i = float(np.nanmax(sep))
+                except Exception:
+                    sep_i = None
+            if sep_i is None:
+                ps = img.get("pixscale")
+                try:
+                    ps = float(ps) if ps is not None else np.nan
+                except (TypeError, ValueError):
+                    ps = np.nan
+                if np.isfinite(ps) and ps > 0.0:
+                    sep_i = 0.5 * np.hypot(nx, ny) * ps / 60.0
+            if sep_i is not None and np.isfinite(sep_i):
+                max_sep = max(max_sep, sep_i)
+        except Exception:
+            continue
+    if max_sep <= 0:
+        return None
+    return max_sep * margin
+
+
+def _catalog_cone_radius_arcmin(
+    image_infos,
+    target_coords,
+    default_arcmin=10.0,
+    min_arcmin=2.0,
+    max_arcmin=60.0,
+):
+    """
+    Cone-search radius sized by the image footprint extent.
+
+    The footprint radius both covers and *limits* the query: a narrow
+    field gets a narrower cone instead of always paying for the default
+    radius.  Falls back to ``default_arcmin`` when no image carries a
+    usable WCS or pixel scale (e.g. a dataset with no WCS solution).
+    """
+    footprint = _footprint_radius_arcmin(image_infos, target_coords)
+    if footprint is None or not np.isfinite(footprint) or footprint <= 0:
+        return float(default_arcmin)
+    return float(min(max(footprint, min_arcmin), max_arcmin))
+
+
+# VizieR resolves ``catalog="sdss"`` to several SDSS releases at once and
+# returns one table per release.  The footprints differ between releases,
+# so the first table is not necessarily the best-covered one.
+_SDSS_RELEASE_RANK = {
+    "v/154": 4,  # DR16 - final release, largest footprint
+    "v/147": 3,  # DR12
+    "v/139": 2,  # DR9
+    "ii/294": 1,  # DR7
+}
+
+
+def _select_sdss_vizier_table(
+    catalog_search, center_ra=None, center_dec=None, radius_deg=None
+):
+    """
+    Pick the best SDSS release from a VizieR TableList.
+
+    Every SDSS release on VizieR answers the same cone query; each applies
+    its own star cuts (``cl``/``class`` == 6, ``mode`` == 1, ``clean`` == 1
+    where present).  Releases are scored on how much of the query disk
+    their surviving primary stars cover - footprints differ between
+    releases - with ties going to the newer release, then to the larger
+    source count.
+    """
+    best_key = None
+    best_df = pd.DataFrame()
+    best_name = "?"
+    for table in catalog_search:
+        name = str(getattr(table, "meta", {}).get("name", "?"))
+        try:
+            df = table.to_pandas()
+        except Exception:
+            continue
+        n0 = len(df)
+        if "mode" in df.columns:
+            df = df[pd.to_numeric(df["mode"], errors="coerce") == 1]
+        if "cl" in df.columns:
+            df = df[pd.to_numeric(df["cl"], errors="coerce") == 6]
+        elif "class" in df.columns:
+            df = df[pd.to_numeric(df["class"], errors="coerce") == 6]
+        if "clean" in df.columns:
+            df = df[pd.to_numeric(df["clean"], errors="coerce") == 1]
+        rank = _SDSS_RELEASE_RANK.get(
+            "/".join(name.split("/")[:2]).lower(), 0
+        )
+        # Coverage decides at ~10% granularity; count alone would favour
+        # older releases that lack the ``clean`` cut.
+        decile = 0
+        if (
+            center_ra is not None
+            and center_dec is not None
+            and radius_deg
+            and len(df) > 0
+        ):
+            ra_arr, dec_arr = _catalog_radec(df)
+            if ra_arr is not None:
+                cov = _field_coverage_fraction(
+                    ra_arr, dec_arr, center_ra, center_dec, radius_deg
+                )
+                if np.isfinite(cov):
+                    decile = int(np.clip(cov * 10, 0, 10))
+        logger.debug(
+            "SDSS %s: %d usable primary stars (of %d rows), coverage decile %d",
+            name,
+            len(df),
+            n0,
+            decile,
+        )
+        key = (decile, rank, len(df))
+        if best_key is None or key > best_key:
+            best_key = key
+            best_df = df
+            best_name = name
+    if len(best_df) > 0:
+        logger.info(
+            "SDSS: using %s (%d usable primary stars)", best_name, len(best_df)
+        )
+    return best_df
 
 
 # =============================================================================
@@ -928,7 +1280,7 @@ class Catalog:
     # =============================================================================
     # =============================================================================
 
-    def query_legacy_survey(self, ra, dec, radius=0.1):
+    def query_legacy_survey(self, ra, dec, radius=0.1, nsources=1000):
         """
         Query the Legacy Survey using the NOIRLab Data Lab TAP service via astroquery's TAP+.
 
@@ -940,6 +1292,11 @@ class Catalog:
             Declination in degrees.
         radius : float, optional
             Search radius in degrees
+        nsources : int, optional
+            Maximum number of sources to return (default 1000).  The TAP
+            query over-fetches so the cap is applied as a spatially
+            uniform subsample - a distance-ordered TOP-N alone would keep
+            only the inner cone in crowded fields.
 
         Returns:
         --------
@@ -948,10 +1305,12 @@ class Catalog:
         """
         tap_service_url = "https://datalab.noirlab.edu/tap"
 
+        fetch_n = min(max(int(nsources) * 10, int(nsources)), 50000)
+
         # `type` is selected so point sources (PSF) can be separated from
         # extended objects (REX, EXP, DEV, SER = galaxies/resolved sources).
         query = f"""
-            SELECT TOP 1000 ra, dec, type, mag_g, mag_r, mag_i, mag_z,
+            SELECT TOP {fetch_n} ra, dec, type, mag_g, mag_r, mag_i, mag_z,
                 sqrt(power(ra - {ra}, 2) + power(dec - {dec}, 2)) AS angular_distance
             FROM ls_dr10.tractor
             WHERE 't'= Q3C_RADIAL_QUERY(ra, dec, {ra}, {dec}, {radius})
@@ -981,6 +1340,17 @@ class Catalog:
                         n_gal, len(table),
                     )
             table = table.drop(columns=["type"], errors="ignore")
+
+            if len(table) > nsources:
+                logger.info(
+                    "Legacy Survey: %d rows exceed the %d-source cap; "
+                    "subsampling spatially to keep coverage uniform.",
+                    len(table),
+                    nsources,
+                )
+                table = _sky_uniform_subsample(
+                    table, int(nsources), center_ra=ra
+                )
 
             filters = ["g", "r", "i", "z"]
 
@@ -1014,6 +1384,9 @@ class Catalog:
             Dictionary containing MAST credentials.
         nsources : int, optional
             Maximum number of sources to fetch (default is 1000).
+            The SQL over-fetches so the cap is applied as a spatially
+            uniform subsample - TOP-N ordered by distance alone would
+            keep only the inner cone in crowded fields.
         sr : float, optional
             Search radius in degrees (default is 0.5).
         max_retries : int, optional
@@ -1043,6 +1416,10 @@ class Catalog:
                     "i", "di", "z", "dz", "J", "dJ", "H", "dH", "K", "dK",
                 ]
 
+                # Over-fetch: the SQL cap alone truncates nearest-first,
+                # leaving the field edge empty; the spatial subsample
+                # below restores uniform coverage at nsources rows.
+                fetch_n = min(max(int(nsources) * 10, int(nsources)), 20000)
                 q = """
                 SELECT TOP {max} {columns}
                 INTO MyDB.{name}
@@ -1051,7 +1428,7 @@ class Catalog:
                 WHERE r.dr < 0.1
                 ORDER BY n.distance
                 """.format(
-                    max=nsources,
+                    max=fetch_n,
                     columns="r." + ",r.".join(table),
                     name=name,
                     ra=ra,
@@ -1092,6 +1469,17 @@ class Catalog:
                 # Drop rows containing a 0 (missing photometry sentinel).
                 tab = tab[~(tab == 0).any(axis=1)]
                 tab.reset_index(drop=True, inplace=True)
+
+                if len(tab) > nsources:
+                    logger.info(
+                        "RefCat2: %d rows exceed the %d-source cap; "
+                        "subsampling spatially to keep coverage uniform.",
+                        len(tab),
+                        nsources,
+                    )
+                    tab = _sky_uniform_subsample(
+                        tab, int(nsources), center_ra=ra
+                    ).reset_index(drop=True)
 
                 return tab
 
@@ -1191,6 +1579,22 @@ class Catalog:
             # radius is arcmin; catalog queries take degrees.
             radius_deg = radius / 60
 
+            # clean() drops sources farther than catalog.max_distance from
+            # the target - a wider query cone must not be re-trimmed to the
+            # default 10 arcmin or the edge coverage would be lost again.
+            try:
+                _cat_cfg = self.input_yaml.setdefault("catalog", {})
+                _cur_md = float(_cat_cfg.get("max_distance", 10.0))
+                if float(radius) > _cur_md:
+                    _cat_cfg["max_distance"] = float(radius)
+                    logger.debug(
+                        "Raised catalog.max_distance to %.1f arcmin to match "
+                        "the query radius.",
+                        radius,
+                    )
+            except Exception:
+                pass
+
             if catalogName == "custom":
                 if not catalog_custom_fpath:
                     logger.critical(
@@ -1254,7 +1658,7 @@ class Catalog:
                         unit="deg",
                     )
                     result = Catalogs.query_region(
-                        coord, radius=5 * u.arcmin, catalog="TIC"
+                        coord, radius=radius * u.arcmin, catalog="TIC"
                     )
                     if len(result) == 0:
                         selectedCatalog = pd.DataFrame()
@@ -1439,18 +1843,26 @@ class Catalog:
                     )
                     if len(catalog_search) < 1:
                         selectedCatalog = pd.DataFrame()
+                    elif catalogName == "sdss":
+                        # The 'sdss' alias resolves to several VizieR
+                        # releases (DR7/9/12/16) returned as separate
+                        # tables with different footprints - keep the one
+                        # with the best-covered field rather than table [0].
+                        selectedCatalog = _select_sdss_vizier_table(
+                            catalog_search,
+                            center_ra=target_ra,
+                            center_dec=target_dec,
+                            radius_deg=radius_deg,
+                        )
                     else:
+                        if len(catalog_search) > 1:
+                            logger.debug(
+                                "%s query matched %d VizieR catalogs; using %s",
+                                catalogName.upper(),
+                                len(catalog_search),
+                                catalog_search[0].meta.get("name"),
+                            )
                         selectedCatalog = catalog_search[0].to_pandas()
-                        if catalogName == "sdss":
-                            # Guard column existence before filtering
-                            if "mode" in selectedCatalog.columns:
-                                selectedCatalog = selectedCatalog[
-                                    selectedCatalog["mode"] == 1
-                                ]
-                            if "cl" in selectedCatalog.columns:
-                                selectedCatalog = selectedCatalog[
-                                    selectedCatalog["cl"] == 6
-                                ]
                     if catalogName == "apass":
                             # APASS `cls` column: 'A' = stellar, 'G' = galaxy.
                             # Stars only for zeropoint calibration.
@@ -1589,15 +2001,47 @@ class Catalog:
                             "format": "json"
                         }
 
-                        response = requests.get(url, params=params, timeout=120)
-                        response.raise_for_status()
-                        data = response.json()
+                        # Paginate: a single page silently truncates the cone
+                        # at pagesize rows, biasing coverage toward whatever
+                        # order the endpoint happens to return.
+                        rows = []
+                        col_names = None
+                        first_row = None
+                        page = 1
+                        while True:
+                            params["page"] = page
+                            response = requests.get(url, params=params, timeout=120)
+                            response.raise_for_status()
+                            data = response.json()
+                            page_rows = (
+                                data.get("data")
+                                if isinstance(data, dict)
+                                else None
+                            )
+                            if col_names is None:
+                                col_names = [
+                                    c["name"] for c in data.get("info", [])
+                                ]
+                            if not page_rows:
+                                break
+                            # If the endpoint ignores 'page', every request
+                            # returns page 1 - detect repeats and stop rather
+                            # than accumulating duplicates.
+                            if page > 1 and page_rows[0] == first_row:
+                                break
+                            if first_row is None:
+                                first_row = page_rows[0]
+                            rows.extend(page_rows)
+                            if (
+                                len(page_rows) < params["pagesize"]
+                                or len(rows) >= 200000
+                            ):
+                                break
+                            page += 1
 
-                        rows = data.get("data") if isinstance(data, dict) else None
                         if not rows:
                             selectedCatalog = pd.DataFrame()
                         else:
-                            col_names = [c["name"] for c in data.get("info", [])]
                             selectedCatalog = pd.DataFrame(rows, columns=col_names)
                             # Normalize null-like strings to NaN.
                             selectedCatalog = selectedCatalog.replace(
@@ -1786,19 +2230,51 @@ class Catalog:
                 "Limiting catalog from %s to %s sources",
                 len(selectedCatalog), max_sources,
             )
-            # Prefer the sources nearest the target when RA/DEC exist.
-            if "RA" in selectedCatalog.columns and "DEC" in selectedCatalog.columns:
-                catalog_coords = SkyCoord(
-                    ra=selectedCatalog["RA"].values * u.degree,
-                    dec=selectedCatalog["DEC"].values * u.degree
-                )
-                distances = catalog_coords.separation(target_coords)
-                selectedCatalog = selectedCatalog.assign(distance=distances.arcsecond)
-                selectedCatalog = selectedCatalog.nsmallest(max_sources, "distance")
-                selectedCatalog = selectedCatalog.drop(columns=["distance"])
-            else:
-                selectedCatalog = selectedCatalog.head(max_sources)
+            # Spatially uniform subsample: keeping the N nearest to the
+            # target would concentrate calibrators at the field centre and
+            # leave the edges empty.
+            selectedCatalog = _sky_uniform_subsample(
+                selectedCatalog, max_sources, center_ra=target_ra
+            )
             logger.info("Catalog limited to %s sources", len(selectedCatalog))
+
+        # Coverage diagnostic: a catalog can answer a cone query yet cover
+        # only part of the disk (survey boundary, or a distance-ordered row
+        # cap that slipped through).  Warn once per catalog/field so
+        # one-sided coverage does not silently reach the zeropoint fit.
+        try:
+            _cov_ra, _cov_dec = _catalog_radec(selectedCatalog)
+            if _cov_ra is not None:
+                _cov = _field_coverage_fraction(
+                    _cov_ra, _cov_dec, target_ra, target_dec, radius_deg
+                )
+                _cov_key = (
+                    catalogName,
+                    round(float(target_ra), 3),
+                    round(float(target_dec), 3),
+                    round(float(radius_deg), 3),
+                )
+                if np.isfinite(_cov) and _cov_key not in _COVERAGE_WARNED_KEYS:
+                    _COVERAGE_WARNED_KEYS.add(_cov_key)
+                    if _cov < 0.8:
+                        logger.warning(
+                            "%s catalog covers only %.0f%% of the %.1f arcmin query "
+                            "field - the survey footprint likely does not cover the "
+                            "full image, so calibrators will be unevenly distributed. "
+                            "Consider catalog.use_catalog='auto' or a "
+                            "wider-coverage catalog.",
+                            catalogName.upper(),
+                            100.0 * _cov,
+                            float(radius),
+                        )
+                    else:
+                        logger.info(
+                            "%s catalog covers %.0f%% of the query field",
+                            catalogName.upper(),
+                            100.0 * _cov,
+                        )
+        except Exception as _cov_exc:
+            logger.debug("Field-coverage check skipped: %s", _cov_exc)
 
         return selectedCatalog
 
@@ -2431,7 +2907,7 @@ class Catalog:
         target_coords,
         target_name=None,
         catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
-        radius=2,
+        radius=10,
         max_separation=3,
         **kwargs,
     ):
@@ -2447,7 +2923,7 @@ class Catalog:
         catalog_list : list, optional
             List of catalogs to combine (default is ['refcat', 'sdss', 'pan_starrs', 'apass', '2mass']).
         radius : float, optional
-            Search radius in arcminutes (default is 2).
+            Search radius in arcminutes (default is 10).
         max_separation : float, optional
             Maximum separation in arcseconds for matching sources (default is 3).
 
@@ -2679,6 +3155,8 @@ class Catalog:
         radius : float
             Cone-search radius in arcmin (default 10, matching the
             pipeline's download radius so results share the CSV cache).
+            Enlarged automatically when the image footprints reach beyond
+            it, so the cone covers the detector corners.
         border : int
             Pixel margin for the on-detector count (default 11).
         min_sources : int
@@ -2804,6 +3282,24 @@ class Catalog:
                 {"path": None, "band": None, "wcs": None, "shape": None}
             ]
 
+        # The cone must cover the detector corners, not just a fixed patch
+        # around the target - sources outside the query radius can never be
+        # scored, so an undersized cone reads as "no coverage" at the edges.
+        # The footprint also limits the cone: a narrow field does not need
+        # the default-radius query.
+        _fov_radius = _catalog_cone_radius_arcmin(
+            image_infos, target_coords, default_arcmin=radius
+        )
+        if _fov_radius != radius:
+            logger.info(
+                "Sizing catalog query radius to %.1f arcmin from the image "
+                "footprint extent (was %.1f)",
+                _fov_radius,
+                radius,
+            )
+            radius = _fov_radius
+        radius_deg = radius / 60.0
+
         band_set = sorted({str(b) for b in (bands or []) if b})
         if not band_set:
             band_set = sorted(
@@ -2873,6 +3369,8 @@ class Catalog:
         # is applied explicitly below.
         # clean() reads input_yaml["imageFilter"]; it is restored after the scan.
         rows = []
+        # catalog -> fraction of the query disk populated by its sources.
+        coverage_map = {}
         # (catalog, band) -> list of usable-source RA/DEC frames, for the
         # coverage plot. Unioned across the band's images at the end.
         plot_sources = {}
@@ -2912,6 +3410,24 @@ class Catalog:
                         dec=pd.to_numeric(cleaned["DEC"], errors="coerce").to_numpy()
                         * u.deg,
                         frame="icrs",
+                    )
+
+                cov_frac = np.nan
+                if coords is not None:
+                    cov_frac = _field_coverage_fraction(
+                        coords.ra.deg,
+                        coords.dec.deg,
+                        float(target_coords.ra.degree),
+                        float(target_coords.dec.degree),
+                        radius_deg,
+                    )
+                coverage_map[name] = cov_frac
+                if np.isfinite(cov_frac) and cov_frac < 0.8:
+                    logger.warning(
+                        "  %-12s covers only %.0f%% of the query field "
+                        "(partial survey footprint)",
+                        name,
+                        100.0 * cov_frac,
                     )
 
                 for img in image_infos:
@@ -2977,6 +3493,7 @@ class Catalog:
                                     else "field"
                                 ),
                                 "n_usable": n,
+                                "coverage": coverage_map.get(name, np.nan),
                                 "mode": (
                                     "onchip"
                                     if wcs_i is not None and shape_i is not None
@@ -2992,7 +3509,7 @@ class Catalog:
 
         report = pd.DataFrame(
             rows,
-            columns=["catalog", "band", "image", "n_usable", "mode"],
+            columns=["catalog", "band", "image", "n_usable", "coverage", "mode"],
         )
 
         # Usable-source summary: the numbers the winners are picked from -
@@ -3040,6 +3557,16 @@ class Catalog:
                 best_min,
                 float(scores.iloc[0]["mean"]),
             )
+            best_cov = coverage_map.get(best, np.nan)
+            if np.isfinite(best_cov) and best_cov < 0.8:
+                logger.warning(
+                    "Optimized catalog: winning %s-band catalog %s covers "
+                    "only %.0f%% of the field - part of the detector will "
+                    "have no calibrators.",
+                    band,
+                    best.upper(),
+                    100.0 * best_cov,
+                )
             if best_min < min_sources:
                 logger.warning(
                     "Optimized catalog: best %s-band catalog %s provides only "
@@ -3202,7 +3729,12 @@ class Catalog:
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
 
-            required_columns = ["flux_AP", use_filter, f"{use_filter}_err"]
+            required_columns = [
+                "flux_AP",
+                "flux_AP_err",
+                use_filter,
+                f"{use_filter}_err",
+            ]
             missing_columns = [
                 col for col in required_columns if col not in catalog.columns
             ]
@@ -4155,7 +4687,7 @@ class Catalog:
                 vmin, vmax = interval.get_limits(np.asarray(stars[i]))
                 norm = ImageNormalize(vmin=vmin, vmax=vmax)
                 cmap = plt.get_cmap("viridis").copy()
-                cmap.set_bad(color="none")
+                cmap = cmap.with_extremes(bad="none")
                 ax.imshow(
                     stars[i],
                     origin="lower",

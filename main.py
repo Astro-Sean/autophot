@@ -126,7 +126,7 @@ except Exception:
 from aperture import (Aperture, exposure_seconds_from_header,
                       gain_e_per_adu_from_header, resolve_gain_e_per_adu)
 from background import BackgroundSubtractor
-from catalog import Catalog, cross_match_sources
+from catalog import Catalog, cross_match_sources, _catalog_cone_radius_arcmin
 from cosmic import RemoveCosmicRays
 from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        AutophotYaml, ColoredLevelFormatter, ConsoleLevelFilter,
@@ -3375,11 +3375,44 @@ def run_photometry():
         selected_catalog_name = Calibrate_Catalog._require_catalog_selected(
             input_yaml["catalog"].get("use_catalog")
         )
+
+        # The catalog cone must cover the detector footprint, not just a
+        # fixed patch around the target - corner regions need calibrators
+        # too, and a narrow field should not pay for the default-wide cone.
+        # The driver may have set catalog_query_radius_arcmin from the
+        # footprint union; otherwise size it from this image's WCS, or its
+        # pixel scale when the image carries no WCS.
+        _cat_radius_arcmin = input_yaml.get("catalog", {}).get(
+            "catalog_query_radius_arcmin"
+        )
+        if _cat_radius_arcmin is None:
+            _cat_radius_arcmin = _catalog_cone_radius_arcmin(
+                [
+                    {
+                        "wcs": imageWCS,
+                        "shape": getattr(image, "shape", None),
+                        "pixscale": input_yaml.get("pixel_scale"),
+                    }
+                ],
+                target_coords,
+                default_arcmin=10.0,
+            )
+        else:
+            try:
+                _cat_radius_arcmin = float(_cat_radius_arcmin)
+            except (TypeError, ValueError):
+                _cat_radius_arcmin = np.nan
+            if not np.isfinite(_cat_radius_arcmin):
+                _cat_radius_arcmin = 10.0
+            else:
+                _cat_radius_arcmin = min(max(_cat_radius_arcmin, 2.0), 60.0)
+
         if input_yaml["catalog"].get("build_catalog", False):
             unCatalogSources = Calibrate_Catalog.build_complete_catalog(
                 target_coords=target_coords,
                 catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
                 max_separation=5,
+                radius=_cat_radius_arcmin,
             )
         else:
             unCatalogSources = Calibrate_Catalog.download(
@@ -3389,6 +3422,7 @@ def run_photometry():
                 catalog_custom_fpath=input_yaml["catalog"].get(
                     "catalog_custom_fpath", None
                 ),
+                radius=_cat_radius_arcmin,
             )
 
         #  Clean Catalog

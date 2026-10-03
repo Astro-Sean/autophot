@@ -4031,9 +4031,41 @@ class Templates:
             )
             imageWCS = get_wcs(header)
 
+            # Size the cone to cover (and be limited by) the detector
+            # footprint so bright-source masking is not biased to the
+            # field centre; works off the pixel scale when the image has
+            # no WCS.
+            _fbs_radius = 10.0
+            try:
+                from catalog import (
+                    _catalog_cone_radius_arcmin,
+                    _pixscale_arcsec,
+                )
+
+                _nx = int(header.get("NAXIS1") or 0)
+                _ny = int(header.get("NAXIS2") or 0)
+                _fbs_radius = _catalog_cone_radius_arcmin(
+                    [
+                        {
+                            "wcs": imageWCS,
+                            "shape": (_ny, _nx)
+                            if _nx > 0 and _ny > 0
+                            else None,
+                            "pixscale": _pixscale_arcsec(header)
+                            or self.input_yaml.get("pixel_scale"),
+                        }
+                    ],
+                    target,
+                    default_arcmin=10.0,
+                )
+            except Exception:
+                pass
+
             sequenceData = Catalog(input_yaml=self.input_yaml)
             bright_sources_catalog = sequenceData.download(
-                target, catalogName=catalogName
+                target,
+                catalogName=catalogName,
+                radius=_fbs_radius,
             )
             if bright_sources_catalog is None:
                 return None
