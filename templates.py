@@ -3685,7 +3685,7 @@ def _psf_stamp_eval(x, y, ctx):
     # position error is not mistaken for a PSF-shape mismatch.
     lx, ly = x - (xi - h), y - (yi - h)
     try:
-        _cen = centroid_2dg(np.where(valid, stamp, np.nan))
+        _cen = centroid_2dg(stamp, mask=~valid)
         if (
             _cen is not None
             and np.isfinite(_cen[0])
@@ -4303,7 +4303,9 @@ class Templates:
             data_for_detection = data.copy()
             data_for_detection[~np.isfinite(data_for_detection)] = image_median
 
-            seg = detect_sources(data_for_detection, threshold, npixels=npixels_det)
+            seg = detect_sources(
+                data_for_detection, threshold, n_pixels=npixels_det
+            )
             if seg is None:
                 logger.warning(
                     "create_image_mask: detect_sources returned None; returning empty mask."
@@ -4320,11 +4322,13 @@ class Templates:
                     )
                 seg = SegmentationImage(seg_arr)
 
-            if seg.nlabels == 0:
+            if seg.n_labels == 0:
                 logger.warning("create_image_mask: no sources detected; returning empty mask.")
                 return mask, masked_centres
 
-            cat = SourceCatalog(data_for_detection, seg, localbkg_width=15 * fwhm)
+            cat = SourceCatalog(
+                data_for_detection, seg, local_bkg_width=15 * fwhm
+            )
             tbl = cat.to_table().to_pandas()
 
             if len(tbl) == 0:
@@ -12037,9 +12041,9 @@ class Templates:
                         try:
                             if outputFpath and os.path.isfile(outputFpath):
                                 with fits.open(outputFpath, mode="update", memmap=False) as _hdul:
-                                    _hdul[0].header["FSCAL_CONV"] = float(_conv_scale)
-                                    _hdul[0].header["FSCAL_PHOT"] = float(_phot_scale)
-                                    _hdul[0].header["FSCAL_DISC"] = float(_discrep_pct)
+                                    _hdul[0].header["HIERARCH FSCAL_CONV"] = float(_conv_scale)
+                                    _hdul[0].header["HIERARCH FSCAL_PHOT"] = float(_phot_scale)
+                                    _hdul[0].header["HIERARCH FSCAL_DISC"] = float(_discrep_pct)
                                     _hdul.flush()
                         except Exception:
                             pass
@@ -12197,9 +12201,9 @@ class Templates:
                         try:
                             if outputFpath and os.path.isfile(outputFpath):
                                 with fits.open(outputFpath, mode="update", memmap=False) as _hdul:
-                                    _hdul[0].header["FSCAL_CONV"] = float(_conv_scale2)
-                                    _hdul[0].header["FSCAL_PHOT"] = float(_phot_scale2)
-                                    _hdul[0].header["FSCAL_DISC"] = float(_discrep_pct2)
+                                    _hdul[0].header["HIERARCH FSCAL_CONV"] = float(_conv_scale2)
+                                    _hdul[0].header["HIERARCH FSCAL_PHOT"] = float(_phot_scale2)
+                                    _hdul[0].header["HIERARCH FSCAL_DISC"] = float(_discrep_pct2)
                                     _hdul.flush()
                         except Exception:
                             pass
@@ -12366,9 +12370,9 @@ class Templates:
                         if _conv_scale3 is not None:
                             try:
                                 with fits.open(outputFpath, mode="update", memmap=False) as _hdul:
-                                    _hdul[0].header["FSCAL_CONV"] = float(_conv_scale3)
-                                    _hdul[0].header["FSCAL_PHOT"] = float(_phot_scale3)
-                                    _hdul[0].header["FSCAL_DISC"] = float(_discrep_pct3)
+                                    _hdul[0].header["HIERARCH FSCAL_CONV"] = float(_conv_scale3)
+                                    _hdul[0].header["HIERARCH FSCAL_PHOT"] = float(_phot_scale3)
+                                    _hdul[0].header["HIERARCH FSCAL_DISC"] = float(_discrep_pct3)
                                     _hdul[0].header["CPHOTR"] = True
                                     _hdul.flush()
                             except Exception:
@@ -12532,9 +12536,9 @@ class Templates:
                             try:
                                 if outputFpath and os.path.isfile(outputFpath):
                                     with fits.open(outputFpath, mode="update", memmap=False) as _hdul:
-                                        _hdul[0].header["FSCAL_CONV"] = float(_conv_exc)
-                                        _hdul[0].header["FSCAL_PHOT"] = float(_phot_exc)
-                                        _hdul[0].header["FSCAL_DISC"] = float(_disc_exc)
+                                        _hdul[0].header["HIERARCH FSCAL_CONV"] = float(_conv_exc)
+                                        _hdul[0].header["HIERARCH FSCAL_PHOT"] = float(_phot_exc)
+                                        _hdul[0].header["HIERARCH FSCAL_DISC"] = float(_disc_exc)
                                         _hdul[0].header["CPHOTR"] = True
                                         _hdul.flush()
                             except Exception:

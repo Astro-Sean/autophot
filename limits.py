@@ -2133,14 +2133,17 @@ class Limits:
             # -----------------------------------------------------------------
             n_final = int(lim_cfg.get("inject_final_n_sites",
                                       lim_cfg.get("inject_quiet_n_sites", 100)))
-            n_final = max(10, min(n_final, 500))
+            # Floor of 4: the completeness fit needs a handful of distinct
+            # sites to stay honest on spatially varying backgrounds; fewer
+            # than that measures a single spot rather than a field limit.
+            n_final = max(4, min(n_final, 500))
 
             # Candidate pool: a modest multiple of the final count, enough to
             # survive filtering without paying per-candidate cost on thousands.
             n_candidates = int(lim_cfg.get("inject_candidate_n_sites", 0))
             if n_candidates <= 0:
-                n_candidates = max(3 * n_final, 150)
-            n_candidates = max(100, min(n_candidates, 5000))
+                n_candidates = max(3 * n_final, 40)
+            n_candidates = max(30, min(n_candidates, 5000))
 
             # Legacy key kept for backward compatibility but no longer drives
             # heavy jitter/KMeans workloads.
@@ -4470,7 +4473,7 @@ class Limits:
                     else:
                         vmin, vmax = np.nanmin(injected_disp), np.nanmax(injected_disp)
                     cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                    cmap.set_bad(color="none")
+                    cmap = cmap.with_extremes(bad="none")
                     im = ax_inject.imshow(
                         np.ma.array(injected_disp, mask=~np.isfinite(injected_disp)),
                         origin="lower",
@@ -4749,7 +4752,7 @@ class Limits:
                     from astropy.visualization import simple_norm
                     norm = simple_norm(cutout, 'sqrt', percent=99.5)
                     cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                    cmap.set_bad(color="none")
+                    cmap = cmap.with_extremes(bad="none")
                     # Mask NaN/inf only; zeros can be real sky-subtracted pixels.
                     cut_disp = np.asarray(cutout, dtype=float).copy()
                     ax_inject.imshow(
@@ -4785,7 +4788,7 @@ class Limits:
                 from astropy.visualization import simple_norm
                 norm = simple_norm(cutout, 'sqrt', percent=99.5)
                 cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                cmap.set_bad(color="none")
+                cmap = cmap.with_extremes(bad="none")
                 # Mask NaN/inf only; zeros can be real sky-subtracted pixels.
                 cut_disp = np.asarray(cutout, dtype=float).copy()
                 ax_sites.imshow(

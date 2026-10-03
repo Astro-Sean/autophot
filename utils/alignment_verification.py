@@ -366,7 +366,7 @@ class AlignmentVerifier:
         diff_data = sci_data - ref_data
 
         _cmap = plt.get_cmap('gray').copy()
-        _cmap.set_bad(color='none')
+        _cmap = _cmap.with_extremes(bad="none")
 
         # Equal-aspect image panels shrink inside cells that do not match
         # the data aspect, so size the figure from the image shape. The

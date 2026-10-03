@@ -1984,19 +1984,19 @@ def run_sfft() -> Optional[int]:
                 with fits.open(FITS_DIFF, mode="update", memmap=False) as _hd:
                     _fhdr = _hd[0].header
                     if np.isfinite(_fscal_conv):
-                        _fhdr["FSCAL_CONV"] = (
+                        _fhdr["HIERARCH FSCAL_CONV"] = (
                             _fscal_conv, "SFFT convolution flux scaling (mean)"
                         )
                     if np.isfinite(_fscal_sig):
-                        _fhdr["FSCAL_SIG"] = (
+                        _fhdr["HIERARCH FSCAL_SIG"] = (
                             _fscal_sig, "SFFT convolution flux scaling (std)"
                         )
                     if np.isfinite(_phot_fscal):
-                        _fhdr["FSCAL_PHOT"] = (
+                        _fhdr["HIERARCH FSCAL_PHOT"] = (
                             _phot_fscal, "SFFT photometric flux scaling"
                         )
                     if np.isfinite(_fscal_conv) and np.isfinite(_phot_fscal):
-                        _fhdr["FSCAL_DISC"] = (
+                        _fhdr["HIERARCH FSCAL_DISC"] = (
                             abs(_fscal_conv - _phot_fscal)
                             / max(abs(_fscal_conv), abs(_phot_fscal), 1e-10)
                             * 100.0,
