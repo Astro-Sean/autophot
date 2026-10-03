@@ -7,8 +7,27 @@ figures, extended with tints/shades of the core hues where extra categories
 are needed, and high lightness contrast for colorblind accessibility.
 """
 
+import os
+
 import numpy as np
 from typing import Optional, Union
+
+HEADLESS_PLOTS_ENV = "AUTOPHOT_HEADLESS_PLOTS"
+
+
+def force_headless_plots():
+    """Declare this process non-interactive for plotting.
+
+    Set at pipeline entry so no code path in the per-image work can pop a
+    GUI window, even if a ``show=True`` flag leaks into a plot call.
+    Inherited by subprocesses.
+    """
+    os.environ[HEADLESS_PLOTS_ENV] = "1"
+
+
+def interactive_display_allowed() -> bool:
+    """True unless the pipeline has declared this process headless."""
+    return os.environ.get(HEADLESS_PLOTS_ENV, "") != "1"
 
 # RPTH palette (Plante & Cushman 2020, Table 1) plus derived swatches.
 # The paper recommends pairing a base color with swatches of that color

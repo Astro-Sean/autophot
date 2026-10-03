@@ -1563,6 +1563,12 @@ class AutomatedPhotometry:
         # leave QUIET_MODE stuck on and silence this call's logging.
         QUIET_MODE = False
 
+        # Batch driver context: no plot may pop a GUI window, here or in
+        # the per-image subprocesses (children inherit the env flag).
+        from plotting_utils import force_headless_plots
+
+        force_headless_plots()
+
         # Deep-copy the input configuration to prevent modifications from
         # persisting across multiple calls to run_photometry()
         default_input = copy.deepcopy(default_input)
