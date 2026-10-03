@@ -518,6 +518,11 @@ def run_photometry():
     import matplotlib
 
     matplotlib.use("Agg")
+    # Hard guarantee for the per-image work: no plot call may pop a GUI
+    # window during image iteration, even if a show flag ever leaks in.
+    from plotting_utils import force_headless_plots
+
+    force_headless_plots()
 
     # ---------------------------------------------------------------------
     # Check for optional Astromatic tools

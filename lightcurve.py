@@ -24,7 +24,11 @@ import pathlib
 import glob
 import shutil
 from functions import set_size, get_distance_modulus
-from plotting_utils import get_marker_size, apply_autophot_mplstyle
+from plotting_utils import (
+    get_marker_size,
+    apply_autophot_mplstyle,
+    interactive_display_allowed,
+)
 from astropy.time import Time
 from collections import Counter
 from pathlib import Path
@@ -808,7 +812,7 @@ def plot_lightcurve(
     # plt.switch_backend() works after pyplot is already imported, unlike
     # matplotlib.use() which silently fails once pyplot is loaded.
     apply_autophot_mplstyle()
-    if show:
+    if show and interactive_display_allowed():
         import matplotlib
 
         current_backend = str(plt.get_backend()).lower()
@@ -1751,7 +1755,7 @@ def plot_lightcurve(
     save_kw = dict(dpi=dpi) if format.lower() != "pdf" else {}
     plt.savefig(outpath, **save_kw, bbox_inches="tight", facecolor="white")
 
-    if show:
+    if show and interactive_display_allowed():
         import matplotlib
 
         # Force interactive backend right before show, in case anything
@@ -2449,7 +2453,7 @@ def plot_variability_check(
     """
     log = logging.getLogger(__name__)
     apply_autophot_mplstyle()
-    if show:
+    if show and interactive_display_allowed():
         import matplotlib
 
         current_backend = str(plt.get_backend()).lower()
@@ -3038,8 +3042,10 @@ def plot_variability_check(
     fig.savefig(outpath, **save_kw, bbox_inches="tight", facecolor="white")
     log.info("plot_variability_check: saved '%s'", outpath)
 
-    if show:
+    if show and interactive_display_allowed():
         plt.show()
+    else:
+        plt.close(fig)
 
     return outpath
 

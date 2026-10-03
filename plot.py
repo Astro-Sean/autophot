@@ -19,6 +19,7 @@ try:
         get_marker_size,
         get_plot_color,
         get_plot_ext,
+        interactive_display_allowed,
         mask_legend_patch,
         overlay_mask_hatch,
         safe_tight_layout,
@@ -31,6 +32,7 @@ except ImportError:
     get_marker_size = None
     get_plot_color = None
     get_plot_ext = lambda _iy=None: ".png"
+    interactive_display_allowed = lambda: False
     mask_legend_patch = lambda **kw: None
     overlay_mask_hatch = lambda *a, **kw: None
     safe_tight_layout = lambda fig=None, **kw: fig.tight_layout(**kw) if fig is not None else None
@@ -1412,7 +1414,7 @@ class Plot:
         # so that plt.show() actually displays the window when show=True.
         # plt.switch_backend() works after pyplot is already imported, unlike
         # matplotlib.use() which silently fails once pyplot is loaded.
-        if show:
+        if show and interactive_display_allowed():
             import matplotlib
             import matplotlib.pyplot as _plt_check
 
@@ -1861,7 +1863,7 @@ class Plot:
         )
         safe_tight_layout(fig, rect=[0, 0, 1, 0.94])
 
-        if bool(show):
+        if bool(show) and interactive_display_allowed():
             plt.show()
         else:
             plt.close(fig)
