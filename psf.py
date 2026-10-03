@@ -2621,6 +2621,34 @@ def _arr_fingerprint(a):
     )
 
 
+_MCMC_POS_KEYS = ("x_0", "y_0", "xcenter", "ycenter", "x_mean", "y_mean")
+
+
+def _apply_position_bounds(model, initial_params, delta):
+    """Restrict position parameters to ``p0 +/- delta`` without widening
+    any bounds already set on the model.
+
+    photutils writes per-source bounds from its ``xy_bounds`` onto the
+    model before handing it to the fitter (``x_0_0``/``x_0_1`` in grouped
+    fits), so the delta window is *intersected* with existing bounds --
+    the tighter of the two wins.  Overwriting them blindly would let a
+    centroid-held source wander the full delta under MCMC; ignoring the
+    existing bounds would also drop the configured xy_bounds entirely.
+    startswith, not substring matching: "x_0" occurs inside "flux_0".
+    """
+    for pname, p0 in zip(model.param_names, np.asarray(initial_params, float)):
+        if not any(pname.startswith(k) for k in _MCMC_POS_KEYS):
+            continue
+        lo_m, hi_m = getattr(model, pname).bounds
+        lo = float(p0) - float(delta)
+        hi = float(p0) + float(delta)
+        if lo_m is not None:
+            lo = max(lo, lo_m)
+        if hi_m is not None:
+            hi = min(hi, hi_m)
+        getattr(model, pname).bounds = (lo, hi)
+
+
 # ===========================================================================
 # MCMCFitter
 # ===========================================================================
@@ -3270,10 +3298,7 @@ class MCMCFitter:
             else np.array(initial_params, float)
         )
         fitted_model = model.copy()
-
-        for pname, p0 in zip(fitted_model.param_names, initial_params):
-            if pname in ("x_0", "y_0"):
-                getattr(fitted_model, pname).bounds = (p0 - self.delta, p0 + self.delta)
+        _apply_position_bounds(fitted_model, initial_params, self.delta)
 
         if use_nddata_uncertainty:
             if weights is not None:
@@ -10978,13 +11003,16 @@ class PSF:
         faint_mask = (snr >= 4.0) & (snr < 8.0)
         vfaint_mask = snr < 4.0
 
-        # --- S/N-adaptive centroid freedom (target fits only) ----------------
-        # A detected target may re-center within xy_bounds, which absorbs WCS
-        # error and proper motion.  A target that has faded below detection
+        # --- S/N-adaptive centroid freedom ----------------------------------
+        # A detected source may re-center within xy_bounds, which absorbs WCS
+        # error and proper motion.  A source that has faded below detection
         # should not -- the fitter would otherwise chase the largest noise
         # excursion inside the bound and report it as a detection.  Detection
         # is tested anywhere inside the *free* window, so a real source
-        # displaced within the bound still counts.
+        # displaced within the bound still counts.  Targets are always
+        # window-checked (few rows, and their aperture S/N may come from the
+        # catalog position); catalog sources shortcut via their aperture S/N
+        # when it already clears the threshold, which keeps large fields cheap.
         _hold_px = phot_cfg.get("fitting_xy_bounds_hold_px", 0.5)
         _det_snr_min = phot_cfg.get("fitting_xy_bounds_detect_snr", 4.0)
         try:
@@ -10997,7 +11025,18 @@ class PSF:
             _det_snr_min = 4.0
         xy_hold_arr = np.zeros(len(init_params), dtype=bool)
         detect_snr_arr = np.full(len(init_params), np.nan)
-        if bool(is_target_fit) and np.isfinite(_det_snr_min) and _det_snr_min > 0:
+        _detect_on = np.isfinite(_det_snr_min) and _det_snr_min > 0
+        if bool(forcePhotometry):
+            # Explicit forced photometry: hold every position regardless of
+            # what is in the window.
+            xy_hold_arr[:] = True
+            log.info(
+                "PSF fit: forcePhotometry set; holding all %d positions to "
+                "%.2f px.",
+                len(init_params),
+                _hold_px,
+            )
+        elif _detect_on:
             _data_e = np.asarray(ndimage.data, float)
             _fit_mask_full = getattr(ndimage, "mask", None)
             _rms_e = bkgrmsval * _gain_for_bkg
@@ -11008,6 +11047,10 @@ class PSF:
             _half = _win + int(np.ceil(aperture_radius)) + 1
             _yy, _xx = np.ogrid[: _data_e.shape[0], : _data_e.shape[1]]
             for _si in range(len(x)):
+                if not is_target_fit and np.isfinite(snr[_si]) and snr[_si] >= _det_snr_min:
+                    # Catalog S/N was measured at this (detected) position --
+                    # a clear detection needs no window check.
+                    continue
                 _cx, _cy = float(x[_si]), float(y[_si])
                 _x0 = max(0, int(np.floor(_cx)) - _half)
                 _x1 = min(_data_e.shape[1], int(np.ceil(_cx)) + _half + 1)
@@ -11048,16 +11091,26 @@ class PSF:
                     np.isfinite(detect_snr_arr[_si])
                     and detect_snr_arr[_si] >= _det_snr_min
                 )
-            for _si in range(len(x)):
+            if is_target_fit:
+                for _si in range(len(x)):
+                    log.info(
+                        "Target PSF: source %d in-window detection S/N=%s -> %s",
+                        _si,
+                        f"{detect_snr_arr[_si]:.2f}"
+                        if np.isfinite(detect_snr_arr[_si])
+                        else "n/a",
+                        f"free within {xy_bounds_eff:.2f} px"
+                        if not xy_hold_arr[_si]
+                        else f"held to {_hold_px:.2f} px (forced photometry)",
+                    )
+            elif np.any(xy_hold_arr):
                 log.info(
-                    "Target PSF: source %d in-window detection S/N=%s -> %s",
-                    _si,
-                    f"{detect_snr_arr[_si]:.2f}"
-                    if np.isfinite(detect_snr_arr[_si])
-                    else "n/a",
-                    f"free within {xy_bounds_eff:.2f} px"
-                    if not xy_hold_arr[_si]
-                    else f"held to {_hold_px:.2f} px (forced photometry)",
+                    "PSF fit: %d/%d sources below detection S/N=%.1f -> "
+                    "positions held to %.2f px (forced photometry).",
+                    int(np.sum(xy_hold_arr)),
+                    len(init_params),
+                    _det_snr_min,
+                    _hold_px,
                 )
 
         # ---- Fitter --------------------------------------------------------
@@ -11129,16 +11182,6 @@ class PSF:
             try:
                 emcee_delta = phot_cfg.get("emcee_delta")
                 delta = float(emcee_delta) if emcee_delta is not None else xy_bounds
-                if (
-                    is_target_fit
-                    and len(init_params) == 1
-                    and xy_hold_arr[0]
-                    and emcee_delta is None
-                ):
-                    # The position prior (p0 +/- delta on x_0/y_0) would
-                    # otherwise let an undetected target wander the full
-                    # xy_bounds under MCMC even though the LSQ bound holds it.
-                    delta = _hold_px
                 emcee_nsteps = phot_cfg.get("emcee_nsteps", 5000)
                 emcee_fitter = MCMCFitter(
                     nwalkers=int(phot_cfg.get("emcee_nwalkers", 32)),
