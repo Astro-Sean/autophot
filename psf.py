@@ -13329,7 +13329,8 @@ class PSF:
                     _n_leg = len(_valid)
                     _leg_ncol = 3 if _n_leg >= 8 else (2 if _n_leg >= 5 else 1)
                     ax1.legend(_valid, _valid_labels, loc="upper left",
-                               frameon=False, fontsize=8, ncol=_leg_ncol)
+                               frameon=False, fontsize=8, ncol=_leg_ncol,
+                               labelcolor="white")
             _ext = get_plot_ext(self.input_yaml)
             save_name_png = (
                 f"PSF_Target_{base}{_ext}" if plotTarget else f"PSF_Residuals_{base}{_ext}"
