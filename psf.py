@@ -165,7 +165,10 @@ class _ConstantLocalBackground:
     Used as the last-resort target-fit background when every annulus is
     too NaN-heavy to measure: a 1-2 px fallback annulus would sit inside
     the PSF core and still fail, while the global median is at least a
-    self-consistent sky estimate.
+    self-consistent sky estimate.  photutils >=3.0 rejects non-
+    LocalBackground estimators, so the target fit instead supplies the
+    constant through the init_params 'local_bkg' column (which overrides
+    the estimator); this class is kept for older-photutils call sites.
     """
 
     def __init__(self, value: float):
@@ -11257,6 +11260,7 @@ class PSF:
             # Handle NaN-heavy regions (chip gaps) by shrinking annulus or falling back to global.
             # In multi-target fits, check the annulus quality for each source and use
             # the most conservative (smallest) annulus that works for all sources.
+            _global_bkg = None
             if is_target_fit:
                 _n_in_mask = int(np.count_nonzero(mask))
                 # `mask` indexes init_params (valid rows only), so use the
@@ -11268,31 +11272,44 @@ class PSF:
                 _inner_r, _outer_r = float(inner_r), float(outer_r)
                 _max_shrink = 3
                 _shrink_factor = 0.7
-                _global_bkg = None
+                # Count validity the same way photutils' LocalBackground will:
+                # _make_mask unions nddata.mask with ~isfinite(data), so a
+                # finite-but-masked defect pixel still gets excluded. Checking
+                # only isfinite() would pass an annulus photutils then empties.
+                # The check runs on the data the fit will see (inverted retry
+                # overrides share the same mask).
+                _check_nd = nd_override if nd_override is not None else ndimage
+                _check_data = np.asarray(_check_nd.data, dtype=float)
+                _check_pixmask = getattr(_check_nd, "mask", None)
+                _annulus_bad = ~np.isfinite(_check_data)
+                if _check_pixmask is not None:
+                    _annulus_bad |= np.asarray(_check_pixmask, dtype=bool)
                 # Pre-allocate coordinate grids once (image shape doesn't change between attempts)
-                yy, xx = np.ogrid[:ndimage.data.shape[0], :ndimage.data.shape[1]]
+                yy, xx = np.ogrid[:_check_data.shape[0], :_check_data.shape[1]]
                 for attempt in range(_max_shrink):
                     _all_ok = True
-                    _worst_nan_frac = 0.0
+                    _worst_bad_frac = 0.0
                     for _si in range(_n_in_mask):
                         r2 = (xx - _xs[_si])**2 + (yy - _ys[_si])**2
                         in_annulus = (r2 >= _inner_r**2) & (r2 < _outer_r**2)
-                        annulus_pixels = ndimage.data[in_annulus]
-                        finite_pixels = annulus_pixels[np.isfinite(annulus_pixels)]
-                        nan_frac = 1.0 - (len(finite_pixels) / max(1, len(annulus_pixels)))
-                        _worst_nan_frac = max(_worst_nan_frac, nan_frac)
-                        if len(finite_pixels) < 10 or nan_frac >= 0.5:
+                        n_annulus = int(np.count_nonzero(in_annulus))
+                        n_valid = n_annulus - int(
+                            np.count_nonzero(_annulus_bad & in_annulus)
+                        )
+                        bad_frac = 1.0 - (n_valid / max(1, n_annulus))
+                        _worst_bad_frac = max(_worst_bad_frac, bad_frac)
+                        if n_valid < 10 or bad_frac >= 0.5:
                             _all_ok = False
                     if _all_ok:
-                        # Sufficient finite pixels for all sources - use this annulus
+                        # Sufficient usable pixels for all sources - use this annulus
                         break
                     if attempt < _max_shrink - 1:
                         _inner_r = max(3.0, _inner_r * _shrink_factor)
                         _outer_r = max(_inner_r + 2.0, _outer_r * _shrink_factor)
                         log.warning(
                             "Target PSF: annulus (r_in=%.1f, r_out=%.1f) has "
-                            "%.1f%% NaN pixels (worst of %d sources); shrinking to (r_in=%.1f, r_out=%.1f).",
-                            float(inner_r), float(outer_r), _worst_nan_frac * 100.0,
+                            "%.1f%% masked/NaN pixels (worst of %d sources); shrinking to (r_in=%.1f, r_out=%.1f).",
+                            float(inner_r), float(outer_r), _worst_bad_frac * 100.0,
                             _n_in_mask, _inner_r, _outer_r,
                         )
                     else:
@@ -11301,23 +11318,22 @@ class PSF:
                         # PSF core and still fail, so deliver the global
                         # median through a constant estimator instead.
                         _global_bkg = float(
-                            np.nanmedian(
-                                ndimage.data[np.isfinite(ndimage.data)]
-                            )
+                            np.nanmedian(_check_data[~_annulus_bad])
                         )
                         if not np.isfinite(_global_bkg):
                             _global_bkg = 0.0
                         log.warning(
-                            "Target PSF: all annulus attempts too NaN-heavy; using global background "
+                            "Target PSF: all annulus attempts too mask-heavy; using global background "
                             "median (%.3g e-) as fallback.",
                             _global_bkg,
                         )
-                if _global_bkg is not None:
-                    localbkg = _ConstantLocalBackground(_global_bkg)
-                else:
-                    localbkg = LocalBackground(
-                        _inner_r, _outer_r, bkg_estimator=MedianBackground()
-                    )
+                # photutils >=3.0 validates local_bkg_estimator as a
+                # LocalBackground instance, so the global-median fallback is
+                # delivered through the init_params 'local_bkg' column (added
+                # to sub_init below), which overrides the estimator.
+                localbkg = LocalBackground(
+                    _inner_r, _outer_r, bkg_estimator=MedianBackground()
+                )
             else:
                 localbkg = LocalBackground(
                     float(inner_r), float(outer_r), bkg_estimator=MedianBackground()
@@ -11346,11 +11362,24 @@ class PSF:
                     progress_bar=False,
                 )
                 sub_init = init_params[mask]
+                if _global_bkg is not None:
+                    # A 'local_bkg' column overrides the estimator, giving the
+                    # annulus-failed sources the global-median background.
+                    # photutils requires the column to carry the data unit.
+                    sub_init["local_bkg"] = np.full(
+                        len(sub_init), _global_bkg, dtype=float
+                    ) * getattr(nd_for_fit, "unit", u.electron)
 
                 # Filter out sources that fall on completely masked regions
-                # to avoid ValueError from photutils PSFPhotometry.
-                _fit_mask = getattr(nd_for_fit, "mask", None)
-                if _fit_mask is not None and len(sub_init) > 0:
+                # to avoid ValueError from photutils PSFPhotometry.  The
+                # effective mask unions nddata.mask with non-finite pixels --
+                # photutils masks those too via _make_mask, so a source on an
+                # all-NaN patch is just as unfittable as a masked one.
+                _fit_mask = ~np.isfinite(nd_for_fit.data)
+                _nd_mask = getattr(nd_for_fit, "mask", None)
+                if _nd_mask is not None:
+                    _fit_mask |= np.asarray(_nd_mask, dtype=bool)
+                if len(sub_init) > 0:
                     _half = max(int(np.ceil(max(fit_shape) / 2)), 1)
                     _sx = np.clip(np.rint(np.asarray(sub_init["x"], dtype=float)).astype(int), 0, nd_for_fit.data.shape[1] - 1) if "x" in sub_init.colnames else None
                     _sy = np.clip(np.rint(np.asarray(sub_init["y"], dtype=float)).astype(int), 0, nd_for_fit.data.shape[0] - 1) if "y" in sub_init.colnames else None
@@ -11374,6 +11403,8 @@ class PSF:
                             # retry logic (init_params[mask]) stays aligned.
                             _mask_indices = np.where(mask)[0]
                             mask[_mask_indices[_fully_masked]] = False
+                if len(sub_init) == 0:
+                    return None, None
 
                 # photutils emits a generic AstropyUserWarning when any fit
                 # is flagged non-converged; we replace it below with a
@@ -11405,6 +11436,10 @@ class PSF:
                     maxiters=10,
                 )
                 sub_init = init_params[mask]
+                if _global_bkg is not None:
+                    sub_init["local_bkg"] = np.full(
+                        len(sub_init), _global_bkg, dtype=float
+                    ) * getattr(ndimage, "unit", u.electron)
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
                         "ignore",
@@ -11495,6 +11530,12 @@ class PSF:
                         retry_sel = np.zeros(len(sub_init), dtype=bool)
                     if np.any(retry_sel):
                         retry_init = init_params[mask][retry_sel]
+                        if _global_bkg is not None:
+                            # Keep the global-bkg override or the retry
+                            # re-measures a NaN annulus and re-flags the row.
+                            retry_init["local_bkg"] = np.full(
+                                len(retry_init), _global_bkg, dtype=float
+                            ) * getattr(nd_for_fit, "unit", u.electron)
                         fit_shape_retry = tuple(_odd(int(s) + 2) for s in fit_shape)
                         xy_bounds_retry = max(0.5, 0.7 * float(xy_bounds_this))
                         log.info(
