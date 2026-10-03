@@ -17,7 +17,7 @@ import warnings
 # --- Third-Party Imports ---
 import numpy as np
 import astroscrappy
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 from scipy.ndimage import binary_dilation, binary_fill_holes
 import matplotlib.pyplot as plt
 from astropy.visualization import ZScaleInterval
@@ -135,6 +135,83 @@ class RemoveCosmicRays:
         # not cosmic rays.
         nan_mask = ~np.isfinite(image)
         return sat_mask | bright_mask | nan_mask
+
+    # --- Protection of Known Sources (e.g. the transient target) ---
+    def _protect_positions_mask(
+        self,
+        positions: Optional[Sequence[Tuple[float, float]]],
+        radius_px: float,
+        psf_fwhm: float,
+    ) -> Optional[np.ndarray]:
+        """
+        Build a boolean disk mask around each finite, in-frame position.
+
+        An undersampled isolated point source (e.g. a faint transient) can
+        be misread as a cosmic-ray cluster: flagging it erases real flux
+        through median interpolation, and its defect mask is nulled in the
+        difference image, so the target is never measured.  Pixels inside
+        these disks are added to the detector ``inmask`` and are therefore
+        never flagged and never interpolated.
+
+        Args:
+            positions: Iterable of (x, y) pixel positions to protect.
+            radius_px: Protection radius in pixels.  Non-positive or
+                non-finite values fall back to ``max(3, 2 * psf_fwhm)``.
+            psf_fwhm: PSF FWHM in pixels, used for the fallback radius.
+
+        Returns:
+            Boolean mask (True = protect) or None when no valid position
+            is inside the frame.
+        """
+        if not positions:
+            return None
+        try:
+            r = float(radius_px)
+        except (TypeError, ValueError):
+            r = 0.0
+        if not np.isfinite(r) or r <= 0:
+            try:
+                r = 2.0 * float(psf_fwhm)
+            except (TypeError, ValueError):
+                r = 0.0
+            if not np.isfinite(r) or r <= 0:
+                r = 6.0
+            r = max(3.0, r)
+        # A runaway FWHM estimate must not shield a large patch from CR
+        # detection: only the sharp core (a few FWHM across) is flaggable,
+        # so 25 px covers every realistic PSF core with room to spare.
+        r = min(r, 25.0)
+
+        ny, nx = self.image.shape
+        out = np.zeros((ny, nx), dtype=bool)
+        n_used = 0
+        for pos in positions:
+            try:
+                px, py = float(pos[0]), float(pos[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if not (np.isfinite(px) and np.isfinite(py)):
+                continue
+            if not (0.0 <= px < nx and 0.0 <= py < ny):
+                continue
+            x0 = max(0, int(px - r))
+            x1 = min(nx, int(px + r) + 1)
+            y0 = max(0, int(py - r))
+            y1 = min(ny, int(py + r) + 1)
+            ys, xs = np.ogrid[y0:y1, x0:x1]
+            out[y0:y1, x0:x1] |= (xs - px) ** 2 + (ys - py) ** 2 <= r * r
+            n_used += 1
+
+        if n_used == 0:
+            return None
+        self.logger.info(
+            "Protecting %d known position(s) from CR detection "
+            "(radius %.1f px, %d px total).",
+            n_used,
+            r,
+            int(np.count_nonzero(out)),
+        )
+        return out
 
     # --- Cosmic Ray Mask Dilation and Hole Filling ---
     def dilate_cosmic_ray_mask(
@@ -322,6 +399,8 @@ class RemoveCosmicRays:
         dilate_factor: float = 1.0,
         dilate_iterations: int = 2,
         defect_margin_px: float = 2.0,
+        protect_positions: Optional[Sequence[Tuple[float, float]]] = None,
+        protect_radius_px: float = 0.0,
         plot: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -347,6 +426,15 @@ class RemoveCosmicRays:
                 defect mask (default: 2.0).  The defect mask marks pixels that
                 are not real data and is used for subtraction/aperture masks;
                 the much larger dilated mask is a source-exclusion halo.
+            protect_positions: Pixel positions (x, y) that must never be
+                flagged or cleaned - typically the transient target and any
+                additional fit targets.  An undersampled isolated point
+                source can read as a cosmic-ray cluster to L.A.Cosmic; a
+                flag erases real flux via median interpolation and lands in
+                the defect mask that is nulled in the difference image.
+            protect_radius_px: Radius (pixels) of the protective disk around
+                each ``protect_positions`` entry.  Non-positive falls back
+                to max(3, 2 * psf_fwhm).
             plot: If True, plot a side-by-side comparison (default: True).
 
         Returns:
@@ -403,6 +491,16 @@ class RemoveCosmicRays:
             if mask.shape != self.image.shape:
                 self.logger.warning("Mask shape doesn't match image. Ignoring mask.")
                 mask = self._create_mask(self.image, satlevel)
+
+        # Protect known-source positions (typically the transient target)
+        # from flagging and cleaning.  Pixels under these disks are added
+        # to the detector inmask, so the source keeps its real flux.
+        _protect = self._protect_positions_mask(
+            protect_positions, protect_radius_px, psf_fwhm
+        )
+        if _protect is not None:
+            mask = np.asarray(mask, dtype=bool) | _protect
+
         _n_protected = int(np.count_nonzero(mask))
         _frac_protected = _n_protected / mask.size
         self.logger.debug(
