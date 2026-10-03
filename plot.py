@@ -1887,6 +1887,7 @@ class Plot:
         import matplotlib.pyplot as plt
         from functions import set_size
         import numpy as np
+        import pandas as pd
 
         try:
             apply_autophot_mplstyle()
@@ -1911,6 +1912,30 @@ class Plot:
 
             df["dx"] = df["x_fit"] - df["x_pix"]
             df["dy"] = df["y_fit"] - df["y_pix"]
+
+            # Held sources (xy_held_psf=1) are pinned inside a ~0.5 px window
+            # because the in-window detection S/N was too low; their centroids
+            # chase noise to the bound edge and pile up in a square at +/-hold
+            # px.  That is bounded wander, not an astrometric measurement, so
+            # exclude them or they dominate the offset statistics.
+            n_held = 0
+            if "xy_held_psf" in df.columns:
+                _held = pd.to_numeric(df["xy_held_psf"], errors="coerce") == 1
+                n_held = int(_held.sum())
+                if n_held:
+                    df = df[~_held].copy()
+                    logger.info(
+                        "WCS vs PSF offset plot: excluded %d held (low-S/N "
+                        "forced-centroid) sources from the offset statistics.",
+                        n_held,
+                    )
+            if len(df) == 0:
+                logger.warning(
+                    "No free PSF fits for WCS vs PSF offset plot "
+                    "(%d held sources excluded)",
+                    n_held,
+                )
+                return
 
             # Only PSF fit errors are used; catalog position errors are not
             # propagated into the error bars.
@@ -2093,10 +2118,13 @@ class Plot:
                 fontsize="small",
             )
 
+            _n_label = f"N = {len(df_plot)}"
+            if n_held:
+                _n_label += f" (+{n_held} held)"
             ax.text(
                 0.05,
                 0.05,
-                f"N = {len(df_plot)}",
+                _n_label,
                 transform=ax.transAxes,
                 verticalalignment="bottom",
                 horizontalalignment="left",
