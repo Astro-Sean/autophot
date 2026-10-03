@@ -431,6 +431,8 @@ default_input:
     transmission_curve_map: null # dict[str,str]|null --- Optional band->throughput file map for Gaia curve-map custom catalog builds. Example: `{"g":"curves/g.dat","r":"curves/r.dat","i":"curves/i.dat"}`.
     curve_map_svo: null # dict[str,str]|null --- Optional band->SVO filter-ID map to fetch curves. Example: `{"g":"SDSS/SDSS.g","r":"SDSS/SDSS.r","i":"SDSS/SDSS.i"}`.
     catalog_radius: 0.25 # float --- Search radius (degrees) around target for catalog query.
+    catalog_query_radius_arcmin: null # float|null --- Cone radius (arcmin) for per-image catalog downloads. The driver sets this from the footprint union so the cone covers (and is limited to) the detector extent; when unset, main.py sizes it from each image's WCS, or its pixel scale when no WCS exists (clamped to 2-60 arcmin, default 10).
+    max_distance: 10 # float --- Max distance (arcmin) from the target a catalog source may sit before clean() drops it. Raised automatically to at least the resolved query radius so a widened cone is not re-trimmed.
     gaia_xp_radius_deg: 0.1667 # float --- Search radius (degrees) for Gaia XP query (if used).
     # Sparse fields may hold too few XP-spectra sources inside gaia_xp_radius_deg; the cone is then grown by gaia_xp_grow_factor until gaia_xp_min_sources are found or gaia_xp_max_radius_deg is reached. Set gaia_xp_min_sources <= 0 (or the cap <= radius) to disable.
     gaia_xp_min_sources: 25 # int --- Desired minimum XP-spectra sources; the cone grows when a query returns fewer.
