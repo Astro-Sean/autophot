@@ -11186,7 +11186,13 @@ def run_photometry():
             except Exception:
                 pass
         prelim_threshold = TargetPosition["threshold"].iloc[0]
-        perform_ForcePhotometry = False
+        # Explicit forced-photometry mode: every target position is held at
+        # the catalog coordinate.  The default adaptive mode only holds a
+        # target when its in-window detection S/N falls below
+        # fitting_xy_bounds_detect_snr.
+        perform_ForcePhotometry = bool(
+            (input_yaml.get("photometry", {}) or {}).get("force_photometry", False)
+        )
 
         # np.full sized to all rows (primary + any additional targets).
         _n_tp = len(TargetPosition)
