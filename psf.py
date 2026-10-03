@@ -10978,6 +10978,88 @@ class PSF:
         faint_mask = (snr >= 4.0) & (snr < 8.0)
         vfaint_mask = snr < 4.0
 
+        # --- S/N-adaptive centroid freedom (target fits only) ----------------
+        # A detected target may re-center within xy_bounds, which absorbs WCS
+        # error and proper motion.  A target that has faded below detection
+        # should not -- the fitter would otherwise chase the largest noise
+        # excursion inside the bound and report it as a detection.  Detection
+        # is tested anywhere inside the *free* window, so a real source
+        # displaced within the bound still counts.
+        _hold_px = phot_cfg.get("fitting_xy_bounds_hold_px", 0.5)
+        _det_snr_min = phot_cfg.get("fitting_xy_bounds_detect_snr", 4.0)
+        try:
+            _hold_px = max(0.01, float(_hold_px))  # photutils requires > 0
+        except (TypeError, ValueError):
+            _hold_px = 0.5
+        try:
+            _det_snr_min = float(_det_snr_min)
+        except (TypeError, ValueError):
+            _det_snr_min = 4.0
+        xy_hold_arr = np.zeros(len(init_params), dtype=bool)
+        detect_snr_arr = np.full(len(init_params), np.nan)
+        if bool(is_target_fit) and np.isfinite(_det_snr_min) and _det_snr_min > 0:
+            _data_e = np.asarray(ndimage.data, float)
+            _fit_mask_full = getattr(ndimage, "mask", None)
+            _rms_e = bkgrmsval * _gain_for_bkg
+            _ap_noise = max(
+                float(_rms_e) * np.sqrt(np.pi * aperture_radius ** 2), 1e-10
+            )
+            _win = max(1, int(np.ceil(xy_bounds_eff)))
+            _half = _win + int(np.ceil(aperture_radius)) + 1
+            _yy, _xx = np.ogrid[: _data_e.shape[0], : _data_e.shape[1]]
+            for _si in range(len(x)):
+                _cx, _cy = float(x[_si]), float(y[_si])
+                _x0 = max(0, int(np.floor(_cx)) - _half)
+                _x1 = min(_data_e.shape[1], int(np.ceil(_cx)) + _half + 1)
+                _y0 = max(0, int(np.floor(_cy)) - _half)
+                _y1 = min(_data_e.shape[0], int(np.ceil(_cy)) + _half + 1)
+                _sub = _data_e[_y0:_y1, _x0:_x1]
+                _ok = np.isfinite(_sub)
+                if _fit_mask_full is not None:
+                    _ok &= ~_fit_mask_full[_y0:_y1, _x0:_x1]
+                if _sub.size == 0 or _ok.mean() < 0.5:
+                    # Window mostly unusable: nothing can be verified, so
+                    # hold the position rather than let the fitter latch
+                    # onto a surviving noise island.
+                    xy_hold_arr[_si] = True
+                    continue
+                _d2 = (_yy[_y0:_y1, :] - _cy) ** 2 + (_xx[:, _x0:_x1] - _cx) ** 2
+                _cand = _ok & (_d2 <= _win ** 2)
+                if not np.any(_cand):
+                    xy_hold_arr[_si] = True
+                    continue
+                _bkg = float(np.median(_sub[_ok]))
+                _resid = np.where(_cand, _sub - _bkg, 0.0)
+                if is_difference_image:
+                    # Rising and fading sources both count as detections.
+                    _pk = int(np.argmax(np.abs(_resid)))
+                else:
+                    _pk = int(np.argmax(_resid))
+                _py, _px = np.unravel_index(_pk, _sub.shape)
+                _apd2 = (_yy[_y0:_y1, :] - (_y0 + _py)) ** 2 + (
+                    _xx[:, _x0:_x1] - (_x0 + _px)
+                ) ** 2
+                _ap = _ok & (_apd2 <= aperture_radius ** 2)
+                _ap_flux = float(np.sum(_sub[_ap] - _bkg))
+                if is_difference_image:
+                    _ap_flux = abs(_ap_flux)
+                detect_snr_arr[_si] = _ap_flux / _ap_noise
+                xy_hold_arr[_si] = not (
+                    np.isfinite(detect_snr_arr[_si])
+                    and detect_snr_arr[_si] >= _det_snr_min
+                )
+            for _si in range(len(x)):
+                log.info(
+                    "Target PSF: source %d in-window detection S/N=%s -> %s",
+                    _si,
+                    f"{detect_snr_arr[_si]:.2f}"
+                    if np.isfinite(detect_snr_arr[_si])
+                    else "n/a",
+                    f"free within {xy_bounds_eff:.2f} px"
+                    if not xy_hold_arr[_si]
+                    else f"held to {_hold_px:.2f} px (forced photometry)",
+                )
+
         # ---- Fitter --------------------------------------------------------
         # Emcee is driven only by perform_emcee_fitting_s2n. Used only when is_target_fit is True.
         # perform_emcee_fitting_s2n 0 or None: never use emcee (LSQ only).
@@ -11047,6 +11129,16 @@ class PSF:
             try:
                 emcee_delta = phot_cfg.get("emcee_delta")
                 delta = float(emcee_delta) if emcee_delta is not None else xy_bounds
+                if (
+                    is_target_fit
+                    and len(init_params) == 1
+                    and xy_hold_arr[0]
+                    and emcee_delta is None
+                ):
+                    # The position prior (p0 +/- delta on x_0/y_0) would
+                    # otherwise let an undetected target wander the full
+                    # xy_bounds under MCMC even though the LSQ bound holds it.
+                    delta = _hold_px
                 emcee_nsteps = phot_cfg.get("emcee_nsteps", 5000)
                 emcee_fitter = MCMCFitter(
                     nwalkers=int(phot_cfg.get("emcee_nwalkers", 32)),
@@ -11109,7 +11201,7 @@ class PSF:
         # Background: photutils subtracts per-source local background (annulus inner_r..outer_r)
         # from each fit-shape cutout before fitting the PSF, so the model is fit to
         # (data - local_bkg). NDData uncertainty includes background_rms in the noise model.
-        def _psf_fit(mask, inner_r, outer_r, fit_shape, fitter, use_emcee_this_tier, nd_override=None):
+        def _psf_fit(mask, inner_r, outer_r, fit_shape, fitter, use_emcee_this_tier, nd_override=None, xy_bound=None):
             if not np.any(mask):
                 return None, None
             # Copy the ePSF model per call to prevent cross-tier/cross-retry
@@ -11187,7 +11279,13 @@ class PSF:
                 localbkg = LocalBackground(
                     float(inner_r), float(outer_r), bkg_estimator=MedianBackground()
                 )
-            xy_bounds_this = _effective_xy_bounds_for_shape(fit_shape)
+            if xy_bound is None:
+                xy_bounds_this = _effective_xy_bounds_for_shape(fit_shape)
+            else:
+                # Held (undetected) sources get a near-zero bound so the
+                # centroid cannot chase noise peaks; still strictly
+                # positive because photutils rejects xy_bounds <= 0.
+                xy_bounds_this = max(0.01, float(xy_bound))
 
             if not iterative:
                 nd_for_fit = nd_override if nd_override is not None else ndimage
@@ -11569,17 +11667,28 @@ class PSF:
                 len(init_params),
                 "MCMC" if use_emcee_all else "LSQ",
             )
-            res, psfphot_last = _psf_fit(
-                all_mask, bright_inner, bright_outer,
-                fit_shape, tier_fitter_all, use_emcee_all,
-            )
-            if res is not None:
-                results.append(res)
-            else:
-                log.warning(
-                    "Target PSF fit returned None; "
-                    "may be due to convergence issues or invalid parameters."
+            # photutils takes one scalar xy_bounds per call, so held
+            # (undetected) sources are fit in a second call.  A held source
+            # carries ~zero flux, so dropping it from the joint group fit
+            # costs little deblending accuracy.
+            _bounds_plan = [(all_mask & ~xy_hold_arr, None)]
+            if np.any(all_mask & xy_hold_arr):
+                _bounds_plan.append((all_mask & xy_hold_arr, _hold_px))
+            for _sub_mask, _xb in _bounds_plan:
+                if not np.any(_sub_mask):
+                    continue
+                res, psfphot_last = _psf_fit(
+                    _sub_mask, bright_inner, bright_outer,
+                    fit_shape, tier_fitter_all, use_emcee_all,
+                    xy_bound=_xb,
                 )
+                if res is not None:
+                    results.append(res)
+                else:
+                    log.warning(
+                        "Target PSF fit returned None; "
+                        "may be due to convergence issues or invalid parameters."
+                    )
         else:
             # ---- Standard tier-based dispatch (single target or field stars) ----
             for mask, inner_r, outer_r, label in [
@@ -11600,17 +11709,24 @@ class PSF:
                         label,
                         "MCMC" if use_emcee_this else "LSQ",
                     )
-                    res, psfphot_last = _psf_fit(
-                        mask, inner_r, outer_r, fit_shape, tier_fitter, use_emcee_this
-                    )
-                    if res is not None:
-                        results.append(res)
-                    elif is_target_fit and len(sources) == 1:
-                        log.warning(
-                            "Target PSF fit returned None for %s tier; "
-                            "may be due to convergence issues or invalid parameters.",
-                            label,
+                    for _sub_mask, _xb in [
+                        (mask & ~xy_hold_arr, None),
+                        (mask & xy_hold_arr, _hold_px),
+                    ]:
+                        if not np.any(_sub_mask):
+                            continue
+                        res, psfphot_last = _psf_fit(
+                            _sub_mask, inner_r, outer_r, fit_shape,
+                            tier_fitter, use_emcee_this, xy_bound=_xb,
                         )
+                        if res is not None:
+                            results.append(res)
+                        elif is_target_fit and len(sources) == 1:
+                            log.warning(
+                                "Target PSF fit returned None for %s tier; "
+                                "may be due to convergence issues or invalid parameters.",
+                                label,
+                            )
 
         if not results:
             if is_target_fit and len(sources) == 1:
@@ -11716,15 +11832,21 @@ class PSF:
                     use_emcee_inv = _any_low_snr and emcee_fitter is not None
                     tier_fitter_inv = emcee_fitter if use_emcee_inv else lsq_fitter
                     log.debug("Fitting %d sources on inverted image (single-call fallback)...", int(retry_mask_all.sum()))
-                    res_inv, psfphot_inv = _psf_fit(
-                        retry_mask_all, bright_inner, bright_outer,
-                        fit_shape, tier_fitter_inv, use_emcee_inv,
-                        nd_override=ndimage_inverted,
-                    )
-                    if res_inv is not None:
-                        results_inverted.append(res_inv)
-                        if psfphot_inv is not None:
-                            psfphot_inverted = psfphot_inv
+                    for _sm, _xb in [
+                        (retry_mask_all & ~xy_hold_arr, None),
+                        (retry_mask_all & xy_hold_arr, _hold_px),
+                    ]:
+                        if not np.any(_sm):
+                            continue
+                        res_inv, psfphot_inv = _psf_fit(
+                            _sm, bright_inner, bright_outer,
+                            fit_shape, tier_fitter_inv, use_emcee_inv,
+                            nd_override=ndimage_inverted, xy_bound=_xb,
+                        )
+                        if res_inv is not None:
+                            results_inverted.append(res_inv)
+                            if psfphot_inv is not None:
+                                psfphot_inverted = psfphot_inv
             else:
                 # Single-target or field stars: tier-based retry
                 retry_mask_bright = bright_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
@@ -11744,14 +11866,22 @@ class PSF:
                             else lsq_fitter
                         )
                         log.debug("Fitting %d %s sources on inverted image (fallback)...", int(mask.sum()), label)
-                        res_inv, psfphot_inv = _psf_fit(
-                            mask, inner_r, outer_r, fshape, tier_fitter, use_emcee_this, nd_override=ndimage_inverted
-                        )
-                        if res_inv is not None:
-                            results_inverted.append(res_inv)
-                            # Store the psfphot object from the last successful inverted fit for plotting
-                            if psfphot_inv is not None:
-                                psfphot_inverted = psfphot_inv
+                        for _sm, _xb in [
+                            (mask & ~xy_hold_arr, None),
+                            (mask & xy_hold_arr, _hold_px),
+                        ]:
+                            if not np.any(_sm):
+                                continue
+                            res_inv, psfphot_inv = _psf_fit(
+                                _sm, inner_r, outer_r, fshape,
+                                tier_fitter, use_emcee_this,
+                                nd_override=ndimage_inverted, xy_bound=_xb,
+                            )
+                            if res_inv is not None:
+                                results_inverted.append(res_inv)
+                                # Store the psfphot object from the last successful inverted fit for plotting
+                                if psfphot_inv is not None:
+                                    psfphot_inverted = psfphot_inv
 
         # Process inverted results and replace bad normal fits where inverted succeeded
         combined_inv = None
@@ -12096,6 +12226,22 @@ class PSF:
             _snr_psf = np.abs(_fpsf) / _fpsf_err
             _snr_psf[(_fpsf_err <= 0) | ~np.isfinite(_fpsf) | ~np.isfinite(_fpsf_err)] = np.nan
         updated["snr_psf"] = _snr_psf
+
+        # In-window detection S/N and centroid-hold verdict per source;
+        # idx_keep maps init_params rows back to source-table positions.
+        # Useful for spotting epochs where the target was forced rather
+        # than measured.
+        updated["detect_snr_psf"] = np.nan
+        updated["xy_held_psf"] = np.nan
+        _det_pos = np.asarray(idx_keep, int)
+        _det_ok = (_det_pos >= 0) & (_det_pos < len(updated))
+        if np.any(_det_ok):
+            updated.iloc[
+                _det_pos[_det_ok], updated.columns.get_indexer(["detect_snr_psf"])
+            ] = detect_snr_arr[_det_ok]
+            updated.iloc[
+                _det_pos[_det_ok], updated.columns.get_indexer(["xy_held_psf"])
+            ] = xy_hold_arr[_det_ok].astype(float)
 
         # Copy difference-image PSF snapshot for rows where inverted fit replaced the primary.
         # idx_out values are POSITIONS (orig_idx = arange(len(sources))), so
