@@ -446,16 +446,21 @@ class RemoveCosmicRays:
         # Preserve NaNs (chip gaps) before cosmic ray removal
         nan_mask = np.isnan(self.image)
 
-        # --- Convert image to float32 ---
-        self.image = self.image.astype(np.float32)
+        # Work in float64 so the CR step does not quantize inputs that are
+        # already higher precision; the rest of the pipeline measures in
+        # float64 anyway.  Repaired pixels are interpolants, so the output
+        # must stay floating point even for integer inputs.
+        _out_dtype = (
+            np.float64 if self.image.dtype == np.float64 else np.float32
+        )
+        self.image = self.image.astype(np.float64)
 
-        # --- Convert optional arrays to float32 ---
         if invar is not None:
-            invar = invar.astype(np.float32)
+            invar = invar.astype(np.float64)
         if bkg is not None:
-            bkg = bkg.astype(np.float32)
+            bkg = bkg.astype(np.float64)
         if bkg_rms is not None:
-            bkg_rms = bkg_rms.astype(np.float32)
+            bkg_rms = bkg_rms.astype(np.float64)
 
         # --- Input Validation ---
         if not isinstance(self.image, np.ndarray):
@@ -525,10 +530,10 @@ class RemoveCosmicRays:
                 # low-signal regions and causing false CR detections.
                 bkg_rms = np.full_like(
                     self.image, float(readnoise) / max(gain, 1.0),
-                    dtype=np.float32,
+                    dtype=np.float64,
                 )
             else:
-                bkg_rms = np.asarray(bkg_rms, dtype=np.float32)
+                bkg_rms = np.asarray(bkg_rms, dtype=np.float64)
                 if np.any(np.isnan(bkg_rms)):
                     _finite_median = float(np.nanmedian(bkg_rms))
                     if not np.isfinite(_finite_median) or _finite_median <= 0:
@@ -552,7 +557,7 @@ class RemoveCosmicRays:
                 )
                 _poisson_data = self.image - _sky_est
             sigma = calc_total_error(_poisson_data, bkg_rms, effective_gain=gain)
-            invar = np.asarray(sigma, dtype=np.float32) ** 2
+            invar = np.asarray(sigma, dtype=np.float64) ** 2
             self.logger.debug("Computed variance map from total error.")
 
         # --- PSF Size Calculation ---
@@ -583,8 +588,20 @@ class RemoveCosmicRays:
                 self.logger.info(
                     "Using ccdproc.cosmicray_lacosmic for cosmic ray removal"
                 )
-                clean_image, cr_mask = cosmicray_lacosmic(
-                    self.image,
+                # cosmicray_lacosmic takes no inmask kwarg: the exclusion
+                # mask travels on the CCDData.mask attribute.  A CCDData
+                # input also returns a single object (mask updated in
+                # place), not astroscrappy's (crmask, cleanarr) tuple.
+                import astropy.units as _u
+                from astropy.nddata import CCDData as _CCDData
+
+                _ccd = _CCDData(
+                    np.asarray(self.image, dtype=np.float64),
+                    unit=_u.adu,
+                    mask=np.asarray(mask, dtype=bool),
+                )
+                _out = cosmicray_lacosmic(
+                    _ccd,
                     sigclip=sigclip,
                     sigfrac=sigfrac,
                     objlim=objlim,
@@ -605,18 +622,36 @@ class RemoveCosmicRays:
                     gain_apply=False,
                     inbkg=bkg,
                     invar=invar,
-                    inmask=mask,
                 )
+                clean_image = np.asarray(
+                    _out.data if hasattr(_out, "data") else _out[0],
+                    dtype=np.float64,
+                )
+                # The returned mask unions the input mask with detected CRs;
+                # strip the input exclusion so cr_mask is detections only.
+                _out_mask = np.asarray(
+                    _out.mask if hasattr(_out, "mask") else _out[1],
+                    dtype=bool,
+                )
+                cr_mask = _out_mask & ~np.asarray(mask, dtype=bool)
             else:
                 self.logger.debug("Using astroscrappy for cosmic ray removal")
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
+                    # astroscrappy's Cython kernels are typed to float32
+                    # buffers; the working arrays are float64.
                     cr_mask, clean_image = astroscrappy.detect_cosmics(
-                        self.image,
-                        inmask=mask,
+                        np.asarray(self.image, dtype=np.float32),
+                        inmask=np.asarray(mask, dtype=bool),
                         gain=gain,
-                        inbkg=bkg,
-                        invar=invar,
+                        inbkg=(
+                            None if bkg is None else np.asarray(bkg, np.float32)
+                        ),
+                        invar=(
+                            None
+                            if invar is None
+                            else np.asarray(invar, np.float32)
+                        ),
                         readnoise=readnoise,
                         satlevel=satlevel,
                         sepmed=True,
@@ -690,9 +725,14 @@ class RemoveCosmicRays:
             )
 
             # --- Return the cleaned image and masks ---
-            # Restore NaNs (chip gaps) after cosmic ray removal
+            # Restore NaNs (chip gaps) after cosmic ray removal and match
+            # the input's precision (float64 in, float64 out).
             clean_image[nan_mask] = np.nan
-            return clean_image, processed_mask, defect_mask
+            return (
+                clean_image.astype(_out_dtype, copy=False),
+                processed_mask,
+                defect_mask,
+            )
 
         # --- Error Handling ---
         except Exception as e:

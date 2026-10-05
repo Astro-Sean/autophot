@@ -538,6 +538,73 @@ def _skycoord_dedup_keep_one(catalog_df, sep_threshold_arcsec=0.1):
     return catalog_df[~drop].reset_index(drop=True)
 
 
+def _drop_fainter_blended_neighbors(
+    catalog_df, mag_col, radius_arcsec=6.0, dmag=3.0
+):
+    """
+    Drop catalog entries that sit within ``radius_arcsec`` of another entry
+    at least ``dmag`` magnitudes brighter in ``mag_col``.
+
+    Some catalogs (notably Pan-STARRS) contain spurious faint entries within
+    a few arcsec of a bright star; the measured flux at that position is the
+    bright star's, so the faint entry lands on a false zeropoint locus and
+    can hijack the linearity fit.  Even when the faint entry is a real
+    companion, its photometry is dominated by the neighbour, so dropping it
+    costs nothing for calibration.
+
+    Parameters
+    ----------
+    catalog_df : pd.DataFrame  - must contain "RA", "DEC" (degrees) and mag_col
+    mag_col : str              - magnitude column used for the brightness test
+    radius_arcsec : float      - neighbour search radius
+    dmag : float               - minimum magnitude difference that marks the
+                                 fainter member as contaminated
+
+    Returns
+    -------
+    pd.DataFrame - catalog with the fainter member of each such pair removed
+    """
+    import numpy as np
+
+    if catalog_df is None or len(catalog_df) < 2:
+        return catalog_df
+    if (
+        not {"RA", "DEC"}.issubset(catalog_df.columns)
+        or mag_col not in catalog_df.columns
+    ):
+        return catalog_df
+
+    ra = pd.to_numeric(catalog_df["RA"], errors="coerce").to_numpy(dtype=float)
+    dec = pd.to_numeric(catalog_df["DEC"], errors="coerce").to_numpy(dtype=float)
+    mags = pd.to_numeric(catalog_df[mag_col], errors="coerce").to_numpy(
+        dtype=float
+    )
+    cosd = np.cos(np.deg2rad(np.nan_to_num(dec, nan=0.0)))
+    radius_deg = radius_arcsec / 3600.0
+
+    n = len(catalog_df)
+    drop = np.zeros(n, dtype=bool)
+    # Chunked N^2: catalogs are ~1e2-1e3 rows, but bound memory anyway.
+    block = 1024
+    col_idx = np.arange(n)
+    for s in range(0, n, block):
+        e = min(s + block, n)
+        dra = (ra[s:e, None] - ra[None, :]) * cosd[None, :]
+        ddec = dec[s:e, None] - dec[None, :]
+        sep_deg = np.hypot(dra, ddec)
+        # dm[i, j] < 0 means neighbour j is brighter than source i.
+        dm = mags[None, :] - mags[s:e, None]
+        is_self = (np.arange(s, e)[:, None] == col_idx[None, :])
+        contaminated = (
+            (sep_deg <= radius_deg)
+            & (dm <= -dmag)
+            & np.isfinite(dm)
+            & ~is_self
+        )
+        drop[s:e] = np.any(contaminated, axis=1)
+    return catalog_df[~drop].reset_index(drop=True)
+
+
 # =============================================================================
 # Spatial coverage helpers
 # =============================================================================
@@ -2453,7 +2520,12 @@ class Catalog:
                             cen_ra, cen_dec = image_wcs.wcs.crval
                             max_distance_threshold = 4 * 3600.0
 
-                    dra = (ra_values - cen_ra) * np.cos(np.radians(cen_dec))
+                    # Wrap the RA offset across 0/360 deg - a field centred
+                    # on RA ~0.1 with catalog entries at 359.9 otherwise
+                    # measures dra ~ 360 deg and drops every valid source.
+                    dra = (
+                        _unwrap_ra_near(ra_values, cen_ra) - cen_ra
+                    ) * np.cos(np.radians(cen_dec))
                     ddec = dec_values - cen_dec
                     distance = np.sqrt(dra**2 + ddec**2) * 3600.0  # arcseconds
                     valid_indices = distance < max_distance_threshold
@@ -2595,6 +2667,45 @@ class Catalog:
                         f"Filter column '{image_filter}' not found in output catalog; "
                         f"available columns: {list(outputCatalog.columns)}"
                     )
+
+                # Drop entries sharing a position with a much brighter
+                # catalog source.  Pan-STARRS in particular carries spurious
+                # faint rows within a few arcsec of bright stars; whether the
+                # faint entry is an artifact or a real companion, its measured
+                # flux is dominated by the neighbour, so it cannot calibrate.
+                cat_cfg = self.input_yaml.get("catalog", {}) or {}
+                try:
+                    blend_radius = float(
+                        cat_cfg.get("blend_neighbor_radius_arcsec", 6.0)
+                    )
+                    blend_dmag = float(
+                        cat_cfg.get("blend_neighbor_dmag", 3.0)
+                    )
+                except (TypeError, ValueError):
+                    blend_radius, blend_dmag = 6.0, 3.0
+                if (
+                    blend_radius > 0
+                    and blend_dmag > 0
+                    and image_filter in outputCatalog.columns
+                    and not outputCatalog.empty
+                ):
+                    n_blend = len(outputCatalog)
+                    outputCatalog = _drop_fainter_blended_neighbors(
+                        outputCatalog,
+                        mag_col=image_filter,
+                        radius_arcsec=blend_radius,
+                        dmag=blend_dmag,
+                    )
+                    n_blend -= len(outputCatalog)
+                    if n_blend > 0:
+                        logger.info(
+                            "Removed %d sources within %.1f arcsec of a "
+                            ">%.1f-mag-brighter catalog neighbour "
+                            "(blend/artifact rejection)",
+                            n_blend,
+                            blend_radius,
+                            blend_dmag,
+                        )
 
             # Final deduplication before returning.
             if not outputCatalog.empty and {"RA", "DEC"}.issubset(outputCatalog.columns):
@@ -3824,13 +3935,27 @@ class Catalog:
                     slope_constraint=1.0, slope_tolerance=0  # slope fixed to 1
                 )
                 # Residual threshold adapts to the scatter in this field.
-                initial_mad = np.median(np.abs(y_fit - np.median(y_fit)))
-                ransac_residual_threshold = max(3.0 * initial_mad, 0.1)
+                # The MAD must be taken on the slope-1 residuals (y - x, the
+                # per-source ZP deltas), NOT on the catalog magnitudes y
+                # themselves: a field spanning several magnitudes otherwise
+                # yields a threshold of a few mag and RANSAC accepts every
+                # locus, including the bogus one.
+                _delta_fit = y_fit - X_fit.flatten()
+                initial_mad = np.median(
+                    np.abs(_delta_fit - np.median(_delta_fit))
+                )
+                ransac_residual_threshold = max(
+                    3.0 * 1.4826 * initial_mad, 0.15
+                )
                 ransac = RANSACRegressor(
                     estimator=base_estimator,
                     residual_threshold=ransac_residual_threshold,
                     max_trials=500,
                     min_samples=0.25,
+                    # Fixed seed: the inlier set feeds the ZP calibration
+                    # chain, so the same image must give the same calibrators
+                    # (and the same zeropoint) on every run.
+                    random_state=42,
                 )
                 ransac.fit(X_fit, y_fit)
                 slope = ransac.estimator_.slope_
@@ -3839,6 +3964,38 @@ class Catalog:
                 # Inliers are computed on the FULL catalog, not the fit subset.
                 residuals_full = y_full - (slope * X_full.flatten() + intercept)
                 inlier_mask = np.abs(residuals_full) < ransac_residual_threshold
+
+                # Majority-locus guard: the high-S/N fit subset can be
+                # dominated by catalog artifacts (spurious faint entries
+                # coincident with bright stars inherit the bright flux and
+                # its S/N, so they top the S/N ladder on noisy images).
+                # The median per-source offset over the FULL clean catalog
+                # tracks the majority locus instead; if it collects more
+                # inliers than the RANSAC model, re-anchor on it.
+                zp_median = np.nanmedian(y_full - X_full.flatten())
+                resid_median = (y_full - X_full.flatten()) - zp_median
+                mad_median = 1.4826 * np.nanmedian(
+                    np.abs(resid_median - np.nanmedian(resid_median))
+                )
+                median_band = max(3.0 * mad_median, 0.3)
+                median_inlier_mask = np.abs(resid_median) < median_band
+                if np.sum(median_inlier_mask) > np.sum(inlier_mask):
+                    logger.warning(
+                        "Linearity fit anchored on a minority locus "
+                        "(%d/%d inliers); the median offset ZP=%.3f supports "
+                        "%d/%d - re-anchoring on the majority locus. Check "
+                        "the catalog for blended/spurious entries.",
+                        int(np.sum(inlier_mask)),
+                        len(X_full),
+                        zp_median,
+                        int(np.sum(median_inlier_mask)),
+                        len(X_full),
+                    )
+                    intercept = zp_median
+                    slope = 1.0
+                    residuals_full = resid_median
+                    inlier_mask = median_inlier_mask
+                    ransac_residual_threshold = median_band
 
                 # Post-RANSAC sigma clip on the full-catalog inliers;
                 # sigma=3.0 (not 2.5) is more stable for small samples.
@@ -4083,7 +4240,7 @@ class Catalog:
                         f"    Skipping robust selection."
                     )
                     clean_catalog = clean_catalog[inlier_mask] if n_clean == n_inlier_mask else clean_catalog
-                    return clean_catalog, saturation_range
+                    return clean_catalog, fit_params, saturation_range
                 
                 inlier_catalog = clean_catalog[inlier_mask].copy()
                 inlier_flux = flux[inlier_mask]
@@ -4275,9 +4432,19 @@ class Catalog:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
             logger.error(
-                f"Error in build_psf: {exc_type} in {fname} at line {exc_tb.tb_lineno}: {str(e)}"
+                f"Error in check_saturation_range: {exc_type} in {fname} at line {exc_tb.tb_lineno}: {str(e)}"
             )
-            return catalog, fit_params, saturation_range
+            # Fail closed, not open: the caller feeds the returned catalog
+            # straight into the ZP fit, so returning the raw input would
+            # silently calibrate on saturated/non-linear sources.  The
+            # 0.5-mag combined-error cut is the one vetting step that does
+            # not depend on the failed fit - apply it if we got that far.
+            _fallback = (
+                clean_catalog
+                if "clean_catalog" in locals() and clean_catalog is not None
+                else catalog
+            )
+            return _fallback, fit_params, saturation_range
 
     # =============================================================================
     # =============================================================================
@@ -4564,8 +4731,11 @@ class Catalog:
                 logger.warning(
                     f"Star {i} at position {position} skipped due to error: {e}"
                 )
-                for key in metrics:
-                    metrics[key].append(np.nan)
+                # Do NOT append NaN to metrics here: metrics arrays must stay
+                # aligned with valid_indices (and hence with profile_mask /
+                # combined_mask), or metrics[key][combined_mask] below would
+                # misassign per-source diagnostics or raise on a length
+                # mismatch whenever a source raises mid-loop.
 
         for key in metrics:
             metrics[key] = np.array(metrics[key])
@@ -4578,14 +4748,14 @@ class Catalog:
             sigma=threshold,
             masked=True,
             cenfunc=np.nanmedian,
-            stdfunc=np.nanstd,
+            stdfunc=mad_std,
         )
         sharpness_sigma_clip = sigma_clip(
             metrics["sharpness"],
             sigma=threshold,
             masked=True,
             cenfunc=np.nanmedian,
-            stdfunc=np.nanstd,
+            stdfunc=mad_std,
         )
 
         roundness_mask = np.isfinite(metrics["roundness"]) & ~roundness_sigma_clip.mask
@@ -4781,7 +4951,10 @@ class Catalog:
         # mag() does not mutate flux_AP.
         instMag = mag(selectedCatalog["flux_AP"])
         inst_col = "inst_" + self.input_yaml["imageFilter"] + "_AP"
-        selectedCatalog[inst_col] = np.round(instMag, 3)
+        # Keep full float64 precision - this column feeds the zeropoint
+        # fit, and 1-mmag rounding is unnecessary quantization on sparse
+        # calibrator fields.
+        selectedCatalog[inst_col] = instMag
 
         sourceSNR = snr(selectedCatalog["maxPixel"], selectedCatalog["noiseSky"])
         selectedCatalog["snr"] = np.round(sourceSNR, 1)

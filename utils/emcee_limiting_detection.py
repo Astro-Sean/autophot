@@ -287,6 +287,14 @@ def main() -> int:
                     epsf_model.evaluate(x=gx, y=gy, flux=F, x_0=x_inj, y_0=y_inj),
                     dtype=float,
                 )
+                # Realize the source's own shot noise (same model as
+                # limits.py): without it only the sky fluctuates and the
+                # completeness transition is artificially sharp.
+                if args.gain > 0:
+                    psf_e = np.clip(psf_img * float(args.gain), 0.0, None)
+                    psf_img = psf_img + (
+                        rng.poisson(psf_e) - psf_e
+                    ) / float(args.gain)
                 new_img = cut + psf_img
 
                 # Beta (aperture-based)

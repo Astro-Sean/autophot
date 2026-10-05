@@ -144,25 +144,27 @@ class AlignmentVerifier:
             ref_val = ref_header.get(param, None)
             
             if sci_val is not None and ref_val is not None:
+                try:
+                    diff = abs(float(sci_val) - float(ref_val))
+                except (TypeError, ValueError):
+                    # One malformed card should not abort the whole check.
+                    continue
                 if param.startswith('CRVAL'):  # World coordinates - small tolerance
                     tolerance = 1e-6  # degrees
-                    diff = abs(float(sci_val) - float(ref_val))
                     if diff > tolerance:
                         results['consistent'] = False
                         results['issues'].append(f"{param} differs by {diff:.8f} deg")
                     results['differences'][param] = diff
-                    
+
                 elif param.startswith('CRPIX'):  # Pixel coordinates - very small tolerance
                     tolerance = 0.01  # pixels
-                    diff = abs(float(sci_val) - float(ref_val))
                     if diff > tolerance:
                         results['consistent'] = False
                         results['issues'].append(f"{param} differs by {diff:.3f} px")
                     results['differences'][param] = diff
-                    
+
                 elif param.startswith('CDELT'):  # Pixel scale - small tolerance
                     tolerance = 1e-6  # degrees/pixel
-                    diff = abs(float(sci_val) - float(ref_val))
                     if diff > tolerance:
                         results['consistent'] = False
                         results['issues'].append(f"{param} differs by {diff:.8f} deg/px")
@@ -401,10 +403,15 @@ class AlignmentVerifier:
         # Panels in a row share the same y extent; repeat labels add clutter.
         ax_ref.tick_params(axis='y', labelleft=False)
 
+        # NaN edges from resampling would otherwise poison the percentile
+        # and leave a blank panel.
+        _diff_p99 = np.nanpercentile(np.abs(diff_data), 99)
+        if not np.isfinite(_diff_p99) or _diff_p99 <= 0:
+            _diff_p99 = 1.0
         im = ax_diff.imshow(
             diff_data, cmap=_cmap, origin='lower',
-            vmin=-np.percentile(np.abs(diff_data), 99),
-            vmax=np.percentile(np.abs(diff_data), 99),
+            vmin=-_diff_p99,
+            vmax=_diff_p99,
         )
         overlay_mask_hatch(ax_diff, ~np.isfinite(np.asarray(diff_data)))
         ax_diff.set_title('Difference (Science - Reference)')

@@ -2330,6 +2330,18 @@ class Limits:
                 
             sourceNum = int(len(injection_df))
 
+            if sourceNum < 10:
+                # Repeated jittered trials share a site, so the effective
+                # sample is sourceNum, not sourceNum x reps: a few-site
+                # limit carries site-selection bias its binomial error
+                # does not capture.
+                logger.warning(
+                    "Limiting-magnitude injection uses only %d independent "
+                    "site(s); the reported limit is a few-site estimate "
+                    "whose error does not include site-selection bias.",
+                    sourceNum,
+                )
+
             H_final, W_final = cutout.shape
 
             # Largest target-centred injection radius that keeps a
@@ -3490,6 +3502,29 @@ class Limits:
         if x.size < 30:
             raise RuntimeError(f"Too few trials for logistic_emcee fit (N={x.size}).")
 
+        p_t = float(np.clip(completeness_target, 1e-6, 1.0 - 1e-6))
+        n_det = float(np.sum(y))
+        if n_det == 0.0 or n_det == float(x.size):
+            # A one-sided grid contains no information about the transition;
+            # the posterior would be set by the prior bounds, not the data.
+            raise RuntimeError(
+                "Completeness grid is one-sided (all detections or all "
+                "misses); the transition is not sampled."
+            )
+        # The target completeness must be bracketed by the empirical
+        # recovery fractions at the grid ends; otherwise the fit can return
+        # a prior-dominated m50 that looks like a measurement.
+        emp_ends = []
+        for m in (float(np.min(x)), float(np.max(x))):
+            mm = x == m
+            emp_ends.append(float(np.mean(y[mm])))
+        if not (emp_ends[1] <= p_t <= emp_ends[0]):
+            raise RuntimeError(
+                "Completeness target %.2f not bracketed by grid ends "
+                "(recovery %.2f -> %.2f); refusing prior-dominated fit."
+                % (p_t, emp_ends[0], emp_ends[1])
+            )
+
         def log_prior(theta):
             m50, log_s = theta
             if not np.isfinite(m50) or not np.isfinite(log_s):
@@ -3541,18 +3576,70 @@ class Limits:
         if flat.shape[0] < 50:
             raise RuntimeError("Too few posterior samples after burn-in.")
 
+        # Enforce convergence rather than trusting a chain that happened to
+        # finish: R-hat, ESS, and acceptance fraction are checked and a
+        # non-converged fit falls back to the bisection result upstream.
+        try:
+            from utils.mcmc_diagnostics import assess_convergence
+
+            _conv = assess_convergence(
+                # emcee returns (steps, walkers, params); the diagnostics
+                # want (walkers, steps, params).
+                np.transpose(
+                    sampler.get_chain(discard=discard), (1, 0, 2)
+                ),
+                sampler.acceptance_fraction,
+            )
+            if not _conv.converged:
+                raise RuntimeError(
+                    "logistic_emcee chain failed convergence checks "
+                    "(flags=0x%x, rhat=%s, ess=%s, acc=%.3f)."
+                    % (
+                        int(_conv.flags),
+                        (
+                            "%.3f" % _conv.rhat
+                            if np.isfinite(_conv.rhat)
+                            else "nan"
+                        ),
+                        (
+                            "%.0f" % _conv.n_eff
+                            if np.isfinite(_conv.n_eff)
+                            else "nan"
+                        ),
+                        float(_conv.acceptance_fraction),
+                    )
+                )
+        except ImportError:
+            logger.debug(
+                "utils.mcmc_diagnostics unavailable; skipping convergence check."
+            )
+
         m50_samp = flat[:, 0]
         s_samp = np.exp(flat[:, 1])
         # Transform each posterior sample to the magnitude at which completeness
         # equals completeness_target (m = m50 + s*ln((1-p)/p); reduces to m50
         # for p=0.5) so non-50% targets get the correct posterior.
-        p_t = float(np.clip(completeness_target, 1e-6, 1.0 - 1e-6))
         m_targ_samp = m50_samp + s_samp * np.log((1.0 - p_t) / p_t)
         m50 = float(np.nanmedian(m_targ_samp))
         m50_err = float(
             0.5
             * (np.nanpercentile(m_targ_samp, 84) - np.nanpercentile(m_targ_samp, 16))
         )
+
+        # Reject posteriors pinned to the prior edge or landing far outside
+        # the sampled grid - both mean the likelihood did not locate m50.
+        _x_lo, _x_hi = float(np.min(x)), float(np.max(x))
+        _edge = np.abs(m50_samp - float(m_guess)) > 4.9
+        if (
+            not (_x_lo - 1.0 <= m50 <= _x_hi + 1.0)
+            or float(np.mean(_edge)) > 0.5
+        ):
+            raise RuntimeError(
+                "logistic_emcee result (%.3f) lies outside the sampled grid "
+                "[%.2f, %.2f] or is pinned at the prior bound; the data did "
+                "not constrain the transition."
+                % (m50, _x_lo, _x_hi)
+            )
 
         # Always write a diagnostic plot for the logistic completeness fit.
         try:

@@ -104,7 +104,7 @@ def _measure_term_for_dir(image_dir, use_filter, calib_path=None):
     from zeropoint import Zeropoint
 
     if calib_path is None:
-        cands = glob.glob(os.path.join(image_dir, "Calib_*.csv"))
+        cands = sorted(glob.glob(os.path.join(image_dir, "Calib_*.csv")))
         if not cands:
             return None
         calib_path = cands[0]

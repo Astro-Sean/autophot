@@ -2676,7 +2676,22 @@ class WCSSolver:
                                     for _cx, _cy in [(0,0), (_nx-1,0), (0,_ny-1), (_nx-1,_ny-1)]:
                                         _ra_s, _dec_s = _mw.all_pix2world(_cx, _cy, 0)
                                         _ra_t, _dec_t = _mw.wcs_pix2world(_cx, _cy, 0)
-                                        _delta = np.sqrt((_ra_s-_ra_t)**2 + (_dec_s-_dec_t)**2) * 3600
+                                        # Small-angle separation: wrap dRA
+                                        # and project by cos(dec), else a
+                                        # high-dec or RA=0 field reports a
+                                        # spuriously large correction.
+                                        _dra = (
+                                            _ra_s - _ra_t + 180.0
+                                        ) % 360.0 - 180.0
+                                        _ddec = _dec_s - _dec_t
+                                        _cosd = np.cos(
+                                            np.deg2rad(
+                                                0.5 * (_dec_s + _dec_t)
+                                            )
+                                        )
+                                        _delta = np.sqrt(
+                                            (_dra * _cosd) ** 2 + _ddec**2
+                                        ) * 3600
                                         _delta_px = _delta / max(_pixscale, 0.01)
                                         _max_sip_px = max(_max_sip_px, _delta_px)
                                     if _max_sip_px > _sip_thresh_px:
@@ -2725,8 +2740,24 @@ class WCSSolver:
                                                         for _cx, _cy in [(0,0), (_nx-1,0), (0,_ny-1), (_nx-1,_ny-1)]:
                                                             _ra_s, _dec_s = _lw.all_pix2world(_cx, _cy, 0)
                                                             _ra_t, _dec_t = _lw.wcs_pix2world(_cx, _cy, 0)
-                                                            _delta = np.sqrt((_ra_s-_ra_t)**2 + (_dec_s-_dec_t)**2) * 3600
-                                                            _delta_px = _delta / max(_pixscale, 0.01)
+                                                            _dra = (
+                                                                _ra_s - _ra_t
+                                                                + 180.0
+                                                            ) % 360.0 - 180.0
+                                                            _ddec = _dec_s - _dec_t
+                                                            _cosd = np.cos(
+                                                                np.deg2rad(
+                                                                    0.5
+                                                                    * (_dec_s + _dec_t)
+                                                                )
+                                                            )
+                                                            _delta = np.sqrt(
+                                                                (_dra * _cosd) ** 2
+                                                                + _ddec**2
+                                                            ) * 3600
+                                                            _delta_px = _delta / max(
+                                                                _pixscale, 0.01
+                                                            )
                                                             _lmax = max(_lmax, _delta_px)
                                                         if _lmax <= _sip_thresh_px:
                                                             logger.info(
@@ -3094,7 +3125,9 @@ class WCSSolver:
                     crval2_in = float(self.header.get("CRVAL2", np.nan))
                     crval1_sv = float(wcs_header.get("CRVAL1", np.nan))
                     crval2_sv = float(wcs_header.get("CRVAL2", np.nan))
-                    dra_arcsec = (crval1_sv - crval1_in) * 3600.0
+                    dra_arcsec = (
+                        (crval1_sv - crval1_in + 180.0) % 360.0 - 180.0
+                    ) * 3600.0
                     ddec_arcsec = (crval2_sv - crval2_in) * 3600.0
                     logger.info(
                         "WCS header delta: CTYPE (%s, %s) -> (%s, %s) | "

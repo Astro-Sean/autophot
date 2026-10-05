@@ -233,15 +233,26 @@ class Zeropoint:
         -------
         zp_params : dict  keyed by 'AP' and 'PSF'
         """
+        def _empty_entry():
+            return {
+                "zeropoint": np.nan,
+                "zeropoint_error": np.nan,
+                "zeropoint_error_stat": np.nan,
+                "zeropoint_scatter": np.nan,
+                "bootstrap_se": np.nan,
+                "n_eff": np.nan,
+                "n_sources": 0,
+                "n_inliers": 0,
+                "fit_method": "median_fallback",
+                "reliable": False,
+                "reliability_flags": ["no usable calibrators"],
+                "has_color_term": False,
+            }
+
         zp_params = {}
         if catalog is None or getattr(catalog, "empty", False) or len(catalog) == 0:
             for flux_type in ["AP", "PSF"]:
-                zp_params[flux_type] = {
-                    "zeropoint": np.nan,
-                    "zeropoint_error": np.nan,
-                    "n_sources": 0,
-                    "has_color_term": False,
-                }
+                zp_params[flux_type] = _empty_entry()
             return zp_params
         use_filter = self._normalize_filter(use_filter)
         # Aperture correction is applied at photometry stage (main.py), not here.
@@ -249,29 +260,17 @@ class Zeropoint:
 
         for flux_type in ["AP", "PSF"]:
             fcol = f"flux_{flux_type}"
-            if fcol not in catalog.columns:
-                zp_params[flux_type] = {
-                    "zeropoint": np.nan,
-                    "zeropoint_error": np.nan,
-                    "n_sources": 0,
-                    "has_color_term": False,
-                }
-                continue
-
-            if use_filter not in catalog.columns:
-                zp_params[flux_type] = {
-                    "zeropoint": np.nan,
-                    "zeropoint_error": np.nan,
-                    "n_sources": 0,
-                    "has_color_term": False,
-                }
+            if fcol not in catalog.columns or use_filter not in catalog.columns:
+                zp_params[flux_type] = _empty_entry()
                 continue
 
             flux = np.asarray(catalog[fcol].values, float)
             catmag = np.asarray(catalog[use_filter].values, float)
 
             ok = np.isfinite(flux) & (flux > 0) & np.isfinite(catmag)
-            if ok.sum() == 0:
+            n_d = int(ok.sum())
+            mad_raw = np.nan
+            if n_d == 0:
                 median_zp = mad_zp = np.nan
             else:
                 delta = catmag[ok] - (-2.5 * np.log10(flux[ok]))
@@ -285,13 +284,48 @@ class Zeropoint:
                 )
                 # SE(median) ~ 1.858 * MAD/sqrt(N); use MAD as fallback if N < 2
                 mad_zp = (1.858 * mad_raw / np.sqrt(n_d)) if n_d >= 2 else mad_raw
+                # Same N-scaled error floor as fit_zeropoint: a single-point
+                # MAD is 0, which would otherwise report error = 0.
+                if np.isfinite(mad_zp) and n_d >= 1:
+                    mad_zp = max(
+                        mad_zp, max(0.001, 0.02 * max(0, 5 - n_d) / 5.0)
+                    )
 
+            # Same field-level systematic term as fit_zeropoint.
+            mad_stat = mad_zp
+            _sys_zp = float(
+                (self.input_yaml.get("zeropoint", {}) or {}).get(
+                    "systematic_err", 0.0
+                )
+                or 0.0
+            )
+            if _sys_zp > 0 and np.isfinite(mad_zp):
+                mad_zp = float(np.hypot(mad_zp, _sys_zp))
+
+            _fb_flags = []
+            if not np.isfinite(median_zp):
+                _fb_flags.append("non-finite zeropoint")
+            elif n_d < 3:
+                _fb_flags.append(f"very few calibrators (N={n_d})")
             zp_params[flux_type] = {
                 "zeropoint": median_zp,
                 "zeropoint_error": mad_zp,
-                "n_sources": int(ok.sum()),
+                "zeropoint_error_stat": mad_stat,
+                "zeropoint_scatter": (
+                    float(1.4826 * mad_raw)
+                    if np.isfinite(mad_raw)
+                    else np.nan
+                ),
+                "bootstrap_se": np.nan,
+                "n_eff": np.nan,
+                "n_sources": n_d,
+                "n_inliers": n_d,
+                "fit_method": "median_fallback",
+                "reliable": not _fb_flags,
                 "has_color_term": False,
             }
+            if _fb_flags:
+                zp_params[flux_type]["reliability_flags"] = _fb_flags
         return zp_params
 
     @staticmethod
@@ -529,7 +563,7 @@ class Zeropoint:
 
         Returns
         -------
-        (flux, flux_err, catmag, catmag_err, vmask) or None if < 3 rows survive
+        (flux, flux_err, catmag, catmag_err, vmask) or None if < 2 rows survive
         """
         fcol = f"flux_{flux_type}"
         ecol = f"flux_{flux_type}_err"
@@ -829,6 +863,55 @@ class Zeropoint:
                         fwhm_min_src,
                     )
 
+            # Reject sources with pathological PSF-fit quality (blends,
+            # non-converged fits, CRs).  Upper-tail MAD clip on each
+            # available diagnostic; |cfit| is used because centroid bias
+            # is bad in either direction.  A source that failed PSF
+            # fitting is a suspect calibrator even if aperture
+            # photometry looks clean.
+            psf_q_sigma = float(zp_cfg.get("psf_fit_reject_sigma", 4.0))
+            psf_q_mask = np.zeros(len(sources), dtype=bool)
+            if psf_q_sigma > 0:
+                for _qc, _use_abs in (
+                    ("qfit", False),
+                    ("cfit", True),
+                    ("reduced_chi2", False),
+                ):
+                    if _qc not in sources.columns:
+                        continue
+                    _qv = pd.to_numeric(sources[_qc], errors="coerce").to_numpy(
+                        dtype=float
+                    )
+                    if _use_abs:
+                        _qv = np.abs(_qv)
+                    _qfin = np.isfinite(_qv)
+                    if int(_qfin.sum()) < fwhm_min_src:
+                        continue
+                    _v = _qv[_qfin]
+                    _qmed = float(np.nanmedian(_v))
+                    _qmad = float(mad_std(_v))
+                    if not np.isfinite(_qmad) or _qmad <= 0:
+                        # Identical values: sigma_clip returns an empty
+                        # mask on zero MAD, so any deviation is flagged.
+                        _qmad = 1e-6
+                    _bad = _v > _qmed + psf_q_sigma * _qmad
+                    psf_q_mask[np.flatnonzero(_qfin)[_bad]] = True
+                n_psfq = int(psf_q_mask.sum())
+                if (
+                    n_psfq > 0
+                    and len(sources) - n_psfq < fwhm_min_keep
+                ):
+                    logger.debug(
+                        "Skipping PSF-fit-quality rejection: would leave %d "
+                        "calibrators (< %d).",
+                        len(sources) - n_psfq,
+                        fwhm_min_keep,
+                    )
+                    psf_q_mask = np.zeros(len(sources), dtype=bool)
+                    n_psfq = 0
+                if n_psfq > 0:
+                    removed_parts.append(f"{n_psfq} PSF-fit-outlier")
+
             mask = (
                 valid_mags
                 & (sources[filter_col] >= upperMaglimit)
@@ -838,6 +921,7 @@ class Zeropoint:
                 & (~saturated_mask)
                 & (~flags_mask)
                 & (~fwhm_mask)
+                & (~psf_q_mask)
             )
             cleaned = sources.loc[mask].copy()
             detail = f" (removed: {', '.join(removed_parts)})" if removed_parts else ""
@@ -955,12 +1039,29 @@ class Zeropoint:
                         cenfunc=np.nanmedian,
                         stdfunc=mad_std,
                     )
-                    # SE(median) ~ 1.858 * MAD/sqrt(N); use MAD as fallback if N < 2
-                    image_zp_err = (
-                        (1.858 * mad_val / np.sqrt(n_valid))
-                        if n_valid >= 2
-                        else mad_val
+                    # mad_std already returns 1.4826*MAD (a sigma estimate),
+                    # so SE(median) = 1.2533 * mad_std / sqrt(N).  Using the
+                    # raw-MAD factor 1.858 here double-counts the scaling and
+                    # inflates the error by 1.48x.  For N < 2 the MAD is 0,
+                    # so fall back to the per-source propagated error.
+                    if n_valid >= 2:
+                        image_zp_err = float(1.2533 * mad_val / np.sqrt(n_valid))
+                    elif n_valid == 1:
+                        image_zp_err = float(zp_err_arr[valid][0])
+                    else:
+                        image_zp_err = np.nan
+
+                # Same field-level systematic term as fit_zeropoint:
+                # correlated calibration systematics do not average down
+                # with N and are invisible to the scatter-based error.
+                _sys_zp = float(
+                    (self.input_yaml.get("zeropoint", {}) or {}).get(
+                        "systematic_err", 0.0
                     )
+                    or 0.0
+                )
+                if _sys_zp > 0 and np.isfinite(image_zp_err):
+                    image_zp_err = float(np.hypot(image_zp_err, _sys_zp))
 
                 src[f"mask_{method}"] = mask
                 sources.loc[src.index, src.columns] = src
@@ -979,6 +1080,114 @@ class Zeropoint:
     # -----------------------------------------------------------------------
     # ODR fit helper: proper X and Y error handling for slope=1 fits
     # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _crude_mode(values):
+        """
+        Crude-mode center of a 1-D sample: median of the densest
+        fixed-width histogram bin.
+
+        A plain median sits between loci when the sample splits close to
+        50/50; the densest bin lands on the dominant population.  Used to
+        seed the iterative sigma clip in _odr_slope1_fit.
+        """
+        v = np.asarray(values, float)
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            return np.nan
+        if v.size < 8:
+            return float(np.median(v))
+        iqr = np.subtract(*np.percentile(v, [75, 25]))
+        bin_w = max(0.1, iqr / 4.0)
+        edges = np.arange(
+            float(v.min()) - bin_w, float(v.max()) + 2 * bin_w, bin_w
+        )
+        counts, edges = np.histogram(v, bins=edges)
+        peak = int(np.argmax(counts))
+        sel = (v >= edges[peak]) & (v <= edges[peak + 1])
+        if not np.any(sel):
+            return float(np.median(v))
+        return float(np.median(v[sel]))
+
+    @staticmethod
+    def _bootstrap_se(values, n_boot, rng):
+        """
+        Nonparametric standard error of the sample median from seeded
+        bootstrap resamples.
+
+        For a symmetric unimodal locus this recovers SE(median) =
+        1.2533*sigma/sqrt(N); on skewed or multimodal loci - where the
+        MAD-based scale misjudges the distribution - it reports the
+        actual estimator variability, so it makes an honest floor for
+        the fitted ZP error.
+        """
+        v = np.asarray(values, float)
+        v = v[np.isfinite(v)]
+        if v.size < 2 or n_boot <= 0 or rng is None:
+            return np.nan
+        boot = v[rng.integers(0, v.size, (int(n_boot), v.size))]
+        return float(np.std(np.median(boot, axis=1)))
+
+    @staticmethod
+    def _block_bootstrap_se(resid, xpos, ypos):
+        """
+        Spatial block-bootstrap standard error of the ZP mean.
+
+        Calibrator residuals that vary smoothly across the detector
+        (patchy flats, PSF variation, mis-registration) are spatially
+        correlated: neighbouring calibrators carry the same deviation
+        and do not provide independent measurements, so the naive
+        sigma/sqrt(N) error understates the true calibration
+        uncertainty.  Partitioning the field into contiguous blocks
+        and measuring the dispersion of the block means folds the
+        intra-block correlation into the standard error (Kunsch 1989;
+        Carlstein 1986).  On iid residuals the estimate recovers
+        sigma/sqrt(N).
+
+        The estimate depends on block size relative to the
+        correlation length, so the maximum over two grid resolutions
+        (G = 2 and G = 3) is returned.
+
+        Returns
+        -------
+        (se, n_eff) : block-bootstrap standard error of the mean and
+            the implied effective calibrator count
+            (sigma_MAD/se)^2, capped at N.  NaN when unusable.
+        """
+        r = np.asarray(resid, float)
+        xp = np.asarray(xpos, float)
+        yp = np.asarray(ypos, float)
+        ok = np.isfinite(r) & np.isfinite(xp) & np.isfinite(yp)
+        r, xp, yp = r[ok], xp[ok], yp[ok]
+        n = r.size
+        if n < 8 or np.ptp(xp) <= 0 or np.ptp(yp) <= 0:
+            return np.nan, np.nan
+        sig = 1.4826 * np.nanmedian(np.abs(r - np.nanmedian(r)))
+        if not np.isfinite(sig) or sig <= 0:
+            return np.nan, np.nan
+        best = np.nan
+        for g in (2, 3):
+            if n < g * g * 2:
+                continue
+            ix = np.clip(
+                ((xp - xp.min()) / np.ptp(xp) * g).astype(int), 0, g - 1
+            )
+            iy = np.clip(
+                ((yp - yp.min()) / np.ptp(yp) * g).astype(int), 0, g - 1
+            )
+            blocks = ix * g + iy
+            means = np.array(
+                [r[blocks == b].mean() for b in np.unique(blocks)]
+            )
+            nb = means.size
+            if nb < 2:
+                continue
+            se_g = float(np.std(means, ddof=1) / np.sqrt(nb))
+            if np.isfinite(se_g) and (not np.isfinite(best) or se_g > best):
+                best = se_g
+        if not np.isfinite(best) or best <= 0:
+            return np.nan, np.nan
+        return best, float(min(n, (sig / best) ** 2))
 
     def _odr_slope1_fit(
         self,
@@ -1000,6 +1209,15 @@ class Zeropoint:
             sigma^2_perp = (sigma^2_x + sigma^2_y) / 2
 
         We minimize the weighted sum: chi^2 = Sigma (y_i - x_i - ZP)^2 / (sigma^2_x + sigma^2_y)
+
+        For a fixed slope the ODR solution reduces to the inverse-variance
+        weighted mean of delta - the maximum-likelihood estimator for a
+        constant (the SCAMP instrumental-calibration convention; a
+        clipped median is the common alternative, which the iterative
+        clip approximates).  Outlier rejection is an iterative sigma
+        clip seeded at a crude mode, capped at ``sigma_clip_max``, and
+        the reported error is chi^2/dof-inflated when the residuals
+        exceed the formal per-source errors.
 
         Parameters
         ----------
@@ -1047,6 +1265,7 @@ class Zeropoint:
         mad_delta = np.nanmedian(np.abs(delta - med_delta)) * 1.4826
         if mad_delta < 1e-6:
             mad_delta = np.nanstd(delta)
+        var_perp_raw = var_perp.copy()
         _med_var_perp = float(np.median(var_perp))
         _sys_floor = max(0.0, mad_delta**2 - _med_var_perp)
         if _sys_floor > 0:
@@ -1068,19 +1287,22 @@ class Zeropoint:
         )
 
         # Iterative outlier rejection: deterministic analogue of RANSAC.
+        zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
+        sigma_clip_max = float(zp_cfg.get("sigma_clip_max", 0.5))
         inlier_mask_local = np.ones(len(delta), dtype=bool)
-        zp = np.nanmedian(delta)
+        # Anchor on the densest locus, not the median: near ~50%
+        # contamination the median lands between loci while the crude
+        # mode sits on the dominant population.
+        zp = self._crude_mode(delta)
 
         for iteration in range(max_iter):
             n_before = inlier_mask_local.sum()
 
-            delta_in = delta[inlier_mask_local]
-            var_in = var_perp[inlier_mask_local]
-            weights = 1.0 / np.clip(var_in, 1e-12, None)
-            weights = weights / weights.sum() if weights.sum() > 0 else weights
-            zp_new = np.average(delta_in, weights=weights)
-
-            residuals = delta - zp_new
+            # Residuals around the CURRENT estimate: on iteration 0 this
+            # is the mode seed, so the first clip already gates around
+            # the dominant locus instead of a mean that contamination
+            # has dragged off it.
+            residuals = delta - zp
             med_res = np.nanmedian(residuals[inlier_mask_local])
             mad_res = (
                 np.nanmedian(np.abs(residuals[inlier_mask_local] - med_res)) * 1.4826
@@ -1089,18 +1311,26 @@ class Zeropoint:
             if mad_res < 1e-6:  # identical points: nothing to clip
                 break
 
-            # 3-sigma clip on perpendicular distance; the threshold folds in
-            # the median measurement variance so well-measured scatter is not
-            # clipped away.
-            threshold = 3.0 * np.sqrt(mad_res**2 + np.median(var_perp))
+            # Cap the clip width (sigmaMax-style): an unbounded MAD on
+            # contaminated data inflates the acceptance window until no
+            # outlier is ever rejected.  The gate uses the RAW median
+            # per-source variance - the floored variance carries the MAD
+            # back into the gate and defeats the clip.
+            mad_clip = mad_res
+            if sigma_clip_max > 0 and mad_res > sigma_clip_max:
+                mad_clip = sigma_clip_max
+                logger.debug(
+                    "ODR: clip sigma capped at %.3f (raw MAD %.3f)",
+                    sigma_clip_max,
+                    mad_res,
+                )
+            threshold = 3.0 * np.sqrt(
+                mad_clip**2 + np.median(var_perp_raw)
+            )
             prev_mask = inlier_mask_local
             inlier_mask_local = np.abs(residuals) < threshold
 
             n_after = inlier_mask_local.sum()
-
-            if n_after == n_before:
-                logger.debug("ODR converged at iteration %s", iteration + 1)
-                break
 
             if n_after < min_points:
                 logger.warning(
@@ -1114,7 +1344,18 @@ class Zeropoint:
                 inlier_mask_local = prev_mask
                 break
 
-            zp = zp_new
+            # Re-centre on the surviving locus for the next iteration.
+            delta_in = delta[inlier_mask_local]
+            var_in = var_perp[inlier_mask_local]
+            weights = 1.0 / np.clip(var_in, 1e-12, None)
+            weights = weights / weights.sum() if weights.sum() > 0 else weights
+            zp = np.average(delta_in, weights=weights)
+
+            if n_after == n_before and np.array_equal(
+                inlier_mask_local, prev_mask
+            ):
+                logger.debug("ODR converged at iteration %s", iteration + 1)
+                break
 
         if inlier_mask_local.sum() < min_points:
             logger.warning(
@@ -1124,7 +1365,19 @@ class Zeropoint:
             inlier_mask_local = np.ones(len(delta), dtype=bool)
 
         delta_in = delta[inlier_mask_local]
-        var_in = var_perp[inlier_mask_local]
+
+        # Refit the excess-variance floor on the converged locus: the
+        # pre-clip floor used the all-points MAD, which contaminating
+        # outliers inflate, giving every surviving point too much
+        # variance and a too-conservative weighting.  The inlier floor
+        # is the actual intrinsic scatter of the calibration
+        # population: sigma_int^2 = MAD_in^2 - median(var_perp_in).
+        _mad_odr_in = (
+            np.nanmedian(np.abs(delta_in - np.nanmedian(delta_in))) * 1.4826
+        )
+        _med_var_in_raw = float(np.median(var_perp_raw[inlier_mask_local]))
+        _sys_floor_in = max(0.0, _mad_odr_in**2 - _med_var_in_raw)
+        var_in = var_perp_raw[inlier_mask_local] + _sys_floor_in
 
         # Keep unnormalized weights: the error formula below needs w_sum.
         w_raw = 1.0 / np.clip(var_in, 1e-12, None)
@@ -1235,6 +1488,7 @@ class Zeropoint:
         tau_factor: float = 10.0,
         adaptive: bool = True,
         min_autocorr_N: int = 100,
+        random_state: int | None = None,
     ):
         """
         MCMC fit for y = x + ZP (slope=1 constraint) with proper X,Y errors.
@@ -1242,6 +1496,14 @@ class Zeropoint:
         Uses the emcee ensemble sampler for posterior estimation.
         Following the methodology from:
         https://github.com/nikhil-sarin/2Derrors
+
+        The robust mixture model is the Hogg, Bovy & Lang (2010,
+        arXiv:1008.4686) formulation: each point is a mixture of a
+        "good" component and a "bad" (outlier) component with a mixing
+        fraction.  Our prior caps f_out at 0.5 - tighter than HBL's
+        uniform [0,1] - so the narrow component stays identifiable as
+        the majority locus; V_out is data-adaptive ((3*MAD)^2) rather
+        than fitted.
 
         Supports two modes:
 
@@ -1285,8 +1547,8 @@ class Zeropoint:
             Outlier variance scale in mag^2 (only used when robust=True).
             Default 1.0 mag^2 gives ~1 mag outlier scatter.
         max_steps : int
-            Hard cap on total production steps to prevent infinite runtime.
-            Default 50000 when adaptive=True, 10000 otherwise.
+            Hard cap on total production steps to prevent infinite runtime
+            (default 10000).
         tau_factor : float
             Convergence criterion: stop when chain length > tau_factor * tau
             for all parameters (default 10, following emcee recommendations).
@@ -1297,6 +1559,14 @@ class Zeropoint:
         min_autocorr_N : int
             Minimum number of steps before starting convergence checks
             (default 100).
+        random_state : int or None
+            Seed for walker initialisation and the emcee sampler's internal
+            generator.  emcee 3.1 has no ``seed`` kwarg - it snapshots the
+            global np.random state at construction and then evolves its own
+            generator - so we assign a seeded RandomState to
+            ``sampler.random_state`` directly.  The same input then yields a
+            bit-identical zeropoint across runs; None keeps the old
+            non-deterministic behaviour.
 
         Notes
         -----
@@ -1355,6 +1625,15 @@ class Zeropoint:
         if mad_delta < 1e-6:
             mad_delta = np.nanstd(delta)
 
+        # Capture the RAW per-source scale before the systematic floor:
+        # after flooring, median(var_perp) ~ MAD^2 by construction, so a
+        # cleanliness test against it passes on arbitrarily contaminated
+        # data (the 2025-08-07 ZTF-i epoch fast-pathed on MAD = 1.4 mag).
+        _med_err_raw = float(np.sqrt(np.median(var_perp)))
+        _w_raw = 1.0 / np.clip(var_perp, 1e-12, None)
+        _w_sum_raw = float(np.sum(_w_raw))
+        _max_wfrac = float(np.max(_w_raw) / _w_sum_raw) if _w_sum_raw > 0 else 1.0
+
         zp_spread = max(1.0, 5 * mad_delta)  # Broad prior
 
         # BUG 144: Make V_out data-adaptive instead of fixed 1.0 mag^2.
@@ -1382,15 +1661,32 @@ class Zeropoint:
         # Add a constant floor so the inlier width matches the observed
         # scatter, preserving relative weighting between sources.
         _med_var_perp = float(np.median(var_perp))
-        _sys_floor = max(0.0, mad_delta**2 - _med_var_perp)
+        # Estimate the locus scatter on a mode-anchored clip, not the
+        # full sample: contaminating outliers inflate the all-points
+        # MAD, which widens the inlier component and blurs the
+        # mixture's inlier/outlier discrimination.
+        _mad_locus = mad_delta
+        _c0 = self._crude_mode(delta)
+        if np.isfinite(_c0):
+            _m0 = np.nanmedian(np.abs(delta - _c0)) * 1.4826
+            if np.isfinite(_m0) and _m0 > 1e-6:
+                _pre = np.abs(delta - _c0) < 3.0 * _m0
+                if _pre.sum() >= max(3, len(delta) // 4):
+                    _dp = delta[_pre]
+                    _mp = (
+                        np.nanmedian(np.abs(_dp - np.nanmedian(_dp))) * 1.4826
+                    )
+                    if np.isfinite(_mp) and _mp > 1e-6:
+                        _mad_locus = _mp
+        _sys_floor = max(0.0, _mad_locus**2 - _med_var_perp)
         if _sys_floor > 0:
             var_perp = var_perp + _sys_floor
             logger.debug(
                 "MCMC: added systematic floor %.4f mag^2 (sigma=%.4f mag) "
-                "to var_perp (MAD=%.4f, median var_perp=%.6f -> %.6f)",
+                "to var_perp (locus MAD=%.4f, median var_perp=%.6f -> %.6f)",
                 _sys_floor,
                 np.sqrt(_sys_floor),
-                mad_delta,
+                _mad_locus,
                 _med_var_perp,
                 float(np.median(var_perp)),
             )
@@ -1398,24 +1694,36 @@ class Zeropoint:
         # Fast-path: if the data is clean (MAD within expected scatter and
         # no strong outliers), a weighted mean is equivalent to the MCMC
         # posterior mean but ~100x faster.  Skip emcee entirely.
+        # Eligibility is judged on the RAW per-source errors - the floored
+        # variance is ~MAD^2 by construction so a test against it is
+        # circular.  Two extra guards: an absolute MAD cap (calibrator
+        # scatter beyond ~0.3 mag is pathological regardless of claimed
+        # errors) and a weight-concentration limit (one or two tiny-error
+        # sources must not carry the whole mean).
         _weighted_mean = np.average(delta, weights=1.0 / np.clip(var_perp, 1e-12, None))
         _weighted_err = np.sqrt(1.0 / np.sum(1.0 / np.clip(var_perp, 1e-12, None)))
         _max_resid = np.max(np.abs(delta - _weighted_mean))
-        # Clean data: max residual within 4 sigma of its own error, and
-        # MAD consistent with median per-source error (no excess scatter)
-        _med_err = float(np.sqrt(np.median(var_perp)))
+        _zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
+        _fast_mad_cap = float(_zp_cfg.get("fast_path_max_mad", 0.3))
         if (
-            mad_delta < 1.5 * _med_err
-            and _max_resid < 4.0 * _med_err
+            mad_delta < min(1.5 * _med_err_raw, _fast_mad_cap)
+            and _max_resid < 4.0 * _med_err_raw
+            and _max_wfrac < 0.5
             and len(delta) >= 5
         ):
             logger.info(
                 "ZP fast-path: clean data (MAD=%.4f, max_resid=%.4f vs "
-                "med_err=%.4f); weighted mean used instead of MCMC",
+                "raw med_err=%.4f); weighted mean used instead of MCMC",
                 mad_delta,
                 _max_resid,
-                _med_err,
+                _med_err_raw,
             )
+            # chi^2 inflation keeps the reported error honest when the
+            # floored per-source errors understate the observed scatter.
+            _chi2_f = float(np.sum((delta - _weighted_mean) ** 2 / var_perp))
+            _dof_f = max(1, len(delta) - 1)
+            if _chi2_f > _dof_f:
+                _weighted_err = float(_weighted_err * np.sqrt(_chi2_f / _dof_f))
             inlier_mask_fast = np.abs(delta - _weighted_mean) < 4.0 * np.sqrt(var_perp)
             if not np.any(inlier_mask_fast):
                 # Near-zero per-source errors can make the 4-sigma gate
@@ -1424,6 +1732,12 @@ class Zeropoint:
             full_mask_fast = np.zeros(n_input, dtype=bool)
             full_mask_fast[np.flatnonzero(finite)[inlier_mask_fast]] = True
             return float(_weighted_mean), float(_weighted_err), full_mask_fast
+
+        # Shared by both modes below.  BUG 145: data-adaptive walker
+        # initialization spread - a fixed 0.01 mag is too tight for data
+        # with 0.1+ mag scatter and causes slow burn-in.
+        zp_init_spread = max(0.01, 0.1 * mad_delta)
+        rng = np.random.default_rng(random_state)
 
         if robust:
             # ================================================================
@@ -1483,11 +1797,6 @@ class Zeropoint:
             n_walkers_eff = min(n_walkers, max(8, len(delta) // 2))
             n_walkers_eff = max(n_walkers_eff, 8)  # emcee needs >= 2*ndim walkers
 
-            # BUG 145: Data-adaptive walker initialization spread.
-            # The old 0.01 mag spread is too tight for data with 0.1+ mag
-            # scatter, causing slow burn-in. Use 0.1 * MAD for ZP spread.
-            zp_init_spread = max(0.01, 0.1 * mad_delta)
-            rng = np.random.default_rng()
             pos = np.empty((n_walkers_eff, ndim), float)
             for i in range(n_walkers_eff):
                 for _ in range(100):
@@ -1501,6 +1810,14 @@ class Zeropoint:
                     pos[i] = [zp_guess, 0.05]
 
             sampler = emcee.EnsembleSampler(n_walkers_eff, ndim, log_probability)
+            if random_state is not None:
+                # emcee 3.1 snapshots the global np.random state at
+                # construction; seeding it after the fact via the public
+                # random_state setter makes the whole run reproducible.
+                # RandomState seeds must be < 2**32.
+                sampler.random_state = np.random.RandomState(
+                    int(random_state) % (2**32)
+                ).get_state()
 
             sampler.run_mcmc(pos, n_burn, progress=False)
             sampler.reset()
@@ -1717,7 +2034,6 @@ class Zeropoint:
             n_walkers_eff = min(n_walkers, max(4, len(delta_in) // 2))
             n_walkers_eff = max(n_walkers_eff, 4)
 
-            rng = np.random.default_rng()
             pos = np.empty((n_walkers_eff, 1), float)
             for i in range(n_walkers_eff):
                 for _ in range(100):
@@ -1728,6 +2044,10 @@ class Zeropoint:
                 else:
                     pos[i] = zp_guess
             sampler = emcee.EnsembleSampler(n_walkers_eff, 1, log_probability)
+            if random_state is not None:
+                sampler.random_state = np.random.RandomState(
+                    int(random_state) % (2**32)
+                ).get_state()
 
             sampler.run_mcmc(pos, n_burn, progress=False)
             sampler.reset()
@@ -2051,7 +2371,7 @@ class Zeropoint:
         max_trials: int = 4000,
         ransac_min_samples: int = 2,
         n_jobs: int | None = 1,
-        random_state: int = 42,
+        random_state: int | None = 42,
         min_sources: int = 1,
         fixed_color_coeffs=None,
         fixed_color_coeff_errors=None,
@@ -2062,6 +2382,23 @@ class Zeropoint:
         """
         Fit ZP = m_cat - m_inst[+/-c*(c1-c2)] vs m_inst via MCMC, ODR, or RANSAC.
         Supports linear, quadratic, and piecewise linear color terms.
+
+        Notes
+        -----
+        Conventions follow the standard photometric-calibration practice:
+
+        - Slope-1 fit of ``delta = m_cat - m_inst`` with iterative
+          sigma-clipping seeded at a crude mode and capped at
+          ``sigma_clip_max``.
+        - ``zeropoint_error`` is the statistical error on the mean
+          (formal weighted-mean error, chi^2/dof-inflated when residuals
+          exceed claimed errors - the SCAMP convention - floored at
+          SE(median) of the inlier locus) folded in quadrature with
+          ``zeropoint.systematic_err`` for field-correlated
+          calibration systematics.
+        - ``zeropoint_scatter`` is sigmaMAD = 1.4826*MAD of the inlier
+          deltas, the robust dispersion of the calibration locus.
+        - ``zeropoint_error_stat`` keeps the pre-systematic component.
 
         Parameters
         ----------
@@ -2095,9 +2432,11 @@ class Zeropoint:
             use_filter = self.input_yaml.get("imageFilter")
             use_filter = self._normalize_filter(use_filter)
 
-            # Allow fit_method override from config
+            # Allow fit_method/random_state override from config
             zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
             fit_method = zp_cfg.get("fit_method", fit_method)
+            _rs = zp_cfg.get("random_state", random_state)
+            random_state = int(_rs) if _rs is not None else None
 
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
@@ -2225,6 +2564,7 @@ class Zeropoint:
                         n_steps=int(zp_mcmc_cfg.get("mcmc_n_steps", 1000)),
                         max_steps=int(zp_mcmc_cfg.get("mcmc_max_steps", 10000)),
                         tau_factor=float(zp_mcmc_cfg.get("mcmc_tau_factor", 10.0)),
+                        random_state=random_state,
                     )
                     # Build dummy cov matrix for compatibility
                     cov = (
@@ -2296,11 +2636,179 @@ class Zeropoint:
                         )
                         zp_std = float(_zp_floor)
 
+                # Absolute error floor at any N (same 0.001 mag floor
+                # estimate_zeropoint applies): a formal error below a
+                # millimagnitude claims a precision no single-epoch
+                # calibration can justify.
+                if np.isfinite(zp_std) and zp_std < 0.001:
+                    zp_std = 0.001
+
+                # Scatter floor on the reported error: a formal error
+                # tighter than the scatter-based standard error is not
+                # believable - inverse-variance errors collapse when a
+                # few tiny-error sources dominate the sum.  (2025-08-07
+                # ZTF-i reported +/-0.021 mag with an inlier MAD of 1.4.)
+                # The floor is SE(median) = 1.2533*sigma/sqrt(N) =
+                # 1.858*MAD/sqrt(N) (Kendall & Stuart): the same scale
+                # estimate_zeropoint/_fallback_zeropoint/get() report, so
+                # every estimator path bottoms out at the same error for
+                # the same locus.  25% above the mean SE, which is the
+                # conservative direction for a robust location estimate.
+                _d_in = np.asarray(delta_mag)[inlier_short]
+                _d_in = _d_in[np.isfinite(_d_in)]
+                _mad_in = (
+                    float(median_abs_deviation(_d_in, nan_policy="omit"))
+                    if _d_in.size >= 2
+                    else np.nan
+                )
+                if _d_in.size >= 2 and np.isfinite(zp_std):
+                    _scatter_se = 1.858 * _mad_in / np.sqrt(_d_in.size)
+                    if np.isfinite(_scatter_se) and zp_std < _scatter_se:
+                        logger.info(
+                            f"[{flux_type}] ZP error raised from {zp_std:.4f} "
+                            f"to scatter floor {_scatter_se:.4f} mag "
+                            f"(inlier MAD={_mad_in:.3f}, N={_d_in.size})"
+                        )
+                        zp_std = float(_scatter_se)
+
+                # Bootstrap check of the statistical error
+                # (nonparametric): resample the inlier locus and take
+                # the SE of the bootstrap medians.  For a clean
+                # symmetric locus this equals SE(median); skewed or
+                # multimodal loci - where the MAD-based scale
+                # misjudges the distribution - produce a larger,
+                # honest floor.
+                _n_boot = int(zp_cfg.get("bootstrap_resamples", 512) or 0)
+                _se_boot = np.nan
+                if _d_in.size >= 8 and _n_boot > 0 and np.isfinite(zp_std):
+                    _se_boot = self._bootstrap_se(
+                        _d_in, _n_boot, np.random.default_rng(random_state)
+                    )
+                    if np.isfinite(_se_boot) and zp_std < _se_boot:
+                        logger.debug(
+                            f"[{flux_type}] ZP error raised from {zp_std:.4f} "
+                            f"to bootstrap SE {_se_boot:.4f} mag "
+                            f"({_n_boot} resamples)"
+                        )
+                        zp_std = float(_se_boot)
+
+                # Spatially-correlated calibrator residuals deflate
+                # the effective sample size: when the zeropoint varies
+                # smoothly across the field, neighbouring calibrators
+                # carry the same deviation and are not independent
+                # measurements.  The block-bootstrap SE folds that
+                # correlation in; it is noisy at small N, so it only
+                # floors the error when it clearly exceeds the iid
+                # scatter SE (1.5x gate ~ several times its own
+                # sampling noise) rather than chasing block-partition
+                # jitter.
+                _se_sp = np.nan
+                _n_eff = np.nan
+                if (
+                    {"x_pix", "y_pix"}.issubset(clean_catalog.columns)
+                    and _d_in.size >= 8
+                    and np.isfinite(ZP)
+                    and np.isfinite(_mad_in)
+                    and _mad_in > 0
+                    and np.isfinite(zp_std)
+                ):
+                    _pos_idx = np.flatnonzero(vmask)[inlier_short]
+                    _se_sp, _n_eff = self._block_bootstrap_se(
+                        np.asarray(delta_mag)[inlier_short] - ZP,
+                        np.asarray(clean_catalog["x_pix"], float)[_pos_idx],
+                        np.asarray(clean_catalog["y_pix"], float)[_pos_idx],
+                    )
+                    _se_iid = 1.4826 * _mad_in / np.sqrt(_d_in.size)
+                    if (
+                        np.isfinite(_se_sp)
+                        and _se_sp > 1.5 * _se_iid
+                        and zp_std < _se_sp
+                    ):
+                        logger.info(
+                            f"[{flux_type}] ZP error raised from "
+                            f"{zp_std:.4f} to {_se_sp:.4f} mag: "
+                            f"calibrator residuals spatially correlated "
+                            f"(N_eff={_n_eff:.0f} of {_d_in.size})"
+                        )
+                        zp_std = float(_se_sp)
+
+                # Field-level systematic term: the statistical error above
+                # only reflects per-source dispersion about the locus.
+                # Calibration systematics that correlate across the field
+                # (reference-catalog ties, bandpass mismatch, flat-field
+                # residuals) do not average down with N and are invisible
+                # to the scatter floor, so they enter in quadrature here.
+                # Both components are reported separately below.
+                zp_stat_err = zp_std
+                _sys_zp = float(zp_cfg.get("systematic_err", 0.0) or 0.0)
+                if _sys_zp > 0 and np.isfinite(zp_std):
+                    zp_std = float(np.hypot(zp_std, _sys_zp))
+
+                # Reliability assessment: flag fits that do not describe
+                # a dominant 1:1 locus - the signature of a mis-stacked
+                # or mis-registered image, or of a catalog population too
+                # contaminated to calibrate against, rather than a
+                # genuinely unusual zeropoint.
+                _zp_flags = []
+                _min_inlier_frac = float(
+                    zp_cfg.get("min_inlier_fraction", 0.5)
+                )
+                _max_inlier_mad = float(zp_cfg.get("max_inlier_mad", 0.3))
+                # A fit that returned non-finite values is unreliable by
+                # definition - without this gate the header would read
+                # ZP_<m>="unknown" next to ZP_<m>_OK=True.
+                if not (np.isfinite(ZP) and np.isfinite(zp_std)):
+                    _zp_flags.append("fit did not return a finite zeropoint/error")
+                # Fewer than 3 inliers cannot define a locus - the fit is
+                # interpolating a pair of points at best.
+                if _n_inl < 3:
+                    _zp_flags.append(
+                        f"degenerate inlier set ({_n_inl} inliers)"
+                    )
+                if n_sources > 0 and _n_inl < _min_inlier_frac * n_sources:
+                    _zp_flags.append(
+                        f"fit anchored on a minority of sources "
+                        f"({_n_inl}/{n_sources} inliers)"
+                    )
+                if np.isfinite(_mad_in) and _mad_in > _max_inlier_mad:
+                    _zp_flags.append(
+                        f"inlier scatter too large (MAD={_mad_in:.3f} mag)"
+                    )
+                # Flagging lives in the strong-correlation regime: with
+                # only 4-9 blocks the SE estimate carries ~25-40%
+                # sampling noise, so n_eff < N/4 (i.e. se_sp > 2x the
+                # iid SE) is required before calling the fit unreliable
+                # - looser thresholds false-flag clean fields.
+                _neff_min_frac = float(
+                    zp_cfg.get("spatial_corr_min_neff_frac", 0.25)
+                )
+                if (
+                    np.isfinite(_n_eff)
+                    and np.isfinite(_se_sp)
+                    and _d_in.size >= 8
+                    and _se_sp > 1.5 * (1.4826 * _mad_in / np.sqrt(_d_in.size))
+                    and _n_eff < _neff_min_frac * _d_in.size
+                ):
+                    _zp_flags.append(
+                        f"calibrator residuals spatially correlated "
+                        f"(N_eff={_n_eff:.0f} of {_d_in.size})"
+                    )
+
                 fit_params[flux_type].update(
                     {
                         "zeropoint": ZP,
                         "zeropoint_error": zp_std,
+                        "zeropoint_error_stat": zp_stat_err,
+                        "zeropoint_scatter": (
+                            float(1.4826 * _mad_in)
+                            if np.isfinite(_mad_in)
+                            else np.nan
+                        ),
+                        "bootstrap_se": _se_boot,
+                        "n_eff": _n_eff,
                         "n_sources": int(n_sources),
+                        "n_inliers": int(np.sum(inlier_short)),
+                        "fit_method": fit_method_this,
                         "has_color_term": bool(
                             has_color_term and fixed_color_coeffs is not None
                         ),
@@ -2482,6 +2990,74 @@ class Zeropoint:
                             f"[{flux_type}] Free-slope diagnostic fit failed: {_e}"
                         )
 
+                _fs = fit_params[flux_type].get("free_slope", np.nan)
+                _fs_e = fit_params[flux_type].get("free_slope_err", np.nan)
+                if (
+                    np.isfinite(_fs)
+                    and np.isfinite(_fs_e)
+                    and _fs_e > 0
+                    and abs(_fs - 1.0) / _fs_e > 3
+                ):
+                    _zp_flags.append(
+                        f"free slope {_fs:.3f} deviates from 1 by "
+                        f"{abs(_fs - 1.0) / _fs_e:.1f} sigma"
+                    )
+
+                # Spatial coherence: a mis-stacked or mis-registered
+                # frame produces a ZP gradient across the detector rather
+                # than a flat 1:1 locus.  Check the inlier residual slope
+                # along both pixel axes; flag a >3-sigma tilt whose
+                # amplitude across the field exceeds the configured mag.
+                if {"x_pix", "y_pix"}.issubset(
+                    clean_catalog.columns
+                ) and np.isfinite(ZP):
+                    _pos_idx = np.flatnonzero(vmask)[inlier_short]
+                    _resid_in = np.asarray(delta_mag)[inlier_short] - ZP
+                    _grad_min_mag = float(
+                        zp_cfg.get("spatial_gradient_min_mag", 0.1)
+                    )
+                    for _pc in ("x_pix", "y_pix"):
+                        _pp = np.asarray(
+                            clean_catalog[_pc].to_numpy(dtype=float)
+                        )[_pos_idx]
+                        _okp = np.isfinite(_pp) & np.isfinite(_resid_in)
+                        if int(_okp.sum()) < 10:
+                            continue
+                        _xg = _pp[_okp]
+                        _Ag = np.vstack([_xg, np.ones_like(_xg)]).T
+                        try:
+                            _gc, _, _, _ = np.linalg.lstsq(
+                                _Ag, _resid_in[_okp], rcond=None
+                            )
+                            _gres = _resid_in[_okp] - _Ag @ _gc
+                            _gdof = max(1, int(_okp.sum()) - 2)
+                            _gcov = (
+                                np.linalg.inv(_Ag.T @ _Ag)
+                                * float(np.sum(_gres**2))
+                                / _gdof
+                            )
+                            _gslope = float(_gc[0])
+                            _gerr = float(np.sqrt(_gcov[0, 0]))
+                            _amp = abs(_gslope) * float(np.ptp(_xg))
+                            if (
+                                _gerr > 0
+                                and abs(_gslope) / _gerr > 3
+                                and _amp > _grad_min_mag
+                            ):
+                                _zp_flags.append(
+                                    f"{_amp:.2f} mag ZP gradient along {_pc}"
+                                )
+                        except np.linalg.LinAlgError:
+                            pass
+
+                fit_params[flux_type]["reliable"] = not _zp_flags
+                if _zp_flags:
+                    fit_params[flux_type]["reliability_flags"] = list(_zp_flags)
+                    logger.warning(
+                        f"[{flux_type}] Zeropoint reliability suspect: "
+                        + "; ".join(_zp_flags)
+                    )
+
                 global_xmins.append(xs[0])
                 global_xmaxs.append(xs[-1])
                 _em = float(np.nanmean(in_e)) if np.size(in_e) else 0.0
@@ -2504,6 +3080,191 @@ class Zeropoint:
                 full_mask = np.zeros(len(clean_catalog), dtype=bool)
                 full_mask[np.flatnonzero(vmask)] = inlier_short
                 inlier_masks_full[flux_type] = full_mask
+
+            # AP vs PSF consistency: two independent flux measurements of
+            # the same stars must agree on the zeropoint once they are on
+            # the same flux scale.  flux_AP is measured at the finite
+            # science aperture, flux_PSF at effectively infinite radius, so
+            # ZP_AP = ZP_true + ap_corr by construction (ap_corr <= 0: the
+            # aperture misses flux).  Comparing the raw ZPs fires whenever
+            # |ap_corr| > 3 sigma - noise, not signal - so place ZP_AP on
+            # the total scale first and fold ap_corr_err into the combined
+            # error.  A residual >3-sigma split means one estimator is
+            # anchored on a different source population (or the PSF fluxes
+            # are biased): the calibration is not trustworthy even if each
+            # fit looked clean internally.
+            _zp_ap = fit_params.get("AP", {}).get("zeropoint", np.nan)
+            _zp_psf = fit_params.get("PSF", {}).get("zeropoint", np.nan)
+            # Compare on the statistical error component: the configured
+            # field-level systematic folded into zeropoint_error is
+            # common-mode between two measurements of the same stars and
+            # cancels in the difference - using the total error here would
+            # dilute a real AP/PSF split.
+            _e_ap = fit_params.get("AP", {}).get(
+                "zeropoint_error_stat",
+                fit_params.get("AP", {}).get("zeropoint_error", np.nan),
+            )
+            _e_psf = fit_params.get("PSF", {}).get(
+                "zeropoint_error_stat",
+                fit_params.get("PSF", {}).get("zeropoint_error", np.nan),
+            )
+            if np.all(np.isfinite([_zp_ap, _zp_psf, _e_ap, _e_psf])):
+                # Absolute floor on top of the sigma test: with ~0.01-mag
+                # statistical errors, an honest 0.03-0.1 mag method
+                # systematic (ePSF wing truncation, ap_corr residual,
+                # different spatial PSF coverage) trips the sigma gate on
+                # most clean nights, drowning the flag in false positives.
+                _dzp_min = float(
+                    (
+                        self.input_yaml.get("zeropoint", {}) or {}
+                    ).get("ap_psf_disagree_min_mag", 0.05)
+                    or 0.0
+                )
+                # Bridge the two flux scales with the per-star offset
+                # d_i = inst_PSF - inst_AP measured on shared inliers.
+                # flux_PSF is normalised on the ePSF build cutout
+                # (photutils >=3.0 dropped norm_radius) and flux_AP at
+                # the science aperture radius, so the image's own
+                # calibrators are the only reliable way to learn the
+                # delivered AP-to-PSF scale.  On a healthy pair of fits
+                # ZP_AP - ZP_PSF == median(d_i); a deviation means the
+                # two fits anchored on different calibrator populations.
+                _dzp = np.nan
+                _e_comb = np.nan
+                _bridge_desc = ""
+                _shared = inlier_masks_full.get("AP", np.zeros(
+                    len(clean_catalog), bool
+                )) & inlier_masks_full.get("PSF", np.zeros(
+                    len(clean_catalog), bool
+                ))
+                if (
+                    int(_shared.sum()) >= 5
+                    and "flux_AP" in clean_catalog.columns
+                    and "flux_PSF" in clean_catalog.columns
+                ):
+                    _fa = clean_catalog["flux_AP"].to_numpy(dtype=float)[
+                        _shared
+                    ]
+                    _fps = clean_catalog["flux_PSF"].to_numpy(dtype=float)[
+                        _shared
+                    ]
+                    _okf = (
+                        np.isfinite(_fa)
+                        & np.isfinite(_fps)
+                        & (_fa > 0)
+                        & (_fps > 0)
+                    )
+                    if int(_okf.sum()) >= 5:
+                        _d = -2.5 * np.log10(_fps[_okf] / _fa[_okf])
+                        _delta_emp = float(np.median(_d))
+                        _se_delta = float(
+                            1.2533
+                            * mad_std(_d)
+                            / np.sqrt(float(_d.size))
+                        )
+                        _se_delta = max(_se_delta, 0.001)
+                        _dzp = abs((_zp_ap - _zp_psf) - _delta_emp)
+                        _e_comb = np.sqrt(
+                            _e_ap**2 + _e_psf**2 + _se_delta**2
+                        )
+                        _bridge_desc = (
+                            f"shared-star offset {_delta_emp:.3f} +/- "
+                            f"{_se_delta:.3f} mag (N={_okf.sum()})"
+                        )
+                        for _m in ("AP", "PSF"):
+                            _fp = fit_params.get(_m) or {}
+                            if "zeropoint" not in _fp:
+                                continue
+                            _fp["ap_psf_offset"] = _delta_emp
+                            _fp["ap_psf_offset_err"] = _se_delta
+                            _fp["ap_psf_offset_n"] = int(_okf.sum())
+                        # The measured offset should track the CoG
+                        # correction to within method systematics; a
+                        # larger gap means the delivered PSF "total" and
+                        # the curve-of-growth infinity disagree (ePSF
+                        # cutout truncation or a poor model) and
+                        # apply_aperture_correction cannot reconcile the
+                        # two scales.
+                        _ap_corr_chk = float(
+                            self.input_yaml.get("aperture_correction", 0.0)
+                            or 0.0
+                        )
+                        if np.isfinite(_ap_corr_chk) and abs(
+                            _delta_emp - _ap_corr_chk
+                        ) > max(0.1, 3.0 * _se_delta):
+                            _gap_flag = (
+                                f"measured AP-PSF offset {_delta_emp:.3f} "
+                                f"deviates from CoG aperture correction "
+                                f"{_ap_corr_chk:.3f} by "
+                                f"{abs(_delta_emp - _ap_corr_chk):.3f} mag"
+                            )
+                            logger.warning(
+                                "AP/PSF scale gap: %s. The ePSF "
+                                "normalisation depth and the curve-of-"
+                                "growth correction disagree; calibrated "
+                                "AP and PSF magnitudes cannot be "
+                                "reconciled to better than this offset.",
+                                _gap_flag,
+                            )
+                            for _m in ("AP", "PSF"):
+                                _fp = fit_params.get(_m) or {}
+                                if "zeropoint" not in _fp:
+                                    continue
+                                _fp.setdefault(
+                                    "reliability_flags", []
+                                ).append(_gap_flag)
+                                _fp["reliable"] = False
+                if not np.isfinite(_dzp):
+                    # Too few shared inliers: fall back to the external
+                    # curve-of-growth correction as the scale bridge.
+                    _ap_corr = float(
+                        self.input_yaml.get("aperture_correction", 0.0) or 0.0
+                    )
+                    _ap_corr_err = float(
+                        self.input_yaml.get(
+                            "aperture_correction_err", 0.0
+                        )
+                        or 0.0
+                    )
+                    if not np.isfinite(_ap_corr):
+                        _ap_corr, _ap_corr_err = 0.0, 0.0
+                    if not np.isfinite(_ap_corr_err) or _ap_corr_err < 0:
+                        _ap_corr_err = 0.0
+                    _zp_ap_total = _zp_ap - _ap_corr
+                    _e_ap_total = np.sqrt(_e_ap**2 + _ap_corr_err**2)
+                    _dzp = abs(_zp_ap_total - _zp_psf)
+                    _e_comb = np.sqrt(_e_ap_total**2 + _e_psf**2)
+                    _bridge_desc = (
+                        f"CoG aperture correction {_ap_corr:.3f} +/- "
+                        f"{_ap_corr_err:.3f} mag"
+                    )
+                _sig = _dzp / _e_comb if _e_comb > 0 else np.inf
+                if _sig > 3.0 and _dzp > _dzp_min:
+                    _cross_flag = (
+                        f"AP and PSF zeropoints disagree by {_sig:.1f} sigma "
+                        f"(delta={_dzp:.3f} mag relative to {_bridge_desc})"
+                    )
+                    logger.warning(
+                        "AP and PSF zeropoints disagree: ZP_AP=%.3f +/- "
+                        "%.3f vs ZP_PSF=%.3f +/- %.3f; residual %.3f mag "
+                        "(%.1f sigma) relative to %s. Calibration may be "
+                        "unreliable.",
+                        _zp_ap,
+                        _e_ap,
+                        _zp_psf,
+                        _e_psf,
+                        _dzp,
+                        _sig,
+                        _bridge_desc,
+                    )
+                    for _m in ("AP", "PSF"):
+                        _fp = fit_params.get(_m) or {}
+                        if "zeropoint" not in _fp:
+                            continue
+                        _fp.setdefault("reliability_flags", []).append(
+                            _cross_flag
+                        )
+                        _fp["reliable"] = False
 
             if global_xmins:
                 xr = max(global_xmaxs) - min(global_xmins)
@@ -2670,6 +3431,16 @@ class Zeropoint:
         Produces a combined histogram PDF for AP and PSF.
         Supports linear, quadratic, and piecewise linear color terms.
 
+        Notes
+        -----
+        Same conventions as fit_zeropoint: the reported
+        ``zeropoint_error`` is SE(median) = 1.858*MAD/sqrt(N) (the
+        1.2533*sigma/sqrt(N) asymptotic standard error of the median)
+        folded in quadrature with ``zeropoint.systematic_err``, and
+        ``zeropoint_scatter`` reports sigmaMAD of the inlier locus.
+        The N<10 inflation factor on SE(median) is a heuristic - the
+        MAD-based SE has no closed small-sample form - not a t-correction.
+
         Parameters
         ----------
         fixed_color_coeffs : tuple or None
@@ -2703,20 +3474,9 @@ class Zeropoint:
                     logger.warning(
                         "estimate_zeropoint: catalog is None/empty; returning NaN zeropoint."
                     )
-                    return catalog, {
-                        "AP": {
-                            "zeropoint": np.nan,
-                            "zeropoint_error": np.nan,
-                            "n_sources": 0,
-                            "has_color_term": False,
-                        },
-                        "PSF": {
-                            "zeropoint": np.nan,
-                            "zeropoint_error": np.nan,
-                            "n_sources": 0,
-                            "has_color_term": False,
-                        },
-                    }
+                    return catalog, self._fallback_zeropoint(
+                        catalog, self.input_yaml.get("imageFilter")
+                    )
 
                 fpath = self.input_yaml.get("fpath", "")
                 base_name = os.path.splitext(os.path.basename(fpath))[0] or "zeropoint"
@@ -2729,8 +3489,6 @@ class Zeropoint:
                 required = [
                     "flux_AP",
                     "flux_AP_err",
-                    "flux_PSF",
-                    "flux_PSF_err",
                     use_filter,
                     f"{use_filter}_err",
                 ]
@@ -2739,6 +3497,16 @@ class Zeropoint:
                     # If filter columns are missing, go directly to fallback
                     zp_params = self._fallback_zeropoint(catalog, use_filter)
                     return catalog, zp_params
+
+                # PSF photometry may not be available (e.g. too few isolated
+                # sources for ePSF build).  Add NaN placeholder columns so the
+                # PSF pass below is skipped gracefully via _finite_vmask -
+                # same convention as fit_zeropoint.
+                for _psf_col in ("flux_PSF", "flux_PSF_err"):
+                    if _psf_col not in catalog.columns:
+                        catalog[_psf_col] = np.nan
+
+                zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
 
                 try:
                     color1, color2 = self.get_color_term_for_filter(use_filter)
@@ -2779,7 +3547,6 @@ class Zeropoint:
                 ap_corr_err_mag = float(
                     self.input_yaml.get("aperture_correction_err", 0.0) or 0.0
                 )
-                ap_zp_raw = np.nan
 
                 for flux_type in ["AP", "PSF"]:
                     pack = self._finite_vmask(clean_catalog, flux_type, use_filter)
@@ -2787,7 +3554,15 @@ class Zeropoint:
                         zp_params[flux_type] = {
                             "zeropoint": np.nan,
                             "zeropoint_error": np.nan,
+                            "zeropoint_error_stat": np.nan,
+                            "zeropoint_scatter": np.nan,
+                            "bootstrap_se": np.nan,
+                            "n_eff": np.nan,
                             "n_sources": 0,
+                            "n_inliers": 0,
+                            "fit_method": "sigma_clip",
+                            "reliable": False,
+                            "reliability_flags": ["no finite calibrators"],
                             "has_color_term": False,
                         }
                         continue
@@ -2872,7 +3647,15 @@ class Zeropoint:
                         zp_params[flux_type] = {
                             "zeropoint": np.nan,
                             "zeropoint_error": np.nan,
+                            "zeropoint_error_stat": np.nan,
+                            "zeropoint_scatter": np.nan,
+                            "bootstrap_se": np.nan,
+                            "n_eff": np.nan,
                             "n_sources": 0,
+                            "n_inliers": 0,
+                            "fit_method": "sigma_clip",
+                            "reliable": False,
+                            "reliability_flags": ["no finite calibrators"],
                             "has_color_term": False,
                         }
                         continue
@@ -2904,7 +3687,15 @@ class Zeropoint:
                         zp_params[flux_type] = {
                             "zeropoint": np.nan,
                             "zeropoint_error": np.nan,
+                            "zeropoint_error_stat": np.nan,
+                            "zeropoint_scatter": np.nan,
+                            "bootstrap_se": np.nan,
+                            "n_eff": np.nan,
                             "n_sources": 0,
+                            "n_inliers": 0,
+                            "fit_method": "sigma_clip",
+                            "reliable": False,
+                            "reliability_flags": ["no sigma-clip inliers"],
                             "has_color_term": False,
                         }
                         continue
@@ -2912,8 +3703,6 @@ class Zeropoint:
                     # Median central value (stable against residual outliers
                     # and imperfect error modelling).
                     zp_final = float(np.nanmedian(inlier_deltas))
-                    if flux_type == "AP":
-                        ap_zp_raw = zp_final
 
                     n_inl = len(inlier_deltas)
                     mad_zp = float(
@@ -2969,6 +3758,66 @@ class Zeropoint:
                     )
                     zp_err = max(zp_err, zp_floor)
 
+                    # Nonparametric bootstrap check (same floor as
+                    # fit_zeropoint): the SE of the bootstrap medians
+                    # captures estimator variability on skewed or
+                    # multimodal loci that the MAD scale misjudges.
+                    _se_boot = np.nan
+                    _se_sp = np.nan
+                    _n_eff = np.nan
+                    _n_boot = int(
+                        zp_cfg.get("bootstrap_resamples", 512) or 0
+                    )
+                    if n_inl >= 8 and _n_boot > 0:
+                        _se_boot = self._bootstrap_se(
+                            inlier_deltas,
+                            _n_boot,
+                            np.random.default_rng(
+                                zp_cfg.get("random_state", 42)
+                            ),
+                        )
+                        if np.isfinite(_se_boot) and zp_err < _se_boot:
+                            zp_err = float(_se_boot)
+
+                    # Spatial block-bootstrap (same as fit_zeropoint):
+                    # calibrators sharing a smooth field-dependent
+                    # deviation are not independent measurements, so
+                    # their correlated SE floors the error when it
+                    # clearly exceeds the iid scatter SE.
+                    if (
+                        {"x_pix", "y_pix"}.issubset(clean_catalog.columns)
+                        and n_inl >= 8
+                        and np.isfinite(mad_zp)
+                        and mad_zp > 0
+                    ):
+                        _se_sp, _n_eff = self._block_bootstrap_se(
+                            inlier_deltas - zp_final,
+                            np.asarray(clean_catalog["x_pix"], float)[
+                                vmask_sigma_idx
+                            ],
+                            np.asarray(clean_catalog["y_pix"], float)[
+                                vmask_sigma_idx
+                            ],
+                        )
+                        _se_iid = 1.4826 * mad_zp / np.sqrt(n_inl)
+                        if (
+                            np.isfinite(_se_sp)
+                            and _se_sp > 1.5 * _se_iid
+                            and zp_err < _se_sp
+                        ):
+                            zp_err = float(_se_sp)
+
+                    # Same field-level systematic term as fit_zeropoint:
+                    # correlated calibration systematics do not average
+                    # down with N, so they enter in quadrature on top of
+                    # the statistical component.
+                    zp_stat = zp_err
+                    _sys_zp = float(
+                        zp_cfg.get("systematic_err", 0.0) or 0.0
+                    )
+                    if _sys_zp > 0 and np.isfinite(zp_err):
+                        zp_err = float(np.hypot(zp_err, _sys_zp))
+
                     logger.debug(
                         "[%s] ZP error breakdown: SE_median=%.4f, mean_src_err=%.4f, combined=%.4f (N=%d, MAD=%.4f)",
                         flux_type,
@@ -2979,16 +3828,77 @@ class Zeropoint:
                         mad_zp,
                     )
 
+                    # Same reliability gates as fit_zeropoint: the estimate
+                    # still returns a number (degraded, not dead) but a
+                    # non-dominant or scattered locus must not read as a
+                    # trustworthy calibration.
+                    _est_flags = []
+                    _min_in_frac = float(
+                        zp_cfg.get("min_inlier_fraction", 0.5)
+                    )
+                    _max_in_mad = float(zp_cfg.get("max_inlier_mad", 0.3))
+                    if not np.isfinite(zp_final) or not np.isfinite(zp_err):
+                        _est_flags.append(
+                            "estimate did not return a finite zeropoint/error"
+                        )
+                    if n_inl < 3:
+                        _est_flags.append(
+                            f"degenerate inlier set ({n_inl} inliers)"
+                        )
+                    if n_inl < _min_in_frac * len(delta_mag_full):
+                        _est_flags.append(
+                            f"estimate anchored on a minority of sources "
+                            f"({n_inl}/{len(delta_mag_full)} inliers)"
+                        )
+                    if np.isfinite(mad_zp) and mad_zp > _max_in_mad:
+                        _est_flags.append(
+                            f"inlier scatter too large (MAD={mad_zp:.3f} mag)"
+                        )
+                    _neff_min_frac = float(
+                        zp_cfg.get("spatial_corr_min_neff_frac", 0.25)
+                    )
+                    if (
+                        np.isfinite(_n_eff)
+                        and np.isfinite(_se_sp)
+                        and n_inl >= 8
+                        and _se_sp > 1.5 * (1.4826 * mad_zp / np.sqrt(n_inl))
+                        and _n_eff < _neff_min_frac * n_inl
+                    ):
+                        _est_flags.append(
+                            f"calibrator residuals spatially correlated "
+                            f"(N_eff={_n_eff:.0f} of {n_inl})"
+                        )
+                    if _est_flags:
+                        logger.warning(
+                            f"[{flux_type}] Zeropoint reliability suspect: "
+                            + "; ".join(_est_flags)
+                        )
+
                     zp_params[flux_type].update(
                         {
                             "zeropoint": zp_final,
                             "zeropoint_error": zp_err,
+                            "zeropoint_error_stat": zp_stat,
+                            "zeropoint_scatter": (
+                                float(1.4826 * mad_zp)
+                                if np.isfinite(mad_zp)
+                                else np.nan
+                            ),
+                            "bootstrap_se": _se_boot,
+                            "n_eff": _n_eff,
                             "n_sources": n_inl,
+                            "n_inliers": n_inl,
+                            "fit_method": "sigma_clip",
+                            "reliable": not _est_flags,
                             "has_color_term": bool(
                                 has_color_term and fixed_color_coeffs is not None
                             ),
                         }
                     )
+                    if _est_flags:
+                        zp_params[flux_type]["reliability_flags"] = list(
+                            _est_flags
+                        )
                     if has_color_term and fixed_color_coeffs is not None:
                         # Extract slope for backwards compatibility
                         slope_for_params = (

@@ -1273,7 +1273,14 @@ class SExtractorWrapper:
                     image_data = raw_data.astype(np.float32) if raw_data.dtype.kind != 'f' else raw_data
                 else:
                     image_data = None
-            gain = float(header.get(gain_key, 1.0))
+            try:
+                gain = float(header.get(gain_key, 1.0))
+            except (TypeError, ValueError):
+                gain = 1.0
+            # gain<=0 (or non-finite) poisons SExtractor's flux-error noise
+            # model; fall back to the same default as a missing key.
+            if not np.isfinite(gain) or gain <= 0:
+                gain = 1.0
             saturation_raw = header.get(satur_key, 60000)
             try:
                 saturation = float(saturation_raw)
