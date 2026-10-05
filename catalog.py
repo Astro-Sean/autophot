@@ -143,6 +143,91 @@ def _catalog_plot_style(name):
     return {"marker": markers[i], "color": f"C{i % 10}"}
 
 
+# Photometric system of each catalog's reported magnitudes, keyed on the
+# cleaned column names built from databases/catalog.yml. A plain string
+# means one system covers every band; a dict resolves per band because
+# the catalog mixes systems (APASS: Johnson BV are Vega, Sloan gri are
+# AB; Gaia synthetic columns: SDSS_Std are AB, JKC_Std are Vega).
+# "combined" merges several sources band-dependent per row, and "custom"
+# is user-supplied - its system cannot be inferred.
+CATALOG_MAGSYS = {
+    "gaia": {
+        "u": "abmag",
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "B": "vegamag",
+        "V": "vegamag",
+        "R": "vegamag",
+        "I": "vegamag",
+    },
+    "gaia_custom": "abmag",
+    "pan_starrs": "abmag",
+    "sdss": "abmag",
+    "legacy": "abmag",
+    "skymapper": "abmag",
+    "refcat": {
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "J": "vegamag",
+        "H": "vegamag",
+        "K": "vegamag",
+    },
+    "apass": {
+        "B": "vegamag",
+        "V": "vegamag",
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+    },
+    "2mass": "vegamag",
+    "tic": {
+        "u": "abmag",
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "B": "vegamag",
+        "V": "vegamag",
+        "J": "vegamag",
+        "H": "vegamag",
+        "K": "vegamag",
+        "G": "vegamag",
+        "T": "vegamag",
+    },
+    "custom": "unknown",
+    "combined": "mixed",
+}
+
+def catalog_magsys(catalog_name, band=None):
+    """
+    Photometric system of a catalog's reported magnitudes.
+
+    Returns "abmag", "vegamag", "mixed" (per-row system varies for
+    combined catalogs), or "unknown" (custom/unrecognized backends).
+    *band* is normalized through the pipeline's filter map before
+    lookup; pass it whenever a mixed catalog is in play so the value
+    reflects the band actually calibrated.
+    """
+    name = Catalog._normalize_catalog_name(catalog_name)
+    entry = CATALOG_MAGSYS.get(str(name or "").strip().lower())
+    if entry is None:
+        return "unknown"
+    if isinstance(entry, str):
+        return entry
+
+    if band:
+        key = normalize_photometric_filter_name(band) or str(band).strip()
+        key = str(key).strip()
+        if key in entry:
+            return entry[key]
+    systems = set(entry.values())
+    return systems.pop() if len(systems) == 1 else "mixed"
+
+
 def _unwrap_ra_near(ra_deg, center_ra):
     """Wrap RA values to within +/-180 deg of the field centre for plotting."""
     return (np.asarray(ra_deg, dtype=float) - center_ra + 180.0) % 360.0 - 180.0 + center_ra

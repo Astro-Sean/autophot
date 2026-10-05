@@ -126,7 +126,8 @@ except Exception:
 from aperture import (Aperture, exposure_seconds_from_header,
                       gain_e_per_adu_from_header, resolve_gain_e_per_adu)
 from background import BackgroundSubtractor
-from catalog import Catalog, cross_match_sources, _catalog_cone_radius_arcmin
+from catalog import (Catalog, catalog_magsys, cross_match_sources,
+                     _catalog_cone_radius_arcmin)
 from cosmic import RemoveCosmicRays
 from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        AutophotYaml, ColoredLevelFormatter, ConsoleLevelFilter,
@@ -142,7 +143,7 @@ from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        normalize_target_name, odd, pix_dist, quadrature_add,
                        resolve_verbose_level, safe_fits_write,
                        silence_noisy_loggers, strict_config_enabled,
-                       verbose_to_console_level)
+                       verbose_to_console_level, write_output_csv)
 from fwhm import Find_FWHM
 from limits import BETA_APERTURE_SIGMA_N, Limits, _analytic_psf_for_injection
 from plot import Plot
@@ -723,6 +724,13 @@ def run_photometry():
                 _dep_key,
                 input_yaml_loc,
                 _dep_new,
+            )
+        for _rm_key in _cfg_report.get("removed", []):
+            logging.getLogger(__name__).warning(
+                "Removed config key %s in %s: no longer used; "
+                "safe to delete.",
+                _rm_key,
+                input_yaml_loc,
             )
         _cfg_errs = format_config_errors(
             _cfg_report, source=str(input_yaml_loc)
@@ -3524,6 +3532,16 @@ def run_photometry():
             input_yaml["catalog"].get("use_catalog")
         )
 
+        # Report the photometric system of the calibrating magnitudes so
+        # the printout and output.csv agree on abmag/vegamag provenance.
+        _ref_cat_label = (
+            "combined"
+            if input_yaml["catalog"].get("build_catalog", False)
+            else str(selected_catalog_name or "")
+        )
+        _ref_magsys = catalog_magsys(_ref_cat_label, input_yaml.get("imageFilter"))
+        log_status("Using %s catalog (%s)", _ref_cat_label, _ref_magsys)
+
         # The catalog cone must cover the detector footprint, not just a
         # fixed patch around the target - corner regions need calibrators
         # too, and a narrow field should not pay for the default-wide cone.
@@ -5741,9 +5759,10 @@ def run_photometry():
                 ]
             )
         if _zp_rows:
+            _zp_sys = locals().get("_ref_magsys", "")
             log_status(
                 ascii_table(
-                    "Zeropoint",
+                    f"Zeropoint ({_zp_sys})" if _zp_sys else "Zeropoint",
                     ["Method", "ZP", "err", "scat", "N", "slope", "reliable"],
                     _zp_rows,
                 )
@@ -13451,6 +13470,7 @@ def run_photometry():
                 "zp_ap_psf_offset": np.nan,
                 "zp_ap_psf_offset_err": np.nan,
                 "zp_ref": "",
+                "magsys": "",
             }
         )
 
@@ -14099,6 +14119,9 @@ def run_photometry():
         output["zp_ref"] = (
             f"{_zp_ref_cat}_{image_filter}" if _zp_ref_cat else ""
         )
+        output["magsys"] = (
+            catalog_magsys(_zp_ref_cat, image_filter) if _zp_ref_cat else ""
+        )
 
         # Color-term provenance for the post-processing transient
         # correction: the index the term applies to and the calibrator
@@ -14276,6 +14299,7 @@ def run_photometry():
             "zp_ap_neff",
             "zp_ap_flags",
             "zp_ref",
+            "magsys",
             # PSF / seeing
             "target_fwhm",
             "fwhm_psf",
@@ -14306,11 +14330,9 @@ def run_photometry():
                 ordered[k] = output_normalised[k]
         output_normalised = ordered
         output_df = pd.DataFrame(output_normalised, index=[0])
-        output_df.to_csv(
-            output_csv_path,
-            index=False,
-            float_format="%.6f",
-        )
+        # Saved transposed (field,value rows) so the wide schema stays
+        # readable; read_output_csv reverses it for any consumer.
+        write_output_csv(output_df, output_csv_path)
 
         # =====================================================================
         # Save additional-target outputs (one CSV per additional target)
@@ -14386,6 +14408,7 @@ def run_photometry():
                     "zp_psf": np.nan,
                     "zp_psf_err": np.nan,
                     "zp_ref": output.get("zp_ref", ""),
+                    "magsys": output.get("magsys", ""),
                 }
 
                 if _at_row is not None:
@@ -14630,11 +14653,7 @@ def run_photometry():
                     if k not in _at_ordered:
                         _at_ordered[k] = _at_norm[k]
                 _at_df = pd.DataFrame(_at_ordered, index=[0])
-                _at_df.to_csv(
-                    _at_csv_path,
-                    index=False,
-                    float_format="%.6f",
-                )
+                write_output_csv(_at_df, _at_csv_path)
                 logging.info(
                     "Saved additional-target output: %s (%s, mag_psf=%.3f)",
                     os.path.basename(_at_csv_path),

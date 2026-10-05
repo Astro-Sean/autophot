@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 import pathlib
 import glob
 import shutil
-from functions import set_size, get_distance_modulus
+from functions import set_size, get_distance_modulus, border_msg
 from plotting_utils import (
     get_marker_size,
     apply_autophot_mplstyle,
@@ -778,7 +778,8 @@ def plot_lightcurve(
     mark_today : bool
         If True, plot vertical line at current MJD.
     target_name : str or None
-        Optional title (e.g. object name) for the plot.
+        Optional target label (e.g. object name); appended to output
+        filenames to keep multi-target products distinct.
     dpi : int
         DPI for raster formats (ignored for pdf).
     plot_color : bool
@@ -807,6 +808,12 @@ def plot_lightcurve(
     str or None
         Path to detections CSV if return_detections and detections exist; else None.
     """
+    logging.getLogger(__name__).info(
+        border_msg(
+            f"Lightcurve plot - {target_name}" if target_name
+            else "Lightcurve plot"
+        )
+    )
     # Switch to an interactive backend before any pyplot figure creation
     # so that plt.show() actually displays the window when show=True.
     # plt.switch_backend() works after pyplot is already imported, unlike
@@ -1492,11 +1499,6 @@ def plot_lightcurve(
             frameon=False,
         )
 
-    # No plot titles by default; but if target_name is supplied, use it as
-    # a suptitle so multi-target lightcurves are distinguishable.
-    if target_name:
-        fig.suptitle(str(target_name), fontsize=11, y=0.98)
-
     ax0.invert_yaxis()
 
     # ---------- Colour evolution panel (same-night pairs only) ----------
@@ -1815,6 +1817,7 @@ def generate_photometry_table(
         color_match_days: Max separation (days) for same-night colour pairs.
         input_yaml: Configuration dictionary for reading S/N thresholds from config.
     """
+    logging.getLogger(__name__).info(border_msg("Photometry table"))
     complete_data = pd.read_csv(output_file)
     complete_data = _normalize_photometry_columns(complete_data)
     if complete_data.columns.duplicated().any():
@@ -1865,9 +1868,14 @@ def generate_photometry_table(
         else:
             band_label = label_map.get(str(band).strip().lower(), band)
 
-        import logging
         logger = logging.getLogger(__name__)
-        logger.info("Processing band: %s, band_label: %s, data rows: %s", band, band_label, len(data))
+        logger.info(
+            border_msg(
+                f"Processing band: {band_label} "
+                f"({len(data)} rows)",
+                body="-",
+            )
+        )
         # Coerce numerics: CSV concatenation can yield strings like "nan".
         if "beta" in data.columns:
             data["beta"] = pd.to_numeric(data["beta"], errors="coerce")
@@ -2458,6 +2466,7 @@ def plot_variability_check(
         Path to the saved figure, or None when insufficient data.
     """
     log = logging.getLogger(__name__)
+    log.info(border_msg("Variability check"))
     apply_autophot_mplstyle()
     if show and interactive_display_allowed():
         import matplotlib
@@ -3100,6 +3109,8 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
     """
     if output_file is None:
         return None
+
+    logging.getLogger(__name__).info(border_msg("Detection check plots"))
 
     try:
         data = pd.read_csv(output_file)

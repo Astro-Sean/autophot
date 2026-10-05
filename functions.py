@@ -1544,15 +1544,12 @@ def beta_psf(n, flux_psf, flux_psf_err):
 
 def log_step(msg: str) -> str:
     """
-    Compact one-line marker for routine pipeline steps.
+    One-line subheader for pipeline steps: ``---- X ----``.
 
-    Uses minimal decoration to reduce visual clutter while maintaining
-    clear section markers. Prefer for frequently called stages.
+    Subordinate to ``border_msg`` section banners (``==== X ====``);
+    prefer for routine stages inside a major section.
     """
-    m = str(msg).strip()
-    if not m:
-        return ""
-    return f"[{m}]"
+    return border_msg(msg, body="-")
 
 
 def _rule_line(title: str, char: str, width: int = 70) -> str:
@@ -2282,6 +2279,10 @@ _CONFIG_LOADED_SECTIONS = (
 # input.yaml, so they must round-trip validation.
 _CONFIG_DATA_KEYS = frozenset({"variable_sources", "name_prefix", "objname"})
 
+# Removed keys that older configs may still carry; warn rather than
+# reject - they are ignored, not honoured.
+_CONFIG_REMOVED_KEYS = frozenset({"template_subtraction.zogy_update"})
+
 # Renamed keys still honoured at point of use; warn rather than reject.
 _CONFIG_DEPRECATED_KEYS = {
     "photometry.psf_contam_asymmetry_frac": "photometry.psf_contam_asymmetry_sigma",
@@ -2389,16 +2390,18 @@ def config_schema_key_paths(schema=None) -> list:
 
 
 def find_unknown_config_keys(config, schema=None):
-    """Return ``(unknown, deprecated)`` sorted lists of dotted key paths in
-    *config*.
+    """Return ``(unknown, deprecated, removed)`` sorted lists of dotted key
+    paths in *config*.
 
     ``unknown``: keys absent from the schema (typos, stale names, a scalar
     where a section mapping is expected).  ``deprecated``: renamed keys still
-    honoured at point of use.  ``_``-prefixed keys are runtime slots injected
-    by the pipeline and are skipped at any level.
+    honoured at point of use.  ``removed``: keys dropped from the schema that
+    older configs may still carry - ignored, but not a fatal unknown.
+    ``_``-prefixed keys are runtime slots injected by the pipeline and are
+    skipped at any level.
     """
     schema = load_default_input_schema() if schema is None else schema
-    unknown, deprecated = [], []
+    unknown, deprecated, removed = [], [], []
 
     def _walk(cfg, sch, prefix):
         for key, val in cfg.items():
@@ -2410,6 +2413,8 @@ def find_unknown_config_keys(config, schema=None):
             if not isinstance(sch, dict) or key not in sch:
                 if path in _CONFIG_DEPRECATED_KEYS:
                     deprecated.append(path)
+                elif path in _CONFIG_REMOVED_KEYS:
+                    removed.append(path)
                 else:
                     unknown.append(path)
                 continue
@@ -2430,7 +2435,7 @@ def find_unknown_config_keys(config, schema=None):
         _walk(config, schema, "")
     else:
         unknown.append("<root> (input is not a YAML mapping)")
-    return sorted(unknown), sorted(deprecated)
+    return sorted(unknown), sorted(deprecated), sorted(removed)
 
 
 def find_invalid_config_values(config):
@@ -2468,13 +2473,15 @@ def check_input_config(config, schema=None) -> dict:
 
         {"unknown":     [dotted paths the pipeline cannot read],
          "deprecated":  [(path, current key name)],
+         "removed":     [dotted paths dropped from the schema],
          "bad_values":  [(path, value, allowed set)]}
     """
     schema = load_default_input_schema() if schema is None else schema
-    unknown, deprecated = find_unknown_config_keys(config, schema)
+    unknown, deprecated, removed = find_unknown_config_keys(config, schema)
     return {
         "unknown": unknown,
         "deprecated": [(p, _CONFIG_DEPRECATED_KEYS[p]) for p in deprecated],
+        "removed": removed,
         "bad_values": find_invalid_config_values(config),
     }
 
@@ -2774,6 +2781,44 @@ def get_image(fpath):
     return image
 
 
+def read_output_csv(file_path, **kwargs):
+    """Read a per-image ``Output_*.csv`` in either on-disk layout.
+
+    Current outputs are saved transposed (``field,value`` rows following the
+    preferred output order); files from older runs hold a single wide row.
+    Always return the wide one-row frame so concatenation and analysis code
+    is layout-agnostic.
+    """
+    df = pd.read_csv(file_path, **kwargs)
+    if (
+        df.shape[1] == 2
+        and df.columns[0] == "field"
+        and df.columns[1] == "value"
+    ):
+        df = (
+            df.set_index("field")["value"]
+            .to_frame()
+            .T.reset_index(drop=True)
+            .rename_axis(columns=None)
+        )
+    return df
+
+
+def write_output_csv(df, file_path, float_format="%.6f"):
+    """Write a single-row output frame transposed (``field,value`` rows).
+
+    The output schema runs ~60 columns wide; a vertical table stays readable
+    and diffs cleanly between epochs.  Row order follows the preferred
+    ordering applied to the frame's columns before transposing.
+    """
+    df.T.to_csv(
+        file_path,
+        header=["value"],
+        index_label="field",
+        float_format=float_format,
+    )
+
+
 def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
     """
     Concatenate multiple CSV files into a single output file, ensuring empty cells are treated as NaN.
@@ -2800,7 +2845,7 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
 
                 # dtype=str preserves blank cells so they can be mapped
                 # to NaN below rather than parsed as 0 or ''.
-                df = pd.read_csv(
+                df = read_output_csv(
                     file_path,
                     keep_default_na=True,
                     na_values=["", " ", "NA", "N/A", "NaN", "null"],
@@ -2815,7 +2860,7 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
             elif file == loc_file:
                 file_path = os.path.join(root, file)
 
-                df = pd.read_csv(
+                df = read_output_csv(
                     file_path,
                     keep_default_na=True,
                     na_values=["", " ", "NA", "N/A", "NaN", "null"],

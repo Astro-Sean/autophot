@@ -436,8 +436,10 @@ def main(argv=None):
             if not outs:
                 logger.error("No Output_*.csv under %s", reduced_dir)
                 return 1
+            from functions import read_output_csv
             df = pd.concat(
-                [pd.read_csv(f, comment="#") for f in outs], ignore_index=True
+                [read_output_csv(f, comment="#") for f in outs],
+                ignore_index=True,
             )
         out_path = os.path.join(
             reduced_dir, "LightCurve_Output_colorcorrected.csv"
