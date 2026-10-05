@@ -210,10 +210,13 @@ def detect_dipoles(
 ) -> Tuple[int, float, float, float]:
     """Detect dipole residuals around known source positions.
 
-    A dipole is an anti-symmetric positive/negative residual pair caused
-    by astrometric misalignment or PSF-matching failure.  For each source,
-    we search for a positive peak within ``dipole_radius_fwhm * FWHM`` and
-    a corresponding negative peak on the opposite side.
+    Two kernel-mismatch morphologies are caught: an anti-symmetric
+    positive/negative lobe pair from astrometric misalignment, and a
+    "sombrero" (core of one sign ringed by the opposite sign) from a
+    sharpening match kernel.  For each source, we search for a positive
+    peak within ``dipole_radius_fwhm * FWHM`` and a corresponding negative
+    excursion, then require either opposite-lobe geometry or a bipolar
+    cluster of >N-sigma pixels in each sign.
 
     Parameters
     ----------
@@ -253,10 +256,17 @@ def detect_dipoles(
         # Stamp would fall off the edge.
         if xi < radius or xi >= nx - radius or yi < radius or yi >= ny - radius:
             continue
-        n_checked += 1
 
         stamp = diff_data[yi - radius:yi + radius + 1, xi - radius:xi + radius + 1]
         stamp_mask = quality_mask[yi - radius:yi + radius + 1, xi - radius:xi + radius + 1]
+
+        # A nearly fully masked stamp can never flag (its cleaned pixels
+        # are all zero) but would still dilute dipole_fraction as
+        # "checked" -- skip it entirely.  Eight unmasked pixels is the
+        # minimum for the >=4-per-sign bipolar test to have any support.
+        if np.count_nonzero(~stamp_mask & np.isfinite(stamp)) < 8:
+            continue
+        n_checked += 1
 
         stamp_clean = stamp.copy()
         stamp_clean[stamp_mask] = 0.0
@@ -279,13 +289,28 @@ def detect_dipoles(
         dy_neg = neg_idx[0] - cy
         dx_neg = neg_idx[1] - cx
 
-        # Opposite sides: center-to-peak vectors point opposite ways.
+        # Two bipolar morphologies both indicate kernel mismatch:
+        #
+        # 1) Classic dipole: lobes on opposite sides of the source center
+        #    with comparable peak amplitudes (misalignment).
+        #
+        # 2) Sombrero: a sharpening (deconvolving) kernel leaves a core of
+        #    one sign ringed by the opposite sign -- the negative power is
+        #    spread over an annulus, so neither a lobe-geometry test nor a
+        #    peak-amplitude ratio sees it, and masked cores shift the lobes
+        #    off the antipodal axis (SN2024pba 2025-02-22 r: +11 kADU core
+        #    inside a -1 kADU ring).  Require a handful of >N-sigma pixels
+        #    in EACH sign: real variability or flux-scale mismatch leaves
+        #    a unipolar residual, and noise rarely produces >=4 such
+        #    pixels per sign in one stamp.
         dot = dy_pos * dy_neg + dx_pos * dx_neg
-        if dot >= 0:
-            continue
-
         amp_ratio = min(abs(pos_peak), abs(neg_peak)) / max(abs(pos_peak), abs(neg_peak))
-        if amp_ratio < min_antisym:
+        _is_dipole = dot < 0 and amp_ratio >= min_antisym
+        _is_bipolar = min(
+            int(np.sum(stamp_clean > threshold)),
+            int(np.sum(stamp_clean < -threshold)),
+        ) >= 4
+        if not (_is_dipole or _is_bipolar):
             continue
 
         dipole_count += 1
@@ -342,7 +367,15 @@ def measure_bright_star_residuals(
         annulus_data = stamp[annulus & ~stamp_mask]
         annulus_data = annulus_data[np.isfinite(annulus_data)]
         if len(annulus_data) > 10:
-            residuals.append(np.median(annulus_data) / noise_sigma)
+            # Excess-power RMS, not the median: a dipole residual's
+            # positive and negative lobes cancel in a median, so it
+            # reports ~0 for the exact failure mode this check exists to
+            # catch.  Subtracting the expected noise variance keeps a
+            # clean subtraction at ~0 sigma.
+            _rms2 = float(np.mean(annulus_data ** 2))
+            residuals.append(
+                np.sqrt(max(_rms2 - noise_sigma ** 2, 0.0)) / noise_sigma
+            )
 
     if not residuals:
         return 0.0, 0.0, 0
@@ -380,20 +413,28 @@ def compute_autocorrelation(
     region = diff_data[y0:y1, x0:x1].copy()
     region_mask = quality_mask[y0:y1, x0:x1]
 
-    region[region_mask] = 0.0
-    region[~np.isfinite(region)] = 0.0
-    region = region - np.mean(region)
+    valid = ~(region_mask | ~np.isfinite(region))
 
-    # 1-D autocorrelation averaged over up to 50 rows.
+    # Masked autocorrelation: masked pixels must be EXCLUDED from both the
+    # mean and each lag pair.  Zeroing them first injects artificial
+    # correlation (runs of zeros correlate) and biases the peak estimate.
     n_rows = region.shape[0]
     row_autocorrs = []
     for i in range(min(n_rows, 50)):
-        row = region[i]
-        if np.std(row) < 1e-10:
+        v = valid[i]
+        if v.sum() < max_lag + 8:
             continue
-        ac = np.correlate(row, row, mode="full")[len(row) - 1:]
-        ac = ac / ac[0]  # lag-0 normalized to 1
-        row_autocorrs.append(ac[:max_lag + 1])
+        row = region[i]
+        r = np.where(v, row - np.mean(row[v]), 0.0)
+        num = np.correlate(r, r, mode="full")[len(r) - 1:]
+        den = np.correlate(
+            v.astype(float), v.astype(float), mode="full"
+        )[len(v) - 1:]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ac = np.where(den > 0, num / den, 0.0)
+        if ac[0] <= 0:
+            continue
+        row_autocorrs.append((ac / ac[0])[: max_lag + 1])
 
     if not row_autocorrs:
         return 0.0, 0.0
@@ -602,7 +643,22 @@ def assess_difference_image(
     metrics.diff_median = float(np.median(valid_pixels))
     metrics.diff_std = float(np.std(valid_pixels))
     metrics.diff_rms = float(np.sqrt(np.mean(valid_pixels ** 2)))
-    noise_sigma = metrics.diff_std
+    # The dipole/bright-star thresholds need the *noise* level, not the
+    # power of the residuals themselves: a plain std over a diff littered
+    # with kernel-sidelobe residuals inflates noise_sigma (51 vs 11 ADU on
+    # a ZTF epoch with a deconvolving kernel) and the checks pass vacuously.
+    # Sigma-clipping recovers the background noise floor; keep the raw std
+    # in the metrics for reporting.
+    try:
+        _, _, _sigclip = sigma_clipped_stats(
+            valid_pixels, sigma=3.0, maxiters=10
+        )
+    except Exception:
+        _sigclip = np.nan
+    if np.isfinite(_sigclip) and _sigclip > 0:
+        noise_sigma = float(_sigclip)
+    else:
+        noise_sigma = metrics.diff_std
 
     # --- Spatial background variation ---
     try:
@@ -651,8 +707,10 @@ def assess_difference_image(
             edge_mask[-edge_w:, :] = True
             edge_mask[:, :edge_w] = True
             edge_mask[:, -edge_w:] = True
-            edge_mask = edge_mask | quality_mask
-            edge_pixels = diff_data[~edge_mask]
+            # The metric needs the std of pixels IN the edge band (bad
+            # pixels still excluded); ~edge_mask would select the interior
+            # and report ratio ~1.0 regardless of edge artefacts.
+            edge_pixels = diff_data[edge_mask & ~quality_mask]
             edge_pixels = edge_pixels[np.isfinite(edge_pixels)]
             if len(edge_pixels) > 0 and metrics.diff_std > 0:
                 metrics.edge_std_ratio = float(np.std(edge_pixels) / metrics.diff_std)

@@ -119,10 +119,16 @@ def _angular_sep_arcsec(ra1, dec1, ra2, dec2) -> float:
     ra1, dec1 = float(ra1), float(dec1)
     ra2 = np.atleast_1d(np.asarray(ra2, float))
     dec2 = np.atleast_1d(np.asarray(dec2, float))
-    # Haversine
-    dra = np.radians(ra2 - ra1) * np.cos(np.radians((dec1 + dec2) / 2.0))
+    # Haversine; the cos(dec) factor belongs inside the sin^2(dRA) term.
+    # sin^2 is periodic so a raw dRA is already wrap-safe.
+    dra = np.radians(ra2 - ra1)
     ddec = np.radians(dec2 - dec1)
-    sep_rad = 2.0 * np.arcsin(np.sqrt(np.sin(ddec / 2.0) ** 2 + np.cos(np.radians(dec1)) * np.cos(np.radians(dec2)) * np.sin(dra / 2.0) ** 2))
+    a = np.sin(ddec / 2.0) ** 2 + (
+        np.cos(np.radians(dec1))
+        * np.cos(np.radians(dec2))
+        * np.sin(dra / 2.0) ** 2
+    )
+    sep_rad = 2.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
     return np.degrees(sep_rad) * 3600.0
 
 

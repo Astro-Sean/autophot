@@ -834,11 +834,15 @@ class ImageDistortionCorrector:
             # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
             if data.dtype.kind != 'f':
                 data = data.astype(np.float32)
+            satur = None
             if np.issubdtype(original_dtype, np.integer):
                 max_possible = np.iinfo(original_dtype).max
                 if np.nanmax(data) >= 0.99 * max_possible:
                     satur = float(max_possible)
-            else:
+            if satur is None:
+                # An integer dtype not at the type max (or any float image)
+                # still needs the histogram estimate - satur must never be
+                # left unbound.
                 finite = data[np.isfinite(data)]
                 if finite.size == 0:
                     satur = float(1e6)
@@ -2737,6 +2741,20 @@ class ImageDistortionCorrector:
                     feasible_degree = deg
                     break
 
+            # feasible_degree == 0 means the match count cannot support even
+            # degree 1 (6 params on <5 stars).  SCAMP has no translation-only
+            # mode (DISTORT_DEGREES=0 is rejected), so an under-constrained
+            # degree-1 fit is worse than no SCAMP at all - use the sparse
+            # field fallback instead.
+            if feasible_degree == 0:
+                self.logger.warning(
+                    "Only %d matched sources - too few for SCAMP degree 1 "
+                    "(need %d). Falling back to reproject/AstroAlign.",
+                    _num_matched, _min_sources_for_degree[1],
+                )
+                return self._align_fallback_reproject_then_astroalign(
+                    science_image, reference_image, output_dir
+                )
             # Track whether SCAMP's .head needs SIP preservation.
             # When SCAMP runs at a lower degree than the reference's distortion
             # order, the .head replaces high-order SIP with a lower-order PV
@@ -2745,15 +2763,6 @@ class ImageDistortionCorrector:
             # (while keeping SCAMP's linear CRVAL/CD correction) avoids this.
             preserve_sip_in_head = False
             if feasible_degree < required_degree:
-                if _num_matched < _min_sources_for_degree[0]:
-                    self.logger.warning(
-                        "Only %d matched sources - too few for any WCS correction "
-                        "(need %d). Falling back to reproject/AstroAlign.",
-                        _num_matched, _min_sources_for_degree[0],
-                    )
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
-                    )
                 self.logger.info(
                     "Reference has distortion order %d but only %d matched sources "
                     "(need %d for degree %d). Running SCAMP at degree %d - "
@@ -4776,13 +4785,14 @@ class ImageDistortionCorrector:
                     pass
 
             # reproject handles NaN poorly; zero them and rely on footprint coverage
-            n_nan = int(np.sum(~np.isfinite(ref_data)))
+            ref_valid_mask = np.isfinite(ref_data)
+            n_nan = int(np.sum(~ref_valid_mask))
             if n_nan > 0:
                 self.logger.info(
                     "Reference has %d NaN pixels (%.2f%%) - replacing with 0 before reprojection.",
                     n_nan, 100.0 * n_nan / ref_data.size,
                 )
-                ref_data = np.where(np.isfinite(ref_data), ref_data, 0.0)
+                ref_data = np.where(ref_valid_mask, ref_data, 0.0)
 
             # Build reproject config from input_yaml (same as templates.py)
             iy = getattr(self, "input_yaml", None) or {}
@@ -4904,6 +4914,64 @@ class ImageDistortionCorrector:
 
             # Footprint coverage check - zero overlap means WCS mismatch
             fp_mask = footprint.astype(bool)
+            # Zero-filled NaN pixels contribute 0 flux but full overlap
+            # weight: an output pixel partly over invalid input is diluted
+            # by the valid fraction, and one fully inside a hole reads as
+            # real ~zero data.  Reproject the validity map with the same
+            # backend: rescale where most input was real, mask where not.
+            _weight_fp = np.asarray(footprint, dtype=np.float32)
+            if not ref_valid_mask.all():
+                try:
+                    _vsrc = ref_valid_mask.astype(np.float64)
+                    if used_method == "adaptive":
+                        _vf, _ = reproject_adaptive(
+                            (_vsrc, ref_wcs), sci_wcs,
+                            shape_out=sci_data.shape,
+                            roundtrip_coords=roundtrip,
+                            parallel=use_parallel,
+                            conserve_flux=conserve_flux,
+                            center_jacobian=center_jacobian,
+                            **({"despike_jacobian": True} if "despike_jacobian" in _ADAPTIVE_PARAMS else {}),
+                        )
+                    elif used_method == "interp":
+                        _vf, _ = reproject_interp(
+                            (_vsrc, ref_wcs), sci_wcs,
+                            shape_out=sci_data.shape,
+                            order=interp_order_norm,
+                            roundtrip_coords=roundtrip,
+                        )
+                    else:
+                        from reproject import reproject_exact
+
+                        _vf, _ = reproject_exact(
+                            (_vsrc, ref_wcs), sci_wcs,
+                            shape_out=sci_data.shape,
+                            parallel=use_parallel,
+                        )
+                    _vf = np.asarray(_vf, dtype=float)
+                    _majority = fp_mask & np.isfinite(_vf) & (_vf > 0.5)
+                    aligned_ref = np.asarray(aligned_ref, dtype=float)
+                    aligned_ref[_majority] = (
+                        aligned_ref[_majority] / _vf[_majority]
+                    )
+                    fp_mask &= _majority
+                    # The downstream weight map should carry partial
+                    # coverage, not just the binary footprint.
+                    _weight_fp = np.asarray(footprint, dtype=np.float32)
+                    _vf_clip = np.clip(
+                        np.where(np.isfinite(_vf), _vf, 0.0), 0.0, 1.0
+                    )
+                    # Pixels rejected as majority-invalid become NaN in
+                    # aligned_ref; they must carry zero weight too.
+                    _weight_fp = (
+                        _weight_fp * _vf_clip * fp_mask
+                    ).astype(np.float32)
+                except Exception as _ve:
+                    self.logger.debug(
+                        "Valid-fraction correction skipped: %s", _ve
+                    )
+            else:
+                _weight_fp = np.asarray(footprint, dtype=np.float32)
             n_footprint = int(np.sum(fp_mask))
             n_total = int(fp_mask.size)
             if n_footprint == 0:
@@ -4936,9 +5004,7 @@ class ImageDistortionCorrector:
             # a sibling weight map still on the old grid must be refreshed.
             refresh_sibling_weight_map(
                 str(aligned_reference_fpath),
-                weight_data=np.asarray(footprint, dtype=np.float32)
-                if footprint is not None
-                else None,
+                weight_data=_weight_fp,
                 logger=self.logger,
             )
             self.logger.info(
@@ -5375,8 +5441,22 @@ class ImageDistortionCorrector:
             sci_world = sci_wcs.all_pix2world(sci_corners, 0)
             ref_world = ref_wcs.all_pix2world(ref_corners, 0)
 
-            ra_min = max(np.min(sci_world[:, 0]), np.min(ref_world[:, 0]))
-            ra_max = min(np.max(sci_world[:, 0]), np.max(ref_world[:, 0]))
+            # Wrap RAs into a branch cut at the field centre - raw
+            # min/max over corner RAs gives ra_min~0, ra_max~360 for a
+            # field straddling RA=0, producing a ~360-degree "overlap".
+            _ra_ref = float(
+                np.median(
+                    np.concatenate([sci_world[:, 0], ref_world[:, 0]])
+                )
+            )
+
+            def _unwrap_ra(ra):
+                return (np.asarray(ra, float) - _ra_ref + 180.0) % 360.0 - 180.0 + _ra_ref
+
+            _sci_ra = _unwrap_ra(sci_world[:, 0])
+            _ref_ra = _unwrap_ra(ref_world[:, 0])
+            ra_min = max(np.min(_sci_ra), np.min(_ref_ra))
+            ra_max = min(np.max(_sci_ra), np.max(_ref_ra))
             dec_min = max(np.min(sci_world[:, 1]), np.min(ref_world[:, 1]))
             dec_max = min(np.max(sci_world[:, 1]), np.max(ref_world[:, 1]))
 
@@ -5408,7 +5488,11 @@ class ImageDistortionCorrector:
                 # Output grid center is (width/2, height/2); pix_scale in arcsec/px
                 cos_dec = np.cos(np.radians(target_dec))
 
-                dra_arcsec = (target_ra - overlap_center_ra) * cos_dec * 3600
+                # overlap_center_ra is in the unwrapped frame; bring the
+                # target into it before differencing.
+                dra_arcsec = (
+                    _unwrap_ra(target_ra) - overlap_center_ra
+                ) * cos_dec * 3600
                 ddec_arcsec = (target_dec - overlap_center_dec) * 3600
 
                 dx_pix = dra_arcsec / pix_scale
@@ -6490,13 +6574,14 @@ class ImageDistortionCorrector:
                 finite = np.isfinite(img)
                 if not finite.any():
                     raise ValueError(f"No finite image pixels in {fits_path}")
+                valid = finite.copy()
                 if not finite.all():
                     img = img.copy()
                     img[~finite] = np.nanmedian(img[finite])
-                return img
+                return img, valid
 
-            ref_img = _load_and_clean_image(ref_image_copy)
-            sci_img = _load_and_clean_image(sci_image_copy)
+            ref_img, ref_valid = _load_and_clean_image(ref_image_copy)
+            sci_img, sci_valid = _load_and_clean_image(sci_image_copy)
             MAX_CONTROL_POINTS = 300
             # Undersampling threshold for interpolation-order decisions.  Must
             # be defined before the aafitrans branch: when aafitrans is missing
@@ -6567,7 +6652,22 @@ class ImageDistortionCorrector:
                         order=_aa_interp_order,
                         cval=np.nan,
                     )
-                    footprint = np.isfinite(aligned_ref_img)
+                    # Warp the source-validity map the same way: the median
+                    # fill above makes interior holes look like real data,
+                    # so an interpolated pixel can contain fabricated flux.
+                    # Pixels warped from >10% invalid input are not
+                    # measurements - extend the footprint mask to them.
+                    _aligned_valid = ndimage.affine_transform(
+                        ref_valid.astype(np.float32),
+                        _nd_matrix,
+                        offset=_nd_offset,
+                        output_shape=sci_img.shape,
+                        order=1,
+                        cval=0.0,
+                    )
+                    footprint = np.isfinite(aligned_ref_img) & (
+                        _aligned_valid > 0.9
+                    )
                     # BUG 117: If affine_transform produced all-NaN (convention
                     # issue or extreme transform), fall back to astroalign.
                     if not footprint.any():
@@ -6596,7 +6696,21 @@ class ImageDistortionCorrector:
                         "    bilinear is preferred.",
                         fwhm_sci_pix, fwhm_ref_pix,
                     )
-                aligned_ref_img, footprint = aa.apply_transform(tform, ref_img, sci_img)
+                # propagate_mask warps the source NaN footprint along with
+                # the data so interior chip-gap holes are excluded from the
+                # footprint rather than filled with the flat median values
+                # used above.  It derives the mask from NaN positions, so
+                # restore them for this call; older astroalign lacks the
+                # kwarg and falls back to the median-filled behaviour.
+                try:
+                    _ref_nan = np.where(ref_valid, ref_img, np.nan)
+                    aligned_ref_img, footprint = aa.apply_transform(
+                        tform, _ref_nan, sci_img, propagate_mask=True
+                    )
+                except TypeError:
+                    aligned_ref_img, footprint = aa.apply_transform(
+                        tform, ref_img, sci_img
+                    )
             # Preserve NaNs (chip gaps) instead of replacing with sentinel
             aligned_ref_img = np.nan_to_num(
                 aligned_ref_img, nan=np.nan, posinf=np.nan, neginf=np.nan
@@ -7215,7 +7329,11 @@ class ImageDistortionCorrector:
                         w = np.asarray(hdul_w[0].data, dtype=float)
                     if w.shape != img.shape:
                         return
-                    bad = (~np.isfinite(w)) | (w <= 0) | (img == 0)
+                    # Do not mask img == 0: with FILL_VALUE=NAN and
+                    # BLANK_BADPIXELS=Y, padding is already non-finite or
+                    # zero-weight, and a genuine zero sky pixel is a real
+                    # measurement, not a sentinel.
+                    bad = (~np.isfinite(w)) | (w <= 0)
                     if not np.any(bad):
                         return
                     n_before = int(np.count_nonzero(~np.isfinite(img)))
@@ -8127,9 +8245,13 @@ class ImageDistortionCorrector:
                 if len(catalog) <= max_sources:
                     return catalog
 
-                # Set random seed for reproducibility
-                if random_seed is not None:
-                    np.random.seed(random_seed)
+                # Local RNG: np.random.seed() would reset the global state
+                # and perturb every other stochastic consumer in the process.
+                _rng = (
+                    np.random.RandomState(random_seed)
+                    if random_seed is not None
+                    else np.random
+                )
 
                 valid_sources = []
                 for row in catalog:
@@ -8146,7 +8268,7 @@ class ImageDistortionCorrector:
                     return valid_sources[:max_sources]
                 elif selection_mode == "random":
                     # Random selection across entire image
-                    np.random.shuffle(valid_sources)
+                    _rng.shuffle(valid_sources)
                     return valid_sources[:max_sources]
                 elif selection_mode == "uniform":
                     # True uniform spatial grid sampling - ensure coverage across entire image
@@ -8180,7 +8302,7 @@ class ImageDistortionCorrector:
                             break
 
                         if cell_key in grid_cells and len(grid_cells[cell_key]) > 0:
-                            np.random.shuffle(grid_cells[cell_key])
+                            _rng.shuffle(grid_cells[cell_key])
                             selected_sources.append(grid_cells[cell_key][0])
                             selected_count += 1
 
@@ -8196,7 +8318,7 @@ class ImageDistortionCorrector:
                                     remaining_sources.extend(cell_sources[1:])
 
                         if remaining_sources:
-                            np.random.shuffle(remaining_sources)
+                            _rng.shuffle(remaining_sources)
                             additional_needed = min(remaining_needed, len(remaining_sources))
                             selected_sources.extend(remaining_sources[:additional_needed])
                             selected_count += additional_needed
@@ -8208,7 +8330,7 @@ class ImageDistortionCorrector:
                         available_sources = [s for s in valid_sources if s not in used_sources]
 
                         if available_sources:
-                            np.random.shuffle(available_sources)
+                            _rng.shuffle(available_sources)
                             additional_needed = min(remaining_needed, len(available_sources))
                             selected_sources.extend(available_sources[:additional_needed])
 

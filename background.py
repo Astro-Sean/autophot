@@ -19,8 +19,10 @@ Key design choices
 6. **Saturation masking** -- pixels near saturation are masked before
    background estimation.
 7. **BiweightLocationBackground** -- resistant to outlier-contaminated boxes.
-8. **Low exclude_percentile (80 %)** -- boxes with >20 % masked pixels are
-   interpolated over rather than estimated.
+8. **exclude_percentile (80 %)** -- photutils 3.0 keeps a mesh node while
+   MORE than (100 - p)% of the box pixels are usable, so p=80 still lets a
+   box with up to 80 % masked pixels contribute an estimate from its
+   surviving subset (sigma-clipped pixels count as masked).
 """
 
 # TODO: Mask out regions where the pixel shares the same value as it's nearest nighbout. Also dilute this to avoid aretifacts at the edges
@@ -466,7 +468,7 @@ class BackgroundSubtractor:
         * mesh_scale = 6 -> boxes are ~6x FWHM.  Large enough that individual
           sources don't dominate a box, but small enough that the mesh resolves
           real sky gradients (vignetting, scattered light, etc.).
-        * min_box = 128 matches LSST's bin size for better sky tracking.
+        * min_box = 128, a standard survey bin size for good sky tracking.
         * filter_size is 3 or 5 **mesh boxes** (NOT pixels!).  In Background2D
           this is a median filter applied to the *mesh grid*, so filter_size=3
           means a 3x3 box neighbourhood.  Values much larger than 5 flatten
@@ -527,6 +529,26 @@ class BackgroundSubtractor:
         max_allowed = max(min_box, int(min(shape) * region_fraction_limit))
         base = min(base, max_allowed)
         base = base | 1  # force odd
+
+        # photutils>=3 handles edges with partial remainder boxes of
+        # arbitrary width - a 1-2 px remainder produces the noisiest mesh
+        # nodes on the whole image, right at the border.  Nudge base by a
+        # few pixels so each remainder is either 0 or a usable fraction.
+        def _remainder_penalty(b):
+            pen = 0.0
+            for dim in shape:
+                rem = dim % b
+                if 0 < rem < b / 3.0:
+                    pen += (b / 3.0 - rem) / b
+            return pen
+
+        if _remainder_penalty(base) > 0:
+            lo = max(3, min_box)
+            cands = [b for b in range(lo | 1, int(max_allowed) + 1, 2)]
+            if cands:
+                best = min(cands, key=lambda b: (_remainder_penalty(b), abs(b - base)))
+                if _remainder_penalty(best) < _remainder_penalty(base):
+                    base = best
 
         box_size = (base, base)
 
@@ -2407,9 +2429,10 @@ class BackgroundSubtractor:
             if isinstance(self.config, dict)
             else {}
         )
-        # Default to a finer mesh for local transient fits so the cutout background
-        # is as flat as possible for PSF measurement.
-        local_mesh_scale = float(bcfg.get("local_mesh_scale", 0.8))
+        # Mesh scale for local transient fits.  _compute_box_sizes clamps
+        # mesh_scale to [mesh_scale_min, mesh_scale_max] (4-10), so values
+        # below 4 are silently ignored - keep the honest effective default.
+        local_mesh_scale = float(bcfg.get("local_mesh_scale", 4.0))
         local_region_fraction_limit = float(
             bcfg.get("local_region_fraction_limit", 0.15)
         )
@@ -2417,7 +2440,11 @@ class BackgroundSubtractor:
         local_nsigma = float(bcfg.get("local_source_mask_nsigma", 5.0))
         local_npixels = int(bcfg.get("local_source_mask_npixels", 7))
         local_mask_iterations = int(bcfg.get("local_source_mask_iterations", 2))
-        local_exclude_percentile = float(bcfg.get("local_exclude_percentile", 95.0))
+        # photutils 3.0 exclude_percentile semantics: a mesh node survives
+        # while MORE than (100 - p)% of the box pixels are usable, so p=95
+        # would let a 95%-masked box contribute an estimate from a few
+        # unclipped pixels.  80 matches the global-pass regimes.
+        local_exclude_percentile = float(bcfg.get("local_exclude_percentile", 80.0))
         local_sigma = float(bcfg.get("local_sigma_clip", 3.0))
         local_sigma_maxiters = int(bcfg.get("local_sigma_clip_maxiters", 10))
         if bool(bcfg.get("fast_mode", False)):

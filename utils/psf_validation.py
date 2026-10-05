@@ -417,7 +417,12 @@ def validate_psf_loo(
             if background_rms is not None:
                 err_stamp = background_rms[y0:y1, x0:x1].astype(float).copy()
             else:
-                err_stamp = np.full_like(stamp, read_noise / np.sqrt(gain))
+                # read_noise is in e-; the stamp is in ADU, so the
+                # conversion is /gain (not /sqrt(gain), which only
+                # coincides at gain=1).
+                err_stamp = np.full_like(
+                    stamp, read_noise / max(float(gain), 1e-30)
+                )
 
             # Add Poisson noise
             poisson = np.sqrt(np.clip(stamp, 0, None) * gain) / gain
@@ -507,7 +512,8 @@ def validate_psf_loo(
         return 1.4826 * np.nanmedian(np.abs(x - med))
 
     result.flux_bias_frac = float(np.nanmedian(biases))
-    result.flux_bias_frac_err = float(mad_std(biases) / np.sqrt(n_valid))
+    # SE of a median estimator is 1.253*sigma/sqrt(N), not sigma/sqrt(N).
+    result.flux_bias_frac_err = float(1.2533 * mad_std(biases) / np.sqrt(n_valid))
     result.flux_scatter_frac = float(mad_std(biases))
     result.centroid_bias_px = float(np.nanmedian(offsets))
     result.centroid_scatter_px = float(mad_std(offsets))

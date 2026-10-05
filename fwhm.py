@@ -1113,7 +1113,9 @@ class Find_FWHM:
         dy = min(abs(dy), 3) if dy is not None else 3
 
         n_valid = np.isfinite(data).sum()
-        if n_valid < 5:
+        # Gaussian2d + constant is 7 free parameters; fewer valid pixels
+        # than ~1.5x that leaves the fit exactly determined or worse.
+        if n_valid < 10:
             logger.debug(
                 f"fit_gaussian: too few valid pixels ({n_valid}), skipping fit."
             )
@@ -2158,7 +2160,9 @@ class Find_FWHM:
         rr0 = np.hypot(x_arr - x0, y_arr - y0)
         peak_val = float(np.nanmax(data))
         secondary = loc_max & (rr0 > 1.5) & (data > 0.3 * peak_val)
-        if label(secondary)[1] > 1:
+        # >= 1: one detached secondary maximum is already a blend; > 1
+        # would let a single close companion through the veto.
+        if label(secondary)[1] >= 1:
             return None
 
         # --- Anisotropic 2D Gaussian (shape diagnostics) ---

@@ -100,6 +100,8 @@ class MCMCConvergenceReport:
                 flag_names.append("BAD_ACCEPTANCE")
             if self.flags & MCMC_FLAG_TOO_FEW_STEPS:
                 flag_names.append("TOO_FEW_STEPS")
+            if self.flags & MCMC_FLAG_NAN_DIAG:
+                flag_names.append("NAN_DIAG")
             lines.append(f"  Flags: {', '.join(flag_names)}")
         return "\n".join(lines)
 
@@ -113,6 +115,7 @@ MCMC_FLAG_HIGH_RHAT = 1 << 0       # R-hat > 1.1
 MCMC_FLAG_LOW_ESS = 1 << 1         # n_eff < 100
 MCMC_FLAG_BAD_ACCEPTANCE = 1 << 2  # acc_frac outside [0.15, 0.8]
 MCMC_FLAG_TOO_FEW_STEPS = 1 << 3   # total_steps < 100
+MCMC_FLAG_NAN_DIAG = 1 << 4        # non-finite per-param diagnostic
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +243,11 @@ def compute_ess(chain: np.ndarray) -> float:
     # Compute autocorrelation for each walker, then average
     taus = []
     for w in range(n_walkers):
-        c = chain[w] - chain[w].mean()
+        # A single non-finite step would otherwise poison the whole walker.
+        cw = chain[w][np.isfinite(chain[w])]
+        if cw.size < 4:
+            continue
+        c = cw - cw.mean()
         if np.all(c == 0):
             continue
         n = len(c)
@@ -342,31 +349,48 @@ def assess_convergence(
         report.flags |= MCMC_FLAG_TOO_FEW_STEPS
         log.warning("MCMC convergence: only %d steps (< %d minimum)", n_steps, min_steps)
 
-    # R-hat
+    # R-hat.  A NaN-poisoned parameter (a walker that hit non-finite logp)
+    # must not be silently skipped: nanmax would drop it and convergence
+    # could be reported on the surviving parameters alone.
     try:
         rhats = compute_rhat_all_params(chain)
         report.rhat_per_param = rhats
-        report.rhat = float(np.nanmax(rhats))
-        if np.isfinite(report.rhat) and report.rhat > rhat_threshold:
-            report.flags |= MCMC_FLAG_HIGH_RHAT
+        if np.isfinite(rhats).any():
+            report.rhat = float(np.nanmax(rhats))
+        else:
+            report.rhat = np.nan
+        if np.isfinite(rhats).all():
+            if report.rhat > rhat_threshold:
+                report.flags |= MCMC_FLAG_HIGH_RHAT
+        else:
+            report.flags |= MCMC_FLAG_NAN_DIAG
     except Exception as e:
         log.debug("R-hat computation failed: %s", e)
         report.rhat = np.nan
+        report.flags |= MCMC_FLAG_NAN_DIAG
 
     # ESS
     try:
         ess = compute_ess_all_params(chain)
         report.n_eff_per_param = ess
-        report.n_eff = float(np.nanmin(ess))
-        if np.isfinite(report.n_eff) and report.n_eff < ess_threshold:
-            report.flags |= MCMC_FLAG_LOW_ESS
+        if np.isfinite(ess).any():
+            report.n_eff = float(np.nanmin(ess))
+        else:
+            report.n_eff = np.nan
+        if np.isfinite(ess).all():
+            if report.n_eff < ess_threshold:
+                report.flags |= MCMC_FLAG_LOW_ESS
+        else:
+            report.flags |= MCMC_FLAG_NAN_DIAG
     except Exception as e:
         log.debug("ESS computation failed: %s", e)
         report.n_eff = np.nan
+        report.flags |= MCMC_FLAG_NAN_DIAG
 
     # Acceptance fraction
     if isinstance(acceptance_fraction, np.ndarray):
-        acc = float(np.mean(acceptance_fraction))
+        finite_acc = acceptance_fraction[np.isfinite(acceptance_fraction)]
+        acc = float(np.mean(finite_acc)) if finite_acc.size else np.nan
     else:
         acc = float(acceptance_fraction)
     report.acceptance_fraction = acc

@@ -1291,8 +1291,11 @@ def _fit_moffat_composite(stars, fwhm, max_components=3, ellipticity=None):
             continue
         rs.append(rr[ok])
         vs.append(data[ok] / flux)
-        # Inverse-variance weights rescale by flux^2 after normalisation.
-        ws.append(w[ok] * flux * flux)
+        # v = data/flux has sigma_v = sigma/flux, so its residual weight
+        # is w_v = flux * w.  wscale below is sqrt(w_stored/median), so the
+        # stored quantity must be w_v^2 for the effective weight to be
+        # proportional to 1/sigma_v.
+        ws.append((w[ok] * flux) ** 2)
     if not rs:
         return None
     r = np.concatenate(rs)
@@ -1313,8 +1316,19 @@ def _fit_moffat_composite(stars, fwhm, max_components=3, ellipticity=None):
         t = np.sign(model) * np.sqrt(np.abs(model)) - v_sqrt
         return t * wscale
 
+    # Component count is capped by independent stars, not pixels: one
+    # cutout contributes ~400 correlated pixels but only one noisy PSF
+    # realisation, so 1-3 stars cannot support a 6-9 parameter composite.
+    n_stars = len(rs)
+    k_max = max(1, min(int(max_components), n_stars // 2))
+    if k_max < int(max_components):
+        logger.debug(
+            "Moffat composite: %d stars support at most %d component(s).",
+            n_stars,
+            k_max,
+        )
     fwhm = max(0.5, float(fwhm))
-    for k in range(int(max_components), 0, -1):
+    for k in range(k_max, 0, -1):
         g0 = fwhm * np.array([0.8, 1.8, 4.5][:k])
         b0 = np.array([4.5, 2.5, 1.7][:k])
         a0 = peak * np.array([0.7, 0.25, 0.05][:k])
@@ -1989,6 +2003,13 @@ def convolve_psf_stamp(
         conv = map_coordinates(
             conv_native, [gy2, gx2], order=3, mode="constant", cval=0.0
         )
+        # A cubic interpolant of a unit-sum native stamp only approximates
+        # sum == k^2 on the oversampled grid (the photutils unit-flux
+        # convention).  Renormalize so every fitted flux inherits the exact
+        # scale.
+        _conv_sum = float(np.nansum(conv))
+        if np.isfinite(_conv_sum) and _conv_sum > 0:
+            conv = conv * (float(k * k) / _conv_sum)
     else:
         conv = conv_native
 
@@ -3166,6 +3187,15 @@ class MCMCFitter:
 
         self.sampler = emcee.EnsembleSampler(**sampler_kwargs)
 
+        # emcee 3.1 snapshots global np.random into the sampler at
+        # construction, so the moves are unseeded even when self.random_state
+        # is a seeded RandomState (which only drives the walker-init jitter).
+        # Derive a dedicated per-sampler state so proposals are reproducible.
+        if isinstance(self.random_state, np.random.RandomState):
+            self.sampler.random_state = np.random.RandomState(
+                self.random_state.randint(0, 2**32 - 1)
+            )
+
         # Precompute the likelihood/prior invariants once per fit; they
         # would otherwise be rebuilt on every log_prob call.
         self._ll_ctx = self._build_eval_context(
@@ -3214,7 +3244,11 @@ class MCMCFitter:
                             warnings.filterwarnings("ignore", message=".*chain is shorter.*")
                             warnings.filterwarnings("ignore", message=".*autocorrelation.*")
                             tau = self.sampler.get_autocorr_time(quiet=True)
-                        tau_est = np.nanmean(tau)
+                        # Convergence is governed by the SLOWEST parameter:
+                        # a mean over per-parameter taus lets a single
+                        # slow-mixing parameter (e.g. flux in a degenerate
+                        # fit) pass the threshold unconverged.
+                        tau_est = np.nanmax(tau)
                         # Standard emcee recommendation: each walker must run for at
                         # least 50 * tau steps.  We use adaptive_tau_target*tau as
                         # the convergence threshold (default 100) to ensure a
@@ -3392,7 +3426,14 @@ class MCMCFitter:
                     )
 
         if chain.shape[0] == 0:
-            log.error("[MCMC] No samples after burn-in/thinning.")
+            # The returned point estimate is the LSQ initial guess, NOT a
+            # posterior - mark the record so callers do not mistake the
+            # fallback for a sampled result (NaN errors alone are easy to
+            # drop silently downstream).
+            log.error(
+                "[MCMC] No samples after burn-in/thinning; returning "
+                "initial parameters with fit_failed flag."
+            )
             per16 = per50 = per84 = best_params = initial_params.copy()
             perr_lo = perr_hi = perr_sym = np.full_like(best_params, np.nan)
         else:
@@ -3444,8 +3485,11 @@ class MCMCFitter:
             "p50": per50.copy(),
             "p84": per84.copy(),
             "param_errs": perr_sym.copy(),
+            "fit_failed": bool(chain.shape[0] == 0),
         }
         self.fit_info["per_source"].append(record)
+        if chain.shape[0] == 0:
+            self.fit_info["fit_failed"] = True
         if self.store_samples:
             self.fit_info["samples"][self.counter] = chain
             self.fit_info["log_prob"] = logp
@@ -3535,8 +3579,9 @@ class PoissonLikelihoodFitter:
               d^2lnL/dn_bar^2 = -n_i/n_bar^2 (expected value -1/n_bar)
 
         When noise_variance is provided (per-pixel background+read noise variance),
-        the Hessian's second derivative is modified to:
-              d^2lnL/dn_i^2 = -1/n_bar^2 - 1/sigma_bkg^2
+        the pixel variance is n_bar + sigma_bkg^2 and the Hessian's second
+        derivative becomes:
+              d^2lnL/dn_i^2 = -1/(n_bar + sigma_bkg^2)
         This combines source Poisson noise with background Gaussian noise,
         consistent with the LSQ fitter's full noise model.  Without this,
         errors are severely underestimated for faint sources where background
@@ -3556,19 +3601,19 @@ class PoissonLikelihoodFitter:
         # near zero.
         d2lnL_dnbar2 = -1.0 / n_bar
 
-        # Add background variance to the Hessian's second derivative so that
-        # parameter errors include background+read noise, not just source
-        # Poisson noise.  This makes PoissonLikelihoodFitter errors consistent
-        # with LSQ/MCMC fitters that use the full noise model.
+        # Include background+read noise in the curvature.  A pixel with
+        # Poisson source mean n_bar plus Gaussian background variance nv has
+        # total variance n_bar + nv, so the expected Fisher curvature is
+        # -1/(n_bar + nv).  Adding -1/nv on top of -1/n_bar double-counts
+        # the information and underestimates parameter errors by up to ~2x
+        # (the two terms only agree in the n_bar >> nv limit).
         if noise_variance is not None:
             nv = np.asarray(noise_variance, float)
-            if np.isscalar(nv) and nv > 0:
-                d2lnL_dnbar2 = d2lnL_dnbar2 - 1.0 / nv
-            elif nv.ndim == 0 and float(nv) > 0:
-                d2lnL_dnbar2 = d2lnL_dnbar2 - 1.0 / float(nv)
+            if nv.ndim == 0 and float(nv) > 0:
+                d2lnL_dnbar2 = -1.0 / (n_bar + float(nv))
             elif nv.shape == n_bar.shape:
                 nv_safe = np.clip(nv, 1e-30, None)
-                d2lnL_dnbar2 = d2lnL_dnbar2 - 1.0 / nv_safe
+                d2lnL_dnbar2 = -1.0 / (n_bar + nv_safe)
         
         # Numerical derivatives of model w.r.t. parameters.  Central
         # differences (second-order) rather than forward: the forward
@@ -3787,6 +3832,18 @@ class PoissonLikelihoodFitter:
             _, final_hessian = self._compute_derivatives(data, model, x, y, params, param_names, noise_variance=noise_variance)
 
             information = -0.5 * (final_hessian + final_hessian.T)
+            # A rank-deficient information matrix (an unconstrained or
+            # degenerate parameter direction) still pinv()s to a
+            # minimum-norm covariance whose errors look plausible but are
+            # meaningless - flag it rather than reporting silently.
+            _info_rank = np.linalg.matrix_rank(information)
+            if _info_rank < information.shape[0]:
+                log.warning(
+                    "[PoissonFitter] Rank-deficient information matrix "
+                    "(%d/%d); reported errors are unreliable",
+                    _info_rank,
+                    information.shape[0],
+                )
             cov_matrix = np.linalg.pinv(information)
 
             if np.all(np.isfinite(cov_matrix)) and np.all(np.diag(cov_matrix) > 0):
@@ -4293,6 +4350,21 @@ class PSF:
                 phot_cfg.get("psf_norm_radius_mask_frac_rescue_max", 0.25)
             )
             _min_cand = max(4, int(phot_cfg.get("psf_min_candidates", 8)))
+            # photutils >=3.0 dropped norm_radius: each star is normalised
+            # by the interpolated sum over the WHOLE cutout, so masked
+            # pixels anywhere corrupt the flux scale, not just those inside
+            # the norm circle.  Gate on the same signature the builder
+            # call uses and apply a looser whole-cutout cap in that case.
+            try:
+                _bld_has_norm_radius = (
+                    "norm_radius"
+                    in _inspect.signature(EPSFBuilder.__init__).parameters
+                )
+            except Exception:
+                _bld_has_norm_radius = True
+            _cut_frac_max = float(
+                phot_cfg.get("psf_norm_cutout_mask_frac_max", 0.15)
+            )
             _nyy, _nxx = np.mgrid[:ny_cut, :nx_cut]
             _in_norm = (
                 np.hypot(
@@ -4301,6 +4373,7 @@ class PSF:
                 <= _norm_r
             )
             _norm_frac = np.zeros(len(epsfstars))
+            _cut_frac = np.zeros(len(epsfstars))
             for _si, _st in enumerate(epsfstars):
                 _bad = ~np.isfinite(np.asarray(_st.data, float))
                 _m = getattr(_st, "mask", None)
@@ -4309,7 +4382,11 @@ class PSF:
                 _norm_frac[_si] = np.sum(_bad & _in_norm) / float(
                     _in_norm.sum()
                 )
+                if not _bld_has_norm_radius:
+                    _cut_frac[_si] = float(np.mean(_bad))
             _norm_keep = _norm_frac <= _norm_frac_max
+            if not _bld_has_norm_radius:
+                _norm_keep &= _cut_frac <= _cut_frac_max
             if not _norm_keep.all():
                 # Keep-floor rescue: on a sparse field a strict cut can
                 # starve the build (observed: 5 -> 3 stars).  Rescue the
@@ -4318,13 +4395,20 @@ class PSF:
                 # partially masked star still contributes valid samples,
                 # and its masked pixels carry weight 0.
                 if int(_norm_keep.sum()) < _min_cand:
+                    # Rescue ranking uses the metric that actually enters
+                    # the normalisation denominator.
+                    _rank_frac = (
+                        _norm_frac
+                        if _bld_has_norm_radius
+                        else np.maximum(_norm_frac, _cut_frac)
+                    )
                     _rej = np.flatnonzero(~_norm_keep)
-                    _rej = _rej[np.argsort(_norm_frac[_rej])]
+                    _rej = _rej[np.argsort(_rank_frac[_rej])]
                     _n_rescued = 0
                     for _ri in _rej:
                         if int(_norm_keep.sum()) >= _min_cand:
                             break
-                        if _norm_frac[_ri] <= _norm_rescue_frac_max:
+                        if _rank_frac[_ri] <= _norm_rescue_frac_max:
                             _norm_keep[_ri] = True
                             _n_rescued += 1
                     if _n_rescued:
@@ -8479,6 +8563,10 @@ class PSF:
                             "stars, so it is kept.",
                             _mad_emp / _mad_ana, _mad_emp, _mad_ana,
                         )
+                        # Honest accounting: a model that fits its own stars
+                        # grossly worse than the analytic fallback has not
+                        # converged to the data, whatever the shape gates say.
+                        self.psf_converged = False
 
             if not _good:
                 _fwhm_bad = np.isfinite(_epsf_fwhm_meas) and (
@@ -9795,7 +9883,9 @@ class PSF:
                     os.path.join(
                         models_dir, f"{filename_prefix}_{base}.fits"
                     ),
-                    stamp2d.astype(np.float32),
+                    # ZOGY's kernel fit re-reads this stamp - keep the same
+                    # float64 precision as the grid model below.
+                    stamp2d.astype(np.float64),
                     hdr_c,
                 )
             safe_fits_write(
@@ -10935,7 +11025,10 @@ class PSF:
         gain = _gain_for_bkg  # reuse gain already resolved above
         read_noise = float(self.input_yaml.get("read_noise", 0.0))
         fwhm_clamped = max(1.0, min(fwhm, 50.0))
-        sigma_pix = fwhm_clamped * 0.8493218002882191  # gaussian_fwhm_to_sigma
+        # gaussian_fwhm_to_sigma = 1/(2*sqrt(2 ln 2)) = 0.4246609.  The
+        # previous constant (1/sqrt(2 ln 2)) is a HWHM conversion - it made
+        # sigma_pix 2x too wide and the analytic C 4x too small.
+        sigma_pix = fwhm_clamped * 0.42466090014400953
         C = 1.0 / (4.0 * np.pi * sigma_pix ** 2)
         C = max(C, 1e-6)
         # The Gaussian C is exact only for a circular Gaussian PSF.  Measure
@@ -11005,6 +11098,18 @@ class PSF:
         bright_mask = snr >= 8.0
         faint_mask = (snr >= 4.0) & (snr < 8.0)
         vfaint_mask = snr < 4.0
+        # A NaN S/N (e.g. unmeasurable bootstrap flux) passes none of the
+        # tier cuts, so the source would silently go unfitted.  Route it to
+        # the most conservative tier instead of dropping it.
+        _nan_snr = ~np.isfinite(snr)
+        if np.any(_nan_snr):
+            log.warning(
+                "PSF fit: %d/%d sources have NaN S/N; assigning to the "
+                "very-faint tier.",
+                int(np.sum(_nan_snr)),
+                len(snr),
+            )
+            vfaint_mask |= _nan_snr
 
         # --- S/N-adaptive centroid freedom ----------------------------------
         # A detected source may re-center within xy_bounds, which absorbs WCS
@@ -11204,6 +11309,7 @@ class PSF:
                     readnoise=float(self.input_yaml.get("read_noise", 0.0)),
                     background_rms=bkgrmsval,
                     threads=int(phot_cfg.get("emcee_threads", 1)),
+                    random_state=phot_cfg.get("emcee_random_state", 42),
                     store_samples=bool(phot_cfg.get("emcee_store_samples", False)) or is_target_fit,
                     # On difference images a negative residual is a real
                     # fading source; the positive-flux prior would pin the
@@ -11409,6 +11515,10 @@ class PSF:
                 # photutils emits a generic AstropyUserWarning when any fit
                 # is flagged non-converged; we replace it below with a
                 # counted warning decoded from the flags column.
+                _per_src_before = len(
+                    (getattr(fitter, "fit_info", None) or {}).get("per_source")
+                    or []
+                )
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
                         "ignore",
@@ -11440,6 +11550,10 @@ class PSF:
                     sub_init["local_bkg"] = np.full(
                         len(sub_init), _global_bkg, dtype=float
                     ) * getattr(ndimage, "unit", u.electron)
+                _per_src_before = len(
+                    (getattr(fitter, "fit_info", None) or {}).get("per_source")
+                    or []
+                )
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
                         "ignore",
@@ -11488,7 +11602,11 @@ class PSF:
                 flag_vals = np.asarray(res["flags"], int)
                 nonzero_flags = flag_vals[flag_vals != 0]
                 if len(nonzero_flags) > 0 and hasattr(psfphot, "decode_flags"):
-                    decoded = psfphot.decode_flags(res["flags"], return_bit_values=True)
+                    # decode_flags reads the object's own results table;
+                    # passing res["flags"] positionally landed in
+                    # return_bit_values, returned ints, and silently broke
+                    # the name join below.  Default returns flag names.
+                    decoded = psfphot.decode_flags()
                     unique_issues = set()
                     for src_issues in decoded:
                         for issue in src_issues:
@@ -11577,14 +11695,81 @@ class PSF:
                                 )
                                 if "flags" not in res_retry.columns:
                                     res_retry["flags"] = 0
-                                # Prefer retry solutions for the retried ids.
-                                keep = ~np.isin(
-                                    np.asarray(res["idx"], int),
-                                    np.asarray(res_retry["idx"], int),
+                                # Substitute the retry solution only where it
+                                # is actually better than the original: the
+                                # retried rows were pathological, but a retry
+                                # that diverged or converged worse must not
+                                # overwrite a usable first-pass fit.  Compare
+                                # reduced_chi2 when both exist; otherwise
+                                # require the retry to be finite/flag-free.
+                                _retry_ids = np.asarray(res_retry["idx"], int)
+                                _orig_ids = np.asarray(res["idx"], int)
+                                _chi2_o = np.asarray(
+                                    res.get(
+                                        "reduced_chi2",
+                                        pd.Series(np.inf, index=res.index),
+                                    ),
+                                    dtype=float,
                                 )
-                                res = pd.concat(
-                                    [res.loc[keep], res_retry], ignore_index=True
+                                _chi2_r = np.asarray(
+                                    res_retry.get(
+                                        "reduced_chi2",
+                                        pd.Series(
+                                            np.inf, index=res_retry.index
+                                        ),
+                                    ),
+                                    dtype=float,
                                 )
+                                _flux_r = self._first_present(
+                                    res_retry, ["flux_fit", "flux"]
+                                )
+                                _flags_r = np.asarray(
+                                    res_retry["flags"], dtype=int
+                                )
+                                _accept = np.zeros(len(res_retry), dtype=bool)
+                                for _ri, _rid in enumerate(_retry_ids):
+                                    _oi = np.flatnonzero(_orig_ids == _rid)
+                                    if len(_oi) == 0:
+                                        continue
+                                    _oi = _oi[0]
+                                    _ok_fit = (
+                                        np.isfinite(_flux_r[_ri])
+                                        and _flux_r[_ri] != 0
+                                        and _flags_r[_ri] == 0
+                                    )
+                                    _c_r = (
+                                        _chi2_r[_ri]
+                                        if _ri < len(_chi2_r)
+                                        else np.inf
+                                    )
+                                    _c_o = (
+                                        _chi2_o[_oi]
+                                        if _oi < len(_chi2_o)
+                                        else np.inf
+                                    )
+                                    if not np.isfinite(_c_o):
+                                        # Original had no usable chi2 at all -
+                                        # accept any finite retry.
+                                        _accept[_ri] = np.isfinite(
+                                            _flux_r[_ri]
+                                        )
+                                    else:
+                                        _accept[_ri] = _ok_fit or (
+                                            np.isfinite(_c_r)
+                                            and _c_r <= _c_o
+                                        )
+                                if np.any(_accept):
+                                    res_retry = res_retry.iloc[
+                                        np.flatnonzero(_accept)
+                                    ]
+                                    keep = ~np.isin(
+                                        _orig_ids,
+                                        np.asarray(res_retry["idx"], int),
+                                    )
+                                    res = pd.concat(
+                                        [res.loc[keep], res_retry],
+                                        ignore_index=True,
+                                    )
                         except Exception as exc:
                             log.warning("LSQ retry skipped (non-fatal): %s", exc)
 
@@ -11598,12 +11783,16 @@ class PSF:
                         res[nm] = np.nan
 
                 # MCMCFitter.fit_info is cumulative across fitter calls (e.g.
-                # different SNR tiers). The current `res` only corresponds to the
-                # most recent fitted batch, so take the last `len(res)` records.
-                # Use param_errs (chain std dev) from each per-source record,
-                # consistent with LSQ's curvature-based errors.  The p16/p50/p84
-                # values are kept for diagnostics/corner plots only.
-                if isinstance(per_src, (list, tuple)) and len(per_src) >= len(res):
+                # different SNR tiers), so only records appended since this
+                # call started may be mapped to `res` rows - slicing the last
+                # len(res) of the full history bleeds a previous tier's tail
+                # records in whenever a fit silently skipped sources.
+                _n_new = (
+                    len(per_src) - _per_src_before
+                    if isinstance(per_src, (list, tuple))
+                    else 0
+                )
+                if isinstance(per_src, (list, tuple)) and _n_new == len(res):
                     per_src_batch = per_src[-len(res) :]
                     if len(per_src_batch) == len(res):
                         # Collect errors in arrays for vectorized column assignment
@@ -12168,18 +12357,20 @@ class PSF:
         if is_target_fit and not check_inverted:
             inverted_fit_mask[:] = False
 
-        # Enforce positive fitted fluxes: negative solutions are unphysical for
-        # a positive PSF on science images and indicate overfitting or local
-        # background issues.  Clip at a tiny floor and propagate to errors.
+        # Enforce positive fitted fluxes: negative solutions are unphysical
+        # for a positive PSF on science images and indicate a failed or
+        # background-dominated fit.  Report them as NaN, not as a 1e-6 flux -
+        # the clipped value produced a finite but meaningless magnitude
+        # (~+15 inst mag) that looked like a real detection downstream.
         # EXCEPTIONS: preserve negative flux for:
         #   1. Inverted fits (fading sources detected via image inversion)
         #   2. Difference images (FORCECON header set by SFFT/ZOGY), where
         #      negative fluxes are physically meaningful (fading sources)
         allow_negative = inverted_fit_mask | is_difference_image
         with np.errstate(invalid="ignore"):
-            flux_fit_clipped = np.clip(flux_fit, 1e-6, np.inf)
-            # For allowed-negative fits, use the original flux; otherwise clip
-            flux_fit = np.where(allow_negative, flux_fit, flux_fit_clipped)
+            flux_fit = np.where(
+                allow_negative | (flux_fit > 0), flux_fit, np.nan
+            )
             flux_err = np.where(np.isfinite(flux_err), flux_err, np.nan)
         cfit_out = self._first_present(combined, ["cfit"])
         qfit_out = self._first_present(combined, ["qfit"])
@@ -12199,6 +12390,16 @@ class PSF:
             np.isfinite(_chi2_scale) & (_chi2_scale > 0), _chi2_scale, 1.0
         )
         _chi2_scale = np.clip(_chi2_scale, 1.0, 10.0)
+        # A clamped scale hides severe model mismatch: reduced_chi2 > 100
+        # reports the same inflation as chi2 = 100.  The flagged errors
+        # should be read as lower bounds, not honest sigmas.
+        _n_clamped = int(np.count_nonzero(np.asarray(_chi2, float) > 100.0))
+        if _n_clamped:
+            logging.getLogger(__name__).warning(
+                "%d PSF fit(s) have reduced_chi2 > 100 - error inflation is "
+                "clamped at 10x, so their reported errors are lower bounds.",
+                _n_clamped,
+            )
 
         # qfit-based error inflation for TARGET fits was REMOVED.
         # qfit = sum(|residuals|) / flux_fit is inversely proportional to
@@ -12223,6 +12424,12 @@ class PSF:
                 float(np.max(_total_scale)),
             )
         flux_err = flux_err * _total_scale
+        # Position errors carry the same model-mismatch term: an
+        # undersampled or imperfect ePSF inflates centroid error by the same
+        # sqrt(reduced_chi2), so scaling only flux_err would report
+        # inconsistent precision between flux and astrometry.
+        x_err = x_err * _total_scale
+        y_err = y_err * _total_scale
 
         # Apply the same scaling to the pre-inverted snapshot errors so that
         # flux_PSF_err_normal is consistent with flux_PSF_err.
@@ -12339,12 +12546,13 @@ class PSF:
             _snap_i, _pos = _snap_i[_ok], _pos[_ok]
             if len(_pos):
                 _gc = updated.columns.get_indexer
-                updated.iloc[_pos, _gc(["flux_PSF_normal"])] = (
-                    snap_flux_e[_snap_i] / exposure_time
-                )
-                updated.iloc[_pos, _gc(["flux_PSF_err_normal"])] = (
-                    snap_flux_err_e[_snap_i] / exposure_time
-                )
+                if np.isfinite(exposure_time) and exposure_time > 0:
+                    updated.iloc[_pos, _gc(["flux_PSF_normal"])] = (
+                        snap_flux_e[_snap_i] / exposure_time
+                    )
+                    updated.iloc[_pos, _gc(["flux_PSF_err_normal"])] = (
+                        snap_flux_err_e[_snap_i] / exposure_time
+                    )
                 updated.iloc[_pos, _gc(["x_fit_normal"])] = snap_x[_snap_i]
                 updated.iloc[_pos, _gc(["y_fit_normal"])] = snap_y[_snap_i]
                 updated.iloc[_pos, _gc(["x_fit_err_normal"])] = snap_xe[_snap_i]
@@ -12392,9 +12600,15 @@ class PSF:
             flux_err_inv = self._first_present(
                 combined_inv, ["flux_fit_err", "flux_err", "flux_uncertainty"], unit=u.electron
             )
-            # Enforce positive fitted fluxes for inverted image
+            # A non-positive flux on the inverted image is a non-detection,
+            # not a tiny positive measurement - NaN it so the valid_inv_flux
+            # gate below drops it instead of producing an absurd finite
+            # magnitude from -1e-6/exposure.
             with np.errstate(invalid="ignore"):
-                flux_fit_inv = np.clip(flux_fit_inv, 1e-6, np.inf)
+                flux_fit_inv = np.asarray(flux_fit_inv, float)
+                flux_fit_inv[
+                    ~np.isfinite(flux_fit_inv) | (flux_fit_inv <= 0)
+                ] = np.nan
                 flux_err_inv = np.where(np.isfinite(flux_err_inv), flux_err_inv, np.nan)
 
             # Scale inverted-fit flux errors by sqrt(reduced_chi2), matching
@@ -12413,12 +12627,21 @@ class PSF:
             # Flux in e/s (negative sign because this was measured on inverted image)
             flux_fit_inv_arr = np.asarray(flux_fit_inv, float)
             flux_err_inv_arr = np.asarray(flux_err_inv, float)
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["flux_PSF_inverted"])] = (
-                -1.0 * flux_fit_inv_arr / exposure_time
-            )
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["flux_PSF_err_inverted"])] = (
-                flux_err_inv_arr / exposure_time
-            )
+            _gc_inv = updated.columns.get_indexer
+            if not np.isfinite(exposure_time) or exposure_time <= 0:
+                updated.iloc[idx_out_inv, _gc_inv(["flux_PSF_inverted"])] = (
+                    np.nan
+                )
+                updated.iloc[
+                    idx_out_inv, _gc_inv(["flux_PSF_err_inverted"])
+                ] = np.nan
+            else:
+                updated.iloc[idx_out_inv, _gc_inv(["flux_PSF_inverted"])] = (
+                    -1.0 * flux_fit_inv_arr / exposure_time
+                )
+                updated.iloc[
+                    idx_out_inv, _gc_inv(["flux_PSF_err_inverted"])
+                ] = (flux_err_inv_arr / exposure_time)
             # Compute inverted instrumental magnitudes (negative flux = fading source)
             with np.errstate(divide="ignore", invalid="ignore"):
                 _inv_flux = np.asarray(updated["flux_PSF_inverted"], dtype=float)

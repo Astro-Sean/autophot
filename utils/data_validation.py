@@ -295,10 +295,22 @@ def validate_image(
         report.info["has_wcs"] = True
         if pixel_scale is None:
             try:
-                cdelt = np.sqrt(np.abs(wcs.wcs.cdelt[0] * wcs.wcs.cdelt[1])) * 3600
-                pixel_scale = float(cdelt)
+                # cdelt alone reads [1,1] for CD-matrix WCS (the scale
+                # lives in the matrix); proj_plane_pixel_scales handles
+                # both conventions.
+                from astropy.wcs.utils import proj_plane_pixel_scales
+
+                scales = proj_plane_pixel_scales(wcs) * 3600.0
+                pixel_scale = float(np.sqrt(scales[0] * scales[1]))
             except Exception:
-                pass
+                try:
+                    cdelt = (
+                        np.sqrt(np.abs(wcs.wcs.cdelt[0] * wcs.wcs.cdelt[1]))
+                        * 3600
+                    )
+                    pixel_scale = float(cdelt)
+                except Exception:
+                    pass
         if pixel_scale is None or not np.isfinite(pixel_scale) or pixel_scale <= 0:
             report.add_warning(
                 VAL_BAD_PIXELSCALE,
@@ -316,7 +328,9 @@ def validate_image(
             )
             report.flags |= VAL_FATAL
         else:
-            mask_fraction = float(np.sum(mask) / mask.size)
+            # count_nonzero so a non-boolean bitmask counts masked pixels,
+            # not the sum of flag values.
+            mask_fraction = float(np.count_nonzero(mask) / mask.size)
             report.info["mask_fraction"] = mask_fraction
             if mask_fraction > 0.5:
                 report.add_warning(

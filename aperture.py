@@ -583,6 +583,16 @@ def _measure_worker(args):
         )
         empirical_std = 1.4826 * np.median(np.abs(bkg_pix - bkg_value))
 
+        # On heavily quantized data (integer ADU, low bit depth) the MAD
+        # collapses to zero even though real scatter exists.  biweight_scale
+        # is MAD-normalized internally, so it collapses too - the annulus
+        # is already 4-sigma-clipped above, so a plain std is the
+        # quantization-resistant scale here.
+        if empirical_std <= 0 or not np.isfinite(empirical_std):
+            _std = float(np.std(bkg_pix))
+            if np.isfinite(_std) and _std > 0:
+                empirical_std = _std
+
         if empirical_std <= 0 or not np.isfinite(empirical_std):
             return {"idx": i, "fail_reason": "bkg_invalid"}
 
@@ -665,6 +675,19 @@ def _measure_worker(args):
             total_var = source_flux + effective_area * sky_var
             if total_var > 0 and np.isfinite(total_var):
                 sqrt_var = np.sqrt(total_var)
+
+        # Annulus-estimator noise: the subtracted bkg_used * effective_area
+        # carries SE(bkg)^2 * area^2 variance (the DAOPHOT A^2/N_ann term).
+        # aperture_sum_err covers only pixel noise INSIDE the aperture, so
+        # without this term flux_AP_err is underestimated by ~25-40% for
+        # typical annulus/aperture area ratios (and more for sparse annuli).
+        # SE(median) ~ 1.2533 * sigma / sqrt(N_ann), N_ann = clipped pixels
+        # actually used for the median.
+        if np.isfinite(sqrt_var) and bkg_pix.size > 0:
+            _bkg_se = 1.2533 * empirical_std / np.sqrt(bkg_pix.size)
+            _ann_noise = abs(_bkg_se * effective_area)
+            if np.isfinite(_ann_noise) and _ann_noise > 0:
+                sqrt_var = float(np.hypot(sqrt_var, _ann_noise))
 
         if np.isfinite(sqrt_var) and sqrt_var > 0:
             snr = aperture_sum / sqrt_var
@@ -3170,8 +3193,17 @@ class Aperture:
         if _n_corr >= 2:
             _mad_corr = float(median_abs_deviation(corrections, nan_policy="omit"))
             correction_err = float(1.858 * _mad_corr / np.sqrt(_n_corr))
+            # An identical-corrections ensemble (MAD=0) reports zero error;
+            # floor at the quantization level of the CoG grid rather than
+            # claiming infinite precision.
+            correction_err = max(correction_err, 0.001)
         else:
-            correction_err = float(np.nanstd(corrections))
+            # A single star gives no scatter estimate at all - report NaN,
+            # not nanstd() = 0.0, which claims a perfectly known correction.
+            correction_err = np.nan
+            logger.warning(
+                "Aperture correction from a single star; error unknown."
+            )
         logger.info("Aperture correction: %.3f +/- %.3f (N=%d, SE of median)", correction, correction_err, _n_corr)
 
         if plot:

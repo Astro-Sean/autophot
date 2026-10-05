@@ -1084,7 +1084,7 @@ def run_sfft() -> Optional[int]:
     #       = 4*(FWHM_broad-FWHM_narrow)/(2*2.355) + 2  ~ 0.85*FWHM_diff + 2
     #       This sets a *minimum* - the kernel must contain the PSF mismatch lobe.
     #
-    #   LSST ip_diffim (PsfMatchConfigAL):
+    #   ip_diffim (PsfMatchConfigAL):
     #       kernel_size = kernelSizeFwhmScaling * sigma_largest_Gaussian_basis
     #       kernelSizeFwhmScaling = 6.0 (default); sigma_basis ~ FWHM_broad/2.355
     #       => kernel_size ~ 6 * FWHM_broad/2.355 ~ 2.55 * FWHM_broad
@@ -1100,7 +1100,7 @@ def run_sfft() -> Optional[int]:
     #
     #   hw_broad:  multiplier * FWHM_broad
     #              The kernel must contain the broader PSF's support. This is the
-    #              primary term from SFFT (ratio 2.0) and LSST (effective ratio ~1.28).
+    #              primary term from SFFT (ratio 2.0) and ip_diffim (effective ratio ~1.28).
     #              We use a user-configurable multiplier (default 2.0) applied to FWHM_broad.
     #
     #   hw_conv:   ceil(3 * sigma_conv) = ceil(3 * fwhm_conv / 2.355)
@@ -1139,7 +1139,7 @@ def run_sfft() -> Optional[int]:
                 f"boosting broad-PSF multiplier {_mult:.2f} -> {_mult_effective:.2f}"
             )
 
-        # hw_broad: must contain the broader PSF support (SFFT / LSST convention).
+        # hw_broad: must contain the broader PSF support (SFFT / ip_diffim convention).
         hw_broad = int(np.ceil(_mult_effective * fwhm_broad))
 
         # hw_conv: must enclose the PSF-difference lobe to 3-sigma (Israel 2007).
@@ -2012,20 +2012,20 @@ def run_sfft() -> Optional[int]:
             log_warning(f"Could not write FSCAL headers: {e}")
 
         # ------------------------------------------------------------------
-        # Post-subtraction image quality improvements (LSST-inspired + SFFT v1.5.0+)
+        # Post-subtraction image quality improvements (ip_diffim-inspired + SFFT v1.5.0+)
         #
         # 1. SFFT NOISE DECORRELATION (SFFT v1.5.0+)
         #    SFFT provides built-in noise decorrelation for difference images,
         #    particularly useful for coadded images or when convolution is involved.
         #    This whitens correlated noise in the difference image.
         #
-        # 2. DECORRELATION KERNEL  (LSST DMTN-021, Reiss & Lupton 2016)
+        # 2. DECORRELATION KERNEL  (DMTN-021, Reiss & Lupton 2016)
         #    The A&L PSF-matching kernel kappa is convolved with the template,
         #    which introduces pixel-pixel covariance in the difference image D.
         #    Detected sources therefore appear correlated, inflating peak S/N
         #    at scales of ~KerHW px and causing a detection threshold that must
         #    be raised to ~5.5sigma (rather than the canonical 5.0sigma) to control false
-        #    positives.  LSST corrects this by convolving D with a whitening
+        #    positives.  The correction convolves D with a whitening
         #    (decorrelation) kernel psi computed in Fourier space from kappa and the
         #    mean variances of the two images (DMTN-021 Eq. 2):
         #
@@ -2036,34 +2036,34 @@ def run_sfft() -> Optional[int]:
         #    matched-filter detection can be run at 5.0sigma with no excess FPR.
         #    The decorrelation kernel is ~2xKerHW px in size and inexpensive.
         #
-        # 3. VARIANCE SCALING  (LSST ScaleVarianceTask, DMTN-021 4.1)
+        # 3. VARIANCE SCALING  (ScaleVarianceTask semantics, DMTN-021 4.1)
         #    Warping and co-adding introduce pixel covariance that causes the
-        #    variance plane to underestimate the true noise.  LSST rescales the
+        #    variance plane to underestimate the true noise.  The reference rescales the
         #    variance by a factor that brings IQR(D/sqrt(V)) to unity.
         #    Here we measure the actual difference-image noise (IQR sigma) and
         #    record VSCALE = sigma_diff / sigma_sci in the header; main.py then
         #    rescales the science-derived background_rms so the error model
         #    matches the difference image.  The image pixels are NOT rescaled:
         #    their flux scale is set by SFFT's kernel integral, and rescaling
-        #    would bias all measured fluxes.  This is the LSST semantics --
+        #    would bias all measured fluxes.  This is the DMTN-021 semantics --
         #    ScaleVarianceTask rescales the VARIANCE model, not the image.
         # ------------------------------------------------------------------
-        log_info(border_msg("Post-subtraction quality improvements", metadata="LSST-inspired + SFFT v1.5.0+", use_ansi=False))
+        log_info(border_msg("Post-subtraction quality improvements", metadata="ip_diffim-inspired + SFFT v1.5.0+", use_ansi=False))
         if decorrelate_noise or save_decorrelated:
             log_info("  Decorrelation kernel (DMTN-021) - whitens A&L convolution noise (detection side product)")
         log_info("  Variance calibration (ScaleVarianceTask) - VSCALE noise-model factor")
 
         # Apply noise decorrelation if requested
         # Note: SFFT's DeCorrelation_Calculator requires kernel information from the SFFT solution
-        # which is not easily accessible in the current pipeline architecture. The LSST decorrelation
-        # (DMTN-021) provides equivalent noise whitening and is used as the primary method.
+        # which is not easily accessible in the current pipeline architecture. The DMTN-021 decorrelation
+        # provides equivalent noise whitening and is used as the primary method.
         if decorrelate_noise:
             if _HAS_DECORRELATION:
                 log_info("SFFT decorrelation available but requires kernel information from SFFT solution.")
-                log_info("Using LSST decorrelation (DMTN-021) as equivalent alternative.")
+                log_info("Using DMTN-021 decorrelation as equivalent alternative.")
             else:
                 log_info("SFFT decorrelation not available (SFFT v1.5.0+ required).")
-                log_info("Using LSST decorrelation (DMTN-021) as equivalent alternative.")
+                log_info("Using DMTN-021 decorrelation as equivalent alternative.")
 
         def _decorrelate_diffim(
             diff: np.ndarray,
@@ -2072,7 +2072,7 @@ def run_sfft() -> Optional[int]:
             var_ref: float,
             nan_mask: np.ndarray,
         ) -> np.ndarray:
-            """Apply LSST DMTN-021 decorrelation to the A&L difference image.
+            """Apply DMTN-021 decorrelation to the A&L difference image.
 
             Parameters
             ----------
@@ -2174,7 +2174,7 @@ def run_sfft() -> Optional[int]:
             SFFT's kernel integral already sets the photometric flux scale of
             the difference image; rescaling the pixels to hit a predicted
             noise target would silently corrupt that calibration.  Following
-            LSST ScaleVarianceTask semantics, the *noise model* is corrected
+            ScaleVarianceTask semantics, the *noise model* is corrected
             instead (via the VSCALE header keyword consumed by main.py).
             """
             try:
@@ -2221,12 +2221,19 @@ def run_sfft() -> Optional[int]:
                 _nan_mask = ~np.isfinite(diff_arr)
 
                 # Estimate per-image variances from sigma-clipped noise of each
-                # input image (use the data already loaded).
+                # input image (use the data already loaded).  clean_fits_nans
+                # writes the 0.0 sentinel for invalid pixels - those are
+                # finite, so they would drag the IQR toward zero on heavily
+                # masked images.  Exclude them alongside the non-finite.
                 _sci_var = None
                 _ref_var = None
                 try:
-                    _sci_vals = data_sci[np.isfinite(data_sci)].ravel()
-                    _ref_vals = data_ref[np.isfinite(data_ref)].ravel()
+                    _sci_vals = data_sci[
+                        np.isfinite(data_sci) & (data_sci != 0.0)
+                    ].ravel()
+                    _ref_vals = data_ref[
+                        np.isfinite(data_ref) & (data_ref != 0.0)
+                    ].ravel()
                     if len(_sci_vals) > 1000 and len(_ref_vals) > 1000:
                         _q25s, _q75s = np.percentile(_sci_vals, [25.0, 75.0])
                         _q25r, _q75r = np.percentile(_ref_vals, [25.0, 75.0])

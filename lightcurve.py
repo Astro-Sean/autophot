@@ -2099,6 +2099,12 @@ def generate_photometry_table(
         )
         _table_tag = f"{_table_tag}_{_safe_tn}"
     fname = os.path.join(save_path, f"{_table_tag}.dat")
+    # The blanket %.3f float format would quantise MJD to ~86 s; format
+    # the column at ~0.1 s precision (%.6f day) before writing.
+    if "MJD" in out_phot.columns:
+        out_phot["MJD"] = pd.to_numeric(
+            out_phot["MJD"], errors="coerce"
+        ).map(lambda v: f"{v:.6f}" if np.isfinite(v) else "-")
     # Uniform numeric formatting; non-detections use NaN for Mag/Error (written as empty or "-")
     out_phot.to_csv(fname, index=False, float_format="%.3f", na_rep="-")
 
@@ -2655,19 +2661,29 @@ def plot_variability_check(
         ensemble_ids = set(sel.head(n_ensemble)["star_id"])
 
         def _ens_epoch_stats(ids):
-            return (
-                cat_all[cat_all["star_id"].isin(ids)]
-                .groupby("mjd")["inst"]
-                .agg(["mean", "std", "count"])
-                .rename(
-                    columns={
-                        "mean": "ens_mean",
-                        "std": "ens_std",
-                        "count": "ens_n",
-                    }
+            # Per-epoch SE of the common-mode mean.  The std must be taken
+            # on star-DEMEANED residuals: the raw across-star std measures
+            # the spread of intrinsic magnitudes (irrelevant to the mean's
+            # precision) and inflates delta_err by the ensemble's mag span
+            # divided by sqrt(N).
+            sub = cat_all[cat_all["star_id"].isin(ids)].copy()
+            sub["inst_dm"] = sub["inst"] - sub.groupby("star_id")[
+                "inst"
+            ].transform("mean")
+            out = (
+                sub.groupby("mjd")
+                .agg(
+                    ens_mean=("inst", "mean"),
+                    ens_std=("inst_dm", "std"),
+                    ens_n=("inst", "count"),
                 )
                 .reset_index()
             )
+            # Single-star epochs leave std NaN; use the pooled within-star
+            # RMS so those epochs do not get a silently-zero error.
+            pooled = float(sub["inst_dm"].std()) if len(sub) else np.nan
+            out["ens_std"] = out["ens_std"].fillna(pooled)
+            return out
 
         # Veto variable ensemble members: a genuinely variable (or
         # saturated/blended) star in the ensemble leaks its signal into the
@@ -2696,6 +2712,18 @@ def plot_variability_check(
             )
             bad = set(rms[rms > rms_cut].index)
             if not bad or len(ensemble_ids) - len(bad) < 3:
+                if bad:
+                    # Removing the discrepant members would leave fewer
+                    # than 3 stars, so they stay in the common-mode mean
+                    # and can bias it - flag rather than keep silent.
+                    log.warning(
+                        "plot_variability_check: band %s - %d discrepant "
+                        "ensemble member(s) retained; removing them would "
+                        "leave fewer than 3 stars, so the common-mode "
+                        "mean may be biased.",
+                        band,
+                        len(bad),
+                    )
                 break
             ensemble_ids -= bad
             log.info(
@@ -2804,8 +2832,11 @@ def plot_variability_check(
         tgt["ens_std"] = tgt["epoch"].map(ens_std_map)
         tgt["ens_n"] = tgt["epoch"].map(ens_n_map)
         tgt["diff"] = tgt["inst"] - tgt["ens_mean"]
+        # A NaN instrumental error means the uncertainty is unknown, not
+        # zero - propagate it so the max_plot_err gate drops the point
+        # instead of treating it as perfectly measured.
         tgt["delta_err"] = np.sqrt(
-            tgt["inst_err"].fillna(0.0) ** 2
+            tgt["inst_err"] ** 2
             + (
                 tgt["ens_std"].fillna(0.0)
                 / np.sqrt(tgt["ens_n"].clip(lower=1))
@@ -2814,7 +2845,7 @@ def plot_variability_check(
         )
         if max_plot_err is not None and max_plot_err > 0:
             n_before = len(tgt)
-            tgt = tgt[tgt["delta_err"].fillna(0.0) <= max_plot_err]
+            tgt = tgt[tgt["delta_err"] <= max_plot_err]
             if len(tgt) < n_before:
                 log.info(
                     "plot_variability_check: band %s - %d target point(s) "

@@ -2324,7 +2324,10 @@ def run_photometry():
                                                update_header_from_wcs)
 
                         with fits.open(_dc_out) as _dc_hdul:
-                            _dc_data = np.asarray(_dc_hdul[0].data, dtype=np.float32)
+                            # Preserve the stored precision - SWarp writes
+                            # float64 on some paths and there is no reason
+                            # to add a quantization step here.
+                            _dc_data = np.asarray(_dc_hdul[0].data, dtype=np.float64)
                             _dc_wcs_new = get_wcs(_dc_hdul[0].header)
                         if _dc_wcs_new is None:
                             log_status(
@@ -2979,6 +2982,14 @@ def run_photometry():
             fwhm=ImageFWHM,
             galaxies=variable_sources,
             mask_simbad_galaxies=True,
+            # CR-repaired pixels are smooth interpolants with near-zero
+            # local scatter - leaving them in the mesh stats biases the
+            # local RMS estimate low.
+            mask=(
+                cosmic_rays_defect_mask
+                if cosmic_rays_defect_mask.shape == image.shape
+                else None
+            ),
         )
 
         background_surface = np.asarray(result["background"], dtype=np.float32)
@@ -3462,6 +3473,13 @@ def run_photometry():
                 fwhm=ImageFWHM,
                 galaxies=variable_sources,
                 mask_simbad_galaxies=True,
+                # CR-repaired pixels carry near-zero local scatter - keep
+                # them out of the mesh stats (see the main pass above).
+                mask=(
+                    cosmic_rays_defect_mask
+                    if cosmic_rays_defect_mask.shape == image.shape
+                    else None
+                ),
             )
 
             background_surface = np.asarray(result["background"], dtype=np.float32)
@@ -5708,18 +5726,26 @@ def run_photometry():
                     _m,
                     _fmt3(_zpd.get("zeropoint")),
                     _fmt3(_zpd.get("zeropoint_error")),
+                    _fmt3(_zpd.get("zeropoint_scatter")),
                     str(int(_zpd.get("n_sources", 0) or 0)),
                     (
                         f"{float(_slope):.4f}"
                         if np.isfinite(_slope if _slope is not None else np.nan)
                         else "-"
                     ),
+                    (
+                        "yes"
+                        if _zpd.get("reliable", True)
+                        else "NO: " + "; ".join(_zpd.get("reliability_flags", []))
+                    ),
                 ]
             )
         if _zp_rows:
             log_status(
                 ascii_table(
-                    "Zeropoint", ["Method", "ZP", "err", "N", "slope"], _zp_rows
+                    "Zeropoint",
+                    ["Method", "ZP", "err", "scat", "N", "slope", "reliable"],
+                    _zp_rows,
                 )
             )
 
@@ -5742,6 +5768,41 @@ def run_photometry():
                     header[f"ZP_{m}_e"] = float(zp_err)
                 else:
                     header[f"ZP_{m}_e"] = "unknown"
+
+                # Inlier scatter (sigma of catalog - instrumental deltas):
+                # the dispersion the mean-error ZP_<m>_e is derived from.
+                _zp_scat = image_zeropoint[m].get("zeropoint_scatter", np.nan)
+                if np.isfinite(_zp_scat):
+                    header[f"ZP_{m}_SCAT"] = float(_zp_scat)
+
+                # Effective calibrator count after the spatial
+                # block-bootstrap correction; absent when positions are
+                # unavailable or the field is too small to partition.
+                _zp_neff = image_zeropoint[m].get("n_eff", np.nan)
+                if np.isfinite(_zp_neff):
+                    header[f"ZP_{m}_NEFF"] = float(_zp_neff)
+
+                # Reliability flag from the fit diagnostics (minority
+                # inlier locus, excessive scatter, spatial gradient,
+                # free-slope deviation): a finite ZP that failed these
+                # checks must not read as trustworthy downstream.
+                _rel = image_zeropoint[m].get("reliable")
+                if _rel is not None:
+                    header[f"ZP_{m}_OK"] = bool(_rel)
+
+                # Shared-inlier AP-to-PSF scale bridge: flux_PSF is
+                # normalised on the ePSF cutout while flux_AP stops at
+                # the science aperture, so this measured offset (written
+                # once per method) is the image-consistent way to
+                # reconcile the two scales.
+                _off = image_zeropoint[m].get("ap_psf_offset", np.nan)
+                if np.isfinite(_off):
+                    header["ZP_APSFOFF"] = float(_off)
+                    _off_e = image_zeropoint[m].get(
+                        "ap_psf_offset_err", np.nan
+                    )
+                    if np.isfinite(_off_e):
+                        header["ZP_APSFOFF_E"] = float(_off_e)
             except Exception as e:
                 log_exception(e, f"Issue with {m} zeropoint")
                 header[f"ZP_{m}"] = "unknown"
@@ -5799,7 +5860,10 @@ def run_photometry():
         )
         image_sources = None
 
-        header["aper"] = int(np.ceil(optimum_radius * ImageFWHM))
+        # Write the radius actually used (odd-ified at the aperture stage),
+        # not the un-rounded optimum estimate - the two differ by 1 px
+        # whenever ceil() lands on an even value.
+        header["aper"] = int(aperture_radius)
         # RDNOISE was already written to the header earlier.
 
         safe_fits_write(fpath, image, header)
@@ -7678,7 +7742,7 @@ def run_photometry():
                             #   hw_broad = ceil(mult * FWHM_broad)   -- primary
                             #   hw_conv  = ceil(3 * FWHM_conv / 2.355) -- secondary
                             #   kernel_hw = max(hw_broad, hw_conv)
-                            # This is the SFFT/LSST convention: the kernel must
+                            # This is the SFFT/ip_diffim convention: the kernel must
                             # contain the BROADER PSF.  Previously this used
                             # FWHM_conv as the primary term (templates.py
                             # formula), which gave a smaller isolation radius
@@ -9111,12 +9175,24 @@ def run_photometry():
                             if _qclass and _qscore is not None and np.isfinite(_qscore)
                             else (_qclass or "n/a")
                         )
+                        # Report the direction actually applied: the ZOGY
+                        # branch can override the configured forceconv when
+                        # it would require a deconvolving kernel.
+                        _convd_rep = _ts_cfg.get("forceconv", "?")
+                        try:
+                            _convd_hdr = str(
+                                get_header(fpath).get("CONVD", "")
+                            ).strip()
+                            if _convd_hdr:
+                                _convd_rep = _convd_hdr
+                        except Exception:
+                            pass
                         log_status(
                             "Subtraction: OK | %s (forceconv=%s, kernel=%s) | "
                             "matched=%d | diff med=%.2f std=%.2f ADU | "
                             "masked=%.1f%% | quality=%s",
                             _ts_cfg.get("method", "?"),
-                            _ts_cfg.get("forceconv", "?"),
+                            _convd_rep,
                             _ts_cfg.get("kernel_order", "?"),
                             _n_match,
                             _dmed,
@@ -9250,7 +9326,7 @@ def run_photometry():
         header = get_header(fpath)
 
         # -----------------------------------------------------------------------
-        # VSCALE error propagation (LSST-style variance rescaling)
+        # VSCALE error propagation (DMTN-021-style variance rescaling)
         #
         # run_sfft.py measures the difference-image noise (IQR sigma) and
         # writes VSCALE = sigma_diff / sigma_sci to the header.  The
@@ -9443,6 +9519,22 @@ def run_photometry():
                 image = image * _flux_correction
                 if background_rms is not None:
                     background_rms = background_rms * abs(_flux_correction)
+            elif (
+                np.isfinite(_fscal_disc)
+                and _fscal_disc > 3.0
+                and not _is_forceconv_sci
+            ):
+                # ForceConv=REF gets no in-image correction: the kernel
+                # flux scale disagrees with the aperture-derived scale by
+                # FSCAL_DISC percent and every diff flux inherits that
+                # fractional bias.  Record it so the photometry error
+                # budget can carry it.
+                input_yaml["flux_scale_discrep_frac"] = _fscal_disc / 100.0
+                logging.warning(
+                    "SFFT flux scaling discrepancy %.1f%% (ForceConv=REF, "
+                    "uncorrected) - folding into photometry error budget.",
+                    _fscal_disc,
+                )
 
         # -----------------------------------------------------------------------
         # ForceConv PSF consistency check
@@ -10992,11 +11084,11 @@ def run_photometry():
             try:
                 y0b, y1b, x0b, x1b = [int(v) for v in local_cutout_box]
                 cutout_y0, cutout_x0 = int(y0b), int(x0b)
-                target_cutout = np.asarray(image[y0b:y1b, x0b:x1b], dtype=np.float32)
+                target_cutout = np.asarray(image[y0b:y1b, x0b:x1b], dtype=np.float64)
                 # Background RMS cutout (if available) so error models match.
                 if background_rms is not None and np.ndim(background_rms) == 2:
                     target_cutout_rms = np.asarray(
-                        background_rms[y0b:y1b, x0b:x1b], dtype=np.float32
+                        background_rms[y0b:y1b, x0b:x1b], dtype=np.float64
                     )
                 # Hardware defects mask cutout (if available)
                 if (
@@ -11183,8 +11275,22 @@ def run_photometry():
                         # assembled in errorTerms below.
                         _lpi_inst_err_col = f"inst_{input_yaml['imageFilter']}_AP_err"
                         if _lpi_inst_err_col in TargetPosition.columns:
-                            _lpi_snr = f / ferr
-                            if _lpi_snr > 0:
+                            # |flux|/flux_err: on difference images a
+                            # negative flux still carries the inflated
+                            # error - skipping it here would drop the LPI
+                            # term exactly where it matters most.  But only
+                            # write a finite magnitude error when the
+                            # magnitude itself is finite: a negative-flux
+                            # AP measurement reports inst_AP=NaN, and a
+                            # finite err on a NaN magnitude is meaningless.
+                            _lpi_inst_col = _lpi_inst_err_col[: -len("_err")]
+                            _lpi_inst_val = (
+                                float(TargetPosition[_lpi_inst_col].iloc[0])
+                                if _lpi_inst_col in TargetPosition.columns
+                                else np.nan
+                            )
+                            _lpi_snr = abs(f) / ferr
+                            if _lpi_snr > 0 and np.isfinite(_lpi_inst_val):
                                 TargetPosition.loc[
                                     TargetPosition.index[0], _lpi_inst_err_col
                                 ] = float(2.5 / np.log(10.0) / _lpi_snr)
@@ -11363,6 +11469,8 @@ def run_photometry():
                     "y_fit",
                     "x_fit_normal",
                     "y_fit_normal",
+                    "x_fit_inverted",
+                    "y_fit_inverted",
                 ):
                     if col in TargetPosition.columns:
                         for _row_i in range(len(TargetPosition)):
@@ -12032,6 +12140,15 @@ def run_photometry():
         # available, since downstream code (limits, output dict) uses it.
         idx = TargetPosition.index[0]
 
+        def _finite_or(v, default):
+            # fit_params may carry None for unfitted terms; keep the
+            # arithmetic below free of None comparisons.
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return default
+            return f if np.isfinite(f) else default
+
         for method in ["AP", "PSF"]:
             if (
                 method not in image_zeropoint
@@ -12088,6 +12205,17 @@ def run_photometry():
                     if np.isfinite(_f_psf) and abs(_f_psf) > 0:
                         _ker_flux_err = _ker_err_frac * abs(_f_psf)
                         _inst_err_col = f"{inst_col}_err"
+                        # Fold into flux_PSF_err too: otherwise the reported
+                        # S/N (flux/err) is optimistic relative to the
+                        # magnitude error that already carries this term.
+                        if "flux_PSF_err" in TargetPosition.columns:
+                            _old_f_err = float(
+                                TargetPosition["flux_PSF_err"].iloc[0]
+                            )
+                            if np.isfinite(_old_f_err):
+                                TargetPosition.at[idx, "flux_PSF_err"] = float(
+                                    np.hypot(_old_f_err, _ker_flux_err)
+                                )
                         if _inst_err_col in TargetPosition.columns:
                             _old_inst_err = float(TargetPosition[_inst_err_col].iloc[0])
                             if np.isfinite(_old_inst_err):
@@ -12103,6 +12231,82 @@ def run_photometry():
                                     _ker_mag_err,
                                     _ker_err_frac,
                                 )
+            # The LPI background infill runs before the PSF fit, so its
+            # predicted-scatter term belongs in the PSF error budget exactly
+            # as it does for AP (folded at the flux_AP_err update above) -
+            # same aperture-integrated conservative proxy, already in e-/s.
+            if (
+                method == "PSF"
+                and np.isfinite(lpi_extra_flux_err)
+                and "flux_PSF_err" in TargetPosition.columns
+            ):
+                _lpi_f_err = float(TargetPosition["flux_PSF_err"].iloc[0])
+                if np.isfinite(_lpi_f_err):
+                    TargetPosition.at[idx, "flux_PSF_err"] = float(
+                        np.hypot(_lpi_f_err, lpi_extra_flux_err)
+                    )
+                _lpi_inst_col = f"{inst_col}_err"
+                _lpi_flux = (
+                    float(TargetPosition["flux_PSF"].iloc[0])
+                    if "flux_PSF" in TargetPosition.columns
+                    else np.nan
+                )
+                if (
+                    _lpi_inst_col in TargetPosition.columns
+                    and np.isfinite(_lpi_flux)
+                    and abs(_lpi_flux) > 0
+                ):
+                    _lpi_old_ierr = float(
+                        TargetPosition[_lpi_inst_col].iloc[0]
+                    )
+                    if np.isfinite(_lpi_old_ierr):
+                        _lpi_mag_err = (
+                            1.0857 * lpi_extra_flux_err / abs(_lpi_flux)
+                        )
+                        TargetPosition.at[idx, _lpi_inst_col] = float(
+                            np.hypot(_lpi_old_ierr, _lpi_mag_err)
+                        )
+            # Uncorrected SFFT flux-scale discrepancy (ForceConv=REF): the
+            # kernel integral and aperture scales disagree by this fraction,
+            # a calibration bias on every diff flux that no per-pixel error
+            # term sees.  Carry it as a fractional flux error on both
+            # methods so the S/N and mag error reflect the scale ambiguity.
+            _fscal_frac = float(
+                input_yaml.get("flux_scale_discrep_frac", 0.0) or 0.0
+            )
+            if PreformSubtraction and _fscal_frac > 0:
+                _f_col = "flux_AP" if method == "AP" else "flux_PSF"
+                _fe_col = f"{_f_col}_err"
+                if (
+                    _f_col in TargetPosition.columns
+                    and _fe_col in TargetPosition.columns
+                ):
+                    _fs_flux = float(TargetPosition[_f_col].iloc[0])
+                    _fs_err = float(TargetPosition[_fe_col].iloc[0])
+                    if (
+                        np.isfinite(_fs_flux)
+                        and abs(_fs_flux) > 0
+                        and np.isfinite(_fs_err)
+                    ):
+                        TargetPosition.at[idx, _fe_col] = float(
+                            np.hypot(_fs_err, _fscal_frac * abs(_fs_flux))
+                        )
+                _fs_inst_err = f"{inst_col}_err"
+                _fs_flux_val = (
+                    float(TargetPosition[_f_col].iloc[0])
+                    if _f_col in TargetPosition.columns
+                    else np.nan
+                )
+                if (
+                    _fs_inst_err in TargetPosition.columns
+                    and np.isfinite(_fs_flux_val)
+                    and abs(_fs_flux_val) > 0
+                ):
+                    _fs_old = float(TargetPosition[_fs_inst_err].iloc[0])
+                    if np.isfinite(_fs_old):
+                        TargetPosition.at[idx, _fs_inst_err] = float(
+                            np.hypot(_fs_old, 1.0857 * _fscal_frac)
+                        )
             try:
                 # Calibrated magnitude: inst_mag + ZP. For AP, optionally subtract
                 # aperture correction (only when apply_aperture_correction is True;
@@ -12119,15 +12323,19 @@ def run_photometry():
 
                 # BUG 155: Color term correction for the target.
                 # The ZP was computed after subtracting slope * color_diff from
-                # calibrator delta_mags, so ZP = median(m_cat - m_inst - slope*color).
+                # calibrator delta_mags, so ZP = median(m_cat - m_inst - slope*color)
+                # - anchored at color_diff = 0.
                 # For the target: cal_mag = m_inst + ZP + slope * color_target.
                 # If the target has catalog colors (known variable), apply the
-                # actual correction.  If not (transient), the current cal_mag
-                # implicitly assumes color_target ~ median_color (correction ~ 0),
-                # but we must add |slope| * color_scatter as a systematic.
+                # actual correction.  If not (transient), apply
+                # slope * median_color as the best estimate and carry
+                # |slope| * color_scatter plus |slope_err| * |median_color|
+                # as systematics.
                 _zp_info = image_zeropoint[method]
-                _color_slope = _zp_info.get("color_term", 0.0)
-                _color_slope_err = _zp_info.get("color_term_error", 0.0)
+                _color_slope = _finite_or(_zp_info.get("color_term"), 0.0)
+                _color_slope_err = _finite_or(
+                    _zp_info.get("color_term_error"), 0.0
+                )
                 _color1_name = _zp_info.get("color1")
                 _color2_name = _zp_info.get("color2")
                 _median_color = _zp_info.get("median_color", 0.0)
@@ -12189,26 +12397,30 @@ def run_photometry():
                     except Exception as _e:
                         logging.debug(f"Color term lookup for target failed: {_e}")
 
+                # ZP_AP is fitted on raw flux_AP (finite aperture), so it
+                # already absorbs the aperture loss: inst_AP + ZP_AP is the
+                # total-scale magnitude.  Adding ap_corr again double-counts
+                # the correction (inst + ZP_AP + ap_corr is too bright by
+                # |ap_corr|).  apply_aperture_correction requests the
+                # total-flux scale explicitly, which is what ZP_AP already
+                # delivers - the flag is retained for backwards
+                # compatibility but adds nothing to the value or error.
                 if method == "AP" and apply_ap_corr and np.isfinite(ap_corr):
-                    cal_mag = (
-                        TargetPosition.at[idx, inst_col]
-                        + image_zeropoint[method]["zeropoint"]
-                        + ap_corr
+                    logging.info(
+                        "%s: apply_aperture_correction set; ZP_AP already "
+                        "embeds the %.4f mag aperture correction, so no "
+                        "further term is added.",
+                        method,
+                        ap_corr,
                     )
-                    errorTerms = [
-                        TargetPosition.at[idx, f"{inst_col}_err"],
-                        image_zeropoint[method]["zeropoint_error"],
-                        ap_corr_err,
-                    ]
-                else:
-                    cal_mag = (
-                        TargetPosition.at[idx, inst_col]
-                        + image_zeropoint[method]["zeropoint"]
-                    )
-                    errorTerms = [
-                        TargetPosition.at[idx, f"{inst_col}_err"],
-                        image_zeropoint[method]["zeropoint_error"],
-                    ]
+                cal_mag = (
+                    TargetPosition.at[idx, inst_col]
+                    + image_zeropoint[method]["zeropoint"]
+                )
+                errorTerms = [
+                    TargetPosition.at[idx, f"{inst_col}_err"],
+                    image_zeropoint[method]["zeropoint_error"],
+                ]
 
                 # Apply color term correction to target (BUG 155)
                 if _has_color_term:
@@ -12241,14 +12453,45 @@ def run_photometry():
                         )
                         if _color_corr_err > 0:
                             errorTerms.append(_color_corr_err)
-                    elif _color_scatter > 0:
-                        # Target color unknown: add systematic from color uncertainty
-                        _color_syst = abs(_color_slope) * _color_scatter
-                        errorTerms.append(_color_syst)
+                    elif (_color_scatter or 0.0) > 0 or (
+                        _median_color is not None
+                        and np.isfinite(_median_color)
+                    ):
+                        # Target color unknown: the ZP is anchored at
+                        # color_diff = 0 (calibrator deltas had
+                        # slope * color_diff subtracted), so the target's
+                        # expected magnitude is ZP + slope * E[color], not
+                        # ZP + slope * 0.  Use the calibrator median color
+                        # as E[color]; the residual uncertainty is the
+                        # scatter around it plus the slope-error term on
+                        # the correction itself.
+                        try:
+                            _med_c = float(_median_color)
+                            if not np.isfinite(_med_c):
+                                _med_c = 0.0
+                        except (TypeError, ValueError):
+                            _med_c = 0.0
+                        if abs(_med_c) > 0:
+                            cal_mag += _color_slope * _med_c
+                        _color_syst_terms = [
+                            abs(_color_slope) * max(_color_scatter or 0.0, 0.0)
+                        ]
+                        if _color_slope_err is not None and np.isfinite(
+                            _color_slope_err
+                        ):
+                            _color_syst_terms.append(
+                                abs(_color_slope_err) * abs(_med_c)
+                            )
+                        _color_syst = float(
+                            np.sqrt(np.sum(np.square(_color_syst_terms)))
+                        )
+                        if _color_syst > 0:
+                            errorTerms.append(_color_syst)
                         logging.info(
-                            f"{method}: Target color unknown; adding color-term "
-                            f"systematic {_color_syst:.4f} mag "
-                            f"(|slope|={abs(_color_slope):.4f} * scatter={_color_scatter:.3f})."
+                            f"{method}: Target color unknown; applied median "
+                            f"calibrator color {_med_c:.3f} "
+                            f"(correction {_color_slope * _med_c:+.4f} mag) "
+                            f"and color-term systematic {_color_syst:.4f} mag."
                         )
                 TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}"] = (
                     cal_mag
@@ -12489,16 +12732,90 @@ def run_photometry():
                                     )
                                 )
 
-                            _cal_mag = (
-                                _inst_mag + _zp
-                                if (np.isfinite(_inst_mag) and np.isfinite(_zp))
-                                else np.nan
-                            )
-                            _cal_err = (
-                                np.sqrt(_inst_err**2 + _zp_err**2)
-                                if (np.isfinite(_inst_err) and np.isfinite(_zp_err))
-                                else np.nan
-                            )
+                            _cal_mag = np.nan
+                            _cal_err = np.nan
+                            if np.isfinite(_inst_mag) and np.isfinite(_zp):
+                                # Same convention as the primary and
+                                # additional-target paths: unknown color
+                                # pivots the correction to the median
+                                # calibrator color, and the error budget
+                                # carries the color systematic plus the
+                                # image-level systematics.
+                                _ot_zpi = image_zeropoint[_method]
+                                _cal_mag = _inst_mag + _zp
+                                _ot_terms = [
+                                    t
+                                    for t in (_inst_err, _zp_err)
+                                    if np.isfinite(t)
+                                ]
+                                _o_slope = _finite_or(
+                                    _ot_zpi.get("color_term"), 0.0
+                                )
+                                _o_slope_err = _finite_or(
+                                    _ot_zpi.get("color_term_error"), 0.0
+                                )
+                                _o_med = _finite_or(
+                                    _ot_zpi.get("median_color"), 0.0
+                                )
+                                _o_scat = _finite_or(
+                                    _ot_zpi.get("color_scatter"), 0.0
+                                )
+                                if (
+                                    _ot_zpi.get("color1") is not None
+                                    and _ot_zpi.get("color2") is not None
+                                    and abs(_o_slope) > 1e-8
+                                ):
+                                    _cal_mag += _o_slope * _o_med
+                                    _o_sys = float(
+                                        np.hypot(
+                                            abs(_o_slope) * _o_scat,
+                                            abs(_o_slope_err) * abs(_o_med),
+                                        )
+                                    )
+                                    if _o_sys > 0:
+                                        _ot_terms.append(_o_sys)
+                                _o_floor = float(
+                                    (input_yaml.get("photometry") or {}).get(
+                                        "systematic_error_floor_mag", 0.0
+                                    )
+                                )
+                                if _o_floor > 0:
+                                    _ot_terms.append(_o_floor)
+                                if PreformSubtraction:
+                                    _dq_ot = str(
+                                        input_yaml.get(
+                                            "diff_quality_class", "unknown"
+                                        )
+                                    )
+                                    if _dq_ot == "downgrade":
+                                        _ot_terms.append(
+                                            float(
+                                                (
+                                                    input_yaml.get("photometry")
+                                                    or {}
+                                                ).get(
+                                                    "subtraction_downgrade_sys_err_mag",
+                                                    0.05,
+                                                )
+                                            )
+                                        )
+                                    elif _dq_ot == "fail":
+                                        _ot_terms.append(
+                                            float(
+                                                (
+                                                    input_yaml.get("photometry")
+                                                    or {}
+                                                ).get(
+                                                    "subtraction_fail_sys_err_mag",
+                                                    0.15,
+                                                )
+                                            )
+                                        )
+                                _cal_err = (
+                                    quadrature_add(_ot_terms)
+                                    if _ot_terms
+                                    else np.nan
+                                )
 
                             _ot_record[f"inst_mag_{_method.lower()}"] = _inst_mag
                             _ot_record[f"inst_mag_{_method.lower()}_err"] = _inst_err
@@ -13123,8 +13440,16 @@ def run_photometry():
                 "inst_mag_psf_err": np.nan,
                 "zp_ap": np.nan,
                 "zp_ap_err": np.nan,
+                "zp_ap_reliable": False,
+                "zp_ap_neff": np.nan,
+                "zp_ap_flags": "",
                 "zp_psf": np.nan,
                 "zp_psf_err": np.nan,
+                "zp_psf_reliable": False,
+                "zp_psf_neff": np.nan,
+                "zp_psf_flags": "",
+                "zp_ap_psf_offset": np.nan,
+                "zp_ap_psf_offset_err": np.nan,
                 "zp_ref": "",
             }
         )
@@ -13153,7 +13478,7 @@ def run_photometry():
         _lm_alt = "AP" if _lm_prim == "PSF" else "PSF"
         _lm_zp = np.nan
         if isinstance(image_zeropoint, dict):
-            for _mkey in (_lm_prim, _lm_alt):
+            for _mi, _mkey in enumerate((_lm_prim, _lm_alt)):
                 _zpv = (image_zeropoint.get(_mkey) or {}).get("zeropoint")
                 try:
                     _zpv = float(_zpv)
@@ -13161,6 +13486,21 @@ def run_photometry():
                     _zpv = np.nan
                 if np.isfinite(_zpv):
                     _lm_zp = _zpv
+                    if _mi == 1:
+                        # Cross-method fallback: convert between the
+                        # aperture (ZP_AP) and total (ZP_PSF) scales -
+                        # they differ by ~ap_corr.  Same convention as
+                        # the limiting_mag conversion below.
+                        _lm_apc = float(
+                            input_yaml.get("aperture_correction", 0.0) or 0.0
+                        )
+                        if not np.isfinite(_lm_apc):
+                            _lm_apc = 0.0
+                        _lm_zp = (
+                            _zpv - _lm_apc
+                            if _mkey == "AP"
+                            else _zpv + _lm_apc
+                        )
                     break
 
         # Store multi-SNR limiting magnitude results (deferred from earlier computation)
@@ -13247,7 +13587,7 @@ def run_photometry():
         # Forced photometry is always performed at the target position.  This
         # block decides whether the measurement constitutes a detection or a
         # non-detection (upper limit).  The decision uses multiple criteria
-        # beyond simple SNR, following best practices from ZTF, LSST, and the
+        # beyond simple SNR, following best practices from ZTF and the
         # image-subtraction literature (Zackay & Ofek 2016):
         #
         # 1. SNR threshold: |flux|/flux_err >= detection_limit (primary criterion)
@@ -13709,6 +14049,21 @@ def run_photometry():
                         output[f"zp_{m_low}_nsrc"] = int(
                             image_zeropoint[method].get("n_sources", 0)
                         )
+                        # Epoch-level ZP quality: without these columns the
+                        # merged lightcurve cannot distinguish a flagged fit
+                        # (spatially-correlated calibrators, minority locus)
+                        # from a clean one.
+                        output[f"zp_{m_low}_reliable"] = bool(
+                            image_zeropoint[method].get("reliable", True)
+                        )
+                        output[f"zp_{m_low}_neff"] = float(
+                            image_zeropoint[method].get("n_eff", np.nan)
+                            or np.nan
+                        )
+                        output[f"zp_{m_low}_flags"] = "; ".join(
+                            image_zeropoint[method].get("reliability_flags", [])
+                            or []
+                        )
                         output[f"color_term_{m_low}"] = image_zeropoint[method].get(
                             "color_term", np.nan
                         )
@@ -13717,6 +14072,20 @@ def run_photometry():
                         )
                 except Exception:
                     pass
+
+        # Measured AP-to-PSF flux-scale bridge (shared-inlier median of
+        # inst_PSF - inst_AP).  flux_PSF is normalised on the ePSF cutout
+        # and flux_AP at the science aperture, so this column is the only
+        # image-consistent scale difference; it is identical for AP and
+        # PSF entries and lets downstream consumers reconcile the two
+        # magnitude scales without trusting the CoG correction.
+        _off_entry = image_zeropoint.get("PSF") or image_zeropoint.get("AP") or {}
+        output["zp_ap_psf_offset"] = float(
+            _off_entry.get("ap_psf_offset", np.nan)
+        )
+        output["zp_ap_psf_offset_err"] = float(
+            _off_entry.get("ap_psf_offset_err", np.nan)
+        )
 
         # Calibration provenance: band-qualified catalog backend that
         # supplied the zeropoint calibrators (e.g. "pan_starrs_r"), so
@@ -13771,19 +14140,69 @@ def run_photometry():
                 if recovery_method in {"PSF", "EMCEE"}:
                     zp_sel = output.get("zp_psf", np.nan)
                     zp_fallback = output.get("zp_ap", np.nan)
+                    _sel_err = output.get("zp_psf_err", np.nan)
+                    _fb_err = output.get("zp_ap_err", np.nan)
+                    _fb_is_ap = True
                 else:
                     zp_sel = output.get("zp_ap", np.nan)
                     zp_fallback = output.get("zp_psf", np.nan)
+                    _sel_err = output.get("zp_ap_err", np.nan)
+                    _fb_err = output.get("zp_psf_err", np.nan)
+                    _fb_is_ap = False
 
                 zp_sel = float(zp_sel) if np.isfinite(zp_sel) else np.nan
+                zp_err_sel = float(_sel_err) if np.isfinite(_sel_err) else np.nan
                 if not np.isfinite(zp_sel):
-                    zp_sel = float(zp_fallback) if np.isfinite(zp_fallback) else np.nan
+                    zp_sel = (
+                        float(zp_fallback)
+                        if np.isfinite(zp_fallback)
+                        else np.nan
+                    )
+                    zp_err_sel = (
+                        float(_fb_err) if np.isfinite(_fb_err) else np.nan
+                    )
+                    if np.isfinite(zp_sel):
+                        # Cross-method fallback: the AP zeropoint lives on
+                        # the finite-aperture scale, PSF on the total-flux
+                        # scale (they differ by ~ap_corr).  Convert the
+                        # fallback to the recovery method's scale, and carry
+                        # the aperture-correction uncertainty - without it a
+                        # converted limit inherits ap_corr's scatter for free.
+                        _lm_apc = float(
+                            input_yaml.get("aperture_correction", 0.0) or 0.0
+                        )
+                        if not np.isfinite(_lm_apc):
+                            _lm_apc = 0.0
+                        _lm_apc_err = float(
+                            input_yaml.get("aperture_correction_err", 0.0)
+                            or 0.0
+                        )
+                        if not np.isfinite(_lm_apc_err):
+                            _lm_apc_err = 0.0
+                        zp_sel = (
+                            zp_sel - _lm_apc
+                            if _fb_is_ap
+                            else zp_sel + _lm_apc
+                        )
+                        if _lm_apc_err > 0 and np.isfinite(zp_err_sel):
+                            zp_err_sel = float(
+                                np.hypot(zp_err_sel, _lm_apc_err)
+                            )
 
                 output["limiting_mag"] = (
                     lim_inst + zp_sel if np.isfinite(zp_sel) else np.nan
                 )
+                _lim_inst_err = float(
+                    output.get("limiting_inst_mag_err", np.nan) or np.nan
+                )
+                output["limiting_mag_err"] = (
+                    float(np.hypot(_lim_inst_err, zp_err_sel))
+                    if np.isfinite(_lim_inst_err) and np.isfinite(zp_err_sel)
+                    else np.nan
+                )
         except Exception:
             output["limiting_mag"] = np.nan
+            output["limiting_mag_err"] = np.nan
 
         # Adds uniform flux/magnitude values (filter stored in `filter` column).
         #
@@ -13847,9 +14266,15 @@ def run_photometry():
             "zp_psf",
             "zp_psf_err",
             "zp_psf_nsrc",
+            "zp_psf_reliable",
+            "zp_psf_neff",
+            "zp_psf_flags",
             "zp_ap",
             "zp_ap_err",
             "zp_ap_nsrc",
+            "zp_ap_reliable",
+            "zp_ap_neff",
+            "zp_ap_flags",
             "zp_ref",
             # PSF / seeing
             "target_fwhm",
@@ -13898,13 +14323,6 @@ def run_photometry():
                 sanitize_target_name_for_filename as _stfn
 
             _image_filter = input_yaml.get("imageFilter", "")
-            _ap_corr = float(input_yaml.get("aperture_correction", 0.0) or 0.0)
-            _ap_corr_err = float(input_yaml.get("aperture_correction_err", 0.0) or 0.0)
-            _apply_ap_corr = bool(
-                (input_yaml.get("photometry") or {}).get(
-                    "apply_aperture_correction", False
-                )
-            )
 
             # Map additional target name -> fit row (if it was in the image)
             _fit_by_name = {}
@@ -14079,9 +14497,10 @@ def run_photometry():
                             or "zeropoint" not in image_zeropoint[_method]
                         ):
                             continue
-                        _zp = float(image_zeropoint[_method].get("zeropoint", np.nan))
+                        _zp_info_at = image_zeropoint[_method]
+                        _zp = float(_zp_info_at.get("zeropoint", np.nan))
                         _zp_err = float(
-                            image_zeropoint[_method].get("zeropoint_error", np.nan)
+                            _zp_info_at.get("zeropoint_error", np.nan)
                         )
                         _m_low = _method.lower()
                         _inst_val = _at_out.get(f"inst_mag_{_m_low}", np.nan)
@@ -14089,16 +14508,82 @@ def run_photometry():
                         _at_out[f"zp_{_m_low}"] = _zp
                         _at_out[f"zp_{_m_low}_err"] = _zp_err
                         if np.isfinite(_inst_val) and np.isfinite(_zp):
+                            # ZP_AP already embeds the aperture loss (it is
+                            # fitted on raw flux_AP); adding ap_corr again
+                            # would double-count the correction.  See the
+                            # primary-target calibration for the convention.
                             _cal = _inst_val + _zp
                             _err_terms = [_inst_err, _zp_err]
+                            # Color term: the additional target's color is
+                            # unknown, so - as for the primary unknown-color
+                            # branch - pivot the correction to the median
+                            # calibrator color and carry its systematic.
+                            _c_slope = _finite_or(
+                                _zp_info_at.get("color_term"), 0.0
+                            )
+                            _c_slope_err = _finite_or(
+                                _zp_info_at.get("color_term_error"), 0.0
+                            )
+                            _c_med = _finite_or(
+                                _zp_info_at.get("median_color"), 0.0
+                            )
+                            _c_scat = _finite_or(
+                                _zp_info_at.get("color_scatter"), 0.0
+                            )
                             if (
-                                _method == "AP"
-                                and _apply_ap_corr
-                                and np.isfinite(_ap_corr)
+                                _zp_info_at.get("color1") is not None
+                                and _zp_info_at.get("color2") is not None
+                                and abs(_c_slope) > 1e-8
                             ):
-                                _cal += _ap_corr
-                                _err_terms.append(_ap_corr_err)
+                                _cal += _c_slope * _c_med
+                                _c_sys = float(
+                                    np.hypot(
+                                        abs(_c_slope) * _c_scat,
+                                        abs(_c_slope_err) * abs(_c_med),
+                                    )
+                                )
+                                if _c_sys > 0:
+                                    _err_terms.append(_c_sys)
                             _at_out[f"mag_{_m_low}"] = _cal
+                            # Image-level systematics that also apply to the
+                            # primary's error budget.
+                            _sys_floor_at = float(
+                                (input_yaml.get("photometry") or {}).get(
+                                    "systematic_error_floor_mag", 0.0
+                                )
+                            )
+                            if _sys_floor_at > 0:
+                                _err_terms.append(_sys_floor_at)
+                            if PreformSubtraction:
+                                _dq_at = str(
+                                    input_yaml.get(
+                                        "diff_quality_class", "unknown"
+                                    )
+                                )
+                                if _dq_at == "downgrade":
+                                    _err_terms.append(
+                                        float(
+                                            (
+                                                input_yaml.get("photometry")
+                                                or {}
+                                            ).get(
+                                                "subtraction_downgrade_sys_err_mag",
+                                                0.05,
+                                            )
+                                        )
+                                    )
+                                elif _dq_at == "fail":
+                                    _err_terms.append(
+                                        float(
+                                            (
+                                                input_yaml.get("photometry")
+                                                or {}
+                                            ).get(
+                                                "subtraction_fail_sys_err_mag",
+                                                0.15,
+                                            )
+                                        )
+                                    )
                             _at_out[f"mag_{_m_low}_err"] = (
                                 quadrature_add(
                                     [e for e in _err_terms if np.isfinite(e)]
@@ -14111,12 +14596,18 @@ def run_photometry():
                             image_zeropoint[_method].get("n_sources", 0) or 0
                         )
 
-                    # Detection flag
+                    # Detection flag.  snr_psf is unsigned (|flux|/err), so
+                    # a negative dip would otherwise pass the threshold -
+                    # require positive flux on the same method whose S/N
+                    # satisfied the cut, matching the primary's gate.
                     _det_snr = _at_out["snr"]
                     _det_threshold = _at_out.get("threshold", np.nan)
                     _is_det = False
                     if np.isfinite(_det_snr) and _det_snr >= float(detection_limit):
-                        _is_det = True
+                        if np.isfinite(_at_out["snr_psf"]):
+                            _is_det = _at_out["flux_psf"] > 0
+                        else:
+                            _is_det = _at_out["flux_ap"] > 0
                     _at_out["is_detection"] = _is_det
                 else:
                     # Target outside image: write NaN row with expected position
@@ -14173,18 +14664,30 @@ def run_photometry():
         if "target_y_pix" in input_yaml and input_yaml["target_y_pix"] is not None:
             target_lines.append(f"# target_y_pix: {input_yaml['target_y_pix']:.6f} px")
 
+        def _fmt6(v):
+            # fit_params values may be None rather than NaN; a bare
+            # f"{None:.6f}" raises TypeError and aborts the CALIB write
+            # after the output CSV was already produced.
+            try:
+                f = float(v)
+                return f"{f:.6f}"
+            except (TypeError, ValueError):
+                return "nan"
+
         zp_lines = ["# Zeropoint and calibration information"]
         for method in image_zeropoint.keys():
             if method in image_zeropoint:
                 zp = image_zeropoint[method].get("zeropoint", np.nan)
                 zp_err = image_zeropoint[method].get("zeropoint_error", np.nan)
-                zp_lines.append(f"# {method}_zeropoint: {zp:.6f}")
-                zp_lines.append(f"# {method}_zeropoint_error: {zp_err:.6f}")
+                zp_lines.append(f"# {method}_zeropoint: {_fmt6(zp)}")
+                zp_lines.append(f"# {method}_zeropoint_error: {_fmt6(zp_err)}")
                 if "color_term" in image_zeropoint[method]:
                     ct = image_zeropoint[method].get("color_term")
                     ct_err = image_zeropoint[method].get("color_term_error")
-                    zp_lines.append(f"# {method}_color_term: {ct:.6f}")
-                    zp_lines.append(f"# {method}_color_term_error: {ct_err:.6f}")
+                    zp_lines.append(f"# {method}_color_term: {_fmt6(ct)}")
+                    zp_lines.append(
+                        f"# {method}_color_term_error: {_fmt6(ct_err)}"
+                    )
 
         if _multi_snr_results is not None:
             lim_lines = ["# Multi-S/N detection limits"]
