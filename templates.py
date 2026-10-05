@@ -199,11 +199,6 @@ try:
 except ImportError:
     def invalidate_fits_cache(fpath=None):
         return None
-try:
-    from functions import download_zogy
-except ImportError:
-    download_zogy = None
-
 # =============================================================================
 # External Tool Imports
 # =============================================================================
@@ -214,10 +209,6 @@ try:
 except ImportError:
     legacystamps = None  # type: ignore[assignment]
     _HAS_LEGACYSTAMPS = False
-# ZOGY subtraction uses the pmvreeswijk/ZOGY package, downloaded at
-# runtime via functions.download_zogy() into <wdir>/ZOGY/.  The module is
-# imported lazily inside _subtract_zogy() because it requires wdir on
-# sys.path.
 
 # =============================================================================
 # Optional Alignment Packages
@@ -8999,7 +8990,7 @@ class Templates:
 
         Supports three backends that are tried in cascade when a method
         fails:
-          - **ZOGY** (Zackay, Ofek & Gal-Yam 2016) via pmvreeswijk/ZOGY.
+          - **ZOGY** (Zackay, Ofek & Gal-Yam 2016) via a self-contained numpy implementation.
           - **SFFT** (Hu et al. 2022) via an external conda environment.
           - **HOTPANTS** (Becker 2015) via a compiled executable.
 
@@ -10921,20 +10912,9 @@ class Templates:
                         science_data.shape,
                     )
 
-            # -----------------------------------------------------------------
-            # Download pmvreeswijk/ZOGY from GitHub for reference/config, but
-            # run the ZOGY math via the self-contained _zogy_subtract() which
-            # uses only numpy FFTs (no pyfftw/lmfit/sip_tpv/healpy deps).
-            # -----------------------------------------------------------------
-            wdir = self.input_yaml.get("wdir", ".")
+            # The ZOGY math runs via the self-contained _zogy_subtract()
+            # (numpy FFTs only, no external ZOGY package needed).
             ts_cfg = self.input_yaml.get("template_subtraction", {})
-            zogy_update = _as_bool(ts_cfg.get("zogy_update", False), False)
-
-            if download_zogy is not None:
-                logger.info(
-                    "Ensuring pmvreeswijk/ZOGY is available in %s/ZOGY/ ...", wdir
-                )
-                download_zogy(wdir, update=zogy_update)
 
             # -----------------------------------------------------------------
             # Sky subtraction: ZOGY assumes background-subtracted images
