@@ -150,20 +150,22 @@ On difference images, `photometry.check_inverted_image: True` recovers a fading 
 
 ## Catalogs
 
-| Catalog | `use_catalog` | Notes |
-|---------|---------------|-------|
-| Gaia DR3 + XP | `gaia` | Default for most filters |
-| Pan-STARRS | `pan_starrs` / `ps1` | DR1/DR2 |
-| SDSS | `sdss` | |
-| APASS | `apass` | |
-| 2MASS | `2mass` | Infrared |
-| Legacy Survey | `legacy` | DR8+ |
-| SkyMapper | `skymapper` | Southern sky |
-| RefCAT2 | `refcat` | Needs MAST CasJobs credentials |
-| TIC | `tic` | TESS Input Catalog |
-| Custom CSV | `custom` | Set `catalog.catalog_custom_fpath` |
-| Gaia + custom curves | `gaia_custom` | User transmission curves |
-| Auto-select | `auto` | Picks the best catalog per band |
+| Catalog | `use_catalog` | Magnitude system | Notes |
+|---------|---------------|------------------|-------|
+| Gaia DR3 + XP | `gaia` | ugriz `abmag`, BVRI `vegamag` | Default for most filters; synthetic mags from XP spectra (SDSS_Std = AB, JKC_Std = Vega) |
+| Pan-STARRS | `pan_starrs` / `ps1` | `abmag` | DR1/DR2 |
+| SDSS | `sdss` | `abmag` | |
+| APASS | `apass` | BV `vegamag`, gri `abmag` | Johnson BV are Vega, Sloan bands are AB |
+| 2MASS | `2mass` | `vegamag` | Infrared |
+| Legacy Survey | `legacy` | `abmag` | DR8+ |
+| SkyMapper | `skymapper` | `abmag` | Southern sky |
+| RefCAT2 | `refcat` | griz `abmag`, JHK `vegamag` | Needs MAST CasJobs credentials; optical ATLAS-derived, IR from 2MASS |
+| TIC | `tic` | ugriz `abmag`; BV, JHK, G, T `vegamag` | TESS Input Catalog; mixes source systems |
+| Custom CSV | `custom` | user-defined | Set `catalog.catalog_custom_fpath`; reported as `unknown` |
+| Gaia + custom curves | `gaia_custom` | `abmag` | User transmission curves; magnitudes synthesized in AB |
+| Auto-select | `auto` | per resolved catalog | Picks the best catalog per band |
+
+The system of the calibrating magnitudes is resolved per band for the mixed catalogs above, printed in the run log next to the catalog choice and the zeropoint table, and written to `output.csv` as `magsys` (`abmag`, `vegamag`, `mixed`, or `unknown`). For a `custom` catalog the system cannot be inferred, so `magsys` reports `unknown` unless you are certain of the convention your columns follow.
 
 Different catalogs can serve different filters in one run:
 
@@ -202,7 +204,7 @@ The output CSV is long-form: one row per image with a `filter` column. Lightcurv
 
 ## Environment variables
 
-Needed for TNS lookups and RefCAT2; do not hard-code them:
+Needed for TNS lookups and RefCAT2;
 
 ```bash
 export MASTCASJOBS_WSID="..."
@@ -212,15 +214,6 @@ export TNS_BOT_NAME="..."
 export TNS_BOT_API="..."
 ```
 
-## Testing
-
-The suite runs entirely on synthetic data - no external images needed:
-
-```bash
-pip install -e ".[test]"
-pytest
-pytest -m "not slow and not mcmc and not injection"  # quick pass
-```
 
 ## Citation
 

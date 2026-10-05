@@ -40,7 +40,7 @@ except (ModuleNotFoundError, ImportError):
         m = str(message).strip()
         if not m:
             return ""
-        return f"\n\n- {m} -\n"
+        return f"\n---- {m} ----"
 
     def log_warning_from_exception(logger, message, exc, *, exc_info=False):
         logger.warning("%s: %s", message, exc, exc_info=exc_info)

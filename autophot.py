@@ -1536,7 +1536,7 @@ class AutomatedPhotometry:
         # Common preprocessing defaults used by main.py
         default_input["preprocessing"].setdefault("trim_image", 0)
 
-        _log(log_step("Configuration"))
+        _log(border_msg("Configuration"))
         _log(f"Configuration loaded in {time.perf_counter() - t0:.3f} seconds.")
         return default_input
 
@@ -1685,6 +1685,11 @@ class AutomatedPhotometry:
                 _log_always(
                     f"[WARNING] Deprecated config key {_dep_key}: "
                     f"rename to {_dep_new} (still honoured)."
+                )
+            for _rm_key in _report.get("removed", []):
+                _log_always(
+                    f"[WARNING] Removed config key {_rm_key}: "
+                    f"no longer used; safe to delete from input.yaml."
                 )
             _errs = format_config_errors(_report, source="driver configuration")
             if _errs:
@@ -2692,7 +2697,7 @@ class AutomatedPhotometry:
                             )
                         gc.collect()
                     else:
-                        _log(log_step("Reduce/calibrate template files"))
+                        _log(border_msg("Reduce/calibrate template files"))
                         failed_templates = []
                         for template in print_progress_bar(
                             template_file_list, title="Template files calibrated"
@@ -2719,7 +2724,7 @@ class AutomatedPhotometry:
 
                 # Reduce science frames
                 _log("")
-                _log(log_step("Reduce/calibrate science files"))
+                _log(border_msg("Reduce/calibrate science files"))
 
                 counter = 0
                 if file_list:
@@ -2863,7 +2868,7 @@ class AutomatedPhotometry:
 
             # Concatenate per-image outputs into one light curve CSV
             reduced_loc = f"{default_input['fits_dir']}_{default_input['outdir_name']}"
-            _log_always(log_step(f"Collect photometry: {reduced_loc}"))
+            _log_always(border_msg(f"Collect photometry: {reduced_loc}"))
             output_loc = os.path.join(reduced_loc, "LightCurve_Output.csv")
             concatenate_csv_files(
                 folder_path=reduced_loc,
@@ -2904,7 +2909,7 @@ class AutomatedPhotometry:
             output_photometry = output_loc
         else:
             # do_photometry=False: recover existing files and create output table
-            _log(log_step("Recover photometry (skip reductions)"))
+            _log(border_msg("Recover photometry (skip reductions)"))
 
             # Set up output directory path (same logic as when do_photometry=True)
             work_dir = default_input.get("fits_dir") or ""
@@ -2925,7 +2930,7 @@ class AutomatedPhotometry:
                     default_input["_additional_targets_resolved"] = []
 
             # Concatenate existing per-image outputs into one light curve CSV
-            _log(log_step(f"Collect photometry: {reduced_loc}"))
+            _log(border_msg(f"Collect photometry: {reduced_loc}"))
             output_photometry = os.path.join(reduced_loc, "LightCurve_Output.csv")
 
             if os.path.exists(reduced_loc):

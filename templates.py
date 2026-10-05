@@ -179,7 +179,7 @@ except (ModuleNotFoundError, ImportError):
         m = str(message).strip()
         if not m:
             return ""
-        return f"\n\n- {m} -\n"
+        return f"\n---- {m} ----"
 
     distance_to_uniform_row_col = None
     get_header = None
