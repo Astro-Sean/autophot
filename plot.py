@@ -2041,6 +2041,19 @@ class Plot:
             rms_dx = np.sqrt(np.nanmean(df_plot["dx"]**2))
             rms_dy = np.sqrt(np.nanmean(df_plot["dy"]**2))
 
+            # Store the catalog-vs-fit astrometric scatter so the PSF fit
+            # can size the forced-photometry position bound from it (same
+            # mechanism as the science-vs-template alignment diagnostic).
+            self.input_yaml["wcs_offset_rms_x_px"] = float(rms_dx)
+            self.input_yaml["wcs_offset_rms_y_px"] = float(rms_dy)
+            self.input_yaml["wcs_offset_n"] = int(len(df_plot))
+            if has_errors:
+                self.input_yaml["wcs_offset_pos_err_px"] = float(
+                    np.nanmedian(
+                        np.hypot(df_plot["x_fit_err"], df_plot["y_fit_err"])
+                    )
+                )
+
             # Get pixel scale before setting limits so we can enforce a
             # minimum range of max(1 px, 1 arcsec) whichever is larger.
             pixel_scale = None
@@ -2346,6 +2359,19 @@ class Plot:
             rms_dx = float(np.sqrt(np.nanmean(dx_plot**2)))
             rms_dy = float(np.sqrt(np.nanmean(dy_plot**2)))
 
+            # Feed the measured registration scatter back through
+            # input_yaml so the PSF fit can size the forced-photometry
+            # position bound from the actual astrometric uncertainty
+            # (residual dx/dy rms plus the median centroid error).
+            self.input_yaml["align_offset_rms_x_px"] = rms_dx
+            self.input_yaml["align_offset_rms_y_px"] = rms_dy
+            self.input_yaml["align_offset_n"] = int(len(dx_plot))
+            _pos_err = np.hypot(dx_err_plot, dy_err_plot)
+            if np.isfinite(_pos_err).any():
+                self.input_yaml["align_offset_pos_err_px"] = float(
+                    np.nanmedian(_pos_err)
+                )
+
             # Same layout as WCS_vs_PSF_Offset.
             width_pt = 5.5 * 72.27
             aspect = 1.0
@@ -2484,8 +2510,12 @@ class Plot:
                 ax.set_aspect("equal", adjustable="box")
 
             # --- Colorbar (manually positioned to avoid twin axis overlap) ---
+            # _has_twin decides how much room the right margin must leave
+            # between the axes and the colorbar for the arcsec tick labels.
+            _has_twin = pixel_scale is not None and pixel_scale > 0
+            _cbar_x = 0.88
             if _sc_obj is not None:
-                _cax = fig.add_axes([0.86, 0.12, 0.025, 0.80])
+                _cax = fig.add_axes([_cbar_x, 0.12, 0.025, 0.80])
                 cbar = fig.colorbar(_sc_obj, cax=_cax)
                 cbar.set_label("Distance from target [px]", fontsize="small")
                 cbar.ax.tick_params(labelsize="x-small")
@@ -2519,9 +2549,13 @@ class Plot:
             )
 
             # Right margin: only reserve space when a colorbar or the
-            # arcsec twin-axis labels actually need it.
-            _has_twin = pixel_scale is not None and pixel_scale > 0
-            _right = 0.81 if _sc_obj is not None else (0.88 if _has_twin else 0.95)
+            # arcsec twin-axis labels actually need it.  With a colorbar
+            # the twin tick labels and axis label sit between the axes
+            # edge and the bar, so the gap must be wide enough for both.
+            if _sc_obj is not None:
+                _right = _cbar_x - (0.10 if _has_twin else 0.04)
+            else:
+                _right = 0.88 if _has_twin else 0.95
             fig.subplots_adjust(left=0.10, right=_right, top=0.93, bottom=0.12)
 
             fig.savefig(save_path, dpi=150, facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
