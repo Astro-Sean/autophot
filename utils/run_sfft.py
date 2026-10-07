@@ -12,10 +12,11 @@ should use nCPU=1 when SFFT is enabled to minimise leaks and thread exhaustion.
 """
 
 import argparse
-import os
 import ast
 import importlib.util
 import logging
+import os
+import shutil
 import sys
 import time
 import warnings
@@ -212,6 +213,75 @@ def _pick_xy_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
         if xcol in df.columns and ycol in df.columns:
             return xcol, ycol
     return None, None
+
+
+def _xy_from_sfft_catalog(df: pd.DataFrame) -> np.ndarray:
+    """Return finite source positions as 0-based ``(x, y)`` pixels."""
+    if df is None or df.empty:
+        return np.empty((0, 2), dtype=float)
+    xcol, ycol = _pick_xy_columns(df)
+    if xcol is None:
+        return np.empty((0, 2), dtype=float)
+    x = pd.to_numeric(df[xcol], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(df[ycol], errors="coerce").to_numpy(dtype=float)
+    xy = np.column_stack((x - 1.0, y - 1.0))
+    return xy[np.isfinite(xy).all(axis=1)]
+
+
+def _diff_source_residual_scale(
+    diff_image: np.ndarray,
+    xy: np.ndarray,
+    radius: int = 4,
+) -> Optional[float]:
+    """Median absolute residual summed in small source apertures.
+
+    This compares retry candidates on the source positions where kernel
+    mismatch is visible.  Aperture sums are used instead of pixel medians so
+    correlated positive and negative residual rings both count.
+    """
+    diff = np.asarray(diff_image, dtype=float)
+    xy = np.asarray(xy, dtype=float)
+    if diff.ndim != 2 or xy.size == 0:
+        return None
+    resids = []
+    rad = max(1, int(round(radius)))
+    ny, nx = diff.shape
+    for x0, y0 in xy:
+        if not np.isfinite((x0, y0)).all():
+            continue
+        xi, yi = int(round(x0)), int(round(y0))
+        xlo, xhi = max(0, xi - rad), min(nx, xi + rad + 1)
+        ylo, yhi = max(0, yi - rad), min(ny, yi + rad + 1)
+        patch = diff[ylo:yhi, xlo:xhi]
+        patch = patch[np.isfinite(patch)]
+        if patch.size:
+            resids.append(float(np.sum(np.abs(patch))))
+    if not resids:
+        return None
+    return float(np.median(resids))
+
+
+def _adopt_prior_free_retry(
+    n_second: int,
+    n_first: int,
+    min_sources: int,
+    resid_first: Optional[float],
+    resid_second: Optional[float],
+) -> bool:
+    """Return True when a prior-free retry has enough evidence to adopt it."""
+    if int(n_second) >= int(min_sources):
+        return (
+            resid_first is None
+            or resid_second is None
+            or resid_second <= 1.10 * resid_first
+        )
+    if int(n_second) > int(n_first):
+        return (
+            resid_first is not None
+            and resid_second is not None
+            and resid_second <= 0.80 * resid_first
+        )
+    return False
 
 
 def _flag_mask_from_columns(
@@ -607,6 +677,15 @@ def run_sfft() -> Optional[int]:
         type=str,
         default="true",
         help="If true, keep vetted prior sources even when < min_prior_sources; SFFT uses them as preferred sources.",
+    )
+    parser.add_argument(
+        "-self_match_min_sources",
+        type=int,
+        default=10,
+        help=(
+            "If SFFT keeps fewer matches than this after a prior run, "
+            "try one self-match run."
+        ),
     )
     parser.add_argument(
         "-coarse_var_rejection",
@@ -1722,29 +1801,100 @@ def run_sfft() -> Optional[int]:
             _n_matched = len(matched_sources)
 
             # If the vetted priors yielded too few matched sources, SFFT's own
-            # SExtractor detection may still find enough -- retry once without
-            # priors before declaring the field too sparse.
+            # SExtractor detection may still find enough -- compare one prior-free
+            # retry before accepting it.  The first output is backed up because a
+            # larger but worse source set should not replace a valid vetted fit.
             _min_matched = 2 if constant_phot_ratio else 3
+            _self_match_min = max(
+                _min_matched,
+                int(getattr(args, "self_match_min_sources", 10) or 10),
+            )
             if (
-                _n_matched < _min_matched
+                _n_matched < _self_match_min
                 and matching_sources is not None
                 and not _used_unvetted
                 and ALLOW_UNVETTED_SOURCE_RETRY
             ):
                 log_warning(
-                    f"Prior-vetted matching produced only {_n_matched} matched "
-                    f"sources (< {_min_matched}). Retrying without priors so SFFT "
-                    "can use its own source detection."
+                    f"Prior-vetted matching produced {_n_matched} matched "
+                    f"sources (< {_self_match_min}). Trying one prior-free "
+                    "SFFT match for more kernel constraints."
                 )
-                _used_unvetted = True
-                result = _run_esp(False)
-                if len(result) < 2:
-                    raise ValueError(
-                        f"SFFT ESP returned {len(result)} value(s), expected at least 2"
+                _first_result = result
+                _first_diff = diff_image
+                _first_prep = prep_data
+                _first_matched = matched_sources
+                _first_n = _n_matched
+                _backups = {}
+                for _path in (FITS_DIFF, fits_solution):
+                    if _path and os.path.isfile(_path):
+                        _backup = f"{_path}.prior_backup_{os.getpid()}"
+                        shutil.copy2(_path, _backup)
+                        _backups[_path] = _backup
+                    elif _path:
+                        _backups[_path] = None
+
+                _adopt_unvetted = False
+                try:
+                    result = _run_esp(False)
+                    if len(result) < 2:
+                        raise ValueError(
+                            f"SFFT ESP returned {len(result)} value(s), "
+                            "expected at least 2"
+                        )
+                    diff_image, prep_data = result[0], result[1]
+                    matched_sources = _extract_matched_df(prep_data)
+                    _n_matched = len(matched_sources)
+
+                    _eval_xy = _xy_from_sfft_catalog(matched_sources)
+                    if _eval_xy.size == 0:
+                        _eval_xy = _xy_from_sfft_catalog(_first_matched)
+                    if _eval_xy.size == 0 and matching_sources is not None:
+                        _eval_xy = np.asarray(matching_sources, dtype=float) - 1.0
+                        _eval_xy = _eval_xy[np.isfinite(_eval_xy).all(axis=1)]
+
+                    _resid_first = _diff_source_residual_scale(_first_diff, _eval_xy)
+                    _resid_second = _diff_source_residual_scale(diff_image, _eval_xy)
+                    _adopt_unvetted = _adopt_prior_free_retry(
+                        _n_matched,
+                        _first_n,
+                        _self_match_min,
+                        _resid_first,
+                        _resid_second,
                     )
-                diff_image, prep_data = result[0], result[1]
-                matched_sources = _extract_matched_df(prep_data)
-                _n_matched = len(matched_sources)
+                    log_info(
+                        f"Prior-free SFFT retry: matched={_n_matched} "
+                        f"source-residual={_resid_second} vs prior={_resid_first}; "
+                        f"adopt={_adopt_unvetted}"
+                    )
+                except Exception as retry_exc:
+                    log_warning(
+                        f"Prior-free SFFT retry failed ({type(retry_exc).__name__}: "
+                        f"{retry_exc}); keeping prior-vetted result."
+                    )
+                    result = _first_result
+                    diff_image = _first_diff
+                    prep_data = _first_prep
+                    matched_sources = _first_matched
+                    _n_matched = _first_n
+
+                if not _adopt_unvetted:
+                    for _path, _backup in _backups.items():
+                        if _backup is not None and os.path.isfile(_backup):
+                            shutil.copy2(_backup, _path)
+                            os.remove(_backup)
+                        elif _path and os.path.isfile(_path):
+                            os.remove(_path)
+                    result = _first_result
+                    diff_image = _first_diff
+                    prep_data = _first_prep
+                    matched_sources = _first_matched
+                    _n_matched = _first_n
+                else:
+                    _used_unvetted = True
+                    for _backup in _backups.values():
+                        if _backup is not None and os.path.isfile(_backup):
+                            os.remove(_backup)
 
             log_info(f"Number of sources used in matching: {_n_matched}")
 
@@ -1892,6 +2042,7 @@ def run_sfft() -> Optional[int]:
             # prior so the user can diagnose subtraction quality issues.
             if (
                 matching_sources is not None
+                and not _used_unvetted
                 and len(matching_sources) > 0
                 and xcol is not None
                 and ycol is not None
@@ -2263,8 +2414,8 @@ def run_sfft() -> Optional[int]:
                             # Realize the kernel at the image centre.
                             # Realize_MatchingKernel takes XY_q in [X, Y] = [col, row]
                             # order (SFFT's Fortran convention).
-                            _cx = float(_nx_img) / 2.0  # X = column
-                            _cy = float(_ny_img) / 2.0  # Y = row
+                            _cx = (float(_nx_img) + 1.0) / 2.0  # X = column
+                            _cy = (float(_ny_img) + 1.0) / 2.0  # Y = row
                             _XY_q = np.array([[_cx, _cy]])
                             _ker_stack = Realize_MatchingKernel(_XY_q).FromArray(
                                 Solution=_solution,

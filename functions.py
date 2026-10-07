@@ -4077,6 +4077,183 @@ def refresh_sibling_weight_map(
         return
 
 
+def _sfft_match_bad_mask(
+    science_image,
+    template_image,
+    hardware_defects_mask=None,
+):
+    """Return pixels to keep SFFT kernel priors away from.
+
+    The caller's broader ``defects_mask`` includes the catalog source mask;
+    using it here would reject every candidate around its own aperture
+    footprint, which starved the kernel fit in sparse fields.  This helper is
+    deliberately limited to invalid pixels and coordinate-aligned hardware
+    defects.
+    """
+    bad = ~np.isfinite(np.asarray(science_image))
+    template_image = np.asarray(template_image)
+    if template_image.shape == bad.shape:
+        bad |= ~np.isfinite(template_image)
+
+    if hardware_defects_mask is not None:
+        hardware_mask = np.asarray(hardware_defects_mask, dtype=bool)
+        if hardware_mask.shape == bad.shape:
+            bad |= hardware_mask
+    return bad
+
+
+def _sfft_post_anomaly_retry_viable(
+    n_surviving_vetted,
+    has_vetted_list,
+    n_pipeline_priors,
+    min_for_retry,
+):
+    """Decide whether the SFFT post-anomaly feedback retry can produce a
+    constrained kernel.
+
+    Post-anomaly positions are first-pass SubSources, so banning them
+    removes constraints directly from the retry's SubSource catalog;
+    ``n_surviving_vetted`` (SFFT-vetted sources not near an anomaly)
+    predicts the retry's matched count.  When that count and the pipeline
+    priors both sit at or below the kernel minimum, the retry cannot reach
+    a constrained solution - its prior pass dies at run_sfft's
+    matched-source gate and the prior-free alternative was already
+    evaluated in the first pass.  A larger prior pool can still feed SFFT
+    new SubSources, so it is not vetoed.
+    """
+    if not has_vetted_list:
+        return True
+    if n_surviving_vetted >= min_for_retry:
+        return True
+    return n_pipeline_priors > min_for_retry
+
+
+def _sfft_actual_convd(header):
+    """Return the image SFFT actually convolved, or an empty string."""
+    if header is None:
+        return ""
+    convd = str(header.get("CONVD", "")).strip().upper()
+    if convd in ("SCI", "REF"):
+        return convd
+
+    forcecon = str(header.get("FORCECON", "")).strip().upper()
+    if forcecon in ("SCI", "REF"):
+        return forcecon
+    if forcecon != "AUTO":
+        return ""
+
+    try:
+        fwhm_sci = float(header.get("FWHM_SCI", 0.0))
+        fwhm_ref = float(header.get("FWHM_REF", 0.0))
+    except (TypeError, ValueError):
+        return ""
+    if not (
+        np.isfinite(fwhm_sci)
+        and np.isfinite(fwhm_ref)
+        and fwhm_sci > 0
+        and fwhm_ref > 0
+    ):
+        return ""
+    return "SCI" if fwhm_sci <= fwhm_ref else "REF"
+
+
+def _sfft_photometric_flux_correction(
+    header,
+    convd=None,
+    min_disc_pct=3.0,
+    max_disc_pct=50.0,
+):
+    """Return the whole-image SFFT flux correction, or ``None``.
+
+    This correction is valid only when SFFT convolved the science image: both
+    the transient and the residual scale then share the convolution flux
+    scale.  For ``CONVD=REF`` the transient remains in native science units,
+    so multiplying the whole difference would bias the target amplitude.
+    """
+    actual_convd = convd if convd is not None else _sfft_actual_convd(header)
+    if str(actual_convd).strip().upper() != "SCI":
+        return None
+    try:
+        fscal_conv = float(header.get("FSCAL_CONV", header.get("FSCAL", 0.0)))
+        fscal_phot = float(header.get("FSCAL_PHOT", 0.0))
+        fscal_disc = float(header.get("FSCAL_DISC", np.nan))
+    except (TypeError, ValueError):
+        return None
+    if not (
+        np.isfinite(fscal_conv)
+        and np.isfinite(fscal_phot)
+        and fscal_conv > 0
+        and fscal_phot > 0
+    ):
+        return None
+    if not np.isfinite(fscal_disc):
+        fscal_disc = (
+            abs(fscal_conv - fscal_phot)
+            / max(abs(fscal_conv), abs(fscal_phot), 1e-10)
+            * 100.0
+        )
+    if min_disc_pct < fscal_disc <= max_disc_pct:
+        return fscal_phot / fscal_conv
+    return None
+
+
+def _sfft_difference_gain(
+    header,
+    science_gain,
+    convd=None,
+    flux_corrected=False,
+    flux_scale=None,
+):
+    """Return the gain that converts difference ADU to science electrons.
+
+    ``CONVD=SCI`` scales a science transient by the solved convolution scale,
+    so the effective gain must be ``GAIN_SCI / scale``.  ``CONVD=REF`` leaves
+    the transient on the native science scale and keeps the science gain.
+    ``flux_scale`` allows the caller to supply the kernel sum at the target,
+    which can differ from the header mean for a spatially varying solution.
+    """
+    try:
+        science_gain = float(science_gain)
+    except (TypeError, ValueError):
+        return np.nan
+    if not np.isfinite(science_gain) or science_gain <= 0:
+        return np.nan
+
+    actual_convd = convd if convd is not None else _sfft_actual_convd(header)
+    if str(actual_convd).strip().upper() != "SCI":
+        return science_gain
+
+    if flux_scale is not None:
+        try:
+            fscal = float(flux_scale)
+        except (TypeError, ValueError):
+            fscal = 0.0
+    else:
+        scale_key = "FSCAL_PHOT" if flux_corrected else "FSCAL_CONV"
+        try:
+            fscal = float(header.get(scale_key, 0.0))
+        except (TypeError, ValueError):
+            fscal = 0.0
+        if not (np.isfinite(fscal) and fscal > 0) and not flux_corrected:
+            try:
+                fscal = float(header.get("FSCAL", 0.0))
+            except (TypeError, ValueError):
+                fscal = 0.0
+    if np.isfinite(fscal) and fscal > 0:
+        return science_gain / fscal
+    if flux_scale is not None:
+        return np.nan
+
+    if not flux_corrected:
+        try:
+            diff_gain = float(header.get("GAIN", 0.0))
+        except (TypeError, ValueError):
+            diff_gain = 0.0
+        if np.isfinite(diff_gain) and diff_gain > 0:
+            return diff_gain
+    return science_gain
+
+
 def _keep_floor_cut(current_mask, bad_mask, metric, min_keep):
     """Apply a boolean cut bounded by a keep-floor on the surviving pool.
 
