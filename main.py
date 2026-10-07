@@ -132,15 +132,18 @@ from cosmic import RemoveCosmicRays
 from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        AutophotYaml, ColoredLevelFormatter, ConsoleLevelFilter,
                        PlainFormatter, SuppressStdout, _bounded_centroid,
-                       _keep_floor_cut, ascii_kv, ascii_table,
-                       beta_aperture, beta_psf, border_msg,
+                       _keep_floor_cut, _sfft_actual_convd,
+                       _sfft_difference_gain, _sfft_match_bad_mask,
+                       _sfft_photometric_flux_correction, ascii_kv,
+                       ascii_table, beta_aperture, beta_psf, border_msg,
                        check_input_config, compact_status,
                        convert_to_mjd_astropy, dict_to_string_with_hashtag,
                        flux_upper_limit, format_config_errors, get_header,
                        get_image, get_image_and_header, get_instrument_config,
                        load_telescope_config, log_exception, log_status,
                        log_step, log_warning_from_exception, metrics_table,
-                       normalize_target_name, odd, pix_dist, quadrature_add,
+                       canonical_target_name, odd,
+                       pix_dist, quadrature_add,
                        resolve_verbose_level, safe_fits_write,
                        silence_noisy_loggers, strict_config_enabled,
                        verbose_to_console_level, write_output_csv)
@@ -1912,15 +1915,9 @@ def run_photometry():
             except Exception as e:
                 logging.info("No RA/DEC keywords found (%s).", e)
 
-        #  Set Target Name
-        if not (input_yaml["target_name"] is None):
-            input_yaml["target_name"] = normalize_target_name(input_yaml["target_name"])
-        elif not (input_yaml["target_ra"] is None) and not (
-            input_yaml["target_dec"] is None
-        ):
-            input_yaml["target_name"] = "Transient"
-        else:
-            input_yaml["target_name"] = "Center of Field"
+        #  Set Target Name - canonical_target_name applies the same
+        #  fallback as the driver pre-fetch so catalog cache keys agree.
+        input_yaml["target_name"] = canonical_target_name(input_yaml)
 
         #  Update Input YAML with Image and Filter Metadata
         input_yaml["imageFilter"] = imageFilter
@@ -5260,18 +5257,52 @@ def run_photometry():
         # To build from the original (pre-alignment) image instead (to avoid interpolation
         # artifacts in the PSF model itself), set psf_build_from_aligned=False.
         epsf_model = None
-        # Provenance of the PSF model actually used: "epsf" (built from
-        # image sources) or "none" (aperture-only). Written to the Output
-        # CSV so model provenance is never silent in the data products.
+        # Provenance of the PSF model actually used: "epsf" or
+        # "gridded-epsf-NxM" (empirical, from image sources; suffixed
+        # "-understaffed" when the pool was below the normal floor),
+        # "analytic-composite"/"analytic-moffat" (composite Moffat
+        # fitted to the sparse pool),
+        # or "none" (aperture-only). Written to the Output CSV so model
+        # provenance is never silent in the data products.
         psf_model_kind = "none"
         PSFSources = None
         build_from_aligned = bool(phot_cfg.get("psf_build_from_aligned", True))
+        _user_forced_ap_only = bool(
+            input_yaml["photometry"].get("do_AperturePhotometry", False)
+        )
+        # A pool below min_sources_for_psf cannot fill an oversampled ePSF
+        # grid, but build() already degrades to a flagged 1x understaffed
+        # model internally; psf_build_min_stars is the floor below which
+        # even that attempt is skipped for the analytic fallback.
+        psf_build_min_stars = max(
+            1, int(phot_cfg.get("psf_build_min_stars", 2))
+        )
+        # Below psf_empirical_min_stars the pool goes straight to the
+        # analytic composite fit: a 1x understaffed ePSF on a handful of
+        # stars is a noisy stack where every grid cell carries the star
+        # noise, while the joint composite-Moffat fit is constrained by
+        # every pixel of every cutout.  Undersampled images are exempt -
+        # a smooth analytic profile cannot represent pixel-phase
+        # structure, so the empirical attempt is still made and the
+        # analytic fallback only fires if it fails.
+        psf_empirical_min_stars = max(
+            psf_build_min_stars,
+            int(phot_cfg.get("psf_empirical_min_stars", 6)),
+        )
+        _undersampled_img = float(ImageFWHM) <= float(
+            phot_cfg.get("undersampled_fwhm_threshold", 2.5)
+        )
+        psf_build_gate_stars = (
+            psf_build_min_stars if _undersampled_img else psf_empirical_min_stars
+        )
         if (
             not build_from_aligned
             and template_available
             and science_path_original != fpath
             and os.path.exists(science_path_original)
             and (not do_aperture_ONLY or prepare_template)
+            and psf_source_pool is not None
+            and len(psf_source_pool) >= psf_build_gate_stars
         ):
             try:
                 image_orig, header_orig = get_image_and_header(science_path_original)
@@ -5351,6 +5382,22 @@ def run_photometry():
                     del image_orig, result_orig
                     if epsf_model is not None:
                         psf_model_kind = getattr(_psf_builder, "psf_model_kind", "epsf")
+                        if getattr(
+                            _psf_builder, "psf_ensemble_understaffed", False
+                        ):
+                            psf_model_kind += "-understaffed"
+                        if getattr(
+                            _psf_builder, "psf_grid_underresolved", False
+                        ):
+                            psf_model_kind += "-underresolved"
+                        if do_aperture_ONLY and not _user_forced_ap_only:
+                            do_aperture_ONLY = False
+                            logging.info(
+                                "Re-enabling PSF photometry: understaffed "
+                                "ePSF built from %d pool stars "
+                                "(low-confidence).",
+                                len(psf_sources_orig),
+                            )
                         logging.info(
                             "PSF built from original (pre-alignment) science image to avoid resampling degradation."
                         )
@@ -5362,12 +5409,29 @@ def run_photometry():
                 epsf_model, PSFSources = None, None
 
         # Build the PSF from the current (possibly aligned) image when the
-        # build-from-original path did not produce a model.
+        # build-from-original path did not produce a model.  Sparse fields
+        # reach this gate with do_aperture_ONLY still set (the early
+        # <min_sources_for_psf branch) - the build attempt is still made
+        # down to psf_build_gate_stars unless the user forced aperture-only.
+        _n_pool = 0 if psf_source_pool is None else len(psf_source_pool)
         if (
-            (not do_aperture_ONLY or prepare_template)
+            epsf_model is None
+            and _n_pool < psf_build_gate_stars
+            and not _user_forced_ap_only
+            and bool(phot_cfg.get("psf_analytic_fallback", True))
+        ):
+            logging.info(
+                "PSF pool has %d sources < empirical floor %d; skipping "
+                "the understaffed ePSF build for the analytic "
+                "composite-Moffat fit.",
+                _n_pool,
+                psf_build_gate_stars,
+            )
+        if (
+            (not do_aperture_ONLY or prepare_template or not _user_forced_ap_only)
             and epsf_model is None
             and psf_source_pool is not None
-            and len(psf_source_pool) >= min_sources_for_psf
+            and len(psf_source_pool) >= psf_build_gate_stars
         ):
             if build_from_aligned:
                 logging.info(
@@ -5387,6 +5451,26 @@ def run_photometry():
                 )
                 if epsf_model is not None:
                     psf_model_kind = getattr(_psf_builder, "psf_model_kind", "epsf")
+                    if getattr(_psf_builder, "psf_ensemble_understaffed", False):
+                        # Sub-threshold pools give a usable but
+                        # low-confidence 1x model; mark the provenance so
+                        # it is not read as a full ePSF downstream.
+                        psf_model_kind += "-understaffed"
+                    if getattr(_psf_builder, "psf_grid_underresolved", False):
+                        # The kept rung sits below ~4 grid points per FWHM
+                        # (photutils oversampling >= 4/FWHM guideline) -
+                        # the model cannot resolve the core.
+                        psf_model_kind += "-underresolved"
+                    if do_aperture_ONLY and not _user_forced_ap_only:
+                        # A sparse-field run reaches the build with
+                        # aperture-only still set; a produced model is
+                        # still worth fitting.
+                        do_aperture_ONLY = False
+                        logging.info(
+                            "Re-enabling PSF photometry: understaffed ePSF "
+                            "built from %d pool stars (low-confidence).",
+                            len(psf_source_pool),
+                        )
                 if epsf_model is None:
                     logging.warning(
                         "PSF build returned no model (e.g. insufficient isolated stars); continuing with aperture-only."
@@ -5402,18 +5486,199 @@ def run_photometry():
                 PSFSources = None
                 do_aperture_ONLY = True
 
+        # Sparse-field analytic fallback: when no empirical model exists
+        # (pool below the build floor, or the build itself failed) fit a
+        # composite Moffat to whatever pool cutouts remain.  On oversampled
+        # data an analytic profile loses little to an ePSF, and a model of
+        # any kind restores PSF-fit positions/fluxes plus the AP-vs-PSF
+        # zeropoint cross-check.  psf_model_kind marks it analytic so the
+        # products never read it as an empirical ePSF.
+        if (
+            epsf_model is None
+            and not _user_forced_ap_only
+            and bool(phot_cfg.get("psf_analytic_fallback", True))
+        ):
+            try:
+                from types import SimpleNamespace
+
+                from astropy.nddata.utils import extract_array
+
+                from psf import _analytic_psf_stamp
+
+                _an_beta = max(
+                    1.1, float(phot_cfg.get("psf_init_moffat_beta", 4.765))
+                )
+                _an_fwhm = max(1.0, float(ImageFWHM))
+                _an_cutout = int(2 * np.ceil(6.0 * _an_fwhm) + 1)
+                _an_stars = []
+                if psf_source_pool is not None and len(psf_source_pool) > 0:
+                    _an_src = psf_source_pool.loc[
+                        np.isfinite(psf_source_pool["x_pix"])
+                        & np.isfinite(psf_source_pool["y_pix"])
+                    ]
+                    # NaN-padded extraction keeps pool stars near the edge;
+                    # photutils extract_stars drops them outright and the
+                    # composite fit masks non-finite pixels anyway.
+                    _an_half = _an_cutout // 2
+                    _an_mask_arr = (
+                        np.asarray(hardware_defects_mask, dtype=bool)
+                        if hardware_defects_mask is not None
+                        and np.shape(hardware_defects_mask)
+                        == np.shape(image)
+                        else None
+                    )
+                    for _row in _an_src.itertuples():
+                        _cx = float(_row.x_pix)
+                        _cy = float(_row.y_pix)
+                        # Integer-centred extraction: output index _an_half
+                        # maps exactly to (_iy, _ix), so the source's
+                        # cutout centre is its offset from that anchor.
+                        _ix, _iy = int(np.rint(_cx)), int(np.rint(_cy))
+                        _cut = extract_array(
+                            np.asarray(image, dtype=float),
+                            (_an_cutout, _an_cutout),
+                            (_iy, _ix),
+                            mode="partial",
+                            fill_value=np.nan,
+                        )
+                        _mcut = None
+                        if _an_mask_arr is not None:
+                            # Masked-region cutouts carry interpolated
+                            # values that are not stellar signal; the
+                            # composite fit must not see them.
+                            _mcut = extract_array(
+                                _an_mask_arr.astype(float),
+                                (_an_cutout, _an_cutout),
+                                (_iy, _ix),
+                                mode="partial",
+                                fill_value=1.0,
+                            ).astype(bool)
+                        _ok = np.isfinite(_cut)
+                        if _mcut is not None:
+                            _ok &= ~_mcut
+                        if _ok.sum() < 30:
+                            continue
+                        _an_stars.append(
+                            SimpleNamespace(
+                                data=_cut,
+                                cutout_center=np.array(
+                                    [_cx - (_ix - _an_half), _cy - (_iy - _an_half)]
+                                ),
+                                weights=_ok.astype(float),
+                                mask=_mcut,
+                                flux=np.nan,
+                            )
+                        )
+                epsf_model, _ = _analytic_psf_stamp(
+                    _an_fwhm,
+                    1,
+                    _an_cutout,
+                    _an_beta,
+                    stars=_an_stars if _an_stars else None,
+                    phot_cfg=phot_cfg,
+                )
+                if epsf_model is not None and _an_stars:
+                    # One or two stars cannot constrain the wing slope: the
+                    # fit can land on the beta bound and return a model far
+                    # off the measured image FWHM, which then biases the
+                    # fitted fluxes.  The wide discard band is the right
+                    # gate here - a sparse-field Moffat fit reads ~10-15%
+                    # narrower than the empirical FWHM without being
+                    # degenerate; outside it the canonical composite at
+                    # the measured FWHM is the honest model.
+                    from psf import measure_epsf_fwhm_native
+
+                    _an_meas = measure_epsf_fwhm_native(
+                        np.asarray(epsf_model.data, dtype=float), 1
+                    )
+                    _an_lo = float(
+                        phot_cfg.get("psf_epsf_fwhm_discard_min_frac", 0.6)
+                    ) * _an_fwhm
+                    _an_hi = float(
+                        phot_cfg.get("psf_epsf_fwhm_discard_max_frac", 2.0)
+                    ) * _an_fwhm
+                    if not (_an_lo <= _an_meas <= _an_hi):
+                        logging.warning(
+                            "Analytic PSF fit landed at FWHM=%.2f px "
+                            "(image FWHM=%.2f px) on %d stars; using the "
+                            "canonical composite at the measured FWHM.",
+                            _an_meas,
+                            _an_fwhm,
+                            len(_an_stars),
+                        )
+                        epsf_model, _ = _analytic_psf_stamp(
+                            _an_fwhm,
+                            1,
+                            _an_cutout,
+                            _an_beta,
+                            stars=None,
+                        )
+                if epsf_model is not None:
+                    _an_n = 0 if _an_stars is None else len(_an_stars)
+                    psf_model_kind = getattr(
+                        epsf_model, "_autophot_kind", "analytic-moffat"
+                    )
+                    PSFSources = None
+                    do_aperture_ONLY = False
+                    logging.warning(
+                        "PSF model: analytic composite-Moffat fitted on %d "
+                        "pool stars (FWHM=%.2f px); empirical ePSF "
+                        "unavailable - PSF photometry is low-confidence.",
+                        _an_n,
+                        _an_fwhm,
+                    )
+                    # Composite-model diagnostic: per-star cutouts and
+                    # residuals plus the component breakdown - the main
+                    # visual check on what the analytic fit actually did.
+                    try:
+                        from plotting_utils import get_plot_ext
+                        from psf import plot_analytic_psf
+
+                        _an_png = os.path.join(
+                            write_dir,
+                            f"PSF_Analytic_{os.path.splitext(base_filename)[0]}"
+                            f"{get_plot_ext(input_yaml)}",
+                        )
+                        plot_analytic_psf(
+                            epsf_model,
+                            stars=_an_stars,
+                            fwhm_native=_an_fwhm,
+                            snr_min=float(
+                                phot_cfg.get("psf_analytic_min_snr", 5.0)
+                            ),
+                            save_path=_an_png,
+                        )
+                    except Exception as _an_plot_err:
+                        logging.warning(
+                            "Analytic PSF diagnostic plot failed: %s",
+                            _an_plot_err,
+                        )
+            except Exception as _an_err:
+                epsf_model = None
+                log_exception(
+                    _an_err,
+                    "Analytic PSF fallback failed; continuing aperture-only.",
+                )
+
         # Every attempted build reports its own verdict (STATUS one-liner on
         # success, warning on failure); a build skipped because the pool is
         # below the minimum would otherwise leave the section empty.
         if (
-            (not do_aperture_ONLY or prepare_template)
+            (not do_aperture_ONLY or prepare_template or not _user_forced_ap_only)
             and epsf_model is None
-            and (psf_source_pool is None or len(psf_source_pool) < min_sources_for_psf)
+            and (
+                psf_source_pool is None
+                or len(psf_source_pool) < psf_build_gate_stars
+            )
         ):
             log_status(
-                "PSF model: none (pool has %d sources; need >= %d)",
+                "PSF model: none (pool has %d sources; need >= %d for an "
+                "empirical build%s)",
                 0 if psf_source_pool is None else len(psf_source_pool),
-                min_sources_for_psf,
+                psf_build_gate_stars,
+                "; analytic fallback unavailable"
+                if not bool(phot_cfg.get("psf_analytic_fallback", True))
+                else "",
             )
 
         # Log PSF roundness and run PSF fit on catalog when we have an ePSF (from original or current image).
@@ -6465,8 +6730,10 @@ def run_photometry():
             # below then only re-thresholds the same distances.  argwhere +
             # cKDTree would allocate an (N_mask, 2) coordinate array and pay
             # an O(N log N) build plus per-iteration queries instead.
-            masked_image = (
-                (defects_mask) | ~np.isfinite(image) | ~np.isfinite(template_image)
+            masked_image = _sfft_match_bad_mask(
+                image,
+                template_image,
+                hardware_defects_mask=hardware_defects_mask,
             )
 
             if not np.any(masked_image):
@@ -7100,6 +7367,7 @@ def run_photometry():
                         "Flux-consistent matching: output %s sources",
                         len(MatchingSources),
                     )
+                    _n_flux_consistent = len(MatchingSources)
                     # Fallback: if flux consistency removed too many sources,
                     # use the best-ranked well-aligned sources instead of ALL
                     # sources.  Using all sources (including non-linear/
@@ -7124,7 +7392,7 @@ def run_photometry():
                         MatchingSources = _fallback_sources.head(_max_fallback)
                         logging.warning(
                             f"Flux consistency returned only\n"
-                            f"    {len(MatchingSources)} sources (from\n"
+                            f"    {_n_flux_consistent} sources (from\n"
                             f"    {len(image_sources)} input). Using top\n"
                             f"    {len(MatchingSources)} well-aligned sources\n"
                             f"    by {_rank_col or 'index order'} as fallback\n"
@@ -9187,6 +9455,18 @@ def run_photometry():
                             if ConsistentSources is not None
                             else 0
                         )
+                        try:
+                            _actual_backend = str(
+                                get_header(fpath).get("SUBALGO", "")
+                            ).strip().lower()
+                            if (
+                                _actual_backend == "sfft"
+                                and os.path.isfile(sfft_matched_sources)
+                            ):
+                                _sfft_used = pd.read_csv(sfft_matched_sources)
+                                _n_match = int(len(_sfft_used.dropna(how="all")))
+                        except Exception:
+                            pass
                         _qclass = input_yaml.get("diff_quality_class")
                         _qscore = input_yaml.get("diff_quality_score")
                         _qtxt = (
@@ -9430,8 +9710,8 @@ def run_photometry():
                     # Sample the kernel at a 4x4 grid across the image to
                     # estimate the spatial variation of the noise amplification.
                     _grid_n = 4
-                    _xs = np.linspace(0, _nx_img, _grid_n)
-                    _ys = np.linspace(0, _ny_img, _grid_n)
+                    _xs = np.linspace(1, _nx_img, _grid_n)
+                    _ys = np.linspace(1, _ny_img, _grid_n)
                     _XY_q = np.array([[x, y] for y in _ys for x in _xs])
                     _ker_stack = Realize_MatchingKernel(_XY_q).FromFITS(_solpath)
                     _l2_norms = []
@@ -9501,58 +9781,56 @@ def run_photometry():
         # true photometric flux ratio (FSCAL_PHOT) by several percent.  The
         # residual flux error creates dipoles at source positions.
         #
-        # For ForceConv=SCI (diff = Conv(SCI) - REF), the entire diff is
-        # proportional to FSCAL_CONV, so a multiplicative correction by
-        # FSCAL_PHOT / FSCAL_CONV brings the flux scale to the true ratio.
-        #
-        # For ForceConv=REF (diff = SCI - Conv(REF)), a multiplicative correction
-        # would incorrectly scale the science contribution.  We skip it - the
-        # gain update in the ForceConv=SCI block below handles the flux
-        # calibration for that case.
+        # For CONVD=SCI (diff = Conv(SCI) - REF), the transient and source
+        # residuals share FSCAL_CONV, so a multiplicative correction by
+        # FSCAL_PHOT / FSCAL_CONV brings the pixels to the photometric ratio.
+        # For CONVD=REF the target remains in native science units even when
+        # the convolved reference scale is wrong, so the same multiplication
+        # would bias the measured transient amplitude.
         # -----------------------------------------------------------------------
+        _sfft_flux_correction_applied = False
+        _sfft_flux_correction = None
         if PreformSubtraction:
-            _fscal_conv = float(header.get("FSCAL_CONV", 0.0))
+            _fscal_conv = float(header.get("FSCAL_CONV", header.get("FSCAL", 0.0)))
             _fscal_phot = float(header.get("FSCAL_PHOT", 0.0))
-            _fscal_disc = float(header.get("FSCAL_DISC", 0.0))
-            _convd_hdr = str(header.get("CONVD", "")).strip().upper()
-            _is_forceconv_sci = _convd_hdr == "SCI" or (
-                _convd_hdr == "" and "FSCAL" in header
+            _fscal_disc = float(header.get("FSCAL_DISC", np.nan))
+            if not (np.isfinite(_fscal_disc) and _fscal_disc > 0):
+                _fscal_disc = (
+                    abs(_fscal_conv - _fscal_phot)
+                    / max(abs(_fscal_conv), abs(_fscal_phot), 1e-10)
+                    * 100.0
+                    if _fscal_conv > 0 and _fscal_phot > 0
+                    else np.nan
+                )
+            _sfft_convd = _sfft_actual_convd(header)
+            _sfft_flux_correction = _sfft_photometric_flux_correction(
+                header,
+                convd=_sfft_convd,
             )
-            if (
-                _fscal_conv > 0
-                and _fscal_phot > 0
-                and np.isfinite(_fscal_disc)
-                and _fscal_disc > 3.0
-                and _fscal_disc <= 50.0
-                and _is_forceconv_sci
-            ):
-                _flux_correction = _fscal_phot / _fscal_conv
+            if _sfft_flux_correction is not None:
                 logging.info(
                     "Applying post-SFFT flux scaling correction: FSCAL_CONV=%.4f "
                     "FSCAL_PHOT=%.4f (%.1f%% mismatch) -> diff image scaled by %.4f",
                     _fscal_conv,
                     _fscal_phot,
                     _fscal_disc,
-                    _flux_correction,
+                    _sfft_flux_correction,
                 )
-                image = image * _flux_correction
+                image = image * _sfft_flux_correction
+                _sfft_flux_correction_applied = True
                 if background_rms is not None:
-                    background_rms = background_rms * abs(_flux_correction)
-            elif (
-                np.isfinite(_fscal_disc)
-                and _fscal_disc > 3.0
-                and not _is_forceconv_sci
-            ):
-                # ForceConv=REF gets no in-image correction: the kernel
-                # flux scale disagrees with the aperture-derived scale by
-                # FSCAL_DISC percent and every diff flux inherits that
-                # fractional bias.  Record it so the photometry error
-                # budget can carry it.
+                    background_rms = background_rms * abs(_sfft_flux_correction)
+            elif np.isfinite(_fscal_disc) and _fscal_disc > 3.0:
+                # REF leaves the transient in native science units, and an SCI
+                # correction outside the guarded range is deliberately not
+                # applied.  In either case the residual scale uncertainty
+                # belongs in the photometric error budget.
                 input_yaml["flux_scale_discrep_frac"] = _fscal_disc / 100.0
                 logging.warning(
-                    "SFFT flux scaling discrepancy %.1f%% (ForceConv=REF, "
+                    "SFFT flux scaling discrepancy %.1f%% (CONVD=%s, "
                     "uncorrected) - folding into photometry error budget.",
                     _fscal_disc,
+                    _sfft_convd or "unknown",
                 )
 
         # -----------------------------------------------------------------------
@@ -9571,6 +9849,8 @@ def run_photometry():
         # -----------------------------------------------------------------------
         _forceconv_diff = None
         _epsf_original = None
+        _is_sfft_diff = False
+        _sfft_science_gain = np.nan
         # The model that matches the SCIENCE image.  The subtraction block
         # below may convolve epsf_model with the SFFT kernel (ForceConv=SCI)
         # or replace it entirely (ZOGY diff PSF); any later refit on the
@@ -9578,60 +9858,52 @@ def run_photometry():
         _epsf_science = epsf_model
         if PreformSubtraction:
             _forceconv_hdr = str(header.get("FORCECON", "")).strip().upper()
-            # SFFT writes "AUTO" to the header when ForceConv=AUTO, but internally
-            # decides the direction: it convolves the sharper image (smaller FWHM)
-            # to match the broader one. We need to determine the actual direction
-            # so the ePSF consistency block triggers correctly.
-            if _forceconv_hdr == "AUTO":
-                # SFFT writes "AUTO" to FORCECON but records the actual direction
-                # in the CONVD keyword. Use that if available; otherwise infer
-                # from FWHM comparison (SFFT convolves the sharper image).
-                _convd = str(header.get("CONVD", "")).strip().upper()
-                if _convd in ("SCI", "REF"):
-                    _forceconv_diff = _convd
+            # CONVD records what was actually convolved.  FORCECON can remain a
+            # requested mode (AUTO) or be stale after a direction veto, so it
+            # cannot override the measured direction used for photometry.
+            _convd = str(header.get("CONVD", "")).strip().upper()
+            if _convd in ("SCI", "REF", "ZOGY"):
+                _forceconv_diff = _convd
+                if _forceconv_hdr and _forceconv_hdr != _convd:
                     logging.info(
-                        "SFFT ForceConv=AUTO resolved to %s (from CONVD keyword): "
-                        "difference image has %s PSF.",
+                        "Using actual CONVD=%s (FORCECON=%s): difference image "
+                        "has %s PSF.",
                         _convd,
-                        "reference" if _convd == "SCI" else "science",
+                        _forceconv_hdr,
+                        (
+                            "reference"
+                            if _convd == "SCI"
+                            else "science" if _convd == "REF" else "geometric-mean"
+                        ),
                     )
-                else:
-                    _auto_sci_fwhm = float(header.get("FWHM_SCI", 0))
-                    _auto_ref_fwhm = float(header.get("FWHM_REF", 0))
-                    if _auto_sci_fwhm > 0 and _auto_ref_fwhm > 0:
-                        if _auto_sci_fwhm <= _auto_ref_fwhm:
-                            _forceconv_diff = "SCI"
-                            logging.info(
-                                "SFFT ForceConv=AUTO resolved to SCI (science FWHM=%.2f <= ref FWHM=%.2f): "
-                                "difference image has reference PSF.",
-                                _auto_sci_fwhm,
-                                _auto_ref_fwhm,
-                            )
-                        else:
-                            _forceconv_diff = "REF"
-                            logging.info(
-                                "SFFT ForceConv=AUTO resolved to REF (science FWHM=%.2f > ref FWHM=%.2f): "
-                                "difference image has science PSF.",
-                                _auto_sci_fwhm,
-                                _auto_ref_fwhm,
-                            )
+            elif _forceconv_hdr == "AUTO":
+                # Old SFFT products may lack CONVD.  SFFT AUTO convolves the
+                # sharper image to match the broader one.
+                _auto_sci_fwhm = float(header.get("FWHM_SCI", 0))
+                _auto_ref_fwhm = float(header.get("FWHM_REF", 0))
+                if _auto_sci_fwhm > 0 and _auto_ref_fwhm > 0:
+                    if _auto_sci_fwhm <= _auto_ref_fwhm:
+                        _forceconv_diff = "SCI"
+                        logging.info(
+                            "SFFT ForceConv=AUTO resolved to SCI "
+                            "(science FWHM=%.2f <= ref FWHM=%.2f): "
+                            "difference image has reference PSF.",
+                            _auto_sci_fwhm,
+                            _auto_ref_fwhm,
+                        )
                     else:
-                        _forceconv_diff = ""
+                        _forceconv_diff = "REF"
+                        logging.info(
+                            "SFFT ForceConv=AUTO resolved to REF "
+                            "(science FWHM=%.2f > ref FWHM=%.2f): "
+                            "difference image has science PSF.",
+                            _auto_sci_fwhm,
+                            _auto_ref_fwhm,
+                        )
+                else:
+                    _forceconv_diff = ""
             else:
                 _forceconv_diff = _forceconv_hdr
-                # ZOGY sets FORCECON=ZOGY but also writes CONVD=REF/SCI/ZOGY
-                # to indicate the actual convolution direction.  Use CONVD
-                # to pick the correct photometry path.
-                if _forceconv_diff == "ZOGY":
-                    _zogy_convd = str(header.get("CONVD", "")).strip().upper()
-                    if _zogy_convd in ("REF", "SCI"):
-                        _forceconv_diff = _zogy_convd
-                        logging.info(
-                            "ZOGY ForceConv=REF/SCI (CONVD=%s): difference image "
-                            "has %s PSF.",
-                            _zogy_convd,
-                            "science" if _zogy_convd == "REF" else "reference",
-                        )
             if _forceconv_diff == "ZOGY":
                 # ZOGY with no pre-convolution: geometric mean PSF.
                 # The science ePSF does NOT match the diff PSF.
@@ -9833,6 +10105,52 @@ def run_photometry():
                 _sci_fwhm_hdr = float(header.get("FWHM_SCI", 0))
                 # Save original science ePSF for potential re-realization at target position
                 _epsf_original = epsf_model
+
+                # SFFT CONVD=SCI scales a science transient by the solved
+                # convolution flux scale.  The photometry gain must invert that
+                # final pixel scale so the difference flux returns to the same
+                # e-/s convention used by the pre-subtraction zeropoint.
+                _is_sfft_diff = (
+                    "SOLPATH" in header
+                    or "FSCAL" in header
+                    or "FSCAL_CONV" in header
+                )
+                if _is_sfft_diff:
+                    try:
+                        _sci_gain = float(input_yaml.get("gain", 0.0))
+                    except (TypeError, ValueError):
+                        _sci_gain = np.nan
+                    _sfft_science_gain = _sci_gain
+                    _effective_gain = _sfft_difference_gain(
+                        header,
+                        _sci_gain,
+                        convd=_forceconv_diff,
+                        flux_corrected=_sfft_flux_correction_applied,
+                    )
+                    if np.isfinite(_effective_gain) and _effective_gain > 0:
+                        _scale_key = (
+                            "FSCAL_PHOT"
+                            if _sfft_flux_correction_applied
+                            else "FSCAL_CONV"
+                        )
+                        _scale_val = float(header.get(_scale_key, np.nan))
+                        if abs(_effective_gain - _sci_gain) > 0.001:
+                            logging.info(
+                                "Updating gain for CONVD=SCI photometry: %.5g -> %.5g "
+                                "e-/ADU (%s=%.5g).",
+                                _sci_gain,
+                                _effective_gain,
+                                _scale_key,
+                                _scale_val,
+                            )
+                        input_yaml["gain"] = _effective_gain
+                    else:
+                        logging.warning(
+                            "CONVD=SCI SFFT gain correction failed; keeping "
+                            "science gain %.5g e-/ADU.",
+                            _sci_gain,
+                        )
+
                 if _ref_fwhm_hdr > 0 and _sci_fwhm_hdr > 0:
                     logging.info(
                         "ForceConv=SCI: difference image has reference PSF "
@@ -9905,63 +10223,6 @@ def run_photometry():
                                     "stamp (%s); keeping science ePSF.", _e,
                                 )
 
-                    # --- Update gain from diff header for correct flux calibration ---
-                    # SFFT writes GAIN_DIFF = GAIN_SCI / FSCAL to the diff header
-                    # when ForceConv=SCI.  Using the science gain would make
-                    # flux_PSF = F_sci * FSCAL * gain_sci (wrong by factor FSCAL).
-                    # Using GAIN_DIFF gives flux_PSF = F_sci * FSCAL * gain_sci/FSCAL
-                    # = F_sci * gain_sci (correct, magnitude conserved).
-                    # HOTPANTS normalizes to the science image (-n i) so no gain
-                    # correction is needed - skip this block for non-SFFT diffs.
-                    #
-                    # When the post-SFFT flux scaling correction above is applied
-                    # (diff *= FSCAL_PHOT / FSCAL_CONV), the effective gain must
-                    # be GAIN_SCI / FSCAL_PHOT, not GAIN_SCI / FSCAL_CONV.
-                    _has_fscal = "FSCAL" in header or "SOLPATH" in header
-                    if _has_fscal:
-                        _diff_gain = float(header.get("GAIN", 0))
-                        # If flux correction was applied, adjust gain to match
-                        # the corrected pixel scale (FSCAL_PHOT instead of FSCAL_CONV).
-                        if (
-                            _fscal_conv > 0
-                            and _fscal_phot > 0
-                            and np.isfinite(_fscal_disc)
-                            and _fscal_disc > 3.0
-                            and _fscal_disc <= 50.0
-                        ):
-                            _sci_gain = float(input_yaml.get("gain", 0))
-                            _corrected_gain = (
-                                _sci_gain / _fscal_phot
-                                if _sci_gain > 0 and _fscal_phot > 0
-                                else _diff_gain
-                            )
-                            if abs(_corrected_gain - _diff_gain) > 0.001:
-                                logging.info(
-                                    "Updating gain for flux-corrected diff: %.5g -> %.5g e-/ADU "
-                                    "(FSCAL_PHOT=%.4f, was FSCAL_CONV=%.4f).",
-                                    _diff_gain,
-                                    _corrected_gain,
-                                    _fscal_phot,
-                                    _fscal_conv,
-                                )
-                            input_yaml["gain"] = _corrected_gain
-                        elif _diff_gain > 0 and np.isfinite(_diff_gain):
-                            _sci_gain = float(input_yaml.get("gain", 0))
-                            if _sci_gain > 0 and abs(_diff_gain - _sci_gain) > 0.001:
-                                logging.info(
-                                    "Updating gain for diff-image photometry: %.5g -> %.5g e-/ADU "
-                                    "(SFFT FSCAL=%.4f).",
-                                    _sci_gain,
-                                    _diff_gain,
-                                    _sci_gain / _diff_gain,
-                                )
-                            input_yaml["gain"] = _diff_gain
-                    else:
-                        logging.debug(
-                            "Gain update skipped (no FSCAL/SOLPATH in header - "
-                            "not an SFFT diff, science gain is correct)."
-                        )
-
                     # --- Convolve ePSF with SFFT kernel to match diff-image PSF ---
                     _solpath = str(header.get("SOLPATH", "")).strip()
                     if epsf_model is not None and _solpath and os.path.isfile(_solpath):
@@ -9981,15 +10242,19 @@ def run_photometry():
                             # Target position will be set after WCS conversion below;
                             # for a constant kernel (order 0) position doesn't matter.
                             # Use image centre as default (correct for order 0, approximate for >0).
-                            _cx = float(_nx) / 2.0
-                            _cy = float(_ny) / 2.0
+                            _cx = (float(_nx) + 1.0) / 2.0
+                            _cy = (float(_ny) + 1.0) / 2.0
                             _is_gridded_epsf = isinstance(epsf_model, GriddedPSFModel)
                             if _is_gridded_epsf:
                                 # Each grid cell gets the kernel realized at
                                 # its own fiducial position - the matching
                                 # kernel is spatially varying, so one kernel
-                                # cannot serve the whole field.
-                                _XY_q = np.asarray(epsf_model.grid_xypos, dtype=float)
+                                # cannot serve the whole field.  SFFT expects
+                                # 1-based Fortran coordinates.
+                                _XY_q = (
+                                    np.asarray(epsf_model.grid_xypos, dtype=float)
+                                    + 1.0
+                                )
                             else:
                                 _XY_q = np.array([[_cx, _cy]])
 
@@ -10046,8 +10311,8 @@ def run_photometry():
                                     if _kerorder > 0:
                                         try:
                                             _n_sample = 9
-                                            _xs_k = np.linspace(0, _nx, _n_sample)
-                                            _ys_k = np.linspace(0, _ny, _n_sample)
+                                            _xs_k = np.linspace(1, _nx, _n_sample)
+                                            _ys_k = np.linspace(1, _ny, _n_sample)
                                             _XY_sample = np.array(
                                                 [[x, y] for y in _ys_k for x in _xs_k]
                                             )
@@ -10252,8 +10517,8 @@ def run_photometry():
                                 if _kerorder > 0:
                                     try:
                                         _n_sample = 9
-                                        _xs_k = np.linspace(0, _nx, _n_sample)
-                                        _ys_k = np.linspace(0, _ny, _n_sample)
+                                        _xs_k = np.linspace(1, _nx, _n_sample)
+                                        _ys_k = np.linspace(1, _ny, _n_sample)
                                         _XY_sample = np.array(
                                             [[x, y] for y in _ys_k for x in _xs_k]
                                         )
@@ -10568,6 +10833,72 @@ def run_photometry():
         input_yaml["target_x_pix"] = target_x_pix
         input_yaml["target_y_pix"] = target_y_pix
 
+        # The solved SFFT kernel sum is the local flux scale.  A spatially
+        # varying kernel can make that target scale differ from the header's
+        # field mean, so refine the photometric gain at the target position
+        # before any aperture, PSF, or limiting-magnitude measurements.
+        if (
+            _forceconv_diff == "SCI"
+            and _is_sfft_diff
+            and np.isfinite(target_x_pix)
+            and np.isfinite(target_y_pix)
+            and np.isfinite(_sfft_science_gain)
+            and _sfft_science_gain > 0
+        ):
+            _solpath_gain = str(header.get("SOLPATH", "")).strip()
+            if _solpath_gain and os.path.isfile(_solpath_gain):
+                try:
+                    from sfft.utils.SFFTSolutionReader import Realize_FluxScaling
+
+                    _xy_fortran = np.array(
+                        [
+                            [
+                                float(target_x_pix) + 1.0,
+                                float(target_y_pix) + 1.0,
+                            ]
+                        ]
+                    )
+                    _local_fscal_arr = np.asarray(
+                        Realize_FluxScaling(_xy_fortran).FromFITS(_solpath_gain),
+                        dtype=float,
+                    ).reshape(-1)
+                    if _local_fscal_arr.size == 0:
+                        raise ValueError("empty local SFFT flux scale")
+                    _local_fscal = float(_local_fscal_arr[0])
+                    if (
+                        _sfft_flux_correction_applied
+                        and _sfft_flux_correction is not None
+                    ):
+                        _local_fscal *= _sfft_flux_correction
+                    if not (np.isfinite(_local_fscal) and _local_fscal > 0):
+                        raise ValueError(
+                            f"non-positive local SFFT flux scale {_local_fscal}"
+                        )
+                    _target_gain = _sfft_difference_gain(
+                        header,
+                        _sfft_science_gain,
+                        convd="SCI",
+                        flux_scale=_local_fscal,
+                    )
+                    if np.isfinite(_target_gain) and _target_gain > 0:
+                        _current_gain = float(input_yaml.get("gain", np.nan))
+                        if not np.isfinite(_current_gain) or abs(
+                            _target_gain - _current_gain
+                        ) > 0.001:
+                            logging.info(
+                                "SFFT target flux scale %.5f gives gain %.5g "
+                                "e-/ADU at (%.1f, %.1f).",
+                                _local_fscal,
+                                _target_gain,
+                                float(target_x_pix),
+                                float(target_y_pix),
+                            )
+                        input_yaml["gain"] = _target_gain
+                except Exception as _gain_e:
+                    logging.debug(
+                        "Target-local SFFT gain refinement failed: %s", _gain_e
+                    )
+
         # --- Re-realize SFFT kernel at target position for spatially-varying kernels ---
         # When KerPolyOrder > 0, the SFFT kernel changes across the field.
         # The initial realization used the image centre; now that we know the
@@ -10608,8 +10939,15 @@ def run_photometry():
 
                     _kerhw_re = int(header.get("KERHW", 0))
                     _L_re = 2 * _kerhw_re + 1
-                    # SFFT Fortran coordinates: X = column, Y = row
-                    _XY_q_re = np.array([[float(target_x_pix), float(target_y_pix)]])
+                    # SFFT Fortran coordinates: X = column, Y = row, 1-based.
+                    _XY_q_re = np.array(
+                        [
+                            [
+                                float(target_x_pix) + 1.0,
+                                float(target_y_pix) + 1.0,
+                            ]
+                        ]
+                    )
 
                     _ker_stack_re = Realize_MatchingKernel(_XY_q_re).FromFITS(_solpath)
                     # Transpose from SFFT (X, Y) to numpy (Y, X) for fftconvolve
@@ -12045,7 +12383,9 @@ def run_photometry():
                 else np.nan
             )
             if np.isfinite(snr_psf):
-                _targ_diag.append((f"SNR (PSF){inverted_tag}", f"{snr_psf:.1f}"))
+                _targ_diag.append(
+                    (f"SNR (PSF, pre-uncal){inverted_tag}", f"{snr_psf:.1f}")
+                )
             # Difference-image PSF before inverted replacement (negative flux = oversubtraction dip)
             if (
                 "_inverted_fit" in TargetPosition.columns
@@ -12285,9 +12625,9 @@ def run_photometry():
                         TargetPosition.at[idx, _lpi_inst_col] = float(
                             np.hypot(_lpi_old_ierr, _lpi_mag_err)
                         )
-            # Uncorrected SFFT flux-scale discrepancy (ForceConv=REF): the
-            # kernel integral and aperture scales disagree by this fraction,
-            # a calibration bias on every diff flux that no per-pixel error
+            # Uncorrected SFFT flux-scale discrepancy: the kernel integral and
+            # aperture scales disagree by this fraction, a calibration bias
+            # on every diff flux that no per-pixel error
             # term sees.  Carry it as a fractional flux error on both
             # methods so the S/N and mag error reflect the scale ambiguity.
             _fscal_frac = float(
@@ -13428,8 +13768,8 @@ def run_photometry():
                 if not do_aperture_ONLY and "fwhm_psf" in TargetPosition.columns
                 else np.nan
             ),
-            # Which PSF model was used: epsf / none. The photometry PSF is
-            # always built from sources in the field.
+            # Which PSF model was used: epsf / gridded-epsf-NxM (possibly
+            # -understaffed) / analytic-moffat / none.
             "psf_model": psf_model_kind,
             "separation": separation if "separation" in locals() else np.nan,
             "beta": target_beta,
@@ -14862,19 +15202,42 @@ def run_photometry():
             )
             IsolatedSources = IsolatedSources[mask_x & mask_y]
             # This refit runs on the reloaded SCIENCE image, so it needs the
-            # unconvolved science model - not epsf_model, which by this point
-            # may be the SFFT-convolved ePSF or the ZOGY diff PSF.  None ->
-            # fit() returns the table unchanged (no valid science PSF).
-            IsolatedSources = PSF(
-                image=image,
-                input_yaml=input_yaml,
-            ).fit(
-                epsf_model=_epsf_science,
-                sources=IsolatedSources,
-                plotTarget=False,
-                background_rms=background_rms,
-                mask=hardware_defects_mask,
-            )
+            # unconvolved science model and science gain - not epsf_model,
+            # which by this point may be the SFFT-convolved ePSF or the ZOGY
+            # diff PSF.  None -> fit() returns the table unchanged (no valid
+            # science PSF).
+            _redo_gain = input_yaml["gain"]
+            _redo_rms = background_rms
+            _redo_mask = hardware_defects_mask
+            if (
+                np.isfinite(_sfft_science_gain)
+                and _sfft_science_gain > 0
+                and _forceconv_diff == "SCI"
+            ):
+                input_yaml["gain"] = _sfft_science_gain
+            if (
+                background_rms_cached is not None
+                and background_rms_cached.shape == image.shape
+            ):
+                _redo_rms = background_rms_cached
+            if (
+                hardware_defects_mask_cached is not None
+                and hardware_defects_mask_cached.shape == image.shape
+            ):
+                _redo_mask = hardware_defects_mask_cached
+            try:
+                IsolatedSources = PSF(
+                    image=image,
+                    input_yaml=input_yaml,
+                ).fit(
+                    epsf_model=_epsf_science,
+                    sources=IsolatedSources,
+                    plotTarget=False,
+                    background_rms=_redo_rms,
+                    mask=_redo_mask,
+                )
+            finally:
+                input_yaml["gain"] = _redo_gain
             # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
             ra_IsolatedSources, dec_IsolatedSources = imageWCS.all_pix2world(
                 IsolatedSources["x_pix"].values,
