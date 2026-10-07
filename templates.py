@@ -193,7 +193,7 @@ try:
 except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
-from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write, cap_console_lines, STATUS
+from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write, cap_console_lines, STATUS, _sfft_post_anomaly_retry_viable
 try:
     from functions import invalidate_fits_cache
 except ImportError:
@@ -2411,6 +2411,82 @@ def _pad_to_shape(image, target_shape, fill=np.nan, mask=None):
     return image, mask
 
 
+def _merge_detection_lists(
+    xy_a, flux_a, fwhm_a, xy_b, flux_b, fwhm_b, radius=1.5
+):
+    """Union two detection lists, deduplicated at ``radius`` px.
+
+    The first list wins on overlap so a deeper detection pass only adds
+    sources, never replaces shallower-pass centroids.
+    """
+    if xy_a is None or len(xy_a) == 0:
+        return xy_b, flux_b, fwhm_b
+    if xy_b is None or len(xy_b) == 0:
+        return xy_a, flux_a, fwhm_a
+    from scipy.spatial import cKDTree
+
+    dists, _ = cKDTree(xy_a).query(xy_b, k=1, distance_upper_bound=radius)
+    new_rows = np.isinf(dists)
+    if not new_rows.any():
+        return xy_a, flux_a, fwhm_a
+    return (
+        np.vstack([xy_a, xy_b[new_rows]]),
+        np.concatenate([flux_a, flux_b[new_rows]]),
+        np.concatenate([fwhm_a, fwhm_b[new_rows]]),
+    )
+
+
+def _close_group_survivor_indices(xy, flux, min_sep):
+    """Indices keeping the brightest member of each close-pair group.
+
+    Same crowding rule spalipy applies internally, but it removes every
+    member of a pair closer than ``min_sep``; keeping the brightest member
+    of each connected group preserves one anchor per group while retaining
+    the anti-ambiguity intent (a survivor's 2nd-nearest neighbour in the
+    other catalog is then >2*max_match_dist once both sides are filtered).
+    """
+    n = len(xy)
+    if n < 2 or min_sep <= 0:
+        return np.arange(n)
+    from scipy.spatial import cKDTree
+
+    pairs = cKDTree(xy).query_pairs(float(min_sep))
+    if not pairs:
+        return np.arange(n)
+    parent = np.arange(n)
+
+    def _find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for a, b in pairs:
+        parent[_find(b)] = _find(a)
+    groups = {}
+    for i in range(n):
+        groups.setdefault(_find(i), []).append(i)
+    flux = np.asarray(flux, float)
+    keep = []
+    for idxs in groups.values():
+        idxs = np.asarray(idxs)
+        keep.append(int(idxs[np.argmax(flux[idxs])]))
+    return np.sort(np.asarray(keep))
+
+
+def _finite_coverage_floor(cfg_min_ff, src_finite_px, out_size):
+    """Finite-fraction floor for a warped template.
+
+    A stamp template can only fill its own footprint on the science grid,
+    so the gate checks that the warp retained most of the attainable
+    coverage (20% allowed for resample edge losses) rather than an
+    absolute fraction the source can never reach.  Returns
+    ``(floor, attainable_fraction)``.
+    """
+    attainable = float(src_finite_px) / max(1.0, float(out_size))
+    return min(float(cfg_min_ff), 0.8 * attainable), attainable
+
+
 def _reproject_template(
     science_image: np.ndarray,
     science_header: fits.Header,
@@ -2799,6 +2875,44 @@ def _select_forceconv(
     return direction, deconvolves, note
 
 
+def _apply_sfft_deconvolution_veto(
+    direction: str,
+    deconvolves: bool,
+    enabled: bool = True,
+) -> Tuple[str, bool, bool]:
+    """Flip an impossible SFFT convolution direction when enabled.
+
+    A direction that must sharpen the convolved image produces the same
+    negative-sidelobe kernel the ZOGY probe vetoes.  The opposite direction is
+    always a broadening convolution for a non-trivial PSF difference, so it is
+    safer than honoring an explicit sharpening request.
+    """
+    direction = str(direction).strip().upper()
+    if not enabled or not deconvolves or direction not in ("REF", "SCI"):
+        return direction, bool(deconvolves), False
+    return ("SCI" if direction == "REF" else "REF"), False, True
+
+
+def _auto_sfft_kernel_order(
+    rel_diff: float,
+    n_eff: int,
+    max_order: int,
+    last_resort: bool = False,
+) -> int:
+    """Choose conservative SFFT spatial-kernel freedom.
+
+    A larger source list makes higher orders feasible, but does not show that
+    the matching kernel varies spatially.  Add freedom only for measured PSF
+    mismatch or a known low-quality alignment, then cap it by kernel size.
+    """
+    max_order = max(0, min(int(max_order), 3))
+    if n_eff >= 80 and rel_diff > 0.6:
+        return min(2, max_order)
+    if n_eff >= 30 and (rel_diff > 0.4 or last_resort):
+        return min(1, max_order)
+    return 0
+
+
 def _diff_resid_at_sources(
     diff_path: Any,
     xy_list: Any,
@@ -3021,6 +3135,29 @@ def deduplicate_points(
         if all(euclidean_distance(pt, k) >= min_sep for k in kept):
             kept.append(pt)
     return kept
+
+
+def _read_sfft_matching_positions(path: str) -> Optional[List[Tuple[float, float]]]:
+    """Read finite SFFT matched positions in 0-based image coordinates."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        sources = pd.read_csv(path)
+    except Exception:
+        return None
+    if {"X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"}.issubset(
+        sources.columns
+    ):
+        xy = sources[["X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"]].apply(
+            pd.to_numeric, errors="coerce"
+        ).to_numpy(dtype=float) - 1.0
+    elif {"x_pix", "y_pix"}.issubset(sources.columns):
+        xy = sources[["x_pix", "y_pix"]].apply(
+            pd.to_numeric, errors="coerce"
+        ).to_numpy(dtype=float)
+    else:
+        return None
+    return [tuple(row) for row in xy[np.isfinite(xy).all(axis=1)]]
 
 
 def _validate_noise_map(
@@ -5463,6 +5600,7 @@ class Templates:
                         else {}
                     )
                     _sp_detect_thresh = float(_sp_cfg.get("spalipy_detect_thresh", 2.0) or 2.0)
+                    _sp_min_pool = int(_sp_cfg.get("spalipy_detect_min_sources", 20) or 20)
                     _sp_match_radius_cfg = _sp_cfg.get("spalipy_match_radius_arcsec", None)
                     if _sp_match_radius_cfg is not None:
                         _sp_match_radius = float(_sp_match_radius_cfg)
@@ -5475,65 +5613,41 @@ class Templates:
                     def _detect_for_spalipy(data, min_sources=20):
                         """Detect sources via SExtractor, return spalipy-format Table.
 
-                        If too few point sources are found (< 10), retry with
-                        relaxed ellipticity and FWHM cuts to include extended
-                        sources (galaxies) as additional alignment anchors.
-                        If still too few, retry with a lower detection threshold
-                        (similar to SCAMP's sparse-field sensitivity boost).
+                        A wide ellipticity cut (0.9) is used from the start so
+                        extended sources count as alignment anchors - the
+                        registration needs reliable centroids, not stellar
+                        profiles.  When the pool is thinner than ``min_sources``
+                        a deeper pass is run and merged (deduplicated) so it can
+                        only add anchors.
                         """
                         xy, flux, fwhm = _detect_sextractor_sources(
                             data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
-                            thresh=_sp_detect_thresh,
+                            thresh=_sp_detect_thresh, ell_max=0.9,
                         )
                         _xy_len = len(xy) if xy is not None else 0
-                        if _xy_len < 10:
+                        if _xy_len < min_sources and _sp_detect_thresh > 0.5:
+                            _low_thresh = max(0.5, _sp_detect_thresh * 0.5)
                             logger.info(
-                                "spalipy: only %d point sources; retrying with "
-                                "relaxed ellipticity (0.9) to include extended sources.",
-                                _xy_len,
+                                "spalipy: only %d sources; retrying with "
+                                "lower detection threshold (%.1f -> %.1f).",
+                                _xy_len, _sp_detect_thresh, _low_thresh,
                             )
-                            xy_ext, flux_ext, fwhm_ext = _detect_sextractor_sources(
+                            xy_low, flux_low, fwhm_low = _detect_sextractor_sources(
                                 data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
-                                thresh=_sp_detect_thresh, ell_max=0.9,
+                                thresh=_low_thresh, ell_max=0.9,
                             )
-                            _xy_ext_len = len(xy_ext) if xy_ext is not None else 0
-                            if _xy_ext_len > _xy_len:
-                                logger.info(
-                                    "spalipy: extended-source retry found %d sources "
-                                    "(was %d with ell<0.5).",
-                                    _xy_ext_len, _xy_len,
-                                )
-                                xy, flux, fwhm = xy_ext, flux_ext, fwhm_ext
-                                _xy_len = _xy_ext_len
-
-                            # If still too few sources, retry with lower threshold
-                            # (similar to SCAMP's sparse-field DETECT_THRESH=0.5)
-                            if _xy_len < 10 and _sp_detect_thresh > 0.5:
-                                _low_thresh = max(0.5, _sp_detect_thresh * 0.5)
-                                logger.info(
-                                    "spalipy: still only %d sources; retrying with "
-                                    "lower detection threshold (%.1f -> %.1f).",
-                                    _xy_len, _sp_detect_thresh, _low_thresh,
-                                )
-                                xy_low, flux_low, fwhm_low = _detect_sextractor_sources(
-                                    data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
-                                    thresh=_low_thresh, ell_max=0.9,
-                                )
-                                _xy_low_len = len(xy_low) if xy_low is not None else 0
-                                if _xy_low_len > _xy_len:
-                                    logger.info(
-                                        "spalipy: low-threshold retry found %d sources "
-                                        "(was %d).",
-                                        _xy_low_len, _xy_len,
-                                    )
-                                    xy, flux, fwhm = xy_low, flux_low, fwhm_low
+                            _n_low = len(xy_low) if xy_low is not None else 0
+                            xy, flux, fwhm = _merge_detection_lists(
+                                xy, flux, fwhm, xy_low, flux_low, fwhm_low,
+                            )
+                            _xy_len = len(xy) if xy is not None else 0
+                            logger.info(
+                                "spalipy: low-threshold pass found %d sources; "
+                                "merged pool now %d.",
+                                _n_low, _xy_len,
+                            )
                         if xy is None or len(xy) < 4:
                             return None
-                        if len(xy) < min_sources:
-                            logger.info(
-                                "spalipy: detection found only %d sources.",
-                                len(xy),
-                            )
                         return Table({
                             "x": xy[:, 0],
                             "y": xy[:, 1],
@@ -5542,8 +5656,44 @@ class Templates:
                             "flag": np.zeros(len(xy), dtype=int),
                         })
 
-                    sci_det = _detect_for_spalipy(scienceImage)
-                    tpl_det = _detect_for_spalipy(templateImage)
+                    def _dedup_close_pairs(det, min_sep):
+                        """Subset a detection table to its brightest-per-close-group
+                        members (see ``_close_group_survivor_indices``)."""
+                        if det is None or len(det) < 2:
+                            return det
+                        _coo = np.column_stack([
+                            np.asarray(det["x"], float),
+                            np.asarray(det["y"], float),
+                        ])
+                        return det[
+                            _close_group_survivor_indices(
+                                _coo, det["flux"], min_sep
+                            )
+                        ]
+
+                    def _wcs_overlap_filter(det, det_header, tgt_header, tgt_shape):
+                        """Keep detections whose sky positions land inside the
+                        other image's pixel footprint (plus a margin).
+
+                        The margin covers moderate WCS header offsets so real
+                        overlap-region sources are not clipped by a slightly
+                        stale pointing record.
+                        """
+                        from astropy.wcs import WCS as _WCSf
+                        _margin = max(50.0, 0.1 * float(max(tgt_shape)))
+                        _w_det = _WCSf(det_header)
+                        _w_tgt = _WCSf(tgt_header)
+                        _ra, _dec = _w_det.all_pix2world(det["x"], det["y"], 0)
+                        _px, _py = _w_tgt.all_world2pix(_ra, _dec, 0)
+                        _in = (
+                            np.isfinite(_px) & np.isfinite(_py)
+                            & (_px >= -_margin) & (_px < tgt_shape[1] + _margin)
+                            & (_py >= -_margin) & (_py < tgt_shape[0] + _margin)
+                        )
+                        return det[_in]
+
+                    sci_det = _detect_for_spalipy(scienceImage, _sp_min_pool)
+                    tpl_det = _detect_for_spalipy(templateImage, _sp_min_pool)
                     if sci_det is None or tpl_det is None:
                         logger.info("spalipy: insufficient sources for alignment.")
                         return _fail("spalipy", "insufficient sources")
@@ -5564,10 +5714,12 @@ class Templates:
                     # matches between unrelated sources in non-overlapping
                     # sky regions.
                     try:
-                        from astropy.wcs import WCS as _WCS
-                        from astropy.coordinates import SkyCoord
                         import astropy.units as u
-                        from astropy.coordinates import match_coordinates_sky
+                        from astropy.coordinates import (
+                            SkyCoord,
+                            match_coordinates_sky,
+                        )
+                        from astropy.wcs import WCS as _WCS
 
                         _sci_wcs = _WCS(scienceHeader)
                         _tpl_wcs = _WCS(templateHeader)
@@ -5615,24 +5767,45 @@ class Templates:
                             # Few RA/DEC matches can mean non-overlapping
                             # fields OR a WCS offset larger than the match
                             # radius.  When the footprints still overlap, let
-                            # spalipy's internal quad matching try the full
-                            # detection lists rather than giving up.
+                            # spalipy's internal quad matching try the
+                            # detections inside the shared footprint: feeding
+                            # the full lists would let the brightest-N quad
+                            # anchors all sit outside the overlap, where they
+                            # can never match.
                             if _wcs_footprints_overlap(
                                 scienceHeader, scienceImage.shape,
                                 templateHeader, templateImage.shape,
                             ):
+                                try:
+                                    _sci_ov = _wcs_overlap_filter(
+                                        _sci_det_all, scienceHeader,
+                                        templateHeader, templateImage.shape,
+                                    )
+                                    _tpl_ov = _wcs_overlap_filter(
+                                        _tpl_det_all, templateHeader,
+                                        scienceHeader, scienceImage.shape,
+                                    )
+                                except Exception:
+                                    _sci_ov = _tpl_ov = None
+                                if (
+                                    _sci_ov is not None
+                                    and len(_sci_ov) >= 4
+                                    and len(_tpl_ov) >= 4
+                                ):
+                                    sci_det, tpl_det = _sci_ov, _tpl_ov
+                                else:
+                                    sci_det = _sci_det_all
+                                    tpl_det = _tpl_det_all
                                 logger.warning(
                                     "spalipy: only %d RA/DEC matched sources\n"
                                     "    but WCS footprints overlap - WCS\n"
                                     "    offset may exceed the match radius.\n"
                                     "    Falling back to spalipy internal quad\n"
-                                    "    matching on all detections\n"
-                                    "    (sci=%d, tpl=%d).",
+                                    "    matching (sci=%d, tpl=%d\n"
+                                    "    footprint-filtered detections).",
                                     len(_sci_matched),
-                                    _n_sci_before, _n_tpl_before,
+                                    len(sci_det), len(tpl_det),
                                 )
-                                sci_det = _sci_det_all
-                                tpl_det = _tpl_det_all
                             else:
                                 logger.info(
                                     "spalipy: too few RA/DEC matched sources "
@@ -5652,35 +5825,18 @@ class Templates:
                             "falling back to overlap filtering.",
                             _match_err,
                         )
-                        # Fallback: old WCS overlap filtering
+                        # Fallback: WCS overlap filtering
                         try:
-                            from astropy.wcs import WCS as _WCS
-                            _sci_wcs = _WCS(scienceHeader)
-                            _tpl_wcs = _WCS(templateHeader)
-                            _sci_shape = scienceImage.shape
-                            _tpl_shape = templateImage.shape
-
-                            _ra, _dec = _sci_wcs.all_pix2world(
-                                sci_det["x"], sci_det["y"], 0,
-                            )
-                            _px, _py = _tpl_wcs.all_world2pix(_ra, _dec, 0)
-                            _sci_in_tpl = (
-                                (_px >= 0) & (_px < _tpl_shape[1]) &
-                                (_py >= 0) & (_py < _tpl_shape[0])
-                            )
                             _n_sci_before = len(sci_det)
-                            sci_det = sci_det[_sci_in_tpl]
-
-                            _ra, _dec = _tpl_wcs.all_pix2world(
-                                tpl_det["x"], tpl_det["y"], 0,
-                            )
-                            _px, _py = _sci_wcs.all_world2pix(_ra, _dec, 0)
-                            _tpl_in_sci = (
-                                (_px >= 0) & (_px < _sci_shape[1]) &
-                                (_py >= 0) & (_py < _sci_shape[0])
-                            )
                             _n_tpl_before = len(tpl_det)
-                            tpl_det = tpl_det[_tpl_in_sci]
+                            sci_det = _wcs_overlap_filter(
+                                sci_det, scienceHeader,
+                                templateHeader, templateImage.shape,
+                            )
+                            tpl_det = _wcs_overlap_filter(
+                                tpl_det, templateHeader,
+                                scienceHeader, scienceImage.shape,
+                            )
 
                             if len(sci_det) < _n_sci_before or len(tpl_det) < _n_tpl_before:
                                 logger.info(
@@ -5713,7 +5869,6 @@ class Templates:
                     # Spalipy(source, template_data=..., source_det=..., template_det=...)
                     # transforms source -> template grid.  We want template -> science,
                     # so science is the template and template is the source.
-                    _n_sources = min(len(sci_det), len(tpl_det))
 
                     # --- Reflection detection: flip template if needed ---
                     # spalipy's similarity transform [[a,-b],[b,a]] has positive
@@ -5767,27 +5922,78 @@ class Templates:
                     _yaml_min_quad_sep = _sp_cfg.get("spalipy_min_quad_sep")
                     _yaml_quad_edge_buffer = _sp_cfg.get("spalipy_quad_edge_buffer")
                     _yaml_max_quad_cand = _sp_cfg.get("spalipy_max_quad_cand")
+                    _yaml_patience = _sp_cfg.get("spalipy_patience_quad_cand")
 
                     # --- Image geometry for parameter scaling ---
                     _tpl_h, _tpl_w = _tpl_fill.shape
                     _sci_h, _sci_w = scienceImage.shape
                     _min_img_dim = float(min(_tpl_w, _tpl_h, _sci_w, _sci_h))
 
+                    # max_match_dist: maximum matching distance in template
+                    # (science) pixel frame after affine transform.  spalipy
+                    # also requires the 2nd-nearest match to be >2x this
+                    # distance (anti-double-match).  Centroid uncertainty is
+                    # ~FWHM/10, so scale with FWHM.  Too large -> false matches
+                    # pass the 2nd-nearest test; too small -> real matches
+                    # rejected.  Clamp to [2, 5] px.
+                    if _yaml_max_match_dist is not None:
+                        _max_match_dist = float(_yaml_max_match_dist)
+                    else:
+                        _max_match_dist = float(np.clip(0.5 * _med_fwhm, 2.0, 5.0))
+
+                    # min_sep: minimum separation between detections used in
+                    # alignment.  Removes crowded/blended sources.  Set to
+                    # max(1 FWHM, 2*max_match_dist) per spalipy's default
+                    # logic (min_sep defaults to 2*max_match_dist when None).
+                    if _yaml_min_sep is not None:
+                        _det_sep = float(_yaml_min_sep)
+                    else:
+                        _det_sep = max(float(_med_fwhm), 2.0 * _max_match_dist)
+
+                    # Crowding dedup applied here so downstream sizing sees
+                    # the real usable pool.  spalipy's own min_sep filter
+                    # drops BOTH members of every close pair; keeping the
+                    # brightest member of each close group recovers one
+                    # anchor per group while preserving the anti-ambiguity
+                    # intent (the survivor's 2nd-nearest neighbour in the
+                    # other list is then >2*max_match_dist once both lists
+                    # are deduplicated).  Applying it ourselves also makes
+                    # the surviving count exact, so min_n_match cannot trip
+                    # the constructor-time "detections < min_n_match" guard.
+                    _n_sci_dedup = len(sci_det)
+                    _n_tpl_dedup = len(_tpl_det)
+                    sci_det = _dedup_close_pairs(sci_det, _det_sep)
+                    _tpl_det = _dedup_close_pairs(_tpl_det, _det_sep)
+                    _n_sources = min(len(sci_det), len(_tpl_det))
+                    if len(sci_det) < _n_sci_dedup or len(_tpl_det) < _n_tpl_dedup:
+                        logger.info(
+                            "spalipy: crowding dedup (min_sep=%.1f px) "
+                            "sci %d->%d, tpl %d->%d usable sources.",
+                            _det_sep, _n_sci_dedup, len(sci_det),
+                            _n_tpl_dedup, len(_tpl_det),
+                        )
+                    if _n_sources < 4:
+                        logger.info(
+                            "spalipy: too few non-crowded sources "
+                            "(sci=%d, tpl=%d; need >=4).",
+                            len(sci_det), len(_tpl_det),
+                        )
+                        return _fail("spalipy", "too few non-crowded sources")
+
                     # n_quad_det: number of detections used for quad construction.
                     # C(n_quad_det, 4) quads are made per sub-tile, so this has
                     # O(n^4) performance impact.  For sparse fields, use all
                     # sources (more quads = more chances to find a match).
-                    # For moderate fields, 25 gives C(25,4)=12650 quads.
-                    # For dense fields, 20 gives C(20,4)=4845 quads (enough).
+                    # For moderate and dense fields, 25 gives C(25,4)=12650
+                    # quads - a dense hash space so the correct quad is
+                    # rarely missed.
                     if _yaml_n_quad is not None:
                         _n_quad = int(_yaml_n_quad)
                     else:
                         if _n_sources <= 25:
                             _n_quad = _n_sources
-                        elif _n_sources <= 100:
-                            _n_quad = 25
                         else:
-                            _n_quad = 20
+                            _n_quad = 25
 
                     # min_n_match: minimum matched sources for alignment.
                     # Lower for sparse fields so spalipy doesn't reject valid
@@ -5808,18 +6014,6 @@ class Templates:
                             _min_match, _n_sources,
                         )
 
-                    # max_match_dist: maximum matching distance in template
-                    # (science) pixel frame after affine transform.  spalipy
-                    # also requires the 2nd-nearest match to be >2x this
-                    # distance (anti-double-match).  Centroid uncertainty is
-                    # ~FWHM/10, so scale with FWHM.  Too large -> false matches
-                    # pass the 2nd-nearest test; too small -> real matches
-                    # rejected.  Clamp to [2, 5] px.
-                    if _yaml_max_match_dist is not None:
-                        _max_match_dist = float(_yaml_max_match_dist)
-                    else:
-                        _max_match_dist = float(np.clip(0.5 * _med_fwhm, 2.0, 5.0))
-
                     # max_quad_hash_dist: tolerance for quad hash matching.
                     # Scaled by FWHM to account for centroid uncertainty.
                     if _yaml_hash_dist is not None:
@@ -5837,15 +6031,6 @@ class Templates:
                         _min_quad_sep = float(_yaml_min_quad_sep)
                     else:
                         _min_quad_sep = float(np.clip(_min_img_dim / 4.0, 10.0, 50.0))
-
-                    # min_sep: minimum separation between detections used in
-                    # alignment.  Removes crowded/blended sources.  Set to
-                    # max(1 FWHM, 2*max_match_dist) per spalipy's default
-                    # logic (min_sep defaults to 2*max_match_dist when None).
-                    if _yaml_min_sep is not None:
-                        _det_sep = float(_yaml_min_sep)
-                    else:
-                        _det_sep = max(float(_med_fwhm), 2.0 * _max_match_dist)
 
                     # quad_edge_buffer: exclude detections within this many
                     # pixels of the template edge from quad construction.
@@ -5884,22 +6069,27 @@ class Templates:
                                     _tpl_y_min, _tpl_y_max, _sci_h,
                                     _quad_edge_buffer,
                                 )
-                        except Exception:
-                            pass
+                        except Exception as _qeb_exc:
+                            logger.debug(
+                                "spalipy: quad_edge_buffer skipped: %s",
+                                _qeb_exc,
+                            )
 
-                    # max_quad_cand: maximum quad candidates to try for
-                    # affine transform.  More candidates = more chances to
-                    # find the correct transform, but slower.  Scale with
-                    # source count.
+                    # max_quad_cand: maximum quad candidates to try for the
+                    # affine transform.  Each candidate is one cross-match
+                    # plus a least-squares refit - cheap relative to quad
+                    # construction - so a generous budget is affordable.
+                    # patience_quad_cand: stop after this many consecutive
+                    # non-improving candidates; spalipy's default of 2 aborts
+                    # the search before ambiguous hash-order lists are
+                    # explored, so we ask for more tries.
                     if _yaml_max_quad_cand is not None:
                         _max_quad_cand = int(_yaml_max_quad_cand)
                     else:
-                        if _n_sources <= 25:
-                            _max_quad_cand = 10
-                        elif _n_sources <= 100:
-                            _max_quad_cand = 15
-                        else:
-                            _max_quad_cand = 10
+                        _max_quad_cand = 20
+                    _patience = (
+                        int(_yaml_patience) if _yaml_patience is not None else 4
+                    )
 
                     # interp_order: spline interpolation order for resampling.
                     # Lower order for undersampled images (less smooth interpolation).
@@ -5993,29 +6183,38 @@ class Templates:
                     # spalipy logs per-quad progress through the root logger;
                     # keep only warnings on normal runs.
                     from functions import quiet_root_logger
+                    import inspect as _inspect
+                    _spalipy_sig = _inspect.signature(Spalipy.__init__).parameters
                     while not _aligned_ok:
                         for _try_order in _spalipy_orders_to_try:
+                            _sp_kwargs = {
+                                "source_mask": _tpl_nan if _tpl_nan.any() else None,
+                                "template_data": _sci_fill,
+                                "source_det": _tpl_det,
+                                "template_det": sci_det,
+                                "output_shape": scienceImage.shape,
+                                "min_n_match": _min_match,
+                                "n_quad_det": _n_quad,
+                                "max_quad_hash_dist": _hash_dist,
+                                "max_match_dist": _max_match_dist,
+                                "min_quad_sep": _min_quad_sep,
+                                "quad_edge_buffer": _quad_edge_buffer,
+                                "max_quad_cand": _max_quad_cand,
+                                "patience_quad_cand": _patience,
+                                "min_sep": _det_sep,
+                                "interp_order": _interp_order,
+                                "sub_tile": _try_sub_tile,
+                                "spline_order": _try_order,
+                                "cval": np.nan,
+                            }
+                            # pyproject pins spalipy>=3.5; drop kwargs the
+                            # installed version predates.
+                            _sp_kwargs = {
+                                k: v for k, v in _sp_kwargs.items()
+                                if k in _spalipy_sig
+                            }
                             with quiet_root_logger():
-                                sp = Spalipy(
-                                    _tpl_fill,
-                                    source_mask=_tpl_nan if _tpl_nan.any() else None,
-                                    template_data=_sci_fill,
-                                    source_det=_tpl_det,
-                                    template_det=sci_det,
-                                    output_shape=scienceImage.shape,
-                                    min_n_match=_min_match,
-                                    n_quad_det=_n_quad,
-                                    max_quad_hash_dist=_hash_dist,
-                                    max_match_dist=_max_match_dist,
-                                    min_quad_sep=_min_quad_sep,
-                                    quad_edge_buffer=_quad_edge_buffer,
-                                    max_quad_cand=_max_quad_cand,
-                                    min_sep=_det_sep,
-                                    interp_order=_interp_order,
-                                    sub_tile=_try_sub_tile,
-                                    spline_order=_try_order,
-                                    cval=np.nan,
-                                )
+                                sp = Spalipy(_tpl_fill, **_sp_kwargs)
                             try:
                                 with quiet_root_logger():
                                     sp.align()
@@ -6102,8 +6301,47 @@ class Templates:
                             sp.affine_transform.rotation,
                             _n_matched,
                         )
-                    except Exception:
-                        pass
+                        # Post-spline residuals: the true accuracy of the
+                        # combined affine + distortion correction.  Computed
+                        # manually - sp._residuals() hits a broadcasting bug
+                        # in this spalipy version for 2D coordinate input.
+                        _sdm0 = sp._source_det_matched[0]
+                        _tdm0 = sp._template_det_matched[0]
+                        if _sdm0 is not None and _tdm0 is not None and len(_sdm0):
+                            _src_coo = np.column_stack([
+                                np.asarray(_sdm0["x"], float),
+                                np.asarray(_sdm0["y"], float),
+                            ])
+                            _tpl_coo = np.column_stack([
+                                np.asarray(_tdm0["x"], float),
+                                np.asarray(_tdm0["y"], float),
+                            ])
+                            _aff = sp.affine_transform.apply_transform(_src_coo)
+                            _dx = _tpl_coo[:, 0] - _aff[:, 0]
+                            _dy = _tpl_coo[:, 1] - _aff[:, 1]
+                            _sbsx = getattr(sp, "_sbs_x", None)
+                            _sbsy = getattr(sp, "_sbs_y", None)
+                            if (
+                                _sbsx is not None and _sbsy is not None
+                                and _sbsx[0] is not None and _sbsy[0] is not None
+                            ):
+                                _dx = _dx - _sbsx[0].ev(
+                                    _tpl_coo[:, 0], _tpl_coo[:, 1]
+                                )
+                                _dy = _dy - _sbsy[0].ev(
+                                    _tpl_coo[:, 0], _tpl_coo[:, 1]
+                                )
+                            logger.info(
+                                "spalipy: post-fit residuals "
+                                "dx=%.3f+/-%.3f px dy=%.3f+/-%.3f px.",
+                                float(np.median(_dx)), float(np.std(_dx)),
+                                float(np.median(_dy)), float(np.std(_dy)),
+                            )
+                    except Exception as _res_exc:
+                        # Telemetry only - never fail the warp over it.
+                        logger.debug(
+                            "spalipy: residual stats skipped: %s", _res_exc
+                        )
 
                     aligned_template = np.asarray(sp.aligned_data, dtype=np.float32)
 
@@ -6114,9 +6352,14 @@ class Templates:
                     try:
                         _warped_mask = getattr(sp, "aligned_mask", None)
                         if _warped_mask is not None:
-                            _aligned_nan = _aligned_nan | np.asarray(_warped_mask).astype(bool)
-                    except Exception:
-                        pass
+                            _aligned_nan = _aligned_nan | np.asarray(
+                                _warped_mask
+                            ).astype(bool)
+                    except Exception as _mask_exc:
+                        logger.debug(
+                            "spalipy: warped mask merge skipped: %s",
+                            _mask_exc,
+                        )
                     if _aligned_nan.any():
                         aligned_template = np.where(_aligned_nan, np.nan, aligned_template)
 
@@ -6131,8 +6374,10 @@ class Templates:
                         )
                         return _fail("spalipy", "output shape mismatch")
                     _finite_frac = float(np.mean(np.isfinite(aligned_template)))
-                    _min_ff = float(
-                        _ts_cfg.get("alignment_min_finite_fraction", 0.25)
+                    _min_ff, _attainable_ff = _finite_coverage_floor(
+                        _ts_cfg.get("alignment_min_finite_fraction", 0.25),
+                        float(np.count_nonzero(~_tpl_nan)),
+                        aligned_template.size,
                     )
                     _min_px = int(
                         _ts_cfg.get("alignment_min_valid_pixels", 1000)
@@ -6140,9 +6385,10 @@ class Templates:
                     _valid_px = aligned_template[np.isfinite(aligned_template)]
                     if _finite_frac < _min_ff or _valid_px.size < _min_px:
                         logger.warning(
-                            "spalipy output nearly empty (finite=%.1f%%, "
-                            "n=%d < %d); rejecting.",
-                            100.0 * _finite_frac, _valid_px.size, _min_px,
+                            "spalipy output nearly empty (finite=%.1f%% "
+                            "vs attainable %.1f%%, n=%d < %d); rejecting.",
+                            100.0 * _finite_frac, 100.0 * _attainable_ff,
+                            _valid_px.size, _min_px,
                         )
                         return _fail("spalipy", "insufficient finite coverage")
                     if float(np.nanstd(_valid_px)) <= 0:
@@ -7799,6 +8045,7 @@ class Templates:
                 & (catalog_img["threshold"] > 3)
                 & (catalog_tpl["threshold"] > 3)
             )
+            n_positive = int(ok.sum())
             if not ok.any():
                 logger.info("No sources pass positivity + SNR cuts")
                 return empty, nan_fit
@@ -7834,6 +8081,7 @@ class Templates:
                     )
                 ok = ok & sat_ok
 
+            n_flux_eligible = int(ok.sum())
             f_img = catalog_img[params.flux_key].values[ok]
             f_tpl = catalog_tpl[params.flux_key].values[ok]
             fe_img = catalog_img[params.flux_key_err].values[ok]
@@ -7843,6 +8091,7 @@ class Templates:
             mag_tpl, me_tpl = flux_to_mag(f_tpl, fe_tpl)
 
             good = (me_img < 1) & (me_tpl < 1)
+            n_measurable = int(good.sum())
             if not good.any():
                 logger.info("No sources pass error threshold")
                 return empty, nan_fit
@@ -7978,13 +8227,22 @@ class Templates:
                         n_bad_s, n_bad_t, n_unmeas,
                     )
 
-            # --- MAD-based outlier removal in magnitude space ---
-            robust_mask = self.robust_outlier_mask(
-                mag_img,
-                window_size=50,
-                n_sigma=5,
-                use_mad=True,
-            )
+            # --- MAD-based outlier removal on paired magnitude residuals ---
+            if params.fix_slope_to_one:
+                _pair_residual = mag_tpl - mag_img
+                _pair_center = float(np.nanmedian(_pair_residual))
+                _pair_scale = float(
+                    median_abs_deviation(_pair_residual, scale="normal")
+                )
+                _pair_limit = np.maximum(
+                    max(float(params.mag_residual_threshold), 1e-6),
+                    3.0 * mag_err,
+                )
+                _pair_limit = np.maximum(_pair_limit, 5.0 * _pair_scale)
+                robust_mask = np.abs(_pair_residual - _pair_center) <= _pair_limit
+            else:
+                robust_mask = np.ones(len(mag_img), dtype=bool)
+            n_pair_residual = int(robust_mask.sum())
             keep_mask = robust_mask & psf_ok
 
             # Adaptive relaxation: the veto must never starve the source
@@ -8025,6 +8283,7 @@ class Templates:
                         "(%d best-fitting vetoed sources restored)",
                         _n_want, _pv_chi2_max, _chi2_eff, int(n_restore),
                     )
+            n_psf_vetted = int(keep_mask.sum())
             mag_img_r = mag_img[keep_mask]
             mag_tpl_r = mag_tpl[keep_mask]
             mag_err_r = mag_err[keep_mask]
@@ -8576,6 +8835,20 @@ class Templates:
                 )
                 _sel = full["is_inlier"].to_numpy(bool)
 
+            logger.info(
+                "Flux-match stages: input=%d positive/SNR=%d unsaturated=%d "
+                "measurable=%d pair-residual=%d PSF/RANSAC candidates=%d "
+                "flux-inliers=%d S/N-inliers=%d output=%d",
+                n_img,
+                n_positive,
+                n_flux_eligible,
+                n_measurable,
+                n_pair_residual,
+                n_psf_vetted,
+                int(final_inliers.sum()),
+                int(is_snr_inlier.sum()),
+                int(_sel.sum()),
+            )
             return (
                 full[_sel],
                 (mag_slope, flux_scale),
@@ -10024,17 +10297,17 @@ class Templates:
                 ts_cfg["sfft_crowded_method"] = (
                     False  # default to ESP (sparse) for better performance on typical fields
                 )
-            # Kernel polynomial order: auto-select based on source count
-            # when set to "auto".  Integer values (0-3) are user overrides.
-            # null/None defaults to 0 (constant kernel, minimal RAM).
+            # Kernel polynomial order controls spatial variation of the solved
+            # kernel, not the size of the PSF correction itself.  Source count
+            # limits what can be fitted, while PSF mismatch and alignment
+            # quality decide whether extra spatial terms are needed.
             #
             # RAM scaling (SFFT linear system):
             #   order 0:  1 term  ->  manageable
             #   order 1:  3 terms ->  moderate
             #   order 2:  6 terms ->  ~7 GB (auto caps at 2)
             #   order 3: 10 terms ->  ~20 GB (user must set explicitly)
-            # Default is 0 (constant kernel, minimal RAM).  Set "auto" in
-            # YAML to enable auto-selection (capped at order 2).
+            # null/None defaults to 0 (constant kernel, minimal RAM).
             _raw_kernel = ts_cfg.get("kernel_order", 0)
             _is_auto = isinstance(_raw_kernel, str) and _raw_kernel.strip().lower() == "auto"
             # null/None -> 0 (constant).  Only "auto" string triggers auto-select.
@@ -10102,8 +10375,6 @@ class Templates:
                         _rel_diff_check, science_fwhm, template_fwhm, n_eff,
                     )
             else:
-                # Auto-select kernel polynomial order based on source count.
-                #
                 # The polynomial order controls how the kernel varies SPATIALLY
                 # across the field of view - NOT how the PSF difference is
                 # modelled.  The DFT kernel itself handles the PSF shape
@@ -10156,36 +10427,27 @@ class Templates:
                         pass
                 _max_auto_order = 2 if _ker_hw_for_cap <= 25 else 1
 
-                if n_eff < 15:
-                    kernel_order = 0
-                elif n_eff < 30:
-                    kernel_order = 1
-                else:
-                    kernel_order = min(2, _max_auto_order)
+                # Source count sets how much spatial freedom is feasible, but
+                # it is not evidence that the kernel varies across the field.
+                # Higher orders fit edge noise and masked-source systematics,
+                # so auto starts constant and adds spatial terms only for a
+                # large mismatch or a known low-quality alignment.
+                _is_last_resort = "last_resort" in Path(scienceFpath).name.lower()
+                kernel_order = _auto_sfft_kernel_order(
+                    rel_diff,
+                    n_eff,
+                    _max_auto_order,
+                    last_resort=_is_last_resort,
+                )
 
-                # Large PSF differences cause spatially-varying kernel shapes
-                # that a constant kernel (order 0) cannot model.  Boost to 1
-                # when rel_diff is large and we have enough sources.
-                # Require n_eff >= 30 for order 1 to avoid overfitting:
-                # order 1 triples the free parameters (3 * kernel_pixels),
-                # which needs at least 30 sources for reliable spatial fitting.
-                if rel_diff > 0.4 and n_eff >= 30 and kernel_order < 1:
-                    kernel_order = 1
+                if kernel_order > 0:
                     logger.info(
-                        "Boosting kernel_order to 1 (large PSF rel_diff=%.2f "
-                        "needs spatially-varying kernel, n_eff=%d >= 30).",
+                        "Boosting kernel_order to %d (PSF rel_diff=%.2f, "
+                        "n_eff=%d, last_resort=%s).",
+                        kernel_order,
                         rel_diff,
                         n_eff,
-                    )
-
-                # Last-resort alignment may have spatially-varying residuals
-                # that benefit from a linear kernel.  Only boost from 0->1.
-                _is_last_resort = "last_resort" in Path(scienceFpath).name.lower()
-                if _is_last_resort and kernel_order == 0:
-                    kernel_order = 1
-                    logger.info(
-                        "Boosting kernel_order to 1 (last-resort alignment - "
-                        "spatially-varying residuals need linear terms).",
+                        _is_last_resort,
                     )
 
                 logger.info(
@@ -10675,7 +10937,32 @@ class Templates:
                 # sidelobe rings are not -- checking only the clean
                 # matched calibrators let a deconvolving-kernel diff
                 # pass QA (SN2024pba 2025-02-22 r).
-                _dipole_sources = list(matching_sources or [])
+                _matching_priors = list(matching_sources or [])
+                _matching_for_quality = _matching_priors
+                if backend_used == "sfft":
+                    _sfft_base = (
+                        Path(base_name).stem.replace(" ", "_")
+                        .replace(".", "_")
+                        .replace("_APT", "")
+                        .replace("_ERROR", "")
+                    )
+                    _sfft_match_csv = scienceDir / (
+                        f"SFFT_Matching_Sources_{_sfft_base}.csv"
+                    )
+                    _sfft_actual_sources = _read_sfft_matching_positions(
+                        str(_sfft_match_csv)
+                    )
+                    if _sfft_actual_sources is not None:
+                        _matching_for_quality = _sfft_actual_sources
+                        logger.info(
+                            "SFFT kernel sources: %d pipeline priors -> %d "
+                            "sources used by the adopted run.",
+                            len(_matching_priors),
+                            len(_matching_for_quality),
+                        )
+                _n_matching_sources = len(_matching_for_quality)
+
+                _dipole_sources = list(_matching_for_quality)
                 if masked_centers:
                     _dipole_sources = deduplicate_points(
                         _dipole_sources + list(masked_centers), min_sep=2.0
@@ -10697,7 +10984,8 @@ class Templates:
                     "kernel_half_width": int(kernel_half_width) if kernel_half_width else 0,
                     "science_fwhm": float(science_fwhm),
                     "template_fwhm": float(template_fwhm),
-                    "n_matching_sources": len(matching_sources) if matching_sources else 0,
+                    "n_matching_sources": _n_matching_sources,
+                    "n_matching_priors": len(_matching_priors),
                     "flux_scale_conv": float(diff_header.get("FSCAL_CONV", 0.0)),
                     "flux_scale_phot": float(diff_header.get("FSCAL_PHOT", 0.0)),
                     "flux_scale_discrep_pct": float(diff_header.get("FSCAL_DISC", 0.0)),
@@ -10731,7 +11019,8 @@ class Templates:
                     "template_fwhm": float(template_fwhm),
                     "kernel_order": int(kernel_order),
                     "kernel_half_width": int(kernel_half_width) if kernel_half_width else 0,
-                    "n_matching_sources": len(matching_sources) if matching_sources else 0,
+                    "n_matching_sources": _n_matching_sources,
+                    "n_matching_priors": len(_matching_priors),
                     "n_masked_sources": len(masked_sources) if masked_sources else 0,
                     "masked_percentage": float(masked_percentage),
                     "universal_mask_frac": float(np.mean(universal_mask)),
@@ -12464,7 +12753,7 @@ class Templates:
             # REF => DIFF = SCI - conv(REF): transients keep the science PSF.
             # SCI => DIFF = conv(SCI) - REF: difference has reference PSF.
             #
-            # Default is AUTO: resolved HERE from the measured post-alignment
+            # AUTO is resolved HERE from the measured post-alignment
             # FWHMs -- we do NOT pass AUTO through to SFFT, whose internal
             # AUTO selects on header FWHMs that SWarp LANCZOS3 resampling can
             # flip relative to the true PSF ordering (BUG 122).  Pipeline AUTO
@@ -12475,24 +12764,46 @@ class Templates:
             # difference image keeps the science PSF and the science ePSF
             # model is used directly for photometry).
             #
-            # Users can override with forceconv in YAML (REF/SCI/AUTO); an
-            # explicit REF/SCI that requires deconvolution is honoured but
-            # logged loudly below.
+            # Users can override with forceconv in YAML (REF/SCI/AUTO).  An
+            # explicit direction that requires deconvolution is vetoed to the
+            # broadening direction by default; sfft_veto_deconvolution=False
+            # restores the old warning-only behaviour.
             # Backward compat: fall back to sfft_forceconv if forceconv is absent.
             _fc_cfg = str(
                 ts_sub.get("forceconv", ts_sub.get("sfft_forceconv", "REF"))
             ).strip().upper()
             _fc_tol = float(ts_sub.get("sfft_forceconv_auto_tol", 0.05) or 0.05)
-            forceconv, _fc_deconvolves, _fc_note = _select_forceconv(
+            _fc_requested, _fc_deconvolves, _fc_note = _select_forceconv(
                 _fc_cfg, science_fwhm, template_fwhm, auto_tol=_fc_tol
             )
+            _fc_veto_enabled = _as_bool(
+                ts_sub.get("sfft_veto_deconvolution", True), True
+            )
+            forceconv, _fc_deconvolves, _fc_vetoed = _apply_sfft_deconvolution_veto(
+                _fc_requested, _fc_deconvolves, enabled=_fc_veto_enabled
+            )
+            if _fc_vetoed:
+                _fc_note += f"; vetoed {_fc_requested}->{forceconv} deconvolution"
             logger.info(
                 "SFFT ForceConv=%s (cfg=%s, FWHM: sci=%.2f ref=%.2f; %s).",
                 forceconv, _fc_cfg, science_fwhm, template_fwhm, _fc_note,
             )
             if _fc_cfg not in ("REF", "SCI", "AUTO"):
                 logger.warning("Unknown forceconv=%r; defaulting to REF.", _fc_cfg)
-            if _fc_deconvolves:
+            if _fc_vetoed:
+                logger.warning(
+                    "SFFT ForceConv=%s requires deconvolution: the convolved\n"
+                    "    image (FWHM=%.2f) is broader than the target (%.2f).\n"
+                    "    Overriding to ForceConv=%s, a broadening\n"
+                    "    convolution. The difference image carries the %s\n"
+                    "    PSF.",
+                    _fc_requested,
+                    template_fwhm if _fc_requested == "REF" else science_fwhm,
+                    science_fwhm if _fc_requested == "REF" else template_fwhm,
+                    forceconv,
+                    "reference" if forceconv == "SCI" else "science",
+                )
+            elif _fc_deconvolves:
                 logger.warning(
                     "SFFT ForceConv=%s requires deconvolution: the convolved\n"
                     "    image (FWHM=%.2f) is broader than the target (%.2f).\n"
@@ -12897,6 +13208,8 @@ class Templates:
                     "true" if _as_bool(
                         ts_sub.get("sfft_allow_unvetted_source_retry", True), True
                     ) else "false",
+                    "-self_match_min_sources",
+                    str(int(ts_sub.get("sfft_self_match_min_sources", 10) or 10)),
                 ]
 
                 # Cross-match tolerance factor: DIVIDES SFFT's auto tolerance
@@ -12970,6 +13283,7 @@ class Templates:
                 ts_sub.get("sfft_post_anomaly_match_radius_px", 1.5)
             )
             if use_post_anom_feedback and post_anomaly_csv.exists():
+              retry_log_path = None
               try:
                 try:
                     df_anom = pd.read_csv(post_anomaly_csv)
@@ -13077,11 +13391,11 @@ class Templates:
                     # if the SFFT list is empty or would be emptied by
                     # anomaly removal.
                     _candidate_sources = list(current_matching_sources)
+                    _surviving_vetted = []
                     if sfft_vetted_sources:
                         # Check how many SFFT-vetted sources survive anomaly
                         # removal before committing to the replacement.
                         _anom_arr_check = np.asarray(post_anom_xy, float)
-                        _surviving_vetted = []
                         for x0, y0 in sfft_vetted_sources:
                             _dist2 = (_anom_arr_check[:, 0] - float(x0)) ** 2 + (
                                 _anom_arr_check[:, 1] - float(y0)
@@ -13132,7 +13446,36 @@ class Templates:
                     # Safety: don't retry if too few matching sources remain
                     # after removing anomaly-adjacent sources.  SFFT needs at
                     # least sfft_min_prior_sources to produce a valid kernel.
-                    if len(current_matching_sources) < _min_for_retry:
+                    #
+                    # The anomaly positions ARE first-pass SubSources, so
+                    # banning them removes constraints directly from the
+                    # retry's SubSource catalog - _surviving_vetted predicts
+                    # the retry's matched count.  When both that count and
+                    # the pipeline priors sit at/below the kernel minimum
+                    # the retry cannot reach a constrained solution (its
+                    # prior pass dies at run_sfft's matched-source gate and
+                    # the prior-free alternative was already evaluated in
+                    # the first pass); skip it rather than spend a subprocess
+                    # call on a guaranteed failure.
+                    if not _sfft_post_anomaly_retry_viable(
+                        len(_surviving_vetted),
+                        bool(sfft_vetted_sources),
+                        len(current_matching_sources),
+                        _min_for_retry,
+                    ):
+                        logger.warning(
+                            "SFFT post-anomaly feedback: banning %d anomaly "
+                            "position(s) leaves %d/%d kernel constraints "
+                            "(min=%d) with only %d pipeline prior(s); retry "
+                            "cannot produce a constrained kernel. Skipping "
+                            "retry; keeping first-pass result.",
+                            n_post,
+                            len(_surviving_vetted),
+                            len(sfft_vetted_sources),
+                            _min_for_retry,
+                            len(current_matching_sources),
+                        )
+                    elif len(current_matching_sources) < _min_for_retry:
                         logger.warning(
                             "SFFT post-anomaly feedback: only %d matching "
                             "sources remain after removing %d anomaly-adjacent "
@@ -13235,6 +13578,29 @@ class Templates:
                         n_post,
                         post_anom_min_count,
                     )
+              except subprocess.CalledProcessError as exc_pa:
+                # Retry subprocess exited non-zero.  str(exc_pa) would dump
+                # the full command line - the actual SFFT error lives at the
+                # tail of the retry log instead.
+                logger.warning(
+                    "SFFT post-anomaly feedback retry failed (exit=%s); "
+                    "keeping first-pass SFFT result. Retry log: %s",
+                    exc_pa.returncode,
+                    retry_log_path,
+                )
+                try:
+                    _pa_tail = (
+                        Path(retry_log_path)
+                        .read_text(errors="ignore")
+                        .splitlines()[-25:]
+                    )
+                    if _pa_tail:
+                        logger.warning(
+                            "SFFT post-anomaly retry log tail:\n%s",
+                            "\n".join(_pa_tail),
+                        )
+                except Exception:
+                    pass
               except Exception as exc_pa:
                 # Post-anomaly feedback retry failed.  Don't propagate - the
                 # first-pass SFFT result is already written to outputFpath.
@@ -13674,6 +14040,60 @@ class Templates:
                     "(%s); keeping the existing result.",
                     exc,
                 )
+                # The abort may have skipped the FSCAL header write
+                # (e.g. the matched-source veto fires after SFFT's own
+                # subtraction completed).  Recover the scalings from the
+                # run log so the flux-scale discrepancy still reaches the
+                # photometric error budget and the quality manifest.
+                try:
+                    import re as _re_resc
+
+                    _resc_log = _active_log_holder[0] or locals().get(
+                        "log_path"
+                    )
+                    if _resc_log and Path(_resc_log).exists():
+                        _resc_text = Path(_resc_log).read_text(errors="ignore")
+                        _rc_resc = _re_resc.search(
+                            r"Flux Scaling through the Convolution.*?\[(-?[\d.]+)",
+                            _resc_text,
+                        )
+                        _rp_resc = _re_resc.search(
+                            r"Flux Scaling from Photometry.*?\[(-?[\d.]+)",
+                            _resc_text,
+                        )
+                        _resc_hdr = fits.getheader(outputFpath)
+                        if _rc_resc and _rp_resc and (
+                            _resc_hdr.get("FSCAL_CONV") is None
+                            or _resc_hdr.get("FSCAL_PHOT") is None
+                        ):
+                            _conv_resc = float(_rc_resc.group(1))
+                            _phot_resc = float(_rp_resc.group(1))
+                            _disc_resc = abs(_conv_resc - _phot_resc) / max(
+                                abs(_conv_resc), abs(_phot_resc), 1e-10
+                            ) * 100.0
+                            with fits.open(
+                                outputFpath, mode="update", memmap=False
+                            ) as _hdul:
+                                _hdul[0].header["HIERARCH FSCAL_CONV"] = (
+                                    _conv_resc
+                                )
+                                _hdul[0].header["HIERARCH FSCAL_PHOT"] = (
+                                    _phot_resc
+                                )
+                                _hdul[0].header["HIERARCH FSCAL_DISC"] = (
+                                    _disc_resc
+                                )
+                                _hdul.flush()
+                            logger.info(
+                                "Recovered SFFT flux scaling from log on "
+                                "rescue path: conv=%.4f phot=%.4f "
+                                "discrepancy=%.1f%%.",
+                                _conv_resc,
+                                _phot_resc,
+                                _disc_resc,
+                            )
+                except Exception:
+                    pass
                 return "done"
             # If the failure happened before the command builder was defined
             # (early config parsing), no retry is possible.
