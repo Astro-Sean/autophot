@@ -68,6 +68,7 @@ from functions import (
     normalize_photometric_filter_name,
     parse_supported_filter_group_key,
     log_warning_from_exception,
+    canonical_target_name,
     SUPPORTED_PHOTOMETRIC_FILTERS,
 )
 from aperture import Aperture
@@ -304,17 +305,141 @@ def _plot_footprint_outline(ax, fps, center_ra, color, dashed=False):
     )
 
 
+def _usable_mag_mask(cleaned, band, bright_lim, faint_lim):
+    """Sources with a finite in-window magnitude in ``band``."""
+    if cleaned is None or len(cleaned) == 0 or band not in cleaned.columns:
+        return None
+    m = pd.to_numeric(cleaned[band], errors="coerce")
+    return np.isfinite(m) & (m >= bright_lim) & (m <= faint_lim)
+
+
+def _footprints_from_image_infos(image_infos):
+    """Sky-polygon footprints for the optimizer coverage map.
+
+    Returns a list of ``{band, ra, dec, name}`` dicts; images without a
+    WCS or shape contribute nothing (their sources were field-scored).
+    """
+    footprints = []
+    for img in image_infos or []:
+        w_i, s_i = img.get("wcs"), img.get("shape")
+        if w_i is None or s_i is None:
+            continue
+        ny, nx = s_i
+        try:
+            fp_ra, fp_dec = w_i.all_pix2world(
+                [0.0, nx - 1.0, nx - 1.0, 0.0],
+                [0.0, 0.0, ny - 1.0, ny - 1.0],
+                0,
+            )
+            footprints.append(
+                {
+                    "band": img.get("band"),
+                    "ra": np.asarray(fp_ra, dtype=float).ravel(),
+                    "dec": np.asarray(fp_dec, dtype=float).ravel(),
+                    "name": (
+                        os.path.basename(str(img["path"]))
+                        if img.get("path")
+                        else "field"
+                    ),
+                }
+            )
+        except Exception:
+            continue
+    return footprints
+
+
+def _draw_score_panel(
+    ax, sub, band, winner, min_sources, coverage_min, band_color
+):
+    """One optimizer scoreboard panel: worst-image usable count per
+    catalog (bars), per-image mean (tick), the required minimum (dashed
+    line), and per-catalog field coverage under each name (red below the
+    threshold).  ``sub`` is the report rows for ``band``."""
+    stats = (
+        sub.groupby("catalog")
+        .agg(
+            n_min=("n_usable", "min"),
+            n_mean=("n_usable", "mean"),
+            cov=("coverage", "first"),
+        )
+        .sort_values(["n_min", "n_mean"], ascending=False)
+    )
+    if stats.empty:
+        ax.set_visible(False)
+        return
+
+    xs = np.arange(len(stats))
+    ax.bar(
+        xs,
+        stats["n_min"].values,
+        color=[
+            band_color if c == winner else "0.75" for c in stats.index
+        ],
+        edgecolor="black",
+        linewidth=0.6,
+        zorder=3,
+    )
+    for x, m in zip(xs, stats["n_mean"].values):
+        ax.plot(
+            [x - 0.3, x + 0.3], [m, m], color="black", lw=1.4, zorder=4
+        )
+    for x, n in zip(xs, stats["n_min"].values):
+        ax.text(
+            x, n, f"{int(n)}",
+            ha="center", va="bottom", fontsize=7, zorder=5,
+        )
+    ax.axhline(min_sources, color="tab:red", lw=1.0, ls="--", zorder=2)
+    ax.text(
+        0.99,
+        min_sources,
+        f"required >= {min_sources:g}",
+        transform=ax.get_yaxis_transform(),
+        ha="right",
+        va="bottom",
+        fontsize=7,
+        color="tab:red",
+    )
+
+    labels = []
+    for c, row in stats.iterrows():
+        cov = row["cov"]
+        labels.append(
+            f"{c}\n{cov:.0%} cov" if np.isfinite(cov) else f"{c}\ncov n/a"
+        )
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels, fontsize=7)
+    for tick, (_, row) in zip(ax.get_xticklabels(), stats.iterrows()):
+        if np.isfinite(row["cov"]) and row["cov"] < coverage_min:
+            tick.set_color("tab:red")
+
+    title = f"{band}-band"
+    if winner:
+        title += f" -> {winner}"
+    ax.set_title(title, fontsize=10)
+    from matplotlib.ticker import MaxNLocator
+
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.grid(axis="y", lw=0.3, color="0.85", zorder=0)
+    ax.set_axisbelow(True)
+
+
 def plot_optimized_catalog_coverage(
     plot_data,
     target_coords=None,
     wdir=None,
     target_name="target",
     outpath=None,
+    report=None,
+    min_sources=5,
+    coverage_min=0.8,
+    skipped=None,
 ):
     """
     Render the find_optimized_catalog coverage map: one subplot per band,
     image footprints as band-coloured squares, usable catalog sources with
-    a unique marker+color per catalog.
+    a unique marker+color per catalog.  When ``report`` is given, a
+    scoreboard row is appended below the map panels (worst-image usable
+    counts vs the required minimum, per-catalog field coverage).
 
     Parameters
     ----------
@@ -331,6 +456,15 @@ def plot_optimized_catalog_coverage(
         Used in the output filename.
     outpath : str, optional
         Explicit output path; overrides wdir/target_name.
+    report : pd.DataFrame, optional
+        Optimizer report (catalog/band/image/n_usable/coverage); enables
+        the scoreboard row.
+    min_sources : float
+        Preferred minimum usable sources on the worst image (scoreboard).
+    coverage_min : float
+        Field-coverage fraction below which a catalog name turns red.
+    skipped : dict, optional
+        Catalog -> reason it was not evaluated; listed as a footnote.
 
     Returns
     -------
@@ -369,12 +503,19 @@ def plot_optimized_catalog_coverage(
     n_bands = len(band_set)
     ncols = min(3, n_bands)
     nrows = int(ceil(n_bands / ncols))
+    have_score = report is not None and len(report) > 0
+    if have_score:
+        report = report.copy()
+        if "coverage" not in report.columns:
+            report["coverage"] = np.nan
+    score_rows = int(ceil(n_bands / ncols)) if have_score else 0
     fig, axes = plt.subplots(
-        nrows,
+        nrows + score_rows,
         ncols,
-        figsize=(5.2 * ncols, 4.6 * nrows),
+        figsize=(5.2 * ncols, 4.6 * nrows + 3.4 * score_rows),
         squeeze=False,
         constrained_layout=True,
+        height_ratios=[4.6] * nrows + [3.4] * score_rows,
     )
 
     footprints = plot_data.get("footprints", [])
@@ -496,6 +637,39 @@ def plot_optimized_catalog_coverage(
     for j in range(n_bands, nrows * ncols):
         axes[j // ncols][j % ncols].set_visible(False)
 
+    # Scoreboard row(s): same grid layout as the map panels so band
+    # columns line up.
+    if have_score:
+        winners = winners or {}
+        for idx, band in enumerate(band_set):
+            ax = axes[nrows + idx // ncols][idx % ncols]
+            sub = report[report["band"].astype(str) == band]
+            _draw_score_panel(
+                ax,
+                sub,
+                band,
+                winners.get(band),
+                min_sources,
+                coverage_min,
+                _band_color(band),
+            )
+            if idx % ncols == 0:
+                ax.set_ylabel("usable sources (worst image)")
+        for j in range(n_bands, score_rows * ncols):
+            axes[nrows + j // ncols][j % ncols].set_visible(False)
+
+        note = (
+            f"bar = worst-image usable count, tick = per-image mean; "
+            f"coverage under each name (red = below {coverage_min:.0%})"
+        )
+        if skipped:
+            note += " | skipped: " + "; ".join(
+                f"{k} ({str(v).splitlines()[0]})" for k, v in skipped.items()
+            )
+        # Negative y lands below the x tick labels; bbox_inches="tight"
+        # keeps it in the saved figure.
+        fig.text(0.5, -0.015, note, ha="center", fontsize=7, color="0.4")
+
     if outpath is None:
         rep_dir = os.path.join(wdir or ".", "catalog_queries")
         outpath = os.path.join(
@@ -510,13 +684,6 @@ def plot_optimized_catalog_coverage(
         plt.close(fig)
     logger.info("Optimized catalog coverage plot: %s", outpath)
     return outpath
-
-
-# =============================================================================
-# =============================================================================
-# #
-# =============================================================================
-# =============================================================================
 
 
 def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
@@ -1706,7 +1873,10 @@ class Catalog:
                     target_name = "target"
             else:
                 if "Unknown" not in target_name:
-                    target_name = self.input_yaml.get("target_name", "Transient")
+                    # Re-anchor on the configured name so every caller
+                    # shares one cache key; "Unknown" labels (additional
+                    # targets) keep their own namespace.
+                    target_name = canonical_target_name(self.input_yaml)
 
             if not catalog_custom_fpath:
                 catalog_custom_fpath = self.input_yaml["catalog"].get(
@@ -2140,79 +2310,116 @@ class Catalog:
                     # {"info": [column metadata], "data": [row arrays]}; the
                     # release segment must be dr1/dr2 ('ps1' is rejected), and
                     # 'mean' is the MeanObjectView (gMeanPSFMag et al.).
-                    try:
-                        ra = float(target_coords.ra.degree)
-                        dec = float(target_coords.dec.degree)
-
-                        url = "https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/mean"
-                        params = {
-                            "ra": ra,
-                            "dec": dec,
-                            "radius": radius_deg,
-                            "pagesize": 50000,
-                            "format": "json"
-                        }
-
-                        # Paginate: a single page silently truncates the cone
-                        # at pagesize rows, biasing coverage toward whatever
-                        # order the endpoint happens to return.
-                        rows = []
-                        col_names = None
-                        first_row = None
-                        page = 1
-                        while True:
-                            params["page"] = page
-                            response = requests.get(url, params=params, timeout=120)
-                            response.raise_for_status()
-                            data = response.json()
-                            page_rows = (
-                                data.get("data")
-                                if isinstance(data, dict)
-                                else None
+                    #
+                    # MAST read timeouts are common on wide cones, so retry
+                    # with backoff. An exhausted query raises a distinct
+                    # "query failed" error - folding it into an empty
+                    # DataFrame would make a transient failure look like a
+                    # genuine 0-source (no coverage) result downstream.
+                    _ps_attempts = max(
+                        1,
+                        int(
+                            self.input_yaml.get("catalog", {}).get(
+                                "pan_starrs_max_retries", 3
                             )
-                            if col_names is None:
-                                col_names = [
-                                    c["name"] for c in data.get("info", [])
-                                ]
-                            if not page_rows:
-                                break
-                            # If the endpoint ignores 'page', every request
-                            # returns page 1 - detect repeats and stop rather
-                            # than accumulating duplicates.
-                            if page > 1 and page_rows[0] == first_row:
-                                break
-                            if first_row is None:
-                                first_row = page_rows[0]
-                            rows.extend(page_rows)
-                            if (
-                                len(page_rows) < params["pagesize"]
-                                or len(rows) >= 200000
-                            ):
-                                break
-                            page += 1
+                            or 3
+                        ),
+                    )
+                    _ps_delay = float(
+                        self.input_yaml.get("catalog", {}).get(
+                            "pan_starrs_retry_base_delay_sec", 5.0
+                        )
+                        or 5.0
+                    )
+                    selectedCatalog = None
+                    _ps_exc = None
+                    for _ps_try in range(1, _ps_attempts + 1):
+                        try:
+                            ra = float(target_coords.ra.degree)
+                            dec = float(target_coords.dec.degree)
 
-                        if not rows:
-                            selectedCatalog = pd.DataFrame()
-                        else:
-                            selectedCatalog = pd.DataFrame(rows, columns=col_names)
-                            # Normalize null-like strings to NaN.
-                            selectedCatalog = selectedCatalog.replace(
-                                ['None', 'none', 'NONE', 'null', 'NULL', 'nan', 'NaN'], np.nan
+                            url = "https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/mean"
+                            params = {
+                                "ra": ra,
+                                "dec": dec,
+                                "radius": radius_deg,
+                                "pagesize": 50000,
+                                "format": "json"
+                            }
+
+                            # Paginate: a single page silently truncates the cone
+                            # at pagesize rows, biasing coverage toward whatever
+                            # order the endpoint happens to return.
+                            rows = []
+                            col_names = None
+                            first_row = None
+                            page = 1
+                            while True:
+                                params["page"] = page
+                                response = requests.get(url, params=params, timeout=120)
+                                response.raise_for_status()
+                                data = response.json()
+                                page_rows = (
+                                    data.get("data")
+                                    if isinstance(data, dict)
+                                    else None
+                                )
+                                if col_names is None:
+                                    col_names = [
+                                        c["name"] for c in data.get("info", [])
+                                    ]
+                                if not page_rows:
+                                    break
+                                # If the endpoint ignores 'page', every request
+                                # returns page 1 - detect repeats and stop rather
+                                # than accumulating duplicates.
+                                if page > 1 and page_rows[0] == first_row:
+                                    break
+                                if first_row is None:
+                                    first_row = page_rows[0]
+                                rows.extend(page_rows)
+                                if (
+                                    len(page_rows) < params["pagesize"]
+                                    or len(rows) >= 200000
+                                ):
+                                    break
+                                page += 1
+
+                            if not rows:
+                                selectedCatalog = pd.DataFrame()
+                            else:
+                                selectedCatalog = pd.DataFrame(rows, columns=col_names)
+                                # Normalize null-like strings to NaN.
+                                selectedCatalog = selectedCatalog.replace(
+                                    ['None', 'none', 'NONE', 'null', 'NULL', 'nan', 'NaN'], np.nan
+                                )
+                                # Coerce numeric columns; name columns stay strings.
+                                for col in selectedCatalog.columns:
+                                    if col not in ['objName', 'objAltName1', 'objAltName2', 'objAltName3']:
+                                        try:
+                                            selectedCatalog[col] = pd.to_numeric(selectedCatalog[col], errors='coerce')
+                                        except Exception:
+                                            pass
+
+                            logger.info("Retrieved %s Pan-STARRS sources", len(selectedCatalog))
+                            break
+
+                        except Exception as api_exc:
+                            _ps_exc = api_exc
+                            logger.warning(
+                                "Direct Pan-STARRS API attempt %d/%d failed (%s)",
+                                _ps_try,
+                                _ps_attempts,
+                                api_exc,
                             )
-                            # Coerce numeric columns; name columns stay strings.
-                            for col in selectedCatalog.columns:
-                                if col not in ['objName', 'objAltName1', 'objAltName2', 'objAltName3']:
-                                    try:
-                                        selectedCatalog[col] = pd.to_numeric(selectedCatalog[col], errors='coerce')
-                                    except Exception:
-                                        pass
+                            if _ps_try < _ps_attempts:
+                                time.sleep(_ps_delay * (2 ** (_ps_try - 1)))
+                    if selectedCatalog is None:
+                        raise RuntimeError(
+                            f"PAN_STARRS catalog query failed after "
+                            f"{_ps_attempts} attempt(s): {_ps_exc}"
+                        )
 
-                        logger.info("Retrieved %s Pan-STARRS sources", len(selectedCatalog))
-
-                    except Exception as api_exc:
-                        logger.warning("Direct Pan-STARRS API failed (%s), using empty catalog", api_exc)
-                        selectedCatalog = pd.DataFrame()
-                    
                     # Catch remaining null sentinels (numeric -999 included).
                     selectedCatalog = selectedCatalog.replace([-999, -999.0, "None", "none", "NONE", "null", "NULL"], np.nan)
                     columns = [
@@ -3132,7 +3339,7 @@ class Catalog:
         logger.info(log_step(f"Custom catalog: {catalog_list_str}"))
 
         if not target_name:
-            target_name = self.input_yaml.get("target_name", "Transient")
+            target_name = canonical_target_name(self.input_yaml)
 
         # Target RA/DEC in the filename makes the cache field-specific;
         # otherwise catalogs from different targets with the same name get
@@ -3302,6 +3509,182 @@ class Catalog:
     # =============================================================================
     # =============================================================================
 
+    def _catalog_supported_bands(self, catalog_names, cat_cfg=None):
+        """Bands each candidate backend can serve, from catalog.yml.
+
+        Returns ``(supported_bands, skipped)`` where ``skipped`` maps a
+        catalog name to the reason it cannot participate (currently only
+        an unreadable custom catalog).
+        """
+        cat_cfg = cat_cfg if cat_cfg is not None else (
+            self.input_yaml.get("catalog", {}) or {}
+        )
+        filepath = os.path.dirname(os.path.abspath(__file__))
+        catalog_db = AutophotYaml(
+            os.path.join(filepath, "databases", "catalog.yml")
+        ).load()
+
+        supported_bands = {}
+        skipped = {}
+        for name in catalog_names:
+            # catalog.yml uses 'panstarrs' for the normalized 'pan_starrs'.
+            yml_name = {"pan_starrs": "panstarrs"}.get(name, name)
+            section = catalog_db.get(yml_name) or {}
+            bands_i = {
+                k
+                for k in section
+                if normalize_photometric_filter_name(k) is not None
+            }
+            if name == "custom":
+                # custom.yml band names are nominal; the CSV decides.
+                try:
+                    csv_cols = set(
+                        pd.read_csv(
+                            cat_cfg["catalog_custom_fpath"], nrows=0
+                        ).columns
+                    )
+                except Exception as exc:
+                    skipped[name] = f"custom catalog unreadable: {exc}"
+                    continue
+                bands_i = {b for b in bands_i if b in csv_cols}
+                # clean() also auto-detects <band>/<band>_err column pairs.
+                bands_i |= {
+                    c
+                    for c in csv_cols
+                    if f"{c}_err" in csv_cols
+                    and normalize_photometric_filter_name(c) is not None
+                }
+            supported_bands[name] = bands_i
+        return supported_bands, skipped
+
+    def _optimizer_plot_sources(
+        self,
+        catalog_names,
+        band_set,
+        image_infos,
+        target_coords,
+        radius,
+        border=11,
+    ):
+        """Rebuild ``plot_data["sources"]`` for the coverage map without a
+        full rescan.
+
+        Used on cached-selection auto runs: every download here hits the
+        local catalog CSV cache, so the (catalog, band) -> usable-source
+        RA/DEC union is recomputed with the same masks the optimizer
+        applies, but entirely offline.  Returns a dict keyed by
+        ``(catalog_name, band)`` holding concatenated RA/DEC frames.
+        """
+        zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
+        bright_lim = float(zp_cfg.get("bright_mag_limit", 11.0))
+        faint_lim = float(zp_cfg.get("faint_mag_limit", 22.0))
+        supported_bands, _ = self._catalog_supported_bands(
+            list(catalog_names)
+        )
+        band_set = sorted({str(b) for b in band_set if b})
+
+        per_key = {}
+        for name in catalog_names:
+            name = self._normalize_catalog_name(str(name))
+            if not (set(band_set) & supported_bands.get(name, set())):
+                continue
+            try:
+                with _quiet_catalog_log():
+                    raw = self.download(
+                        target_coords=target_coords,
+                        catalogName=name,
+                        radius=radius,
+                    )
+            except Exception:
+                continue
+            try:
+                with _quiet_catalog_log():
+                    cleaned = self.clean(
+                        raw, catalogName=name, update_names_only=True
+                    )
+                    if (
+                        cleaned is not None
+                        and len(cleaned) > 0
+                        and {"RA", "DEC"}.issubset(cleaned.columns)
+                    ):
+                        cleaned = _skycoord_dedup_keep_one(
+                            cleaned, sep_threshold_arcsec=0.1
+                        )
+            except Exception:
+                cleaned = None
+
+            coords = None
+            if (
+                cleaned is not None
+                and len(cleaned) > 0
+                and {"RA", "DEC"}.issubset(cleaned.columns)
+            ):
+                coords = SkyCoord(
+                    ra=pd.to_numeric(cleaned["RA"], errors="coerce").to_numpy()
+                    * u.deg,
+                    dec=pd.to_numeric(cleaned["DEC"], errors="coerce").to_numpy()
+                    * u.deg,
+                    frame="icrs",
+                )
+
+            for img in image_infos or []:
+                img_bands = (
+                    [img["band"]] if img.get("band") else band_set
+                )
+                img_bands = [
+                    b
+                    for b in img_bands
+                    if b in supported_bands.get(name, set())
+                ]
+                if not img_bands:
+                    continue
+
+                onchip_mask = None
+                wcs_i = img.get("wcs")
+                shape_i = img.get("shape")
+                if (
+                    coords is not None
+                    and wcs_i is not None
+                    and shape_i is not None
+                ):
+                    try:
+                        x, y = wcs_i.world_to_pixel(coords)
+                        x = np.asarray(x, dtype=float).ravel()
+                        y = np.asarray(y, dtype=float).ravel()
+                        ny, nx = shape_i
+                        onchip_mask = (
+                            np.isfinite(x)
+                            & np.isfinite(y)
+                            & (x >= border)
+                            & (x < nx - border)
+                            & (y >= border)
+                            & (y < ny - border)
+                        )
+                    except Exception:
+                        pass
+
+                for band in img_bands:
+                    mag_mask = _usable_mag_mask(
+                        cleaned, band, bright_lim, faint_lim
+                    )
+                    if mag_mask is None:
+                        usable = None
+                    elif onchip_mask is not None:
+                        usable = mag_mask.to_numpy() & onchip_mask
+                    else:
+                        usable = mag_mask.to_numpy()
+                    if usable is not None and usable.any():
+                        per_key.setdefault((name, band), []).append(
+                            cleaned.loc[usable, ["RA", "DEC"]]
+                        )
+
+        return {
+            key: pd.concat(frames, ignore_index=True).drop_duplicates(
+                subset=["RA", "DEC"]
+            )
+            for key, frames in per_key.items()
+        }
+
     def find_optimized_catalog(
         self,
         target_coords,
@@ -3368,8 +3751,9 @@ class Catalog:
         write_plot : bool
             Render a coverage map - one subplot per band, image footprints
             as band-coloured squares, usable catalog sources with a unique
-            marker/color per catalog - under ``<wdir>/catalog_queries/``
-            (default True).
+            marker/color per catalog, plus a scoreboard row (worst-image
+            usable count vs the required minimum, per-catalog field
+            coverage) - under ``<wdir>/catalog_queries/`` (default True).
         outdir : str, optional
             If given, the coverage CSV and PNG are written directly into
             this directory (e.g. the run's ``*_REDUCED`` output folder)
@@ -3392,7 +3776,7 @@ class Catalog:
         zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
         bright_lim = float(zp_cfg.get("bright_mag_limit", 11.0))
         faint_lim = float(zp_cfg.get("faint_mag_limit", 22.0))
-        target_name = target_name or self.input_yaml.get("target_name", "target")
+        target_name = target_name or canonical_target_name(self.input_yaml)
 
         # --- Candidate set ----------------------------------------------------
         excluded = {}
@@ -3419,42 +3803,11 @@ class Catalog:
         )
 
         # --- Bands each backend can serve -------------------------------------
-        filepath = os.path.dirname(os.path.abspath(__file__))
-        catalog_db = AutophotYaml(
-            os.path.join(filepath, "databases", "catalog.yml")
-        ).load()
-
-        supported_bands = {}
+        supported_bands, _band_skips = self._catalog_supported_bands(
+            catalog_names, cat_cfg
+        )
         skipped = dict(excluded)
-        for name in catalog_names:
-            # catalog.yml uses 'panstarrs' for the normalized 'pan_starrs'.
-            yml_name = {"pan_starrs": "panstarrs"}.get(name, name)
-            section = catalog_db.get(yml_name) or {}
-            bands_i = {
-                k
-                for k in section
-                if normalize_photometric_filter_name(k) is not None
-            }
-            if name == "custom":
-                # custom.yml band names are nominal; the CSV decides.
-                try:
-                    csv_cols = set(
-                        pd.read_csv(
-                            cat_cfg["catalog_custom_fpath"], nrows=0
-                        ).columns
-                    )
-                except Exception as exc:
-                    skipped[name] = f"custom catalog unreadable: {exc}"
-                    continue
-                bands_i = {b for b in bands_i if b in csv_cols}
-                # clean() also auto-detects <band>/<band>_err column pairs.
-                bands_i |= {
-                    c
-                    for c in csv_cols
-                    if f"{c}_err" in csv_cols
-                    and normalize_photometric_filter_name(c) is not None
-                }
-            supported_bands[name] = bands_i
+        skipped.update(_band_skips)
 
         # --- Normalise image descriptors --------------------------------------
         image_infos = []
@@ -3506,13 +3859,6 @@ class Catalog:
                 "find_optimized_catalog: no bands to optimize - pass "
                 "`bands` or images with resolved filters."
             )
-
-        def _usable_mag_mask(cleaned, band):
-            """Sources with a finite in-window magnitude in ``band``."""
-            if cleaned is None or len(cleaned) == 0 or band not in cleaned.columns:
-                return None
-            m = pd.to_numeric(cleaned[band], errors="coerce")
-            return np.isfinite(m) & (m >= bright_lim) & (m <= faint_lim)
 
         # Download each candidate once. Failures are recorded, not fatal: a
         # catalog that does not cover the field (or is unreachable) simply
@@ -3667,7 +4013,9 @@ class Catalog:
                             )
 
                     for band in img_bands:
-                        mag_mask = _usable_mag_mask(cleaned, band)
+                        mag_mask = _usable_mag_mask(
+                            cleaned, band, bright_lim, faint_lim
+                        )
                         if mag_mask is None:
                             usable = None
                         elif onchip_mask is not None:
@@ -3804,32 +4152,7 @@ class Catalog:
         # --- Plot data ---------------------------------------------------------
         # Image footprints (WCS corners -> sky polygon) and per-(catalog,
         # band) usable-source positions, unioned across the band's images.
-        footprints = []
-        for img in image_infos:
-            w_i, s_i = img.get("wcs"), img.get("shape")
-            if w_i is None or s_i is None:
-                continue
-            ny, nx = s_i
-            try:
-                fp_ra, fp_dec = w_i.all_pix2world(
-                    [0.0, nx - 1.0, nx - 1.0, 0.0],
-                    [0.0, 0.0, ny - 1.0, ny - 1.0],
-                    0,
-                )
-                footprints.append(
-                    {
-                        "band": img.get("band"),
-                        "ra": np.asarray(fp_ra, dtype=float).ravel(),
-                        "dec": np.asarray(fp_dec, dtype=float).ravel(),
-                        "name": (
-                            os.path.basename(str(img["path"]))
-                            if img.get("path")
-                            else "field"
-                        ),
-                    }
-                )
-            except Exception:
-                continue
+        footprints = _footprints_from_image_infos(image_infos)
 
         sources_union = {}
         for key, frames in plot_sources.items():
@@ -3861,6 +4184,9 @@ class Catalog:
                         if outdir
                         else None
                     ),
+                    report=report,
+                    min_sources=min_sources,
+                    skipped=skipped,
                 )
             except Exception as exc:
                 logger.warning(
@@ -3942,15 +4268,64 @@ class Catalog:
             # NOTE: sky sigma-clipping and threshold filtering are already done
             # by Zeropoint.clean() before this method is called.  Repeating them
             # here with different parameters (threshold=5 vs 3.0) causes additional
-            # source loss.  Only apply a threshold cut if it wasn't already applied.
+            # source loss.  'threshold' is the peak-pixel S/N, which undersells
+            # the aperture S/N by ~1/sqrt(A_psf) on oversampled images (a 22-px
+            # FWHM star needs aperture S/N ~12+ to pass a peak cut of 5).  Gate
+            # on the better of the two metrics so good calibrators survive, and
+            # keep the strongest sources when the pool would drop below the
+            # keep-floor -- the ZP fit flags a degenerate inlier set itself.
             if "threshold" in catalog.columns:
-                threshold_cut = catalog["threshold"] < threshold
+                _peak_snr = pd.to_numeric(
+                    catalog["threshold"], errors="coerce"
+                ).to_numpy(dtype=float)
+                _snr_col = next(
+                    (
+                        c
+                        for c in ("SNR", "snr_ap", "snr")
+                        if c in catalog.columns
+                    ),
+                    None,
+                )
+                if _snr_col is not None:
+                    _aper_snr = pd.to_numeric(
+                        catalog[_snr_col], errors="coerce"
+                    ).to_numpy(dtype=float)
+                    _det_metric = np.fmax(_peak_snr, _aper_snr)
+                else:
+                    _det_metric = _peak_snr
+                threshold_cut = ~np.isfinite(_det_metric) | (
+                    _det_metric < threshold
+                )
                 n_thresh = int(np.sum(threshold_cut))
                 if n_thresh > 0:
-                    logger.info(
-                        f"Removing {n_thresh} sources with threshold < {threshold}"
+                    _min_keep = int(
+                        (self.input_yaml.get("zeropoint") or {}).get(
+                            "saturation_check_min_keep", 3
+                        )
                     )
-                    catalog = catalog[~threshold_cut]
+                    if len(catalog) - n_thresh < _min_keep:
+                        _rank = np.where(
+                            np.isfinite(_det_metric), -_det_metric, np.inf
+                        )
+                        _keep_idx = np.argsort(_rank, kind="stable")[
+                            : _min_keep
+                        ]
+                        _keep_mask = np.zeros(len(catalog), dtype=bool)
+                        _keep_mask[_keep_idx] = True
+                        n_dropped = int((~_keep_mask).sum())
+                        logger.info(
+                            f"Keeping {_min_keep} highest-S/N sources "
+                            f"instead of applying threshold < {threshold} "
+                            f"cut ({n_dropped} dropped); calibrator pool is "
+                            "too small to vet further."
+                        )
+                        catalog = catalog[_keep_mask]
+                    else:
+                        logger.info(
+                            f"Removing {n_thresh} sources with detection "
+                            f"S/N < {threshold} (peak and aperture)"
+                        )
+                        catalog = catalog[~threshold_cut]
 
             flux = catalog["flux_AP"].values
             flux_err = catalog["flux_AP_err"].values

@@ -624,6 +624,50 @@ class Prepare:
         Returns:
             Dict: Dictionary containing RA, DEC, and object information.
         """
+        # A real target_name together with explicit coordinates is a
+        # conflict: the name requests a TNS/SIMBAD position lookup while
+        # target_ra/target_dec would silently override it, so a stale
+        # coordinate pair under the right name runs photometry at the
+        # wrong position.  "Transient" is the placeholder default (main.py
+        # assigns it when only coordinates exist), not a real identifier.
+        name = self.input_yaml.get("target_name")
+        name_given = (
+            name is not None
+            and str(name).strip() != ""
+            and str(name).strip().lower() != "transient"
+        )
+        coords_given = (
+            self.input_yaml.get("target_ra") is not None
+            or self.input_yaml.get("target_dec") is not None
+        )
+        if name_given and coords_given:
+            self.logger.error(
+                "Conflicting target identification: target_name='%s' set "
+                "alongside explicit coordinates (target_ra=%s, "
+                "target_dec=%s).",
+                name,
+                self.input_yaml.get("target_ra"),
+                self.input_yaml.get("target_dec"),
+            )
+            print(
+                f"\n{'='*60}\n"
+                f"ERROR: target_name and explicit coordinates conflict.\n\n"
+                f"  target_name : {name}\n"
+                f"  target_ra   : {self.input_yaml.get('target_ra')}\n"
+                f"  target_dec  : {self.input_yaml.get('target_dec')}\n\n"
+                f"target_name requests a TNS/SIMBAD position lookup, but\n"
+                f"explicit coordinates silently override it.\n\n"
+                f"To fix this, either:\n"
+                f"  a) Remove target_ra and target_dec to resolve '{name}'\n"
+                f"     via TNS/SIMBAD, or\n"
+                f"  b) Remove target_name to use the manual coordinates.\n"
+                f"{'='*60}\n"
+            )
+            sys.exit(
+                "Stopped: target_name conflicts with explicit "
+                "target_ra/target_dec."
+            )
+
         # If the user already provided coordinates, do NOT query TNS.
         # Treat target_ra/target_dec as authoritative (degrees, FK5/J2000).
         if (
@@ -643,8 +687,13 @@ class Prepare:
         target_name = self.input_yaml.get("target_name", None)
         tns_dir = pathlib.Path(self.input_yaml["wdir"]) / "tns_objects"
         tns_dir.mkdir(parents=True, exist_ok=True)
-        if target_name is None or (isinstance(target_name, str) and target_name.strip() == ""):
+        if (
+            target_name is None
+            or (isinstance(target_name, str) and target_name.strip() == "")
+            or str(target_name).strip().lower() == "transient"
+        ):
             # No name and no coordinates; caller decides whether to continue.
+            # The "Transient" placeholder is not a real lookup target.
             return {}
 
         transient_path = tns_dir / f"{target_name}.yml"

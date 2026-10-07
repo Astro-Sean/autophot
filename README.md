@@ -180,7 +180,7 @@ catalog:
 
 Mapping keys take single bands (`u`), families (`UBVRI`, `JHK`), mixes (`uRI`), or lists (`u, RI`). Case matters: `r` is SDSS r, `R` is Johnson-Cousins R. Bad keys fall back to `default` with a warning.
 
-With `use_catalog: auto`, the pipeline scans every image footprint once before processing, downloads each feasible catalog, and keeps the one with the most usable calibrators per band. The resolved mapping is cached under `<wdir>/catalog_queries/` so restarts skip the rescan; Gaia stays available as a fallback but is excluded from the bulk scan to protect the archive servers. For non-standard filters, supply curve files via `gaia_custom` and `catalog.transmission_curve_map`.
+With `use_catalog: auto`, the pipeline scans every image footprint once before processing, downloads each feasible catalog, and keeps the one with the most usable calibrators per band. The resolved mapping is cached under `<wdir>/catalog_queries/` so restarts skip the rescan; Gaia stays available as a fallback but is excluded from the bulk scan to protect the archive servers. If a selected catalog fails at query time, the run demotes it to the best still-working candidate for that band instead of stopping (a genuine 0-source answer is also demoted in the cache; transient query failures fall back for that run only). For non-standard filters, supply curve files via `gaia_custom` and `catalog.transmission_curve_map`.
 
 ## Limiting magnitudes
 

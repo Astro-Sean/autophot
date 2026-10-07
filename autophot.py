@@ -519,7 +519,7 @@ try:
         concatenate_csv_files,
         log_step,
         log_exception,
-        normalize_target_name,
+        canonical_target_name,
         print_progress_bar,
         resolve_verbose_level,
         sanitize_photometric_filters,
@@ -549,7 +549,7 @@ except Exception as _exc:  # pragma: no cover
             concatenate_csv_files,
             log_step,
             log_exception,
-            normalize_target_name,
+            canonical_target_name,
             print_progress_bar,
             resolve_verbose_level,
             sanitize_photometric_filters,
@@ -2293,8 +2293,8 @@ class AutomatedPhotometry:
                 # cached catalog under e.g. "sn2026yos/" but main.py looks for
                 # it under "2026yos/", causing a cache miss and redundant Gaia
                 # archive downloads.
-                backup_yaml["target_name"] = normalize_target_name(
-                    backup_yaml.get("target_name")
+                backup_yaml["target_name"] = canonical_target_name(
+                    backup_yaml
                 )
 
                 # Pre-download reference catalog(s) once, before the per-image loop.
@@ -2304,9 +2304,28 @@ class AutomatedPhotometry:
                     from catalog import (
                         Catalog as _Catalog,
                         _catalog_cone_radius_arcmin,
+                        AUTO_OPTIMIZE_CATALOGS as _AUTO_CATALOGS,
+                        AUTO_OPTIMIZE_EXCLUDED as _AUTO_EXCLUDED,
+                        plot_optimized_catalog_coverage as _plot_coverage,
+                        _footprints_from_image_infos as _mk_footprints,
                     )
                     _cat = _Catalog(input_yaml=backup_yaml)
                     _use_cat = backup_yaml.get("catalog", {}).get("use_catalog")
+
+                    def _fmt_use_catalog(m):
+                        """Compact band->catalog string, e.g.
+                        'g,r -> skymapper; B -> apass'."""
+                        if not isinstance(m, dict):
+                            return str(m)
+                        _rev = {}
+                        for _b, _c in m.items():
+                            if _c is None:
+                                continue
+                            _rev.setdefault(str(_c).strip(), []).append(str(_b))
+                        return "; ".join(
+                            f"{','.join(sorted(_bs))} -> {_c}"
+                            for _c, _bs in sorted(_rev.items())
+                        )
 
                     _available_catalogs = [
                         "gaia", "pan_starrs", "sdss", "apass",
@@ -2337,10 +2356,13 @@ class AutomatedPhotometry:
                     # mapping is cached next to the catalog CSVs so a
                     # restarted run skips the scan entirely; delete the
                     # file to force a fresh optimization.
-                    if (
+                    _auto_mode = (
                         isinstance(_use_cat, str)
                         and _use_cat.strip().lower() == "auto"
-                    ):
+                    )
+                    _opt = None
+                    _opt_cache = None
+                    if _auto_mode:
                         _opt_cache = os.path.join(
                             backup_yaml["wdir"],
                             "catalog_queries",
@@ -2363,22 +2385,26 @@ class AutomatedPhotometry:
                                     if _need <= _have or "default" in _cached_map:
                                         _use_cat = _cached_map
                                         _log(
-                                            f"  Reusing cached catalog "
-                                            f"selection: {_opt_cache} "
-                                            f"(bands={_cached.get('bands')}, "
-                                            f"images={_cached.get('n_images')})"
+                                            "  use_catalog=auto: reusing "
+                                            "cached selection "
+                                            f"{_fmt_use_catalog(_cached_map)}"
+                                        )
+                                        _log(
+                                            f"    cache: {_opt_cache} "
+                                            f"({_cached.get('n_images', '?')} "
+                                            "images; delete to re-scan)"
                                         )
                                     else:
                                         _log(
-                                            f"  Cached catalog selection "
-                                            f"misses bands "
+                                            f"  Cached auto selection "
+                                            f"misses band(s) "
                                             f"{sorted(_need - _have)}; "
                                             f"re-optimizing."
                                         )
                             except Exception as _ce:
                                 _log(
-                                    f"  [WARNING] Could not read cached "
-                                    f"catalog selection ({_ce}); "
+                                    f"  [WARNING] Could not read auto "
+                                    f"catalog cache ({_ce}); "
                                     f"re-optimizing."
                                 )
                         if _use_cat is None:
@@ -2387,6 +2413,11 @@ class AutomatedPhotometry:
                                     file_list,
                                     getattr(prepare_db, "file_filter_map", {}),
                                     pixscale_fallback=_cfg_scale,
+                                )
+                                _log(
+                                    "  use_catalog=auto: scanning "
+                                    f"{len(_image_infos)} image footprint(s) "
+                                    "to pick the best catalog per band"
                                 )
                                 _opt = _cat.find_optimized_catalog(
                                     target_coords=_target_coords,
@@ -2402,7 +2433,10 @@ class AutomatedPhotometry:
                                 # logged by find_optimized_catalog - only the
                                 # resolved mapping and a compact skip summary
                                 # belong here.
-                                _log(f"  Resolved use_catalog: {_use_cat}")
+                                _log(
+                                    "  Auto-selected catalog(s): "
+                                    f"{_fmt_use_catalog(_use_cat)}"
+                                )
                                 if _opt.get("skipped"):
                                     _log(
                                         "  Skipped: "
@@ -2441,8 +2475,9 @@ class AutomatedPhotometry:
                                                 sort_keys=True,
                                             )
                                         _log(
-                                            f"  Cached optimized catalog "
-                                            f"selection: {_opt_cache}"
+                                            "  Cached auto selection: "
+                                            f"{_opt_cache} "
+                                            "(delete to force re-scan)"
                                         )
                                     except Exception as _we:
                                         _log(
@@ -2494,28 +2529,33 @@ class AutomatedPhotometry:
                     # Only run this when a Gaia-based catalog is selected - refcat, sdss,
                     # pan_starrs, 2mass, legacy, skymapper don't use Gaia XP spectra.
                     _gaia_catalogs = {"gaia", "apass"}
+                    # Case-sensitive matching: SDSS bands are lowercase, JKC are uppercase.
+                    # Computed unconditionally so a fallback onto a Gaia-backed
+                    # catalog during pre-fetch can re-enable the XP systems.
+                    _req_set = {str(f).strip() for f in required_filters}
+                    _auto_phot_systems = []
+                    if _req_set & {"u", "g", "r", "i", "z"}:
+                        _auto_phot_systems.append("SDSS_Std")
+                    if _req_set & {"U", "B", "V", "R", "I"}:
+                        _auto_phot_systems.append("JKC_Std")
                     _needs_gaia_xp = any(
                         str(c).lower() in _gaia_catalogs for c in _unique_cats
                     )
                     if _needs_gaia_xp:
-                        # Case-sensitive matching: SDSS bands are lowercase, JKC are uppercase.
-                        _req_set = {str(f).strip() for f in required_filters}
-                        _sdss_bands = {"u", "g", "r", "i", "z"}
-                        _jkc_bands = {"U", "B", "V", "R", "I"}
-                        _need_sdss = bool(_req_set & _sdss_bands)
-                        _need_jkc = bool(_req_set & _jkc_bands)
-                        _auto_phot_systems = []
-                        if _need_sdss:
-                            _auto_phot_systems.append("SDSS_Std")
-                        if _need_jkc:
-                            _auto_phot_systems.append("JKC_Std")
                         if _auto_phot_systems:
                             backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = _auto_phot_systems
-                            _log(f"  Auto-selected GaiaXPy systems: {_auto_phot_systems} (filters: {sorted(_req_set)})")
+                            _log(
+                                "  GaiaXPy photometric systems: "
+                                f"{', '.join(_auto_phot_systems)} "
+                                f"(filters: {', '.join(sorted(_req_set))})"
+                            )
                     else:
                         # Non-Gaia catalog: disable GaiaXPy to avoid unnecessary archive queries.
                         backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = []
-                        _log(f"  Skipping GaiaXPy (catalog {_unique_cats} does not require Gaia XP spectra).")
+                        _log(
+                            "  Skipping GaiaXPy: no selected catalog "
+                            "needs Gaia XP spectra"
+                        )
 
                     # One cone per catalog must cover the union of image
                     # footprints - a fixed 10 arcmin radius centred on the
@@ -2558,30 +2598,202 @@ class AutomatedPhotometry:
                             "(no WCS or pixel scale available)"
                         )
 
-                    for _cat_name in _unique_cats:
-                        try:
-                            if backup_yaml.get("catalog", {}).get("build_catalog", False):
-                                _log(f"  Pre-building catalog: {_cat_name}")
-                                _cat.build_complete_catalog(
-                                    target_coords=_target_coords,
-                                    catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
-                                    max_separation=5,
-                                    radius=_prefetch_radius,
+                    # Fallback ranking for auto-resolved mappings: the
+                    # optimizer report when the scan ran this session, else
+                    # the coverage CSV the earlier scan left in the output
+                    # directory.
+                    _opt_report = (
+                        _opt.get("report") if isinstance(_opt, dict) else None
+                    )
+                    if _opt_report is None and _auto_mode:
+                        _cov_csv = os.path.join(
+                            new_output_dir,
+                            f"{backup_yaml.get('target_name', 'target')}"
+                            "_optimized_catalog_coverage.csv",
+                        )
+                        if os.path.exists(_cov_csv):
+                            try:
+                                _opt_report = pd.read_csv(_cov_csv)
+                            except Exception:
+                                _opt_report = None
+
+                    # Coverage map + scoreboard: fresh scans render the
+                    # figure inside find_optimized_catalog; cached runs
+                    # rebuild it from the persisted report and the local
+                    # catalog CSV cache (offline) so every auto run leaves
+                    # the figure behind.
+                    if _auto_mode and _opt_report is not None:
+                        _cov_png = os.path.join(
+                            new_output_dir,
+                            f"{backup_yaml.get('target_name', 'target')}"
+                            "_optimized_catalog_coverage.png",
+                        )
+                        if not os.path.exists(_cov_png):
+                            try:
+                                _rep_cats = sorted(
+                                    _opt_report["catalog"].astype(str)
+                                    .unique()
                                 )
-                            else:
-                                _resolved = _cat._require_catalog_selected(_cat_name)
-                                _log(f"  Pre-fetching catalog: {_resolved}")
-                                _cat.download(
+                                _rebuilt_sources = (
+                                    _cat._optimizer_plot_sources(
+                                        _rep_cats,
+                                        band_set=sorted(
+                                            str(b)
+                                            for b in required_filters
+                                        ),
+                                        image_infos=_image_infos or [],
+                                        target_coords=_target_coords,
+                                        radius=_prefetch_radius,
+                                    )
+                                )
+                                _plot_coverage(
+                                    {
+                                        "footprints": _mk_footprints(
+                                            _image_infos
+                                        ),
+                                        "sources": _rebuilt_sources,
+                                        "winners": (
+                                            {
+                                                str(b): str(c)
+                                                for b, c in _use_cat.items()
+                                                if str(b).strip().lower()
+                                                not in {"default", "*", "all"}
+                                            }
+                                            if isinstance(_use_cat, dict)
+                                            else {}
+                                        ),
+                                        "band_set": sorted(
+                                            str(b)
+                                            for b in required_filters
+                                        ),
+                                        "evaluated": list(_rep_cats),
+                                        "skipped": {},
+                                    },
                                     target_coords=_target_coords,
-                                    target_name=backup_yaml.get("target_name", "target"),
-                                    catalogName=_resolved,
-                                    catalog_custom_fpath=backup_yaml.get("catalog", {}).get(
-                                        "catalog_custom_fpath", None
+                                    target_name=backup_yaml.get(
+                                        "target_name", "target"
                                     ),
-                                    radius=_prefetch_radius,
+                                    wdir=backup_yaml["wdir"],
+                                    outpath=_cov_png,
+                                    report=_opt_report,
+                                    skipped=(
+                                        _opt.get("skipped")
+                                        if isinstance(_opt, dict)
+                                        else None
+                                    ),
                                 )
-                        except RuntimeError as _ce:
-                            if "0 sources" in str(_ce):
+                            except Exception as _cpe:
+                                _log(
+                                    "  [WARNING] Could not rebuild catalog "
+                                    f"coverage plot: {_cpe}"
+                                )
+
+                    _prefetch_failed = {}
+
+                    def _prefetch_one(_name):
+                        if backup_yaml.get("catalog", {}).get("build_catalog", False):
+                            _log(f"  Pre-building catalog: {_name}")
+                            _cat.build_complete_catalog(
+                                target_coords=_target_coords,
+                                catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
+                                max_separation=5,
+                                radius=_prefetch_radius,
+                            )
+                            return
+                        _resolved = _cat._require_catalog_selected(_name)
+                        _pf_bands = (
+                            sorted(
+                                str(b)
+                                for b, c in _use_cat.items()
+                                if str(c).strip().lower()
+                                == str(_resolved).strip().lower()
+                                and str(b).strip().lower()
+                                not in {"default", "*", "all"}
+                            )
+                            if isinstance(_use_cat, dict)
+                            else []
+                        )
+                        _log(
+                            f"  Pre-fetching catalog: {_resolved}"
+                            + (
+                                f" (bands: {', '.join(_pf_bands)})"
+                                if _pf_bands
+                                else ""
+                            )
+                        )
+                        # A fallback onto a Gaia-backed catalog needs the XP
+                        # systems re-enabled (they are disabled above whenever
+                        # no Gaia-backed winner was selected).
+                        if str(_resolved).strip().lower() in _gaia_catalogs:
+                            _xp = backup_yaml.setdefault("catalog", {}).get(
+                                "gaia_xp_photometric_systems"
+                            )
+                            if not _xp and _auto_phot_systems:
+                                backup_yaml["catalog"][
+                                    "gaia_xp_photometric_systems"
+                                ] = _auto_phot_systems
+                                _log(
+                                    "  Re-enabled GaiaXPy systems "
+                                    f"{_auto_phot_systems} for fallback "
+                                    f"catalog '{_resolved}'."
+                                )
+                        _cat.download(
+                            target_coords=_target_coords,
+                            target_name=backup_yaml.get("target_name", "target"),
+                            catalogName=_resolved,
+                            catalog_custom_fpath=backup_yaml.get("catalog", {}).get(
+                                "catalog_custom_fpath", None
+                            ),
+                            radius=_prefetch_radius,
+                        )
+
+                    def _auto_candidates(band):
+                        """Best-first fallback backends for `band` (None = any)."""
+                        _ordered = []
+
+                        def _push(c):
+                            c = str(c).strip().lower()
+                            if (
+                                c
+                                and c not in _ordered
+                                and c not in _prefetch_failed
+                            ):
+                                _ordered.append(c)
+
+                        if _opt_report is not None and len(_opt_report):
+                            _sub = _opt_report
+                            if band is not None:
+                                _sub = _sub[_sub["band"] == str(band)]
+                            if not _sub.empty:
+                                _rank = (
+                                    _sub.groupby("catalog")["n_usable"]
+                                    .agg(["min", "mean"])
+                                    .sort_values(
+                                        ["min", "mean"], ascending=False
+                                    )
+                                )
+                                for _c in _rank.index:
+                                    _push(_c)
+                        for _c in _AUTO_CATALOGS:
+                            if _c not in _AUTO_EXCLUDED:
+                                _push(_c)
+                        # Gaia sits last: excluded from the bulk auto scan to
+                        # protect the archive, but still a valid last resort.
+                        _push("gaia")
+                        return _ordered
+
+                    for _cat_name in list(_unique_cats):
+                        try:
+                            _prefetch_one(_cat_name)
+                        except Exception as _ce:
+                            _prefetch_failed[
+                                str(_cat_name).strip().lower()
+                            ] = _ce
+                            if (
+                                not _auto_mode
+                                and isinstance(_ce, RuntimeError)
+                                and "0 sources" in str(_ce)
+                            ):
                                 _alternatives = [
                                     c for c in _available_catalogs
                                     if c not in [n.lower() for n in _unique_cats]
@@ -2610,10 +2822,175 @@ class AutomatedPhotometry:
                                 )
                                 _log("")
                                 sys.exit(0)
-                            else:
-                                _log(f"  [WARNING] Pre-fetch of '{_cat_name}' failed: {_ce}")
-                        except Exception as _ce:
                             _log(f"  [WARNING] Pre-fetch of '{_cat_name}' failed: {_ce}")
+
+                    # Auto-resolved mappings demote a failed winner to the
+                    # best still-working candidate per band rather than
+                    # stopping the run.  A "0 sources" failure means the
+                    # survey genuinely does not cover the field, so the
+                    # demotion is persisted to the optimizer cache; anything
+                    # else is treated as transient and falls back for this
+                    # run only.
+                    if (
+                        _auto_mode
+                        and _prefetch_failed
+                        and not backup_yaml.get("catalog", {}).get(
+                            "build_catalog", False
+                        )
+                    ):
+                        while True:
+                            if isinstance(_use_cat, dict):
+                                _failed_keys = [
+                                    k
+                                    for k, v in _use_cat.items()
+                                    if str(v).strip().lower()
+                                    in _prefetch_failed
+                                ]
+                            elif (
+                                _use_cat is not None
+                                and str(_use_cat).strip().lower()
+                                in _prefetch_failed
+                            ):
+                                _failed_keys = [None]
+                            else:
+                                _failed_keys = []
+                            _acted = False
+                            for _k in _failed_keys:
+                                _band = (
+                                    str(_k)
+                                    if _k is not None
+                                    and str(_k).strip().lower()
+                                    not in {"default", "*", "all"}
+                                    else None
+                                )
+                                _nxt = next(
+                                    iter(_auto_candidates(_band)), None
+                                )
+                                if _nxt is None:
+                                    continue
+                                _acted = True
+                                _was = (
+                                    _use_cat[_k] if _k is not None else _use_cat
+                                )
+                                _log(
+                                    f"  Catalog '{_was}' failed; trying "
+                                    f"'{_nxt}'"
+                                    + (f" for {_band}-band" if _band else "")
+                                )
+                                try:
+                                    _prefetch_one(_nxt)
+                                except Exception as _ce2:
+                                    _prefetch_failed[
+                                        str(_nxt).strip().lower()
+                                    ] = _ce2
+                                    _log(
+                                        "  [WARNING] Fallback catalog "
+                                        f"'{_nxt}' also failed: "
+                                        f"{str(_ce2).splitlines()[0]}"
+                                    )
+                                else:
+                                    if _k is not None:
+                                        _use_cat[_k] = _nxt
+                                    else:
+                                        _use_cat = _nxt
+                            if not _acted:
+                                break
+
+                        _unresolved = (
+                            [
+                                k
+                                for k, v in _use_cat.items()
+                                if str(v).strip().lower() in _prefetch_failed
+                            ]
+                            if isinstance(_use_cat, dict)
+                            else (
+                                [None]
+                                if _use_cat is not None
+                                and str(_use_cat).strip().lower()
+                                in _prefetch_failed
+                                else []
+                            )
+                        )
+                        if _unresolved:
+                            _log(
+                                ascii_card(
+                                    "No working photometric catalog found",
+                                    [
+                                        f"Target: RA={backup_yaml['target_ra']:.6f} deg, "
+                                        f"Dec={backup_yaml['target_dec']:.6f} deg",
+                                        "",
+                                        "'auto' tried every candidate catalog and all",
+                                        "queries failed:",
+                                    ]
+                                    + [
+                                        "  - "
+                                        + str(_c)
+                                        + ": "
+                                        + str(_prefetch_failed[_c]).splitlines()[0]
+                                        for _c in sorted(_prefetch_failed)
+                                    ]
+                                    + [
+                                        "",
+                                        "Check the failing services and re-run, or set",
+                                        "'catalog.use_catalog' to a working backend.",
+                                    ],
+                                )
+                                if ascii_card
+                                else "No working photometric catalog found."
+                            )
+                            _log("")
+                            sys.exit(0)
+
+                        # Commit the remapped selection for this run.
+                        backup_yaml.setdefault("catalog", {})[
+                            "use_catalog"
+                        ] = _use_cat
+                        if isinstance(_use_cat, dict):
+                            _unique_cats = sorted(
+                                {
+                                    str(v).strip()
+                                    for v in _use_cat.values()
+                                    if v is not None and str(v).strip()
+                                }
+                            )
+                        elif _use_cat is not None and str(_use_cat).strip():
+                            _unique_cats = [str(_use_cat).strip()]
+                        else:
+                            _unique_cats = []
+
+                        # A genuine 0-source (no coverage) failure demotes the
+                        # catalog in the optimizer cache so restarts skip it.
+                        _demoted = any(
+                            isinstance(e, RuntimeError)
+                            and "0 sources" in str(e)
+                            for e in _prefetch_failed.values()
+                        )
+                        if (
+                            _demoted
+                            and isinstance(_use_cat, dict)
+                            and _opt_cache
+                            and os.path.exists(_opt_cache)
+                        ):
+                            try:
+                                with open(_opt_cache) as _fh:
+                                    _cached = yaml.safe_load(_fh) or {}
+                                _cached["use_catalog"] = {
+                                    str(k): str(v)
+                                    for k, v in _use_cat.items()
+                                }
+                                with open(_opt_cache, "w") as _fh:
+                                    yaml.safe_dump(
+                                        _cached, _fh, sort_keys=True
+                                    )
+                                _log(
+                                    "  Demoted failed catalog(s) in cached "
+                                    f"selection: {_opt_cache}"
+                                )
+                            except Exception as _we:
+                                _log(
+                                    "  [WARNING] Could not update cached "
+                                    f"catalog selection ({_we})"
+                                )
                 except Exception as _pe:
                     _log(f"[WARNING] Catalog pre-download step failed: {_pe}")
                     _log("         main.py will retry per-image (cached CSV may still exist).")

@@ -1048,6 +1048,26 @@ def normalize_target_name(name):
     return name
 
 
+def canonical_target_name(input_yaml):
+    """Resolve the target-name label used for catalog cache paths.
+
+    Applies the same fallback everywhere (driver pre-fetch, per-image
+    main.py, catalog downloads): the configured name with transient
+    prefixes stripped, ``"Transient"`` when only coordinates exist, or
+    ``"Center of Field"`` when neither is set.  Blank names count as
+    unset, matching the check_tns conflict guard.
+    """
+    name = input_yaml.get("target_name")
+    if name is not None and str(name).strip() != "":
+        return normalize_target_name(str(name).strip())
+    if (
+        input_yaml.get("target_ra") is not None
+        and input_yaml.get("target_dec") is not None
+    ):
+        return "Transient"
+    return "Center of Field"
+
+
 def format_exception_origin(exc: BaseException) -> str:
     """
     Return ``path:lineno`` for the stack frame where *exc* was raised.
