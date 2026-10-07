@@ -16,9 +16,9 @@ default_input:
 
   global_verbose_level: 1 # int|str --- Console verbosity: 0/quiet=warnings, errors, and the final result only; 1/normal=stage progress and key measurements; 2/verbose=intermediate diagnostics; 3/debug=full internal diagnostics. The per-image LOG_*.log file always records everything (DEBUG). CLI flags -v/-q/--verbose-level override this at runtime.
 
-  target_name: Transient # str --- Target name used in outputs (e.g. IAU name).
-  target_ra: null # float --- Target right ascension (degrees, FK5/J2000).
-  target_dec: null # float --- Target declination (degrees, FK5/J2000).
+  target_name: Transient # str --- Target name used in outputs (e.g. IAU name). A real name is resolved via TNS/SIMBAD to obtain coordinates; setting a real name together with `target_ra`/`target_dec` is a config error. The default `Transient` is a placeholder, not a lookup target.
+  target_ra: null # float --- Target right ascension (degrees, FK5/J2000). Mutually exclusive with a real `target_name` (see above).
+  target_dec: null # float --- Target declination (degrees, FK5/J2000). Mutually exclusive with a real `target_name`.
 
   # Additional targets to fit simultaneously with the primary target.
   # Useful when a nearby contaminating source (e.g. another transient or
@@ -438,6 +438,8 @@ default_input:
     catalog_radius: 0.25 # float --- Search radius (degrees) around target for catalog query.
     catalog_query_radius_arcmin: null # float|null --- Cone radius (arcmin) for per-image catalog downloads. The driver sets this from the footprint union so the cone covers (and is limited to) the detector extent; when unset, main.py sizes it from each image's WCS, or its pixel scale when no WCS exists (clamped to 2-60 arcmin, default 10).
     max_distance: 10 # float --- Max distance (arcmin) from the target a catalog source may sit before clean() drops it. Raised automatically to at least the resolved query radius so a widened cone is not re-trimmed.
+    pan_starrs_max_retries: 3 # int --- Attempts for the MAST Pan-STARRS mean-object API before the query is declared failed (read timeouts are common on wide cones). An exhausted query raises a distinct "query failed" error so it is not conflated with a genuine 0-source (no coverage) result.
+    pan_starrs_retry_base_delay_sec: 5.0 # float --- Initial backoff (seconds) between Pan-STARRS query attempts; doubles each retry.
     blend_neighbor_radius_arcsec: 6.0 # float --- Drop catalog sources within this separation of a much brighter catalog neighbour (see blend_neighbor_dmag). Targets spurious faint entries near bright stars (e.g. Pan-STARRS artifacts) and genuinely contaminated faint companions. Set <= 0 to disable.
     blend_neighbor_dmag: 3.0 # float --- Minimum magnitude difference (image band) that marks the fainter member of a close pair as blend-contaminated. Set <= 0 to disable.
     gaia_xp_radius_deg: 0.1667 # float --- Search radius (degrees) for Gaia XP query (if used).
