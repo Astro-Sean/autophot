@@ -154,7 +154,7 @@ PLOT_COLORS = {
     'sfft_scatter':     '#4E857B',  # Sage - SFFT_Matching scatter
     'hist_primary':     '#005CAB',  # Medium blue - single-colour histograms
     'snr_mag_scatter':  '#4E857B',  # Sage - S/N vs magnitude scatter
-    'injection_site':   '#5B9BD5',  # Sky blue - injection-site markers on images
+    'injection_site':   '#00E5FF',  # Bright cyan - injection-site markers (high contrast on gray images)
     'epsf_recovery':    '#003366',  # Navy - ePSF injection-recovery markers
     'threshold_line':   '#D9A020',  # Deep yellow - median/threshold guide lines
 

@@ -734,7 +734,26 @@ class Zeropoint:
                     f"{n_brightness} mag-range[{upperMaglimit:.1f}-{lowerMaglimit:.1f}]"
                 )
 
-            low_snr = sources["threshold"] < threshold_limit
+            # 'threshold' is peak-pixel S/N, which undersells aperture S/N on
+            # oversampled images; gate on the better of the two so calibrators
+            # with real flux are not lost on well-oversampled data.
+            _thr_snr = pd.to_numeric(
+                sources["threshold"], errors="coerce"
+            ).to_numpy(dtype=float)
+            _aper_col = next(
+                (c for c in ("SNR", "snr_ap", "snr") if c in sources.columns),
+                None,
+            )
+            if _aper_col is not None:
+                _det_snr = np.fmax(
+                    _thr_snr,
+                    pd.to_numeric(
+                        sources[_aper_col], errors="coerce"
+                    ).to_numpy(dtype=float),
+                )
+            else:
+                _det_snr = _thr_snr
+            low_snr = _det_snr < threshold_limit
             n_snr = low_snr.sum()
             if n_snr > 0:
                 removed_parts.append(f"{n_snr} threshold<{threshold_limit:.0f}")

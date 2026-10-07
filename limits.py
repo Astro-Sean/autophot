@@ -2133,10 +2133,10 @@ class Limits:
             # -----------------------------------------------------------------
             n_final = int(lim_cfg.get("inject_final_n_sites",
                                       lim_cfg.get("inject_quiet_n_sites", 100)))
-            # Floor of 4: the completeness fit needs a handful of distinct
+            # Floor of 6: the completeness fit needs a handful of distinct
             # sites to stay honest on spatially varying backgrounds; fewer
             # than that measures a single spot rather than a field limit.
-            n_final = max(4, min(n_final, 500))
+            n_final = max(6, min(n_final, 500))
 
             # Candidate pool: a modest multiple of the final count, enough to
             # survive filtering without paying per-candidate cost on thousands.
@@ -4906,36 +4906,43 @@ class Limits:
                     if not (np.isfinite(sx) and np.isfinite(sy)):
                         continue
                     site_circle = Circle((sx, sy), radius=aperture_radius,
-                                        edgecolor=PLOT_COLORS.get('injection_site', '#7FB8D9'), facecolor='none', linestyle='--', linewidth=0.5)
+                                        edgecolor=PLOT_COLORS.get('injection_site', '#00E5FF'), facecolor='none', linestyle='--', linewidth=0.9)
                     ax_sites.add_patch(site_circle)
-                    ax_sites.plot([sx], [sy], '+', color=PLOT_COLORS.get('injection_site', '#7FB8D9'), markersize=4, markeredgewidth=0.5)
+                    ax_sites.plot([sx], [sy], '+', color=PLOT_COLORS.get('injection_site', '#00E5FF'), markersize=5, markeredgewidth=0.9)
 
                 ax_sites.set_title("Injection sites", fontsize=9)
                 ax_sites.set_xlabel('X [pixels]', fontsize=8)
                 ax_sites.set_ylabel('Y [pixels]', fontsize=8)
                 ax_sites.tick_params(labelsize=8)
 
-                # Site markers have no other label; name them once at figure
-                # level. The guard keeps combined multi-row figures from
-                # stacking duplicate legends.
-                if not fig.legends:
+                # Site markers have no other label; name them inside the
+                # main completeness panel (upper right stays empty on the
+                # descending recovery curve).  The former figure-level
+                # legend above the axes overlapped the top-axis label.
+                if draw_main_plot:
                     import matplotlib.lines as mlines
 
-                    _site_color = PLOT_COLORS.get('injection_site', '#7FB8D9')
-                    fig.legend(
+                    _site_color = PLOT_COLORS.get(
+                        'injection_site', '#00E5FF'
+                    )
+                    _prev_leg = ax.get_legend()
+                    if _prev_leg is not None:
+                        ax.add_artist(_prev_leg)
+                    ax.legend(
                         handles=[
                             mlines.Line2D(
                                 [], [], marker="+", linestyle="None",
                                 color=_site_color, markersize=6,
-                                markeredgewidth=0.8,
+                                markeredgewidth=0.9,
                                 label="Injection site",
                             )
                         ],
-                        loc="upper center",
-                        bbox_to_anchor=(0.5, 1.0),
+                        loc="upper right",
                         ncol=1,
                         fontsize=8,
-                        frameon=False,
+                        frameon=True,
+                        framealpha=0.85,
+                        edgecolor="0.7",
                     )
 
             # Dashed lines at the top of the main plot marking the demo

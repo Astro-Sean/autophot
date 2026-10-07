@@ -496,6 +496,7 @@ default_input:
     fwhm_reject_sigma: 3.0 # float --- MAD sigma-clip band on calibrator FWHM in Zeropoint.clean(): rejects extended sources (galaxies, blends) above and CR-like narrow detections below the stellar locus. Set <= 0 to disable.
     fwhm_reject_min_sources: 4 # int --- Minimum calibrators with valid FWHM before the FWHM clip engages. Below this the median/MAD locus is too unstable to trust.
     fwhm_reject_min_keep: 3 # int --- Keep-floor for the FWHM clip: skipped if it would leave fewer calibrators than this. The ZP fit needs only a handful of clean points, so a sparse inlier set is still usable.
+    saturation_check_min_keep: 3 # int --- Keep-floor for the detection-S/N gate in check_saturation_range: if removing low-S/N calibrators would leave fewer than this, the highest-S/N sources are kept instead. Prevents the gate from starving the ZP fit on sparse fields.
     variable_source_match_radius_pix: 5.0 # float --- Matching radius (pixels) for removing known variable sources (from SIMBAD) from the ZP calibration catalog. Sources within this distance of a known variable are excluded from the zeropoint fit.
     defect_exclusion_fwhm: 2.0 # float --- Calibrators within this distance (in FWHM units) of hardware_defects_mask pixels (trails, bad columns, saturation, MaxiMask classes) get a defect_flag and are rejected from the ZP fit: masked pixels in the aperture/PSF footprint bias measured flux even when the fit converged. The flag is kept on the CALIB output catalog. Set to 0 to disable flagging.
     reject_defect_sources: True # bool --- Drop defect_flagged calibrators in Zeropoint.clean() (see defect_exclusion_fwhm). When False the flag is still written to the CALIB catalog but not used as a rejection.
@@ -590,7 +591,7 @@ default_input:
     scale_growth_factor: 1.5 # float --- If no quiet injection sites are found, multiply runtime `scale` by this factor and retry (up to scale_growth_max_px).
     scale_growth_max_px: 600 # int --- Maximum runtime `scale` (pixels) allowed during limiting-magnitude quiet-site retries.
     injection_n_sites: 25 # int --- Legacy: Number of quiet injection sites around the target used for injection/recovery trials. Prefer inject_final_n_sites.
-    inject_final_n_sites: 4 # int --- Target number of final injection sites after filtering and spatial selection (default 4, clamped 4-500). Sites are distributed uniformly around the target via farthest-point sampling.
+    inject_final_n_sites: 6 # int --- Target number of final injection sites after filtering and spatial selection (default 6, clamped 6-500). Sites are distributed uniformly around the target via farthest-point sampling.
     inject_candidate_n_sites: 0 # int --- Candidate pool size before filtering (0 = auto-size to 3x final count, min 150, max 5000). Larger pools improve quiet-site ranking but increase measurement cost.
     injection_jitter_repetitions: 3 # int --- Sub-pixel jitter repetitions per site per magnitude (more = smoother completeness curve; slower).
     injection_jitter_pix: 0.5 # float --- Radius (pixels) of the uniform sub-pixel offset applied to jitter repetitions 2..N (rep 1 uses the nominal site position).
