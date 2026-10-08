@@ -84,6 +84,100 @@ def _object_label(otype, name, max_len: int = 20):
     return label
 
 
+def _resolve_plot_snr(data, method, err_col):
+    import numpy as np
+    import pandas as pd
+
+    columns = {str(column).lower(): column for column in data.columns}
+    method_low = str(method).strip().lower()
+    method_snr_col = columns.get(f"snr_{method_low}")
+    if method_snr_col is not None:
+        return pd.to_numeric(data[method_snr_col], errors="coerce").to_numpy(
+            dtype=float
+        )
+
+    flux_col = columns.get(f"flux_{method_low}")
+    flux_err_col = columns.get(f"flux_{method_low}_err")
+    if flux_col is not None and flux_err_col is not None:
+        flux = pd.to_numeric(data[flux_col], errors="coerce").to_numpy(
+            dtype=float
+        )
+        flux_err = pd.to_numeric(data[flux_err_col], errors="coerce").to_numpy(
+            dtype=float
+        )
+        return np.divide(
+            np.abs(flux),
+            flux_err,
+            out=np.full(len(data), np.nan),
+            where=(flux_err > 0) & np.isfinite(flux_err),
+        )
+
+    snr_col = columns.get("snr")
+    if snr_col is not None:
+        return pd.to_numeric(data[snr_col], errors="coerce").to_numpy(dtype=float)
+
+    mag_err = pd.to_numeric(data[err_col], errors="coerce").to_numpy(dtype=float)
+    return np.divide(
+        2.5 / np.log(10.0),
+        mag_err,
+        out=np.full(len(data), np.nan),
+        where=(mag_err > 0) & np.isfinite(mag_err),
+    )
+
+
+def _instrumental_limit_to_apparent(data, band, method):
+    import numpy as np
+    import pandas as pd
+
+    limit_col = (
+        "limiting_inst_mag"
+        if "limiting_inst_mag" in data.columns
+        else ("lmag" if "lmag" in data.columns else None)
+    )
+    if limit_col is None:
+        return pd.Series(np.nan, index=data.index, dtype=float)
+
+    method_low = str(method).strip().lower()
+    band_low = str(band).strip().lower()
+    columns = {str(column).lower(): column for column in data.columns}
+    zp_col = next(
+        (
+            columns[name]
+            for name in (
+                f"zp_{method_low}",
+                f"zp_{band_low}_{method_low}",
+            )
+            if name in columns
+        ),
+        None,
+    )
+    if zp_col is None:
+        return pd.Series(np.nan, index=data.index, dtype=float)
+
+    limit = pd.to_numeric(data[limit_col], errors="coerce")
+    zeropoint = pd.to_numeric(data[zp_col], errors="coerce")
+    return limit + zeropoint
+
+
+def _resolve_plot_limit(data, band, method, snr_limit, adaptive_limit_col, mag_col):
+    import numpy as np
+    import pandas as pd
+
+    for column in (
+        adaptive_limit_col,
+        f"limiting_mag_{snr_limit:.0f}s2n",
+        "limiting_mag",
+    ):
+        if column and column in data.columns:
+            values = pd.to_numeric(data[column], errors="coerce")
+            if np.isfinite(values).any():
+                return values
+
+    if "limiting_inst_mag" in data.columns or "lmag" in data.columns:
+        return _instrumental_limit_to_apparent(data, band, method)
+    return pd.to_numeric(data[mag_col], errors="coerce")
+
+
 class Plot:
     """Diagnostic plotting utilities for AutoPHOT.
 
@@ -1403,7 +1497,8 @@ class Plot:
         """
         Plot lightcurve with detections and optional upper limits.
         Detection = SNR >= snr_limit and (beta > beta_limit if 'beta' present).
-        Non-detections are plotted as upper limits at limiting_inst_mag (instrumental limiting magnitude) when show_limits=True.
+        Non-detections are plotted as apparent-magnitude upper limits
+        when show_limits=True.
 
         Parameters
         ----------
@@ -1620,44 +1715,7 @@ class Plot:
             if data_band.empty:
                 continue
 
-            col_lc = {str(c).lower(): c for c in data_band.columns}
-
-            # Resolve SNR: match lightcurve-style priority; headers are usually lowercase.
-            if method_u == "PSF" and "snr_psf" in col_lc:
-                snr = np.asarray(data_band[col_lc["snr_psf"]], dtype=float)
-            elif (
-                method_u == "PSF"
-                and "flux_psf" in col_lc
-                and "flux_psf_err" in col_lc
-            ):
-                err_psf = np.asarray(data_band[col_lc["flux_psf_err"]], dtype=float)
-                snr = np.divide(
-                    np.asarray(data_band[col_lc["flux_psf"]], dtype=float),
-                    err_psf,
-                    out=np.full(len(data_band), np.nan),
-                    where=(err_psf > 0) & np.isfinite(err_psf),
-                )
-            elif method_u == "AP" and "snr_ap" in col_lc:
-                snr = np.asarray(data_band[col_lc["snr_ap"]], dtype=float)
-            elif "snr" in col_lc:
-                snr = np.asarray(data_band[col_lc["snr"]], dtype=float)
-            elif "snr_psf" in col_lc:
-                snr = np.asarray(data_band[col_lc["snr_psf"]], dtype=float)
-            elif "snr_ap" in col_lc:
-                snr = np.asarray(data_band[col_lc["snr_ap"]], dtype=float)
-            else:
-                err_vals = np.asarray(
-                    pd.to_numeric(data_band[err_col], errors="coerce"), dtype=float
-                )
-                mag_vals = np.asarray(
-                    pd.to_numeric(data_band[mag_col], errors="coerce"), dtype=float
-                )
-                snr = np.divide(
-                    mag_vals,
-                    err_vals,
-                    out=np.zeros(len(data_band)),
-                    where=err_vals > 0,
-                )
+            snr = _resolve_plot_snr(data_band, method, err_col)
 
             # Detection: SNR >= snr_limit and (optionally) beta > beta_limit
             beta_ok = (
@@ -1758,24 +1816,14 @@ class Plot:
                         zorder=0,
                     )
             if show_limits and not nondetects.empty:
-                # Upper limits sit at the limiting magnitude (fainter = non-detection).
-                # Column priority: adaptive S/N selection, then per-threshold
-                # limiting_mag_<n>s2n, then the standard columns.
-                if adaptive_limit_col and adaptive_limit_col in nondetects.columns:
-                    y_lim = nondetects[adaptive_limit_col]
-                elif f"limiting_mag_{snr_limit:.0f}s2n" in nondetects.columns and np.any(
-                    np.isfinite(nondetects[f"limiting_mag_{snr_limit:.0f}s2n"])
-                ):
-                    y_lim = nondetects[f"limiting_mag_{snr_limit:.0f}s2n"]
-                elif "limiting_inst_mag" in nondetects.columns and np.any(
-                    np.isfinite(nondetects["limiting_inst_mag"])
-                ):
-                    y_lim = nondetects["limiting_inst_mag"]
-                elif "lmag" in nondetects.columns and np.any(np.isfinite(nondetects["lmag"])):
-                    # Backwards compatibility when plotting older output CSVs.
-                    y_lim = nondetects["lmag"]
-                else:
-                    y_lim = nondetects[mag_col]
+                y_lim = _resolve_plot_limit(
+                    nondetects,
+                    b,
+                    method,
+                    snr_limit,
+                    adaptive_limit_col,
+                    mag_col,
+                )
                 x_nd = x_transform(nondetects["mjd"])
                 ax1.errorbar(
                     x_nd,
