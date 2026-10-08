@@ -318,40 +318,125 @@ def _header_numeric_value(cfg_value, header):
         return None
 
 
-def _write_analytic_psf_stamp(out_path, fwhm_px, input_yaml, n_stars=0):
+def _analytic_star_cutouts(image, sources, cutout_n, mask=None):
+    """Extract NaN-padded star cutouts for the joint analytic-PSF fit.
+
+    ``sources`` needs ``x_pix``/``y_pix`` columns in *image* pixel
+    coordinates.  NaN-padded extraction keeps pool stars near the edge
+    (photutils extract_stars drops them outright) and the composite fit
+    masks non-finite pixels anyway.  Returns SimpleNamespace records
+    understood by ``psf._fit_moffat_composite_full``.
+    """
+    from types import SimpleNamespace
+
+    from astropy.nddata.utils import extract_array
+
+    stars = []
+    if sources is None or len(sources) == 0:
+        return stars
+    img = np.asarray(image, dtype=float)
+    cutout_n = int(cutout_n)
+    half = cutout_n // 2
+    mask_arr = (
+        np.asarray(mask, dtype=bool)
+        if mask is not None and np.shape(mask) == np.shape(img)
+        else None
+    )
+    for row in sources.itertuples():
+        cx = float(getattr(row, "x_pix", np.nan))
+        cy = float(getattr(row, "y_pix", np.nan))
+        if not (np.isfinite(cx) and np.isfinite(cy)):
+            continue
+        # Integer-centred extraction: output index `half` maps exactly
+        # to (iy, ix), so the source's cutout centre is its offset from
+        # that anchor.
+        ix, iy = int(np.rint(cx)), int(np.rint(cy))
+        cut = extract_array(
+            img,
+            (cutout_n, cutout_n),
+            (iy, ix),
+            mode="partial",
+            fill_value=np.nan,
+        )
+        mcut = None
+        if mask_arr is not None:
+            # Masked-region cutouts carry interpolated values that are
+            # not stellar signal; the composite fit must not see them.
+            mcut = extract_array(
+                mask_arr.astype(float),
+                (cutout_n, cutout_n),
+                (iy, ix),
+                mode="partial",
+                fill_value=1.0,
+            ).astype(bool)
+        ok = np.isfinite(cut)
+        if mcut is not None:
+            ok &= ~mcut
+        if ok.sum() < 30:
+            continue
+        stars.append(
+            SimpleNamespace(
+                data=cut,
+                cutout_center=np.array(
+                    [cx - (ix - half), cy - (iy - half)]
+                ),
+                weights=ok.astype(float),
+                mask=mcut,
+                flux=np.nan,
+            )
+        )
+    return stars
+
+
+def _zogy_fwhm_fallback(*values):
+    """First finite, positive value in *values*, else 5.0 px."""
+    for v in (*values, 5.0):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(v) and v > 0:
+            return v
+    return 5.0
+
+
+def _write_analytic_psf_stamp(
+    out_path, fwhm_px, input_yaml, n_stars=0, stars=None, stamp=None
+):
     """Write a native-resolution analytic PSF stamp FITS for ZOGY.
 
-    Used when the empirical ePSF build produced no model file.  ZOGY
-    only needs a plausible PSF for its Fourier matched filter, so a
-    composite-Moffat at the measured FWHM is a better fallback than
-    dropping to SFFT on a starved field.  The stamp carries OVERSAMP=1
-    so ``_load_psf_stamp_native`` reads it back unchanged, and the
-    PSFBUILD provenance key marks it as analytic (photometry's
-    empirical-only policy does not apply to subtraction PSFs).
+    ZOGY only needs a plausible PSF for its Fourier matched filter, so
+    a composite-Moffat at the measured FWHM is a better fallback than
+    dropping to SFFT on a starved field - and a fitted composite is a
+    reasonable model outright when ePSF builds do not converge.
+
+    ``stars`` are cutouts from ``_analytic_star_cutouts``: when given,
+    the composite Moffat is fitted to them rather than written at its
+    canonical profile.  ``stamp`` short-circuits the fit entirely - an
+    already-built ImagePSF (e.g. the photometry analytic model) is
+    serialized as-is.  The stamp carries OVERSAMP=1 so
+    ``_load_psf_stamp_native`` reads it back unchanged, and PSFBUILD
+    marks it analytic (photometry's empirical-only policy does not
+    apply to subtraction PSFs).
     """
     from psf import _analytic_psf_stamp
 
-    beta = max(
-        1.1,
-        float(
-            (input_yaml.get("photometry") or {}).get(
-                "psf_init_moffat_beta", 4.765
-            )
-        ),
-    )
+    phot_cfg = input_yaml.get("photometry") or {}
+    beta = max(1.1, float(phot_cfg.get("psf_init_moffat_beta", 4.765)))
     fwhm_px = max(1.0, float(fwhm_px))
     cutout_n = int(2 * np.ceil(6.0 * fwhm_px) + 1)
-    stamp, _comps = _analytic_psf_stamp(
-        fwhm_px, 1, cutout_n, beta, stars=None
-    )
+    if stamp is None:
+        stamp, _comps = _analytic_psf_stamp(
+            fwhm_px, 1, cutout_n, beta, stars=stars, phot_cfg=phot_cfg
+        )
     data = np.asarray(stamp.data, dtype=float)
     hdr = fits.Header()
     hdr["OVERSAMP"] = (1, "PSF oversampling factor (native grid)")
-    hdr["PSFNPIX"] = (int(cutout_n), "native-pixel cutout size")
+    hdr["PSFNPIX"] = (int(data.shape[0]), "native-pixel cutout size")
     hdr["FWHM_PIX"] = (float(fwhm_px), "Image FWHM in native pixels")
-    hdr["NPSFSTAR"] = (int(n_stars), "Stars used in ePSF build")
+    hdr["NPSFSTAR"] = (int(n_stars), "Stars used in PSF model build")
     hdr["PSFBUILD"] = (
-        "analytic-composite",
+        str(getattr(stamp, "_autophot_kind", "analytic-composite")),
         "PSF model construction method",
     )
     safe_fits_write(out_path, data, hdr)
@@ -5527,10 +5612,6 @@ def run_photometry():
             and bool(phot_cfg.get("psf_analytic_fallback", True))
         ):
             try:
-                from types import SimpleNamespace
-
-                from astropy.nddata.utils import extract_array
-
                 from psf import _analytic_psf_stamp
 
                 _an_beta = max(
@@ -5538,65 +5619,12 @@ def run_photometry():
                 )
                 _an_fwhm = max(1.0, float(ImageFWHM))
                 _an_cutout = int(2 * np.ceil(6.0 * _an_fwhm) + 1)
-                _an_stars = []
-                if psf_source_pool is not None and len(psf_source_pool) > 0:
-                    _an_src = psf_source_pool.loc[
-                        np.isfinite(psf_source_pool["x_pix"])
-                        & np.isfinite(psf_source_pool["y_pix"])
-                    ]
-                    # NaN-padded extraction keeps pool stars near the edge;
-                    # photutils extract_stars drops them outright and the
-                    # composite fit masks non-finite pixels anyway.
-                    _an_half = _an_cutout // 2
-                    _an_mask_arr = (
-                        np.asarray(hardware_defects_mask, dtype=bool)
-                        if hardware_defects_mask is not None
-                        and np.shape(hardware_defects_mask)
-                        == np.shape(image)
-                        else None
-                    )
-                    for _row in _an_src.itertuples():
-                        _cx = float(_row.x_pix)
-                        _cy = float(_row.y_pix)
-                        # Integer-centred extraction: output index _an_half
-                        # maps exactly to (_iy, _ix), so the source's
-                        # cutout centre is its offset from that anchor.
-                        _ix, _iy = int(np.rint(_cx)), int(np.rint(_cy))
-                        _cut = extract_array(
-                            np.asarray(image, dtype=float),
-                            (_an_cutout, _an_cutout),
-                            (_iy, _ix),
-                            mode="partial",
-                            fill_value=np.nan,
-                        )
-                        _mcut = None
-                        if _an_mask_arr is not None:
-                            # Masked-region cutouts carry interpolated
-                            # values that are not stellar signal; the
-                            # composite fit must not see them.
-                            _mcut = extract_array(
-                                _an_mask_arr.astype(float),
-                                (_an_cutout, _an_cutout),
-                                (_iy, _ix),
-                                mode="partial",
-                                fill_value=1.0,
-                            ).astype(bool)
-                        _ok = np.isfinite(_cut)
-                        if _mcut is not None:
-                            _ok &= ~_mcut
-                        if _ok.sum() < 30:
-                            continue
-                        _an_stars.append(
-                            SimpleNamespace(
-                                data=_cut,
-                                cutout_center=np.array(
-                                    [_cx - (_ix - _an_half), _cy - (_iy - _an_half)]
-                                ),
-                                weights=_ok.astype(float),
-                                mask=_mcut,
-                                flux=np.nan,
-                            )
-                        )
+                _an_stars = _analytic_star_cutouts(
+                    image,
+                    psf_source_pool,
+                    _an_cutout,
+                    mask=hardware_defects_mask,
+                )
                 epsf_model, _ = _analytic_psf_stamp(
                     _an_fwhm,
                     1,
@@ -6163,9 +6191,14 @@ def run_photometry():
                     )
                     variable_sources = pd.DataFrame(columns=variable_sources.columns)
         # source_check intentionally has no mask parameter: show all sources.
+        _psf_sources_for_plot = (
+            None
+            if str(psf_model_kind).lower().startswith("analytic")
+            else PSFSources
+        )
         Plot(input_yaml=input_yaml).source_check(
             image=image,
-            psfSources=PSFSources,
+            psfSources=_psf_sources_for_plot,
             catalogSources=CatalogSources,
             FWHMSources=FWHMSources,
             variable_sources=variable_sources,
@@ -6973,9 +7006,10 @@ def run_photometry():
                     )
                 except ValueError:
                     template_gain = 1.0
-                    tpl_gain_key = "fallback (header lacks GAIN)"
+                    tpl_gain_key = "fallback (header lacks usable gain)"
                     logging.warning(
-                        "Template header lacks GAIN; using gain=1.0 e-/ADU for aperture photometry."
+                        "Template header lacks a usable gain; using gain=1.0 e-/ADU "
+                        "for aperture photometry."
                     )
                 logging.info(
                     "Template: exptime=%.5g s, gain=%.5g e-/ADU, aperture=%.1f px",
@@ -8814,6 +8848,8 @@ def run_photometry():
             # matched stars when enough exist; otherwise the photometry
             # ePSF written earlier (PSF_model_image_<base>) is picked up
             # by _pick_psf() in subtract().
+            _zogy_sci_psf = None
+            _zogy_tpl_psf = None
             if (
                 "zogy"
                 in str(
@@ -8829,6 +8865,21 @@ def run_photometry():
                         or 3
                     ),
                 )
+                # zogy_psf="auto" keeps the ePSF-first build order and
+                # only writes an analytic stamp when no empirical model
+                # materialises; "analytic" skips the ePSF builds and
+                # always hands ZOGY the fitted composite-Moffat model.
+                _zogy_psf_mode = str(
+                    input_yaml["template_subtraction"].get(
+                        "zogy_psf", "auto"
+                    )
+                ).strip().lower()
+                if _zogy_psf_mode not in ("auto", "analytic"):
+                    logging.warning(
+                        "Unknown zogy_psf=%r; using 'auto'.",
+                        _zogy_psf_mode,
+                    )
+                    _zogy_psf_mode = "auto"
                 template_image, template_header = get_image_and_header(
                     templateFpath
                 )
@@ -8937,57 +8988,111 @@ def run_photometry():
                     write_dir,
                     f"PSF_model_template_{_psf_base}.fits",
                 )
-                if df_zogy_template_build is not None:
+                if _zogy_psf_mode == "analytic":
+                    # Fitted composite Moffat on the reference star pool.
+                    # Written under a ZOGY-specific name and passed to
+                    # subtract() explicitly so it cannot be mistaken for
+                    # a photometry ePSF product.
+                    _zogy_tpl_psf = os.path.join(
+                        write_dir, f"ZOGY_PSF_template_{_psf_base}.fits"
+                    )
                     try:
-                        PSF(
-                            image=template_image,
-                            input_yaml=input_yaml,
-                            header=template_header,
-                        ).build(
-                            psfSources=df_zogy_template_build,
-                            mask=None,
-                            make_template_psf=True,
-                            filename_prefix="PSF_model_template",
+                        _tpl_fwhm_an = _zogy_fwhm_fallback(
+                            template_fwhm,
+                            template_header.get("FWHM"),
+                            ImageFWHM,
                         )
-                    except Exception as e:
-                        log_warning_from_exception(
-                            logging.getLogger(),
-                            "ZOGY template PSF build failed",
-                            e,
+                        _tpl_stars = _analytic_star_cutouts(
+                            template_image,
+                            df_zogy_template_build,
+                            int(2 * np.ceil(6.0 * _tpl_fwhm_an) + 1),
                         )
-                if not os.path.exists(_tpl_psf_file):
-                    # The ePSF build can produce no model on starved
-                    # fields (non-converged + out-of-band FWHM, too few
-                    # settled stars).  ZOGY only needs a plausible PSF
-                    # for its matched filter - write an analytic
-                    # composite-Moffat stamp rather than falling to SFFT.
-                    try:
-                        _tpl_fwhm_fb = float(template_fwhm)
-                        if not np.isfinite(_tpl_fwhm_fb) or _tpl_fwhm_fb <= 0:
-                            _tpl_fwhm_fb = float(ImageFWHM)
-                        if not np.isfinite(_tpl_fwhm_fb) or _tpl_fwhm_fb <= 0:
-                            _tpl_fwhm_fb = 5.0
                         _write_analytic_psf_stamp(
-                            _tpl_psf_file,
-                            _tpl_fwhm_fb,
+                            _zogy_tpl_psf,
+                            _tpl_fwhm_an,
                             input_yaml,
-                            n_stars=0
-                            if df_zogy_template_build is None
-                            else len(df_zogy_template_build),
+                            n_stars=len(_tpl_stars),
+                            stars=_tpl_stars or None,
                         )
-                        logging.warning(
-                            "ZOGY: template ePSF build produced no model; "
-                            "wrote analytic Moffat PSF stamp "
-                            "(FWHM %.2f px) so ZOGY can still run.",
-                            _tpl_fwhm_fb,
+                        logging.info(
+                            "ZOGY: fitted analytic template PSF "
+                            "(zogy_psf=analytic, %d star cutouts, "
+                            "FWHM %.2f px) -> %s",
+                            len(_tpl_stars),
+                            _tpl_fwhm_an,
+                            os.path.basename(_zogy_tpl_psf),
                         )
                     except Exception as e:
+                        _zogy_tpl_psf = None
                         log_warning_from_exception(
                             logging.getLogger(),
-                            "ZOGY analytic template-PSF fallback failed; "
+                            "ZOGY analytic template-PSF build failed; "
                             "ZOGY will fall back to SFFT",
                             e,
                         )
+                else:
+                    if df_zogy_template_build is not None:
+                        try:
+                            PSF(
+                                image=template_image,
+                                input_yaml=input_yaml,
+                                header=template_header,
+                            ).build(
+                                psfSources=df_zogy_template_build,
+                                mask=None,
+                                make_template_psf=True,
+                                filename_prefix="PSF_model_template",
+                            )
+                        except Exception as e:
+                            log_warning_from_exception(
+                                logging.getLogger(),
+                                "ZOGY template PSF build failed",
+                                e,
+                            )
+                    if not os.path.exists(_tpl_psf_file):
+                        # The ePSF build can produce no model on starved
+                        # fields (non-converged + out-of-band FWHM, too
+                        # few settled stars).  ZOGY only needs a
+                        # plausible PSF for its matched filter - write
+                        # an analytic composite-Moffat stamp, fitted to
+                        # the reference stars when they exist, rather
+                        # than falling to SFFT.
+                        try:
+                            _tpl_fwhm_fb = _zogy_fwhm_fallback(
+                                template_fwhm,
+                                template_header.get("FWHM"),
+                                ImageFWHM,
+                            )
+                            _tpl_stars = _analytic_star_cutouts(
+                                template_image,
+                                df_zogy_template_build,
+                                int(2 * np.ceil(6.0 * _tpl_fwhm_fb) + 1),
+                            )
+                            _write_analytic_psf_stamp(
+                                _tpl_psf_file,
+                                _tpl_fwhm_fb,
+                                input_yaml,
+                                n_stars=len(_tpl_stars),
+                                stars=_tpl_stars or None,
+                            )
+                            logging.warning(
+                                "ZOGY: template ePSF build produced no "
+                                "model; wrote %s PSF stamp "
+                                "(FWHM %.2f px, %d stars) so ZOGY can "
+                                "still run.",
+                                "fitted analytic composite"
+                                if _tpl_stars
+                                else "canonical Moffat",
+                                _tpl_fwhm_fb,
+                                len(_tpl_stars),
+                            )
+                        except Exception as e:
+                            log_warning_from_exception(
+                                logging.getLogger(),
+                                "ZOGY analytic template-PSF fallback "
+                                "failed; ZOGY will fall back to SFFT",
+                                e,
+                            )
                 # Science PSF: a dedicated matched-star build needs >=5
                 # stars.  Below that the photometry ePSF written earlier
                 # (built from the full vetted pool) is the better model
@@ -9001,14 +9106,105 @@ def run_photometry():
                     write_dir,
                     f"PSF_model_image_{_psf_base}.fits",
                 )
-                _epsf_on_disk = [
-                    p
-                    for p in Path(write_dir).glob("PSF_model_image*.fits")
-                    if "_cell" not in p.name
-                ]
-                if n_matched_s >= 5 or (
-                    n_matched_s >= _zogy_min_stars and not _epsf_on_disk
+
+                def _science_psf_models_on_disk():
+                    roots = (Path(write_dir), Path(write_dir) / "PSF_MODELS")
+                    return [
+                        path
+                        for root in roots
+                        for path in root.glob("PSF_model_image*.fits")
+                        if path.stem.endswith("_" + _psf_base)
+                        and "_cellx" not in path.name
+                    ]
+
+                _epsf_on_disk = _science_psf_models_on_disk()
+                _phot_analytic = (
+                    epsf_model is not None
+                    and str(psf_model_kind).lower().startswith("analytic")
+                )
+
+                def _write_sci_analytic_stamp(out_path):
+                    # Serialize the photometry analytic model verbatim
+                    # when it is already a native-resolution stamp;
+                    # otherwise fit the composite Moffat to the vetted
+                    # science pool (or the matched ZOGY stars).
+                    fwhm = _zogy_fwhm_fallback(ImageFWHM)
+                    reuse = (
+                        _phot_analytic
+                        and np.ndim(getattr(epsf_model, "data", None)) == 2
+                        and int(
+                            np.atleast_1d(
+                                getattr(epsf_model, "oversampling", 1)
+                            )[0]
+                        )
+                        == 1
+                    )
+                    if reuse:
+                        _write_analytic_psf_stamp(
+                            out_path,
+                            fwhm,
+                            input_yaml,
+                            n_stars=len(
+                                getattr(
+                                    epsf_model, "_autophot_star_fits", None
+                                )
+                                or []
+                            ),
+                            stamp=epsf_model,
+                        )
+                        return fwhm, "photometry model reuse"
+                    pool = (
+                        psf_source_pool
+                        if psf_source_pool is not None
+                        and len(psf_source_pool) > 0
+                        else df_zogy_science
+                    )
+                    stars = _analytic_star_cutouts(
+                        image,
+                        pool,
+                        int(2 * np.ceil(6.0 * fwhm) + 1),
+                        mask=hardware_defects_mask,
+                    )
+                    _write_analytic_psf_stamp(
+                        out_path,
+                        fwhm,
+                        input_yaml,
+                        n_stars=len(stars),
+                        stars=stars or None,
+                    )
+                    return fwhm, "%d star cutouts" % len(stars)
+
+                if _zogy_psf_mode == "analytic":
+                    _zogy_sci_psf = os.path.join(
+                        write_dir, f"ZOGY_PSF_image_{_psf_base}.fits"
+                    )
+                    try:
+                        _fwhm, _how = _write_sci_analytic_stamp(
+                            _zogy_sci_psf
+                        )
+                        logging.info(
+                            "ZOGY: analytic science PSF stamp "
+                            "(zogy_psf=analytic, %s, FWHM %.2f px) -> %s",
+                            _how,
+                            _fwhm,
+                            os.path.basename(_zogy_sci_psf),
+                        )
+                    except Exception as e:
+                        _zogy_sci_psf = None
+                        log_warning_from_exception(
+                            logging.getLogger(),
+                            "ZOGY analytic science-PSF build failed; "
+                            "ZOGY will fall back to SFFT",
+                            e,
+                        )
+                elif not _phot_analytic and (
+                    n_matched_s >= 5
+                    or (n_matched_s >= _zogy_min_stars and not _epsf_on_disk)
                 ):
+                    # A matched-star rebuild on a subset of the same
+                    # pool cannot improve on a model the photometry
+                    # stage already vetted, so an analytic photometry
+                    # model skips this build entirely.
                     try:
                         PSF(
                             image=image,
@@ -9026,22 +9222,22 @@ def run_photometry():
                             "ZOGY science PSF build failed",
                             e,
                         )
-                if not _epsf_on_disk and not os.path.exists(_sci_psf_file):
+                _epsf_on_disk = _science_psf_models_on_disk()
+                if (
+                    _zogy_psf_mode != "analytic"
+                    and not _epsf_on_disk
+                    and not os.path.exists(_sci_psf_file)
+                ):
                     try:
-                        _sci_fwhm_fb = float(ImageFWHM)
-                        if not np.isfinite(_sci_fwhm_fb) or _sci_fwhm_fb <= 0:
-                            _sci_fwhm_fb = 5.0
-                        _write_analytic_psf_stamp(
-                            _sci_psf_file,
-                            _sci_fwhm_fb,
-                            input_yaml,
-                            n_stars=n_matched_s,
+                        _fwhm, _how = _write_sci_analytic_stamp(
+                            _sci_psf_file
                         )
                         logging.warning(
                             "ZOGY: no science ePSF available; wrote "
-                            "analytic Moffat PSF stamp (FWHM %.2f px) so "
+                            "analytic PSF stamp (%s, FWHM %.2f px) so "
                             "ZOGY can still run.",
-                            _sci_fwhm_fb,
+                            _how,
+                            _fwhm,
                         )
                     except Exception as e:
                         log_warning_from_exception(
@@ -9050,7 +9246,7 @@ def run_photometry():
                             "ZOGY will fall back to SFFT",
                             e,
                         )
-                elif n_matched_s < 5:
+                elif _zogy_psf_mode != "analytic" and n_matched_s < 5:
                     logging.info(
                         "ZOGY: %d matched sources; %s for the science PSF.",
                         n_matched_s,
@@ -9408,6 +9604,8 @@ def run_photometry():
                     templateNoise=template_weight_path,
                     background_defects_mask=hardware_defects_mask,
                     scale=combined_scale,
+                    science_psf=_zogy_sci_psf,
+                    template_psf=_zogy_tpl_psf,
                 )
                 if fpath is None:
                     logging.warning(
