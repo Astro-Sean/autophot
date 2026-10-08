@@ -232,6 +232,7 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
         # entirely.  Only inject when the base class actually exposes the
         # list -- a photutils refactor that dropped it should disable
         # salvage, not silently diverge.
+        self._epsf_hist = epsf_history
         if epsf_history is not None and isinstance(
             getattr(self, "_epsf", None), list
         ):
@@ -249,6 +250,24 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
                 _fk["filter_non_finite"] = True
         except Exception:
             pass
+
+    def _process_iteration(self, stars, epsf, iter_num, **kwargs):
+        res = super()._process_iteration(
+            stars, epsf, iter_num, **kwargs
+        )
+        # photutils >=3.1 dropped the builder's ``self._epsf`` history
+        # list; when it is absent keep feeding the caller-provided list
+        # with each completed iteration's model so a later crash can be
+        # salvaged.  Under <3.1 the base build loop appends to _epsf
+        # itself, so this branch stays inert there.
+        try:
+            if getattr(self, "_epsf", None) is None and isinstance(
+                self._epsf_hist, list
+            ):
+                self._epsf_hist.append(res[0])
+        except Exception:
+            pass
+        return res
 
     def _fit_star(self, epsf, star, *args, **kwargs):
         # One pathological cutout must not abort the whole build:
@@ -291,14 +310,32 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
 
     def _check_convergence(self, stars, centers, fit_failed):
         res = super()._check_convergence(stars, centers, fit_failed)
-        # res[1] is the squared centre movement over successfully fitted
-        # stars; store it expanded to the flat-star order so the caller
-        # can prune the entries still moving after a non-converged build.
+        # Store the per-star squared centre movement expanded to the
+        # flat-star order so the caller can prune the entries still
+        # moving after a non-converged build.  photutils <3.1 returned
+        # the per-star array as res[1]; >=3.1 returns
+        # (converged, fraction, max_dist_sq, new_centers), so the
+        # per-star term is recomputed from the centers argument there.
         try:
             move = np.full(len(stars.all_stars), np.nan)
-            move[np.logical_not(np.asarray(fit_failed, bool))] = np.asarray(
-                res[1], float
-            )
+            good = np.logical_not(np.asarray(fit_failed, bool))
+            per_star = None
+            try:
+                r1 = np.asarray(res[1], dtype=float)
+                if r1.ndim > 0 and r1.size == int(good.sum()):
+                    per_star = r1
+            except (TypeError, IndexError):
+                per_star = None
+            if per_star is None:
+                new_centers = np.asarray(
+                    stars.cutout_center_flat, dtype=float
+                )
+                dd = np.sum(
+                    (new_centers - np.asarray(centers, dtype=float)) ** 2,
+                    axis=1,
+                )
+                per_star = dd[good]
+            move[good] = per_star
             self._last_move = move
         except Exception:
             self._last_move = None

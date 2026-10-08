@@ -524,16 +524,19 @@ def _zogy_star_psf(
 
     Bright matched sources measure the *actual* field PSF directly --
     independent of ePSF convergence or the header/SExtractor FWHM (both
-    under-measure broad plateau PSFs on resampled frames).  Cutouts are
-    stacked at integer positions; the sub-pixel smearing (~0.3 px worst
-    case) slightly broadens the stack -- acceptable for PSFs of several
-    pixels.
+    under-measure broad plateau PSFs on resampled frames).  Each cutout
+    is recentred on its own centroid before stacking -- matched positions
+    carry ~1 px catalogue centring error that would otherwise smear the
+    core into the wings and inflate the stack width.
 
-    Returns ``(stamp, fwhm, kept_positions)``: an odd-sized unit-
-    normalized azimuthal stamp built from the median radial profile, the
-    profile's interpolated half-maximum crossing FWHM, and the positions
-    that survived the per-star consistency filter (cosmic rays and hot
-    pixels masquerading as matched sources must not collapse the stack).
+    Returns ``(stamp, fwhm, kept_positions)``: a unit-normalized stamp
+    built as the 2D median of the subpixel-recentred, peak-normalized
+    cutouts (the real resampled-frame PSF shape -- an analytic model
+    can carry 2-5x wrong far-wing flux that a matching kernel then
+    prints as core/ring residuals), the half-maximum FWHM measured on
+    that stamp, and the positions that survived the per-star
+    consistency filter (cosmic rays and hot pixels masquerading as
+    matched sources must not collapse the stack).
     ``(None, nan, None)`` when no cutout survives the consistency filter.
     """
     if positions is None or len(positions) < 1:
@@ -549,6 +552,7 @@ def _zogy_star_psf(
     sky_r_in = half - int(np.ceil(0.5 * guess)) - 1
     radii = np.arange(0.0, half - 1, 0.5)
     profs = []
+    shifted = []
     kept_pos = []
     for pos in positions:
         try:
@@ -572,7 +576,26 @@ def _zogy_star_psf(
         sky_std = 1.4826 * float(np.nanmedian(np.abs(c[sky_m] - sky)))
         if not np.isfinite(sky_std) or sky_std < 0:
             sky_std = 0.0
-        peak = float(c[half, half]) - sky
+        # Matched positions carry catalogue centring error (a bad match
+        # or the integer round is enough): profiling about the catalog
+        # position smears the core into the wings and broadens every
+        # member of the stack.  Recentre on the cutout's own centroid.
+        _cb = int(np.ceil(1.5 * guess)) + 2
+        _sub = c[half - _cb : half + _cb + 1, half - _cb : half + _cb + 1]
+        _wsub = np.clip(np.where(np.isfinite(_sub), _sub - sky, 0.0), 0.0, None)
+        _wsum = float(_wsub.sum())
+        if _wsum > 0:
+            _sgy, _sgx = np.mgrid[-_cb : _cb + 1, -_cb : _cb + 1]
+            cx = float((_wsub * _sgx).sum() / _wsum)
+            cy = float((_wsub * _sgy).sum() / _wsum)
+        else:
+            cx = cy = 0.0
+        r_c = np.hypot(gx - cx, gy - cy)
+        _pk_m = (r_c <= 2.0) & np.isfinite(c)
+        peak = (
+            float(np.nanmax(c[_pk_m])) - sky if _pk_m.any()
+            else float(c[half, half]) - sky
+        )
         # A matched science position can land on blank sky in the other
         # frame (e.g. a cosmic ray); its noise "profile" then measures a
         # garbage width and can still slip through the FWHM window.
@@ -584,6 +607,16 @@ def _zogy_star_psf(
             _cp = float(np.nanmax(c))
             if np.isfinite(_cp) and _cp >= 0.9 * saturate:
                 continue
+        # The header saturation gate misses clipped stars whenever the
+        # SATURATE card is absent or bogus (GROND r carries 1e10).  A
+        # flat top is self-evident: the median over the core disk sits
+        # within ~3% of the peak, where even a FWHM~15 px unsaturated
+        # profile keeps the median below ~0.95.
+        _core_m = (r_c <= 2.5) & np.isfinite(c)
+        if _core_m.sum() >= 5:
+            _core_med = float(np.nanmedian(c[_core_m]) - sky) / peak
+            if np.isfinite(_core_med) and _core_med > 0.97:
+                continue
         with warnings.catch_warnings():
             # Empty radial bins (all-NaN cutout corners, gaps past the
             # cutout edge) are expected; nanmedian of an empty slice is
@@ -592,13 +625,25 @@ def _zogy_star_psf(
             prof = np.array(
                 [
                     np.nanmedian(
-                        c[np.isfinite(c) & (r >= ri - 0.5) & (r < ri + 0.5)]
+                        c[
+                            np.isfinite(c)
+                            & (r_c >= ri - 0.5)
+                            & (r_c < ri + 0.5)
+                        ]
                     )
                     - sky
                     for ri in radii
                 ]
             ) / peak
         profs.append(prof)
+        # Subpixel-recentred, peak-normalized cutout for the 2D median
+        # stack: keeps the real PSF shape (ellipticity, resampled-frame
+        # wings) that the azimuthal median profile erases.
+        _cs = np.where(np.isfinite(c), c - sky, 0.0)
+        _cs = _ndimage_shift(
+            _cs, (-cy, -cx), order=3, mode="constant", cval=0.0
+        )
+        shifted.append(_cs / peak)
         kept_pos.append((x, y))
     if len(profs) < 1:
         return None, float("nan"), None
@@ -676,6 +721,7 @@ def _zogy_star_psf(
         # PSF than a blind analytic guess.
         return None, float("nan"), None
     profs = profs[near]
+    shifted = [s for s, k in zip(shifted, near) if k]
     kept_pos = [p for p, k in zip(kept_pos, near) if k]
     med = np.nanmedian(profs, axis=0)
     # Half-maximum crossing with linear interpolation.
@@ -686,12 +732,43 @@ def _zogy_star_psf(
         j = int(i[0])
         frac = (med[j - 1] - 0.5) / (med[j - 1] - med[j] + 1e-30)
         fwhm = 2.0 * (radii[j - 1] + frac * 0.5)
-    # Rebuild an azimuthal stamp from the clipped median profile.
-    med = np.clip(med, 0.0, None)
-    n = 2 * int(np.ceil(3.0 * (fwhm if np.isfinite(fwhm) else guess))) + 1
+    # 2D median of the recentred, peak-normalized cutouts.  Residual
+    # sky offset comes out of the far annulus; negative clips keep
+    # median-of-few noise dips from feeding the FFT denominators.
+    stamp = np.nanmedian(np.asarray(shifted), axis=0)
+    n = stamp.shape[0]
     gy, gx = np.mgrid[0:n, 0:n]
     rr = np.hypot(gx - n // 2, gy - n // 2)
-    stamp = np.interp(rr, radii, med, left=med[0], right=0.0)
+    _edge = stamp[rr > sky_r_in]
+    if _edge.size:
+        stamp = stamp - float(np.nanmedian(_edge))
+    stamp = np.where(np.isfinite(stamp), stamp, 0.0)
+    stamp = np.clip(stamp, 0.0, None)
+    # A median of few members can peak ~1 px off the stamp centre;
+    # left as-is, ifftshift splits the PSF across the padded array
+    # corners and both the kernel and the fidelity probe misread it.
+    _rc = int(np.ceil(1.5 * guess))
+    _core = stamp[
+        n // 2 - _rc : n // 2 + _rc + 1, n // 2 - _rc : n // 2 + _rc + 1
+    ]
+    _csum = float(_core.sum())
+    if _csum > 0:
+        _cgy, _cgx = np.mgrid[-_rc : _rc + 1, -_rc : _rc + 1]
+        _dx = float((_core * _cgx).sum() / _csum)
+        _dy = float((_core * _cgy).sum() / _csum)
+        if np.isfinite(_dx) and np.isfinite(_dy) and (
+            abs(_dx) > 0.05 or abs(_dy) > 0.05
+        ):
+            stamp = _ndimage_shift(
+                stamp, (-_dy, -_dx), order=3, mode="constant", cval=0.0
+            )
+    fwhm_s = _measure_stamp_fwhm(stamp)
+    if np.isfinite(fwhm_s) and fwhm_s > 0:
+        fwhm = fwhm_s
+    logger.debug(
+        "ZOGY star-stack kept positions: %s",
+        ", ".join(f"({p[0]:.1f},{p[1]:.1f})" for p in kept_pos),
+    )
     total = float(stamp.sum())
     if not np.isfinite(total) or total <= 0:
         return None, float("nan"), None
@@ -730,10 +807,23 @@ def _zogy_star_stack_consistent(star_fwhm, reference_fwhms, max_frac=0.12):
         # Loose sanity bound still applies: a stack nowhere near any
         # reference is a spike ensemble, not a PSF.
         return min(references) * 0.5 <= star_fwhm <= max(references) * 2.0
-    return any(
+    if any(
         abs(star_fwhm - reference) / reference <= max_frac
         for reference in consistent
-    )
+    ):
+        return True
+    # A stack narrower than the reference ensemble is not a contaminant
+    # signature: galaxies, saturation flat-tops and centroid jitter all
+    # broaden a stack, and nothing real is narrower than the true PSF.
+    # The references are not independent probes either -- a fallback
+    # model stamp is sized on the image FWHM, so two agreeing numbers
+    # can still be one biased measurement (galaxy-inflated detection
+    # FWHMs are a documented failure mode).  A coherent stack reading
+    # narrower is evidence the references are biased, not that the stars
+    # are junk; trust it within a bounded offset -- past ~40% the stack
+    # is a different source population, not a width disagreement.
+    ref_lo = min(consistent)
+    return star_fwhm < ref_lo and star_fwhm >= ref_lo * 0.6
 
 
 def _load_psf_stamp_native(fpath: str) -> np.ndarray:
@@ -915,8 +1005,9 @@ _ZOGY_WIENER_EPS_GRID = (1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1.0)
 
 def _zogy_wiener_kernel_adaptive(source_psf, target_psf,
                                  neg_tol=_ZOGY_KERNEL_NEG_TOL,
-                                 half_width=0, fid_tol=None):
-    """Wiener kernel at the weakest regularization that stays faithful.
+                                 half_width=0, fid_tol=None,
+                                 neg_cap=None):
+    """Wiener kernel at the damping level that best reproduces the target.
 
     Steps up the eps grid; for each candidate the realised convolution
     ``source * kernel`` is compared against the target width (when
@@ -927,16 +1018,20 @@ def _zogy_wiener_kernel_adaptive(source_psf, target_psf,
     source (GROND TDP4 59585 r).  A candidate that misses the target
     width is unusable no matter how clean it is.
 
-    Preference order: the weakest-damped candidate that is both clean
-    (neg <= ``neg_tol``) and faithful; failing that, the least-negative
-    faithful candidate (ringy but doing the right convolution - the
-    caller's sidelobe screen judges whether it may be applied); failing
-    that, the least-negative candidate overall so the veto still sees
-    the honest diagnostic.
+    Preference order: the faithful candidate with the smallest width
+    error whose windowed sidelobe mass stays under ``neg_cap`` - the
+    residuals scale with the width error, so between two admissible
+    candidates fidelity wins over cleanliness (TDP6 60881 r: eps=1e-3
+    at 3% width error / 0.19 sidelobes beats eps=1e-2 at 11% / 0.125);
+    failing that, the least-negative faithful candidate (the caller's
+    sidelobe screen judges whether it may be applied); failing that,
+    the least-negative candidate overall so the veto still sees the
+    honest diagnostic.
 
     Returns ``(kernel, neg_frac, eps_rel)``.
     """
     faithful = (None, np.inf, _ZOGY_WIENER_EPS_GRID[0])
+    fid_best = (None, np.inf, np.inf, _ZOGY_WIENER_EPS_GRID[0])
     best = (None, np.inf, _ZOGY_WIENER_EPS_GRID[-1])
     for eps in _ZOGY_WIENER_EPS_GRID:
         try:
@@ -962,12 +1057,25 @@ def _zogy_wiener_kernel_adaptive(source_psf, target_psf,
                 continue
             if neg < faithful[1]:
                 faithful = (k, neg, eps)
+            # The cap is judged on the windowed kernel - the part that
+            # actually prints onto the image.
+            neg_w = float(-np.nansum(kw[kw < 0])) if kw is not None else neg
+            cap = neg_cap if neg_cap is not None else np.inf
+            if (
+                np.isfinite(neg_w)
+                and neg_w <= cap
+                and (fe, neg, eps) < (fid_best[2], fid_best[1], fid_best[3])
+            ):
+                fid_best = (k, neg, fe, eps)
             if neg <= neg_tol:
                 return k, neg, eps
         elif neg <= neg_tol:
             return k, neg, eps
-    if fid_tol is not None and faithful[0] is not None:
-        return faithful
+    if fid_tol is not None:
+        if fid_best[0] is not None:
+            return fid_best[0], fid_best[1], fid_best[3]
+        if faithful[0] is not None:
+            return faithful
     return best
 
 
@@ -1039,6 +1147,22 @@ def _zogy_taper_stamp(stamp, fwhm, r_in_f=2.0, r_out_f=4.0):
     return out
 
 
+def _zerolag_stamp_fwhm(arr):
+    """FWHM of a PSF held in zero-lag (ifftshifted) padded layout.
+
+    The stamp's PSF is split across the four array corners, so a plain
+    radial profile about the argmax mixes quarter-arcs at different
+    radii and can under-read the width by ~25%.  Rolling by half the
+    array reassembles the PSF at the centre before measuring.
+    """
+    a = np.asarray(arr, dtype=float)
+    if a.ndim != 2:
+        return float("nan")
+    return _measure_stamp_fwhm(
+        np.roll(a, (a.shape[0] // 2, a.shape[1] // 2), axis=(0, 1))
+    )
+
+
 def _zogy_kernel_fid_err(source_psf, kernel, target_psf):
     """Fractional width error of a matching kernel's realised result.
 
@@ -1059,8 +1183,8 @@ def _zogy_kernel_fid_err(source_psf, kernel, target_psf):
         )
     except Exception:
         return float("nan")
-    f_c = _measure_stamp_fwhm(conv)
-    f_t = _measure_stamp_fwhm(target_psf)
+    f_c = _zerolag_stamp_fwhm(conv)
+    f_t = _zerolag_stamp_fwhm(target_psf)
     if not (np.isfinite(f_c) and np.isfinite(f_t) and f_t > 0):
         return float("nan")
     return abs(f_c - f_t) / f_t
@@ -1108,6 +1232,7 @@ def _zogy_lsq_kernel(
     max_stamps=60,
     margin=None,
     rej_clip=4.0,
+    neg_cap=None,
 ):
     """Solve the matching kernel by regularized least squares on pixels.
 
@@ -1246,7 +1371,7 @@ def _zogy_lsq_kernel(
                 Lap[i, i + 1] = -1.0
     P = Lap.T @ Lap
 
-    def _solve(pt_list):
+    def _solve(pt_list, lam):
         C = np.zeros((n_aug, n_aug))
         d = np.zeros(n_aug)
         n_rows = 0
@@ -1267,7 +1392,7 @@ def _zogy_lsq_kernel(
         trace = float(np.trace(C[:nk2, :nk2]))
         if not np.isfinite(trace) or trace <= 0:
             return None, n_rows, 0.0
-        lam_eff = float(lam_rel) * trace / nk2
+        lam_eff = float(lam) * trace / nk2
         M = C.copy()
         M[:nk2, :nk2] += lam_eff * P
         M += 1e-10 * trace / nk2 * np.eye(n_aug)
@@ -1280,56 +1405,89 @@ def _zogy_lsq_kernel(
                 return None, n_rows, 0.0
         return x, n_rows, lam_eff
 
-    x, n_pix, lam_eff = _solve(pts)
-    if x is None:
-        return None, info
+    def _finalize(x, n_pix, lam_eff, lam):
+        """Rejection re-solve, kernel sanity gates, info fill."""
+        # One rejection pass: a stamp dominated by a masked neighbour, an
+        # unlisted variable, or a resampling edge inflates its residual RMS;
+        # refit without it rather than let it bend the global kernel.
+        kept = pts
+        res_rms = []
+        for cy, cx in pts:
+            rows = _stamp_rows(cy, cx)
+            if rows is None:
+                res_rms.append(np.inf)
+                continue
+            A, y = rows
+            res = y - A @ x[:nk2] - x[nk2]
+            res_rms.append(float(np.std(res)))
+        res_rms = np.asarray(res_rms)
+        finite_rms = res_rms[np.isfinite(res_rms)]
+        if finite_rms.size >= max(min_stamps + 1, 4):
+            med = float(np.median(finite_rms))
+            mad = 1.4826 * float(np.median(np.abs(finite_rms - med)))
+            cut = med + max(rej_clip * mad, 0.5 * med)
+            kept = [
+                p for p, r in zip(pts, res_rms)
+                if np.isfinite(r) and r <= cut
+            ]
+            if len(kept) >= min_stamps and len(kept) < len(pts):
+                x, n_pix, lam_eff = _solve(kept, lam)
+                if x is None:
+                    return None, info
 
-    # One rejection pass: a stamp dominated by a masked neighbour, an
-    # unlisted variable, or a resampling edge inflates its residual RMS;
-    # refit without it rather than let it bend the global kernel.
-    kept = pts
-    res_rms = []
-    for cy, cx in pts:
-        rows = _stamp_rows(cy, cx)
-        if rows is None:
-            res_rms.append(np.inf)
+        k = np.asarray(x[:nk2], dtype=np.float64).reshape(nk, nk)
+        b0 = float(x[nk2])
+        if not np.isfinite(k).all() or not np.isfinite(b0):
+            return None, info
+        ksum = float(k.sum())
+        i2 = dict(info)
+        i2["ksum_raw"] = ksum
+        i2["n_pix"] = int(n_pix)
+        i2["n_stamps"] = len(kept)
+        i2["b0"] = b0
+        i2["lam_eff"] = lam_eff
+        # A kernel sum far from unity means the solver is compensating a
+        # broken flux scale or a wrong direction, not matching PSFs.
+        if not np.isfinite(ksum) or ksum < 0.25 or ksum > 4.0:
+            return None, i2
+        neg = float(-np.sum(k[k < 0])) / abs(ksum)
+        i2["neg"] = neg
+        i2["resid_ratio"] = float(
+            np.median(res_rms[np.isfinite(res_rms)]) / np.nanstd(tgt)
+        ) if np.nanstd(tgt) > 0 else np.nan
+        i2["ok"] = True
+        return k, i2
+
+    # When neg_cap is set the solve escalates the damping until the
+    # kernel's sidelobe mass fits under it - a few-stamp ensemble needs
+    # far more damping than the fiducial lam_rel (TDP6 60881 r: neg 1.7
+    # at lam=1e-3, 0.2 at lam=0.1).  The first satisfying level is the
+    # weakest damping that stays clean; if none qualifies, the
+    # least-negative attempt is returned so the caller's veto reports an
+    # honest diagnostic.
+    try:
+        _cap = float(neg_cap) if neg_cap is not None else None
+    except (TypeError, ValueError):
+        _cap = None
+    lams = [float(lam_rel)]
+    if _cap is not None:
+        lams += [float(lam_rel) * m for m in (10.0, 100.0, 1000.0)]
+    best = (None, np.inf, dict(info))
+    for lam_eff_rel in lams:
+        x, n_pix, lam_eff = _solve(pts, lam_eff_rel)
+        if x is None:
             continue
-        A, y = rows
-        res = y - A @ x[:nk2] - x[nk2]
-        res_rms.append(float(np.std(res)))
-    res_rms = np.asarray(res_rms)
-    finite_rms = res_rms[np.isfinite(res_rms)]
-    if finite_rms.size >= max(min_stamps + 1, 4):
-        med = float(np.median(finite_rms))
-        mad = 1.4826 * float(np.median(np.abs(finite_rms - med)))
-        cut = med + max(rej_clip * mad, 0.5 * med)
-        kept = [p for p, r in zip(pts, res_rms) if np.isfinite(r) and r <= cut]
-        if len(kept) >= min_stamps and len(kept) < len(pts):
-            x, n_pix, lam_eff = _solve(kept)
-            if x is None:
-                return None, info
-
-    k = np.asarray(x[:nk2], dtype=np.float64).reshape(nk, nk)
-    b0 = float(x[nk2])
-    if not np.isfinite(k).all() or not np.isfinite(b0):
-        return None, info
-    ksum = float(k.sum())
-    info["ksum_raw"] = ksum
-    info["n_pix"] = int(n_pix)
-    info["n_stamps"] = len(kept)
-    info["b0"] = b0
-    info["lam_eff"] = lam_eff
-    # A kernel sum far from unity means the solver is compensating a
-    # broken flux scale or a wrong direction, not matching PSFs.
-    if not np.isfinite(ksum) or ksum < 0.25 or ksum > 4.0:
-        return None, info
-    neg = float(-np.sum(k[k < 0])) / abs(ksum)
-    info["neg"] = neg
-    info["resid_ratio"] = float(
-        np.median(res_rms[np.isfinite(res_rms)]) / np.nanstd(tgt)
-    ) if np.nanstd(tgt) > 0 else np.nan
-    info["ok"] = True
-    return k, info
+        k, i2 = _finalize(x, n_pix, lam_eff, lam_eff_rel)
+        if k is None:
+            continue
+        i2["lam_rel"] = lam_eff_rel
+        if i2["neg"] < best[1]:
+            best = (k, i2["neg"], i2)
+        if _cap is None or i2["neg"] <= _cap:
+            return k, i2
+    if best[0] is not None:
+        return best[0], best[2]
+    return None, info
 
 
 def _pack_lsq_kernel(kernel, shape):
@@ -11872,7 +12030,7 @@ class Templates:
                 ) ** -3.5
                 return m / m.sum()
 
-            def _repair_stamp(stamp, star_stamp, star_f, img_f, tag):
+            def _repair_stamp(stamp, star_stamp, star_f, img_f, tag, star_n=0):
                 sf = _measure_stamp_fwhm(stamp)
                 # Negative mass is the signature of a sick stamp: ePSF
                 # outskirts hover at +-noise and can collectively carry more
@@ -11891,6 +12049,29 @@ class Templates:
                     or neg_mass > 0.25
                 )
                 sub, ref_f, sub_tag = None, 0.0, ""
+                if (
+                    star_stamp is not None
+                    and np.isfinite(star_f)
+                    and star_f > 0
+                    and star_n >= 3
+                ):
+                    # A vetted stack of >=3 stars is the truest stamp:
+                    # it carries the real resampled-frame PSF shape
+                    # (wing flux, ellipticity) that an analytic model can
+                    # get wrong by ~2x in the far wings even when its
+                    # FWHM agrees (TDP6 60881 r: model-vs-stack shape
+                    # error printed ~14% cores + negative rings on every
+                    # bright star).  The kernel maps the stamp onto real
+                    # stars, so feed it the real stars.
+                    logger.info(
+                        "ZOGY %s PSF: using star-stack stamp "
+                        "(%d stars, FWHM %.2f px; model stamp %.2f px, "
+                        "neg mass %.2f).",
+                        tag, star_n, star_f,
+                        sf if np.isfinite(sf) else -1.0,
+                        neg_mass if np.isfinite(neg_mass) else -1.0,
+                    )
+                    return star_stamp, star_f
                 if np.isfinite(star_f) and star_f > 0:
                     # The star stack is the most truthful field PSF and
                     # arrives pre-vetted; a stamp >15% off its width is a
@@ -11934,10 +12115,12 @@ class Templates:
             science_psf_data, _fwhm_s_psf = _repair_stamp(
                 science_psf_data, _star_sci_stamp, _star_sci_f, _fs_f,
                 "science",
+                star_n=len(_star_pos) if _star_pos is not None else 0,
             )
             reference_psf_data, _fwhm_t_psf = _repair_stamp(
                 reference_psf_data, _star_ref_stamp, _star_ref_f, _ft_f,
                 "template",
+                star_n=len(_star_ref_pos) if _star_ref_pos is not None else 0,
             )
             # Effective PSF widths drive the AUTO direction choice.  The
             # star-stack width is measured on the real field stars and is
@@ -11950,6 +12133,33 @@ class Templates:
                 _fwhm_t_psf = _star_ref_f
             _fwhm_s_psf = _fwhm_val(_fwhm_s_psf) or _fs_f
             _fwhm_t_psf = _fwhm_val(_fwhm_t_psf) or _ft_f
+
+            # Persist the effective stamps actually handed to the kernel
+            # builder -- the repair step may have substituted a star stack,
+            # and post-mortem debugging needs the stamps that were used,
+            # not the pre-repair models saved upstream.
+            try:
+                _eff_dir = os.path.dirname(str(differenceFpath))
+                _eff_base = os.path.splitext(
+                    os.path.basename(str(differenceFpath))
+                )[0]
+                for _eff_tag, _eff_arr, _eff_f in (
+                    ("science", science_psf_data, _fwhm_s_psf),
+                    ("template", reference_psf_data, _fwhm_t_psf),
+                ):
+                    fits.writeto(
+                        os.path.join(
+                            _eff_dir,
+                            f"ZOGY_PSF_effective_{_eff_tag}_{_eff_base}.fits",
+                        ),
+                        np.asarray(_eff_arr, dtype=float),
+                        fits.Header({"FWHMPIX": float(_eff_f or np.nan)}),
+                        overwrite=True,
+                    )
+            except Exception as _e:
+                logger.debug(
+                    "ZOGY: could not write effective PSF stamps (%s).", _e
+                )
 
             # Pad PSFs to the image shape (ZOGY requires same-shape FFTs)
             _psf_sci = _pad_psf_to_image(science_psf_data, science_data.shape)
@@ -12125,6 +12335,31 @@ class Templates:
                         continue
                 if _mxy.size >= 2 and np.isfinite(_mxy[:2]).all():
                     _kfit_xy.append((float(_mxy[0]), float(_mxy[1])))
+            # A matched position that failed the star-stack vetting in
+            # either frame (blank sky, flat-topped, CR spike) feeds the
+            # LSQ solve a garbage stamp - the resulting kernel is exactly
+            # the overfit ringy map the sidelobe cap then vetoes.  Fit on
+            # the positions that survived in BOTH frames when there are
+            # enough of them.
+            if _star_pos is not None and _star_ref_pos is not None:
+                _ref_set = {
+                    (round(float(p[0]), 1), round(float(p[1]), 1))
+                    for p in _star_ref_pos
+                }
+                _both = [
+                    p for p in _kfit_xy
+                    if (round(p[0], 1), round(p[1], 1)) in _ref_set
+                ]
+                _sci_set = {
+                    (round(float(p[0]), 1), round(float(p[1]), 1))
+                    for p in _star_pos
+                }
+                _both = [
+                    p for p in _both
+                    if (round(p[0], 1), round(p[1], 1)) in _sci_set
+                ]
+                if len(_both) >= _lsq_min:
+                    _kfit_xy = _both
             _kern_meta = {}
 
             def _build_dir_kernel(_d):
@@ -12181,12 +12416,16 @@ class Templates:
                 _fid_tol = float(
                     ts_cfg.get("zogy_kernel_fidelity_tol", 0.15) or 0.15
                 )
+                _neg_app_cap = float(
+                    ts_cfg.get("zogy_kernel_applied_neg_cap", 0.30) or 0.30
+                )
                 if _adapt_eps:
                     try:
                         _ka, _neg_ka, _eps_w = _zogy_wiener_kernel_adaptive(
                             _src, _tgt,
                             half_width=_kern_win,
                             fid_tol=_fid_tol,
+                            neg_cap=_neg_app_cap,
                         )
                     except Exception:
                         _ka = None
@@ -12224,10 +12463,6 @@ class Templates:
                     _meta["wiener_applied_neg"] = _neg_app
                     _fid_err = _zogy_kernel_fid_err(_src, _kw_full, _tgt)
                     _meta["wiener_fid_err"] = _fid_err
-                    _neg_app_cap = float(
-                        ts_cfg.get("zogy_kernel_applied_neg_cap", 0.30)
-                        or 0.30
-                    )
                     _fw_s = _fwhm_t_psf if _d == "REF" else _fwhm_s_psf
                     _fw_t = _fwhm_s_psf if _d == "REF" else _fwhm_t_psf
                     _fc_tol0 = float(
@@ -12241,11 +12476,23 @@ class Templates:
                         <= _fc_tol0 * max(_fw_s, _fw_t)
                     )
                     if not np.isfinite(_fid_err) or _fid_err > _fid_tol:
+                        try:
+                            _conv_dbg = np.real(
+                                np.fft.ifft2(
+                                    np.fft.fft2(_src) * np.fft.fft2(_kw_full)
+                                )
+                            )
+                            _fc_dbg = _zerolag_stamp_fwhm(_conv_dbg)
+                            _ft_dbg = _zerolag_stamp_fwhm(_tgt)
+                        except Exception:
+                            _fc_dbg = _ft_dbg = float("nan")
                         logger.info(
                             "ZOGY: %s-direction Wiener kernel fails the "
-                            "fidelity check (convolved width %.1f%% off "
-                            "the target PSF, limit %.1f%%); not usable.",
+                            "fidelity check (convolved %.2f px vs target "
+                            "%.2f px, %.1f%% off, limit %.1f%%); not usable.",
                             _d,
+                            _fc_dbg,
+                            _ft_dbg,
                             100.0 * _fid_err if np.isfinite(_fid_err) else -1.0,
                             100.0 * _fid_tol,
                         )
@@ -12270,6 +12517,11 @@ class Templates:
 
                 _kl_full = None
                 _neg_l = np.inf
+                _kc = None
+                _linfo = {}
+                _lsq_cap = float(
+                    ts_cfg.get("zogy_lsq_neg_cap", 0.45) or 0.45
+                )
                 if _lsq_on and _kfit_xy:
                     _s_img = _ref_clean if _d == "REF" else _sci_clean
                     _t_img = _sci_clean if _d == "REF" else _ref_clean
@@ -12282,6 +12534,7 @@ class Templates:
                             invalid_mask=_fill_regions,
                             lam_rel=_lsq_lam,
                             min_stamps=_lsq_min,
+                            neg_cap=_lsq_cap,
                         )
                     except Exception as _e:
                         logger.info(
@@ -12314,9 +12567,6 @@ class Templates:
                 # Wiener probe gates the LSQ choice as well: when the
                 # PSF-ratio kernel screams deconvolution, no pixel-domain
                 # fit is trusted for that direction either.
-                _lsq_cap = float(
-                    ts_cfg.get("zogy_lsq_neg_cap", 0.45) or 0.45
-                )
                 _lsq_rr_max = float(
                     ts_cfg.get("zogy_lsq_resid_cap", 0.5) or 0.5
                 )
@@ -12332,8 +12582,36 @@ class Templates:
                         or _meta["resid_ratio"] <= _lsq_rr_max
                     )
                 )
+                if not _lsq_ok:
+                    # An absent or rejected LSQ candidate used to be
+                    # silent, leaving no trace of why the Wiener path
+                    # won; log the deciding term.
+                    if _kc is None:
+                        logger.debug(
+                            "ZOGY: %s-direction LSQ kernel unavailable "
+                            "(n_stamps=%s, ksum=%s).",
+                            _d,
+                            _linfo.get("n_stamps", "?"),
+                            _linfo.get("ksum_raw", "?"),
+                        )
+                    elif not _lsq_ok:
+                        logger.info(
+                            "ZOGY: %s-direction LSQ kernel rejected "
+                            "(neg=%.3f cap %.2f, resid_ratio=%.3f cap "
+                            "%.2f, lam_rel=%s, probe neg %.3f).",
+                            _d,
+                            _neg_l,
+                            _lsq_cap,
+                            _meta.get("resid_ratio", float("nan")),
+                            _lsq_rr_max,
+                            f"{_linfo.get('lam_rel'):.3g}"
+                            if _linfo.get("lam_rel") is not None
+                            else "?",
+                            _neg_w,
+                        )
                 if _lsq_ok:
                     _meta["method"] = "lsq"
+                    _meta["lam_rel"] = _linfo.get("lam_rel")
                     return _kl_full, _neg_l
                 if _kw_full is not None:
                     _meta["method"] = "wiener"
@@ -12608,7 +12886,11 @@ class Templates:
                         raise ValueError("non-finite matching kernel")
                     _kmeta = _kern_meta.get(_zogy_forceconv, {})
                     _kmeth = _kmeta.get("method", "wiener")
-                    _eps_used = _kmeta.get("wiener_eps", 1e-2)
+                    _eps_used = (
+                        _kmeta.get("wiener_eps", 1e-2)
+                        if _kmeth != "lsq"
+                        else _kmeta.get("lam_rel") or _lsq_lam
+                    )
                     # The LSQ solve carries a differential-background term:
                     # target ~= K*source + b0, so b0 is added to the
                     # convolved image for the model to reproduce the
@@ -12689,10 +12971,12 @@ class Templates:
                             _sr_map = _sr_map * _conv_noise_factor
                         logger.info(
                             "ZOGY: convolved reference to science PSF "
-                            "(FWHM %.2f -> %.2f px, kernel=%s, eps=%.2g, "
+                            "(FWHM %.2f -> %.2f px, kernel=%s, %s=%.2g, "
                             "b0=%.4g). "
                             "Reference noise scaled by sqrt(sum k^2)=%.3f.",
-                            _fwhm_t_psf, _fwhm_s_psf, _kmeth, _eps_used,
+                            _fwhm_t_psf, _fwhm_s_psf, _kmeth,
+                            "eps" if _kmeth != "lsq" else "lam",
+                            _eps_used,
                             _b0, _conv_noise_factor,
                         )
                     else:
@@ -12713,10 +12997,12 @@ class Templates:
                             _sn_map = _sn_map * _conv_noise_factor
                         logger.info(
                             "ZOGY: convolved science to reference PSF "
-                            "(FWHM %.2f -> %.2f px, kernel=%s, eps=%.2g, "
+                            "(FWHM %.2f -> %.2f px, kernel=%s, %s=%.2g, "
                             "b0=%.4g). "
                             "Science noise scaled by sqrt(sum k^2)=%.3f.",
-                            _fwhm_s_psf, _fwhm_t_psf, _kmeth, _eps_used,
+                            _fwhm_s_psf, _fwhm_t_psf, _kmeth,
+                            "eps" if _kmeth != "lsq" else "lam",
+                            _eps_used,
                             _b0, _conv_noise_factor,
                         )
                 except Exception as _conv_e:
