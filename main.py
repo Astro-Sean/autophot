@@ -3542,7 +3542,9 @@ def run_photometry():
         # The catalog cone must cover the detector footprint, not just a
         # fixed patch around the target - corner regions need calibrators
         # too, and a narrow field should not pay for the default-wide cone.
-        # The driver may have set catalog_query_radius_arcmin from the
+        # The driver may have set per-catalog query regions
+        # (catalog_query_regions: footprint-bounds-centred box + cone per
+        # catalog) or the scalar catalog_query_radius_arcmin from the
         # footprint union; otherwise size it from this image's WCS, or its
         # pixel scale when the image carries no WCS.
         _cat_radius_arcmin = input_yaml.get("catalog", {}).get(
@@ -3570,12 +3572,37 @@ def run_photometry():
             else:
                 _cat_radius_arcmin = min(max(_cat_radius_arcmin, 2.0), 60.0)
 
+        # Per-catalog query region persisted by the driver; the selected
+        # catalog's name is normalized so "panstarrs"/"pan_starrs" aliases
+        # resolve to the same entry.  "default" covers catalogs not listed.
+        _cat_regions = input_yaml.get("catalog", {}).get(
+            "catalog_query_regions"
+        ) or {}
+        _cat_region = None
+        if isinstance(_cat_regions, dict) and _cat_regions:
+            _sel_key = Catalog._normalize_catalog_name(
+                str(selected_catalog_name or "")
+            )
+            _cat_region = _cat_regions.get(_sel_key) or _cat_regions.get(
+                "default"
+            )
+            if isinstance(_cat_region, dict):
+                try:
+                    _rr = float(_cat_region.get("radius_arcmin"))
+                    if np.isfinite(_rr) and _rr > 0:
+                        _cat_radius_arcmin = min(max(_rr, 2.0), 60.0)
+                except (TypeError, ValueError):
+                    pass
+            else:
+                _cat_region = None
+
         if input_yaml["catalog"].get("build_catalog", False):
             unCatalogSources = Calibrate_Catalog.build_complete_catalog(
                 target_coords=target_coords,
                 catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
                 max_separation=5,
                 radius=_cat_radius_arcmin,
+                regions=_cat_regions,
             )
         else:
             unCatalogSources = Calibrate_Catalog.download(
@@ -3586,6 +3613,7 @@ def run_photometry():
                     "catalog_custom_fpath", None
                 ),
                 radius=_cat_radius_arcmin,
+                region=_cat_region,
             )
 
         #  Clean Catalog

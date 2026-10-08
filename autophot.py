@@ -2303,12 +2303,14 @@ class AutomatedPhotometry:
                 try:
                     from catalog import (
                         Catalog as _Catalog,
-                        _catalog_cone_radius_arcmin,
                         AUTO_OPTIMIZE_CATALOGS as _AUTO_CATALOGS,
                         AUTO_OPTIMIZE_EXCLUDED as _AUTO_EXCLUDED,
                         plot_optimized_catalog_coverage as _plot_coverage,
                         _footprints_from_image_infos as _mk_footprints,
+                        _footprint_region,
+                        _fmt_region,
                     )
+                    from functions import parse_supported_filter_group_key
                     _cat = _Catalog(input_yaml=backup_yaml)
                     _use_cat = backup_yaml.get("catalog", {}).get("use_catalog")
 
@@ -2362,6 +2364,11 @@ class AutomatedPhotometry:
                     )
                     _opt = None
                     _opt_cache = None
+                    # Per-catalog query regions from the optimizer scan
+                    # (fresh or recovered from the yml cache).  Reusing
+                    # them keeps the pre-fetch hitting the scan's cache
+                    # files instead of re-querying over a different box.
+                    _scan_regions = {}
                     if _auto_mode:
                         _opt_cache = os.path.join(
                             backup_yaml["wdir"],
@@ -2384,6 +2391,12 @@ class AutomatedPhotometry:
                                     }
                                     if _need <= _have or "default" in _cached_map:
                                         _use_cat = _cached_map
+                                        if isinstance(
+                                            _cached.get("regions"), dict
+                                        ):
+                                            _scan_regions = _cached[
+                                                "regions"
+                                            ]
                                         _log(
                                             "  use_catalog=auto: reusing "
                                             "cached selection "
@@ -2429,6 +2442,8 @@ class AutomatedPhotometry:
                                     outdir=new_output_dir,
                                 )
                                 _use_cat = _opt.get("use_catalog") or "gaia"
+                                if isinstance(_opt.get("regions"), dict):
+                                    _scan_regions = _opt["regions"]
                                 # Winners, report and plot paths are already
                                 # logged by find_optimized_catalog - only the
                                 # resolved mapping and a compact skip summary
@@ -2470,6 +2485,18 @@ class AutomatedPhotometry:
                                                     "target_dec": float(
                                                         backup_yaml["target_dec"]
                                                     ),
+                                                    # Persist the query
+                                                    # regions the scan
+                                                    # used so restarted
+                                                    # runs hit the same
+                                                    # CSV cache keys.
+                                                    "regions": {
+                                                        str(k): v
+                                                        for k, v in (
+                                                            _scan_regions
+                                                            or {}
+                                                        ).items()
+                                                    },
                                                 },
                                                 _fh,
                                                 sort_keys=True,
@@ -2557,10 +2584,14 @@ class AutomatedPhotometry:
                             "needs Gaia XP spectra"
                         )
 
-                    # One cone per catalog must cover the union of image
-                    # footprints - a fixed 10 arcmin radius centred on the
-                    # target leaves the corners of wide fields empty, and
-                    # over-sizes the cone on narrow fields.
+                    # Per-band query regions: every band's images get a
+                    # region centred on the footprint bounding box (not the
+                    # target, so offset pointings do not inflate it) and
+                    # bounded by catalog.region_* config.  Each catalog is
+                    # then queried over the union of the bands it serves -
+                    # in auto mode the optimizer already did this, so its
+                    # regions are reused to keep the CSV cache keys
+                    # identical to the scan's.
                     if _image_infos is None:
                         try:
                             _image_infos = _scan_image_footprints(
@@ -2570,11 +2601,85 @@ class AutomatedPhotometry:
                             )
                         except Exception:
                             _image_infos = []
-                    _prefetch_radius = _catalog_cone_radius_arcmin(
-                        _image_infos, _target_coords, default_arcmin=10.0
+                    _cat_bounds = backup_yaml.get("catalog", {}) or {}
+
+                    def _cfg_region(key, default):
+                        try:
+                            v = float(_cat_bounds.get(key, default))
+                        except (TypeError, ValueError):
+                            return float(default)
+                        return v if np.isfinite(v) else float(default)
+
+                    _rb = dict(
+                        margin=_cfg_region("region_margin", 1.1),
+                        min_arcmin=_cfg_region("region_min_arcmin", 2.0),
+                        max_arcmin=_cfg_region("region_max_arcmin", 60.0),
+                        default_arcmin=10.0,
                     )
+                    _bands_req = [str(b) for b in required_filters]
+                    _band_regions = {
+                        b: _footprint_region(
+                            _image_infos, [b], _target_coords, **_rb
+                        )
+                        for b in _bands_req
+                    }
+                    for _b, _br in _band_regions.items():
+                        _log(
+                            f"  {_b}-band coverage region: "
+                            f"{_fmt_region(_br)}"
+                        )
+                    _global_region = _footprint_region(
+                        _image_infos, None, _target_coords, **_rb
+                    )
+                    _prefetch_radius = _global_region["radius_arcmin"]
+
+                    _regions_by_cat = {}
+
+                    def _region_for_catalog(cname):
+                        """Union region over the bands mapped to `cname`
+                        (empty mapping -> all required bands)."""
+                        key = _cat._normalize_catalog_name(str(cname))
+                        if key not in _regions_by_cat:
+                            _bs = []
+                            if isinstance(_use_cat, dict):
+                                for _k, _v in _use_cat.items():
+                                    if (
+                                        str(_v).strip().lower() != key
+                                        or _v is None
+                                    ):
+                                        continue
+                                    _kl = str(_k).strip().lower()
+                                    if _kl in {"default", "*", "all"}:
+                                        continue
+                                    _exp = parse_supported_filter_group_key(
+                                        str(_k)
+                                    )
+                                    _bs.extend(
+                                        _exp if _exp else [str(_k)]
+                                    )
+                            _regions_by_cat[key] = _footprint_region(
+                                _image_infos,
+                                _bs or _bands_req,
+                                _target_coords,
+                                **_rb,
+                            )
+                        return _regions_by_cat[key]
+
+                    def _resolve_query_region(cname):
+                        """Scan region when available (identical cache
+                        keys), else the assigned-bands union."""
+                        key = _cat._normalize_catalog_name(str(cname))
+                        reg = (
+                            _scan_regions.get(key)
+                            if isinstance(_scan_regions, dict)
+                            else None
+                        )
+                        if not isinstance(reg, dict):
+                            reg = _region_for_catalog(cname)
+                        return reg
+
                     # Only persist when a footprint was actually measured:
-                    # leaving the key unset lets main.py re-size the cone
+                    # leaving the keys unset lets main.py re-size the cone
                     # per image after its WCS solve.
                     _measured = any(
                         (i.get("shape") is not None)
@@ -2585,12 +2690,20 @@ class AutomatedPhotometry:
                         for i in _image_infos
                     )
                     if _measured:
-                        backup_yaml.setdefault("catalog", {})[
+                        _cat_section = backup_yaml.setdefault("catalog", {})
+                        _cat_section[
                             "catalog_query_radius_arcmin"
                         ] = _prefetch_radius
+                        _cat_section["catalog_query_regions"] = {
+                            "default": _global_region,
+                            **{
+                                _cat._normalize_catalog_name(str(c)):
+                                _resolve_query_region(c)
+                                for c in _unique_cats
+                            },
+                        }
                         _log(
-                            f"  Catalog query radius: {_prefetch_radius:.1f} "
-                            "arcmin (sized to image footprints)"
+                            f"  Catalog query region: {_fmt_region(_global_region)}"
                         )
                     else:
                         _log(
@@ -2619,10 +2732,11 @@ class AutomatedPhotometry:
 
                     # Coverage map + scoreboard: fresh scans render the
                     # figure inside find_optimized_catalog; cached runs
-                    # rebuild it from the persisted report and the local
-                    # catalog CSV cache (offline) so every auto run leaves
-                    # the figure behind.
-                    if _auto_mode and _opt_report is not None:
+                    # rebuild it from the persisted report (if present)
+                    # and the local catalog CSV cache (offline) so every
+                    # auto run leaves the figure behind - map-only when no
+                    # report survived.
+                    if _auto_mode:
                         _cov_png = os.path.join(
                             new_output_dir,
                             f"{backup_yaml.get('target_name', 'target')}"
@@ -2630,21 +2744,74 @@ class AutomatedPhotometry:
                         )
                         if not os.path.exists(_cov_png):
                             try:
-                                _rep_cats = sorted(
-                                    _opt_report["catalog"].astype(str)
-                                    .unique()
-                                )
-                                _rebuilt_sources = (
-                                    _cat._optimizer_plot_sources(
-                                        _rep_cats,
-                                        band_set=sorted(
-                                            str(b)
-                                            for b in required_filters
-                                        ),
-                                        image_infos=_image_infos or [],
-                                        target_coords=_target_coords,
-                                        radius=_prefetch_radius,
+                                if _opt_report is not None and len(
+                                    _opt_report
+                                ):
+                                    _rep_cats = sorted(
+                                        _opt_report["catalog"]
+                                        .astype(str)
+                                        .unique()
                                     )
+                                    _rep_bands = {
+                                        str(_c): sorted(
+                                            _opt_report.loc[
+                                                _opt_report["catalog"]
+                                                .astype(str)
+                                                == str(_c),
+                                                "band",
+                                            ]
+                                            .astype(str)
+                                            .unique()
+                                        )
+                                        for _c in _rep_cats
+                                    }
+                                else:
+                                    # No report: fall back to the selected
+                                    # catalogs and their supported bands.
+                                    _sel = (
+                                        [
+                                            str(c)
+                                            for c in set(
+                                                _use_cat.values()
+                                            )
+                                            if c is not None
+                                        ]
+                                        if isinstance(_use_cat, dict)
+                                        else [str(_use_cat)]
+                                    )
+                                    _rep_cats = sorted(
+                                        {
+                                            _cat._normalize_catalog_name(c)
+                                            for c in _sel
+                                        }
+                                    )
+                                    _sup = _cat._catalog_supported_bands(
+                                        _rep_cats
+                                    )[0]
+                                    _rep_bands = {
+                                        _c: sorted(
+                                            _sup.get(_c, set())
+                                        )
+                                        for _c in _rep_cats
+                                    }
+                                _rep_regions = {
+                                    str(_c): _resolve_query_region(_c)
+                                    for _c in _rep_cats
+                                }
+                                (
+                                    _rebuilt_sources,
+                                    _rebuilt_all,
+                                ) = _cat._optimizer_plot_sources(
+                                    _rep_cats,
+                                    band_set=sorted(
+                                        str(b)
+                                        for b in required_filters
+                                    ),
+                                    image_infos=_image_infos or [],
+                                    target_coords=_target_coords,
+                                    radius=_prefetch_radius,
+                                    regions=_rep_regions,
+                                    return_all=True,
                                 )
                                 _plot_coverage(
                                     {
@@ -2667,6 +2834,10 @@ class AutomatedPhotometry:
                                             for b in required_filters
                                         ),
                                         "evaluated": list(_rep_cats),
+                                        "band_regions": _band_regions,
+                                        "regions": _rep_regions,
+                                        "catalog_sources": _rebuilt_all,
+                                        "catalog_bands": _rep_bands,
                                         "skipped": {},
                                     },
                                     target_coords=_target_coords,
@@ -2698,6 +2869,9 @@ class AutomatedPhotometry:
                                 catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
                                 max_separation=5,
                                 radius=_prefetch_radius,
+                                regions=backup_yaml.get("catalog", {}).get(
+                                    "catalog_query_regions"
+                                ),
                             )
                             return
                         _resolved = _cat._require_catalog_selected(_name)
@@ -2713,6 +2887,7 @@ class AutomatedPhotometry:
                             if isinstance(_use_cat, dict)
                             else []
                         )
+                        _pf_region = _resolve_query_region(_resolved)
                         _log(
                             f"  Pre-fetching catalog: {_resolved}"
                             + (
@@ -2720,6 +2895,7 @@ class AutomatedPhotometry:
                                 if _pf_bands
                                 else ""
                             )
+                            + f" [{_fmt_region(_pf_region)}]"
                         )
                         # A fallback onto a Gaia-backed catalog needs the XP
                         # systems re-enabled (they are disabled above whenever
@@ -2744,7 +2920,10 @@ class AutomatedPhotometry:
                             catalog_custom_fpath=backup_yaml.get("catalog", {}).get(
                                 "catalog_custom_fpath", None
                             ),
-                            radius=_prefetch_radius,
+                            radius=_pf_region.get(
+                                "radius_arcmin", _prefetch_radius
+                            ),
+                            region=_pf_region,
                         )
 
                     def _auto_candidates(band):
