@@ -357,6 +357,29 @@ class Zeropoint:
         return inst_mag, inst_mag_err, delta_mag, delta_mag_err
 
     @staticmethod
+    def _photometry_positions(catalog, flux_type):
+        if catalog is None or catalog.empty:
+            return None
+
+        def _column_values(column):
+            if column not in catalog.columns:
+                return np.full(len(catalog), np.nan)
+            return pd.to_numeric(catalog[column], errors="coerce").to_numpy(
+                dtype=float
+            )
+
+        x_pix = _column_values("x_pix")
+        y_pix = _column_values("y_pix")
+        if str(flux_type).upper() == "PSF":
+            x_fit = _column_values("x_fit")
+            y_fit = _column_values("y_fit")
+            x_pix = np.where(np.isfinite(x_fit), x_fit, x_pix)
+            y_pix = np.where(np.isfinite(y_fit), y_fit, y_pix)
+        if not (np.isfinite(x_pix).any() and np.isfinite(y_pix).any()):
+            return None
+        return x_pix, y_pix
+
+    @staticmethod
     def _apply_color_correction(
         delta_mag,
         clean_catalog,
@@ -2511,6 +2534,9 @@ class Zeropoint:
             global_xmins, global_xmaxs, global_ymins, global_ymaxs = [], [], [], []
 
             for flux_type in ["AP", "PSF"]:
+                _calibrator_xy = self._photometry_positions(
+                    clean_catalog, flux_type
+                )
                 pack = self._finite_vmask(clean_catalog, flux_type, use_filter)
                 if pack is None:
                     continue
@@ -2724,7 +2750,7 @@ class Zeropoint:
                 _se_sp = np.nan
                 _n_eff = np.nan
                 if (
-                    {"x_pix", "y_pix"}.issubset(clean_catalog.columns)
+                    _calibrator_xy is not None
                     and _d_in.size >= 8
                     and np.isfinite(ZP)
                     and np.isfinite(_mad_in)
@@ -2734,8 +2760,8 @@ class Zeropoint:
                     _pos_idx = np.flatnonzero(vmask)[inlier_short]
                     _se_sp, _n_eff = self._block_bootstrap_se(
                         np.asarray(delta_mag)[inlier_short] - ZP,
-                        np.asarray(clean_catalog["x_pix"], float)[_pos_idx],
-                        np.asarray(clean_catalog["y_pix"], float)[_pos_idx],
+                        _calibrator_xy[0][_pos_idx],
+                        _calibrator_xy[1][_pos_idx],
                     )
                     _se_iid = 1.4826 * _mad_in / np.sqrt(_d_in.size)
                     if (
@@ -3027,18 +3053,14 @@ class Zeropoint:
                 # than a flat 1:1 locus.  Check the inlier residual slope
                 # along both pixel axes; flag a >3-sigma tilt whose
                 # amplitude across the field exceeds the configured mag.
-                if {"x_pix", "y_pix"}.issubset(
-                    clean_catalog.columns
-                ) and np.isfinite(ZP):
+                if _calibrator_xy is not None and np.isfinite(ZP):
                     _pos_idx = np.flatnonzero(vmask)[inlier_short]
                     _resid_in = np.asarray(delta_mag)[inlier_short] - ZP
                     _grad_min_mag = float(
                         zp_cfg.get("spatial_gradient_min_mag", 0.1)
                     )
-                    for _pc in ("x_pix", "y_pix"):
-                        _pp = np.asarray(
-                            clean_catalog[_pc].to_numpy(dtype=float)
-                        )[_pos_idx]
+                    for _pc, _coords in zip(("x", "y"), _calibrator_xy):
+                        _pp = _coords[_pos_idx]
                         _okp = np.isfinite(_pp) & np.isfinite(_resid_in)
                         if int(_okp.sum()) < 10:
                             continue
@@ -3568,6 +3590,9 @@ class Zeropoint:
                 )
 
                 for flux_type in ["AP", "PSF"]:
+                    _calibrator_xy = self._photometry_positions(
+                        clean_catalog, flux_type
+                    )
                     pack = self._finite_vmask(clean_catalog, flux_type, use_filter)
                     if pack is None:
                         zp_params[flux_type] = {
@@ -3804,19 +3829,15 @@ class Zeropoint:
                     # their correlated SE floors the error when it
                     # clearly exceeds the iid scatter SE.
                     if (
-                        {"x_pix", "y_pix"}.issubset(clean_catalog.columns)
+                        _calibrator_xy is not None
                         and n_inl >= 8
                         and np.isfinite(mad_zp)
                         and mad_zp > 0
                     ):
                         _se_sp, _n_eff = self._block_bootstrap_se(
                             inlier_deltas - zp_final,
-                            np.asarray(clean_catalog["x_pix"], float)[
-                                vmask_sigma_idx
-                            ],
-                            np.asarray(clean_catalog["y_pix"], float)[
-                                vmask_sigma_idx
-                            ],
+                            _calibrator_xy[0][vmask_sigma_idx],
+                            _calibrator_xy[1][vmask_sigma_idx],
                         )
                         _se_iid = 1.4826 * mad_zp / np.sqrt(n_inl)
                         if (
