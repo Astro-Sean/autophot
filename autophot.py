@@ -2766,25 +2766,43 @@ class AutomatedPhotometry:
                                         for _c in _rep_cats
                                     }
                                 else:
-                                    # No report: fall back to the selected
-                                    # catalogs and their supported bands.
-                                    _sel = (
-                                        [
-                                            str(c)
-                                            for c in set(
-                                                _use_cat.values()
+                                    # No report: rebuild for the full auto
+                                    # candidate pool (plus any selected
+                                    # catalog outside it) so every catalog
+                                    # with detections reaches the map, not
+                                    # just the winners.  Downloads hit the
+                                    # scan's CSV cache.
+                                    _cat_cfg = (
+                                        backup_yaml.get("catalog", {}) or {}
+                                    )
+                                    _cand = list(_AUTO_CATALOGS)
+                                    if _cat_cfg.get(
+                                        "MASTcasjobs_wsid"
+                                    ) and _cat_cfg.get("MASTcasjobs_pwd"):
+                                        _cand.append("refcat")
+                                    if _cat_cfg.get("catalog_custom_fpath"):
+                                        _cand.append("custom")
+                                    _pool = {
+                                        _cat._normalize_catalog_name(str(c))
+                                        for c in _cand
+                                        if str(c) not in _AUTO_EXCLUDED
+                                    }
+                                    if isinstance(_use_cat, dict):
+                                        _pool |= {
+                                            _cat._normalize_catalog_name(
+                                                str(c)
                                             )
+                                            for c in _use_cat.values()
                                             if c is not None
-                                        ]
-                                        if isinstance(_use_cat, dict)
-                                        else [str(_use_cat)]
-                                    )
-                                    _rep_cats = sorted(
-                                        {
-                                            _cat._normalize_catalog_name(c)
-                                            for c in _sel
+                                            and str(c).strip()
                                         }
-                                    )
+                                    elif _use_cat:
+                                        _pool.add(
+                                            _cat._normalize_catalog_name(
+                                                str(_use_cat)
+                                            )
+                                        )
+                                    _rep_cats = sorted(_pool)
                                     _sup = _cat._catalog_supported_bands(
                                         _rep_cats
                                     )[0]
