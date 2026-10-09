@@ -1534,6 +1534,17 @@ class Limits:
                             var_ref = _global_var
                             sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
 
+                    # The model RMS map can understate the true diff
+                    # noise by orders of magnitude on a degraded
+                    # subtraction (e.g. VSCALE left at 1.0); measured
+                    # against it, EVERY quiet site looks contaminated
+                    # and the filter kills the whole field.  Floor the
+                    # reference by the measured cutout scatter so the
+                    # test only fires on sites worse than the actual
+                    # field noise.
+                    var_ref = max(var_ref, _global_var)
+                    sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
+
                     # --- Variance test ---
                     if _use_var_test and var_ref > 1e-60:
                         ratio = var_ap / var_ref
@@ -4212,8 +4223,12 @@ class Limits:
             
             # Apparent-magnitude secondary axis, if a zeropoint is available.
             secax = None
-            if selected_zeropoint is not None:
-                # Capture by value to avoid late-binding lambda bug
+            if selected_zeropoint is not None and np.isfinite(
+                float(selected_zeropoint)
+            ):
+                # A non-finite zeropoint (fit failed on this field) would
+                # poison the transform and crash the draw with
+                # "Axis limits cannot be NaN or Inf".
                 _zp = float(selected_zeropoint)
                 secax = ax.secondary_xaxis(
                     "top",
