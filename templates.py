@@ -11672,6 +11672,11 @@ class Templates:
             _sr = _rbs(_ref_finite) if _ref_finite.size > 100 else (float(np.std(_ref_finite)) if _ref_finite.size > 0 else 1.0)
             _sn = float(_sn) if _sn and _sn > 0 else 1.0
             _sr = float(_sr) if _sr and _sr > 0 else 1.0
+            # Snapshot the unconvolved science noise: CONVD=SCI rescales
+            # _sn by the kernel norm, but the downstream background_rms
+            # map that VSCALE rescales is in unconvolved units, so the
+            # measured factor must be sigma_diff/sigma_sci.
+            _sn_sci = _sn
 
             # Sanitise the measured FWHMs once: they drive the star-stack
             # window, the PSF plausibility gate, the forceconv resolution,
@@ -13294,24 +13299,43 @@ class Templates:
                 # Filled pixels carry synthetic (median) values, not real
                 # difference signal -- exclude them from the noise estimate.
                 _dvalid = np.isfinite(_dv) & ~_fill_regions
-                if np.count_nonzero(_dvalid) > 1000 and np.isfinite(_sn) and _sn > 0:
+                if np.count_nonzero(_dvalid) > 1000 and np.isfinite(_sn_sci) and _sn_sci > 0:
                     _q25, _q75 = np.percentile(_dv[_dvalid], [25.0, 75.0])
                     _sig_diff = (_q75 - _q25) / 1.3489795003921634
                     if np.isfinite(_sig_diff) and _sig_diff > 0:
-                        _vscale = float(_sig_diff / _sn)
-                        if 1.05 < _vscale <= 5.0:
+                        _vscale = float(_sig_diff / _sn_sci)
+                        # Apply the measured factor even when large:
+                        # a shallow template scaled by the flux ratio
+                        # legitimately produces a noisy diff, and
+                        # leaving VSCALE=1.0 understates every downstream
+                        # photometric error by that factor.  Only a
+                        # pathological ratio (noise model diverged,
+                        # sigma_sci ~ 0) is refused - the IQR cannot be
+                        # trusted at that extreme either.
+                        if 1.05 < _vscale < 1e4:
                             _zogy_hdr["VSCALE"] = (
                                 round(_vscale, 6),
                                 "Noise-model factor sigma_diff/sigma_sci (IQR)",
                             )
-                            logger.info(
-                                "ZOGY: VSCALE=%.4f written to diff header.",
-                                _vscale,
-                            )
-                        elif _vscale > 5.0:
+                            if _vscale > 5.0:
+                                logger.warning(
+                                    "ZOGY: difference noise %.1fx the "
+                                    "science noise model - VSCALE applied "
+                                    "anyway so photometric errors reflect "
+                                    "the measured diff; the excess likely "
+                                    "marks a degraded subtraction "
+                                    "(check quality).",
+                                    _vscale,
+                                )
+                            else:
+                                logger.info(
+                                    "ZOGY: VSCALE=%.4f written to diff header.",
+                                    _vscale,
+                                )
+                        elif _vscale >= 1e4:
                             logger.warning(
                                 "ZOGY: difference noise %.1fx the science "
-                                "noise model - suspiciously large; leaving "
+                                "noise model - pathological; leaving "
                                 "VSCALE=1.0 (check subtraction quality).",
                                 _vscale,
                             )
@@ -15338,19 +15362,34 @@ class Templates:
                                 and _sig_sci > 0
                             ):
                                 _vscale = float(_sig_diff / _sig_sci)
-                                if 1.05 < _vscale <= 5.0:
+                                # Measured factor is applied even when
+                                # large (see the ZOGY path): understating
+                                # it would leave photometric errors a
+                                # factor too small on degraded fields.
+                                if 1.05 < _vscale < 1e4:
                                     _hdr["VSCALE"] = (
                                         round(_vscale, 6),
                                         "Noise-model factor sigma_diff/sigma_sci (IQR)",
                                     )
-                                    logger.info(
-                                        "HOTPANTS: VSCALE=%.4f written to diff header.",
-                                        _vscale,
-                                    )
-                                elif _vscale > 5.0:
+                                    if _vscale > 5.0:
+                                        logger.warning(
+                                            "HOTPANTS: difference noise "
+                                            "%.1fx the science noise "
+                                            "model - VSCALE applied "
+                                            "anyway; the excess likely "
+                                            "marks a degraded "
+                                            "subtraction.",
+                                            _vscale,
+                                        )
+                                    else:
+                                        logger.info(
+                                            "HOTPANTS: VSCALE=%.4f written to diff header.",
+                                            _vscale,
+                                        )
+                                elif _vscale >= 1e4:
                                     logger.warning(
                                         "HOTPANTS: difference noise %.1fx the science "
-                                        "noise model - leaving VSCALE=1.0.",
+                                        "noise model - pathological; leaving VSCALE=1.0.",
                                         _vscale,
                                     )
                     except Exception as _vs_e:

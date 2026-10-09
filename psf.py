@@ -13888,7 +13888,13 @@ class PSF:
             flux_fit = np.where(
                 allow_negative | (flux_fit > 0), flux_fit, np.nan
             )
-            flux_err = np.where(np.isfinite(flux_err), flux_err, np.nan)
+            # A fitter returning err <= 0 means "no usable covariance"
+            # (bounded/degenerate fit) - report it as unmeasured, not as
+            # infinitely precise; a literal 0.0 reaches the output table
+            # and reads as infinite SNR downstream.
+            flux_err = np.where(
+                np.isfinite(flux_err) & (flux_err > 0), flux_err, np.nan
+            )
         cfit_out = self._first_present(combined, ["cfit"])
         qfit_out = self._first_present(combined, ["qfit"])
         chi2_out = self._first_present(combined, ["reduced_chi2", "chi2_red"])

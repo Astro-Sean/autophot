@@ -94,6 +94,10 @@ class QualityMetrics:
     # Overall
     quality_score: float = 1.0
     quality_class: str = "unknown"  # "pass", "downgrade", "fail"
+    # False when no dipole/bright-star residual check could run - the
+    # classification then caps at "downgrade" because the subtraction's
+    # fidelity is unverified rather than verified clean.
+    residual_checks_verified: bool = True
 
     # Metadata
     algorithm: str = ""
@@ -556,6 +560,28 @@ def compute_quality_score(metrics: QualityMetrics, cfg: QualityConfig) -> None:
         metrics.quality_class = "downgrade"
     else:
         metrics.quality_class = "fail"
+
+    # A "pass" on zero residual checks is unverifiable, not verified:
+    # the dipole and bright-star measurements are the only evidence the
+    # subtraction actually removed flux, and scoring them 1.0 for
+    # "nothing to check" would certify a diff no source ever tested.
+    # Cap at "downgrade" so photometry picks up the configured
+    # systematic instead of a clean bill.  Skipped only when the user
+    # deliberately disabled both residual checks.
+    metrics.residual_checks_verified = (
+        metrics.dipole_checked > 0 or metrics.bright_star_count > 0
+    )
+    if (
+        metrics.quality_class == "pass"
+        and not metrics.residual_checks_verified
+        and (cfg.dipole_check_sources or cfg.bright_star_check)
+    ):
+        metrics.quality_class = "downgrade"
+        logger.info(
+            "Difference-image quality downgraded: no residual checks "
+            "were possible (dipole_checked=0, bright_star_count=0) - "
+            "subtraction fidelity is unverified, not verified clean."
+        )
 
 
 # ===========================================================================
