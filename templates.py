@@ -903,6 +903,22 @@ def _load_psf_stamp_native(fpath: str) -> np.ndarray:
     return np.asarray(native, dtype=float)
 
 
+def _psf_stamp_is_empirical(fpath: str) -> bool:
+    """True when the stamp's PSFBUILD card marks a measured ePSF model.
+
+    ``PSFBUILD`` values are ``epsf``/``epsf-understaffed``/
+    ``epsf-underresolved`` for empirical builds and
+    ``analytic-composite``/``analytic-moffat`` for fitted fallbacks; a
+    missing card (older files) counts as not empirical so the
+    star-stack preference stays conservative.
+    """
+    try:
+        kind = str(fits.getheader(fpath).get("PSFBUILD", "")).strip().lower()
+    except Exception:
+        return False
+    return kind.startswith("epsf")
+
+
 def _pick_psf_file(files, image_fpath):
     files = list(files or [])
     if not files:
@@ -11596,6 +11612,14 @@ class Templates:
             # needs native-resolution PSFs.
             science_psf_data = _load_psf_stamp_native(science_psf)
             reference_psf_data = _load_psf_stamp_native(template_psf)
+            # PSFBUILD provenance (written by the stamp creators) tells
+            # the repair logic whether the delivered model is a real
+            # measured ePSF or an analytic fallback - an empirical
+            # model already encodes the field PSF better than a crude
+            # matched-source median stack, while an analytic stamp is
+            # the case the stack exists to rescue.
+            _sci_psf_empirical = _psf_stamp_is_empirical(science_psf)
+            _ref_psf_empirical = _psf_stamp_is_empirical(template_psf)
             if science_data.shape != reference_data.shape:
                 raise ValueError(
                     f"ZOGY requires same image shapes: science {science_data.shape} vs reference {reference_data.shape}"
@@ -12113,7 +12137,15 @@ class Templates:
                 ) ** -3.5
                 return m / m.sum()
 
-            def _repair_stamp(stamp, star_stamp, star_f, img_f, tag, star_n=0):
+            def _repair_stamp(
+                stamp,
+                star_stamp,
+                star_f,
+                img_f,
+                tag,
+                star_n=0,
+                model_empirical=False,
+            ):
                 sf = _measure_stamp_fwhm(stamp)
                 # Negative mass is the signature of a sick stamp: ePSF
                 # outskirts hover at +-noise and can collectively carry more
@@ -12137,15 +12169,19 @@ class Templates:
                     and np.isfinite(star_f)
                     and star_f > 0
                     and star_n >= _min_psf_stars
+                    and not model_empirical
                 ):
-                    # A vetted stack of enough stars is the truest stamp:
-                    # it carries the real resampled-frame PSF shape
-                    # (wing flux, ellipticity) that an analytic model can
-                    # get wrong by ~2x in the far wings even when its
-                    # FWHM agrees (TDP6 60881 r: model-vs-stack shape
-                    # error printed ~14% cores + negative rings on every
-                    # bright star).  The kernel maps the stamp onto real
-                    # stars, so feed it the real stars.
+                    # A vetted stack of enough stars beats an analytic
+                    # model stamp: it carries the real resampled-frame
+                    # PSF shape (wing flux, ellipticity) that an
+                    # analytic model can get wrong by ~2x in the far
+                    # wings even when its FWHM agrees (TDP6 60881 r:
+                    # model-vs-stack shape error printed ~14% cores +
+                    # negative rings on every bright star).  An
+                    # empirical ePSF encodes the same measurement
+                    # better -- vetted isolated stars, subpixel
+                    # recentering, smoothing -- so the stack only
+                    # arbitrates it below, never overrides outright.
                     logger.info(
                         "ZOGY %s PSF: using star-stack stamp "
                         "(%d stars, FWHM %.2f px; model stamp %.2f px, "
@@ -12168,6 +12204,13 @@ class Templates:
                     bad = unsanitary or dev > 0.15
                     sub, ref_f = star_stamp, star_f
                     sub_tag = "star-stack"
+                    if not bad and model_empirical and star_stamp is not None:
+                        logger.info(
+                            "ZOGY %s PSF: keeping the empirical ePSF "
+                            "model (FWHM %.2f px); the star stack "
+                            "(%d stars, %.2f px) agrees within %.0f%%.",
+                            tag, sf, star_n, star_f, 100.0 * dev,
+                        )
                 else:
                     # With no star stack there is no independent arbiter:
                     # the image FWHM can itself be wrong on resampled or
@@ -12219,11 +12262,13 @@ class Templates:
                 science_psf_data, _star_sci_stamp, _star_sci_f, _fs_f,
                 "science",
                 star_n=len(_star_pos) if _star_pos is not None else 0,
+                model_empirical=_sci_psf_empirical,
             )
             reference_psf_data, _fwhm_t_psf = _repair_stamp(
                 reference_psf_data, _star_ref_stamp, _star_ref_f, _ft_f,
                 "template",
                 star_n=len(_star_ref_pos) if _star_ref_pos is not None else 0,
+                model_empirical=_ref_psf_empirical,
             )
             # Effective PSF widths drive the AUTO direction choice.  The
             # star-stack width is measured on the real field stars and is

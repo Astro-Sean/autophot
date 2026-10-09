@@ -9197,14 +9197,17 @@ def run_photometry():
                             "ZOGY will fall back to SFFT",
                             e,
                         )
-                elif not _phot_analytic and (
-                    n_matched_s >= 5
-                    or (n_matched_s >= _zogy_min_stars and not _epsf_on_disk)
+                elif (
+                    not _phot_analytic
+                    and not _epsf_on_disk
+                    and n_matched_s >= _zogy_min_stars
                 ):
                     # A matched-star rebuild on a subset of the same
                     # pool cannot improve on a model the photometry
-                    # stage already vetted, so an analytic photometry
-                    # model skips this build entirely.
+                    # stage already vetted, so it runs only when the
+                    # photometry stage left no ePSF on disk - a
+                    # ZOGY-specific build is the last resort, not the
+                    # default.
                     try:
                         PSF(
                             image=image,
@@ -9246,7 +9249,7 @@ def run_photometry():
                             "ZOGY will fall back to SFFT",
                             e,
                         )
-                elif _zogy_psf_mode != "analytic" and n_matched_s < 5:
+                elif _zogy_psf_mode != "analytic":
                     logging.info(
                         "ZOGY: %d matched sources; %s for the science PSF.",
                         n_matched_s,
