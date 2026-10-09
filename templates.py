@@ -537,7 +537,9 @@ def _zogy_star_psf(
     that stamp, and the positions that survived the per-star
     consistency filter (cosmic rays and hot pixels masquerading as
     matched sources must not collapse the stack).
-    ``(None, nan, None)`` when no cutout survives the consistency filter.
+    ``kept_positions`` is ``None`` only when vetting never ran (no
+    positions offered); a run that rejected everything returns ``[]``
+    so callers can tell "no usable stars" apart from "no vetting".
     """
     if positions is None or len(positions) < 1:
         return None, float("nan"), None
@@ -646,7 +648,7 @@ def _zogy_star_psf(
         shifted.append(_cs / peak)
         kept_pos.append((x, y))
     if len(profs) < 1:
-        return None, float("nan"), None
+        return None, float("nan"), []
     profs = np.asarray(profs)
 
     def _prof_fwhm(p):
@@ -719,7 +721,7 @@ def _zogy_star_psf(
         # list is dominated by spikes/galaxies; no stack.  A single
         # survivor is still used: one bright-star cutout is a far better
         # PSF than a blind analytic guess.
-        return None, float("nan"), None
+        return None, float("nan"), []
     profs = profs[near]
     shifted = [s for s, k in zip(shifted, near) if k]
     kept_pos = [p for p, k in zip(kept_pos, near) if k]
@@ -771,7 +773,10 @@ def _zogy_star_psf(
     )
     total = float(stamp.sum())
     if not np.isfinite(total) or total <= 0:
-        return None, float("nan"), None
+        # The individual cutouts passed vetting even though their
+        # median stack cannot be normalised - the positions are still
+        # the vetted subset.
+        return None, float("nan"), kept_pos
     return stamp / total, fwhm, kept_pos
 
 
@@ -1148,19 +1153,24 @@ def _zogy_taper_stamp(stamp, fwhm, r_in_f=2.0, r_out_f=4.0):
 
 
 def _zerolag_stamp_fwhm(arr):
-    """FWHM of a PSF held in zero-lag (ifftshifted) padded layout.
+    """FWHM of a PSF wherever its peak sits in a periodic layout.
 
-    The stamp's PSF is split across the four array corners, so a plain
-    radial profile about the argmax mixes quarter-arcs at different
-    radii and can under-read the width by ~25%.  Rolling by half the
-    array reassembles the PSF at the centre before measuring.
+    Kernel probes work on zero-lag (ifftshifted) padded arrays, where
+    the PSF is split across the four array corners and a plain radial
+    profile about the argmax mixes quarter-arcs at different radii -
+    under-reading the width by ~25% (the observed "convolved 12 px vs
+    target 5 px" fidelity veto on TDP6 60881 r).  Rolling the argmax to
+    the array centre reassembles the PSF before measuring and is a
+    no-op for already-centred stamps.
     """
     a = np.asarray(arr, dtype=float)
-    if a.ndim != 2:
+    if a.ndim != 2 or not np.isfinite(a).any():
         return float("nan")
-    return _measure_stamp_fwhm(
-        np.roll(a, (a.shape[0] // 2, a.shape[1] // 2), axis=(0, 1))
+    py, px = np.unravel_index(np.nanargmax(a), a.shape)
+    a = np.roll(
+        a, (a.shape[0] // 2 - py, a.shape[1] // 2 - px), axis=(0, 1)
     )
+    return _measure_stamp_fwhm(a)
 
 
 def _zogy_kernel_fid_err(source_psf, kernel, target_psf):
@@ -1218,6 +1228,45 @@ def _zogy_window_kernel(kernel, half_width):
     s = float(np.sum(out))
     if np.isfinite(s) and abs(s) > 1e-30:
         out = out / s
+    return out
+
+
+def _zogy_lsq_fit_positions(matching_sources, star_pos, star_ref_pos):
+    """Positions to feed the pixel-domain LSQ kernel fit.
+
+    A matched position that failed the star-stack vetting in either
+    frame (blank sky, flat-topped, CR spike) gives the solve a garbage
+    stamp, and the resulting overfit kernel is exactly the ringy map
+    the sidelobe cap then vetoes.  Fit on positions that survived in
+    BOTH frames; when only one side's vetting ran, use it; only an
+    unvetted matched list is used raw.  A too-small vetted set leaves
+    the solver's own min_stamps gate to decline the fit rather than
+    reintroducing rejected stamps.
+    """
+    out = []
+    for msrc in matching_sources or []:
+        try:
+            mxy = np.asarray([msrc["x"], msrc["y"]], dtype=float)
+        except (TypeError, IndexError, KeyError):
+            try:
+                mxy = np.asarray(msrc, dtype=float)
+            except (TypeError, ValueError):
+                continue
+        if mxy.size >= 2 and np.isfinite(mxy[:2]).all():
+            out.append((float(mxy[0]), float(mxy[1])))
+    if star_pos is None and star_ref_pos is None:
+        return out
+    for vlist in (star_pos, star_ref_pos):
+        if vlist is None:
+            continue
+        vset = {
+            (round(float(p[0]), 1), round(float(p[1]), 1))
+            for p in vlist
+        }
+        out = [
+            p for p in out
+            if (round(p[0], 1), round(p[1], 1)) in vset
+        ]
     return out
 
 
@@ -11726,16 +11775,24 @@ class Templates:
                     )
                     if _tag == "science":
                         _star_sci_stamp, _star_sci_f = None, float("nan")
+                        # A vetoed ensemble's members are not trusted
+                        # stars: [] (not None) so downstream consumers
+                        # still know vetting ran.
+                        _star_pos = []
                     else:
                         _star_ref_stamp, _star_ref_f = None, float("nan")
+                        _star_ref_pos = []
             # Either validated list beats the raw one: matched-source
             # catalogs can carry cosmic-ray spikes that are blank sky in
-            # the other frame.
+            # the other frame.  An empty vetted list falls through to
+            # the other frame's list, then to raw matches - the
+            # aperture-scale estimator has its own robustification,
+            # unlike the LSQ kernel solve.
             _scale_pos = (
                 _star_pos
-                if _star_pos is not None
+                if _star_pos
                 else _star_ref_pos
-                if _star_ref_pos is not None
+                if _star_ref_pos
                 else matching_sources
             )
 
@@ -12020,6 +12077,10 @@ class Templates:
             # at the best available width when no stack exists.
             # -----------------------------------------------------------------
 
+            _min_psf_stars = int(
+                ts_cfg.get("zogy_min_psf_stars", 3) or 3
+            )
+
             def _moffat_stamp(fwhm):
                 n = 2 * int(np.ceil(3.0 * fwhm)) + 1
                 yy, xx = np.mgrid[0:n, 0:n]
@@ -12053,9 +12114,9 @@ class Templates:
                     star_stamp is not None
                     and np.isfinite(star_f)
                     and star_f > 0
-                    and star_n >= 3
+                    and star_n >= _min_psf_stars
                 ):
-                    # A vetted stack of >=3 stars is the truest stamp:
+                    # A vetted stack of enough stars is the truest stamp:
                     # it carries the real resampled-frame PSF shape
                     # (wing flux, ellipticity) that an analytic model can
                     # get wrong by ~2x in the far wings even when its
@@ -12322,44 +12383,9 @@ class Templates:
             _adapt_eps = _as_bool(
                 ts_cfg.get("zogy_wiener_adaptive_eps", True), True
             )
-            _kfit_xy = []
-            for _msrc in matching_sources or []:
-                try:
-                    _mxy = np.asarray(
-                        [_msrc["x"], _msrc["y"]], dtype=float
-                    )
-                except (TypeError, IndexError, KeyError):
-                    try:
-                        _mxy = np.asarray(_msrc, dtype=float)
-                    except (TypeError, ValueError):
-                        continue
-                if _mxy.size >= 2 and np.isfinite(_mxy[:2]).all():
-                    _kfit_xy.append((float(_mxy[0]), float(_mxy[1])))
-            # A matched position that failed the star-stack vetting in
-            # either frame (blank sky, flat-topped, CR spike) feeds the
-            # LSQ solve a garbage stamp - the resulting kernel is exactly
-            # the overfit ringy map the sidelobe cap then vetoes.  Fit on
-            # the positions that survived in BOTH frames when there are
-            # enough of them.
-            if _star_pos is not None and _star_ref_pos is not None:
-                _ref_set = {
-                    (round(float(p[0]), 1), round(float(p[1]), 1))
-                    for p in _star_ref_pos
-                }
-                _both = [
-                    p for p in _kfit_xy
-                    if (round(p[0], 1), round(p[1], 1)) in _ref_set
-                ]
-                _sci_set = {
-                    (round(float(p[0]), 1), round(float(p[1]), 1))
-                    for p in _star_pos
-                }
-                _both = [
-                    p for p in _both
-                    if (round(p[0], 1), round(p[1], 1)) in _sci_set
-                ]
-                if len(_both) >= _lsq_min:
-                    _kfit_xy = _both
+            _kfit_xy = _zogy_lsq_fit_positions(
+                matching_sources, _star_pos, _star_ref_pos
+            )
             _kern_meta = {}
 
             def _build_dir_kernel(_d):
@@ -12570,6 +12596,17 @@ class Templates:
                 _lsq_rr_max = float(
                     ts_cfg.get("zogy_lsq_resid_cap", 0.5) or 0.5
                 )
+                # Width-fidelity check on the LSQ candidate too: a fit
+                # that passes neg/resid caps but lands its convolved PSF
+                # well off the target width is not trustworthy.  NaN
+                # (unmeasurable) is tolerated -- the pixel residual is
+                # still evidence.
+                _fid_l = (
+                    _zogy_kernel_fid_err(_src, _kl_full, _tgt)
+                    if _kl_full is not None
+                    else np.nan
+                )
+                _meta["lsq_fid_err"] = _fid_l
                 _lsq_ok = (
                     _kl_full is not None
                     and _neg_l <= _lsq_cap
@@ -12580,6 +12617,10 @@ class Templates:
                     and (
                         np.isnan(_meta.get("resid_ratio", np.nan))
                         or _meta["resid_ratio"] <= _lsq_rr_max
+                    )
+                    and (
+                        not np.isfinite(_fid_l)
+                        or _fid_l <= max(_fid_tol, 0.20)
                     )
                 )
                 if not _lsq_ok:
@@ -12597,11 +12638,13 @@ class Templates:
                     elif not _lsq_ok:
                         logger.info(
                             "ZOGY: %s-direction LSQ kernel rejected "
-                            "(neg=%.3f cap %.2f, resid_ratio=%.3f cap "
-                            "%.2f, lam_rel=%s, probe neg %.3f).",
+                            "(neg=%.3f cap %.2f, fid=%.3f, "
+                            "resid_ratio=%.3f cap %.2f, lam_rel=%s, "
+                            "probe neg %.3f).",
                             _d,
                             _neg_l,
                             _lsq_cap,
+                            _fid_l,
                             _meta.get("resid_ratio", float("nan")),
                             _lsq_rr_max,
                             f"{_linfo.get('lam_rel'):.3g}"
