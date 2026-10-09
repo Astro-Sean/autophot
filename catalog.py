@@ -29,6 +29,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from matplotlib.ticker import ScalarFormatter
 from scipy.optimize import minimize
 from scipy.ndimage import gaussian_laplace
@@ -657,6 +658,7 @@ def plot_optimized_catalog_coverage(
         # required region - e.g. a survey boundary shows as an empty
         # half-panel even before the usable-source cuts bite.
         _cat_src = plot_data.get("catalog_sources") or {}
+        _raw_shown = {}
         for _cname in sorted(_cat_src):
             _serves_c = _cat_bands.get(_cname)
             if _serves_c is not None and band not in _serves_c:
@@ -677,6 +679,7 @@ def plot_optimized_catalog_coverage(
                 linewidths=0,
                 zorder=1.5,
             )
+            _raw_shown[_cname] = len(_df)
 
         # Usable sources per catalog (finite mag inside the ZP window; the
         # squares show which of them actually land on a detector).
@@ -698,6 +701,30 @@ def plot_optimized_catalog_coverage(
                 zorder=4,
             )
             legend_handles.append(sc)
+
+        # Catalogs that returned detections but no usable sources on this
+        # band still get a legend entry so the faint underlay points are
+        # attributable.
+        _usable_cats = {
+            cn
+            for (cn, cb), df in sources.items()
+            if cb == band and df is not None and len(df) > 0
+        }
+        for _cname in sorted(_raw_shown):
+            if _cname in _usable_cats:
+                continue
+            legend_handles.append(
+                Line2D(
+                    [],
+                    [],
+                    marker=".",
+                    ls="",
+                    markersize=7,
+                    color=_catalog_plot_style(_cname)["color"],
+                    alpha=0.6,
+                    label=f"{_cname} raw ({_raw_shown[_cname]})",
+                )
+            )
 
         if center_dec is not None:
             # White underlay keeps the cross legible over dense footprints.
@@ -763,6 +790,7 @@ def plot_optimized_catalog_coverage(
         if legend_handles:
             # Single-column legend inside the axes, top right.
             ax.legend(
+                handles=legend_handles,
                 fontsize=7,
                 loc="upper right",
                 ncol=1,
