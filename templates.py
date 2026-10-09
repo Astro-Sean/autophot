@@ -601,7 +601,24 @@ def _zogy_star_psf(
         # A matched science position can land on blank sky in the other
         # frame (e.g. a cosmic ray); its noise "profile" then measures a
         # garbage width and can still slip through the FWHM window.
-        if not np.isfinite(peak) or peak <= 0 or peak < 10.0 * sky_std:
+        # Test the integrated aperture SNR, not the peak: a broad PSF on
+        # a noisy frame spreads its light over hundreds of pixels, so a
+        # real star can sit below a 10-sigma PEAK while its integrated
+        # detection is strong (TDP6 60553 r dropped every matched star
+        # at 6-9 sigma peak).  A CR spike that passes the integrated
+        # test still dies at the FWHM window below.
+        _snr_m = (r_c <= min(1.5 * guess, 25.0)) & np.isfinite(c)
+        _int_flux = float(np.nansum(np.where(_snr_m, c - sky, 0.0)))
+        _int_snr = _int_flux / (
+            sky_std * np.sqrt(max(float(_snr_m.sum()), 1.0)) + 1e-30
+        )
+        if (
+            not np.isfinite(peak)
+            or peak <= 0
+            or peak < 3.0 * sky_std
+            or not np.isfinite(_int_snr)
+            or _int_snr < 6.0
+        ):
             continue
         # A saturated star has a clipped core whose flat-topped profile
         # reads wider than the true PSF -- it would inflate the stack.
@@ -12152,11 +12169,31 @@ class Templates:
                     sub, ref_f = star_stamp, star_f
                     sub_tag = "star-stack"
                 else:
-                    # With no star stack the image FWHM is the only
-                    # reference, and it can be wrong on resampled data --
-                    # only reject physically unsanitary stamps.
+                    # With no star stack there is no independent arbiter:
+                    # the image FWHM can itself be wrong on resampled or
+                    # galaxy-rich data, so swapping a healthy stamp for a
+                    # Moffat at a biased width trades one error for
+                    # another.  Reject only physically unsanitary stamps
+                    # and log a large width disagreement for provenance.
                     bad = unsanitary
                     if np.isfinite(img_f) and img_f > 0:
+                        _dev_img = (
+                            abs(sf - img_f) / img_f
+                            if np.isfinite(sf)
+                            else np.inf
+                        )
+                        if _dev_img > 0.15:
+                            logger.warning(
+                                "ZOGY %s PSF stamp FWHM %.2f px disagrees "
+                                "with the image FWHM %.2f px by %.0f%%; "
+                                "keeping the stamp (no star stack to "
+                                "arbitrate) - check the subtraction "
+                                "quality flags.",
+                                tag,
+                                sf if np.isfinite(sf) else -1.0,
+                                img_f,
+                                100.0 * _dev_img,
+                            )
                         sub, ref_f = _moffat_stamp(img_f), img_f
                         sub_tag = "analytic-Moffat"
                 if not bad or sub is None:
@@ -12631,8 +12668,21 @@ class Templates:
                 if not _lsq_ok:
                     # An absent or rejected LSQ candidate used to be
                     # silent, leaving no trace of why the Wiener path
-                    # won; log the deciding term.
-                    if _kc is None:
+                    # won; log the deciding term.  An empty _linfo means
+                    # the solve never ran (no vetted positions left
+                    # after star-stack filtering) - report that rather
+                    # than printing "?" placeholders.
+                    if _kc is None and not (_lsq_on and _kfit_xy):
+                        logger.debug(
+                            "ZOGY: %s-direction LSQ kernel not attempted "
+                            "(enabled=%s, fit positions=%d, "
+                            "min_stamps=%d).",
+                            _d,
+                            bool(_lsq_on),
+                            len(_kfit_xy) if _kfit_xy else 0,
+                            _lsq_min,
+                        )
+                    elif _kc is None:
                         logger.debug(
                             "ZOGY: %s-direction LSQ kernel unavailable "
                             "(n_stamps=%s, ksum=%s).",
