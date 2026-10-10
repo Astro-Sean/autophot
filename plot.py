@@ -42,6 +42,7 @@ try:
     from lightcurve import (
         _normalize_photometry_columns,
         _time_axis_transform,
+        _apply_lightcurve_quality_filters,
         BAND_COLORS,
         canonical_band_label_map_from_filter_series,
         canonical_bands_from_filter_series,
@@ -49,6 +50,7 @@ try:
         photometry_filter_series,
     )
 except ImportError:
+    _apply_lightcurve_quality_filters = None
     _normalize_photometry_columns = None
     _time_axis_transform = None
     BAND_COLORS = None
@@ -1552,7 +1554,11 @@ class Plot:
         data = pd.read_csv(output_file)
         if _normalize_photometry_columns is not None:
             data = _normalize_photometry_columns(data)
-        
+        if _apply_lightcurve_quality_filters is not None:
+            data = _apply_lightcurve_quality_filters(
+                data, method, input_yaml=input_yaml
+            )
+
         adaptive_limit_col = None
         if adaptive_snr_selection and input_yaml:
             lim_cfg = input_yaml.get("limiting_magnitude") or {}

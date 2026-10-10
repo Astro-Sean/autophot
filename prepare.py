@@ -10,6 +10,7 @@ import sys
 import pathlib
 import logging
 import glob
+import hashlib
 import shutil
 import numpy as np
 import pandas as pd
@@ -41,6 +42,64 @@ from functions import (
 from check import FitsInfo
 from tns import get_coords, get_coords_simbad
 from wcs import get_wcs
+
+
+def _dedupe_identical_files(file_list):
+    """Remove byte-identical copies from a list of file paths.
+
+    Two files are duplicates when they share a size and full content hash;
+    hashing is only attempted within size-colliding groups so unique-size
+    files cost nothing.  For each duplicate set the first path in sorted
+    order is kept.
+
+    Parameters
+    ----------
+    file_list : list of str
+
+    Returns
+    -------
+    (kept, dropped) : tuple
+        ``kept`` preserves the original order minus duplicates; ``dropped``
+        is a list of ``(kept_path, dropped_path)`` pairs for logging.
+    """
+    by_size = {}
+    for path in file_list:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = None
+        by_size.setdefault(size, []).append(path)
+
+    if not any(len(v) > 1 for v in by_size.values()):
+        return list(file_list), []
+
+    content_owner = {}
+    dropped = []
+    dropped_set = set()
+
+    def _content_key(path, size):
+        h = hashlib.md5()  # noqa: S324 - identity hash, not security
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return (size, h.digest())
+
+    for size, paths in by_size.items():
+        if len(paths) < 2 or size is None:
+            continue
+        for path in sorted(paths):
+            try:
+                key = _content_key(path, size)
+            except OSError:
+                continue
+            if key in content_owner:
+                dropped.append((content_owner[key], path))
+                dropped_set.add(path)
+            else:
+                content_owner[key] = path
+
+    kept = [p for p in file_list if p not in dropped_set]
+    return kept, dropped
 
 
 class Prepare:
@@ -200,14 +259,41 @@ class Prepare:
                             cur_dir, f"Output_{base}.csv"
                         )
 
-                    # restart=False skips files whose output CSV already exists.
-                    if os.path.exists(output_csv_path) and not self.input_yaml.get(
-                        "restart", True
-                    ):
-                        files_removed += 1
-                        continue
+                    valid_files.append((filepath, output_csv_path))
 
-                    valid_files.append(filepath)
+        # Drop byte-identical inputs before the restart check: a copy under a
+        # different name must not be processed just because its own output
+        # directory does not exist yet.
+        n_duplicates = 0
+        output_lookup = {fp: out for fp, out in valid_files}
+        candidate_files = [fp for fp, _ in valid_files]
+        if candidate_files:
+            dedup_enabled = bool(
+                (self.input_yaml.get("preprocessing") or {}).get(
+                    "deduplicate_input_files", True
+                )
+            )
+            if dedup_enabled:
+                candidate_files, dup_map = _dedupe_identical_files(candidate_files)
+                n_duplicates = len(dup_map)
+                for kept, dropped in dup_map:
+                    self.logger.warning(
+                        "Duplicate input skipped: %s (identical to %s)",
+                        os.path.basename(dropped),
+                        os.path.basename(kept),
+                    )
+
+        # restart=False skips files whose output CSV already exists.
+        pending_files = []
+        for filepath in candidate_files:
+            if (
+                os.path.exists(output_lookup.get(filepath, ""))
+                and not self.input_yaml.get("restart", True)
+            ):
+                files_removed += 1
+                continue
+            pending_files.append(filepath)
+
         restart = self.input_yaml.get("restart", True)
         self.logger.info(border_msg("Scanning FITS files"))
         self.logger.info(
@@ -220,13 +306,15 @@ class Prepare:
             ),
         )
         self.logger.info(
-            "Scanned %d FITS file(s): %d completed (OUTPUT present), %d pending.",
+            "Scanned %d FITS file(s): %d completed (OUTPUT present), "
+            "%d duplicate(s) skipped, %d pending.",
             total_candidates,
             files_removed,
-            len(valid_files),
+            n_duplicates,
+            len(pending_files),
         )
 
-        return valid_files
+        return pending_files
 
     # --- Check Files ---
     def check_files(self, flist: List[str], template_files: bool = False) -> List[str]:

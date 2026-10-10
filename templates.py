@@ -1128,11 +1128,14 @@ _ZOGY_NEAR_MATCH_KERNEL_NEG_LIMIT = 0.25
 # Sidelobe ceiling for a kernel adopted through a veto override: the
 # flipped-to direction must be trustworthy in its own right, not merely
 # cleaner than the vetoed one.  Wiener kernels adopted this way are held
-# to _ZOGY_KERNEL_NEG_TOL (a genuine smoother is ~1e-3); an LSQ kernel may
-# carry legitimate shift-absorption mass, documented at ~0.05-0.3 -- the
-# 0.25-0.39 kernels applied on J2344 r-band (2026-10) left sombrero
-# residuals and ~1.0 dipole fractions.
-_ZOGY_FLIP_LSQ_NEG_CAP = 0.30
+# to _ZOGY_KERNEL_NEG_TOL (a genuine smoother is ~1e-3); an LSQ kernel
+# defaults to the same sidelobe cap it would need as the configured
+# direction (zogy_lsq_neg_cap): the resid_ratio and width-fidelity gates
+# now bound the sombrero risk that motivated the stricter 0.30 ceiling
+# (documented on J2344 r-band kernels before those gates existed - the
+# neg-0.44 kernel applied there with the gates in place halved the
+# bright-star residuals).  zogy_lsq_flip_neg_cap overrides the default.
+_ZOGY_FLIP_LSQ_NEG_CAP_DEFAULT = 0.45
 
 
 def _zogy_taper_stamp(stamp, fwhm, r_in_f=2.0, r_out_f=4.0):
@@ -1570,6 +1573,207 @@ def _zogy_lsq_kernel(
     if best[0] is not None:
         return best[0], best[2]
     return None, info
+
+
+def _zogy_stamp_shift(sci_stamp, ref_stamp, max_lag=4):
+    """Sub-pixel lag aligning ``ref_stamp`` onto ``sci_stamp``.
+
+    Direct cross-correlation restricted to +-``max_lag`` pixels -- a
+    full-image phase correlation aliases on small stamps.  Returns
+    ``(dx, dy)`` in pixels or None when the peak is unconstrained.
+    """
+    from scipy.signal import correlate
+
+    try:
+        max_lag = int(max_lag)
+    except (TypeError, ValueError):
+        max_lag = 4
+    s = np.asarray(sci_stamp, dtype=float)
+    r = np.asarray(ref_stamp, dtype=float)
+    if s.shape != r.shape or not np.isfinite(s).all() or not np.isfinite(r).all():
+        return None
+    s = s - np.median(s)
+    r = r - np.median(r)
+    if s.max() < 3.0 * s.std() or r.max() < 3.0 * r.std():
+        return None
+    c = correlate(r, s, mode="same")
+    cy, cx = c.shape[0] // 2, c.shape[1] // 2
+    if c.shape[0] < 2 * max_lag + 1 or c.shape[1] < 2 * max_lag + 1:
+        # The stamp cannot express the full lag range -- a clipped
+        # window would report a lag offset relative to a truncated
+        # zero point, which is a wrong answer rather than no answer.
+        return None
+    win = c[cy - max_lag : cy + max_lag + 1, cx - max_lag : cx + max_lag + 1]
+    py, px = np.unravel_index(np.argmax(win), win.shape)
+    # A peak pinned on the lag boundary means the true shift exceeds the
+    # search range -- not a measurable sub-pixel lag.
+    if (
+        py == 0
+        or px == 0
+        or py == win.shape[0] - 1
+        or px == win.shape[1] - 1
+    ):
+        return None
+    dy, dx = float(py - max_lag), float(px - max_lag)
+    d1 = 2.0 * win[py, px] - win[py + 1, px] - win[py - 1, px]
+    if abs(d1) > 1e-12:
+        dy += 0.5 * (win[py + 1, px] - win[py - 1, px]) / d1
+    d2 = 2.0 * win[py, px] - win[py, px + 1] - win[py, px - 1]
+    if abs(d2) > 1e-12:
+        dx += 0.5 * (win[py, px + 1] - win[py, px - 1]) / d2
+    return dx, dy
+
+
+def _zogy_residual_warp(
+    sci,
+    ref,
+    positions,
+    fwhm,
+    *,
+    ban_xy=None,
+    ban_radius=None,
+    min_sources=6,
+    min_rms=0.08,
+    max_lag=4,
+    max_shift=3.0,
+):
+    """Warp ``ref`` onto the science grid with a smooth residual field.
+
+    The global alignment (spalipy cubic spline) leaves spatially varying
+    misregistration of ~0.2-0.4 px -- the dipole residuals around bright
+    stars that no global matching kernel can absorb.  The residual
+    pattern is smooth (dominated by linear gradients), so a degree-1
+    polynomial displacement field fit to per-source lags recovers most
+    of it without risking a high-order warp on sparse anchors.
+
+    Anchors are the same vetted stellar positions feeding the kernel
+    stamp pool; variable/target/banned positions are excluded.  Returns
+    ``(warped_ref, info)``; on any gate failure ``warped_ref`` is the
+    input unchanged and ``info["applied"]`` is False.
+    """
+    from scipy.ndimage import map_coordinates
+
+    info = {"applied": False, "n_anchors": 0}
+    if positions is None or len(positions) < min_sources:
+        info["reason"] = "too few anchors"
+        return ref, info
+
+    ban = None
+    if ban_xy is not None:
+        try:
+            ban = np.atleast_2d(np.asarray(ban_xy, dtype=float))
+        except (TypeError, ValueError):
+            ban = None
+        if ban is not None and (ban.ndim != 2 or ban.shape[1] < 2):
+            ban = None
+
+    hs = int(max(round(1.5 * (fwhm or 8.0)), 8))
+    lag = int(max_lag)
+    meas = []
+    for p in positions:
+        try:
+            x, y = float(p[0]), float(p[1])
+        except (TypeError, IndexError, ValueError, KeyError):
+            continue
+        if not (np.isfinite(x) and np.isfinite(y)):
+            continue
+        if ban is not None and len(ban):
+            if np.min(np.hypot(ban[:, 0] - x, ban[:, 1] - y)) <= (
+                ban_radius or 0.0
+            ):
+                continue
+        xi, yi = int(round(x)), int(round(y))
+        if (
+            xi - hs < 0
+            or yi - hs < 0
+            or xi + hs + 1 > sci.shape[1]
+            or yi + hs + 1 > sci.shape[0]
+        ):
+            continue
+        s = sci[yi - hs : yi + hs + 1, xi - hs : xi + hs + 1]
+        r = ref[yi - hs : yi + hs + 1, xi - hs : xi + hs + 1]
+        sh = _zogy_stamp_shift(s, r, max_lag=lag)
+        if sh is not None:
+            meas.append((x, y, sh[0], sh[1]))
+    info["n_anchors"] = len(meas)
+    if len(meas) < min_sources:
+        info["reason"] = "too few measurable lags"
+        return ref, info
+
+    m = np.asarray(meas)
+    raw_rms = float(np.sqrt(np.mean(m[:, 2] ** 2 + m[:, 3] ** 2)))
+    info["raw_rms"] = raw_rms
+    if raw_rms < min_rms:
+        info["reason"] = "residual registration already fine"
+        return ref, info
+
+    H, W = ref.shape
+    A = np.c_[m[:, 0] / W, m[:, 1] / H, np.ones(len(m))]
+    # MAD-clip passes: anchors whose lag is a fit outlier (mismatched
+    # pair, resolved galaxy) must not bend the whole field.
+    keep = np.ones(len(m), dtype=bool)
+    for _ in range(2):
+        if keep.sum() < min_sources:
+            break
+        cdx, _, _, _ = np.linalg.lstsq(A[keep], m[keep, 2], rcond=None)
+        cdy, _, _, _ = np.linalg.lstsq(A[keep], m[keep, 3], rcond=None)
+        res = np.hypot(m[:, 2] - A @ cdx, m[:, 3] - A @ cdy)
+        mad = np.median(np.abs(res[keep] - np.median(res[keep])))
+        lim = max(4.0 * 1.4826 * mad, 0.05)
+        keep = res <= np.median(res[keep]) + lim
+    if keep.sum() < max(3, int(min_sources)):
+        # The clip rejected below the configured floor: a degree-1 fit
+        # on a handful of survivors is underdetermined noise, not a
+        # registration measurement.
+        info["reason"] = "field fit lost too many anchors"
+        info["n_used"] = int(keep.sum())
+        return ref, info
+    cdx, _, _, _ = np.linalg.lstsq(A[keep], m[keep, 2], rcond=None)
+    cdy, _, _, _ = np.linalg.lstsq(A[keep], m[keep, 3], rcond=None)
+    fit_rms = float(
+        np.sqrt(
+            np.mean(
+                (m[keep, 2] - A[keep] @ cdx) ** 2
+                + (m[keep, 3] - A[keep] @ cdy) ** 2
+            )
+        )
+    )
+    info.update(
+        fit_rms=fit_rms,
+        n_used=int(keep.sum()),
+        dx_coeff=cdx.tolist(),
+        dy_coeff=cdy.tolist(),
+    )
+    # Require a real improvement: fitting noise to noise leaves the same
+    # RMS and would just smear the reference.
+    if fit_rms >= 0.75 * raw_rms:
+        info["reason"] = "field fit does not beat anchor scatter"
+        return ref, info
+
+    yy, xx = np.mgrid[0:H, 0:W]
+    dxf = cdx[0] * xx / W + cdx[1] * yy / H + cdx[2]
+    dyf = cdy[0] * xx / W + cdy[1] * yy / H + cdy[2]
+    info["max_fitted"] = float(np.max(np.hypot(dxf, dyf)))
+    if info["max_fitted"] > max_shift:
+        info["reason"] = "fitted displacement unphysically large"
+        return ref, info
+
+    # The lag of ref relative to sci is +m: ref content sits at +m from
+    # the science position, so the correcting content shift is -m and
+    # map_coordinates samples at +m.
+    fill = float(np.nanmedian(ref))
+    warped = map_coordinates(
+        np.where(np.isfinite(ref), ref, fill),
+        [yy + dyf, xx + dxf],
+        order=3,
+        mode="nearest",
+    )
+    fmask = map_coordinates(
+        np.isfinite(ref).astype(float), [yy + dyf, xx + dxf], order=1, mode="nearest"
+    )
+    warped[fmask < 0.5] = np.nan
+    info["applied"] = True
+    return warped, info
 
 
 def _pack_lsq_kernel(kernel, shape):
@@ -2841,6 +3045,103 @@ def _pad_to_shape(image, target_shape, fill=np.nan, mask=None):
     return image, mask
 
 
+def _check_spalipy_sub_tile_feasibility(
+    det,
+    shape,
+    sub_tile,
+    edge_buffer=0,
+    min_quad_sep=0.0,
+    n_quad_det=25,
+    log=None,
+):
+    """Check if spalipy's sub-tile splitting will produce quads.
+
+    spalipy splits the *source* image into a ``sub_tile`` x ``sub_tile``
+    grid over ``source_data[entry].shape`` - the shape AFTER any padding -
+    and requires each sub-tile to yield at least one valid quad: >=4
+    sources AND a 4-source combination (drawn from the first
+    ``n_quad_det`` of the tile, in table order) whose pairwise separations
+    all exceed ``min_quad_sep``.  A tile with >=4 sources but zero valid
+    quads produces an empty hash array and crashes cdist, so the count
+    alone is not sufficient.  Detections within ``edge_buffer`` of the
+    frame edge are excluded, matching spalipy's edge mask.
+
+    ``det`` must expose ``det["x"]`` / ``det["y"]`` pixel coordinates.
+
+    Returns ``sub_tile`` when every tile supports a quad, else 1.
+    """
+    log = log or logging.getLogger(__name__)
+    if sub_tile <= 1:
+        return sub_tile
+    try:
+        import itertools
+
+        from scipy.spatial import distance as _sp_dist
+
+        coo = np.column_stack(
+            [
+                np.asarray(det["x"], float),
+                np.asarray(det["y"], float),
+            ]
+        )
+        width = shape[1]
+        height = shape[0]
+        if edge_buffer > 0:
+            edge_ok = (
+                (coo[:, 0] >= edge_buffer)
+                & (coo[:, 0] <= width - edge_buffer)
+                & (coo[:, 1] >= edge_buffer)
+                & (coo[:, 1] <= height - edge_buffer)
+            )
+        else:
+            edge_ok = np.ones(len(coo), dtype=bool)
+        sub_w = width / sub_tile
+        sub_h = height / sub_tile
+        counts = []
+        feasible = True
+        for i in range(sub_tile):
+            cx = width * (2 * i + 1) / (sub_tile * 2)
+            for j in range(sub_tile):
+                cy = height * (2 * j + 1) / (sub_tile * 2)
+                mask = (
+                    (np.abs(cx - coo[:, 0]) <= sub_w / 2)
+                    & (np.abs(cy - coo[:, 1]) <= sub_h / 2)
+                    & edge_ok
+                )
+                tile_coo = coo[mask]
+                counts.append(int(tile_coo.shape[0]))
+                if len(tile_coo) < 4:
+                    feasible = False
+                    continue
+                _tc = tile_coo[: max(int(n_quad_det), 1)]
+                if len(_tc) < 4:
+                    feasible = False
+                    continue
+                _has_quad = any(
+                    np.min(_sp_dist.pdist(_tc[list(idx)])) > min_quad_sep
+                    for idx in itertools.combinations(range(len(_tc)), 4)
+                )
+                if not _has_quad:
+                    feasible = False
+        if feasible:
+            log.info(
+                "spalipy: sub_tile=%d feasible (per-tile sources: %s).",
+                sub_tile,
+                counts,
+            )
+            return sub_tile
+        log.info(
+            "spalipy: sub_tile=%d infeasible (per-tile sources: %s, "
+            "a tile lacks 4 sources or a min_quad_sep-spaced "
+            "quad); reducing to sub_tile=1.",
+            sub_tile,
+            counts,
+        )
+        return 1
+    except Exception:
+        return sub_tile
+
+
 def _merge_detection_lists(
     xy_a, flux_a, fwhm_a, xy_b, flux_b, fwhm_b, radius=1.5
 ):
@@ -3341,6 +3642,81 @@ def _auto_sfft_kernel_order(
     if n_eff >= 30 and (rel_diff > 0.4 or last_resort):
         return min(1, max_order)
     return 0
+
+
+def _fscal_phot_needs_repair(
+    phot_scale: float,
+    ap_scale: float,
+    ap_n_ratios: int,
+    sanity_frac: float = 0.15,
+    min_ratios: int = 5,
+) -> bool:
+    """Decide whether SFFT's FSCAL_PHOT should be replaced.
+
+    FSCAL_PHOT comes from SExtractor photometry on the unconvolved
+    images.  On most fields it sits within a few percent of the true
+    science/reference flux ratio, but it occasionally fails outright
+    (e.g. reports ~5-8x for a same-instrument pair where the truth is
+    ~1).  The aperture-scale estimate ``ap_scale`` (wide matched-source
+    apertures, PSF-shape insensitive) is the independent referee: repair
+    only when it rests on enough ratios and the two estimates disagree
+    by more than ``sanity_frac`` of the aperture value.  Moderate
+    disagreements are left alone -- the documented few-percent aperture
+    bias on mismatched PSFs is real but small.
+    """
+    try:
+        phot = float(phot_scale)
+        ap = float(ap_scale)
+        frac = float(sanity_frac)
+    except (TypeError, ValueError):
+        return False
+    if not (
+        np.isfinite(phot)
+        and np.isfinite(ap)
+        and np.isfinite(frac)
+        and ap > 0
+        and frac > 0
+    ):
+        return False
+    try:
+        if int(ap_n_ratios) < int(min_ratios):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return abs(phot - ap) / ap > frac
+
+
+def _sfft_retry_kernel_hw(
+    n_matched: int,
+    fwhm_conv: float,
+    pix_per_source: float = 35.0,
+) -> int:
+    """Kernel half-width for the under-constrained-kernel retry.
+
+    Sizes the retry kernel to the constraint budget instead of the PSF:
+    (2*hw+1)^2 delta-basis pixels stay within pix_per_source per matched
+    source.  ~35 px/source keeps the solved kernel's wing noise near
+    10% of its peak on sparse fields.  The floor holds the
+    convolution-PSF core (one FWHM_conv) so the retry kernel can still
+    do the required broadening.
+    """
+    try:
+        n = max(int(n_matched), 1)
+    except (TypeError, ValueError):
+        n = 1
+    try:
+        budget = float(pix_per_source)
+        if not np.isfinite(budget) or budget <= 0:
+            budget = 35.0
+    except (TypeError, ValueError):
+        budget = 35.0
+    hw = int(np.floor((np.sqrt(budget * n) - 1.0) / 2.0))
+    try:
+        fc = float(fwhm_conv)
+    except (TypeError, ValueError):
+        fc = 0.0
+    floor = max(5, int(np.ceil(fc))) if np.isfinite(fc) and fc > 0 else 5
+    return max(floor, hw)
 
 
 def _diff_resid_at_sources(
@@ -5952,55 +6328,6 @@ class Templates:
                     message="; ".join(_reasons),
                 )
 
-            def _check_sub_tile_feasibility(det, shape, sub_tile, min_per_tile=4):
-                """Check if spalipy's sub-tile splitting will have enough sources.
-
-                spalipy splits the *source* image (template) into sub_tile x
-                sub_tile grid and requires >=4 sources per sub-tile for quad
-                construction.  When the template only partially overlaps the
-                science image, matched sources cluster in the overlap region
-                and some sub-tiles may be empty.
-
-                This simulates the splitting and reduces sub_tile if needed.
-                """
-                if sub_tile <= 1:
-                    return sub_tile
-                try:
-                    coo = np.column_stack([
-                        np.asarray(det["x"], float),
-                        np.asarray(det["y"], float),
-                    ])
-                    width = shape[1]
-                    height = shape[0]
-                    sub_w = width / sub_tile
-                    sub_h = height / sub_tile
-                    counts = []
-                    for i in range(sub_tile):
-                        cx = width * (2 * i + 1) / (sub_tile * 2)
-                        for j in range(sub_tile):
-                            cy = height * (2 * j + 1) / (sub_tile * 2)
-                            mask = (
-                                (np.abs(cx - coo[:, 0]) <= sub_w / 2) &
-                                (np.abs(cy - coo[:, 1]) <= sub_h / 2)
-                            )
-                            counts.append(int(mask.sum()))
-                    _min_count = min(counts)
-                    if _min_count >= min_per_tile:
-                        logger.info(
-                            "spalipy: sub_tile=%d feasible (per-tile sources: %s).",
-                            sub_tile, counts,
-                        )
-                        return sub_tile
-                    else:
-                        logger.info(
-                            "spalipy: sub_tile=%d infeasible (per-tile sources: %s, "
-                            "min=%d < %d needed); reducing to sub_tile=1.",
-                            sub_tile, counts, _min_count, min_per_tile,
-                        )
-                        return 1
-                except Exception:
-                    return sub_tile
-
             def _spalipy() -> AlignmentResult:
                 """Align template to science using spalipy (spline-warp registration).
 
@@ -6544,8 +6871,23 @@ class Templates:
                     else:
                         _sub_tile = 2 if _n_sources >= 200 else 1
                         if _sub_tile > 1:
-                            _sub_tile = _check_sub_tile_feasibility(
-                                _tpl_det, _tpl_fill.shape, _sub_tile,
+                            # spalipy tiles over the source shape it is
+                            # given - the template padded up to the science
+                            # frame - not the raw template shape.
+                            _sp_tile_shape = tuple(
+                                max(int(a), int(b))
+                                for a, b in zip(
+                                    _tpl_fill.shape, scienceImage.shape
+                                )
+                            )
+                            _sub_tile = _check_spalipy_sub_tile_feasibility(
+                                _tpl_det,
+                                _sp_tile_shape,
+                                _sub_tile,
+                                edge_buffer=_quad_edge_buffer,
+                                min_quad_sep=_min_quad_sep,
+                                n_quad_det=_n_quad,
+                                log=logger,
                             )
 
                     # Spline order: SmoothBivariateSpline requires at least
@@ -6658,10 +7000,18 @@ class Templates:
                                     )
                                     sp._aligned_data = None
                                     continue
-                                elif "Not enough detections" in _err_msg and _try_sub_tile > 1:
+                                elif _try_sub_tile > 1 and (
+                                    "Not enough detections" in _err_msg
+                                    or "2-dimensional array" in _err_msg
+                                ):
+                                    # "2-dimensional array" is scipy's cdist
+                                    # error when a sub-tile quadlist is empty
+                                    # (>=4 detections but every 4-source
+                                    # combination has a pair closer than
+                                    # min_quad_sep).
                                     logger.info(
                                         "spalipy: sub_tile=%d failed (not enough "
-                                        "detections in sub-tile); retrying with sub_tile=1.",
+                                        "detections/quads in sub-tile); retrying with sub_tile=1.",
                                         _try_sub_tile,
                                     )
                                     _try_sub_tile = 1
@@ -9678,6 +10028,7 @@ class Templates:
         method: str = "sfft",
         kernel_order: int = 0,
         matching_sources: Optional[List[Tuple[float, float]]] = None,
+        lsq_stamp_sources: Optional[List[Tuple[float, float]]] = None,
         masked_sources: Optional[List[Tuple[float, float]]] = None,
         common_sources: Optional[List[Tuple[float, float]]] = None,
         stamp_loc: Optional[str] = None,
@@ -9717,6 +10068,13 @@ class Templates:
             Kernel-prior positions on the aligned science grid, in
             **0-based** NumPy pixel coordinates.  The SFFT adapter converts
             them to 1-based SExtractor coordinates internally.
+        lsq_stamp_sources : list of (x, y) or None
+            Extra kernel-stamp positions on the aligned science grid
+            (e.g. every position-matched detection pair, not only the
+            flux-consistent subset).  ZOGY only: positions stellar in
+            both frames are merged into the LSQ kernel stamp pool --
+            sparse fields otherwise starve the solve on the handful of
+            flux-consistent matched sources.
         masked_sources : list of (x, y) or None
             Positions to ban from kernel fitting, in **1-based**
             SExtractor/FITS coordinates (the convention ``run_sfft.py``
@@ -10942,6 +11300,7 @@ class Templates:
                     science_fwhm=science_fwhm,
                     template_fwhm=template_fwhm,
                     matching_sources=matching_sources,
+                    lsq_stamp_sources=lsq_stamp_sources,
                     kernel_half_width=kernel_half_width,
                     universal_mask=universal_mask,
                     masked_sources=masked_sources,
@@ -11415,7 +11774,13 @@ class Templates:
                     "algorithm": str(backend_used or "unknown"),
                     "forceconv": str(diff_header.get("FORCECON", "")),
                     "kernel_order": int(kernel_order),
-                    "kernel_half_width": int(kernel_half_width) if kernel_half_width else 0,
+                    # KERHW is authoritative: a kernel-size retry adopts a
+                    # smaller half-width than the configured value.
+                    "kernel_half_width": int(
+                        diff_header.get("KERHW") or kernel_half_width or 0
+                    ),
+                    "kernel_noise": float(diff_header.get("KERNOISE", 0.0) or 0.0),
+                    "kernel_negfrac": float(diff_header.get("KERNEG", 0.0) or 0.0),
                     "science_fwhm": float(science_fwhm),
                     "template_fwhm": float(template_fwhm),
                     "n_matching_sources": _n_matching_sources,
@@ -11452,7 +11817,11 @@ class Templates:
                     "science_fwhm": float(science_fwhm),
                     "template_fwhm": float(template_fwhm),
                     "kernel_order": int(kernel_order),
-                    "kernel_half_width": int(kernel_half_width) if kernel_half_width else 0,
+                    "kernel_half_width": int(
+                        diff_header.get("KERHW") or kernel_half_width or 0
+                    ),
+                    "kernel_noise": float(diff_header.get("KERNOISE", 0.0) or 0.0),
+                    "kernel_negfrac": float(diff_header.get("KERNEG", 0.0) or 0.0),
                     "n_matching_sources": _n_matching_sources,
                     "n_matching_priors": len(_matching_priors),
                     "n_masked_sources": len(masked_sources) if masked_sources else 0,
@@ -11594,6 +11963,7 @@ class Templates:
         science_fwhm=0.0,
         template_fwhm=0.0,
         matching_sources=None,
+        lsq_stamp_sources=None,
         kernel_half_width=None,
         universal_mask=None,
         masked_sources=None,
@@ -11842,6 +12212,121 @@ class Templates:
                 else matching_sources
             )
 
+            # Extra kernel-stamp pool: position-matched detection pairs
+            # beyond the flux-consistent matched list.  The LSQ kernel
+            # only needs positions that are stellar in BOTH frames --
+            # flux consistency is irrelevant to a shape solve -- while
+            # sparse fields starve it on the consistent subset alone.
+            # The same per-star vetting used for the stack members
+            # rejects blank-sky, saturated, CR and extended stamps.
+            _kfit_extra = []
+            # The extra pool feeds the LSQ kernel stamps and the
+            # residual-warp anchors only; skip the per-star vetting when
+            # both consumers are configured off.
+            _kfit_extra_on = _as_bool(
+                ts_cfg.get("zogy_lsq_kernel", True), True
+            ) or _as_bool(ts_cfg.get("zogy_residual_warp", True), True)
+            if lsq_stamp_sources and _kfit_extra_on:
+                _excl_r_k = max(3.0 * max(_fs_f, _ft_f), 15.0)
+                _ban_k = (
+                    np.asarray(_ban_xy) if _ban_xy else None
+                )
+                _mset = set()
+                for _msrc in matching_sources or []:
+                    try:
+                        _mxy = np.asarray(
+                            [_msrc["x"], _msrc["y"]], dtype=float
+                        )
+                    except (TypeError, IndexError, KeyError):
+                        try:
+                            _mxy = np.asarray(_msrc, dtype=float)
+                        except (TypeError, ValueError):
+                            continue
+                    if _mxy.size >= 2 and np.isfinite(_mxy[:2]).all():
+                        _mset.add(
+                            (round(float(_mxy[0]), 1),
+                             round(float(_mxy[1]), 1))
+                        )
+                _extra_pool = []
+                for _ep in lsq_stamp_sources:
+                    try:
+                        _exy = np.asarray(
+                            [_ep["x"], _ep["y"]], dtype=float
+                        )
+                    except (TypeError, IndexError, KeyError):
+                        try:
+                            _exy = np.asarray(_ep, dtype=float)
+                        except (TypeError, ValueError):
+                            continue
+                    if _exy.size < 2 or not np.isfinite(_exy[:2]).all():
+                        continue
+                    _ekey = (
+                        round(float(_exy[0]), 1),
+                        round(float(_exy[1]), 1),
+                    )
+                    if _ekey in _mset:
+                        continue
+                    if _ban_k is not None and _ban_k.size:
+                        if (
+                            np.min(
+                                np.hypot(
+                                    _ban_k[:, 0] - _exy[0],
+                                    _ban_k[:, 1] - _exy[1],
+                                )
+                            )
+                            <= _excl_r_k
+                        ):
+                            continue
+                    _extra_pool.append(
+                        (float(_exy[0]), float(_exy[1]))
+                    )
+                # Dense fields can offer thousands of position-matched
+                # stamps; per-star vetting is a stamp cutout each while
+                # the solver itself subsamples to ~60, so screening the
+                # full list is wasted work.  Stride-subsample the offered
+                # pool (catalogue order is spatially mixed) to a few
+                # multiples of the solve cap.
+                _pool_cap = 300
+                if len(_extra_pool) > _pool_cap:
+                    _step = int(np.ceil(len(_extra_pool) / _pool_cap))
+                    _extra_pool = _extra_pool[::_step][:_pool_cap]
+                if _extra_pool:
+                    _, _, _xp = _zogy_star_psf(
+                        science_data,
+                        _extra_pool,
+                        _fs_f or 8.0,
+                        saturate=science_saturate,
+                    )
+                    _, _, _xr = _zogy_star_psf(
+                        reference_data,
+                        _extra_pool,
+                        _ft_f or 8.0,
+                        saturate=template_saturate,
+                    )
+                    if _xp is not None and _xr is not None:
+                        _xr_set = {
+                            (round(float(p[0]), 1),
+                             round(float(p[1]), 1))
+                            for p in _xr
+                        }
+                        _kfit_extra = [
+                            p
+                            for p in _xp
+                            if (
+                                round(float(p[0]), 1),
+                                round(float(p[1]), 1),
+                            )
+                            in _xr_set
+                        ]
+                        if _kfit_extra:
+                            logger.info(
+                                "ZOGY: %d position-matched stamps "
+                                "joined the LSQ kernel pool (%d offered, "
+                                "stellar in both frames).",
+                                len(_kfit_extra),
+                                len(_extra_pool),
+                            )
+
             # -----------------------------------------------------------------
             # Flux-scale matching: ZOGY requires both images in the same flux
             # units (fn = fr).  When exposure times differ (e.g. 330s sci vs
@@ -12011,6 +12496,62 @@ class Templates:
             # Scale template data and noise to match science flux units
             reference_data = reference_data * _flux_scale
             _sr = _sr * _flux_scale
+
+            # Residual registration refinement: the global alignment
+            # leaves a smooth ~0.2-0.4 px displacement field (dipoles at
+            # bright stars that the order-0 matching kernel cannot
+            # represent).  Measure per-anchor lags on the vetted
+            # positions and warp the reference onto the science grid
+            # before any stamp or kernel work consumes it.
+            if _as_bool(ts_cfg.get("zogy_residual_warp", True), True):
+                _warp_pos = []
+                _wseen = set()
+                for _wp in list(_star_pos or []) + list(_kfit_extra or []):
+                    try:
+                        _wxy = (float(_wp[0]), float(_wp[1]))
+                    except (TypeError, IndexError, ValueError, KeyError):
+                        continue
+                    _wk = (round(_wxy[0], 1), round(_wxy[1], 1))
+                    if _wk in _wseen:
+                        continue
+                    _wseen.add(_wk)
+                    _warp_pos.append(_wxy)
+                try:
+                    _warp_min = int(
+                        ts_cfg.get("zogy_warp_min_sources", 6) or 6
+                    )
+                    _warp_rms = float(
+                        ts_cfg.get("zogy_warp_min_rms", 0.08) or 0.08
+                    )
+                except (TypeError, ValueError):
+                    _warp_min, _warp_rms = 6, 0.08
+                reference_data, _warp_info = _zogy_residual_warp(
+                    science_data,
+                    reference_data,
+                    _warp_pos,
+                    max(_fs_f, _ft_f),
+                    ban_xy=(np.asarray(_ban_xy) if _ban_xy else None),
+                    ban_radius=max(3.0 * max(_fs_f, _ft_f), 15.0),
+                    min_sources=_warp_min,
+                    min_rms=_warp_rms,
+                )
+                if _warp_info.get("applied"):
+                    logger.info(
+                        "ZOGY: residual registration warp applied "
+                        "(%d anchors, lag RMS %.2f -> %.2f px, "
+                        "max |shift| %.2f px).",
+                        _warp_info["n_used"],
+                        _warp_info["raw_rms"],
+                        _warp_info["fit_rms"],
+                        _warp_info["max_fitted"],
+                    )
+                else:
+                    logger.info(
+                        "ZOGY: residual registration warp skipped "
+                        "(%s; %d anchors).",
+                        _warp_info.get("reason", "?"),
+                        _warp_info.get("n_anchors", 0),
+                    )
 
             # -----------------------------------------------------------------
             # Per-pixel noise maps (optional): compute local background RMS
@@ -12473,6 +13014,17 @@ class Templates:
             _kfit_xy = _zogy_lsq_fit_positions(
                 matching_sources, _star_pos, _star_ref_pos
             )
+            if _kfit_extra:
+                _kseen = {
+                    (round(float(p[0]), 1), round(float(p[1]), 1))
+                    for p in _kfit_xy
+                }
+                _kfit_xy = list(_kfit_xy) + [
+                    p
+                    for p in _kfit_extra
+                    if (round(float(p[0]), 1), round(float(p[1]), 1))
+                    not in _kseen
+                ]
             _kern_meta = {}
 
             def _build_dir_kernel(_d):
@@ -12635,31 +13187,90 @@ class Templates:
                 _lsq_cap = float(
                     ts_cfg.get("zogy_lsq_neg_cap", 0.45) or 0.45
                 )
+                _lsq_rr_max = float(
+                    ts_cfg.get("zogy_lsq_resid_cap", 0.5) or 0.5
+                )
                 if _lsq_on and _kfit_xy:
                     _s_img = _ref_clean if _d == "REF" else _sci_clean
                     _t_img = _sci_clean if _d == "REF" else _ref_clean
-                    try:
-                        _kc, _linfo = _zogy_lsq_kernel(
-                            _s_img,
-                            _t_img,
-                            _kfit_xy,
-                            min(_kern_win, _lsq_hwcap),
-                            invalid_mask=_fill_regions,
-                            lam_rel=_lsq_lam,
-                            min_stamps=_lsq_min,
-                            neg_cap=_lsq_cap,
+                    # Kernel support ladder.  A matching kernel is
+                    # compact - the PSF difference plus a shift margin -
+                    # so solving at the full Wiener window hands the fit
+                    # hundreds of unconstrained pixels that grow into
+                    # far-field sidelobes (TDP8_2 r: neg 0.52 at hw=12 vs
+                    # 0.40 at hw=8 on identical stamps).  Solve the
+                    # PSF-scaled compact support first and only escalate
+                    # to the configured cap when the compact kernel
+                    # cannot reach the mapping (residual cap).
+                    _hw_f = max(
+                        _fwhm_val(_fwhm_s_psf) or 0.0,
+                        _fwhm_val(_fwhm_t_psf) or 0.0,
+                    )
+                    _hw_ad = (
+                        min(
+                            max(int(round(0.8 * _hw_f + 3.0)), 6),
+                            _lsq_hwcap,
                         )
-                    except Exception as _e:
-                        logger.info(
-                            "ZOGY: %s-direction LSQ kernel solve failed "
-                            "(%s).",
-                            _d, _e,
+                        if _hw_f > 0
+                        else _lsq_hwcap
+                    )
+                    _hw_ladder = (
+                        [_hw_ad]
+                        if _hw_ad >= _lsq_hwcap
+                        else [_hw_ad, _lsq_hwcap]
+                    )
+                    _kc, _linfo, _kl_full = None, {}, None
+                    _rej_pool = []
+                    for _hw_i in _hw_ladder:
+                        try:
+                            _kc_i, _linfo_i = _zogy_lsq_kernel(
+                                _s_img,
+                                _t_img,
+                                _kfit_xy,
+                                _hw_i,
+                                invalid_mask=_fill_regions,
+                                lam_rel=_lsq_lam,
+                                min_stamps=_lsq_min,
+                                neg_cap=_lsq_cap,
+                            )
+                        except Exception as _e:
+                            logger.info(
+                                "ZOGY: %s-direction LSQ kernel solve "
+                                "failed (%s).",
+                                _d, _e,
+                            )
+                            continue
+                        if _kc_i is None:
+                            continue
+                        _neg_i = float(_linfo_i.get("neg", np.inf))
+                        _linfo_i["hw_used"] = _hw_i
+                        _rej_pool.append((_neg_i, _kc_i, _linfo_i))
+                        if _neg_i > _lsq_cap:
+                            continue
+                        _rr_i = _linfo_i.get("resid_ratio", np.nan)
+                        if np.isfinite(_rr_i) and _rr_i > _lsq_rr_max:
+                            continue
+                        _kl_i = _pack_lsq_kernel(
+                            _kc_i, _sci_clean.shape
                         )
-                        _kc, _linfo = None, {}
+                        _fid_i = _zogy_kernel_fid_err(
+                            _src, _kl_i, _tgt
+                        )
+                        if np.isfinite(_fid_i) and _fid_i > max(
+                            _fid_tol, 0.20
+                        ):
+                            continue
+                        _kc, _linfo, _kl_full = _kc_i, _linfo_i, _kl_i
+                        break
+                    if _kc is None and _rej_pool:
+                        _kc, _linfo = min(
+                            _rej_pool, key=lambda t: t[0]
+                        )[1:3]
                     if _kc is not None:
-                        _kl_full = _pack_lsq_kernel(
-                            _kc, _sci_clean.shape
-                        )
+                        if _kl_full is None:
+                            _kl_full = _pack_lsq_kernel(
+                                _kc, _sci_clean.shape
+                            )
                         _neg_l = float(_linfo.get("neg", np.inf))
                         _meta["b0"] = float(_linfo.get("b0", 0.0))
                         _meta["ksum_raw"] = _linfo.get("ksum_raw", np.nan)
@@ -12680,9 +13291,6 @@ class Templates:
                 # Wiener probe gates the LSQ choice as well: when the
                 # PSF-ratio kernel screams deconvolution, no pixel-domain
                 # fit is trusted for that direction either.
-                _lsq_rr_max = float(
-                    ts_cfg.get("zogy_lsq_resid_cap", 0.5) or 0.5
-                )
                 # Width-fidelity check on the LSQ candidate too: a fit
                 # that passes neg/resid caps but lands its convolved PSF
                 # well off the target width is not trustworthy.  NaN
@@ -12739,14 +13347,15 @@ class Templates:
                         logger.info(
                             "ZOGY: %s-direction LSQ kernel rejected "
                             "(neg=%.3f cap %.2f, fid=%.3f, "
-                            "resid_ratio=%.3f cap %.2f, lam_rel=%s, "
-                            "probe neg %.3f).",
+                            "resid_ratio=%.3f cap %.2f, hw=%s, "
+                            "lam_rel=%s, probe neg %.3f).",
                             _d,
                             _neg_l,
                             _lsq_cap,
                             _fid_l,
                             _meta.get("resid_ratio", float("nan")),
                             _lsq_rr_max,
+                            _linfo.get("hw_used", "?"),
                             f"{_linfo.get('lam_rel'):.3g}"
                             if _linfo.get("lam_rel") is not None
                             else "?",
@@ -12890,8 +13499,18 @@ class Templates:
                 if _veto:
                     _opp = "SCI" if _zogy_forceconv == "REF" else "REF"
                     _neg_opp = _neg_by_dir.get(_opp)
+                    _flip_cap = ts_cfg.get("zogy_lsq_flip_neg_cap")
+                    if _flip_cap is None:
+                        _flip_cap = ts_cfg.get(
+                            "zogy_lsq_neg_cap",
+                            _ZOGY_FLIP_LSQ_NEG_CAP_DEFAULT,
+                        )
+                    try:
+                        _flip_cap = float(_flip_cap)
+                    except (TypeError, ValueError):
+                        _flip_cap = _ZOGY_FLIP_LSQ_NEG_CAP_DEFAULT
                     _neg_cap_opp = (
-                        _ZOGY_FLIP_LSQ_NEG_CAP
+                        _flip_cap
                         if _kern_meta.get(_opp, {}).get("method") == "lsq"
                         else _ZOGY_KERNEL_NEG_TOL
                     )
@@ -13055,18 +13674,54 @@ class Templates:
                         _ksum_l = float(_kmeta.get("ksum_raw", 1.0) or 1.0)
                         if not np.isfinite(_ksum_l) or _ksum_l <= 0:
                             _ksum_l = 1.0
+                        # Small kernel-sum deviations are solve noise, not
+                        # photometry: on sparse fields the stamp solve
+                        # wanders ~3% run-to-run on identical data, and
+                        # folding that into the scale oversubtracts every
+                        # bright source.  Within zogy_lsq_ksum_tol the
+                        # kernel is renormalized to unit sum and the
+                        # measured flux scale stands; a larger deviation
+                        # is a real scale correction and folds as before.
+                        try:
+                            _ksum_tol = abs(
+                                float(
+                                    ts_cfg.get("zogy_lsq_ksum_tol", 0.03)
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            _ksum_tol = 0.03
+                        _ksum_noise = abs(_ksum_l - 1.0) <= _ksum_tol
                         if _zogy_forceconv == "SCI":
+                            # The kernel is always unit-normalized here so
+                            # convolved science keeps the science flux
+                            # scale; the residual rescale of the reference
+                            # term is the fold, skipped when the deviation
+                            # is within solve noise.
                             _conv_kernel = _conv_kernel / _ksum_l
-                            _ref_clean = _ref_clean / _ksum_l
-                            _sr = _sr / _ksum_l
-                            _source_var_r = _source_var_r / _ksum_l**2
-                            if _sr_map is not None:
-                                _sr_map = _sr_map / _ksum_l
-                            _b0 = _b0 / _ksum_l
-                            _flux_scale = _flux_scale / _ksum_l
+                            if not _ksum_noise:
+                                _ref_clean = _ref_clean / _ksum_l
+                                _sr = _sr / _ksum_l
+                                _source_var_r = (
+                                    _source_var_r / _ksum_l**2
+                                )
+                                if _sr_map is not None:
+                                    _sr_map = _sr_map / _ksum_l
+                                _b0 = _b0 / _ksum_l
+                                _flux_scale = _flux_scale / _ksum_l
                         else:
-                            _flux_scale = _flux_scale * _ksum_l
-                        if abs(_ksum_l - 1.0) > 0.15:
+                            if _ksum_noise:
+                                _conv_kernel = _conv_kernel / _ksum_l
+                            else:
+                                _flux_scale = _flux_scale * _ksum_l
+                        if _ksum_noise:
+                            logger.info(
+                                "ZOGY: LSQ kernel sum %.4f within "
+                                "tolerance %.3f -- treated as solve "
+                                "noise; kernel renormalized, measured "
+                                "flux scale (%.4g) kept.",
+                                _ksum_l, _ksum_tol, _flux_scale,
+                            )
+                        elif abs(_ksum_l - 1.0) > 0.15:
                             logger.warning(
                                 "ZOGY: LSQ kernel sum %.3f deviates >15%% "
                                 "from unity -- the prior flux scale was "
@@ -13997,6 +14652,10 @@ class Templates:
                     "-regularize_sparse_threshold",
                     str(int(ts_sub.get("sfft_regularize_sparse_threshold", 30))),
                 ]
+                cmd_local += [
+                    "-kernel_noise_thresh",
+                    str(float(ts_sub.get("sfft_kernel_noise_retry", 0.12))),
+                ]
 
                 # Variable star rejection: enable flags must be passed alongside
                 # their thresholds, otherwise the thresholds are ignored and variable
@@ -14090,6 +14749,125 @@ class Templates:
                 )
             clean_subprocess_log(log_path)
             _active_log_holder[0] = log_path
+
+            # Independent photometric scale for the FSCAL_PHOT sanity
+            # check.  SFFT's FSCAL_PHOT is SExtractor photometry on the
+            # unconvolved images and occasionally fails outright (it has
+            # produced ~5-8x on same-instrument pairs where the truth is
+            # ~1), while it is also the target of the CONVD=SCI flux
+            # correction and the reference of the discrepancy metric --
+            # a broken value corrupts both.  Wide matched-source
+            # apertures (the ZOGY scale estimator) give a PSF-shape-
+            # insensitive scale on the same inputs SFFT saw; the inputs
+            # do not change across the retries, so compute it once.
+            _s_ap, _s_ap_n = np.nan, 0
+            try:
+                _s_ap, _s_ap_n = _zogy_matched_aperture_scale(
+                    np.asarray(fits.getdata(scienceFpath), dtype=np.float64),
+                    np.asarray(
+                        fits.getdata(template_work_fpath), dtype=np.float64
+                    ),
+                    matching_sources,
+                    max(float(science_fwhm), float(template_fwhm)),
+                    sat_sci=sat_sci,
+                    sat_ref=sat_ref,
+                )
+            except Exception as _ap_e:
+                logger.debug(
+                    "SFFT aperture flux-scale estimate failed: %s", _ap_e
+                )
+            try:
+                _fscal_sanity_frac = float(
+                    ts_sub.get("sfft_fscal_phot_sanity_frac", 0.15)
+                )
+            except (TypeError, ValueError):
+                _fscal_sanity_frac = 0.15
+            try:
+                _fscal_ap_min = int(
+                    ts_sub.get("sfft_fscal_ap_min_sources", 5)
+                )
+            except (TypeError, ValueError):
+                _fscal_ap_min = 5
+
+            def _stamp_fscal_cards(diff_path) -> None:
+                """Record the aperture scale and repair a broken FSCAL_PHOT.
+
+                The stamp must be re-applied to every diff a retry writes,
+                because a fresh SFFT product carries fresh SExtractor-based
+                FSCAL cards.  FSCAL_PHO2 keeps the original value for
+                provenance; FSCAL_DISC is recomputed against the repaired
+                photometric scale so downstream retries and the error
+                budget see the trustworthy discrepancy.
+                """
+                try:
+                    if not diff_path or not os.path.isfile(str(diff_path)):
+                        return
+                    with fits.open(
+                        str(diff_path), mode="update", memmap=False
+                    ) as _hdul:
+                        _h = _hdul[0].header
+                        if np.isfinite(_s_ap) and _s_ap > 0:
+                            _h["FSCAL_AP"] = (
+                                float(_s_ap),
+                                "Matched-aperture sci/ref flux scale",
+                            )
+                            _h["HIERARCH FSCAL_NAP"] = (
+                                int(_s_ap_n),
+                                "Ratios used for FSCAL_AP",
+                            )
+                        _phot_hdr = _h.get("FSCAL_PHOT")
+                        _conv_hdr = _h.get("FSCAL_CONV")
+                        if _phot_hdr is None:
+                            return
+                        _phot_use = float(_phot_hdr)
+                        if _fscal_phot_needs_repair(
+                            _phot_use,
+                            _s_ap,
+                            _s_ap_n,
+                            sanity_frac=_fscal_sanity_frac,
+                            min_ratios=_fscal_ap_min,
+                        ):
+                            logger.warning(
+                                "SFFT FSCAL_PHOT=%.4f disagrees with the "
+                                "matched-aperture scale %.4f (%d ratios) by "
+                                "more than %.0f%% - repairing FSCAL_PHOT to "
+                                "the aperture value; original kept in "
+                                "FSCAL_PHO2.",
+                                _phot_use,
+                                float(_s_ap),
+                                int(_s_ap_n),
+                                _fscal_sanity_frac * 100.0,
+                            )
+                            _h["HIERARCH FSCAL_PHO2"] = (
+                                _phot_use,
+                                "Original SExtractor photometric flux scale",
+                            )
+                            _h["HIERARCH FSCAL_PHOT"] = (
+                                float(_s_ap),
+                                "Photometric flux scale (aperture-repaired)",
+                            )
+                            _phot_use = float(_s_ap)
+                        if _conv_hdr is not None:
+                            _disc_new = (
+                                abs(float(_conv_hdr) - _phot_use)
+                                / max(
+                                    abs(float(_conv_hdr)),
+                                    abs(_phot_use),
+                                    1e-10,
+                                )
+                                * 100.0
+                            )
+                            _h["HIERARCH FSCAL_DISC"] = (
+                                float(_disc_new),
+                                "FSCAL_CONV vs FSCAL_PHOT discrepancy (pct)",
+                            )
+                        _hdul.flush()
+                except Exception as _st_e:
+                    logger.debug(
+                        "SFFT FSCAL card stamping failed: %s", _st_e
+                    )
+
+            _stamp_fscal_cards(outputFpath)
 
             # Optional one-pass feedback: exclude SFFT post-anomaly sources and rerun.
             use_post_anom_feedback = _as_bool(
@@ -14368,6 +15146,9 @@ class Templates:
                                     timeout=sfft_timeout,
                                 )
                             clean_subprocess_log(retry_log_path)
+                            # The retry wrote a fresh diff with fresh
+                            # SExtractor-based FSCAL cards - re-stamp.
+                            _stamp_fscal_cards(outputFpath)
                             if _diff_is_valid(str(outputFpath)):
                                 # Adopt the retry: flux-scaling metadata must be
                                 # re-parsed from the retry log below.
@@ -14546,6 +15327,10 @@ class Templates:
                         )
             except Exception:
                 pass
+            # The log-parse fallback above can write a raw SExtractor
+            # FSCAL_PHOT into the header; re-stamp so the retry decisions
+            # and the adopted diff see the repaired value.
+            _stamp_fscal_cards(outputFpath)
 
             # --- Flux scaling discrepancy retry ---
             # If the first pass produced a large flux scaling discrepancy
@@ -14616,6 +15401,7 @@ class Templates:
                             timeout=sfft_timeout,
                         )
                     clean_subprocess_log(discrep_log_path)
+                    _stamp_fscal_cards(outputFpath)
                     # Prefer the header FSCAL values (written by run_sfft.py
                     # from SFFT's return values); fall back to log parsing.
                     _conv_scale2 = _phot_scale2 = _discrep_pct2 = None
@@ -14675,6 +15461,10 @@ class Templates:
                             "image; restoring first-pass result."
                         )
                         _restore_sfft_outputs(_bak_dr)
+                    # The log-parse branch above can rewrite a raw
+                    # SExtractor FSCAL_PHOT; re-stamp so a broken value
+                    # is repaired again on the adopted diff.
+                    _stamp_fscal_cards(outputFpath)
                     logger.info("SFFT subtraction succeeded (discrepancy retry)")
                     return "done"
                 except Exception as exc_dr:
@@ -14760,6 +15550,7 @@ class Templates:
                             timeout=sfft_timeout,
                         )
                     clean_subprocess_log(cpr_log_path)
+                    _stamp_fscal_cards(outputFpath)
                     if not _diff_is_valid(str(outputFpath)):
                         logger.warning(
                             "SFFT ConstPhotRatio retry produced an invalid "
@@ -14832,6 +15623,10 @@ class Templates:
                                 f"{_resid_first:.2f}" if _resid_first is not None else "n/a",
                                 f"{_resid_retry:.2f}" if _resid_retry is not None else "n/a",
                             )
+                    # The log-parse branch above can rewrite a raw
+                    # SExtractor FSCAL_PHOT; re-stamp so a broken value
+                    # is repaired again on the adopted diff.
+                    _stamp_fscal_cards(outputFpath)
                     logger.info("SFFT subtraction succeeded (ConstPhotRatio retry)")
                     return "done"
                 except Exception as exc_cpr:
@@ -14845,6 +15640,163 @@ class Templates:
                 finally:
                     const_phot_ratio = _saved_cpr
                     _discard_sfft_backups(_bak_cpr)
+
+            # --- Under-constrained kernel retry ---
+            # When the matched-source count cannot constrain the full
+            # kernel, the solve deposits white noise in every kernel
+            # pixel; convolved with bright sources that noise reads as
+            # tens-of-percent residuals even though background-variance
+            # diagnostics look clean.  run_sfft.py measures this via the
+            # KERNOISE header card (wing MAD / kernel peak).  When it is
+            # high, retry once with a kernel sized to the constraint
+            # budget -- truncation loses some wing support, but a
+            # conditioned solve beats a noisy full-size one.  Adopt only
+            # when matched-source residuals do not increase.
+            try:
+                _knoise_thresh = float(
+                    ts_sub.get("sfft_kernel_noise_retry", 0.12)
+                )
+            except (TypeError, ValueError):
+                _knoise_thresh = 0.12
+            _knoise_now = _kerhw_now = None
+            try:
+                if outputFpath and os.path.isfile(outputFpath):
+                    _khdr = fits.getheader(outputFpath)
+                    _kn = _khdr.get("KERNOISE", None)
+                    _kw = _khdr.get("KERHW", None)
+                    _knoise_now = float(_kn) if _kn is not None else None
+                    _kerhw_now = int(_kw) if _kw is not None else None
+            except Exception:
+                _knoise_now = _kerhw_now = None
+            _fwhm_conv_rt = float(
+                np.sqrt(
+                    max(
+                        max(float(science_fwhm), float(template_fwhm)) ** 2
+                        - min(float(science_fwhm), float(template_fwhm)) ** 2,
+                        0.0,
+                    )
+                )
+            )
+            _hw_retry = _sfft_retry_kernel_hw(
+                _n_matched_local,
+                _fwhm_conv_rt,
+                ts_sub.get("sfft_kernel_pix_per_source", 35.0),
+            )
+            _do_ksize_retry = (
+                _knoise_now is not None
+                and np.isfinite(_knoise_now)
+                and _knoise_thresh > 0
+                and _knoise_now > _knoise_thresh
+                and _kerhw_now is not None
+                and _kerhw_now > _hw_retry
+                and _n_matched_local >= 3
+            )
+            if _do_ksize_retry:
+                logger.warning(
+                    "SFFT kernel is under-constrained (wing noise/peak="
+                    "%.2f > %.2f): retrying with kernel_hw=%d (was %d, "
+                    "%d matched sources) -- a smaller, better-conditioned "
+                    "solve.",
+                    _knoise_now,
+                    _knoise_thresh,
+                    _hw_retry,
+                    _kerhw_now,
+                    _n_matched_local,
+                )
+                _saved_khw = _sfft_pass_kernel_hw
+                _sfft_pass_kernel_hw = _hw_retry
+                _bak_ks = _backup_sfft_outputs()
+                try:
+                    _resid_r = max(3.0, 1.5 * float(science_fwhm))
+                    _resid_first = _diff_resid_at_sources(
+                        _bak_ks.get(str(outputFpath)),
+                        _orig_matching_sources,
+                        radius=_resid_r,
+                    )
+                    cmd_ks_retry = _build_sfft_cmd(
+                        current_excluded,
+                        _orig_matching_sources,
+                        template_work_fpath,
+                        outputFpath,
+                    )
+                    ks_log_path = (
+                        scienceDir
+                        / f"sfft_{Path(base_name).stem}_ksize_retry.txt"
+                    )
+                    with open(ks_log_path, "w") as lf:
+                        subprocess.run(
+                            cmd_ks_retry,
+                            check=True,
+                            text=True,
+                            stdout=lf,
+                            stderr=lf,
+                            env=sfft_env,
+                            timeout=sfft_timeout,
+                        )
+                    clean_subprocess_log(ks_log_path)
+                    _stamp_fscal_cards(outputFpath)
+                    if not _diff_is_valid(str(outputFpath)):
+                        logger.warning(
+                            "SFFT kernel-size retry produced an invalid "
+                            "difference image; restoring first-pass result."
+                        )
+                        _restore_sfft_outputs(_bak_ks)
+                    else:
+                        _resid_retry = _diff_resid_at_sources(
+                            str(outputFpath),
+                            _orig_matching_sources,
+                            radius=_resid_r,
+                        )
+                        if (
+                            _resid_first is not None
+                            and _resid_retry is not None
+                            and _resid_retry > 1.10 * _resid_first
+                        ):
+                            logger.warning(
+                                "SFFT kernel-size retry increased matched-"
+                                "source residuals (%.2f -> %.2f); restoring "
+                                "first-pass result.",
+                                _resid_first,
+                                _resid_retry,
+                            )
+                            _restore_sfft_outputs(_bak_ks)
+                        else:
+                            _knoise_new = None
+                            try:
+                                _knoise_new = fits.getheader(
+                                    outputFpath
+                                ).get("KERNOISE", None)
+                            except Exception:
+                                pass
+                            logger.info(
+                                "SFFT kernel-size retry adopted "
+                                "(kernel_hw=%d): matched-source resid "
+                                "%s -> %s, KERNOISE %.3f -> %s.",
+                                _hw_retry,
+                                f"{_resid_first:.2f}"
+                                if _resid_first is not None
+                                else "n/a",
+                                f"{_resid_retry:.2f}"
+                                if _resid_retry is not None
+                                else "n/a",
+                                _knoise_now,
+                                f"{float(_knoise_new):.3f}"
+                                if _knoise_new is not None
+                                else "n/a",
+                            )
+                            logger.info("SFFT subtraction succeeded")
+                            return "done"
+                except Exception as exc_ks:
+                    _restore_sfft_outputs(_bak_ks)
+                    log_warning_from_exception(
+                        logger,
+                        "SFFT kernel-size retry failed; "
+                        "keeping first-pass result",
+                        exc_ks,
+                    )
+                finally:
+                    _sfft_pass_kernel_hw = _saved_khw
+                    _discard_sfft_backups(_bak_ks)
 
             logger.info("SFFT subtraction succeeded")
             return "done"
@@ -14912,6 +15864,8 @@ class Templates:
                             )
                 except Exception:
                     pass
+                if callable(locals().get("_stamp_fscal_cards")):
+                    _stamp_fscal_cards(outputFpath)
                 return "done"
             # If the failure happened before the command builder was defined
             # (early config parsing), no retry is possible.
@@ -14960,6 +15914,8 @@ class Templates:
                             timeout=sfft_timeout,
                         )
                     clean_subprocess_log(fallback_log_path)
+                    if callable(locals().get("_stamp_fscal_cards")):
+                        _stamp_fscal_cards(outputFpath)
                     logger.info(
                         "SFFT succeeded with permissive flags fallback."
                     )
@@ -15048,6 +16004,8 @@ class Templates:
                                 "conv=%.4f phot=%.4f discrepancy=%.1f%%.",
                                 _conv_exc, _phot_exc, _disc_exc,
                             )
+                    if callable(locals().get("_stamp_fscal_cards")):
+                        _stamp_fscal_cards(outputFpath)
                     logger.info("SFFT subtraction succeeded (ConstPhotRatio exception retry)")
                     return "done"
                 except Exception as exc_cpr_exc:
@@ -15432,6 +16390,12 @@ class Templates:
                         _hp_forceconv_kw, _hp_forceconv_kw,
                         float(science_fwhm), float(template_fwhm),
                     )
+                    # NOTE: the "-n i" flag above makes HOTPANTS divide the
+                    # convolved-science difference by the kernel sum, so the
+                    # output transient is in science flux units for both
+                    # convolution directions.  No FSCAL_* cards are written:
+                    # none are needed, and a stray one would make main.py
+                    # apply a double correction.
                     # Same variance calibration as run_sfft/ZOGY: the diff
                     # noise exceeds the science-image RMS by
                     # sqrt(1 + (sigma_ref/sigma_sci)^2*|k|^2), so propagate the

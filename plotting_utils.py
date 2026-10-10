@@ -245,17 +245,39 @@ def get_divergent_color(color_name):
     return DIVERGENT_PALETTE.get(color_name, '#000000')
 
 
-def apply_autophot_mplstyle():
-    """
-    Use ``autophot.mplstyle`` when present (repo root), else matplotlib defaults.
-    Call at the start of figure construction for consistent RANSAC / calibration plots.
+def autophot_mplstyle_path():
+    """Path to ``autophot.mplstyle``, or None when it is not installed.
+
+    The style sheet ships inside the ``databases`` package so it survives
+    both editable and regular installs; the module-adjacent lookup covers
+    checkouts where the file still sits at the repository root.
     """
     import os
-    import matplotlib.pyplot as plt
 
+    try:
+        from importlib import resources
+
+        p = resources.files("databases").joinpath("autophot.mplstyle")
+        if p.is_file():
+            return str(p)
+    except Exception:
+        pass
     here = os.path.dirname(os.path.abspath(__file__))
     p = os.path.join(here, "autophot.mplstyle")
     if os.path.exists(p):
+        return p
+    return None
+
+
+def apply_autophot_mplstyle():
+    """
+    Use ``autophot.mplstyle`` when present, else matplotlib defaults.
+    Call at the start of figure construction for consistent RANSAC / calibration plots.
+    """
+    import matplotlib.pyplot as plt
+
+    p = autophot_mplstyle_path()
+    if p is not None:
         plt.style.use(p)
 
 

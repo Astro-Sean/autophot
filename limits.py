@@ -3668,10 +3668,9 @@ class Limits:
                 outdir, f"Completeness_EMCEE_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
             )
 
-            dir_path = os.path.dirname(os.path.realpath(__file__))
-            _style = os.path.join(dir_path, "autophot.mplstyle")
-            if os.path.exists(_style):
-                plt.style.use(_style)
+            from plotting_utils import apply_autophot_mplstyle
+
+            apply_autophot_mplstyle()
 
             # empirical completeness per mag point
             emp = []
