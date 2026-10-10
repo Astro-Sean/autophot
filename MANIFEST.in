@@ -1,1 +1,8 @@
-include autophot.mplstyle
+include LICENSE
+include README.md
+include environment.yml
+recursive-include databases *.yml *.txt *.mplstyle
+recursive-include tests *.py
+recursive-include conda *.yaml *.sh *.bat
+recursive-include scripts *.py *.sh
+global-exclude __pycache__ *.py[cod] .DS_Store

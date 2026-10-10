@@ -4,7 +4,7 @@ channels:
   - astro-sean
   - defaults
 dependencies:
-  - python==3.11.*
+  - python==3.12.*
   - numpy==2.4.6
   - pandas==3.0.1
   - scikit-image==0.26.0
