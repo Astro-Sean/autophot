@@ -34,10 +34,16 @@ AutoPhOT is a photometry pipeline for following up transients and variable sourc
 conda install -n base -c conda-forge conda-libmamba-solver
 conda config --set solver libmamba
 
-conda create -n autophot -c conda-forge -c astro-sean python=3.11 autophot
+conda create -n autophot -c conda-forge -c astro-sean python=3.12 autophot
 conda activate autophot
 
 pip install sfft==1.7.3 sip_tpv==1.1  # not on conda channels
+```
+
+AutoPhOT requires Python 3.12. For the newest features, photutils>=3.1 is recommended; 3.1 is not yet released on PyPI or conda-forge, so the conda package and pip installs resolve to photutils 3.0, which the pipeline supports through compatibility shims. To get the 3.1 development line instead:
+
+```bash
+pip install git+https://github.com/astropy/photutils.git@main
 ```
 
 Check the install:
@@ -52,9 +58,10 @@ autophot-main -h
 ```bash
 git clone https://github.com/Astro-Sean/autophot.git
 cd autophot
-pip install -e .
-pip install sfft==1.7.3 sip_tpv==1.1
+pip install .
 ```
+
+For a development (editable) checkout use `pip install -e .`. Optional extras cover RefCAT2 queries and the non-default aligners: `pip install ".[refcat,aafitrans,spalipy,tweakwcs,chi2-shift]"` or `pip install ".[all]"`.
 
 `environment.yml` pins every dependency for a reproducible setup:
 

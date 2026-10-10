@@ -1,16 +1,24 @@
 [build-system]
-requires = ["setuptools>=69", "wheel", "numpy>=2.0"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "autophot"
-version = "1.2.3"
+version = "1.2.4"
 description = "AutoPHOT object photometry pipeline (CCD/NIR; calibrated aperture/PSF photometry; template subtraction)."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{name = "AutoPHOT contributors"}]
+keywords = ["astronomy", "photometry", "transients", "image subtraction", "lightcurve"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Astronomy",
+]
 dependencies = [
   "astroalign>=2.6.2",
   "astropy>=7.0",
@@ -23,7 +31,11 @@ dependencies = [
   "matplotlib>=3.10",
   "numpy>=2.0",
   "pandas>=3.0",
-  "photutils>=3.1",
+  # photutils 3.1 is not yet released (PyPI tops at 3.0); the code carries
+  # compatibility shims for 3.0 and environment.yml pulls the 3.1.dev line
+  # from upstream main. Do not raise this floor above 3.0 until the 3.1
+  # release lands or pip installs become unresolvable.
+  "photutils>=3.0",
   "PyYAML>=6.0",
   "reproject>=0.20",
   "requests>=2.34",
@@ -54,6 +66,12 @@ chi2-shift = ["image-registration>=0.2"]
 all = ["mastcasjobs==0.0.7", "sfft==1.7.3", "aafitrans==0.2.1", "spalipy>=3.5", "tweakwcs>=0.8", "image-registration>=0.2"]
 test = ["pytest>=8.0"]
 
+[project.urls]
+Homepage = "https://github.com/Astro-Sean/autophot"
+Repository = "https://github.com/Astro-Sean/autophot"
+Issues = "https://github.com/Astro-Sean/autophot/issues"
+Publication = "https://ui.adsabs.harvard.edu/abs/2022A&A...667A..62B"
+
 [project.scripts]
 autophot-main = "main:run_photometry"
 autophot-driver = "autophot:main"
@@ -75,6 +93,7 @@ filterwarnings = [
 [tool.setuptools]
 include-package-data = true
 py-modules = [
+  "additional_targets",
   "aperture",
   "autophot",
   "autophot_tokens",
@@ -82,6 +101,7 @@ py-modules = [
   "batch_main",
   "catalog",
   "check",
+  "color_correction",
   "cosmic",
   "functions",
   "inspect_telescope",
@@ -104,9 +124,6 @@ py-modules = [
 include = ["utils*", "databases*", "autophot_gaia_curves*"]
 
 [tool.setuptools.package-data]
-databases = ["*.yml"]
+databases = ["*.yml", "*.mplstyle", "extinction/*.txt"]
 utils = ["*.py"]
-
-[tool.setuptools.data-files]
-"." = ["autophot.mplstyle"]
 

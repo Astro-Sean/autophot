@@ -1,5 +1,5 @@
 {% set name = "autophot" %}
-{% set version = "1.2.3" %}
+{% set version = "1.2.4" %}
 
 package:
   name: {{ name|lower }}
@@ -30,12 +30,12 @@ build:
 
 requirements:
   host:
-    - python >=3.11,<3.13
+    - python >=3.12,<3.13
     - pip
     - setuptools
     - wheel
   run:
-    - python >=3.11,<3.13
+    - python >=3.12,<3.13
     - astroalign >=2.6.2
     - astropy >=7.0
     - astroquery >=0.4.11
@@ -74,14 +74,19 @@ requirements:
 
 test:
   imports:
+    - autophot
     - main
     - templates
+    - lightcurve
+    - additional_targets
+    - color_correction
     - utils
     - databases
+    - autophot_gaia_curves
   commands:
     - autophot-main -h
   requires:
-    - python >=3.11,<3.13
+    - python >=3.12,<3.13
 
 about:
   home: https://github.com/Astro-Sean/autophot
