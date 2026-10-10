@@ -573,6 +573,147 @@ def _time_axis_transform(mjd_values, reference_epoch=0):
     return _delta(0.0), "Time [MJD]", None
 
 
+def _truthy_series(s: pd.Series) -> pd.Series:
+    """Coerce a mixed bool/string column to strict bool (False on anything
+    unrecognised).  LightCurve CSVs round-trip booleans through several
+    representations ('True', 'true', 1, ...)."""
+    if s.dtype == bool:
+        return s.fillna(False)
+    return s.map(
+        lambda v: str(v).strip().lower() in {"true", "t", "1", "yes", "y"}
+    )
+
+
+def _row_quality_score(df: pd.DataFrame, method: str) -> pd.Series:
+    """Per-row quality ranking used to pick the survivor of a duplicate-epoch
+    cluster.  Higher is better: a reliable zeropoint first, then difference-
+    image quality, then measured S/N."""
+    m_low = str(method).strip().lower()
+    rel_col = f"zp_{m_low}_reliable"
+    if rel_col in df.columns:
+        rel = _truthy_series(df[rel_col]).astype(float)
+    else:
+        rel = pd.Series(0.0, index=df.index)
+
+    dq_rank = pd.Series(2.0, index=df.index)
+    if "diff_quality_class" in df.columns:
+        dq_map = {"pass": 4.0, "unknown": 3.0, "downgrade": 1.0, "fail": 0.0}
+        dq_rank = (
+            df["diff_quality_class"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .map(dq_map)
+            .fillna(2.0)
+        )
+
+    snr_col = (
+        f"snr_{m_low}"
+        if f"snr_{m_low}" in df.columns
+        else ("snr" if "snr" in df.columns else None)
+    )
+    snr = (
+        pd.to_numeric(df[snr_col], errors="coerce").fillna(-np.inf)
+        if snr_col
+        else pd.Series(-np.inf, index=df.index)
+    )
+    # Pack into a single score with clear ordering (reliable ZP dominates).
+    return rel * 1e12 + dq_rank * 1e8 + snr.clip(lower=-1e6).fillna(-1e6)
+
+
+def _dedupe_lightcurve_epochs(
+    df: pd.DataFrame, method: str, tol_days: float, log: logging.Logger
+) -> pd.DataFrame:
+    """Keep one row per (filter, epoch) cluster; rows within ``tol_days`` of
+    each other in the same filter are treated as reprocessed duplicates."""
+    if "mjd" not in df.columns or tol_days <= 0:
+        return df
+    fser = photometry_filter_series(df)
+    mjd = pd.to_numeric(df["mjd"], errors="coerce")
+    quality = _row_quality_score(df, method)
+
+    keep_idx = []
+    drop_idx = []
+    sort_order = np.argsort(mjd.fillna(np.inf).to_numpy(), kind="stable")
+    # Cluster consecutive same-filter rows closer than tol_days.
+    cur = []
+    prev_f, prev_m = None, None
+    for i in sort_order:
+        f = fser.iloc[i] if fser is not None else None
+        m = mjd.iloc[i]
+        same_cluster = (
+            cur
+            and f == prev_f
+            and np.isfinite(m)
+            and np.isfinite(prev_m)
+            and abs(m - prev_m) <= tol_days
+        )
+        if same_cluster:
+            cur.append(i)
+        else:
+            if len(cur) > 1:
+                best = max(cur, key=lambda j: quality.iloc[j])
+                keep_idx.append(best)
+                drop_idx.extend(j for j in cur if j != best)
+            elif cur:
+                keep_idx.append(cur[0])
+            cur = [i]
+        prev_f, prev_m = f, m
+    if len(cur) > 1:
+        best = max(cur, key=lambda j: quality.iloc[j])
+        keep_idx.append(best)
+        drop_idx.extend(j for j in cur if j != best)
+    elif cur:
+        keep_idx.append(cur[0])
+
+    if drop_idx:
+        kept_set = set(keep_idx)
+        for j in drop_idx:
+            _fn = df.iloc[j].get("filename", "?")
+            log.info(
+                "Lightcurve QC: dropped duplicate epoch row %s (filter=%s, mjd=%.5f)",
+                _fn,
+                fser.iloc[j] if fser is not None else "?",
+                mjd.iloc[j],
+            )
+        # Non-clustered rows (NaN mjd or singletons) must be kept too.
+        clustered = set(keep_idx) | set(drop_idx)
+        keep_idx.extend(i for i in range(len(df)) if i not in clustered)
+        df = df.iloc[sorted(keep_idx)].copy()
+    return df
+
+
+def _apply_lightcurve_quality_filters(
+    df: pd.DataFrame,
+    method: str,
+    *,
+    input_yaml=None,
+    log=None,
+) -> pd.DataFrame:
+    """Row-level QC applied to a concatenated photometry table before it is
+    split into detections/limits.
+
+    The only guard is ``deduplicate_epochs`` / ``dedupe_epoch_tol_days``
+    under the ``lightcurve`` config section: collapse rows that are the
+    same exposure reprocessed under another filename (identical filter and
+    MJD within the tolerance); keeps the best-quality row.
+
+    ``is_detection`` is never modified here - the pipeline's detection
+    decision stands on its own.
+
+    Returns the filtered frame (a copy).
+    """
+    log = log or logging.getLogger(__name__)
+    lc_cfg = (input_yaml or {}).get("lightcurve", {}) or {}
+    df = df.copy()
+
+    if lc_cfg.get("deduplicate_epochs", True):
+        tol = float(lc_cfg.get("dedupe_epoch_tol_days", 0.001) or 0.0)
+        df = _dedupe_lightcurve_epochs(df, method, tol, log)
+
+    return df
+
+
 def _compute_detection_mask(
     df: pd.DataFrame,
     mag_col: str,
@@ -734,6 +875,7 @@ def plot_lightcurve(
     ls="",
     max_plot_err=0.5,
     chi2_marginal_threshold=1000.0,
+    input_yaml=None,
 ):
     """Plot a publication-ready lightcurve with detections and limits.
 
@@ -802,6 +944,9 @@ def plot_lightcurve(
         drawn with a white face and faded edge colour to visually flag poor
         PSF-fit quality (e.g. non-Gaussian PSF, sparse field).  Set to ``0``
         or ``None`` to disable.
+    input_yaml : dict or None
+        Pipeline configuration; enables the ``lightcurve`` QC filter
+        (duplicate-epoch collapse).  Defaults apply when not given.
 
     Returns
     -------
@@ -869,6 +1014,9 @@ def plot_lightcurve(
     # numeric coercion and boolean logic. Keep the first occurrence.
     if data.columns.duplicated().any():
         data = data.loc[:, ~data.columns.duplicated()].copy()
+    data = _apply_lightcurve_quality_filters(
+        data, method, input_yaml=input_yaml
+    )
     save_path = os.path.dirname(output_file)
     base = os.path.splitext(os.path.basename(output_file))[0]
 
@@ -1822,6 +1970,9 @@ def generate_photometry_table(
     complete_data = _normalize_photometry_columns(complete_data)
     if complete_data.columns.duplicated().any():
         complete_data = complete_data.loc[:, ~complete_data.columns.duplicated()].copy()
+    complete_data = _apply_lightcurve_quality_filters(
+        complete_data, method, input_yaml=input_yaml
+    )
     phot_table = []
     # Prefer using the per-row filter column if present. Map raw names (gp, Sloan_g, ...)
     # to canonical bands so `_resolve_band_triplet` matches the uniform mag/zp schema.
@@ -3097,12 +3248,14 @@ def plot_variability_check(
 # =============================================================================
 
 
-def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, beta_limit: float = 0.5):
+def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, beta_limit: float = 0.5, input_yaml=None):
     """Copy target plots into detections/nondetections folders by filter.
 
     Args:
         output_file (str): Path to a CSV file containing photometry rows.
         method (str): Detection method, either 'PSF' or 'AP'. Defaults to 'PSF'.
+        input_yaml: Configuration dictionary (``lightcurve`` section controls
+            the shared QC filter).
 
     Returns:
         str: Path to the directory where plots are saved, or None if no output file.
@@ -3129,6 +3282,9 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
                 nd = nd.copy()
                 nd["is_detection"] = False
                 data = pd.concat([data, nd], ignore_index=True)
+        data = _apply_lightcurve_quality_filters(
+            data, method, input_yaml=input_yaml
+        )
     except Exception as exc:
         logging.getLogger(__name__).error(
             "Failed to read detections table '%s': %s", output_file, exc, exc_info=True

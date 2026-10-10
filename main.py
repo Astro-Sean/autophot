@@ -69,6 +69,7 @@ for _env in (
 # Standard Library
 import argparse
 import datetime
+import hashlib
 import logging
 import re
 import shutil
@@ -289,6 +290,267 @@ def _ranked_keep_mask(df, values, valid, keep_n, keep_largest):
     else:
         keep_idx = finite.nsmallest(keep_n).index
     return df.index.isin(keep_idx) | np.asarray(~valid)
+
+
+def _stamp_radial_fwhm(img, x, y, img_fwhm):
+    """Radial-profile FWHM of the source nearest ``(x, y)``, or NaN.
+
+    Recentres on the peak pixel within ~1 FWHM of the catalog position
+    (catalog centroids carry ~1 px error), subtracts the outer-annulus
+    sky, and finds the half-max crossing of the azimuthal-median
+    profile.  Returns NaN when the stamp is edge-truncated, mostly
+    masked, or has no measurable peak - callers treat NaN as "cannot
+    verify".  A profile that stays above half-max out to ~2.5 FWHM is
+    broader than the PSF, i.e. extended, so it reports ``5 * img_fwhm``
+    instead of NaN.
+    """
+    arr = np.asarray(img, dtype=float)
+    if arr.ndim != 2:
+        return float("nan")
+    ny, nx = arr.shape
+    try:
+        fwhm = float(img_fwhm)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not np.isfinite(fwhm) or fwhm <= 0:
+        return float("nan")
+    try:
+        xi, yi = int(round(float(x))), int(round(float(y)))
+    except (TypeError, ValueError):
+        return float("nan")
+    cb = int(np.ceil(fwhm))
+    cx0, cx1 = max(0, xi - cb), min(nx, xi + cb + 1)
+    cy0, cy1 = max(0, yi - cb), min(ny, yi + cb + 1)
+    core = arr[cy0:cy1, cx0:cx1]
+    if core.size < 9 or not np.isfinite(core).any():
+        return float("nan")
+    pk = np.unravel_index(
+        np.nanargmax(np.where(np.isfinite(core), core, -np.inf)),
+        core.shape,
+    )
+    px, py = cx0 + pk[1], cy0 + pk[0]
+    r = int(np.ceil(2.5 * fwhm))
+    x0, x1 = max(0, px - r), min(nx, px + r + 1)
+    y0, y1 = max(0, py - r), min(ny, py + r + 1)
+    st = arr[y0:y1, x0:x1]
+    if st.shape[0] < r or st.shape[1] < r:
+        return float("nan")
+    fin = np.isfinite(st)
+    if fin.sum() < 0.7 * st.size:
+        return float("nan")
+    yy, xx = np.indices(st.shape)
+    rr = np.hypot(xx - (px - x0), yy - (py - y0))
+    # A source much larger than the FWHM fills the stamp: the sky
+    # annulus then sits inside the source and the local background is
+    # overestimated, hiding the extent.  Catch it on raw levels: no
+    # central concentration (outer ~ peak) while the stamp sits well
+    # above the global image sky.  A noise-only stamp has outer ~ peak
+    # too, but nothing is elevated above the global sky, so it falls
+    # through to the significance gate and reports unmeasurable.
+    raw_peak = float(np.nanmedian(st[fin & (rr < 0.25)]))
+    outer_m = fin & (rr > 2.0 * fwhm)
+    if outer_m.sum() >= 10 and np.isfinite(raw_peak):
+        outer_lev = float(np.nanmedian(st[outer_m]))
+        sub = arr[::8, ::8]
+        glev = float(np.nanmedian(sub))
+        gmad = 1.4826 * float(np.nanmedian(np.abs(sub - glev)))
+        if (
+            np.isfinite(outer_lev)
+            and np.isfinite(glev)
+            and np.isfinite(gmad)
+            and outer_lev > 0.5 * raw_peak
+            and outer_lev > glev + max(5.0 * gmad, 1e-30)
+        ):
+            return 5.0 * fwhm
+    sky_m = fin & (rr > 1.8 * fwhm)
+    if sky_m.sum() < 10:
+        return float("nan")
+    sky = float(np.nanmedian(st[sky_m]))
+    sky_mad = 1.4826 * float(
+        np.nanmedian(np.abs(st[sky_m] - sky))
+    )
+    if not np.isfinite(sky_mad) or sky_mad <= 0:
+        sky_mad = float(np.nanstd(st[sky_m]))
+    prof_r = np.arange(0.0, 2.5 * fwhm + 0.25, 0.5)
+    vals = np.full(prof_r.size, np.nan)
+    for i, ri in enumerate(prof_r):
+        m = fin & (rr >= ri - 0.25) & (rr < ri + 0.25)
+        if m.any():
+            vals[i] = float(np.nanmedian(st[m]) - sky)
+    # Pixelated annuli leave some bins empty; work on finite bins only
+    # so an empty neighbour never poisons the crossing interpolation.
+    good = np.isfinite(vals)
+    r_g, v_g = prof_r[good], vals[good]
+    peak = v_g[0] if v_g.size else np.nan
+    # Below ~5 sigma of the sky the "peak" is a noise fluctuation:
+    # unmeasurable, not extended.
+    if not np.isfinite(peak) or peak <= max(5.0 * sky_mad, 1e-30):
+        return float("nan")
+    n_inner = int(np.isfinite(vals[prof_r <= 1.5 * fwhm]).sum())
+    below = np.nonzero(v_g <= 0.5 * peak)[0]
+    if below.size == 0:
+        # Profile never falls to half-max inside the window: either the
+        # source is extended (finite inner bins but no crossing) or the
+        # profile is unmeasurable (bins masked out).
+        return 5.0 * fwhm if n_inner >= 4 else float("nan")
+    i = int(below[0])
+    if i == 0:
+        return float("nan")
+    f = (v_g[i - 1] - 0.5 * peak) / max(v_g[i - 1] - v_g[i], 1e-30)
+    return float(2.0 * (r_g[i - 1] + f * (r_g[i] - r_g[i - 1])))
+
+
+def _stamp_peak_snr(arr, x, y, r=6):
+    """Rough SNR of the peak pixel in a small stamp (for ranking).
+
+    Median/MAD over the stamp stand in for sky and noise; the star
+    pixels are a small fraction of a 2*r+1 box so the median is a fair
+    sky estimate.  Returns 0 when the stamp is unmeasurable.
+    """
+    a = np.asarray(arr, dtype=float)
+    if a.ndim != 2:
+        return 0.0
+    ny, nx = a.shape
+    try:
+        xi, yi = int(round(float(x))), int(round(float(y)))
+    except (TypeError, ValueError):
+        return 0.0
+    x0, x1 = max(0, xi - r), min(nx, xi + r + 1)
+    y0, y1 = max(0, yi - r), min(ny, yi + r + 1)
+    st = a[y0:y1, x0:x1]
+    fin = np.isfinite(st)
+    if fin.sum() < 10:
+        return 0.0
+    med = float(np.nanmedian(st[fin]))
+    mad = 1.4826 * float(np.nanmedian(np.abs(st[fin] - med)))
+    if not np.isfinite(mad) or mad <= 0:
+        mad = float(np.nanstd(st[fin]))
+    pk = float(np.nanmax(st[fin]))
+    if not np.isfinite(mad) or not np.isfinite(pk):
+        return 0.0
+    return max(0.0, (pk - med) / max(mad, 1e-30))
+
+
+def _vet_sparse_prior_candidates(
+    cand_xy, image, template_image, fwhm_sci, fwhm_tpl, max_ratio
+):
+    """Filter candidate kernel-prior positions by stamp morphology.
+
+    A prior only constrains the kernel if BOTH images show a
+    measurable, non-extended source at the position: each stamp's
+    radial profile must reach a ~5-sigma peak (implicit in
+    ``_stamp_radial_fwhm``) and be no wider than ``max_ratio`` x the
+    frame PSF.  Returns a boolean keep mask aligned with ``cand_xy``.
+    """
+    keep = np.zeros(len(cand_xy), dtype=bool)
+    try:
+        fs, ft = float(fwhm_sci), float(fwhm_tpl)
+    except (TypeError, ValueError):
+        return keep
+    if not (np.isfinite(fs) and fs > 0) or not (np.isfinite(ft) and ft > 0):
+        return keep
+    for i, (x, y) in enumerate(cand_xy):
+        w_s = _stamp_radial_fwhm(image, x, y, fs)
+        if not np.isfinite(w_s) or w_s > max_ratio * fs:
+            continue
+        w_t = _stamp_radial_fwhm(template_image, x, y, ft)
+        if not np.isfinite(w_t) or w_t > max_ratio * ft:
+            continue
+        keep[i] = True
+    return keep
+
+
+def _sparse_prior_supplement(
+    catalog_df,
+    existing_xy,
+    covered_xy,
+    ban_xy,
+    image,
+    template_image,
+    fwhm_sci,
+    fwhm_tpl,
+    max_ratio,
+    dedup_pix=1.5,
+    ban_pix=None,
+    max_add=15,
+):
+    """Select catalog positions usable as extra kernel priors.
+
+    Candidates are catalog ``(x, y)`` positions in-bounds with a stamp
+    margin that are not already priors (``existing_xy``), are not
+    covered by ANY science detection (``covered_xy`` - a catalog row
+    matching a rejected detection would re-admit a source the
+    consistency/refinement stages vetoed, e.g. a variable), and are
+    outside the banned positions (target, known variables).  Survivors
+    must look like a measurable, non-extended star in BOTH image
+    stamps.  Returns an ``(N, 2)`` float array ranked by science stamp
+    SNR, brightest first, capped at ``max_add``.
+    """
+    empty = np.empty((0, 2), dtype=float)
+    if catalog_df is None or len(catalog_df) == 0:
+        return empty
+    if not {"x_pix", "y_pix"}.issubset(catalog_df.columns):
+        return empty
+    cx = pd.to_numeric(catalog_df["x_pix"], errors="coerce").to_numpy(
+        dtype=float
+    )
+    cy = pd.to_numeric(catalog_df["y_pix"], errors="coerce").to_numpy(
+        dtype=float
+    )
+    cand = np.column_stack([cx, cy])
+    cand = cand[np.isfinite(cand).all(axis=1)]
+    if len(cand) == 0:
+        return empty
+    arr = np.asarray(image, dtype=float)
+    tpl = np.asarray(template_image, dtype=float)
+    if arr.ndim != 2 or tpl.ndim != 2:
+        return empty
+    try:
+        fs, ft = float(fwhm_sci), float(fwhm_tpl)
+    except (TypeError, ValueError):
+        return empty
+    if not np.isfinite(fs) or fs <= 0:
+        return empty
+    if not np.isfinite(ft) or ft <= 0:
+        ft = fs
+    margin = int(np.ceil(2.5 * max(fs, ft)))
+    ny, nx = arr.shape
+    cand = cand[
+        (cand[:, 0] >= margin)
+        & (cand[:, 0] < nx - margin)
+        & (cand[:, 1] >= margin)
+        & (cand[:, 1] < ny - margin)
+    ]
+    if len(cand) == 0:
+        return empty
+
+    def _far_from(refs, r):
+        refs = np.asarray(refs, dtype=float).reshape(-1, 2)
+        refs = refs[np.isfinite(refs).all(axis=1)]
+        if len(refs) == 0:
+            return np.ones(len(cand), dtype=bool)
+        d, _ = cKDTree(refs).query(cand, k=1)
+        return d > r
+
+    keep = _far_from(existing_xy, dedup_pix) & _far_from(
+        covered_xy, dedup_pix
+    )
+    if ban_pix is None:
+        ban_pix = 2.0 * max(fs, ft)
+    keep &= _far_from(ban_xy, ban_pix)
+    cand = cand[keep]
+    if len(cand) == 0:
+        return empty
+    cand = cand[
+        _vet_sparse_prior_candidates(
+            cand, arr, tpl, fs, ft, max_ratio
+        )
+    ]
+    if len(cand) == 0:
+        return empty
+    snr = np.array([_stamp_peak_snr(arr, x, y) for x, y in cand])
+    order = np.argsort(-snr, kind="stable")
+    return cand[order][: int(max_add)]
 
 
 def _header_numeric_value(cfg_value, header):
@@ -587,6 +849,34 @@ def _trim_nan_boundaries(
     }
 
     return trimmed_data, trimmed_header, trim_info
+
+
+def _content_seed(path: str) -> int:
+    """Deterministic 31-bit RNG seed derived from file content.
+
+    Byte-identical inputs (e.g. duplicated FITS under different names) map to
+    the same seed, while different images get independent streams.  The hash
+    is bounded (size + first and last 4 MiB) so seeding costs a fixed small
+    I/O regardless of file size.
+    """
+    try:
+        h = hashlib.blake2s(digest_size=8)
+        size = os.path.getsize(path)
+        h.update(size.to_bytes(8, "little"))
+        with open(path, "rb") as fh:
+            h.update(fh.read(4 << 20))
+            if size > (8 << 20):
+                fh.seek(-(4 << 20), os.SEEK_END)
+                h.update(fh.read())
+        return int.from_bytes(h.digest(), "little") % (2**31 - 1)
+    except OSError:
+        # Unreadable file: fall back to the path so the seed is still stable.
+        return int.from_bytes(
+            hashlib.blake2s(
+                os.path.abspath(path).encode(), digest_size=8
+            ).digest(),
+            "little",
+        ) % (2**31 - 1)
 
 
 # =============================================================================
@@ -1036,6 +1326,17 @@ def run_photometry():
 
         #  Store Base Filename in YAML
         input_yaml["base"] = base
+
+        # Deterministic RNG when no explicit seed is configured: the seed is
+        # derived from the file bytes so re-running the same image is
+        # bit-identical (injection sites, uncal factor, blank-site FAP draws),
+        # while different images keep independent streams.
+        if input_yaml.get("rng_seed") is None:
+            input_yaml["rng_seed"] = _content_seed(science_file)
+            logging.debug(
+                "rng_seed unset - using per-image seed %d derived from file content",
+                input_yaml["rng_seed"],
+            )
 
         #  Skip if output exists and we are not restarting (resume mode).
         # restart=True (default): reprocess all files (redo even if OUTPUT exists).
@@ -3801,6 +4102,14 @@ def run_photometry():
                             int(n_pre_dedup),
                             int(n_post_dedup),
                         )
+
+            # Snapshot the cleaned in-frame catalog for sparse-field prior
+            # supplementation.  The ZP cleaning below keeps only the few best
+            # calibrators, but every catalogued star is a candidate kernel
+            # prior: a prior position needs astrometry, not photometry.
+            CatalogPriorsPool = (
+                CatalogSources.copy() if CatalogSources is not None else None
+            )
 
         # =============================================================================
         # Run source detection on final calibrated image
@@ -7272,31 +7581,39 @@ def run_photometry():
                         if not np.isfinite(_mad_lr) or _mad_lr <= 0:
                             _mad_lr = 0.3  # fallback ~30% scatter
                         _fwhm_sigma = float(_ts_cfg.get("sfft_fwhm_ratio_nsigma", 0.0))
+                        # Hard physical limit: a source whose measured
+                        # width differs by more than a factor of ~2
+                        # between frames is extended or blended in one
+                        # of them -- always rejected regardless of the
+                        # ensemble distribution.  The MAD clip (relative
+                        # outliers) stays behind the nsigma config flag.
+                        _fwhm_hard_lo = float(
+                            _ts_cfg.get("sfft_fwhm_ratio_min", 0.5)
+                        )
+                        _fwhm_hard_hi = float(
+                            _ts_cfg.get("sfft_fwhm_ratio_max", 2.0)
+                        )
+                        _fwhm_bad = _fwhm_finite & (
+                            (_ratio < _fwhm_hard_lo) | (_ratio > _fwhm_hard_hi)
+                        )
                         if _fwhm_sigma > 0:
                             _fwhm_max_log = _fwhm_sigma * _mad_lr
-                            _fwhm_bad = _fwhm_finite & (
-                                np.abs(np.log(_ratio) - _med_lr) > _fwhm_max_log
-                            )
-                            # Also apply a hard physical limit: ratio outside [0.5, 2.0]
-                            # is always suspicious regardless of the distribution
-                            _fwhm_hard_lo = float(
-                                _ts_cfg.get("sfft_fwhm_ratio_min", 0.5)
-                            )
-                            _fwhm_hard_hi = float(
-                                _ts_cfg.get("sfft_fwhm_ratio_max", 2.0)
-                            )
                             _fwhm_bad = _fwhm_bad | (
                                 _fwhm_finite
-                                & ((_ratio < _fwhm_hard_lo) | (_ratio > _fwhm_hard_hi))
+                                & (np.abs(np.log(_ratio) - _med_lr) > _fwhm_max_log)
                             )
-                        else:
-                            _fwhm_bad = np.zeros(len(image_sources), dtype=bool)
                         _n_fwhm_bad = int(_fwhm_bad.sum())
                         if _n_fwhm_bad > 0 and (_fwhm_finite & ~_fwhm_bad).sum() >= 5:
                             _ximg_mask &= ~_fwhm_bad
                             logging.info(
                                 f"Cross-image FWHM consistency: removed {_n_fwhm_bad} sources "
-                                f"(FWHM ratio outliers > {_fwhm_sigma}sigma or outside [{_fwhm_hard_lo}, {_fwhm_hard_hi}])"
+                                f"(FWHM ratio outside [{_fwhm_hard_lo}, {_fwhm_hard_hi}]"
+                                + (
+                                    f" or > {_fwhm_sigma}sigma outliers"
+                                    if _fwhm_sigma > 0
+                                    else ""
+                                )
+                                + ")"
                             )
                         elif _n_fwhm_bad > 0:
                             logging.info(
@@ -7476,13 +7793,35 @@ def run_photometry():
                     # is dominated by vetted sources, not unvetted position-only
                     # priors.  If we have very few flux-consistent sources,
                     # adding unvetted ones could bias the kernel.
+                    #
+                    # Sparse-field rescue tier: below the gate the pool is
+                    # exactly the regime these adds exist for, so they are
+                    # still allowed - but capped at the vetted count (never
+                    # outnumber consistent priors) and the downstream
+                    # refinement gauntlet (stamp morphology, contamination,
+                    # PSF quality, FFT) vets every added position anyway.
                     _min_consistent_for_nan_add = int(
                         _ts_cfg.get("sfft_min_consistent_for_nan_add", 10)
                     )
-                    _can_add_nan_flux = (
-                        len(MatchingSources) >= _min_consistent_for_nan_add
+                    _nan_rescue_min = int(
+                        _ts_cfg.get("sfft_nan_rescue_min_consistent", 3)
                     )
-                    if not _can_add_nan_flux and "flux_AP" in image_sources.columns:
+                    _n_consistent_now = len(MatchingSources)
+                    _can_add_nan_flux = (
+                        _n_consistent_now >= _min_consistent_for_nan_add
+                    )
+                    _nan_rescue = (
+                        not _can_add_nan_flux
+                        and _n_consistent_now >= _nan_rescue_min
+                    )
+                    _nan_add_cap = (
+                        None if _can_add_nan_flux else _n_consistent_now
+                    )
+                    if (
+                        not _can_add_nan_flux
+                        and not _nan_rescue
+                        and "flux_AP" in image_sources.columns
+                    ):
                         _n_nan = int(
                             (
                                 ~np.isfinite(image_sources["flux_AP"].values)
@@ -7492,15 +7831,16 @@ def run_photometry():
                         if _n_nan > 0:
                             logging.info(
                                 f"Skipping NaN-flux source addition: only "
-                                f"{len(MatchingSources)} flux-consistent sources "
-                                f"(need >= {_min_consistent_for_nan_add}). "
-                                f"{_n_nan} NaN-flux sources would bypass "
-                                f"consistency check."
+                                f"{_n_consistent_now} flux-consistent sources "
+                                f"(need >= {_min_consistent_for_nan_add}, or "
+                                f">= {_nan_rescue_min} for the capped rescue "
+                                f"tier). {_n_nan} NaN-flux sources would "
+                                f"bypass consistency check."
                             )
                     if (
                         "flux_AP" in image_sources.columns
                         and not MatchingSources.empty
-                        and _can_add_nan_flux
+                        and (_can_add_nan_flux or _nan_rescue)
                     ):
                         _nan_flux_mask = ~np.isfinite(
                             image_sources["flux_AP"].values
@@ -7558,6 +7898,11 @@ def run_photometry():
                                     f"Excluded {_n_center_nan} NaN-flux sources with "
                                     f"NaN center pixel in science/template."
                                 )
+                            if (
+                                _nan_add_cap is not None
+                                and len(_new_sources) > _nan_add_cap
+                            ):
+                                _new_sources = _new_sources.head(_nan_add_cap)
                             if not _new_sources.empty:
                                 MatchingSources = pd.concat(
                                     [MatchingSources, _new_sources],
@@ -7567,6 +7912,12 @@ def run_photometry():
                                     f"Added {len(_new_sources)} position-only sources "
                                     f"(NaN flux from aperture failure) for SFFT priors. "
                                     f"Total: {len(MatchingSources)} sources."
+                                    + (
+                                        " (sparse-field rescue tier: capped at "
+                                        "vetted count)"
+                                        if _nan_rescue
+                                        else ""
+                                    )
                                 )
                 else:
                     MatchingSources = image_sources
@@ -8427,6 +8778,125 @@ def run_photometry():
                         if _psf_quality_mask.sum() < len(ms):
                             ms = ms[_psf_quality_mask]
 
+                        # --- Direct stamp-morphology check (both images) ---
+                        # The catalog morphology cuts above are
+                        # science-side only and silently no-op when the
+                        # columns are absent; a source can also be
+                        # stellar in science yet extended in the
+                        # template -- flux-consistency matching never
+                        # rejects galaxies because their aperture flux
+                        # is stable between epochs.  Measure each
+                        # prior's own radial-profile FWHM on a
+                        # peak-recentred stamp in BOTH images and
+                        # reject sources wider than
+                        # sfft_stamp_fwhm_max_ratio x the frame PSF in
+                        # either one.  A profile that never falls to
+                        # half-max inside the window counts as
+                        # extended; unmeasurable stamps (edge, masked)
+                        # are kept but rank worst for the floor.
+                        try:
+                            _morph_max_r = float(
+                                _ts_cfg_refine.get(
+                                    "sfft_stamp_fwhm_max_ratio", 1.6
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            _morph_max_r = 1.6
+                        _morph_imgs = []
+                        _fw_s_m = 0.0
+                        if "image" in dir() and image is not None:
+                            try:
+                                _fw_s_m = float(ImageFWHM)
+                            except (TypeError, ValueError):
+                                _fw_s_m = 0.0
+                            if np.isfinite(_fw_s_m) and _fw_s_m > 0:
+                                _morph_imgs.append((image, _fw_s_m))
+                        if (
+                            "template_image" in dir()
+                            and template_image is not None
+                        ):
+                            try:
+                                _fw_t_m = (
+                                    float(template_fwhm)
+                                    if "template_fwhm" in dir()
+                                    else 0.0
+                                )
+                            except (TypeError, ValueError):
+                                _fw_t_m = 0.0
+                            if not np.isfinite(_fw_t_m) or _fw_t_m <= 0:
+                                _fw_t_m = _fw_s_m
+                            if _fw_t_m > 0:
+                                _morph_imgs.append(
+                                    (template_image, _fw_t_m)
+                                )
+                        if (
+                            _morph_max_r > 1.0
+                            and _morph_imgs
+                            and len(ms) > 0
+                            and {"x_pix", "y_pix"}.issubset(ms.columns)
+                        ):
+                            try:
+                                _morph_ratio = np.full(len(ms), np.nan)
+                                _xs_m = np.asarray(
+                                    ms["x_pix"].values, dtype=float
+                                )
+                                _ys_m = np.asarray(
+                                    ms["y_pix"].values, dtype=float
+                                )
+                                for _mi in range(len(ms)):
+                                    _worst_m = 0.0
+                                    _any_m = False
+                                    for _mim, _mfw in _morph_imgs:
+                                        _mf = _stamp_radial_fwhm(
+                                            _mim,
+                                            _xs_m[_mi],
+                                            _ys_m[_mi],
+                                            _mfw,
+                                        )
+                                        if np.isfinite(_mf):
+                                            _any_m = True
+                                            _worst_m = max(
+                                                _worst_m, _mf / _mfw
+                                            )
+                                    if _any_m:
+                                        _morph_ratio[_mi] = _worst_m
+                                _morph_bad = np.isfinite(_morph_ratio) & (
+                                    _morph_ratio > _morph_max_r
+                                )
+                                (
+                                    _morph_keep,
+                                    _n_morph_rm,
+                                    _n_morph_flag,
+                                ) = _keep_floor_cut(
+                                    np.ones(len(ms), dtype=bool),
+                                    _morph_bad,
+                                    _morph_ratio,
+                                    _psq_min_keep,
+                                )
+                                if _n_morph_rm > 0:
+                                    logging.info(
+                                        f"Stamp morphology check: removed "
+                                        f"{_n_morph_rm} of {_n_morph_flag} "
+                                        f"extended priors (stamp FWHM > "
+                                        f"{_morph_max_r:.2f}x the frame PSF "
+                                        f"in science or template; "
+                                        f"min_keep={_psq_min_keep})."
+                                    )
+                                    ms = ms[_morph_keep]
+                                elif _n_morph_flag > 0:
+                                    logging.info(
+                                        f"Stamp morphology check: "
+                                        f"{_n_morph_flag} extended priors "
+                                        f"flagged but pool is at "
+                                        f"min_keep={_psq_min_keep}; "
+                                        f"keeping all."
+                                    )
+                            except Exception as _morph_err:
+                                logging.debug(
+                                    f"Stamp morphology check failed "
+                                    f"(non-fatal): {_morph_err}"
+                                )
+
                         # --- FFT power-spectrum outlier rejection ---
                         # Same technique used by the PSF build (psf.py
                         # detect_fft_outliers): extract a cutout around each
@@ -8794,6 +9264,176 @@ def run_photometry():
                 ConsistentSources = []
                 MatchingSources = pd.DataFrame(columns=["x_pix", "y_pix"])
                 logging.info("Insufficient sources for matching ")
+
+            # --- Sparse-field prior supplementation ---
+            # A sparse field can exhaust the detections long before
+            # the kernel is constrained: flux consistency needs a
+            # measurable flux pair, which faint stars fail.  When
+            # too few priors survive, pull additional stellar
+            # positions from the cleaned photometric catalog.  Only
+            # positions NOT covered by a science detection are
+            # offered: a catalog row matching a rejected detection
+            # would re-admit a source the flux-consistency or
+            # refinement stages already vetoed (e.g. variables),
+            # while a catalog-only position is a star the shallow
+            # science detection simply missed.  Each candidate must
+            # look like a measurable, non-extended star in BOTH
+            # image stamps; the target and known variables are
+            # banned explicitly because this path bypasses flux
+            # consistency.  Runs on the no-match path too: when the
+            # cross-match starves entirely, catalog astrometry still
+            # knows where the stars are.
+            _supp_cfg = input_yaml.get("template_subtraction", {}) or {}
+            if bool(
+                _supp_cfg.get("sfft_sparse_prior_supplement", True)
+            ) and MatchingSources is not None:
+                try:
+                    _supp_target = int(
+                        _supp_cfg.get("sfft_sparse_prior_target", 10)
+                    )
+                    _supp_max_add = int(
+                        _supp_cfg.get("sfft_sparse_prior_max_add", 15)
+                    )
+                    _supp_max_r = float(
+                        _supp_cfg.get("sfft_stamp_fwhm_max_ratio", 1.6)
+                    )
+                except (TypeError, ValueError):
+                    _supp_target, _supp_max_add, _supp_max_r = 10, 15, 1.6
+                if (
+                    _supp_max_r > 1.0
+                    and len(MatchingSources) < _supp_target
+                    and "CatalogPriorsPool" in dir()
+                    and CatalogPriorsPool is not None
+                    and len(CatalogPriorsPool) > 0
+                    and {"x_pix", "y_pix"}.issubset(
+                        MatchingSources.columns
+                    )
+                    and "image" in dir()
+                    and image is not None
+                    and "template_image" in dir()
+                    and template_image is not None
+                ):
+                    try:
+                        _ban_list = []
+                        try:
+                            _txp = float(
+                                input_yaml.get("target_x_pix", np.nan)
+                            )
+                            _typ = float(
+                                input_yaml.get("target_y_pix", np.nan)
+                            )
+                            if np.isfinite(_txp) and np.isfinite(_typ):
+                                _ban_list.append([_txp, _typ])
+                        except (TypeError, ValueError):
+                            pass
+                        if (
+                            "variable_sources" in dir()
+                            and variable_sources is not None
+                            and len(variable_sources) > 0
+                            and {"RA", "DEC"}.issubset(
+                                variable_sources.columns
+                            )
+                            and "imageWCS" in dir()
+                            and imageWCS is not None
+                        ):
+                            try:
+                                _vx, _vy = imageWCS.all_world2pix(
+                                    variable_sources["RA"].values,
+                                    variable_sources["DEC"].values,
+                                    0,
+                                )
+                                _vxy = np.column_stack([_vx, _vy])
+                                _ban_list.extend(
+                                    _vxy[
+                                        np.isfinite(_vxy).all(axis=1)
+                                    ].tolist()
+                                )
+                            except Exception:
+                                pass
+                        _ban_xy = (
+                            np.asarray(_ban_list, dtype=float).reshape(
+                                -1, 2
+                            )
+                            if _ban_list
+                            else np.empty((0, 2))
+                        )
+                        _ms_xy = MatchingSources[
+                            ["x_pix", "y_pix"]
+                        ].to_numpy(dtype=float)
+                        _ms_xy = _ms_xy[
+                            np.isfinite(_ms_xy).all(axis=1)
+                        ]
+                        _cov_xy = (
+                            image_sources[["x_pix", "y_pix"]].to_numpy(
+                                dtype=float
+                            )
+                            if (
+                                "image_sources" in dir()
+                                and image_sources is not None
+                                and {"x_pix", "y_pix"}.issubset(
+                                    image_sources.columns
+                                )
+                            )
+                            else np.empty((0, 2))
+                        )
+                        _supp_xy = _sparse_prior_supplement(
+                            CatalogPriorsPool,
+                            _ms_xy,
+                            _cov_xy,
+                            _ban_xy,
+                            image,
+                            template_image,
+                            ImageFWHM,
+                            (
+                                template_fwhm
+                                if "template_fwhm" in dir()
+                                else ImageFWHM
+                            ),
+                            _supp_max_r,
+                            max_add=min(
+                                _supp_max_add,
+                                _supp_target - len(MatchingSources),
+                            ),
+                        )
+                        if len(_supp_xy) > 0:
+                            MatchingSources = pd.concat(
+                                [
+                                    MatchingSources,
+                                    pd.DataFrame(
+                                        {
+                                            "x_pix": _supp_xy[:, 0],
+                                            "y_pix": _supp_xy[:, 1],
+                                        }
+                                    ),
+                                ],
+                                ignore_index=True,
+                            )
+                            ConsistentSources = MatchingSources[
+                                ["x_pix", "y_pix"]
+                            ].values.tolist()
+                            # The HOTPANTS stamp file was already written
+                            # without the supplemented positions; refresh
+                            # it so the stamp list stays in sync.
+                            if (
+                                "stamp_loc" in dir()
+                                and stamp_loc is not None
+                            ):
+                                with open(stamp_loc, "w") as f:
+                                    for sx, sy in ConsistentSources:
+                                        f.write(f"{sx+1} {sy+1}\n")
+                            logging.info(
+                                f"Sparse-field supplement: added "
+                                f"{len(_supp_xy)} catalog prior "
+                                f"positions (morphology-vetted in "
+                                f"both images) -> "
+                                f"{len(MatchingSources)} priors."
+                            )
+                    except Exception as _supp_err:
+                        logging.debug(
+                            f"Sparse-field prior supplement failed "
+                            f"(non-fatal): {_supp_err}"
+                        )
+
 
             # Allow manual override of matching sources via YAML config
             manual_sources = input_yaml["template_subtraction"].get(
@@ -9601,6 +10241,16 @@ def run_photometry():
                     templateFpath=templateFpath,
                     method=input_yaml["template_subtraction"]["method"],
                     matching_sources=ConsistentSources,
+                    # Position-matched detection pairs are valid kernel
+                    # stamps even when not flux-consistent: sparse fields
+                    # otherwise starve the ZOGY LSQ solve.
+                    lsq_stamp_sources=(
+                        image_sources[["x_pix", "y_pix"]].values.tolist()
+                        if image_sources is not None
+                        and len(image_sources) > len(ConsistentSources)
+                        and {"x_pix", "y_pix"} <= set(image_sources.columns)
+                        else None
+                    ),
                     masked_sources=masked_sources,
                     stamp_loc=stamp_loc,
                     scienceNoise=weight_fpath,
@@ -10020,6 +10670,17 @@ def run_photometry():
         _sfft_flux_correction_applied = False
         _sfft_flux_correction = None
         if PreformSubtraction:
+            # ZOGY writes FSCAL_* cards with template->science semantics for
+            # provenance, but its convolution kernel is always normalized to
+            # unit sum: a ZOGY transient is already in science units on the
+            # difference image.  Applying the SFFT-style scale inversion
+            # would double-correct it, so the whole flux-scale machinery is
+            # bypassed for ZOGY products.
+            _sub_is_zogy = (
+                str(header.get("FORCECON", "") or "").strip().upper() == "ZOGY"
+                or str(header.get("SUBALGO", "") or "").strip().lower()
+                == "zogy"
+            )
             _fscal_conv = float(header.get("FSCAL_CONV", header.get("FSCAL", 0.0)))
             _fscal_phot = float(header.get("FSCAL_PHOT", 0.0))
             _fscal_disc = float(header.get("FSCAL_DISC", np.nan))
@@ -10032,9 +10693,13 @@ def run_photometry():
                     else np.nan
                 )
             _sfft_convd = _sfft_actual_convd(header)
-            _sfft_flux_correction = _sfft_photometric_flux_correction(
-                header,
-                convd=_sfft_convd,
+            _sfft_flux_correction = (
+                None
+                if _sub_is_zogy
+                else _sfft_photometric_flux_correction(
+                    header,
+                    convd=_sfft_convd,
+                )
             )
             if _sfft_flux_correction is not None:
                 logging.info(
@@ -10049,11 +10714,16 @@ def run_photometry():
                 _sfft_flux_correction_applied = True
                 if background_rms is not None:
                     background_rms = background_rms * abs(_sfft_flux_correction)
-            elif np.isfinite(_fscal_disc) and _fscal_disc > 3.0:
+            elif (
+                np.isfinite(_fscal_disc)
+                and _fscal_disc > 3.0
+                and not _sub_is_zogy
+            ):
                 # REF leaves the transient in native science units, and an SCI
                 # correction outside the guarded range is deliberately not
                 # applied.  In either case the residual scale uncertainty
-                # belongs in the photometric error budget.
+                # belongs in the photometric error budget.  (For ZOGY the
+                # discrepancy describes the template scale, not the transient.)
                 input_yaml["flux_scale_discrep_frac"] = _fscal_disc / 100.0
                 logging.warning(
                     "SFFT flux scaling discrepancy %.1f%% (CONVD=%s, "
@@ -10079,6 +10749,7 @@ def run_photometry():
         _forceconv_diff = None
         _epsf_original = None
         _is_sfft_diff = False
+        _epsf_from_diffpsf = False
         _sfft_science_gain = np.nan
         # The model that matches the SCIENCE image.  The subtraction block
         # below may convolve epsf_model with the SFFT kernel (ForceConv=SCI)
@@ -10343,7 +11014,7 @@ def run_photometry():
                     "SOLPATH" in header
                     or "FSCAL" in header
                     or "FSCAL_CONV" in header
-                )
+                ) and not _sub_is_zogy
                 if _is_sfft_diff:
                     try:
                         _sci_gain = float(input_yaml.get("gain", 0.0))
@@ -10440,6 +11111,7 @@ def run_photometry():
                                     y_0=float(_zh // 2),
                                     oversampling=1,
                                 )
+                                _epsf_from_diffpsf = True
                                 do_aperture_ONLY = False
                                 logging.info(
                                     "ZOGY CONVD=SCI: using subtraction PSF "
@@ -10916,11 +11588,14 @@ def run_photometry():
                                 "Using unconvolved science ePSF (shape mismatch may bias flux).",
                                 _e,
                             )
-                    elif epsf_model is not None:
+                    elif epsf_model is not None and not _epsf_from_diffpsf:
                         # No SFFT solution file (e.g. HOTPANTS fallback).
                         # Convolve ePSF with a Gaussian kernel sized to match
                         # the FWHM difference so the PSF model approximates the
-                        # broader reference PSF in the diff image.
+                        # broader reference PSF in the diff image.  Skipped when
+                        # epsf_model is already the exact diff-image stamp
+                        # (ZOGY DIFFPSF): convolving it again would
+                        # over-broaden the model and bias the fit flux.
                         try:
                             from astropy.convolution import Gaussian2DKernel
 
@@ -14332,6 +15007,32 @@ def run_photometry():
                         100.0 * _emp_p,
                         int(output.get("empirical_n_sites", 0) or 0),
                         best_snr,
+                    )
+
+            # --- Criterion 7: centroid offset ---
+            # Forced photometry lets the PSF fit recentre to absorb small
+            # WCS/centroiding errors.  When the fitted centroid lands far from
+            # the target position the fit has locked onto something else
+            # (a moving object, a subtraction residual, a neighbour); the
+            # measured flux is not the target's and must not be reported as
+            # a target detection.
+            if is_det:
+                _sep_as = float(output.get("separation", np.nan))
+                _max_sep_as = float(
+                    _det_cfg.get("detection_max_offset_arcsec", 2.0) or 0.0
+                )
+                if (
+                    _max_sep_as > 0
+                    and np.isfinite(_sep_as)
+                    and _sep_as > _max_sep_as
+                ):
+                    is_det = False
+                    logging.info(
+                        "Detection rejected: fitted centroid is %.2f\" from "
+                        "the target (max %.2f\") -- fit locked onto an "
+                        "offset source/artifact, not the target.",
+                        _sep_as,
+                        _max_sep_as,
                     )
 
             # --- Log detection decision with all metrics ---

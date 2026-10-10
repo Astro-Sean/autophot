@@ -1780,8 +1780,8 @@ class Aperture:
                 x_range, hx - hx_err, hx + hx_err,
                 color="dodgerblue", alpha=0.5, step="mid",
             )
-            ax_bottom.plot(x_range, hx - hx_err, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
-            ax_bottom.plot(x_range, hx + hx_err, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
+            ax_bottom.step(x_range, hx - hx_err, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
+            ax_bottom.step(x_range, hx + hx_err, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
 
             n_y = len(y_range)
             if n_y > 0:
@@ -2088,8 +2088,8 @@ class Aperture:
             x_range, hx - hx_err, hx + hx_err,
             color="dodgerblue", alpha=0.5, step="mid",
         )
-        ax_bottom.plot(x_range, hx - hx_err, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
-        ax_bottom.plot(x_range, hx + hx_err, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
+        ax_bottom.step(x_range, hx - hx_err, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
+        ax_bottom.step(x_range, hx + hx_err, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
 
         # Right panel: step() and plot(drawstyle="steps-mid") step along the
         # x-axis (value), but we need stepping along y-axis (coordinate) to
@@ -2912,9 +2912,9 @@ class Aperture:
             for idx, prof in profiles_map.items():
                 in_kept = idx in kept_set
                 if in_kept:
-                    ax1.plot(radii / fwhm, prof, color="tab:blue", alpha=0.6, lw=0.8)
+                    ax1.step(radii / fwhm, prof, color="tab:blue", alpha=0.6, lw=0.8, where="mid")
                 else:
-                    ax1.plot(radii / fwhm, prof, color="grey", alpha=0.3, lw=0.5)
+                    ax1.step(radii / fwhm, prof, color="grey", alpha=0.3, lw=0.5, where="mid")
 
             if fine_r is not None:
                 ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black")

@@ -643,6 +643,12 @@ def run_sfft() -> Optional[int]:
         help="With -regularize_kernel=auto, enable regularization only when matched sources fall below this count.",
     )
     parser.add_argument(
+        "-kernel_noise_thresh",
+        type=float,
+        default=0.10,
+        help="Warn when the realized kernel's wing noise (outer-annulus MAD / peak) exceeds this level; marks an under-constrained solve.",
+    )
+    parser.add_argument(
         "-decorrelate_noise",
         type=str,
         default="false",
@@ -2438,6 +2444,64 @@ def run_sfft() -> Optional[int]:
                     _ker_l2 = float(np.sqrt(np.nansum(_ker_2d ** 2)))
                     if not np.isfinite(_ker_l2) or _ker_l2 <= 0:
                         _ker_l2 = None
+
+                # --- Kernel-quality audit ---
+                # The delta-basis solve spreads white noise across all kernel
+                # pixels; the wing MAD relative to the peak measures it.
+                # On an under-constrained solve (few matched sources, large
+                # kernel) the wings are mostly noise and convolve into
+                # bright-star residuals that background-noise metrics miss.
+                # KERNOISE is read by templates.py to drive the small-kernel
+                # retry; KERNEG records the sidelobe mass for provenance.
+                _ker_noise_warn = float(
+                    getattr(args, "kernel_noise_thresh", 0.10) or 0.10
+                )
+                try:
+                    if _ker_2d is not None:
+                        _Lk = _ker_2d.shape[0]
+                        _khalf = (_Lk - 1) / 2.0
+                        _ky, _kx = np.mgrid[0:_Lk, 0:_Lk]
+                        _kr = np.hypot(_ky - _khalf, _kx - _khalf)
+                        _kpeak = float(np.nanmax(_ker_2d))
+                        _kout = _ker_2d[_kr > 0.8 * _khalf]
+                        _kout = _kout[np.isfinite(_kout)]
+                        _ker_noise = None
+                        if _kpeak > 0 and _kout.size >= 20:
+                            _kmed = float(np.median(_kout))
+                            _ker_noise = float(
+                                1.4826 * np.median(np.abs(_kout - _kmed))
+                                / _kpeak
+                            )
+                        _kabs = float(np.nansum(np.abs(_ker_2d)))
+                        _ker_negfrac = (
+                            float(np.nansum(np.abs(_ker_2d[_ker_2d < 0])) / _kabs)
+                            if _kabs > 0
+                            else None
+                        )
+                        if _ker_noise is not None and np.isfinite(_ker_noise):
+                            diff_hdr["KERNOISE"] = (
+                                round(_ker_noise, 4),
+                                "Kernel wing MAD / peak (solve noise level)",
+                            )
+                            _kmsg = (
+                                f"Kernel quality: wing noise/peak="
+                                f"{_ker_noise:.3f}"
+                            )
+                            if _ker_negfrac is not None:
+                                diff_hdr["KERNEG"] = (
+                                    round(_ker_negfrac, 4),
+                                    "Kernel negative-mass fraction",
+                                )
+                                _kmsg += f", negative mass={_ker_negfrac:.2f}"
+                            if _ker_noise > _ker_noise_warn:
+                                _kmsg += " -- under-constrained solve"
+                                log_warning(_kmsg)
+                            else:
+                                log_info(_kmsg)
+                except Exception as _kq_e:
+                    log_warning(
+                        f"Kernel-quality audit failed ({_kq_e}); skipping."
+                    )
 
                 # Which image was convolved?  CONVD records the actual
                 # direction (also resolves AUTO); fall back to ForceConv.

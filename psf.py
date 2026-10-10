@@ -4908,14 +4908,15 @@ def plot_analytic_psf(
         for k, cd in enumerate(comp_disp):
             cut = 0.5 * (cd[_cy0, :] + cd[_cy1, :]) * _fs
             sum_cut_x += cut
-            ax_xb.plot(
+            ax_xb.step(
                 x_phys,
                 cut,
                 color=_comp_colors[k % 10],
                 lw=0.8,
+                where="mid",
                 label=f"c{k + 1}",
             )
-        ax_xb.plot(x_phys, sum_cut_x, color="k", lw=1.2, label="sum")
+        ax_xb.step(x_phys, sum_cut_x, color="k", lw=1.2, where="mid", label="sum")
 
         ax_yr.plot(
             cut_y, y_phys, color="0.4", lw=0.9, drawstyle="steps-mid",
@@ -4924,8 +4925,8 @@ def plot_analytic_psf(
         for k, cd in enumerate(comp_disp):
             cut = 0.5 * (cd[:, _cx0] + cd[:, _cx1]) * _fs
             sum_cut_y += cut
-            ax_yr.plot(cut, y_phys, color=_comp_colors[k % 10], lw=0.8)
-        ax_yr.plot(sum_cut_y, y_phys, color="k", lw=1.2)
+            ax_yr.plot(cut, y_phys, color=_comp_colors[k % 10], lw=0.8, drawstyle="steps-mid")
+        ax_yr.plot(sum_cut_y, y_phys, color="k", lw=1.2, drawstyle="steps-mid")
 
         ax_xb.axvline(0.0, color="0.3", lw=0.5, alpha=0.8, ls="--")
         ax_yr.axhline(0.0, color="0.3", lw=0.5, alpha=0.8, ls="--")
@@ -14940,8 +14941,8 @@ class PSF:
                     _eyh = np.sqrt(np.sum(_unc2, axis=1)) / np.where(_nr > 0, _nr, np.nan)
                 _yv = np.arange(_ty0, _ty1, dtype=float)
                 _ax_B.fill_between(np.arange(_tx0, _tx1), _hx - _exh, _hx + _exh, **kw_bottom)
-                _ax_B.plot(np.arange(_tx0, _tx1), _hx - _exh, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
-                _ax_B.plot(np.arange(_tx0, _tx1), _hx + _exh, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
+                _ax_B.step(np.arange(_tx0, _tx1), _hx - _exh, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
+                _ax_B.step(np.arange(_tx0, _tx1), _hx + _exh, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
                 _ax_R.fill_betweenx(_yv, _hy - _eyh, _hy + _eyh, **kw_right)
                 _draw_right_step(_ax_R, _hy - _eyh, _ty0, _ty1, color="dodgerblue", lw=0.3, alpha=0.7)
                 _draw_right_step(_ax_R, _hy + _eyh, _ty0, _ty1, color="dodgerblue", lw=0.3, alpha=0.7)
@@ -15014,8 +15015,8 @@ class PSF:
                     exh2 = np.sqrt(np.sum(unc2_2, axis=0)) / np.where(n_col2 > 0, n_col2, np.nan)
                     eyh2 = np.sqrt(np.sum(unc2_2, axis=1)) / np.where(n_row2 > 0, n_row2, np.nan)
                 ax2_B.fill_between(np.arange(x0, x1), hx2 - exh2, hx2 + exh2, **kw_bottom)
-                ax2_B.plot(np.arange(x0, x1), hx2 - exh2, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
-                ax2_B.plot(np.arange(x0, x1), hx2 + exh2, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
+                ax2_B.step(np.arange(x0, x1), hx2 - exh2, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
+                ax2_B.step(np.arange(x0, x1), hx2 + exh2, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
                 ax2_R.fill_betweenx(y_vals, hy2 - eyh2, hy2 + eyh2, **kw_right)
                 _draw_right_step(ax2_R, hy2 - eyh2, y0, y1, color="dodgerblue", lw=0.3, alpha=0.7)
                 _draw_right_step(ax2_R, hy2 + eyh2, y0, y1, color="dodgerblue", lw=0.3, alpha=0.7)
