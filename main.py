@@ -879,6 +879,278 @@ def _content_seed(path: str) -> int:
         ) % (2**31 - 1)
 
 
+def _matched_filter_rescue(output: dict, det_cfg: dict) -> bool:
+    """Matched-filter detection rescue predicate.
+
+    The photometric SNR carries every error-budget term (kernel model,
+    flux-scale discrepancy, subtraction quality floors), so a real signal
+    can fall below the SNR gate purely because the reported error is
+    inflated.  The matched-filter statistic is the detection-optimal
+    quantity for a known-PSF source on a difference image and is
+    insensitive to multiplicative scale systematics.
+
+    A rescue is only credible when the matched filter is not contradicted
+    by the same quality gates: positive PSF flux, PSF/AP sign agreement,
+    an acceptable PSF fit, and a positive source-model chi2 improvement.
+    Re-using the vetoes here keeps a strong mf_snr from re-promoting a
+    row the quality gates already rejected (e.g. reduced_chi2 > max).
+    The empirical-FAP and centroid vetoes still apply downstream.
+
+    Config keys (under photometry):
+      detection_mf_snr_min: float (default 5.0) -- matched-filter SNR floor
+      detection_mf_prob_min: float (default 0.9) -- prob_detect floor
+    """
+    _mf_snr = float(output.get("mf_snr", np.nan))
+    _p_det = float(output.get("prob_detect", np.nan))
+    _mf_min = float(det_cfg.get("detection_mf_snr_min", 5.0))
+    _mf_pmin = float(det_cfg.get("detection_mf_prob_min", 0.9))
+    _flux_psf_val = float(output.get("flux_psf", np.nan))
+    _flux_ap_val = float(output.get("flux_ap", np.nan))
+    _chi2 = float(output.get("reduced_chi2", np.nan))
+    _dchi2 = float(output.get("delta_chi2", np.nan))
+    _fc_raw = det_cfg.get("detection_flux_consistency", True)
+    _flux_consistency = (
+        str(_fc_raw).lower() in ("true", "1", "yes")
+        if not isinstance(_fc_raw, bool)
+        else _fc_raw
+    )
+    _max_chi2 = float(det_cfg.get("detection_max_chi2", 10.0))
+    return bool(
+        np.isfinite(_mf_snr)
+        and _mf_snr >= _mf_min
+        and np.isfinite(_p_det)
+        and _p_det >= _mf_pmin
+        and np.isfinite(_flux_psf_val)
+        and _flux_psf_val > 0
+        and (not np.isfinite(_chi2) or _chi2 <= _max_chi2)
+        and (not np.isfinite(_dchi2) or _dchi2 > 0)
+        and not (
+            _flux_consistency
+            and np.isfinite(_flux_psf_val)
+            and np.isfinite(_flux_ap_val)
+            and abs(_flux_psf_val) > 0
+            and abs(_flux_ap_val) > 0
+            and _flux_psf_val * _flux_ap_val < 0
+        )
+    )
+
+
+def _decide_detection(
+    output: dict,
+    det_cfg: dict,
+    detection_limit: float,
+    do_aperture_only: bool,
+    is_inverted: bool,
+) -> bool:
+    """Apply the detection criteria to one epoch's photometry output.
+
+    1. SNR threshold: primary SNR (PSF preferred, AP fallback at source
+       selection) must exceed detection_limit.
+    2. Positive flux: the primary flux must be >0 (we are looking for a
+       brightening, i.e. positive residual on the difference image).
+       Inverted-fit rows flip the sign convention and skip this check.
+    3. Fit quality: reduced_chi2 must be reasonable (a failed PSF model
+       makes the flux unreliable).
+    4. PSF/AP consistency: for detections, PSF and AP flux should agree in
+       sign.  A detection where PSF is positive but AP is strongly negative
+       (or vice versa) is likely a subtraction artifact.
+    5. AP SNR fallback: when PSF SNR is marginal but AP SNR is clearly
+       above threshold, flag as detection (AP is less sensitive to PSF
+       model mismatch for faint sources).
+    5b. Matched-filter rescue: the photometric SNR includes systematic
+       error terms (flux-scale discrepancy, kernel model, subtraction
+       quality floors) that have no bearing on whether a signal exists.
+       A strong mf_snr + prob_detect promotes the point back to a
+       detection; the empirical-FAP and centroid vetoes still apply.
+    6. Empirical FAP veto and 7. centroid-offset veto (see below).
+
+    Config keys (under photometry):
+      detection_limit: float (default 3.0) -- SNR threshold
+      detection_max_chi2: float (default 10.0) -- max reduced chi2
+      detection_flux_consistency: bool (default True) -- PSF/AP signs
+      detection_ap_fallback_ratio: float (default 1.5) -- AP SNR / threshold
+      detection_mf_snr_min: float (default 5.0) -- matched-filter SNR floor
+      detection_mf_prob_min: float (default 0.9) -- prob_detect floor
+    """
+    best_snr = float(output.get("snr", np.nan))
+    det_thresh = float(detection_limit)
+    _max_chi2 = float(det_cfg.get("detection_max_chi2", 10.0))
+    _fc_raw = det_cfg.get("detection_flux_consistency", True)
+    _flux_consistency = (
+        str(_fc_raw).lower() in ("true", "1", "yes")
+        if not isinstance(_fc_raw, bool)
+        else _fc_raw
+    )
+    _ap_fallback_ratio = float(det_cfg.get("detection_ap_fallback_ratio", 1.5))
+
+    # --- Criterion 1: SNR threshold ---
+    is_det = bool(np.isfinite(best_snr) and best_snr >= det_thresh)
+
+    # --- Criterion 2: Positive flux (not oversubtraction) ---
+    if is_det and not is_inverted:
+        _flux_psf_val = float(output.get("flux_psf", np.nan))
+        _flux_ap_val = float(output.get("flux_ap", np.nan))
+        # Primary flux must be positive (we're looking for a transient
+        # that brightened, i.e., positive on the difference image).
+        # For inverted fits, the sign is reversed so we skip this check.
+        _primary_flux = _flux_psf_val if not do_aperture_only else _flux_ap_val
+        if np.isfinite(_primary_flux) and _primary_flux < 0:
+            is_det = False
+            logging.info(
+                "Detection rejected: primary flux negative (%.4f) -- "
+                "likely oversubtraction or noise dip, not a real "
+                "detection.",
+                _primary_flux,
+            )
+
+    # --- Criterion 3: Fit quality (reduced chi2) ---
+    if is_det and not do_aperture_only:
+        _chi2 = float(output.get("reduced_chi2", np.nan))
+        if np.isfinite(_chi2) and _chi2 > _max_chi2:
+            is_det = False
+            logging.info(
+                "Detection rejected: reduced_chi2=%.1f > %.1f -- "
+                "PSF fit quality too poor for reliable detection.",
+                _chi2,
+                _max_chi2,
+            )
+
+    # --- Criterion 4: PSF/AP flux consistency ---
+    if is_det and _flux_consistency and not do_aperture_only:
+        _flux_psf_val = float(output.get("flux_psf", np.nan))
+        _flux_ap_val = float(output.get("flux_ap", np.nan))
+        if (
+            np.isfinite(_flux_psf_val)
+            and np.isfinite(_flux_ap_val)
+            and abs(_flux_psf_val) > 0
+            and abs(_flux_ap_val) > 0
+        ):
+            # Both must be positive for a normal detection
+            if _flux_psf_val < 0 and _flux_ap_val > 0:
+                is_det = False
+                logging.info(
+                    "Detection rejected: PSF flux negative (%.4f) but "
+                    "AP flux positive (%.4f) -- inconsistent, likely "
+                    "subtraction artifact.",
+                    _flux_psf_val,
+                    _flux_ap_val,
+                )
+            elif _flux_psf_val > 0 and _flux_ap_val < 0:
+                is_det = False
+                logging.info(
+                    "Detection rejected: PSF flux positive (%.4f) but "
+                    "AP flux negative (%.4f) -- inconsistent, likely "
+                    "subtraction artifact.",
+                    _flux_psf_val,
+                    _flux_ap_val,
+                )
+
+    # --- Criterion 5: AP SNR fallback ---
+    if not is_det and not do_aperture_only:
+        ap_snr = float(output.get("snr_ap", np.nan))
+        if np.isfinite(ap_snr) and ap_snr >= det_thresh * _ap_fallback_ratio:
+            # Re-check positive flux for the fallback
+            _flux_ap_val = float(output.get("flux_ap", np.nan))
+            if np.isfinite(_flux_ap_val) and _flux_ap_val > 0:
+                is_det = True
+                logging.info(
+                    "Detection fallback: PSF SNR=%.2f < %.1f but AP "
+                    "SNR=%.2f >= %.1f (flux_ap=%.4f > 0); flagging "
+                    "as detection.",
+                    best_snr,
+                    det_thresh,
+                    ap_snr,
+                    det_thresh * _ap_fallback_ratio,
+                    _flux_ap_val,
+                )
+
+    # --- Criterion 5b: matched-filter rescue ---
+    # The photometric SNR carries every error-budget term
+    # (kernel model, flux-scale discrepancy, subtraction
+    # systematics), so a real signal can fall below the SNR
+    # threshold purely because the reported error is inflated.
+    # The matched-filter statistic is the detection-optimal
+    # quantity for a known-PSF source on a difference image and
+    # is insensitive to multiplicative scale systematics; a
+    # strong mf_snr with a confident prob_detect rescues such
+    # points.  The empirical-FAP and centroid vetoes below still
+    # apply to rescued detections.
+    if not is_det and not is_inverted and not do_aperture_only:
+        if _matched_filter_rescue(output, det_cfg):
+            is_det = True
+            logging.info(
+                "Detection rescue: photometric SNR=%.2f missed the "
+                "gate but matched-filter SNR=%.2f >= %.1f with "
+                "prob_detect=%.3f >= %.2f and consistent positive "
+                "flux (%.4f); flagging as detection.",
+                best_snr,
+                float(output.get("mf_snr", np.nan)),
+                float(det_cfg.get("detection_mf_snr_min", 5.0)),
+                float(output.get("prob_detect", np.nan)),
+                float(det_cfg.get("detection_mf_prob_min", 0.9)),
+                float(output.get("flux_psf", np.nan)),
+            )
+
+    # --- Criterion 6: empirical false-alarm rate ---
+    # The analytic matched-filter sigma ignores correlated
+    # difference-image noise; empirical_p_false is the fraction
+    # of blank annulus sites on THIS image whose prob_detect
+    # reaches the target's value.  Veto borderline detections
+    # whose statistic is commonly reproduced by this image's own
+    # noise/artifacts.  Above detection_empirical_snr_max the
+    # finite trial count cannot resolve small FAP anyway.
+    if is_det:
+        _emp_p = float(output.get("empirical_p_false", np.nan))
+        _emp_max_pf = float(det_cfg.get("detection_empirical_max_pfalse", 0.10))
+        _emp_snr_hi = float(det_cfg.get("detection_empirical_snr_max", 10.0))
+        if (
+            np.isfinite(_emp_p)
+            and np.isfinite(best_snr)
+            and best_snr <= _emp_snr_hi
+            and _emp_p > _emp_max_pf
+        ):
+            is_det = False
+            logging.info(
+                "Detection rejected: empirical FAP=%.3f > %.3f "
+                "(blank-position prob_detect exceeds target's at "
+                ">=%.0f%% of %d sites; SNR=%.2f) -- noise/"
+                "artifacts on this image reproduce the signal.",
+                _emp_p,
+                _emp_max_pf,
+                100.0 * _emp_p,
+                int(output.get("empirical_n_sites", 0) or 0),
+                best_snr,
+            )
+
+    # --- Criterion 7: centroid offset ---
+    # Forced photometry lets the PSF fit recentre to absorb small
+    # WCS/centroiding errors.  When the fitted centroid lands far from
+    # the target position the fit has locked onto something else
+    # (a moving object, a subtraction residual, a neighbour); the
+    # measured flux is not the target's and must not be reported as
+    # a target detection.
+    if is_det:
+        _sep_as = float(output.get("separation", np.nan))
+        _max_sep_as = float(
+            det_cfg.get("detection_max_offset_arcsec", 2.0) or 0.0
+        )
+        if (
+            _max_sep_as > 0
+            and np.isfinite(_sep_as)
+            and _sep_as > _max_sep_as
+        ):
+            is_det = False
+            logging.info(
+                "Detection rejected: fitted centroid is %.2f\" from "
+                "the target (max %.2f\") -- fit locked onto an "
+                "offset source/artifact, not the target.",
+                _sep_as,
+                _max_sep_as,
+            )
+
+    return is_det
+
+
 # =============================================================================
 # Main Function: run_photometry
 # =============================================================================
@@ -14849,33 +15121,14 @@ def run_photometry():
         # Multi-criteria detection flag
         # -------------------------------------------------------------------------
         # Forced photometry is always performed at the target position.  This
-        # block decides whether the measurement constitutes a detection or a
-        # non-detection (upper limit).  The decision uses multiple criteria
-        # beyond simple SNR, following best practices from ZTF and the
-        # image-subtraction literature (Zackay & Ofek 2016):
-        #
-        # 1. SNR threshold: |flux|/flux_err >= detection_limit (primary criterion)
-        # 2. Positive flux: the flux must be positive (negative flux = oversub-
-        #    traction or noise dip, NOT a detection).  Exception: inverted fits
-        #    where the transient is in the template.
-        # 3. Fit quality: reduced_chi2 must be reasonable (not so bad that the
-        #    PSF model failed, which would make the flux unreliable).
-        # 4. PSF/AP consistency: for detections, PSF and AP flux should agree in
-        #    sign.  A detection where PSF is positive but AP is strongly negative
-        #    (or vice versa) is likely a subtraction artifact.
-        # 5. AP SNR fallback: when PSF SNR is marginal but AP SNR is clearly
-        #    above threshold, flag as detection (AP is less sensitive to PSF
-        #    model mismatch for faint sources).
-        #
-        # Config keys (under photometry):
-        #   detection_limit: float (default 3.0) -- SNR threshold
-        #   detection_max_chi2: float (default 10.0) -- max reduced chi2 for det
-        #   detection_flux_consistency: bool (default True) -- require PSF/AP sign agreement
-        #   detection_ap_fallback_ratio: float (default 1.5) -- AP SNR / threshold
+        # decides whether the measurement constitutes a detection or a
+        # non-detection (upper limit), following best practices from ZTF and
+        # the image-subtraction literature (Zackay & Ofek 2016); the criteria
+        # and their config keys live in _decide_detection.
         try:
             # The inverted-fit flag must be visible BEFORE the detection
             # decision: an inverted result reports a deliberately negative
-            # primary flux, which the positive-flux criterion below would
+            # primary flux, which the positive-flux criterion would
             # otherwise reject as oversubtraction.
             if "_inverted_fit" not in output:
                 output["_inverted_fit"] = bool(
@@ -14883,157 +15136,16 @@ def run_photometry():
                     and TargetPosition.at[idx, "_inverted_fit"]
                 )
             _det_cfg = input_yaml.get("photometry", {}) or {}
+            _is_inverted = bool(output.get("_inverted_fit", False))
+            is_det = _decide_detection(
+                output,
+                _det_cfg,
+                detection_limit,
+                do_aperture_ONLY,
+                _is_inverted,
+            )
             best_snr = float(output.get("snr", np.nan))
             det_thresh = float(detection_limit)
-            _max_chi2 = float(_det_cfg.get("detection_max_chi2", 10.0))
-            _fc_raw = _det_cfg.get("detection_flux_consistency", True)
-            _flux_consistency = (
-                str(_fc_raw).lower() in ("true", "1", "yes")
-                if not isinstance(_fc_raw, bool)
-                else _fc_raw
-            )
-            _ap_fallback_ratio = float(_det_cfg.get("detection_ap_fallback_ratio", 1.5))
-
-            # --- Criterion 1: SNR threshold ---
-            is_det = bool(np.isfinite(best_snr) and best_snr >= det_thresh)
-
-            # --- Criterion 2: Positive flux (not oversubtraction) ---
-            _is_inverted = bool(output.get("_inverted_fit", False))
-            if is_det and not _is_inverted:
-                _flux_psf_val = float(output.get("flux_psf", np.nan))
-                _flux_ap_val = float(output.get("flux_ap", np.nan))
-                # Primary flux must be positive (we're looking for a transient
-                # that brightened, i.e., positive on the difference image).
-                # For inverted fits, the sign is reversed so we skip this check.
-                _primary_flux = _flux_psf_val if not do_aperture_ONLY else _flux_ap_val
-                if np.isfinite(_primary_flux) and _primary_flux < 0:
-                    is_det = False
-                    logging.info(
-                        "Detection rejected: primary flux negative (%.4f) -- "
-                        "likely oversubtraction or noise dip, not a real "
-                        "detection.",
-                        _primary_flux,
-                    )
-
-            # --- Criterion 3: Fit quality (reduced chi2) ---
-            if is_det and not do_aperture_ONLY:
-                _chi2 = float(output.get("reduced_chi2", np.nan))
-                if np.isfinite(_chi2) and _chi2 > _max_chi2:
-                    is_det = False
-                    logging.info(
-                        "Detection rejected: reduced_chi2=%.1f > %.1f -- "
-                        "PSF fit quality too poor for reliable detection.",
-                        _chi2,
-                        _max_chi2,
-                    )
-
-            # --- Criterion 4: PSF/AP flux consistency ---
-            if is_det and _flux_consistency and not do_aperture_ONLY:
-                _flux_psf_val = float(output.get("flux_psf", np.nan))
-                _flux_ap_val = float(output.get("flux_ap", np.nan))
-                if (
-                    np.isfinite(_flux_psf_val)
-                    and np.isfinite(_flux_ap_val)
-                    and abs(_flux_psf_val) > 0
-                    and abs(_flux_ap_val) > 0
-                ):
-                    # Both must be positive for a normal detection
-                    if _flux_psf_val < 0 and _flux_ap_val > 0:
-                        is_det = False
-                        logging.info(
-                            "Detection rejected: PSF flux negative (%.4f) but "
-                            "AP flux positive (%.4f) -- inconsistent, likely "
-                            "subtraction artifact.",
-                            _flux_psf_val,
-                            _flux_ap_val,
-                        )
-                    elif _flux_psf_val > 0 and _flux_ap_val < 0:
-                        is_det = False
-                        logging.info(
-                            "Detection rejected: PSF flux positive (%.4f) but "
-                            "AP flux negative (%.4f) -- inconsistent, likely "
-                            "subtraction artifact.",
-                            _flux_psf_val,
-                            _flux_ap_val,
-                        )
-
-            # --- Criterion 5: AP SNR fallback ---
-            if not is_det and not do_aperture_ONLY:
-                ap_snr = float(output.get("snr_ap", np.nan))
-                if np.isfinite(ap_snr) and ap_snr >= det_thresh * _ap_fallback_ratio:
-                    # Re-check positive flux for the fallback
-                    _flux_ap_val = float(output.get("flux_ap", np.nan))
-                    if np.isfinite(_flux_ap_val) and _flux_ap_val > 0:
-                        is_det = True
-                        logging.info(
-                            "Detection fallback: PSF SNR=%.2f < %.1f but AP "
-                            "SNR=%.2f >= %.1f (flux_ap=%.4f > 0); flagging "
-                            "as detection.",
-                            best_snr,
-                            det_thresh,
-                            ap_snr,
-                            det_thresh * _ap_fallback_ratio,
-                            _flux_ap_val,
-                        )
-
-            # --- Criterion 6: empirical false-alarm rate ---
-            # The analytic matched-filter sigma ignores correlated
-            # difference-image noise; empirical_p_false is the fraction
-            # of blank annulus sites on THIS image whose prob_detect
-            # reaches the target's value.  Veto borderline detections
-            # whose statistic is commonly reproduced by this image's own
-            # noise/artifacts.  Above detection_empirical_snr_max the
-            # finite trial count cannot resolve small FAP anyway.
-            if is_det:
-                _emp_p = float(output.get("empirical_p_false", np.nan))
-                _emp_max_pf = float(
-                    _det_cfg.get("detection_empirical_max_pfalse", 0.10)
-                )
-                _emp_snr_hi = float(_det_cfg.get("detection_empirical_snr_max", 10.0))
-                if (
-                    np.isfinite(_emp_p)
-                    and np.isfinite(best_snr)
-                    and best_snr <= _emp_snr_hi
-                    and _emp_p > _emp_max_pf
-                ):
-                    is_det = False
-                    logging.info(
-                        "Detection rejected: empirical FAP=%.3f > %.3f "
-                        "(blank-position prob_detect exceeds target's at "
-                        ">=%.0f%% of %d sites; SNR=%.2f) -- noise/"
-                        "artifacts on this image reproduce the signal.",
-                        _emp_p,
-                        _emp_max_pf,
-                        100.0 * _emp_p,
-                        int(output.get("empirical_n_sites", 0) or 0),
-                        best_snr,
-                    )
-
-            # --- Criterion 7: centroid offset ---
-            # Forced photometry lets the PSF fit recentre to absorb small
-            # WCS/centroiding errors.  When the fitted centroid lands far from
-            # the target position the fit has locked onto something else
-            # (a moving object, a subtraction residual, a neighbour); the
-            # measured flux is not the target's and must not be reported as
-            # a target detection.
-            if is_det:
-                _sep_as = float(output.get("separation", np.nan))
-                _max_sep_as = float(
-                    _det_cfg.get("detection_max_offset_arcsec", 2.0) or 0.0
-                )
-                if (
-                    _max_sep_as > 0
-                    and np.isfinite(_sep_as)
-                    and _sep_as > _max_sep_as
-                ):
-                    is_det = False
-                    logging.info(
-                        "Detection rejected: fitted centroid is %.2f\" from "
-                        "the target (max %.2f\") -- fit locked onto an "
-                        "offset source/artifact, not the target.",
-                        _sep_as,
-                        _max_sep_as,
-                    )
 
             # --- Log detection decision with all metrics ---
             _det_status = "DETECTION" if is_det else "non-detection"
@@ -15901,6 +16013,18 @@ def run_photometry():
                             _is_det = _at_out["flux_psf"] > 0
                         else:
                             _is_det = _at_out["flux_ap"] > 0
+                    # Matched-filter rescue, mirroring the primary-target
+                    # gate: a strong mf_snr + prob_detect outweighs a
+                    # photometric SNR suppressed by systematic error terms.
+                    # _at_row carries the mf diagnostics; the fluxes come
+                    # from the normalized output dict.
+                    if not _is_det:
+                        _det_cfg_at = input_yaml.get("photometry", {}) or {}
+                        _at_mf_in = dict(_at_row)
+                        _at_mf_in["flux_psf"] = _at_out["flux_psf"]
+                        _at_mf_in["flux_ap"] = _at_out["flux_ap"]
+                        if _matched_filter_rescue(_at_mf_in, _det_cfg_at):
+                            _is_det = True
                     _at_out["is_detection"] = _is_det
                 else:
                     # Target outside image: write NaN row with expected position
