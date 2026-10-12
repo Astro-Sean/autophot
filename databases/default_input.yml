@@ -89,7 +89,7 @@ default_input:
     upper_limit_snr: 5.0 # float --- S/N threshold for reporting upper limits for non-detections (SNU in ZTF terminology). If the multi-SNR limiting-magnitude machinery includes this threshold, the corresponding limit is used for non-detection upper limits; otherwise the 50% completeness limit is used.
     aperture_size: 1.7 # float --- Aperture radius in units of FWHM (pixels = `aperture_size * fwhm`).
     enforce_nonnegative_local_background: False # bool --- If True, clamp annulus-estimated local background to >=0 before subtraction (prevents flux inflation when local sky is negative from over-subtraction/miscalibration).
-    apply_aperture_correction: False # bool --- If True, apply aperture correction from PSF stars to aperture mags.
+    apply_aperture_correction: False # bool --- DEPRECATED no-op, kept for backward compatibility. ZP_AP is fitted on raw flux_AP and already embeds the aperture loss, so calibrated aperture mags always carry the correction; setting this only logs a note. The measured correction is still stored and used for AP/PSF scale bridging.
     plot_aperture_correction: False # bool --- If True, save the aperture-correction diagnostic plot (curve of growth).
     apply_colorterms: False # bool --- If True, measure and apply color term corrections to catalog sources during calibration.
     color_term_poly_order: 1 # int --- Polynomial order for color term fitting: 1 for linear, 2 for quadratic.

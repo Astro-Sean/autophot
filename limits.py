@@ -210,6 +210,23 @@ def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> f
     return ref_e_in_frame / float(counts_ref)
 
 
+def _ap_diff_resid(input_yaml: dict) -> float:
+    """Residual aperture correction for rescaled diff apertures (mag).
+
+    main.py stores ``aperture_correction_diff_resid`` when the AP radius is
+    rescaled to the diff PSF (ZOGY geometric-mean / ForceConv=SCI); AP
+    recovery measures through that rescaled aperture, so inst->apparent
+    conversions on the diff carry the signed residual.  0.0 when absent.
+    (EMCEE recovery is on the PSF total-flux scale and needs no residual;
+    EMCEE display annotations that read the aperture flux_AP column do.)
+    """
+    try:
+        v = float((input_yaml or {}).get("aperture_correction_diff_resid", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if np.isfinite(v) else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Third-party
 # ---------------------------------------------------------------------------
@@ -3228,6 +3245,11 @@ class Limits:
                     try:
                         if np.isfinite(float(log_zeropoint)):
                             app_mag = float(inject_lmag) + float(log_zeropoint)
+                            # AP recovery measures through the rescaled
+                            # diff aperture - carry the residual correction.
+                            _rm = str(recovery_method).strip().upper()
+                            if _rm == "AP":
+                                app_mag += _ap_diff_resid(self.input_yaml)
                             app_str = f"  apparent={app_mag:.3f}"
                     except (TypeError, ValueError):
                         pass
@@ -3867,7 +3889,11 @@ class Limits:
         if "flux_AP" in sources.columns:
             # flux_AP is e-/s from Aperture.measure; mag() is instrumental in that system
             from functions import mag
-            sources["apparent_mag"] = mag(sources["flux_AP"].values) + zeropoint
+            sources["apparent_mag"] = (
+                mag(sources["flux_AP"].values)
+                + zeropoint
+                + _ap_diff_resid(self.input_yaml)
+            )
             logger.info("Using pipeline convention: mag(flux_AP/s) + zeropoint")
         elif "mag" in sources.columns:
             # Use existing magnitude column (assuming it's apparent)
@@ -4831,7 +4857,11 @@ class Limits:
                             try:
                                 recovered_flux = float(snr_meas["flux_AP"].iloc[0])
                                 recovered_inst = -2.5 * np.log10(recovered_flux) if recovered_flux > 0 else float("nan")
-                                recovered_apparent = recovered_inst + selected_zeropoint
+                                recovered_apparent = (
+                                    recovered_inst
+                                    + selected_zeropoint
+                                    + _ap_diff_resid(self.input_yaml)
+                                )
                             except Exception:
                                 pass
 
@@ -4995,7 +5025,18 @@ class Limits:
                 else:
                     # Convert apparent targets back to instrumental for the primary axis.
                     if selected_zeropoint is not None and np.isfinite(float(selected_zeropoint)):
-                        xvals = [float(m) - float(selected_zeropoint) for m in mag_targets]
+                        # The AP inst scale carries the rescaled-aperture
+                        # residual: inst = apparent - zp - resid.  EMCEE is
+                        # on the PSF total-flux scale and needs no residual.
+                        _x_resid = (
+                            _ap_diff_resid(self.input_yaml)
+                            if str(recovery_method).strip().upper() == "AP"
+                            else 0.0
+                        )
+                        xvals = [
+                            float(m) - float(selected_zeropoint) - _x_resid
+                            for m in mag_targets
+                        ]
                     else:
                         xvals = list(mag_targets)
                     xtrans = ax.transData
@@ -5152,7 +5193,12 @@ class Limits:
                     recovered_inst_err = np.full_like(recovered_inst, np.nan)
         
         logger.info("Debug: recovered_inst sample: %s", recovered_inst[:3])
-        recovered_apparent = recovered_inst + zp_eff
+        # AP recovery measures through the rescaled diff aperture; the
+        # residual puts the recovered inst scale back on the ZP_AP scale.
+        _rec_resid = (
+            _ap_diff_resid(self.input_yaml) if recovery_method_upper == "AP" else 0.0
+        )
+        recovered_apparent = recovered_inst + zp_eff + _rec_resid
         # Apparent error omits the (unknown) zeropoint error term for now.
         if recovered_inst_err is not None:
             recovered_apparent_err = np.sqrt(recovered_inst_err**2)  # TODO: add zeropoint error when available

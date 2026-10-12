@@ -431,6 +431,78 @@ def _stamp_peak_snr(arr, x, y, r=6):
     return max(0.0, (pk - med) / max(mad, 1e-30))
 
 
+def _psf_model_enclosed_fraction(model, radius_px, target_xy=None):
+    """Enclosed-energy fraction of a PSF model stamp inside radius_px.
+
+    radius_px is in native pixels; the stamp's oversampling is divided
+    out so the radius stays on the image-pixel scale.  For a gridded
+    model (3-D .data) the cell nearest target_xy (or the grid mean)
+    is used.  The stamp is recentred on its peak pixel because model
+    loads/realizations can leave a sub-pixel offset.  Returns NaN when
+    the model exposes no usable stamp - callers treat NaN as "cannot
+    verify".
+    """
+    data = getattr(model, "data", None)
+    if data is None:
+        return float("nan")
+    d = np.asarray(data, dtype=float)
+    if d.ndim == 3:
+        try:
+            gxy = np.asarray(model.grid_xypos, dtype=float)
+        except Exception:
+            return float("nan")
+        if gxy.ndim != 2 or gxy.shape[0] != d.shape[0]:
+            return float("nan")
+        if target_xy is not None and np.all(np.isfinite(target_xy)):
+            q = np.asarray(target_xy, dtype=float)
+        else:
+            q = np.nanmean(gxy, axis=0)
+        d = d[int(np.nanargmin(np.sum((gxy - q) ** 2, axis=1)))]
+    if d.ndim != 2 or not np.isfinite(d).any():
+        return float("nan")
+    try:
+        osamp = max(1, int(np.atleast_1d(getattr(model, "oversampling", 1))[0]))
+    except (TypeError, ValueError, IndexError):
+        osamp = 1
+    try:
+        radius = float(radius_px)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not np.isfinite(radius) or radius <= 0:
+        return float("nan")
+    pk = np.unravel_index(
+        np.nanargmax(np.where(np.isfinite(d), d, -np.inf)), d.shape
+    )
+    yy, xx = np.indices(d.shape)
+    rr = np.hypot(xx - pk[1], yy - pk[0]) / osamp
+    fin = np.isfinite(d)
+    tot = float(np.sum(d[fin]))
+    if not np.isfinite(tot) or tot <= 0:
+        return float("nan")
+    frac = float(np.sum(d[fin & (rr <= radius)]) / tot)
+    if not np.isfinite(frac):
+        return float("nan")
+    return float(np.clip(frac, 0.0, 1.0))
+
+
+def _ap_resid_terms(input_yaml):
+    """(resid, resid_err) for the rescaled diff-aperture correction.
+
+    Returns (0.0, 0.0) when no residual was stored - e.g. no subtraction
+    ran, the radius was never rescaled, or no diff-PSF model was usable.
+    """
+    try:
+        r = float(input_yaml.get("aperture_correction_diff_resid", 0.0) or 0.0)
+        e = float(input_yaml.get("aperture_correction_diff_resid_err", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+    if not np.isfinite(r):
+        r = 0.0
+    if not np.isfinite(e):
+        e = 0.0
+    return r, e
+
+
 def _vet_sparse_prior_candidates(
     cand_xy, image, template_image, fwhm_sci, fwhm_tpl, max_ratio
 ):
@@ -4981,6 +5053,11 @@ def run_photometry():
         # aperture-based zeropoints on the same total-flux scale as PSF photometry.
         input_yaml["aperture_correction"] = 0.0
         input_yaml["aperture_correction_err"] = 0.0
+        # Radius the CoG correction was measured at.  The ZOGY/ForceConv=SCI
+        # diff branches rescale photometry.aperture_radius afterwards, so the
+        # calibration paths compare this against the delivered radius to
+        # detect a science/diff aperture mismatch.
+        input_yaml["aperture_correction_radius"] = np.nan
         try:
             if IsolatedSources is not None and len(IsolatedSources) >= 5:
                 logging.info(
@@ -5010,11 +5087,14 @@ def run_photometry():
                     input_yaml["aperture_correction_err"] = (
                         float(ap_corr_err) if np.isfinite(ap_corr_err) else 0.0
                     )
+                    input_yaml["aperture_correction_radius"] = float(aperture_radius)
                     log_status(
-                        "Aperture correction (AP to total): %.3f +/- %.3f mag (stored for later; "
-                        "set apply_aperture_correction: true to apply in pipeline)",
+                        "Aperture correction (AP to total): %.3f +/- %.3f mag "
+                        "at %.1f px (embedded in ZP_AP; stored for AP/PSF "
+                        "scale bridging)",
                         input_yaml["aperture_correction"],
                         input_yaml["aperture_correction_err"],
+                        aperture_radius,
                     )
                 else:
                     log_status("Aperture correction not reliable; leaving as 0.0 mag.")
@@ -12551,6 +12631,113 @@ def run_photometry():
             )
             _has_additional_targets = False
 
+        # Residual aperture correction for difference-image AP photometry.
+        # The CoG correction was measured on the science image at the science
+        # aperture radius (stored in aperture_correction_radius), but the
+        # ZOGY / ForceConv=SCI branches rescaled photometry.aperture_radius to
+        # the diff PSF.  AP photometry on the difference image then encloses a
+        # different PSF fraction than the science aperture that ZP_AP was
+        # fitted on, so inst_AP + ZP_AP lands off the total-flux scale by the
+        # fraction ratio.  Measure the enclosed fraction of the delivered
+        # diff-PSF model at the rescaled radius and store the signed residual
+        # (ac_diff - ac_sci) for every AP inst->calibrated conversion below.
+        input_yaml["aperture_correction_diff_resid"] = 0.0
+        input_yaml["aperture_correction_diff_resid_err"] = 0.0
+        if PreformSubtraction:
+            try:
+                _sci_apr = float(input_yaml.get("aperture_correction_radius", np.nan))
+                _dif_apr = float(
+                    (input_yaml.get("photometry") or {}).get(
+                        "aperture_radius", np.nan
+                    )
+                )
+                _ap_corr_sci = float(input_yaml.get("aperture_correction", np.nan))
+                if (
+                    np.isfinite(_sci_apr)
+                    and np.isfinite(_dif_apr)
+                    and abs(_dif_apr - _sci_apr) > 0.05
+                    and np.isfinite(_ap_corr_sci)
+                ):
+                    _resid_model = epsf_model
+                    if _resid_model is None:
+                        # Aperture-only runs carry no delivered PSF model;
+                        # the analytic composite-Moffat at the diff FWHM
+                        # (input_yaml["fwhm"] was updated to it) is the same
+                        # shape the PSF fallback would have built.
+                        try:
+                            from psf import _analytic_psf_stamp
+
+                            _an_fwhm = max(1.0, float(input_yaml["fwhm"]))
+                            _resid_model, _ = _analytic_psf_stamp(
+                                _an_fwhm,
+                                1,
+                                int(2 * np.ceil(6.0 * _an_fwhm) + 1),
+                                max(
+                                    1.1,
+                                    float(
+                                        phot_cfg.get(
+                                            "psf_init_moffat_beta", 4.765
+                                        )
+                                    ),
+                                ),
+                                stars=None,
+                                phot_cfg=phot_cfg,
+                            )
+                        except Exception:
+                            _resid_model = None
+                    try:
+                        _txy = imageWCS.all_world2pix(
+                            float(input_yaml["target_ra"]),
+                            float(input_yaml["target_dec"]),
+                            wcs_origin,
+                        )
+                    except Exception:
+                        _txy = None
+                    _frac_d = (
+                        _psf_model_enclosed_fraction(
+                            _resid_model, _dif_apr, target_xy=_txy
+                        )
+                        if _resid_model is not None
+                        else np.nan
+                    )
+                    if np.isfinite(_frac_d) and 0.0 < _frac_d <= 1.0:
+                        _ap_corr_dif = 2.5 * np.log10(_frac_d)
+                        input_yaml["aperture_correction_diff_resid"] = float(
+                            _ap_corr_dif - _ap_corr_sci
+                        )
+                        _ap_corr_e = float(
+                            input_yaml.get("aperture_correction_err", 0.0)
+                            or 0.0
+                        )
+                        input_yaml["aperture_correction_diff_resid_err"] = float(
+                            np.hypot(
+                                _ap_corr_e if np.isfinite(_ap_corr_e) else 0.0,
+                                0.003,
+                            )
+                        )
+                        logging.info(
+                            "Diff-aperture residual correction: %.3f +/- %.3f "
+                            "mag (diff PSF enclosed fraction %.4f at %.1f px "
+                            "vs science CoG correction %.3f mag at %.1f px).",
+                            input_yaml["aperture_correction_diff_resid"],
+                            input_yaml["aperture_correction_diff_resid_err"],
+                            _frac_d,
+                            _dif_apr,
+                            _ap_corr_sci,
+                            _sci_apr,
+                        )
+                    else:
+                        logging.info(
+                            "Diff aperture radius rescaled %.1f -> %.1f px but "
+                            "no usable PSF model for the residual aperture "
+                            "correction; AP photometry keeps the science "
+                            "aperture scale.",
+                            _sci_apr,
+                            _dif_apr,
+                        )
+            except Exception as _apres_e:
+                logging.debug("Diff-aperture residual correction failed: %s", _apres_e)
+
         # -------------------------------------------------------------------------
         # Build a shared target cutout for AP / PSF / limiting magnitude
         # -------------------------------------------------------------------------
@@ -13956,6 +14143,16 @@ def run_photometry():
                     TargetPosition.at[idx, f"{inst_col}_err"],
                     image_zeropoint[method]["zeropoint_error"],
                 ]
+                # Rescaled diff aperture: inst_AP encloses a different PSF
+                # fraction than the science aperture ZP_AP was fitted on.
+                # The residual bridges the two so inst + ZP stays on the
+                # total-flux scale.
+                if method == "AP":
+                    _ap_res, _ap_re = _ap_resid_terms(input_yaml)
+                    if _ap_res != 0.0:
+                        cal_mag += _ap_res
+                        if _ap_re > 0:
+                            errorTerms.append(_ap_re)
 
                 # Apply color term correction to target (BUG 155)
                 if _has_color_term:
@@ -14283,6 +14480,14 @@ def run_photometry():
                                     for t in (_inst_err, _zp_err)
                                     if np.isfinite(t)
                                 ]
+                                # Same rescaled-diff-aperture residual as the
+                                # primary target calibration.
+                                if _method == "AP":
+                                    _ap_res, _ot_re = _ap_resid_terms(input_yaml)
+                                    if _ap_res != 0.0:
+                                        _cal_mag += _ap_res
+                                        if _ot_re > 0:
+                                            _ot_terms.append(_ot_re)
                                 _o_slope = _finite_or(
                                     _ot_zpi.get("color_term"), 0.0
                                 )
@@ -15013,6 +15218,10 @@ def run_photometry():
         _lm_prim = "PSF" if _lm_rec in {"PSF", "EMCEE", "MCMC"} else "AP"
         _lm_alt = "AP" if _lm_prim == "PSF" else "PSF"
         _lm_zp = np.nan
+        # AP-recovery limits are measured through the rescaled diff aperture;
+        # the residual puts the recovered inst flux on the ZP_AP aperture
+        # scale.  PSF recovery is total-flux and needs nothing.
+        _lm_resid = _ap_resid_terms(input_yaml)[0] if _lm_prim == "AP" else 0.0
         if isinstance(image_zeropoint, dict):
             for _mi, _mkey in enumerate((_lm_prim, _lm_alt)):
                 _zpv = (image_zeropoint.get(_mkey) or {}).get("zeropoint")
@@ -15049,7 +15258,9 @@ def run_photometry():
                     lim_mag = result.get("limiting_mag", np.nan)
                     if np.isfinite(snr) and np.isfinite(lim_mag):
                         apparent_mag = (
-                            lim_mag + _lm_zp if np.isfinite(_lm_zp) else np.nan
+                            lim_mag + _lm_zp + _lm_resid
+                            if np.isfinite(_lm_zp)
+                            else np.nan
                         )
                         column_name = f"limiting_mag_{snr:.0f}s2n"
                         output[column_name] = apparent_mag
@@ -15548,12 +15759,14 @@ def run_photometry():
                     _sel_err = output.get("zp_psf_err", np.nan)
                     _fb_err = output.get("zp_ap_err", np.nan)
                     _fb_is_ap = True
+                    _lim_is_ap = False
                 else:
                     zp_sel = output.get("zp_ap", np.nan)
                     zp_fallback = output.get("zp_psf", np.nan)
                     _sel_err = output.get("zp_ap_err", np.nan)
                     _fb_err = output.get("zp_psf_err", np.nan)
                     _fb_is_ap = False
+                    _lim_is_ap = True
 
                 zp_sel = float(zp_sel) if np.isfinite(zp_sel) else np.nan
                 zp_err_sel = float(_sel_err) if np.isfinite(_sel_err) else np.nan
@@ -15594,14 +15807,27 @@ def run_photometry():
                                 np.hypot(zp_err_sel, _lm_apc_err)
                             )
 
+                # AP-recovery limits are measured through the rescaled diff
+                # aperture; the residual puts the recovered inst flux on the
+                # ZP_AP aperture scale (PSF recovery is already total-flux).
+                _lim_resid = 0.0
+                _lim_resid_err = 0.0
+                if _lim_is_ap:
+                    _lim_resid, _lim_resid_err = _ap_resid_terms(input_yaml)
+
                 output["limiting_mag"] = (
-                    lim_inst + zp_sel if np.isfinite(zp_sel) else np.nan
+                    lim_inst + zp_sel + _lim_resid if np.isfinite(zp_sel) else np.nan
                 )
                 _lim_inst_err = float(
                     output.get("limiting_inst_mag_err", np.nan) or np.nan
                 )
                 output["limiting_mag_err"] = (
-                    float(np.hypot(_lim_inst_err, zp_err_sel))
+                    float(
+                        np.hypot(
+                            np.hypot(_lim_inst_err, zp_err_sel),
+                            _lim_resid_err,
+                        )
+                    )
                     if np.isfinite(_lim_inst_err) and np.isfinite(zp_err_sel)
                     else np.nan
                 )
@@ -15919,6 +16145,14 @@ def run_photometry():
                             # primary-target calibration for the convention.
                             _cal = _inst_val + _zp
                             _err_terms = [_inst_err, _zp_err]
+                            # Rescaled-diff-aperture residual, same as the
+                            # primary target path.
+                            if _method == "AP":
+                                _ap_res, _at_re = _ap_resid_terms(input_yaml)
+                                if _ap_res != 0.0:
+                                    _cal += _ap_res
+                                    if _at_re > 0:
+                                        _err_terms.append(_at_re)
                             # Color term: the additional target's color is
                             # unknown, so - as for the primary unknown-color
                             # branch - pivot the correction to the median
@@ -16112,7 +16346,9 @@ def run_photometry():
                     lim_mag = result.get("limiting_mag", np.nan)
                     if np.isfinite(snr) and np.isfinite(lim_mag):
                         apparent_mag = (
-                            lim_mag + _lm_zp if np.isfinite(_lm_zp) else np.nan
+                            lim_mag + _lm_zp + _lm_resid
+                            if np.isfinite(_lm_zp)
+                            else np.nan
                         )
                         _mag_str = (
                             f"{apparent_mag:.3f}"
@@ -16144,7 +16380,9 @@ def run_photometry():
         elif np.isfinite(InjectedLimit):
             # Fallback for single S/N limiting magnitude (backward compatibility)
             lim_lines = ["# Detection limits"]
-            apparent_mag = InjectedLimit + _lm_zp if np.isfinite(_lm_zp) else np.nan
+            apparent_mag = (
+                InjectedLimit + _lm_zp + _lm_resid if np.isfinite(_lm_zp) else np.nan
+            )
             _mag_str = f"{apparent_mag:.3f}" if np.isfinite(apparent_mag) else "n/a"
             lim_lines.append(f"# limiting_mag_3S2N: {_mag_str}")
             zp_lines.extend(lim_lines)
