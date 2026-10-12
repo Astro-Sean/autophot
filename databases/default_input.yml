@@ -300,6 +300,7 @@ default_input:
     perform_emcee_fitting_s2n: 10 # float --- If >0, run emcee PSF/MAG fitting when target PSF S/N is below this value. Uses PSF fitting S/N (not aperture S/N) for the trigger. Set to 0 to disable MCMC entirely.
     check_inverted_image: False # bool --- If True, also fit target on image multiplied by -1 to detect negative PSF dips (fading sources in template subtraction).
     aperture_n_jobs: 1 # int --- Worker processes for aperture photometry loops (per-image). 1 = serial; >1 can speed up large source lists.
+    photutils_n_threads: 1 # int --- Threads for photutils compiled paths (AperturePhotometry, LocalBackground, Background2D, SourceCatalog, deblend_sources; PSFPhotometry only benefits on free-threaded CPython). 1 = serial.
     emcee_nwalkers: 32 # int --- Number of emcee walkers (minimum 2*ndim recommended; 32 balances quality and speed).
     emcee_nsteps: null # int|null --- Total emcee steps (per walker). null enables adaptive convergence stopping (runs until autocorrelation time < 50*tau, capped at 50000 steps).
     emcee_delta: null # float|null --- Proposal scale / step size override (implementation-specific).

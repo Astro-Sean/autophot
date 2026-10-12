@@ -74,7 +74,7 @@ from scipy.ndimage import uniform_filter
 # --- Local ---
 from functions import (STATUS, biweight_sky_sigma, biweight_stdfunc,
                        border_msg, log_step, log_warning_from_exception,
-                       set_size)
+                       photutils_n_threads, set_size)
 from plotting_utils import (apply_autophot_mplstyle, get_plot_ext,
                             mask_legend_patch, overlay_mask_hatch)
 from wcs import get_wcs
@@ -797,6 +797,7 @@ class BackgroundSubtractor:
                                 bkg_estimator=MedianBackground(),
                                 bkg_rms_estimator=BiweightScaleBackgroundRMS(),
                                 exclude_percentile=90.0,
+                                n_threads=photutils_n_threads(self.config),
                             )
                             residual = image - np.asarray(bkg.background, dtype=float)
                         except Exception:
@@ -1725,6 +1726,7 @@ class BackgroundSubtractor:
                     bkg_estimator=BiweightLocationBackground(),
                     bkg_rms_estimator=BiweightScaleBackgroundRMS(),
                     exclude_percentile=float(exclude_percentile),
+                    n_threads=photutils_n_threads(self.config),
                 )
 
                 bkg_rms = np.asarray(bkg.background_rms, dtype=float)
@@ -2579,6 +2581,7 @@ class BackgroundSubtractor:
                 bkg_rms_estimator=BiweightScaleBackgroundRMS(),
                 mask=source_mask,
                 exclude_percentile=local_exclude_percentile,
+                n_threads=photutils_n_threads(self.config),
             )
             bkg_surface_local = bkg.background
         except Exception as exc:

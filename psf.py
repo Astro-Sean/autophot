@@ -100,6 +100,15 @@ from photutils.psf import (
     ImagePSF,
     GriddedPSFModel,
 )
+
+try:
+    # photutils >=3.1.dev carries the pixel-integrated analytic PRF
+    # models; earlier dev builds do not, so the boxcar-integrated
+    # kernel path below remains as the fallback.
+    from photutils.psf import MoffatPRF
+except ImportError:
+    MoffatPRF = None
+
 from photutils.detection import DAOStarFinder
 from photutils.segmentation import detect_threshold
 from photutils.utils import calc_total_error
@@ -108,7 +117,7 @@ from photutils.utils.cutouts import overlap_slices
 # ---------------------------------------------------------------------------
 # photutils version compatibility
 # ---------------------------------------------------------------------------
-# photutils >=3.0: build_epsf(stars, epsf=init_epsf) -> EPSFBuildResult
+# photutils >=3.0: build_epsf(stars, epsf=init_epsf) -> EPSFBuildResults
 # photutils  <3.0: build_epsf(stars, init_epsf=init_epsf) -> (epsf, fitted_stars)
 import inspect as _inspect
 
@@ -344,7 +353,14 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import log_step, set_size, log_warning_from_exception, STATUS
+from functions import (
+    log_step,
+    set_size,
+    log_warning_from_exception,
+    photutils_n_threads,
+    psf_photometry_threads,
+    STATUS,
+)
 from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
 from aperture import (
     gain_e_per_adu_from_header,
@@ -1242,6 +1258,32 @@ def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
             fwhm,
         )
         fwhm = 2.0
+    ctr = (osamp * cutout_n - 1) / 2.0
+    if MoffatPRF is not None:
+        # photutils >=3.1.dev integrates the analytic Moffat over the
+        # detector pixel with Gauss-Legendre quadrature - exact where the
+        # boxcar path below is a sampled-kernel approximation (a few x
+        # 1e-4 on the peak at osamp=4).  The stamp is evaluated in
+        # native-pixel units so each grid value is the flux through the
+        # detector-pixel square centred there - the ePSF convention.
+        alpha_native = float(fwhm) / (
+            2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0)
+        )
+        n = osamp * cutout_n
+        yy, xx = np.indices((n, n))
+        model = MoffatPRF(
+            flux=1.0,
+            x_0=ctr / osamp,
+            y_0=ctr / osamp,
+            alpha=max(alpha_native, 1e-6),
+            beta=float(beta),
+        )
+        data = model(xx / osamp, yy / osamp)
+        total = float(np.nansum(data))
+        if np.isfinite(total) and total > 0:
+            data = data / total
+        data = data * float(osamp) ** 2
+        return ImagePSF(data=data, x_0=ctr, y_0=ctr, oversampling=osamp)
     gamma = (osamp * fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0))
     kernel = Moffat2DKernel(
         gamma=max(float(gamma), 1e-6),
@@ -1251,7 +1293,6 @@ def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
     )
     data = pixel_integrate_oversampled(kernel.array, osamp)
     data = data * float(osamp) ** 2
-    ctr = (osamp * cutout_n - 1) / 2.0
     return ImagePSF(data=data, x_0=ctr, y_0=ctr, oversampling=osamp)
 
 
@@ -9136,7 +9177,7 @@ class PSF:
                                 "(converged=no)."
                             )
                             break
-                # photutils >=3.0 returns EPSFBuildResult; <3.0 returns
+                # photutils >=3.0 returns EPSFBuildResults; <3.0 returns
                 # (epsf, fitted_stars).
                 if res is not None and hasattr(res, "epsf"):
                     epsf_c = res.epsf
@@ -12956,11 +12997,17 @@ class PSF:
                 # delivered through the init_params 'local_bkg' column (added
                 # to sub_init below), which overrides the estimator.
                 localbkg = LocalBackground(
-                    _inner_r, _outer_r, bkg_estimator=MedianBackground()
+                    _inner_r,
+                    _outer_r,
+                    bkg_estimator=MedianBackground(),
+                    n_threads=photutils_n_threads(phot_cfg),
                 )
             else:
                 localbkg = LocalBackground(
-                    float(inner_r), float(outer_r), bkg_estimator=MedianBackground()
+                    float(inner_r),
+                    float(outer_r),
+                    bkg_estimator=MedianBackground(),
+                    n_threads=photutils_n_threads(phot_cfg),
                 )
             if xy_bound is None:
                 xy_bounds_this = _effective_xy_bounds_for_shape(fit_shape)
@@ -12984,6 +13031,7 @@ class PSF:
                     grouper=group_maker,
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
+                    n_threads=psf_photometry_threads(phot_cfg),
                 )
                 sub_init = init_params[mask]
                 if _global_bkg is not None:
@@ -13060,6 +13108,7 @@ class PSF:
                     grouper=group_maker,
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
+                    n_threads=psf_photometry_threads(phot_cfg),
                     finder=finder,
                     maxiters=10,
                 )
@@ -13193,6 +13242,7 @@ class PSF:
                                 **{_LOCALBKG_KWARG: localbkg},
                                 xy_bounds=xy_bounds_retry,
                                 progress_bar=False,
+                                n_threads=psf_photometry_threads(phot_cfg),
                             )
                             res_retry = psfphot_retry(nd_for_fit, init_params=retry_init)
                             res_retry = (
