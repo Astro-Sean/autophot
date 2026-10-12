@@ -342,6 +342,7 @@ def _analytic_psf_for_injection(fwhm: float, oversampling: int | None = None):
     """
     from astropy.convolution import Moffat2DKernel
     from photutils.psf import ImagePSF
+    from psf import MoffatPRF
 
     fwhm = float(fwhm)
     if not np.isfinite(fwhm) or fwhm <= 0:
@@ -354,6 +355,28 @@ def _analytic_psf_for_injection(fwhm: float, oversampling: int | None = None):
     gamma = (osamp * fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0))
     size_native = int(np.ceil(10.0 * fwhm)) | 1  # odd, >= ~10*FWHM footprint
     size_native = max(size_native, 15)
+    if MoffatPRF is not None:
+        # Same pixel-integrated path as psf._analytic_moffat_psf: the
+        # PRF evaluates the analytic integral over each detector-pixel
+        # square, replacing the sampled-kernel boxcar below.
+        n = osamp * size_native
+        ctr = (n - 1) / 2.0
+        yy, xx = np.indices((n, n))
+        model = MoffatPRF(
+            flux=1.0,
+            x_0=ctr / osamp,
+            y_0=ctr / osamp,
+            alpha=max(float(gamma) / osamp, 1e-6),
+            beta=beta,
+        )
+        kernel_data = model(xx / osamp, yy / osamp)
+        total = float(np.nansum(kernel_data))
+        if np.isfinite(total) and total > 0:
+            kernel_data = kernel_data / total
+        kernel_data = kernel_data * float(osamp) ** 2
+        return ImagePSF(
+            data=kernel_data, x_0=ctr, y_0=ctr, oversampling=osamp
+        )
     kernel = Moffat2DKernel(
         gamma=max(float(gamma), 1e-6),
         alpha=beta,

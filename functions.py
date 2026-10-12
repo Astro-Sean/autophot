@@ -56,7 +56,6 @@ from skimage.measure import moments
 from photutils.background import Background2D, MedianBackground
 from photutils.centroids import centroid_2dg, centroid_com, centroid_sources
 from photutils.segmentation import detect_sources, SourceCatalog, make_2dgaussian_kernel
-from photutils.aperture import RectangularAperture
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +76,57 @@ _FITS_CACHE_LOCK = _threading.Lock()
 _FITS_HEADER_CACHE = {}   # key -> header
 _FITS_IMAGE_CACHE = {}    # key -> (image, header)
 _FITS_CACHE_MAX = 64      # max entries per cache
+
+# photutils 3.1 exposes n_threads on its compiled paths (aperture sums,
+# annulus stats, source catalogs, deblend groups, Background2D tiles).
+# Those kernels release the GIL, so threads parallelise on stock
+# CPython - but the pipeline stays serial unless configured, matching
+# the sextractor_nthreads/aperture_n_jobs convention.
+_PHOTUTILS_THREADS_CAP = 16
+
+
+def photutils_n_threads(cfg=None, default=1):
+    """Resolve ``photometry.photutils_n_threads`` to a usable thread count.
+
+    ``cfg`` may be the full ``input_yaml`` dict or its ``photometry``
+    section; both shapes occur at call sites.  The result is capped by
+    the CPUs actually available to this process (``sched_getaffinity``
+    reflects cgroup/Slurm limits) and by ``_PHOTUTILS_THREADS_CAP``.
+    """
+    if not isinstance(cfg, dict):
+        cfg = {}
+    phot_cfg = cfg.get("photometry", cfg)
+    if not isinstance(phot_cfg, dict):
+        phot_cfg = {}
+    try:
+        requested = int(phot_cfg.get("photutils_n_threads", default) or default)
+    except (TypeError, ValueError):
+        requested = int(default)
+    if requested < 1:
+        return 1
+    try:
+        n_cpu = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n_cpu = os.cpu_count() or 1
+    return max(1, min(requested, n_cpu, _PHOTUTILS_THREADS_CAP))
+
+
+def _python_free_threaded():
+    """True on CPython free-threaded builds where the GIL is disabled."""
+    is_gil = getattr(sys, "_is_gil_enabled", None)
+    return callable(is_gil) and not is_gil()
+
+
+def psf_photometry_threads(cfg=None, default=1):
+    """``n_threads`` for PSFPhotometry-style entry points.
+
+    photutils only gains from threads in the fit loop on free-threaded
+    CPython; on regular builds it emits a warning and runs serially, so
+    the request is dropped there rather than producing noise.
+    """
+    if not _python_free_threaded():
+        return 1
+    return photutils_n_threads(cfg, default=default)
 
 
 def _fits_cache_key(fpath):
@@ -2109,7 +2159,7 @@ def compute_target_crowding(
                 n_pixels=npixels,
                 nlevels=int(deblend_nlevels),
                 contrast=float(deblend_contrast),
-                progress_bar=False,
+                n_threads=photutils_n_threads(),
             )
         except Exception:
             # If deblending fails, keep the original segmentation.
@@ -2119,7 +2169,7 @@ def compute_target_crowding(
     n_sources_total = int(np.nanmax(seg_data))
 
     try:
-        cat = SourceCatalog(cut, segm)
+        cat = SourceCatalog(cut, segm, n_threads=photutils_n_threads())
         xcen = np.asarray(cat.x_centroid if hasattr(cat, 'x_centroid') else cat.xcentroid)
         ycen = np.asarray(cat.y_centroid if hasattr(cat, 'y_centroid') else cat.ycentroid)
     except Exception:

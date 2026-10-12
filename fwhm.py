@@ -67,6 +67,7 @@ from functions import (
     get_normalized_histogram,
     log_step,
     pad_ones,
+    photutils_n_threads,
     pix_dist,
     set_size,
     biweight_sky_sigma,
@@ -468,12 +469,14 @@ class Find_FWHM:
                 n_pixels=npixels,
                 contrast=contrast,
                 mode="exponential",
-                progress_bar=False,
+                n_threads=photutils_n_threads(self.input_yaml),
             )
         except Exception:
             # Deblending can fail on pathological segment maps; use the raw map.
             deblended_map = segment_map
-        catalog = SourceCatalog(image, deblended_map)
+        catalog = SourceCatalog(
+            image, deblended_map, n_threads=photutils_n_threads(self.input_yaml)
+        )
         if len(catalog) == 0:
             return coordinates_df.iloc[[]].copy()
         coms = np.column_stack((
@@ -1306,6 +1309,7 @@ class Find_FWHM:
                     bkg_rms_estimator=BiweightScaleBackgroundRMS(),
                     sigma_clip=SigmaClip(sigma=3.0, maxiters=5),
                     mask=mask,
+                    n_threads=photutils_n_threads(self.input_yaml),
                 )
                 bkg = bkg2d.background
                 bkg_rms = bkg2d.background_rms

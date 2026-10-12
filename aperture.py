@@ -52,7 +52,7 @@ from astropy.stats import (
     sigma_clip,
 )
 from photutils.aperture import (
-    aperture_photometry,
+    AperturePhotometry,
     CircularAperture,
     CircularAnnulus,
 )
@@ -601,7 +601,7 @@ def _measure_worker(args):
         if not np.isfinite(raw_aperture_sum):
             return {"idx": i, "fail_reason": "aperture_sum_invalid"}
 
-        # IMPORTANT: `photutils.aperture_photometry` (used upstream) integrates
+        # IMPORTANT: `AperturePhotometry` (used upstream) integrates
         # flux with an exact aperture model by default (fractional edge pixels).
         # The background subtraction must therefore use the same *geometric*
         # area (pi*r^2), not the integer pixel count from a "center" mask.
@@ -742,6 +742,9 @@ def _measure_worker(args):
             "maxPixel": max_val * inv_exposure_time,
             "maxPixel_err": max_flux_err,
             "area": effective_area,
+            # photutils aperture flags (no_overlap/partial_overlap) mark
+            # edge sources whose geometric area the flux sum cannot cover.
+            "ap_flags": int(row.get("flags", 0) or 0),
             "counts_AP": aperture_sum,
             "flux_AP": flux_ap,
             "flux_AP_err": (
@@ -1231,6 +1234,7 @@ class Aperture:
             err_col,
             "threshold",
             "area",
+            "ap_flags",
         ]
         str_cols = ["bkg_std_method", "fail_reason"]
         for col in float_cols:
@@ -1281,7 +1285,7 @@ class Aperture:
         sources = sources[valid_mask].reset_index(drop=True)
         if mask is not None:
             mask = np.asarray(mask)
-            # ``mask`` is passed BOTH to aperture_photometry (soft exclusion
+            # ``mask`` is passed BOTH to AperturePhotometry (soft exclusion
             # from the flux sum) and to the workers as a hard defects veto -
             # a mis-shaped array would silently do neither correctly.
             if mask.shape != self.image.shape:
@@ -1299,7 +1303,27 @@ class Aperture:
         apertures_obj = CircularAperture(positions, r=ap_size)
         annuli_obj = CircularAnnulus(positions, r_in=annulusIN, r_out=annulusOUT)
 
-        phot = aperture_photometry(image_e, apertures_obj, error=error, mask=mask).to_pandas()
+        n_jobs = _resolve_n_jobs(n_jobs, half_cpus=True)
+        # AperturePhotometry is the photutils>=3.1 replacement for the
+        # deprecated aperture_photometry(); the compiled n_threads path
+        # shares the worker budget already resolved for this call, and
+        # the flux_err column carries the corrected partial-pixel
+        # error propagation.  ``flags`` (no/partial aperture overlap)
+        # rides into the per-source rows as ap_flags.
+        phot = (
+            AperturePhotometry(
+                image_e,
+                apertures_obj,
+                error=error,
+                mask=mask,
+                n_threads=n_jobs,
+            )
+            .to_table()
+            .to_pandas()
+            .rename(
+                columns={"flux": "aperture_sum", "flux_err": "aperture_sum_err"}
+            )
+        )
         # Use unweighted (center) pixel inclusion for consistency across the pipeline.
         # This avoids fractional-weight median biases and makes AP/PSF background
         # conventions comparable on difference images.
@@ -1308,8 +1332,6 @@ class Aperture:
         # "exact" (fractional) masks scales edge pixels by <1 and biases the
         # annulus median low, which then mis-subtracts sky and confuses diagnostics.
         annulus_masks = [an.to_mask(method="center") for an in annuli_obj]
-
-        n_jobs = _resolve_n_jobs(n_jobs, half_cpus=True)
 
         # ---- Dispatch (parallel for large catalogs) ------------------------
         # Pooled path: broadcast shared state once per worker via initializer;
@@ -1397,6 +1419,7 @@ class Aperture:
             updates["maxPixel"][i] = res["maxPixel"]
             updates["maxPixel_err"][i] = res["maxPixel_err"]
             updates["area"][i] = res["area"]
+            updates["ap_flags"][i] = res["ap_flags"]
             updates["counts_AP"][i] = res["counts_AP"]
             updates["flux_AP"][i] = res["flux_AP"]
             updates["flux_AP_err"][i] = res["flux_AP_err"]

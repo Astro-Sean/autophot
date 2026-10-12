@@ -118,7 +118,7 @@ except ModuleNotFoundError:
 # Photutils Imports
 # =============================================================================
 try:
-    from photutils.aperture import CircularAperture, RectangularAperture
+    from photutils.aperture import CircularAperture
     from photutils.segmentation import (
         detect_sources,
         SourceCatalog,
@@ -132,7 +132,6 @@ except ModuleNotFoundError:
     # Keep template download importable without photutils; the
     # alignment/photometry paths fail at runtime instead.
     CircularAperture = None
-    RectangularAperture = None
     detect_sources = None
     SourceCatalog = None
     make_2dgaussian_kernel = None
@@ -193,7 +192,7 @@ try:
 except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
-from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write, cap_console_lines, STATUS, _sfft_post_anomaly_retry_viable
+from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write, cap_console_lines, photutils_n_threads, STATUS, _sfft_post_anomaly_retry_viable
 try:
     from functions import invalidate_fits_cache
 except ImportError:
@@ -5722,7 +5721,10 @@ class Templates:
                 return mask, masked_centres
 
             cat = SourceCatalog(
-                data_for_detection, seg, local_bkg_width=15 * fwhm
+                data_for_detection,
+                seg,
+                local_bkg_width=15 * fwhm,
+                n_threads=photutils_n_threads(self.input_yaml),
             )
             tbl = cat.to_table().to_pandas()
 
