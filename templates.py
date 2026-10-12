@@ -3644,6 +3644,28 @@ def _auto_sfft_kernel_order(
     return 0
 
 
+def _fscal_ap_card_scale(ap_scale: float, convd) -> float:
+    """Express the sci/ref matched-aperture ratio in FSCAL-card units.
+
+    The FSCAL_* cards record the photometric scale of the CONVOLVED image
+    relative to the static subtraction target: ``run_sfft.py`` inverts
+    MAG_OFFSET for CONVD=SCI, and FSCAL_CONV is the scale applied to the
+    convolved product.  ``_zogy_matched_aperture_scale`` always returns
+    f_sci/f_ref, which matches the card direction only when the template
+    was convolved; on a CONVD=SCI product the card-convention value is
+    the reciprocal.  Comparing the raw ratio against the cards repairs a
+    healthy FSCAL_PHOT to 1/x and writes a fake FSCAL_DISC that can
+    reach ~98%.
+    """
+    try:
+        ap = float(ap_scale)
+    except (TypeError, ValueError):
+        return np.nan
+    if not (np.isfinite(ap) and ap > 0):
+        return np.nan
+    return 1.0 / ap if str(convd).strip().upper() == "SCI" else ap
+
+
 def _fscal_phot_needs_repair(
     phot_scale: float,
     ap_scale: float,
@@ -14806,10 +14828,26 @@ class Templates:
                         str(diff_path), mode="update", memmap=False
                     ) as _hdul:
                         _h = _hdul[0].header
-                        if np.isfinite(_s_ap) and _s_ap > 0:
+                        # The FSCAL_* cards carry the photometric scale of
+                        # the CONVOLVED image relative to the static
+                        # subtraction target (run_sfft.py inverts
+                        # MAG_OFFSET for CONVD=SCI, and FSCAL_CONV is the
+                        # scale applied to the convolved product).
+                        # _zogy_matched_aperture_scale always returns the
+                        # sci/ref ratio, which matches the card direction
+                        # only when the template was convolved; on a
+                        # CONVD=SCI product the referee value is the
+                        # reciprocal -- comparing it raw repairs a
+                        # healthy FSCAL_PHOT to 1/x and writes a fake
+                        # FSCAL_DISC that can reach ~98%.
+                        _convd = str(
+                            _h.get("CONVD", forceconv) or forceconv
+                        ).strip().upper()
+                        _s_ap_cmp = _fscal_ap_card_scale(_s_ap, _convd)
+                        if np.isfinite(_s_ap_cmp) and _s_ap_cmp > 0:
                             _h["FSCAL_AP"] = (
-                                float(_s_ap),
-                                "Matched-aperture sci/ref flux scale",
+                                float(_s_ap_cmp),
+                                "Matched-aperture convolved/static flux scale",
                             )
                             _h["HIERARCH FSCAL_NAP"] = (
                                 int(_s_ap_n),
@@ -14822,7 +14860,7 @@ class Templates:
                         _phot_use = float(_phot_hdr)
                         if _fscal_phot_needs_repair(
                             _phot_use,
-                            _s_ap,
+                            _s_ap_cmp,
                             _s_ap_n,
                             sanity_frac=_fscal_sanity_frac,
                             min_ratios=_fscal_ap_min,
@@ -14834,7 +14872,7 @@ class Templates:
                                 "the aperture value; original kept in "
                                 "FSCAL_PHO2.",
                                 _phot_use,
-                                float(_s_ap),
+                                float(_s_ap_cmp),
                                 int(_s_ap_n),
                                 _fscal_sanity_frac * 100.0,
                             )
@@ -14843,10 +14881,10 @@ class Templates:
                                 "Original SExtractor photometric flux scale",
                             )
                             _h["HIERARCH FSCAL_PHOT"] = (
-                                float(_s_ap),
+                                float(_s_ap_cmp),
                                 "Photometric flux scale (aperture-repaired)",
                             )
-                            _phot_use = float(_s_ap)
+                            _phot_use = float(_s_ap_cmp)
                         if _conv_hdr is not None:
                             _disc_new = (
                                 abs(float(_conv_hdr) - _phot_use)

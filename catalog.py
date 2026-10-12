@@ -362,12 +362,28 @@ def _draw_region_outline(
     ax.plot(xs, ys, color=color, ls=ls, lw=lw, alpha=alpha, zorder=3)
 
 
-def _usable_mag_mask(cleaned, band, bright_lim, faint_lim):
-    """Sources with a finite in-window magnitude in ``band``."""
+def _usable_mag_mask(
+    cleaned, band, bright_lim, faint_lim, mag_err_max=None
+):
+    """Sources with a well-measured in-window magnitude in ``band``.
+
+    A row qualifies when ``cleaned[band]`` is finite and inside the
+    ``[bright_lim, faint_lim]`` window and - when the catalog carries a
+    ``<band>_err`` column - that error is finite and at most
+    ``mag_err_max`` (None or non-finite accepts any finite error).
+    Returns None when the band column is absent.
+    """
     if cleaned is None or len(cleaned) == 0 or band not in cleaned.columns:
         return None
     m = pd.to_numeric(cleaned[band], errors="coerce")
-    return np.isfinite(m) & (m >= bright_lim) & (m <= faint_lim)
+    mask = np.isfinite(m) & (m >= bright_lim) & (m <= faint_lim)
+    err_col = f"{band}_err"
+    if err_col in cleaned.columns:
+        e = pd.to_numeric(cleaned[err_col], errors="coerce")
+        mask = mask & np.isfinite(e)
+        if mag_err_max is not None and np.isfinite(mag_err_max):
+            mask = mask & (e <= float(mag_err_max))
+    return mask
 
 
 def _footprints_from_image_infos(image_infos):
@@ -681,8 +697,10 @@ def plot_optimized_catalog_coverage(
             )
             _raw_shown[_cname] = len(_df)
 
-        # Usable sources per catalog (finite mag inside the ZP window; the
-        # squares show which of them actually land on a detector).
+        # Usable sources per catalog (well-measured in-window mag on a
+        # detector).  Open markers: catalogs share most of their
+        # calibrator pool, so filled symbols would hide coincident
+        # points under whichever catalog was drawn last.
         legend_handles = []
         for (cat_name, cat_band), df in sorted(sources.items()):
             if cat_band != band or df is None or len(df) == 0:
@@ -691,12 +709,12 @@ def plot_optimized_catalog_coverage(
             sc = ax.scatter(
                 _unwrap_ra_near(df["RA"].values, center_ra),
                 df["DEC"].values,
-                s=12,
+                s=18,
                 marker=style["marker"],
-                c=style["color"],
-                alpha=0.9,
-                edgecolors="black",
-                linewidths=0.4,
+                facecolors="none",
+                edgecolors=style["color"],
+                linewidths=0.7,
+                alpha=0.85,
                 label=f"{cat_name} ({len(df)})",
                 zorder=4,
             )
@@ -1207,6 +1225,144 @@ def _field_coverage_fraction(
     return float((occupied & in_region).sum() / in_region.sum())
 
 
+def _in_required_region(ra_deg, dec_deg, region):
+    """Mask of sources inside a region's required box (or its cone).
+
+    The box is tested in projected coordinates - x along RA after the
+    cos(dec) foreshortening, y along Dec - matching the angular-width
+    convention ``_field_coverage_fraction`` and the VizieR ``-c.b``
+    box query use.  Falls back to the circumscribed cone when the
+    region carries no box (pan-sky or corner-less fallback regions).
+    """
+    ra = np.asarray(ra_deg, dtype=float).ravel()
+    dec = np.asarray(dec_deg, dtype=float).ravel()
+    mask = np.zeros(ra.shape, dtype=bool)
+    reg = region or {}
+    try:
+        c_ra = float(reg["ra"])
+        c_dec = float(reg["dec"])
+    except (TypeError, ValueError, KeyError):
+        return mask
+    ok = np.isfinite(ra) & np.isfinite(dec)
+    x = (_unwrap_ra_near(ra[ok], c_ra) - c_ra) * np.cos(
+        np.radians(c_dec)
+    )
+    y = dec[ok] - c_dec
+    try:
+        hw_x = 0.5 * float(reg["width_deg"])
+        hw_y = 0.5 * float(reg["height_deg"])
+    except (TypeError, ValueError, KeyError):
+        hw_x = hw_y = 0.0
+    if hw_x > 0 and hw_y > 0:
+        inside = (np.abs(x) <= hw_x) & (np.abs(y) <= hw_y)
+    else:
+        try:
+            radius_deg = float(reg.get("radius_arcmin") or 0.0) / 60.0
+        except (TypeError, ValueError):
+            return mask
+        if radius_deg <= 0:
+            return mask
+        inside = (x**2 + y**2) <= radius_deg**2
+    mask[ok] = inside
+    return mask
+
+
+def _coverage_optimal_center(ra_deg, dec_deg, region):
+    """Cone centre that keeps a partial-coverage query on covered sky.
+
+    A survey boundary through the required field leaves the
+    footprint-centred query half-empty; distance-ordered (refcat,
+    legacy, gaia) or radius-clamped cones then spend their row budget
+    on sky the catalog never observed.  Returns ``(ra, dec)`` - the
+    centroid of the sources inside the required box, clipped to that
+    box so the re-query still sits on the field - or None when the
+    shift is too small to be worth a second query.
+    """
+    reg = region or {}
+    try:
+        c_ra = float(reg["ra"])
+        c_dec = float(reg["dec"])
+        radius_deg = float(reg.get("radius_arcmin") or 0.0) / 60.0
+    except (TypeError, ValueError, KeyError):
+        return None
+    ra = np.asarray(ra_deg, dtype=float).ravel()
+    dec = np.asarray(dec_deg, dtype=float).ravel()
+    inside = _in_required_region(ra, dec, reg)
+    if inside.sum() < 10:
+        return None
+    x = (_unwrap_ra_near(ra[inside], c_ra) - c_ra) * np.cos(
+        np.radians(c_dec)
+    )
+    y = dec[inside] - c_dec
+    new_x = float(np.mean(x))
+    new_y = float(np.mean(y))
+    # Stay on the required field: coverage confined to a corner pulls
+    # the centre to the box edge, never beyond it.
+    try:
+        hw_x = 0.5 * float(reg["width_deg"])
+        hw_y = 0.5 * float(reg["height_deg"])
+    except (TypeError, ValueError, KeyError):
+        hw_x = hw_y = 0.0
+    if hw_x > 0 and hw_y > 0:
+        new_x = float(np.clip(new_x, -hw_x, hw_x))
+        new_y = float(np.clip(new_y, -hw_y, hw_y))
+    elif radius_deg > 0:
+        d = float(np.hypot(new_x, new_y))
+        if d > radius_deg:
+            new_x *= radius_deg / d
+            new_y *= radius_deg / d
+    if radius_deg <= 0 or np.hypot(new_x, new_y) < 0.05 * radius_deg:
+        return None
+    dec_new = c_dec + new_y
+    ra_new = c_ra + new_x / max(np.cos(np.radians(c_dec)), 1e-6)
+    return (
+        float(ra_new % 360.0),
+        float(np.clip(dec_new, -89.999, 89.999)),
+    )
+
+
+def _refcat_nsources_cap(cat_cfg, radius_arcmin):
+    """RefCat2's effective per-query row cap for a region.
+
+    Mirrors the resolution ``download`` applies: an explicit
+    ``catalog.refcat_nsources`` override, else ~3 rows/arcmin^2 of cone
+    area clipped to [500, 10000].
+    """
+    try:
+        cap = int((cat_cfg or {}).get("refcat_nsources") or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap > 0:
+        return cap
+    return int(
+        np.clip(3.0 * np.pi * float(radius_arcmin) ** 2, 500, 10000)
+    )
+
+
+def _query_rows_capped(name, n_rows, cat_cfg, region):
+    """True when a distance-ordered cone backend likely hit its cap.
+
+    A truncated fetch keeps only the sky nearest the query centre, so
+    recentring changes which part of the field the returned rows
+    cover.  Uncapped backends return the same sky from any centre.
+    """
+    if name == "refcat":
+        cap = _refcat_nsources_cap(
+            cat_cfg, float((region or {}).get("radius_arcmin") or 10.0)
+        )
+        return n_rows >= 0.95 * cap
+    if name == "legacy":
+        # query_legacy_survey trims to a fixed 1000 rows.
+        return n_rows >= 950
+    if name == "gaia":
+        try:
+            cap = int((cat_cfg or {}).get("gaia_xp_max_sources") or 500)
+        except (TypeError, ValueError):
+            cap = 500
+        return n_rows >= 0.95 * cap
+    return False
+
+
 _PIXSCALE_KEYS = (
     "PIXSCALE",
     "PIXSCAL1",
@@ -1456,6 +1612,7 @@ def _region_from_corners(
             "width_deg": None,
             "height_deg": None,
             "n_corners": 0,
+            "clamped": False,
         }
 
     anchor = t_ra if t_ra is not None else float(np.mean(ra % 360.0))
@@ -1535,6 +1692,9 @@ def _region_from_corners(
         "width_deg": width_deg,
         "height_deg": height_deg,
         "n_corners": int(ra.size),
+        # True when max_arcmin shrank the region below the required
+        # extent - the cone then covers only part of the footprint.
+        "clamped": bool(sep_raw > max_arcmin),
     }
 
 
@@ -2424,18 +2584,34 @@ class Catalog:
             )
             pathlib.Path(target_dir).mkdir(parents=True, exist_ok=True)
 
+            # radius is arcmin; catalog queries take degrees.
+            radius_deg = q_radius_arcmin / 60
+
+            # RefCat2's row cap must track the queried area: a flat 500
+            # rows was sized for a 10 arcmin cone and leaves the
+            # footprint-anchored optimizer regions (13-30+ arcmin) too
+            # thin to score or display coverage honestly.  ~3 rows per
+            # arcmin^2 keeps roughly a third of the typical
+            # high-latitude density; catalog.refcat_nsources pins an
+            # exact cap when set.  The cap rides in the cache key so a
+            # truncated older file can never satisfy a larger request.
+            _refcat_ns = None
+            if catalogName == "refcat":
+                _refcat_ns = _refcat_nsources_cap(
+                    self.input_yaml.get("catalog", {}) or {},
+                    q_radius_arcmin,
+                )
+
             # The cache key carries the *queried* centre/extent so runs
             # with different resolved regions never collide.
             box_tag = (
                 f"_box{box_wh[0]:.2f}x{box_wh[1]:.2f}deg" if use_box else ""
             )
+            _ns_tag = f"_n{_refcat_ns}" if _refcat_ns else ""
             fname = (
                 f"{target_name}_r_{q_radius_arcmin:.1f}arcmins{box_tag}_"
-                f"{catalogName}_target_ra_{q_ra:.6f}_dec_{q_dec:.6f}"
+                f"{catalogName}{_ns_tag}_target_ra_{q_ra:.6f}_dec_{q_dec:.6f}"
             )
-
-            # radius is arcmin; catalog queries take degrees.
-            radius_deg = q_radius_arcmin / 60
 
             # clean() drops sources farther than catalog.max_distance from
             # the target - a wider query cone must not be re-trimmed to the
@@ -2461,6 +2637,18 @@ class Catalog:
             # A cone cache at the same centre is a superset of any box
             # query - reuse it before paying for a narrower download.
             _cache_paths = [os.path.join(target_dir, f"{fname}.csv")]
+            if (
+                catalogName == "refcat"
+                and _refcat_ns
+                and _refcat_ns <= 500
+            ):
+                # Legacy files carry no cap tag and top out at the old
+                # flat 500 - only equivalent when the resolved cap
+                # matches; a wider region must fetch the denser table.
+                _legacy = fname.replace(f"_n{_refcat_ns}_", "_")
+                _cache_paths.append(
+                    os.path.join(target_dir, f"{_legacy}.csv")
+                )
             if use_box:
                 _fname_cone = (
                     f"{target_name}_r_{q_radius_arcmin:.1f}arcmins_"
@@ -2680,7 +2868,7 @@ class Catalog:
                         ra=q_ra,
                         dec=q_dec,
                         credentials=credentials,
-                        nsources=500,
+                        nsources=_refcat_ns or 500,
                         sr=radius_deg,
                     )
                     self._require_nonempty_catalog(
@@ -4096,6 +4284,23 @@ class Catalog:
     # =============================================================================
     # =============================================================================
 
+    def _optimizer_mag_err_max(self):
+        """Catalog magnitude-error ceiling for "usable" calibrators.
+
+        ``catalog.optimizer_mag_err_max`` (default 0.2 mag); a non-finite
+        or non-positive value lifts the cap - the error column must still
+        be finite where the catalog carries one.
+        """
+        try:
+            val = float(
+                (self.input_yaml.get("catalog", {}) or {}).get(
+                    "optimizer_mag_err_max", 0.2
+                )
+            )
+        except (TypeError, ValueError):
+            val = 0.2
+        return val if val > 0 else None
+
     def _catalog_supported_bands(self, catalog_names, cat_cfg=None):
         """Bands each candidate backend can serve, from catalog.yml.
 
@@ -4154,6 +4359,7 @@ class Catalog:
         border=11,
         regions=None,
         return_all=False,
+        return_report=False,
     ):
         """Rebuild ``plot_data["sources"]`` for the coverage map without a
         full rescan.
@@ -4170,10 +4376,16 @@ class Catalog:
         ``(sources, catalog_sources)`` where ``catalog_sources`` maps
         catalog name -> every source it returned (post-clean), matching
         ``plot_data["catalog_sources"]`` from the optimizer.
+        ``return_report=True`` appends a third return value: a report
+        DataFrame with the same columns the optimizer report carries
+        (catalog/band/image/n_usable/coverage/r_query_arcmin/mode), so a
+        cached run can still draw the scoreboard row when the original
+        coverage CSV did not survive.
         """
         zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
         bright_lim = float(zp_cfg.get("bright_mag_limit", 11.0))
         faint_lim = float(zp_cfg.get("faint_mag_limit", 22.0))
+        mag_err_max = self._optimizer_mag_err_max()
         supported_bands, _ = self._catalog_supported_bands(
             list(catalog_names)
         )
@@ -4181,6 +4393,7 @@ class Catalog:
 
         per_key = {}
         all_sources = {}
+        report_rows = []
         for name in catalog_names:
             name = self._normalize_catalog_name(str(name))
             if not (set(band_set) & supported_bands.get(name, set())):
@@ -4231,6 +4444,28 @@ class Catalog:
                 )
                 all_sources[name] = cleaned[["RA", "DEC"]].copy()
 
+            # Field coverage over the queried region - same metric the
+            # optimizer uses so the rebuilt report can flag a partial
+            # survey footprint (e.g. a survey boundary crossing the box).
+            cov_frac = np.nan
+            if coords is not None and isinstance(reg, dict):
+                _box = (
+                    (float(reg["width_deg"]), float(reg["height_deg"]))
+                    if name in _BOX_QUERY_CATALOGS and reg.get("width_deg")
+                    else None
+                )
+                try:
+                    cov_frac = _field_coverage_fraction(
+                        coords.ra.deg,
+                        coords.dec.deg,
+                        float(reg["ra"]),
+                        float(reg["dec"]),
+                        float(reg.get("radius_arcmin", radius)) / 60.0,
+                        box_wh=_box,
+                    )
+                except Exception:
+                    cov_frac = np.nan
+
             for img in image_infos or []:
                 img_bands = (
                     [img["band"]] if img.get("band") else band_set
@@ -4269,7 +4504,7 @@ class Catalog:
 
                 for band in img_bands:
                     mag_mask = _usable_mag_mask(
-                        cleaned, band, bright_lim, faint_lim
+                        cleaned, band, bright_lim, faint_lim, mag_err_max
                     )
                     if mag_mask is None:
                         usable = None
@@ -4281,6 +4516,34 @@ class Catalog:
                         per_key.setdefault((name, band), []).append(
                             cleaned.loc[usable, ["RA", "DEC"]]
                         )
+                    if return_report:
+                        report_rows.append(
+                            {
+                                "catalog": name,
+                                "band": band,
+                                "image": (
+                                    os.path.basename(str(img["path"]))
+                                    if img.get("path")
+                                    else "field"
+                                ),
+                                "n_usable": (
+                                    int(usable.sum())
+                                    if usable is not None
+                                    else 0
+                                ),
+                                "coverage": cov_frac,
+                                "r_query_arcmin": float(
+                                    (reg if isinstance(reg, dict) else {}).get(
+                                        "radius_arcmin", radius
+                                    )
+                                ),
+                                "mode": (
+                                    "onchip"
+                                    if wcs_i is not None and shape_i is not None
+                                    else "field"
+                                ),
+                            }
+                        )
 
         out = {
             key: pd.concat(frames, ignore_index=True).drop_duplicates(
@@ -4288,9 +4551,153 @@ class Catalog:
             )
             for key, frames in per_key.items()
         }
+        if return_report:
+            report = pd.DataFrame(
+                report_rows,
+                columns=[
+                    "catalog",
+                    "band",
+                    "image",
+                    "n_usable",
+                    "coverage",
+                    "r_query_arcmin",
+                    "mode",
+                ],
+            )
+            return out, all_sources, report
         if return_all:
             return out, all_sources
         return out
+
+    def _recenter_on_coverage(
+        self,
+        name,
+        reg,
+        coords,
+        target_coords,
+        target_name,
+    ):
+        """Re-query a partially-covered cone catalog on covered sky.
+
+        The nominal region is centred on the footprint bounds, which
+        may sit on a survey boundary: distance-ordered (refcat, legacy)
+        and radius-clamped queries then spend their row budget on sky
+        the catalog never observed.  Re-issues the download centred on
+        the covered portion and returns ``(raw, cleaned, coords, reg,
+        coverage)`` only when the required box gains coverage or kept
+        rows; None keeps the original query.
+        """
+        new_centre = _coverage_optimal_center(
+            coords.ra.deg, coords.dec.deg, reg
+        )
+        if new_centre is None:
+            return None
+        reg2 = dict(reg)
+        reg2["ra"], reg2["dec"] = new_centre
+        reg2["recentered"] = True
+        try:
+            reg2["offset_arcmin"] = float(
+                SkyCoord(
+                    ra=reg2["ra"] * u.deg,
+                    dec=reg2["dec"] * u.deg,
+                    frame="icrs",
+                ).separation(target_coords).arcmin
+            )
+        except Exception:
+            pass
+        try:
+            with _quiet_catalog_log():
+                raw2 = self.download(
+                    target_coords=target_coords,
+                    catalogName=name,
+                    radius=reg2["radius_arcmin"],
+                    target_name=target_name,
+                    region=reg2,
+                )
+                cleaned2 = self.clean(
+                    raw2, catalogName=name, update_names_only=True
+                )
+        except Exception as exc:
+            logger.debug(
+                "  %-12s coverage recentre query failed - %s", name, exc
+            )
+            return None
+        if (
+            cleaned2 is None
+            or len(cleaned2) == 0
+            or not {"RA", "DEC"}.issubset(cleaned2.columns)
+        ):
+            return None
+        cleaned2 = _skycoord_dedup_keep_one(
+            cleaned2, sep_threshold_arcsec=0.1
+        )
+        coords2 = SkyCoord(
+            ra=pd.to_numeric(cleaned2["RA"], errors="coerce").to_numpy()
+            * u.deg,
+            dec=pd.to_numeric(cleaned2["DEC"], errors="coerce").to_numpy()
+            * u.deg,
+            frame="icrs",
+        )
+        # Both candidates are judged against the SAME required box so
+        # the adoption test never rewards a shifted region for merely
+        # covering different sky.
+        _box_wh = (
+            (float(reg["width_deg"]), float(reg["height_deg"]))
+            if reg.get("width_deg") and reg.get("height_deg")
+            else None
+        )
+        _r_deg = float(reg["radius_arcmin"]) / 60.0
+        cov_old = _field_coverage_fraction(
+            coords.ra.deg,
+            coords.dec.deg,
+            float(reg["ra"]),
+            float(reg["dec"]),
+            _r_deg,
+            box_wh=_box_wh,
+        )
+        cov_new = _field_coverage_fraction(
+            coords2.ra.deg,
+            coords2.dec.deg,
+            float(reg["ra"]),
+            float(reg["dec"]),
+            _r_deg,
+            box_wh=_box_wh,
+        )
+        if not np.isfinite(cov_new):
+            return None
+        _cov_old = cov_old if np.isfinite(cov_old) else 0.0
+        n_old = int(
+            _in_required_region(coords.ra.deg, coords.dec.deg, reg).sum()
+        )
+        n_new = int(
+            _in_required_region(coords2.ra.deg, coords2.dec.deg, reg).sum()
+        )
+        if not (
+            cov_new > _cov_old + 0.01
+            or (cov_new >= _cov_old - 1e-9 and n_new > 1.15 * n_old)
+        ):
+            return None
+        # The scoreboard column keeps its "coverage of the queried
+        # region" meaning - here the recentred cone.
+        cov2 = _field_coverage_fraction(
+            coords2.ra.deg,
+            coords2.dec.deg,
+            float(reg2["ra"]),
+            float(reg2["dec"]),
+            _r_deg,
+        )
+        logger.info(
+            "  %-12s recentred on covered sky: (%.4f, %.4f) -> "
+            "(%.4f, %.4f); required-box coverage %.0f%% -> %.0f%%",
+            name,
+            float(reg["ra"]),
+            float(reg["dec"]),
+            float(reg2["ra"]),
+            float(reg2["dec"]),
+            100.0 * _cov_old,
+            100.0 * cov_new,
+        )
+        return raw2, cleaned2, coords2, reg2, cov2
 
     def find_optimized_catalog(
         self,
@@ -4389,6 +4796,7 @@ class Catalog:
         zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
         bright_lim = float(zp_cfg.get("bright_mag_limit", 11.0))
         faint_lim = float(zp_cfg.get("faint_mag_limit", 22.0))
+        mag_err_max = self._optimizer_mag_err_max()
         target_name = target_name or canonical_target_name(self.input_yaml)
 
         # --- Candidate set ----------------------------------------------------
@@ -4633,6 +5041,54 @@ class Catalog:
                         100.0 * cov_frac,
                     )
 
+                # Coverage-recentre: a boundary through the field leaves
+                # a footprint-centred cone half-empty, and distance-
+                # ordered or radius-clamped queries spend their row
+                # budget on sky the catalog never observed.  Re-query
+                # once centred on the covered portion; the region is
+                # adopted only when the required box gains coverage or
+                # kept rows.  Box backends cover their region exactly -
+                # a shifted query cannot add sources the survey lacks.
+                try:
+                    _rc_min = float(
+                        cat_cfg.get("coverage_recenter_min", 0.8) or 0.0
+                    )
+                except (TypeError, ValueError):
+                    _rc_min = 0.8
+                if (
+                    _rc_min > 0
+                    and name not in _BOX_QUERY_CATALOGS
+                    and coords is not None
+                    and np.isfinite(cov_frac)
+                    and cov_frac < _rc_min
+                    and (
+                        reg.get("clamped")
+                        or _query_rows_capped(
+                            name,
+                            len(raw_catalogs[name])
+                            if raw_catalogs.get(name) is not None
+                            else 0,
+                            cat_cfg,
+                            reg,
+                        )
+                    )
+                ):
+                    _rc = self._recenter_on_coverage(
+                        name,
+                        reg,
+                        coords,
+                        target_coords,
+                        target_name,
+                    )
+                    if _rc is not None:
+                        raw2, cleaned, coords, reg, cov_frac = _rc
+                        raw_catalogs[name] = raw2
+                        cat_regions[name] = reg
+                        coverage_map[name] = cov_frac
+                        catalog_sources[name] = cleaned[
+                            ["RA", "DEC"]
+                        ].copy()
+
                 for img in image_infos:
                     img_bands = (
                         [img["band"]] if img.get("band") else band_set
@@ -4675,7 +5131,7 @@ class Catalog:
 
                     for band in img_bands:
                         mag_mask = _usable_mag_mask(
-                            cleaned, band, bright_lim, faint_lim
+                            cleaned, band, bright_lim, faint_lim, mag_err_max
                         )
                         if mag_mask is None:
                             usable = None

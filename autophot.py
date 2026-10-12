@@ -2718,12 +2718,12 @@ class AutomatedPhotometry:
                     _opt_report = (
                         _opt.get("report") if isinstance(_opt, dict) else None
                     )
+                    _cov_csv = os.path.join(
+                        new_output_dir,
+                        f"{backup_yaml.get('target_name', 'target')}"
+                        "_optimized_catalog_coverage.csv",
+                    )
                     if _opt_report is None and _auto_mode:
-                        _cov_csv = os.path.join(
-                            new_output_dir,
-                            f"{backup_yaml.get('target_name', 'target')}"
-                            "_optimized_catalog_coverage.csv",
-                        )
                         if os.path.exists(_cov_csv):
                             try:
                                 _opt_report = pd.read_csv(_cov_csv)
@@ -2819,6 +2819,7 @@ class AutomatedPhotometry:
                                 (
                                     _rebuilt_sources,
                                     _rebuilt_all,
+                                    _rebuilt_report,
                                 ) = _cat._optimizer_plot_sources(
                                     _rep_cats,
                                     band_set=sorted(
@@ -2829,8 +2830,23 @@ class AutomatedPhotometry:
                                     target_coords=_target_coords,
                                     radius=_prefetch_radius,
                                     regions=_rep_regions,
-                                    return_all=True,
+                                    return_report=True,
                                 )
+                                if _opt_report is None or not len(
+                                    _opt_report
+                                ):
+                                    # The coverage CSV did not survive
+                                    # (or the scan ran on another output
+                                    # dir) - the offline rebuild supplies
+                                    # the same counts so the scoreboard
+                                    # row is not lost on cached runs.
+                                    _opt_report = _rebuilt_report
+                                    try:
+                                        _opt_report.to_csv(
+                                            _cov_csv, index=False
+                                        )
+                                    except Exception:
+                                        pass
                                 _plot_coverage(
                                     {
                                         "footprints": _mk_footprints(
