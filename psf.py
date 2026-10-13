@@ -3262,6 +3262,20 @@ class _PositiveFluxFitter:
 
     def __init__(self, fitter):
         self._wrapped_fitter = fitter
+        # photutils passes the astropy spelling ``maxiter``; the in-house
+        # MCMC/Poisson fitters spell it ``maxiters``.  Resolve the wrapped
+        # fitter's accepted name once so the cap lands under the right
+        # keyword, and drop it when the fitter accepts neither.
+        try:
+            _params = inspect.signature(fitter).parameters
+        except (TypeError, ValueError):
+            _params = {}
+        if "maxiter" in _params:
+            self._maxiter_kw = "maxiter"
+        elif "maxiters" in _params:
+            self._maxiter_kw = "maxiters"
+        else:
+            self._maxiter_kw = None
 
     def __getattr__(self, name):
         return getattr(self._wrapped_fitter, name)
@@ -3277,8 +3291,8 @@ class _PositiveFluxFitter:
                     par.bounds = (0.0, hi)
             except Exception:
                 continue
-        if maxiter is not None:
-            kwargs["maxiter"] = maxiter
+        if maxiter is not None and self._maxiter_kw is not None:
+            kwargs[self._maxiter_kw] = maxiter
         return self._wrapped_fitter(
             model, x, y, data, weights=weights, **kwargs
         )
@@ -9759,9 +9773,13 @@ class PSF:
             # stars worse than the pixel-integrated analytic model (the
             # ePSF is fitted to these stars, so it has every advantage --
             # measured: degraded production stamps fit 3-16x worse than
-            # the analytic model while good builds sit at ~parity).  The
-            # comparison runs as a diagnostic only; the delivered PSF is
-            # always the empirical model built from the image's own stars.
+            # the analytic model while good builds sit at ~parity).  When
+            # the gate fires and a sane analytic deliverable exists the
+            # analytic composite is delivered: an empirical model that
+            # loses on its own training stars carries noise, not signal
+            # (J2344: ePSF epochs median chi2 ~11 vs ~1.7 for the
+            # analytic-composite epochs).  Set psf_epsf_residual_swap off
+            # to keep the old always-empirical behaviour.
             if (
                 _good
                 and _res_gate
@@ -9790,14 +9808,44 @@ class PSF:
                         _mad_emp, _mad_ana, _fit_rad, len(_stars_eval),
                     )
                     if _mad_emp > _res_ratio_max * _mad_ana:
-                        log.warning(
-                            "Empirical ePSF fits the PSF stars %.2fx worse "
-                            "than the analytic composite (residual MAD %.4f vs "
-                            "%.4f) -- the empirical model is degraded, but it "
-                            "is still the model built from the image's own "
-                            "stars, so it is kept.",
-                            _mad_emp / _mad_ana, _mad_emp, _mad_ana,
+                        _ad = (
+                            _analytic_deliverable()
+                            if bool(
+                                phot_cfg.get(
+                                    "psf_epsf_residual_swap", True
+                                )
+                            )
+                            else None
                         )
+                        if _ad is not None:
+                            _astamp, _af = _ad
+                            log.warning(
+                                "Empirical ePSF fits the PSF stars %.2fx "
+                                "worse than the analytic composite "
+                                "(residual MAD %.4f vs %.4f) -- "
+                                "delivering the fitted analytic composite "
+                                "(FWHM %.2f px) instead of the degraded "
+                                "empirical model.",
+                                _mad_emp / _mad_ana,
+                                _mad_emp,
+                                _mad_ana,
+                                _af,
+                            )
+                            epsf = _astamp
+                            epsf._autophot_fitted = _analytic_fitted
+                            epsf._autophot_star_fits = _analytic_sfits
+                            _epsf_fwhm_meas = _af
+                            _delivered_analytic = True
+                        else:
+                            log.warning(
+                                "Empirical ePSF fits the PSF stars %.2fx "
+                                "worse than the analytic composite "
+                                "(residual MAD %.4f vs %.4f) -- the "
+                                "empirical model is degraded, but no sane "
+                                "analytic substitute exists, so it is "
+                                "kept.",
+                                _mad_emp / _mad_ana, _mad_emp, _mad_ana,
+                            )
                         # Honest accounting: a model that fits its own stars
                         # grossly worse than the analytic fallback has not
                         # converged to the data, whatever the shape gates say.
@@ -10010,7 +10058,10 @@ class PSF:
             # flattening beyond 3.5*FWHM), which can bias the encircled
             # energy and symmetrise real ellipticity.  Default off: the
             # photometric model should be what the stars converged to.
-            if bool(phot_cfg.get("psf_epsf_wing_smooth", False)):
+            if (
+                bool(phot_cfg.get("psf_epsf_wing_smooth", False))
+                and not _delivered_analytic
+            ):
                 try:
                     epsf.data[:] = clean_epsf_stamp(
                         np.asarray(epsf.data, float),

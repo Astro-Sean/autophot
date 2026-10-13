@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy.stats import mad_std, sigma_clip, sigma_clipped_stats
-from scipy.optimize import minimize
+from scipy.optimize import least_squares, minimize
 from scipy.stats import median_abs_deviation  # single source; avoids duplicate
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.linear_model import RANSACRegressor
@@ -2970,26 +2970,102 @@ class Zeropoint:
                     and len(_in_x) >= 3
                 )
                 if _fit_ok:
-                    _A = np.vstack([_in_x, np.ones_like(_in_x)]).T
-                    # Whiten by sqrt(w): lstsq(W@A, W@y) instead applies the
-                    # inverse-variance weights twice (effective 1/sigma^4),
-                    # so the line tracks only the few brightest calibrators.
+                    # Point estimate: Huber-loss fit on whitened residuals
+                    # (sqrt(w) * (a*x + b - y)), so a single discrepant
+                    # calibrator cannot pull the slope the way plain WLS
+                    # lets it.  Slope error: seeded bootstrap over the
+                    # inliers (zeropoint.bootstrap_resamples /
+                    # random_state) -- with ~10 points the chi2-rescaled
+                    # covariance understates the real uncertainty.  Plain
+                    # WLS is the fallback if the Huber fit fails.
                     _sqrt_w = np.sqrt(_w)
-                    try:
-                        _coef, _resid, _rank, _sv = np.linalg.lstsq(
-                            _sqrt_w[:, None] * _A,
-                            _sqrt_w * _in_y,
-                            rcond=None,
+
+                    def _huber_line(xv, yv, wv):
+                        _sw = np.sqrt(wv)
+
+                        def _pres(p):
+                            return _sw * (xv * p[0] + p[1] - yv)
+
+                        _p0 = np.array(
+                            [1.0, float(np.median(yv - xv))]
                         )
-                        _slope_free, _intercept_free = float(_coef[0]), float(_coef[1])
-                        # Covariance: (A^T W A)^-1 * sigma^2_resid
-                        _AtWA = _A.T @ (_w[:, None] * _A)
-                        _pred = _A @ _coef
-                        _chi2 = float(np.sum(_w * (_in_y - _pred) ** 2))
-                        _dof = max(1, len(_in_x) - 2)
-                        _sigma2_resid = _chi2 / _dof
-                        _cov_free = np.linalg.inv(_AtWA) * _sigma2_resid
-                        _slope_err = float(np.sqrt(_cov_free[0, 0]))
+                        _r = least_squares(
+                            _pres, _p0, loss="huber", f_scale=1.0
+                        )
+                        if not _r.success or not np.isfinite(_r.x).all():
+                            return None
+                        return float(_r.x[0]), float(_r.x[1])
+
+                    _A = np.vstack([_in_x, np.ones_like(_in_x)]).T
+                    _sl_ok = False
+                    try:
+                        _rc = _huber_line(_in_x, _in_y, _w)
+                        if _rc is None:
+                            raise RuntimeError("Huber fit unavailable")
+                        _slope_free, _intercept_free = _rc
+                        _n_boot_sl = int(
+                            zp_cfg.get("bootstrap_resamples", 512) or 0
+                        )
+                        _boot = []
+                        if _n_boot_sl > 0:
+                            _rng_sl = np.random.default_rng(random_state)
+                            _nsl = len(_in_x)
+                            for _bi in range(_n_boot_sl):
+                                _idx = _rng_sl.integers(0, _nsl, _nsl)
+                                try:
+                                    _cb = _huber_line(
+                                        _in_x[_idx],
+                                        _in_y[_idx],
+                                        _w[_idx],
+                                    )
+                                except Exception:
+                                    _cb = None
+                                if _cb is not None:
+                                    _boot.append(_cb[0])
+                        if len(_boot) >= 10:
+                            _boot = np.asarray(_boot)
+                            _slope_err = float(
+                                1.4826
+                                * np.median(
+                                    np.abs(_boot - np.median(_boot))
+                                )
+                            )
+                        else:
+                            _slope_err = np.nan
+                        if not np.isfinite(_slope_err) or _slope_err <= 0:
+                            raise RuntimeError("bootstrap SE unavailable")
+                        _sl_ok = True
+                    except Exception:
+                        # Whiten by sqrt(w): lstsq(W@A, W@y) instead applies
+                        # the inverse-variance weights twice (effective
+                        # 1/sigma^4), so the line tracks only the few
+                        # brightest calibrators.
+                        try:
+                            _coef, _resid, _rank, _sv = np.linalg.lstsq(
+                                _sqrt_w[:, None] * _A,
+                                _sqrt_w * _in_y,
+                                rcond=None,
+                            )
+                            _slope_free, _intercept_free = float(
+                                _coef[0]
+                            ), float(_coef[1])
+                            # Covariance: (A^T W A)^-1 * sigma^2_resid
+                            _AtWA = _A.T @ (_w[:, None] * _A)
+                            _pred = _A @ _coef
+                            _chi2 = float(
+                                np.sum(_w * (_in_y - _pred) ** 2)
+                            )
+                            _dof = max(1, len(_in_x) - 2)
+                            _sigma2_resid = _chi2 / _dof
+                            _cov_free = np.linalg.inv(_AtWA) * _sigma2_resid
+                            _slope_err = float(np.sqrt(_cov_free[0, 0]))
+                            _sl_ok = True
+                        except Exception as _e:
+                            logger.debug(
+                                f"[{flux_type}] Free-slope diagnostic fit "
+                                f"failed: {_e}"
+                            )
+                    if _sl_ok:
                         _dev = _slope_free - 1.0
                         _ys_free = _slope_free * xs + _intercept_free
                         ax.plot(
@@ -3030,10 +3106,6 @@ class Zeropoint:
                         fit_params[flux_type]["free_slope"] = _slope_free
                         fit_params[flux_type]["free_slope_err"] = _slope_err
                         fit_params[flux_type]["free_intercept"] = _intercept_free
-                    except Exception as _e:
-                        logger.debug(
-                            f"[{flux_type}] Free-slope diagnostic fit failed: {_e}"
-                        )
 
                 _fs = fit_params[flux_type].get("free_slope", np.nan)
                 _fs_e = fit_params[flux_type].get("free_slope_err", np.nan)

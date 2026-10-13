@@ -18,12 +18,15 @@ dependencies:
   - emcee==3.1.6
   - astroscrappy==1.2.0
   - reproject==0.20.0
+  - pyvo==1.9.1
   - pyyaml==6.0.3
   - requests==2.34.2
   - tqdm==4.68.2
   - corner==2.2.3
   - ccdproc==2.5.1
   - astroalign==2.6.2
+  # sip_tpv==1.1 does `import pkg_resources`, which setuptools removed in 81.
+  - setuptools<81
   - astromatic-source-extractor
   - astromatic-scamp
   - astromatic-swarp

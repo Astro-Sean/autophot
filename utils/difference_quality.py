@@ -110,6 +110,10 @@ class QualityMetrics:
     flux_scale_conv: float = 0.0
     flux_scale_phot: float = 0.0
     flux_scale_discrep_pct: float = 0.0
+    # Realized matching-kernel audit (SFFT KERNOISE/KERNEG header cards).
+    # Zero when the backend did not solve a delta-basis kernel.
+    kernel_noise: float = 0.0
+    kernel_negfrac: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -166,6 +170,14 @@ class QualityConfig:
     # Classification thresholds
     pass_threshold: float = 0.75
     downgrade_threshold: float = 0.50
+
+    # Kernel-quality caps: a noise-dominated or majority-negative matching
+    # kernel leaves sidelobe residuals at every source, but the sparse
+    # checked-source set cannot detect them all.  Cap the class at
+    # "downgrade" rather than certify a kernel the audit already flagged
+    # (0 disables each cap; only SFFT writes these cards).
+    kernel_noise_downgrade: float = 0.15
+    kernel_negfrac_downgrade: float = 0.5
 
 
 # ===========================================================================
@@ -583,6 +595,40 @@ def compute_quality_score(metrics: QualityMetrics, cfg: QualityConfig) -> None:
             "subtraction fidelity is unverified, not verified clean."
         )
 
+    # A "pass" on a kernel the solve itself flagged as noise-dominated or
+    # majority-negative is the same kind of unverifiable pass: on a sparse
+    # field too few sources are checked for the residual probes to see the
+    # sidelobe ringing such a kernel deposits at every source.  The kernel
+    # audit is direct evidence from the solve, so it caps the class even
+    # when the residual metrics look clean.
+    if metrics.quality_class == "pass":
+        _kcap = []
+        if (
+            cfg.kernel_noise_downgrade > 0
+            and metrics.kernel_noise > cfg.kernel_noise_downgrade
+        ):
+            _kcap.append(
+                f"kernel noise {metrics.kernel_noise:.3f} > "
+                f"{cfg.kernel_noise_downgrade:.3f}"
+            )
+        if (
+            cfg.kernel_negfrac_downgrade > 0
+            and metrics.kernel_negfrac > cfg.kernel_negfrac_downgrade
+        ):
+            _kcap.append(
+                f"kernel negative-mass fraction "
+                f"{metrics.kernel_negfrac:.2f} > "
+                f"{cfg.kernel_negfrac_downgrade:.2f}"
+            )
+        if _kcap:
+            metrics.quality_class = "downgrade"
+            logger.info(
+                "Difference-image quality downgraded: %s - the matching "
+                "kernel is under-constrained, so sidelobe residuals the "
+                "checked sources did not reach are likely.",
+                "; ".join(_kcap),
+            )
+
 
 # ===========================================================================
 # Main entry point
@@ -648,6 +694,8 @@ def assess_difference_image(
     metrics.flux_scale_conv = float(metadata.get("flux_scale_conv", 0.0))
     metrics.flux_scale_phot = float(metadata.get("flux_scale_phot", 0.0))
     metrics.flux_scale_discrep_pct = float(metadata.get("flux_scale_discrep_pct", 0.0))
+    metrics.kernel_noise = float(metadata.get("kernel_noise", 0.0))
+    metrics.kernel_negfrac = float(metadata.get("kernel_negfrac", 0.0))
 
     # --- Global statistics ---
     # Guard against shape mismatch between diff_data and quality_mask
