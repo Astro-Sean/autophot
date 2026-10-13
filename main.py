@@ -9641,16 +9641,16 @@ def run_photometry():
             ) and MatchingSources is not None:
                 try:
                     _supp_target = int(
-                        _supp_cfg.get("sfft_sparse_prior_target", 10)
+                        _supp_cfg.get("sfft_sparse_prior_target", 20)
                     )
                     _supp_max_add = int(
-                        _supp_cfg.get("sfft_sparse_prior_max_add", 15)
+                        _supp_cfg.get("sfft_sparse_prior_max_add", 30)
                     )
                     _supp_max_r = float(
                         _supp_cfg.get("sfft_stamp_fwhm_max_ratio", 1.6)
                     )
                 except (TypeError, ValueError):
-                    _supp_target, _supp_max_add, _supp_max_r = 10, 15, 1.6
+                    _supp_target, _supp_max_add, _supp_max_r = 20, 30, 1.6
                 if (
                     _supp_max_r > 1.0
                     and len(MatchingSources) < _supp_target

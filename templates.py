@@ -11745,6 +11745,12 @@ class Templates:
                     edge_max_std_ratio=float(_ts_cfg_q.get("diffqual_edge_max_std_ratio", 2.0)),
                     pass_threshold=float(_ts_cfg_q.get("diffqual_pass_threshold", 0.75)),
                     downgrade_threshold=float(_ts_cfg_q.get("diffqual_downgrade_threshold", 0.50)),
+                    kernel_noise_downgrade=float(
+                        _ts_cfg_q.get("diffqual_kernel_noise_downgrade", 0.15)
+                    ),
+                    kernel_negfrac_downgrade=float(
+                        _ts_cfg_q.get("diffqual_kernel_negfrac_downgrade", 0.5)
+                    ),
                 )
 
                 # Sources to check for structured residuals: the matched
@@ -14346,8 +14352,8 @@ class Templates:
             # sfft_const_phot_ratio_sparse_threshold to 0, or by explicitly
             # setting sfft_const_phot_ratio: True (skip auto, use always).
             _cpr_sparse_thresh = int(
-                ts_sub.get("sfft_const_phot_ratio_sparse_threshold", 5)
-            ) if ts_sub.get("sfft_const_phot_ratio_sparse_threshold") is not None else 5
+                ts_sub.get("sfft_const_phot_ratio_sparse_threshold", 15)
+            ) if ts_sub.get("sfft_const_phot_ratio_sparse_threshold") is not None else 15
             if not const_phot_ratio and _cpr_sparse_thresh > 0:
                 # Will be checked after we know the matching source count.
                 # For now, flag that auto-enable is eligible.

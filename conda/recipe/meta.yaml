@@ -52,6 +52,7 @@ requirements:
     - pandas >=3.0
     - photutils >=3.0
     - pyyaml >=6.0
+    - pyvo >=1.9
     - reproject >=0.20
     - requests >=2.34
     - scikit-image >=0.24

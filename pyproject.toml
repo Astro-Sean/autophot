@@ -37,6 +37,9 @@ dependencies = [
   # release lands or pip installs become unresolvable.
   "photutils>=3.0",
   "PyYAML>=6.0",
+  # pyvo ships its own SAMP implementation from 1.9; 1.8.x imports the
+  # astropy.samp module deprecated under astropy 8.
+  "pyvo>=1.9",
   "reproject>=0.20",
   "requests>=2.34",
   "scikit-image>=0.24",
