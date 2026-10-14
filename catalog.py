@@ -3882,15 +3882,57 @@ class Catalog:
             else:
                 centroid_method = "center-of-mass"
                 centroid_func = centroid_com
+            # An image-shaped error map switches to the 4-tuple centroid
+            # path so x_pix_err/y_pix_err carry propagated 1-sigma
+            # centroid uncertainties rather than NaN.
+            err_map = None
+            if error is not None:
+                err_map = np.asarray(error, dtype=float)
+                if err_map.shape != image.shape:
+                    logger.warning(
+                        "recenter: error map shape %s != image shape %s; "
+                        "centroid errors skipped",
+                        err_map.shape,
+                        image.shape,
+                    )
+                    err_map = None
             try:
-                x_valid, y_valid = centroid_sources(
-                    image,
-                    old_x_valid,
-                    old_y_valid,
-                    box_size=boxsize,
-                    centroid_func=centroid_func,
-                    mask=nan_mask,
-                )
+                if err_map is not None:
+                    from psf import (
+                        _centroid_sources_with_error_impl,
+                        centroid_2dg_with_error,
+                        centroid_com_with_error,
+                    )
+
+                    (
+                        x_valid,
+                        y_valid,
+                        x_err_valid,
+                        y_err_valid,
+                    ) = _centroid_sources_with_error_impl(
+                        image,
+                        old_x_valid,
+                        old_y_valid,
+                        box_size=boxsize,
+                        centroid_func=(
+                            centroid_2dg_with_error
+                            if undersampled
+                            else centroid_com_with_error
+                        ),
+                        mask=nan_mask,
+                        error=err_map,
+                    )
+                else:
+                    x_valid, y_valid = centroid_sources(
+                        image,
+                        old_x_valid,
+                        old_y_valid,
+                        box_size=boxsize,
+                        centroid_func=centroid_func,
+                        mask=nan_mask,
+                    )
+                    x_err_valid = np.full(len(x_valid), np.nan)
+                    y_err_valid = np.full(len(y_valid), np.nan)
                 x_valid = np.asarray(x_valid)
                 y_valid = np.asarray(y_valid)
             except Exception as e:
@@ -3899,8 +3941,8 @@ class Catalog:
                 )
                 x_valid = old_x_valid.copy()
                 y_valid = old_y_valid.copy()
-            x_err_valid = np.full(len(x_valid), np.nan)
-            y_err_valid = np.full(len(y_valid), np.nan)
+                x_err_valid = np.full(len(x_valid), np.nan)
+                y_err_valid = np.full(len(y_valid), np.nan)
 
             # NaN-fill invalid sources so indices stay aligned.
             x = np.full(len(old_x), np.nan)

@@ -236,7 +236,11 @@ from matplotlib.gridspec import GridSpec
 from astropy.nddata import Cutout2D
 from astropy.visualization import ZScaleInterval
 from photutils.detection import DAOStarFinder
-from photutils.aperture import CircularAperture, CircularAnnulus
+from photutils.aperture import (
+    AperturePhotometry,
+    CircularAperture,
+    CircularAnnulus,
+)
 
 # ---------------------------------------------------------------------------
 # Local
@@ -2039,8 +2043,10 @@ class Limits:
                     _psf_ap_obj = CircularAperture(
                         (float(cx), float(cy)), r=float(aperture_radius_local)
                     )
-                    _psf_phot = _psf_ap_obj.do_photometry(psf_unit, method="exact")
-                    counts_ref_adu = float(_psf_phot[0][0])
+                    _psf_phot = AperturePhotometry(
+                        psf_unit, _psf_ap_obj, method="exact"
+                    )
+                    counts_ref_adu = float(np.atleast_1d(_psf_phot.flux)[0])
             else:
                 # Aperture convention: inst_mag_ap/zp_ap are on the
                 # aperture-flux scale AFTER annulus background subtraction.
@@ -2080,8 +2086,10 @@ class Limits:
                     _psf_ap_obj = CircularAperture(
                         (float(cx), float(cy)), r=float(aperture_radius_local)
                     )
-                    _psf_phot = _psf_ap_obj.do_photometry(psf_unit, method="exact")
-                    counts_ref_adu = float(_psf_phot[0][0])
+                    _psf_phot = AperturePhotometry(
+                        psf_unit, _psf_ap_obj, method="exact"
+                    )
+                    counts_ref_adu = float(np.atleast_1d(_psf_phot.flux)[0])
             # Convert to e-: Aperture.measure works on image*gain. Without this,
             # _flux_for_mag_cached divides e- by ADU, so F_amp is gainx too
             # large, every injected source is gainx too bright, and the limit is

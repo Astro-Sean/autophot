@@ -146,23 +146,40 @@ class QualityFlag(IntFlag):
 def from_photutils_flags(flags: int) -> QualityFlag:
     """Map photutils PSF photometry flags to QualityFlag.
 
-    photutils flag bits (from photutils.psf.utils.decode_psf_flags):
-    - bit 0: fit did not converge
-    - bit 1: fit at parameter bounds
-    - bit 2: data contains non-finite values
-    - bit 4: no covariance matrix
-    - bit 8: negative flux
-    - bit 16: NO_COVARIANCE (photutils 3.0+)
+    photutils >=3.1 flag registry (photutils.psf.flags.PSF_FLAGS):
+    - 1 n_pixels_fit_partial: fitted fewer pixels than the fit region
+    - 2 position_outside_image
+    - 4 non_positive_flux
+    - 8 no_convergence
+    - 16 no_covariance (no QualityFlag equivalent; left unmapped)
+    - 32 parameter_near_bound
+    - 64 no_overlap
+    - 128 fully_masked
+    - 256 too_few_pixels
+    - 512 non_finite_position
+    - 1024 non_finite_flux
+    - 2048 non_finite_local_bkg
+    - 4096 position_outside_fit_region
     """
     qf = QualityFlag.OK
-    if flags & (1 << 0):
+    if flags & 8:
         qf |= QualityFlag.OPTIMIZER_NON_CONVERGENCE
-    if flags & (1 << 1):
+    if flags & 32:
         qf |= QualityFlag.PARAMETER_AT_BOUND
-    if flags & (1 << 2):
-        qf |= QualityFlag.NON_FINITE_PIXELS
-    if flags & (1 << 8):
+    if flags & 4:
         qf |= QualityFlag.NEGATIVE_FLUX
+    if flags & (512 | 1024):
+        qf |= QualityFlag.NON_FINITE_PIXELS
+    if flags & 2048:
+        qf |= QualityFlag.BAD_BACKGROUND
+    if flags & (128 | 256):
+        qf |= QualityFlag.HIGH_MASK_FRACTION
+    # position_outside_fit_region usually means the fit walked onto a
+    # neighbour; the remaining edge bits mark sources clipped by the frame.
+    if flags & 4096:
+        qf |= QualityFlag.CROWDED
+    if flags & (1 | 2 | 64):
+        qf |= QualityFlag.EDGE_PROXIMITY
     return qf
 
 

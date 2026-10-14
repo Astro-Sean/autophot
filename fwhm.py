@@ -38,7 +38,7 @@ from astropy.modeling import models, fitting
 from astropy.utils.exceptions import AstropyWarning
 from astropy.table import Table
 from astropy.visualization import ZScaleInterval, ImageNormalize
-from photutils.detection import StarFinder, IRAFStarFinder, DAOStarFinder, find_peaks
+from photutils.detection import IRAFStarFinder, DAOStarFinder
 from photutils.background import Background2D, MedianBackground, BiweightScaleBackgroundRMS
 from photutils.utils import circular_footprint
 from photutils.profiles import RadialProfile
@@ -48,12 +48,7 @@ from photutils.segmentation import (
     deblend_sources,
     SourceCatalog,
 )
-from photutils.centroids import (
-    centroid_1dg,
-    centroid_2dg,
-    centroid_com,
-    centroid_quadratic,
-)
+
 from skimage import feature, transform, exposure, morphology, draw
 from lmfit import Model
 from lmfit.models import Gaussian2dModel, ConstantModel
@@ -217,6 +212,10 @@ class Find_FWHM:
                 min_separation=fwhm_px,
                 scale_threshold=True,
             )
+        # min_n_pixels=2 keeps undersampled stars (few pixels above threshold)
+        # in the candidate pool while dropping single-pixel hot-pixel peaks;
+        # the photutils 3.1 default of 5 would lose genuine undersampled
+        # detections that roundness/sharpness cuts already vet.
         return IRAFStarFinder(
             fwhm=fwhm_px,
             threshold=threshold,
@@ -225,6 +224,7 @@ class Find_FWHM:
             peak_max=0.98 * saturate,
             sharpness_range=(det_params["sharplo"], det_params["sharphi"]),
             roundness_range=(det_params["roundlo"], det_params["roundhi"]),
+            min_n_pixels=2,
         )
 
     @staticmethod
@@ -471,11 +471,30 @@ class Find_FWHM:
                 mode="exponential",
                 n_threads=photutils_n_threads(self.input_yaml),
             )
+            # 3.1 puts per-label deblend provenance flat on info; log how
+            # many parents hit a fallback (sinh spacing for non-positive
+            # minima, or the marker cap) since those children are the
+            # ones most likely to differ from a manual check.
+            _fb = getattr(deblended_map, "info", None) or {}
+            n_npmin = len(_fb.get("non_positive_min_labels") or [])
+            n_markers = len(_fb.get("too_many_markers_labels") or [])
+            if n_npmin or n_markers:
+                self.logger.debug(
+                    "Deblend fallbacks: %d non-positive-min, "
+                    "%d too-many-markers",
+                    n_npmin,
+                    n_markers,
+                )
         except Exception:
             # Deblending can fail on pathological segment maps; use the raw map.
             deblended_map = segment_map
+        # ``error`` feeds the photutils 3.1 propagated centroid
+        # uncertainties used for the uncertainty-aware veto below.
         catalog = SourceCatalog(
-            image, deblended_map, n_threads=photutils_n_threads(self.input_yaml)
+            image,
+            deblended_map,
+            error=np.full(image.shape, std),
+            n_threads=photutils_n_threads(self.input_yaml),
         )
         if len(catalog) == 0:
             return coordinates_df.iloc[[]].copy()
@@ -484,6 +503,14 @@ class Find_FWHM:
             catalog.y_centroid if hasattr(catalog, 'y_centroid') else catalog.ycentroid,
         ))
         segment_ids = catalog.label
+        try:
+            cen_err = np.hypot(
+                np.asarray(catalog.x_centroid_err, float),
+                np.asarray(catalog.y_centroid_err, float),
+            )
+            cen_err[~np.isfinite(cen_err)] = 0.0
+        except Exception:
+            cen_err = np.zeros(len(catalog))
 
         source_coords = np.column_stack(
             (coordinates_df["x_pix"], coordinates_df["y_pix"])
@@ -502,7 +529,10 @@ class Find_FWHM:
             own_idxs = np.where(segment_ids == own_seg_id)[0]
             row_dists = all_dists[i].copy()
             row_dists[own_idxs] = np.inf
-            if np.min(row_dists) < min_distance:
+            # A neighbour vetoes isolation when its centroid may lie
+            # inside min_distance once its propagated 1-sigma centroid
+            # error is included.
+            if np.min(row_dists - cen_err) < min_distance:
                 coordinates_df.at[i, "is_isolated"] = False
 
         cleaned_df = coordinates_df[coordinates_df["is_isolated"]].copy()
@@ -1289,6 +1319,11 @@ class Find_FWHM:
             ny, nx = image.shape
             if mask is None:
                 mask = ~np.isfinite(image)
+            else:
+                # photutils 3.1 requires boolean masks in Background2D and
+                # the detection helpers below; caller masks use the
+                # 1/True = bad-pixel convention.
+                mask = np.asarray(mask, dtype=bool)
 
             # --- Mask user-specified circles ---
             if mask_sources_XY_R:

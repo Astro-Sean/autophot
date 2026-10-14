@@ -88,7 +88,12 @@ from astropy.modeling.fitting import TRFLSQFitter, SLSQPLSQFitter
 # Photutils
 # ---------------------------------------------------------------------------
 from photutils.background import LocalBackground, MedianBackground
-from photutils.centroids import centroid_com, centroid_2dg, centroid_sources
+from photutils.centroids import (
+    centroid_com,
+    centroid_2dg,
+    centroid_sources,
+    centroid_symmetry,
+)
 from photutils.psf import (
     EPSFBuilder,
     EPSFFitter,
@@ -102,8 +107,8 @@ from photutils.psf import (
 )
 
 try:
-    # photutils >=3.1.dev carries the pixel-integrated analytic PRF
-    # models; earlier dev builds do not, so the boxcar-integrated
+    # photutils >=3.1 carries the pixel-integrated analytic PRF
+    # models; earlier releases do not, so the boxcar-integrated
     # kernel path below remains as the fallback.
     from photutils.psf import MoffatPRF
 except ImportError:
@@ -1925,14 +1930,49 @@ def _composite_moffat_psf(components, oversampling, cutout_n, ellipticity=None):
     n = int(osamp * cutout_n)
     ctr = (n - 1) / 2.0
     yy, xx = np.indices((n, n))
-    # The fitted gammas are intrinsic (de-elongated) radii, so the stamp
-    # is evaluated on the same elliptical metric to restore the true
-    # 2-D shape - a trailed/defocused PSF stays elongated.  Component
-    # centre offsets (grid units) represent the asymmetry the fit found.
-    data = _moffat_comps_image(
-        (xx - ctr) / osamp, (yy - ctr) / osamp, components, ellipticity
-    )
-    data = pixel_integrate_oversampled(data, osamp)
+    data = None
+    used_prf = False
+    if ellipticity is None and MoffatPRF is not None:
+        # A circular sum-of-Moffats is a sum of MoffatPRFs, each giving
+        # the exact analytic integral over a detector pixel
+        # (Gauss-Legendre quadrature) - including at osamp=1, where the
+        # boxcar path below samples the continuous profile without
+        # integrating.  Centre offsets become per-component x_0/y_0;
+        # comps carry peak amplitude, so flux = amp*pi*gamma^2/(beta-1).
+        parts = []
+        for c in components:
+            a, g, b = float(c[0]), max(float(c[1]), 1e-6), float(c[2])
+            if not (np.isfinite(a) and np.isfinite(b) and a > 0 and b > 1.0):
+                parts = None
+                break
+            ox, oy = (
+                (float(c[3]), float(c[4])) if len(c) > 4 else (0.0, 0.0)
+            )
+            parts.append(
+                MoffatPRF(
+                    flux=a * np.pi * g**2 / (b - 1.0),
+                    x_0=ctr / osamp + ox,
+                    y_0=ctr / osamp + oy,
+                    alpha=g,
+                    beta=b,
+                )
+            )
+        if parts:
+            data = np.zeros((n, n), dtype=float)
+            for mdl in parts:
+                data = data + np.asarray(
+                    mdl(xx / osamp, yy / osamp), dtype=float
+                )
+            used_prf = True
+    if data is None:
+        # The fitted gammas are intrinsic (de-elongated) radii, so the stamp
+        # is evaluated on the same elliptical metric to restore the true
+        # 2-D shape - a trailed/defocused PSF stays elongated.  Component
+        # centre offsets (grid units) represent the asymmetry the fit found.
+        data = _moffat_comps_image(
+            (xx - ctr) / osamp, (yy - ctr) / osamp, components, ellipticity
+        )
+        data = pixel_integrate_oversampled(data, osamp)
     # pixel_integrate_oversampled only normalises when it convolves; at
     # osamp==1 it returns the raw profile, so normalise unconditionally
     # before the photutils flux-convention rescale.
@@ -1945,6 +1985,7 @@ def _composite_moffat_psf(components, oversampling, cutout_n, ellipticity=None):
         "analytic-composite" if len(components) > 1 else "analytic-moffat"
     )
     stamp._autophot_ellipticity = ellipticity
+    stamp._autophot_integration = "moffatprf" if used_prf else "boxcar"
     # Kept on the stamp so the analytic diagnostic plot can draw the
     # per-component lines; _autophot_fitted is set True by callers that
     # fitted (rather than canonical) components.
@@ -3020,6 +3061,35 @@ def empirical_false_alarm_prob(
         return np.nan, 0
 
 
+def _propagated_centroid_err(flux, error, xcen, ycen):
+    """1-sigma centroid error propagated from a per-pixel error array.
+
+    For x_c = sum(f_i x_i)/sum(f_i) with independent per-pixel noise the
+    leading propagation term is sqrt(sum(s_i^2 (x_i - x_c)^2))/sum(f_i);
+    likewise for y.  Returns (x_err, y_err), NaN when not computable.
+    """
+    if error is None:
+        return np.nan, np.nan
+    flux = np.asarray(flux, dtype=float)
+    err = np.asarray(error, dtype=float)
+    if err.shape != flux.shape:
+        return np.nan, np.nan
+    ok = np.isfinite(flux) & np.isfinite(err) & (flux > 0)
+    total = float(np.nansum(np.where(ok, flux, 0.0)))
+    if total <= 0 or not np.any(ok):
+        return np.nan, np.nan
+    yy, xx = np.mgrid[0 : flux.shape[0], 0 : flux.shape[1]]
+    xerr = (
+        np.sqrt(np.nansum(np.where(ok, err**2 * (xx - xcen) ** 2, 0.0)))
+        / total
+    )
+    yerr = (
+        np.sqrt(np.nansum(np.where(ok, err**2 * (yy - ycen) ** 2, 0.0)))
+        / total
+    )
+    return float(xerr), float(yerr)
+
+
 def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None):
     """
     Centre-of-mass centroid compatible with centroid_sources_with_error.
@@ -3060,12 +3130,16 @@ def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None)
     xcen = float(np.nansum(flux * xx) / total)
     ycen = float(np.nansum(flux * yy) / total)
 
-    xvar = float(np.nansum(flux * (xx - xcen) ** 2) / total)
-    yvar = float(np.nansum(flux * (yy - ycen) ** 2) / total)
+    # Prefer noise-propagated errors when an error map was supplied;
+    # the flux-moment proxy below stays as the no-error fallback.
+    xerr, yerr = _propagated_centroid_err(flux, error, xcen, ycen)
+    if not (np.isfinite(xerr) and np.isfinite(yerr)):
+        xvar = float(np.nansum(flux * (xx - xcen) ** 2) / total)
+        yvar = float(np.nansum(flux * (yy - ycen) ** 2) / total)
 
-    # COM uncertainty proxy; preserve original behaviour/scale.
-    xerr = float(np.sqrt(xvar / total)) if xvar >= 0 else np.nan
-    yerr = float(np.sqrt(yvar / total)) if yvar >= 0 else np.nan
+        # COM uncertainty proxy; preserve original behaviour/scale.
+        xerr = float(np.sqrt(xvar / total)) if xvar >= 0 else np.nan
+        yerr = float(np.sqrt(yvar / total)) if yvar >= 0 else np.nan
 
     return xcen, ycen, xerr, yerr
 
@@ -3073,15 +3147,20 @@ def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None)
 def centroid_2dg_with_error(data, mask=None, error=None, xpeak=None, ypeak=None):
     """
     2D Gaussian centroid compatible with centroid_sources_with_error (4-tuple API).
-    Uses error for weighting when provided; returns (x, y, nan, nan) for uncertainties.
+    Uses error for weighting when provided; uncertainties come from the
+    same propagated-noise term as centroid_com_with_error (Gaussian-fit
+    covariances are not exposed by centroid_2dg).
     """
     xcen, ycen = centroid_2dg(data, mask=mask, error=error)
-    return (
-        float(np.atleast_1d(xcen)[0]),
-        float(np.atleast_1d(ycen)[0]),
-        np.nan,
-        np.nan,
-    )
+    xcen = float(np.atleast_1d(xcen)[0])
+    ycen = float(np.atleast_1d(ycen)[0])
+    xerr = yerr = np.nan
+    if np.isfinite(xcen) and np.isfinite(ycen):
+        flux = np.asarray(data, dtype=float)
+        if mask is not None:
+            flux = np.where(mask, np.nan, flux)
+        xerr, yerr = _propagated_centroid_err(flux, error, xcen, ycen)
+    return xcen, ycen, xerr, yerr
 
 
 def _centroid_sources_with_error_impl(
@@ -8081,7 +8160,12 @@ class PSF:
             # Use a PSF-shape-aware centroiding choice: for clearly
             # undersampled data, a 2-D Gaussian centroid is generally more
             # stable than a pure centre-of-mass on a few bright pixels.
-            recenter_func = centroid_2dg if undersampled else centroid_com
+            # For well-sampled stars photutils 3.1 defaults EPSFBuilder to
+            # centroid_symmetry (the Anderson 2016 ePSF centre), which does
+            # not get dragged by asymmetric structure around the core the
+            # way a centre of mass is - fitted positions sit up to ~0.1 px
+            # closer to the optical-model centre on asymmetric PSFs.
+            recenter_func = centroid_2dg if undersampled else centroid_symmetry
 
             # Centroid and fit windows scale with FWHM, but must remain odd.
             # For undersampled data, use a smaller recentering box to avoid
@@ -8984,6 +9068,35 @@ class PSF:
                     smoothing_kernel=kern_c,
                     progress_bar=False,
                 )
+                # photutils 3.1 anti-alias filter: the default passband
+                # (0.8, or 0.7 at osamp=2) removes real signal near
+                # 1 cycle/pix on strongly undersampled data; upstream
+                # recommends 0.85-0.9 there.  Only applies when an
+                # oversampled grid exists.
+                if (
+                    undersampled
+                    and osamp_c >= 2
+                    and "alias_passband" in _bld_params
+                ):
+                    _kw["alias_passband"] = float(
+                        phot_cfg.get(
+                            "psf_epsf_alias_passband_undersampled", 0.9
+                        )
+                    )
+                # 3.1 wing smoothing (past 3.5 FWHM) lowers wing noise but
+                # upstream warns it degrades the wings of a strongly
+                # undersampled ePSF at oversampling 1.
+                if "wing_smoothing" in _bld_params:
+                    _kw["wing_smoothing"] = bool(
+                        phot_cfg.get("psf_epsf_wing_smoothing", True)
+                    ) and not (undersampled and osamp_c == 1)
+                # 3.1 convergence is fraction-based (a few drifting stars
+                # no longer force maxiters); expose the knob so a strict
+                # all-stars build remains reachable.
+                if "converged_fraction" in _bld_params:
+                    _kw["converged_fraction"] = float(
+                        phot_cfg.get("psf_epsf_converged_fraction", 0.95)
+                    )
                 # On undersampled data the default 1e-3 px center-accuracy is
                 # unreachable: with ~n_stars/osamp^2 samples per gridpoint the
                 # fitted star centers jitter by ~0.03-0.1 px between iterations
@@ -9203,10 +9316,26 @@ class PSF:
                         if res.final_center_accuracy is not None
                         else float("nan")
                     )
+                    _conv_frac = getattr(res, "final_converged_fraction", None)
+                    _asym = getattr(res, "center_asymmetry", None)
                     log.info(
                         "ePSF build (oversample=x%d): converged=%s, "
-                        "iterations=%d, final_center_accuracy=%.4g px",
+                        "iterations=%d, final_center_accuracy=%.4g px"
+                        "%s%s",
                         osamp_c, res.converged, res.iterations, acc_c,
+                        (
+                            f", converged_fraction={float(_conv_frac):.3f}"
+                            if _conv_frac is not None
+                            else ""
+                        ),
+                        (
+                            ", center_asymmetry="
+                            + np.array2string(
+                                np.asarray(_asym, float), precision=3
+                            )
+                            if _asym is not None
+                            else ""
+                        ),
                     )
                     _n_excl = int(getattr(res, "n_excluded_stars", 0) or 0)
                     if _n_excl > 0:
@@ -13213,9 +13342,9 @@ class PSF:
             if "flags" not in res.columns:
                 res["flags"] = 0
 
-            # Log human-readable flag descriptions using psfphot.decode_flags() (photutils 3.0).
-            # Also specifically warn on NON_FINITE_LOCALBKG (bit 2048) which photutils 3.0
-            # now handles gracefully rather than raising an error.
+            # Log human-readable flag descriptions using psfphot.decode_flags().
+            # Also specifically warn on NON_FINITE_LOCAL_BKG (bit 2048) which photutils
+            # handles gracefully rather than raising an error.
             try:
                 flag_vals = np.asarray(res["flags"], int)
                 nonzero_flags = flag_vals[flag_vals != 0]
@@ -13224,7 +13353,11 @@ class PSF:
                     # passing res["flags"] positionally landed in
                     # return_bit_values, returned ints, and silently broke
                     # the name join below.  Default returns flag names.
+                    # photutils >=3.1 returns a dict keyed by source id;
+                    # earlier versions returned a positional list.
                     decoded = psfphot.decode_flags()
+                    if isinstance(decoded, dict):
+                        decoded = decoded.values()
                     unique_issues = set()
                     for src_issues in decoded:
                         for issue in src_issues:

@@ -40,11 +40,7 @@ conda activate autophot
 pip install sfft==1.7.3 sip_tpv==1.1  # not on conda channels
 ```
 
-AutoPhOT requires Python 3.12. For the newest features, photutils>=3.1 is recommended; 3.1 is not yet released on PyPI or conda-forge, so the conda package and pip installs resolve to photutils 3.0, which the pipeline supports through compatibility shims. To get the 3.1 development line instead:
-
-```bash
-pip install git+https://github.com/astropy/photutils.git@main
-```
+AutoPhOT requires Python 3.12 and photutils>=3.1 (the pipeline uses its compiled aperture photometry and PSF machinery). The conda package and pip installs resolve it automatically.
 
 Check the install:
 
