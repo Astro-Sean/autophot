@@ -41,7 +41,7 @@ from functions import (
 )
 from check import FitsInfo
 from tns import get_coords, get_coords_simbad
-from wcs import get_wcs
+from wcs import get_wcs, pixel_area_scale_arcsec
 
 
 def _dedupe_identical_files(file_list):
@@ -1089,10 +1089,17 @@ class Prepare:
         try:
             with np.errstate(all="ignore"):
                 wcs_obj = get_wcs(header)
-                xy_scales = WCS.utils.proj_plane_pixel_scales(wcs_obj)
-                if xy_scales is None or len(xy_scales) == 0:
+                if wcs_obj is None:
                     return
-                pixel_scale_candidate = float(xy_scales[0]) * 3600.0
+                # photutils 3.1 per-pixel sky areas: sqrt(median |det J|)
+                # is the area-preserving scale across the field, so a
+                # distorted WCS no longer reports the x-axis-only value.
+                _shape = None
+                if "NAXIS1" in header and "NAXIS2" in header:
+                    _shape = (int(header["NAXIS2"]), int(header["NAXIS1"]))
+                pixel_scale_candidate = pixel_area_scale_arcsec(
+                    wcs_obj, shape=_shape
+                )
         except Exception as exc:
             # WCS is missing or invalid; nothing to do.
             self.logger.debug(

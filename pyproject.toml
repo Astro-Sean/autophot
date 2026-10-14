@@ -31,11 +31,9 @@ dependencies = [
   "matplotlib>=3.10",
   "numpy>=2.0",
   "pandas>=3.0",
-  # photutils 3.1 is not yet released (PyPI tops at 3.0); the code carries
-  # compatibility shims for 3.0 and environment.yml pulls the 3.1.dev line
-  # from upstream main. Do not raise this floor above 3.0 until the 3.1
-  # release lands or pip installs become unresolvable.
-  "photutils>=3.0",
+  # photutils 3.1 provides the compiled aperture/deblend/catalog paths the
+  # pipeline uses (AperturePhotometry, n_threads, pixel-integrated PRFs).
+  "photutils>=3.1",
   "PyYAML>=6.0",
   # pyvo ships its own SAMP implementation from 1.9; 1.8.x imports the
   # astropy.samp module deprecated under astropy 8.
@@ -91,6 +89,10 @@ markers = [
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
+    # photutils 3.1 emits PhotutilsDeprecationWarning, which subclasses
+    # astropy's AstropyDeprecationWarning (an AstropyWarning), not
+    # DeprecationWarning - without this the filter above misses it.
+    "ignore::astropy.utils.exceptions.AstropyDeprecationWarning",
 ]
 
 [tool.setuptools]

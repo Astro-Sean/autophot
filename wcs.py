@@ -375,6 +375,74 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
         return None
 
 
+def pixel_area_scale_arcsec(wcs_obj, shape=None) -> float:
+    """Area-preserving nominal pixel scale in arcsec/pixel from a WCS.
+
+    photutils 3.1 ``compute_pixel_area_map`` returns |det J| in
+    arcsec**2 per pixel evaluated with central finite differences, so
+    ``sqrt(median area)`` is the geometric-mean scale in arcsec/pixel
+    across the whole field.  It follows the distortion across the image
+    and stays well defined at the celestial poles and across the RA
+    wraparound, unlike the x-axis-only ``proj_plane_pixel_scales`` value
+    used previously.  When the map cannot be built (no shape,
+    non-celestial WCS) the reference-pixel area from
+    ``compute_pixel_areas`` is used, and as a last resort the old
+    x-axis scale.
+
+    Args:
+        wcs_obj: astropy shared-WCS-interface object (WCS or gwcs).
+        shape (tuple, optional): ``(ny, nx)`` image shape for the full
+            map; falls back to ``wcs_obj.array_shape``/``pixel_shape``.
+
+    Returns:
+        float: median geometric-mean pixel scale in arcsec/pixel, or
+            NaN when nothing usable can be derived.
+    """
+    try:
+        from photutils.utils import compute_pixel_area_map, compute_pixel_areas
+    except Exception:
+        compute_pixel_area_map = compute_pixel_areas = None
+
+    if compute_pixel_area_map is not None:
+        try:
+            if shape is None:
+                shape = getattr(wcs_obj, "array_shape", None) or getattr(
+                    wcs_obj, "pixel_shape", None
+                )
+            if shape is not None and len(shape) >= 2:
+                areas = compute_pixel_area_map(
+                    wcs_obj, tuple(int(s) for s in shape[:2])
+                )
+                med = float(np.nanmedian(np.asarray(areas, dtype=float)))
+                if np.isfinite(med) and med > 0:
+                    return float(np.sqrt(med))
+            crpix = np.asarray(
+                getattr(getattr(wcs_obj, "wcs", wcs_obj), "crpix"), dtype=float
+            )
+            if crpix.size >= 2 and np.all(np.isfinite(crpix[:2])):
+                # CRPIX is FITS 1-based; WCS pixel coords are 0-based.
+                a = compute_pixel_areas(
+                    wcs_obj, [float(crpix[0] - 1.0)], [float(crpix[1] - 1.0)]
+                )
+                a = float(np.asarray(a, dtype=float).ravel()[0])
+                if np.isfinite(a) and a > 0:
+                    return float(np.sqrt(a))
+        except Exception:
+            pass
+
+    try:
+        from astropy.wcs import utils as wcs_utils
+
+        xy = wcs_utils.proj_plane_pixel_scales(wcs_obj)
+        if xy is not None and len(xy) > 0:
+            s = float(np.asarray(xy, dtype=float).ravel()[0])
+            if np.isfinite(s) and s > 0:
+                return float(s * 3600.0)
+    except Exception:
+        pass
+    return float("nan")
+
+
 def _normalize_projection_codes(
     header: fits.Header,
     *,
@@ -3377,14 +3445,16 @@ class WCSSolver:
                         logger.warning("Merged WCS is None after get_wcs - cannot validate pixel scale")
                     else:
                         try:
-                            from astropy.wcs import utils as wcs_utils
-
-                            scale_val = wcs_utils.proj_plane_pixel_scales(merged_wcs)[0]
-                            scale = (
-                                float(scale_val * 3600)
-                                if hasattr(scale_val, "value")
-                                else float(scale_val * 3600)
-                            )  # arcsec/pix
+                            scale = pixel_area_scale_arcsec(
+                                merged_wcs,
+                                getattr(merged_wcs, "array_shape", None)
+                                or (
+                                    int(self.header["NAXIS2"]),
+                                    int(self.header["NAXIS1"]),
+                                )
+                                if self.header is not None
+                                else None,
+                            )
                             if not np.isfinite(scale) or scale <= 0 or scale > 3600:
                                 logger.warning(
                                     "Merged WCS has invalid pixel scale (%.6f); rejecting",

@@ -13207,32 +13207,27 @@ def run_photometry():
                 logging.warning("Failed to convert cutout coordinates: %s", e)
 
             if "flags" in TargetPosition:
+                # photutils >=3.1 removed the standalone decode_psf_flags;
+                # the PSF_FLAGS registry maps bit values to names.
                 try:
-                    from photutils.psf import decode_psf_flags
+                    from photutils.psf.flags import PSF_FLAGS
                 except ImportError:
-                    decode_psf_flags = None  # photutils < 3.0
+                    PSF_FLAGS = None  # photutils < 3.1
 
-                if decode_psf_flags is not None and np.isfinite(
+                if PSF_FLAGS is not None and np.isfinite(
                     TargetPosition["flags"].iloc[0]
                 ):
                     target_flags = int(TargetPosition["flags"].iloc[0])
 
                     # logging.info("Target Flags: %s", target_flags)
-                    issues = decode_psf_flags(target_flags)
+                    issues = [
+                        name
+                        for bit, name in PSF_FLAGS.flag_dict.items()
+                        if target_flags & bit
+                    ]
 
-                    if issues:  # issues is non-empty list or list of lists
-                        if isinstance(issues, list) and all(
-                            isinstance(sub, list) for sub in issues
-                        ):
-                            # Handle array of sources (list of lists)
-                            for idx, source_issues in enumerate(issues):
-                                if source_issues:  # Non-empty issues for this source
-                                    logging.info(
-                                        f"Target fitting issues (source {idx}): {source_issues}"
-                                    )
-                        else:
-                            # Single source (list of str)
-                            logging.info("Target fitting issues: %s", issues)
+                    if issues:
+                        logging.info("Target fitting issues: %s", issues)
 
         # -------------------------------------------------------------------------
         # Flag targets whose photometric footprint overlaps masked defects.

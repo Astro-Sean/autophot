@@ -1284,7 +1284,10 @@ class Aperture:
             )
         sources = sources[valid_mask].reset_index(drop=True)
         if mask is not None:
-            mask = np.asarray(mask)
+            # photutils 3.1 rejects non-boolean masks in AperturePhotometry
+            # and the compiled overlap code, so normalise once here; the
+            # pipeline convention is 1/True = bad pixel.
+            mask = np.asarray(mask, dtype=bool)
             # ``mask`` is passed BOTH to AperturePhotometry (soft exclusion
             # from the flux sum) and to the workers as a hard defects veto -
             # a mis-shaped array would silently do neither correctly.

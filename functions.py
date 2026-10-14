@@ -2087,7 +2087,9 @@ def compute_target_crowding(
       - nearest_neighbor_sep_pix (or None)
       - segmentation (2D int array, cutout coordinates; 0=background)
       - neighbor_mask (2D bool array, cutout coordinates; True=neighbor pixels)
-      - neighbors (list of dicts with x_pix,y_pix,sep_pix in full-image pixels)
+      - neighbors (list of dicts with x_pix,y_pix,sep_pix in full-image pixels,
+        plus cen_err_pix = propagated 1-sigma centroid error and seg_flags =
+        photutils 3.1 segmentation quality flags)
     """
     import numpy as np
 
@@ -2157,10 +2159,24 @@ def compute_target_crowding(
                 cut,
                 segm,
                 n_pixels=npixels,
-                nlevels=int(deblend_nlevels),
+                n_levels=int(deblend_nlevels),
                 contrast=float(deblend_contrast),
                 n_threads=photutils_n_threads(),
             )
+            # 3.1 records per-label deblend provenance on the returned
+            # SegmentationImage; surface how many parents needed a
+            # fallback so crowded-field logs can tell apart a real blend
+            # from a spacing/too-many-markers bail.
+            _fb = getattr(segm, "info", None) or {}
+            n_npmin = len(_fb.get("non_positive_min_labels") or [])
+            n_markers = len(_fb.get("too_many_markers_labels") or [])
+            if n_npmin or n_markers:
+                logger.debug(
+                    "crowding deblend fallbacks: %d non-positive-min, "
+                    "%d too-many-markers",
+                    n_npmin,
+                    n_markers,
+                )
         except Exception:
             # If deblending fails, keep the original segmentation.
             pass
@@ -2169,12 +2185,36 @@ def compute_target_crowding(
     n_sources_total = int(np.nanmax(seg_data))
 
     try:
-        cat = SourceCatalog(cut, segm, n_threads=photutils_n_threads())
+        # The error array feeds photutils 3.1's propagated centroid
+        # uncertainties (x/y_centroid_err), reported per neighbour below.
+        cat = SourceCatalog(
+            cut,
+            segm,
+            error=np.full(cut.shape, sigma),
+            n_threads=photutils_n_threads(),
+        )
         xcen = np.asarray(cat.x_centroid if hasattr(cat, 'x_centroid') else cat.xcentroid)
         ycen = np.asarray(cat.y_centroid if hasattr(cat, 'y_centroid') else cat.ycentroid)
+        labels = np.atleast_1d(cat.label)
+        try:
+            cen_err = np.hypot(
+                np.asarray(cat.x_centroid_err, float),
+                np.asarray(cat.y_centroid_err, float),
+            )
+        except Exception:
+            cen_err = np.full(xcen.shape, np.nan)
+        try:
+            # photutils 3.1 per-source provenance/quality flags
+            # (deblended, edge_touch, non_finite_data, ...).
+            seg_flags = np.asarray(cat.flags, dtype=int)
+        except Exception:
+            seg_flags = np.zeros(xcen.shape, dtype=int)
     except Exception:
         xcen = np.array([])
         ycen = np.array([])
+        labels = np.array([])
+        cen_err = np.array([])
+        seg_flags = np.array([], dtype=int)
 
     # Convert centroids to full-image pixels
     neighbors = []
@@ -2192,9 +2232,9 @@ def compute_target_crowding(
         for idx in order[: max_neighbors + 1]:
             if not np.isfinite(sep[idx]):
                 continue
-            label = int(
-                idx + 1
-            )  # SourceCatalog order corresponds to labels for simple cases
+            # SourceCatalog rows are label-ordered but read the label
+            # explicitly rather than assuming idx+1.
+            label = int(labels[idx]) if idx < len(labels) else int(idx + 1)
             # Prefer excluding by target_label if possible; otherwise exclude by sep ~ 0.
             if target_label > 0 and label == target_label:
                 continue
@@ -2205,6 +2245,12 @@ def compute_target_crowding(
                     "x_pix": float(x0 + xcen[idx]),
                     "y_pix": float(y0 + ycen[idx]),
                     "sep_pix": float(sep[idx]),
+                    "cen_err_pix": (
+                        float(cen_err[idx]) if idx < len(cen_err) else np.nan
+                    ),
+                    "seg_flags": (
+                        int(seg_flags[idx]) if idx < len(seg_flags) else 0
+                    ),
                 }
             )
         # Keep only within neighbor radius for metrics/list
