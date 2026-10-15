@@ -544,6 +544,31 @@ class Zeropoint:
 
         return delta_corr, color_corr_err
 
+    @staticmethod
+    def _representative_color_slope(coeffs, fit_mode):
+        """Return a scalar slope for backward-compatible logging/storage.
+
+        Polynomial coefficients are ``(intercept, slope[, quad])`` so the
+        slope is ``coeffs[1]``.  Piecewise coefficients are
+        ``(breakpoints, (slope1, slope2), intercept)`` so the representative
+        slope is the first segment's slope.  Returns 0.0 when unavailable.
+        """
+        try:
+            if coeffs is None or len(coeffs) < 2:
+                return 0.0
+        except TypeError:
+            return 0.0
+        term = coeffs[1]
+        if fit_mode == "piecewise" or isinstance(term, (tuple, list)):
+            try:
+                return float(term[0])
+            except (TypeError, ValueError, IndexError):
+                return 0.0
+        try:
+            return float(term)
+        except (TypeError, ValueError):
+            return 0.0
+
     def _prepare_catalog(
         self, catalog: pd.DataFrame, threshold: float, use_filter: str, min_sources: int
     ):
@@ -1483,8 +1508,9 @@ class Zeropoint:
 
         Parameters
         ----------
-        chain : ndarray, shape (n_walkers, n_steps)
-            Walker chains for one parameter (already flattened per-walker).
+        chain : ndarray, shape (n_steps, n_walkers)
+            Walker chains for one parameter (emcee ``get_chain()`` layout,
+            already sliced to a single parameter).
 
         Returns
         -------
@@ -1492,12 +1518,12 @@ class Zeropoint:
             R-hat statistic.  <1.01 indicates convergence.  Returns NaN
             if the chain is too short or degenerate.
         """
-        n_walkers, n_steps = chain.shape
+        n_steps, n_walkers = chain.shape
         if n_walkers < 2 or n_steps < 2:
             return np.nan
-        # Per-walker means and variances
-        walker_means = np.mean(chain, axis=1)
-        walker_vars = np.var(chain, axis=1, ddof=1)
+        # Per-walker means and variances reduce over steps (axis=0)
+        walker_means = np.mean(chain, axis=0)
+        walker_vars = np.var(chain, axis=0, ddof=1)
         # Between-walker variance
         B = n_steps * np.var(walker_means, ddof=1)
         # Within-walker variance
@@ -2860,15 +2886,13 @@ class Zeropoint:
                     }
                 )
                 if has_color_term and fixed_color_coeffs is not None:
-                    # Extract slope for backwards compatibility
-                    slope_for_params = (
-                        fixed_color_coeffs[1] if len(fixed_color_coeffs) >= 2 else 0.0
+                    # Extract slope for backwards compatibility (piecewise
+                    # stores a (slope1, slope2) tuple at index 1).
+                    slope_for_params = self._representative_color_slope(
+                        fixed_color_coeffs, fit_mode
                     )
-                    slope_err_for_params = (
-                        fixed_color_coeff_errors[1]
-                        if fixed_color_coeff_errors is not None
-                        and len(fixed_color_coeff_errors) >= 2
-                        else 0.0
+                    slope_err_for_params = self._representative_color_slope(
+                        fixed_color_coeff_errors, fit_mode
                     )
                     fit_params[flux_type].update(
                         {
@@ -3389,8 +3413,8 @@ class Zeropoint:
 
             y_label = rf"Catalog $m_{{\mathrm{{cal,{use_filter}}}}}$ [mag]"
             if has_color_term and fixed_color_coeffs is not None:
-                slope_for_display = (
-                    fixed_color_coeffs[1] if len(fixed_color_coeffs) >= 2 else 0.0
+                slope_for_display = self._representative_color_slope(
+                    fixed_color_coeffs, fit_mode
                 )
                 sign = r" + " if slope_for_display <= 0 else r" - "
                 y_label += (
@@ -4012,17 +4036,13 @@ class Zeropoint:
                             _est_flags
                         )
                     if has_color_term and fixed_color_coeffs is not None:
-                        # Extract slope for backwards compatibility
-                        slope_for_params = (
-                            fixed_color_coeffs[1]
-                            if len(fixed_color_coeffs) >= 2
-                            else 0.0
+                        # Extract slope for backwards compatibility (piecewise
+                        # stores a (slope1, slope2) tuple at index 1).
+                        slope_for_params = self._representative_color_slope(
+                            fixed_color_coeffs, fit_mode
                         )
-                        slope_err_for_params = (
-                            fixed_color_coeff_errors[1]
-                            if fixed_color_coeff_errors is not None
-                            and len(fixed_color_coeff_errors) >= 2
-                            else 0.0
+                        slope_err_for_params = self._representative_color_slope(
+                            fixed_color_coeff_errors, fit_mode
                         )
                         zp_params[flux_type].update(
                             {
@@ -4047,7 +4067,7 @@ class Zeropoint:
                     # ---- Histogram (colour-corrected) ----------------------
                     # Use auto binning (Freedman-Diaconis) for all catalogs.
                     bin_edges = np.histogram_bin_edges(inlier_deltas, bins="fd")
-                    bin_centers = (bin_edges[:-1] + bin_edges[1]) / 2
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
                     width = bin_edges[1] - bin_edges[0]
                     counts, _ = np.histogram(
                         inlier_deltas, bins=bin_edges, density=True
@@ -4787,7 +4807,7 @@ class Zeropoint:
                     ((), (slope,), intercept),
                     ((), (slope_err,), intercept_err),
                     np.ones(len(x), dtype=bool),
-                    "WLS",
+                    "linear",
                 )
 
             # Grid search for the optimal single breakpoint on the full data.
@@ -4850,7 +4870,7 @@ class Zeropoint:
                     ((), (slope,), intercept),
                     ((), (slope_err,), intercept_err),
                     np.ones(len(x), dtype=bool),
-                    "WLS",
+                    "linear",
                 )
 
             # Each segment gets its own WLS + sigma-clip pass.
@@ -4898,7 +4918,7 @@ class Zeropoint:
                     ((), (slope,), intercept),
                     ((), (slope_err,), intercept_err),
                     np.ones(len(x), dtype=bool),
-                    "WLS",
+                    "linear",
                 )
 
             # Coefficients: intercept from segment 1, slopes from both

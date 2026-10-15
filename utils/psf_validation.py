@@ -219,7 +219,9 @@ def _fit_gaussian_stamp(
         xc = (data * xx).sum() / total
         yc = (data * yy).sum() / total
         var = (data * (xx - xc) ** 2).sum() / total + (data * (yy - yc) ** 2).sum() / total
-        sigma_init = np.sqrt(max(var, 0.0)) / 2
+        # var = var_x + var_y; for an isotropic Gaussian var_x = var_y = sigma^2,
+        # so sigma = sqrt(var / 2).
+        sigma_init = np.sqrt(max(var, 0.0) / 2.0)
         sigma_init = max(1.0, min(sigma_init, min(ny, nx) / 2))
     else:
         sigma_init = 2.0
@@ -278,6 +280,124 @@ def _fit_gaussian_stamp(
         }
     except Exception as e:
         log.debug("Validation fit failed: %s", e)
+        return {"converged": False, "reduced_chi2": np.nan}
+
+
+def _fit_epsf_stamp(
+    epsf,
+    stamp: np.ndarray,
+    error: np.ndarray | None = None,
+    init_x: float | None = None,
+    init_y: float | None = None,
+    init_flux: float | None = None,
+    init_background: float | None = None,
+) -> dict:
+    """Fit a stamp with the supplied ePSF model + constant background.
+
+    This is the fit that actually exercises the PSF under validation: the
+    held-out star is modelled with ``epsf.evaluate(x, y, x_0, y_0, flux)``
+    (the photutils ``ImagePSF`` interface) rather than a generic Gaussian.
+
+    Returns the same dict schema as :func:`_fit_gaussian_stamp`, with
+    ``converged`` False (without raising) if the model cannot be evaluated,
+    so the caller can fall back to the Gaussian reference fit.
+    """
+    from scipy.optimize import least_squares
+
+    ny, nx = stamp.shape
+    yy, xx = np.mgrid[0:ny, 0:nx].astype(float)
+
+    if error is None:
+        error = np.ones_like(stamp)
+
+    good = np.isfinite(stamp) & np.isfinite(error) & (error > 0)
+    if good.sum() < 6:
+        return {"converged": False, "reduced_chi2": np.nan}
+
+    edge_pixels = np.concatenate([
+        stamp[0, :].ravel(), stamp[-1, :].ravel(),
+        stamp[:, 0].ravel(), stamp[:, -1].ravel(),
+    ])
+    edge_finite = edge_pixels[np.isfinite(edge_pixels)]
+    bkg_init = float(np.nanmedian(edge_finite)) if len(edge_finite) else 0.0
+    if init_background is not None:
+        bkg_init = float(init_background)
+
+    if init_x is None:
+        init_x = (nx - 1) / 2.0
+    if init_y is None:
+        init_y = (ny - 1) / 2.0
+    if init_flux is None:
+        init_flux = float(np.nansum(stamp[good] - bkg_init))
+        init_flux = max(init_flux, 1.0)
+
+    try:
+        # Probe the model once so a non-evaluable builder falls through to
+        # the Gaussian fallback instead of failing every star.
+        _ = epsf.evaluate(xx, yy, x_0=init_x, y_0=init_y, flux=init_flux)
+    except Exception as e:
+        log.debug("ePSF model not evaluable for validation: %s", e)
+        return {"converged": False, "reduced_chi2": np.nan}
+
+    def model(params):
+        flux, x0, y0, bkg = params
+        return np.asarray(
+            epsf.evaluate(xx, yy, x_0=x0, y_0=y0, flux=flux), float
+        ) + bkg
+
+    def residuals(params):
+        return ((stamp - model(params)) / error)[good]
+
+    p0 = [init_flux, init_x, init_y, bkg_init]
+    bounds = (
+        [0, 0, 0, -1e10],
+        [1e10, nx, ny, 1e10],
+    )
+
+    try:
+        result = least_squares(
+            residuals, p0, bounds=bounds, method="trf", max_nfev=200,
+        )
+        flux_fit, x_fit, y_fit, bkg_fit = result.x
+
+        try:
+            jac = result.jac
+            cov = np.linalg.inv(jac.T @ jac)
+            perr = np.sqrt(np.diag(cov))
+        except Exception:
+            perr = [np.nan] * 4
+
+        dof = max(1, good.sum() - 4)
+        chi2 = float(np.sum(residuals(result.x) ** 2))
+        reduced_chi2 = chi2 / dof
+
+        resid = stamp - model(result.x)
+        resid_flat = resid[good]
+        if len(resid_flat) > 2:
+            resid_centered = resid_flat - resid_flat.mean()
+            denom = np.sum(resid_centered**2)
+            if denom > 0:
+                lag1 = np.sum(resid_centered[:-1] * resid_centered[1:]) / denom
+            else:
+                lag1 = 0.0
+        else:
+            lag1 = 0.0
+
+        return {
+            "x": x_fit,
+            "y": y_fit,
+            "flux": flux_fit,
+            "flux_err": perr[0],
+            "x_err": perr[1],
+            "y_err": perr[2],
+            "background": bkg_fit,
+            "reduced_chi2": reduced_chi2,
+            "residuals": resid,
+            "residual_correlation": lag1,
+            "converged": bool(result.success),
+        }
+    except Exception as e:
+        log.debug("ePSF validation fit failed: %s", e)
         return {"converged": False, "reduced_chi2": np.nan}
 
 
@@ -430,11 +550,20 @@ def validate_psf_loo(
 
             init_x = x_true - x0
             init_y = y_true - y0
-            fit_result = _fit_gaussian_stamp(
-                stamp, error=err_stamp,
+            # The whole point of the validation is to fit the held-out star
+            # with the *rebuilt* PSF, not a generic Gaussian; fall back to the
+            # Gaussian only if the ePSF model cannot be evaluated/fit.
+            fit_result = _fit_epsf_stamp(
+                epsf, stamp, error=err_stamp,
                 init_x=init_x, init_y=init_y,
                 init_flux=flux_true,
             )
+            if not fit_result.get("converged", False):
+                fit_result = _fit_gaussian_stamp(
+                    stamp, error=err_stamp,
+                    init_x=init_x, init_y=init_y,
+                    init_flux=flux_true,
+                )
 
             if not fit_result.get("converged", False):
                 per_star_records.append({
@@ -528,8 +657,12 @@ def validate_psf_loo(
             warnings.simplefilter("ignore")
             log_fluxes = np.log10(fluxes)
             if log_fluxes.std() > 0:
-                corr = np.corrcoef(log_fluxes, biases)[0, 1]
-                result.flux_bias_vs_brightness_slope = float(corr) if np.isfinite(corr) else np.nan
+                # A slope (d bias / d log10 flux), not a correlation: the
+                # brightness_slope_threshold is expressed in bias-per-dex.
+                slope = np.polyfit(log_fluxes, biases, 1)[0]
+                result.flux_bias_vs_brightness_slope = (
+                    float(slope) if np.isfinite(slope) else np.nan
+                )
 
     # Position dependence
     radii = df.loc[valid, "radial_position_px"]
@@ -555,11 +688,13 @@ def validate_psf_loo(
             and abs(result.position_dependence) > position_dep_threshold):
         result.flags |= PSF_VAL_POSITION_DEPENDENCE
 
-    # Fit failure fraction
+    # Fit failure fraction: tolerate a small number of failed held-out fits
+    # (the previous `flags == 0` clause made this tolerance dead code).
     n_failed = int((~df["converged"]).sum())
-    if n_failed > 0:
+    fit_failure_frac = n_failed / max(len(df), 1)
+    if fit_failure_frac >= 0.2:
         result.flags |= PSF_VAL_FIT_FAILURE
 
-    result.passed = (result.flags == 0) and (n_failed / len(df) < 0.2)
+    result.passed = result.flags == 0
 
     return result

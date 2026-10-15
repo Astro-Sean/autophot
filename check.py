@@ -188,7 +188,13 @@ class FitsInfo:
         if flist:
             self.flist = flist
         else:
-            self.flist = [str(p) for p in self.fits_dir.glob("*.[fi][t]s*")]
+            # ``*.[fi][t]s*`` fails to match the common ``.fits`` extension
+            # (it only matches ``.fts``/``.its``).  Enumerate the real
+            # extensions explicitly and de-duplicate.
+            _patterns = ("*.fit", "*.fits", "*.fts", "*.fit.gz", "*.fits.gz")
+            self.flist = sorted(
+                {str(p) for pat in _patterns for p in self.fits_dir.glob(pat)}
+            )
 
         # Only use working directory telescope.yml (wdir-specific configuration)
         self.telescope_file = self.wdir / "telescope.yml"

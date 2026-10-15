@@ -200,7 +200,7 @@ class Prepare:
             return (
                 filename.endswith(valid_extensions)
                 and not any(substring in filename for substring in forbidden_substrings)
-                and not any(substring in root for substring in forbidden_substrings)
+                and not any(substring in root for substring in root_forbidden_substrings)
             )
 
         # `template_subtraction.prepare_templates` was removed from the public
@@ -212,6 +212,14 @@ class Prepare:
             if prepare_templates
             else self.input_yaml["fits_dir"]
         )
+        # The templates/ root path itself contains the "template" token, which
+        # would otherwise veto every candidate file when deliberately
+        # scanning it.  The filename check still applies.
+        root_forbidden_substrings = forbidden_substrings
+        if prepare_templates:
+            root_forbidden_substrings = [
+                s for s in forbidden_substrings if s != "template"
+            ]
 
         for root, _, files in os.walk(search_root):
             for filename in files:

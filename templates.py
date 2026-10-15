@@ -56,6 +56,7 @@ except ImportError:
     tqdm = None
 from scipy.ndimage import (
     binary_dilation,
+    fourier_shift,
     uniform_filter,
     shift as _ndimage_shift,
 )
@@ -271,6 +272,13 @@ class AlignmentResult(NamedTuple):
     the attempt failed.  ``quality`` is 'pass', 'warn', or 'fail' under the
     shared gate in ``_classify_alignment_quality`` ('fail' also marks
     unverifiable products when verification was required).
+
+    ``verification`` records which transform model the measured residuals
+    actually constrain ('unverified', 'wcs_supported',
+    'translation_verified', 'affine_verified', 'spatially_verified') - the
+    matched-source evidence may only support a translation even when the
+    backend fit a richer transform.  ``quad_stats`` carries the raw
+    per-quadrant/coverage dict for downstream consumers.
     """
     science_path: Optional[str]
     template_path: Optional[str]
@@ -283,6 +291,8 @@ class AlignmentResult(NamedTuple):
     finite_fraction: Optional[float] = None
     quality: str = "fail"
     message: str = ""
+    verification: Optional[str] = None
+    quad_stats: Optional[dict] = None
 
     @property
     def success(self) -> bool:
@@ -1775,6 +1785,87 @@ def _zogy_residual_warp(
     return warped, info
 
 
+def _fourier_shift2(img, dy, dx):
+    """Translate ``img`` by ``(dy, dx)`` pixels via the Fourier shift
+    theorem (exact for sub-pixel shifts, periodic wrap at the edges)."""
+    return np.real(
+        np.fft.ifft2(
+            fourier_shift(np.fft.fft2(np.asarray(img, dtype=np.float64)),
+                          (float(dy), float(dx)))
+        )
+    )
+
+
+def _zogy_residual_shift(sci, ref, valid, max_shift=3.0):
+    """Global residual translation of ``ref`` relative to ``sci``.
+
+    ZOGY's astrometric correction (Zackay, Ofek & Gal-Yam 2016,
+    section III.4): a bulk translation left by the global registration
+    is applied directly to the reference so the matching kernel is not
+    asked to absorb it (a shift folded into the kernel couples with the
+    flux-scale gates and the kernel-noise audit).  Phase correlation
+    with upsampled-DFT refinement measures the correcting shift; the
+    caller applies it with ``fourier_shift``, which leaves the
+    reference PSF centred on the corrected grid.
+
+    ``valid`` gates only how much real overlap the measurement has;
+    the inputs are assumed already NaN-filled, so skimage's masked
+    phase-correlation path (integer-pixel only) is not needed.
+
+    Returns ``(dy, dx, info)``; ``info["applied"]`` False means leave
+    ``ref`` untouched.
+    """
+    from skimage.registration import phase_cross_correlation
+
+    info = {"applied": False}
+    s = np.asarray(sci, dtype=np.float64)
+    r = np.asarray(ref, dtype=np.float64)
+    if s.shape != r.shape:
+        info["reason"] = "shape mismatch"
+        return 0.0, 0.0, info
+    v = np.asarray(valid, dtype=bool)
+    if v.shape != s.shape or float(v.mean()) < 0.1:
+        info["reason"] = "insufficient valid overlap"
+        return 0.0, 0.0, info
+    try:
+        shift, error, diffphase = phase_cross_correlation(
+            s, r, upsample_factor=100,
+        )
+    except Exception as exc:
+        info["reason"] = f"phase correlation failed: {exc}"
+        return 0.0, 0.0, info
+    dy, dx = float(shift[0]), float(shift[1])
+    info.update(shift=(dy, dx), error=float(error), diffphase=float(diffphase))
+    mag = float(np.hypot(dy, dx))
+    info["magnitude"] = mag
+    if not (np.isfinite(dy) and np.isfinite(dx)):
+        info["reason"] = "non-finite shift estimate"
+        return 0.0, 0.0, info
+    if mag > float(max_shift):
+        info["reason"] = "shift exceeds zogy_shift_max_px"
+        return 0.0, 0.0, info
+    if mag < 0.01:
+        info["reason"] = "already aligned"
+        return 0.0, 0.0, info
+    # Verify the measured shift actually registers the pair: degenerate
+    # cross-power spectra can return a confident-looking wrong answer,
+    # and applying it would make the alignment worse, not better.
+    r2 = np.real(
+        np.fft.ifft2(fourier_shift(np.fft.fft2(r), (dy, dx)))
+    )
+    try:
+        res, _, _ = phase_cross_correlation(s, r2, upsample_factor=100)
+        res_mag = float(np.hypot(res[0], res[1]))
+    except Exception:
+        res_mag = np.inf
+    info["residual"] = res_mag
+    if not np.isfinite(res_mag) or res_mag > max(0.05, 0.25 * mag):
+        info["reason"] = "correction did not verify"
+        return 0.0, 0.0, info
+    info["applied"] = True
+    return dy, dx, info
+
+
 def _pack_lsq_kernel(kernel, shape):
     """Pack a centred (nk, nk) LSQ kernel into the FFT convolution layout.
 
@@ -2416,13 +2507,28 @@ def compute_alignment_rms(
     try:
         fwhm = min(max(float(fwhm_pixels), 2.0), 8.0)
 
-        # Adaptive detection threshold: lower for sparse fields to ensure
-        # enough sources for reliable RMS measurement.  The first pass at
-        # thresh=5.0 may find too few sources; fall back to 3.0 if needed.
-        _align_thresh = 5.0
-        if input_yaml is not None:
-            _ts_cfg = input_yaml.get("template_subtraction", {}) or {}
-            _align_thresh = float(_ts_cfg.get("alignment_rms_detect_thresh", 5.0) or 5.0)
+        # Adaptive detection threshold ladder: lower for sparse fields to
+        # ensure enough sources for a reliable RMS measurement.  The first
+        # pass uses alignment_rms_detect_thresh (5.0); deeper rungs from
+        # alignment_rms_detect_ladder run only while the pool stays below
+        # alignment_rms_detect_target, so a well-populated field never pays
+        # for the extra SExtractor calls.
+        _ts_cfg = (input_yaml or {}).get("template_subtraction", {}) or {}
+        _align_thresh = float(
+            _ts_cfg.get("alignment_rms_detect_thresh", 5.0) or 5.0
+        )
+        _det_target = int(
+            _ts_cfg.get("alignment_rms_detect_target", 20) or 20
+        )
+        _ladder_cfg = _ts_cfg.get("alignment_rms_detect_ladder", None)
+        if _ladder_cfg is None:
+            _thresh_ladder = [_align_thresh] + (
+                [3.0] if _align_thresh > 3.0 else []
+            )
+        else:
+            _thresh_ladder = [_align_thresh] + [
+                float(t) for t in _ladder_cfg if float(t) < _align_thresh
+            ]
 
         # request centroid errors where available; fakes patched in tests
         # may still return a 3-tuple, so unpack defensively.
@@ -2436,20 +2542,32 @@ def compute_alignment_rms(
             _ey = _d[4] if len(_d) >= 5 else None
             return _xy, _ex, _ey
 
+        def _det_ladder(data):
+            """Detect at progressively lower thresholds until the source
+            pool reaches ``_det_target`` or the ladder is exhausted.
+
+            Deeper rungs propose additional candidates only -- the last
+            (deepest) catalog is kept wholesale, so detection provenance is
+            uniform per rung rather than mixing thresholds within a pool.
+            """
+            xy = ex = ey = None
+            for _thr in _thresh_ladder:
+                _cxy, _cex, _cey = _det_xy_err(data, _thr)
+                if _cxy is not None and len(_cxy):
+                    if xy is None or len(_cxy) >= len(xy):
+                        xy, ex, ey = _cxy, _cex, _cey
+                    if len(xy) >= _det_target:
+                        break
+            return xy, ex, ey
+
         sci_ex = sci_ey = ref_ex = ref_ey = None
         if sci_xy_override is not None:
             sci_xy = np.asarray(sci_xy_override, float)
             if sci_xy.ndim != 2 or sci_xy.shape[1] != 2 or len(sci_xy) < 5:
                 return None
         else:
-            sci_xy, sci_ex, sci_ey = _det_xy_err(sci_data, _align_thresh)
-        ref_xy, ref_ex, ref_ey = _det_xy_err(ref_data, _align_thresh)
-
-        # Sparse-field fallback: retry at 3.0 when too few sources at thresh.
-        if (sci_xy is None or len(sci_xy) < 10) and _align_thresh > 3.0 and sci_xy_override is None:
-            sci_xy, sci_ex, sci_ey = _det_xy_err(sci_data, 3.0)
-        if (ref_xy is None or len(ref_xy) < 10) and _align_thresh > 3.0:
-            ref_xy, ref_ex, ref_ey = _det_xy_err(ref_data, 3.0)
+            sci_xy, sci_ex, sci_ey = _det_ladder(sci_data)
+        ref_xy, ref_ex, ref_ey = _det_ladder(ref_data)
 
         if sci_xy is None or ref_xy is None:
             return None
@@ -2472,6 +2590,7 @@ def compute_alignment_rms(
         _mut_mask = np.isfinite(d_mut) & (d_mut <= max_sep)
         d_mut = d_mut[_mut_mask]
         _mut_idx = np.where(_mut_mask)[0]
+        _coherent_cluster = False
         if len(d_mut) < 10:
             # Wide-radius coherent-offset pass.  When few pairs survive the
             # nominal separation cut, "too few detections" (a genuinely
@@ -2498,6 +2617,10 @@ def compute_alignment_rms(
                     # product.
                     _mut_idx = np.where(_coh)[0]
                     d_mut = np.hypot(_dx_all[_coh], _dy_all[_coh])
+                    # The surviving evidence is a common translation on a
+                    # small cluster - it says nothing about rotation, scale
+                    # or distortion elsewhere in the field.
+                    _coherent_cluster = True
                     logger.info(
                         "Alignment RMS: coherent offset cluster found "
                         "(n=%d of %d mutual pairs, median offset=%.2f px, "
@@ -2629,6 +2752,17 @@ def compute_alignment_rms(
             )
             if _weighted is not None:
                 _quadrant_rms.update(_weighted)
+            # Evidence profile: how much matched-source information the
+            # residuals actually rest on.  A translation recovered from a
+            # small coherent cluster must not read as full-field
+            # verification downstream.
+            _quadrant_rms.update({
+                "coherent_cluster": bool(_coherent_cluster),
+                "n_detected_sci": int(len(sci_xy)),
+                "n_detected_ref": int(len(ref_xy)),
+                "n_mutual": int(np.sum(mutual)),
+                "n_inliers": int(len(d_clipped)),
+            })
             return median_offset, rms, p90, _quadrant_rms
 
         return median_offset, rms, p90
@@ -2796,6 +2930,11 @@ def _classify_alignment_quality(
     max_offset: float,
     max_rms: float,
     max_p90: float,
+    n_matched: Optional[int] = None,
+    min_n_field_gate: int = 20,
+    translation_only: bool = False,
+    wrms_norm: Optional[float] = None,
+    max_wrms_norm: float = 5.0,
 ) -> Tuple[str, List[str]]:
     """Classify a measured alignment into 'pass' / 'warn' / 'fail' /
     'unverified' under one policy shared by every backend.
@@ -2806,6 +2945,21 @@ def _classify_alignment_quality(
     - 'warn': metrics pass but matched-source coverage is poor, so the
       measurement may not represent the whole field.
     - 'pass': metrics inside gates with adequate coverage.
+
+    When the matched sample is smaller than ``min_n_field_gate`` or its
+    coverage is inadequate, the RMS and P90 statistics are dominated by a
+    handful of (often edge) residuals - e.g. uncorrected SIP distortion -
+    and cannot certify a field-wide failure.  Those gates then demote to
+    'warn' instead of 'fail'; the median-offset gate still applies because a
+    systematic shift is meaningful even for a few matches.
+
+    ``translation_only`` marks evidence that only constrains a common
+    shift (the coherent-offset cluster in ``compute_alignment_rms``): the
+    residuals cannot certify rotation, scale or spatial distortion, so a
+    clean score is 'warn', never 'pass'.  ``wrms_norm`` is the ratio of
+    measured residuals to the quadrature-summed SExtractor centroid
+    errors; above ``max_wrms_norm`` the matches are noisier than their
+    formal errors allow, which likewise caps the class at 'warn'.
     """
     measured = [
         v for v in (median_offset, rms, p90)
@@ -2813,6 +2967,9 @@ def _classify_alignment_quality(
     ]
     if not measured:
         return "unverified", []
+    sparse_sample = coverage_ok is False or (
+        n_matched is not None and int(n_matched) < min_n_field_gate
+    )
     reasons = []
     if median_offset is not None and np.isfinite(median_offset) and median_offset > max_offset:
         reasons.append("offset=%.3f px (> %.2f px)" % (median_offset, max_offset))
@@ -2821,10 +2978,83 @@ def _classify_alignment_quality(
     if p90 is not None and np.isfinite(p90) and p90 > max_p90:
         reasons.append("P90=%.3f px (> %.2f px)" % (p90, max_p90))
     if reasons:
+        if sparse_sample and not any(
+            r.startswith("offset=") for r in reasons
+        ):
+            return "warn", [
+                "%s (n=%s matched; field-gate demoted to warn)" % (
+                    "; ".join(reasons), n_matched
+                )
+            ]
         return "fail", reasons
+    if translation_only:
+        return "warn", [
+            "translation-only verification: coherent-offset cluster of "
+            "%s matches cannot constrain rotation/scale across the field"
+            % (n_matched if n_matched is not None else "few")
+        ]
+    if (
+        wrms_norm is not None
+        and np.isfinite(wrms_norm)
+        and wrms_norm > max_wrms_norm
+    ):
+        return "warn", [
+            "matched residuals exceed centroid-error expectation "
+            "(wrms_norm=%.2f > %.1f)" % (wrms_norm, max_wrms_norm)
+        ]
     if coverage_ok is False:
         return "warn", ["matched-source coverage limited"]
     return "pass", []
+
+
+def _alignment_verification_tier(
+    quad: Optional[dict],
+    wcs_based: bool = False,
+    input_yaml: Optional[Dict[str, Any]] = None,
+    min_spatial: Optional[int] = None,
+) -> str:
+    """Classify which transform model the matched-source residuals verify.
+
+    Distinct from the pass/warn/fail quality class: an alignment can look
+    clean yet rest on evidence that only constrains a simpler model.  The
+    tiers, weakest to strongest:
+
+    - ``unverified``: no usable matched-source measurement.
+    - ``wcs_supported``: no matched sources, but the product derives from
+      the image WCS (reproject/tweakwcs) so grid consistency is inherited.
+    - ``translation_verified``: a common shift is measured (coherent
+      cluster, few matches, or clustered coverage), but rotation, scale
+      and distortion are unvalidated outside the matched region.
+    - ``affine_verified``: non-clustered matches cover the field, enough
+      to constrain a linear transform - but too few for a field-wide
+      spatially-varying claim.
+    - ``spatially_verified``: >= ``alignment_min_sources_spatial`` matches
+      spanning at least three quadrants, so per-region residuals exist.
+    """
+    _ts = (input_yaml or {}).get("template_subtraction", {}) or {}
+    min_translation = int(_ts.get("alignment_min_sources_translation", 3) or 3)
+    min_affine = int(_ts.get("alignment_min_sources_affine", 6) or 6)
+    if min_spatial is None:
+        min_spatial = int(_ts.get("alignment_min_sources_spatial", 20) or 20)
+    else:
+        min_spatial = int(min_spatial)
+    n = None
+    if quad:
+        try:
+            n = int(quad.get("n_matched") or 0)
+        except (TypeError, ValueError):
+            n = None
+    if not quad or n is None or n <= 0:
+        return "wcs_supported" if wcs_based else "unverified"
+    if n < min_translation:
+        return "unverified"
+    if quad.get("coherent_cluster"):
+        return "translation_verified"
+    if n < min_affine or not quad.get("coverage_ok", False):
+        return "translation_verified"
+    if n >= min_spatial and int(quad.get("n_quadrants") or 0) >= 3:
+        return "spatially_verified"
+    return "affine_verified"
 
 
 def _alignment_gate_accept(
@@ -2993,6 +3223,7 @@ def _write_alignment_report(
                 "method": a.method_used,
                 "success": bool(a.success),
                 "quality": a.quality,
+                "verification": a.verification,
                 "median_offset_px": _f(a.median_offset_px),
                 "rms_px": _f(a.rms_px),
                 "p90_px": _f(a.p90_px),
@@ -3473,6 +3704,10 @@ def _reproject_template(
                 int(bool(_quad.get("coverage_ok", True))),
                 "Matched-source coverage adequate (1=yes, 0=clustered)",
             )
+        hdr["ALIGVER"] = (
+            _alignment_verification_tier(_quad, wcs_based=True, input_yaml=input_yaml),
+            "Alignment verification tier",
+        )
     except Exception:
         pass
     _atomic_fits_write(output_path, to_write, hdr)
@@ -3502,6 +3737,8 @@ def _reproject_template(
         n_matches=_quad.get("n_matched") if _quad else None,
         finite_fraction=n_footprint / n_total if n_total else None,
         quality="pass",
+        verification=_alignment_verification_tier(_quad, wcs_based=True, input_yaml=input_yaml),
+        quad_stats=_quad,
     )
 
 
@@ -3711,15 +3948,17 @@ def _sfft_retry_kernel_hw(
     n_matched: int,
     fwhm_conv: float,
     pix_per_source: float = 35.0,
+    fwhm_broad: float = 0.0,
 ) -> int:
     """Kernel half-width for the under-constrained-kernel retry.
 
     Sizes the retry kernel to the constraint budget instead of the PSF:
     (2*hw+1)^2 delta-basis pixels stay within pix_per_source per matched
     source.  ~35 px/source keeps the solved kernel's wing noise near
-    10% of its peak on sparse fields.  The floor holds the
-    convolution-PSF core (one FWHM_conv) so the retry kernel can still
-    do the required broadening.
+    10% of its peak on sparse fields.  The floor is the same physical
+    minimum used by the primary sizing (1.5x the broader PSF): a kernel
+    smaller than the PSF wings cannot represent the transform at any
+    noise level, it just trades variance for dipole residuals.
     """
     try:
         n = max(int(n_matched), 1)
@@ -3736,7 +3975,15 @@ def _sfft_retry_kernel_hw(
         fc = float(fwhm_conv)
     except (TypeError, ValueError):
         fc = 0.0
-    floor = max(5, int(np.ceil(fc))) if np.isfinite(fc) and fc > 0 else 5
+    try:
+        fb = float(fwhm_broad)
+    except (TypeError, ValueError):
+        fb = 0.0
+    floor = 5
+    if np.isfinite(fc) and fc > 0:
+        floor = max(floor, int(np.ceil(fc)))
+    if np.isfinite(fb) and fb > 0:
+        floor = max(floor, int(np.ceil(1.5 * fb)))
     return max(floor, hw)
 
 
@@ -5973,6 +6220,15 @@ class Templates:
             # One quality policy for every backend: FWHM-scaled offset/RMS/
             # P90 gates feeding the shared pass/warn/fail classifier.
             _gates = _alignment_gate_thresholds(self.input_yaml, fwhm_pix)
+            _gate_min_n = int(
+                (self.input_yaml.get("template_subtraction", {}) or {}).get(
+                    "alignment_min_sources_for_field_gate", 20
+                )
+                or 20
+            )
+            _gate_max_wrms = float(
+                _ts_cfg.get("alignment_max_wrms_norm", 5.0) or 5.0
+            )
 
             def _fail(method_name, msg=""):
                 return AlignmentResult(
@@ -5997,6 +6253,73 @@ class Templates:
                     templateFpath,
                     requested_method=str(method),
                 )
+                # Optional independent cross-check (opt-in via
+                # template_subtraction.alignment_verify_independent).  The
+                # matched-source gate above is derived from the same
+                # detections the backend used; this independent verifier
+                # re-checks WCS consistency, pixel-grid alignment and
+                # resampling quality.  It is only authoritative for
+                # WCS-derived products (reproject/SWarp/tweakwcs), so a poor
+                # score there demotes a "pass" to "warn"; for source-matched
+                # backends the score is recorded but never downgrades.
+                if (
+                    result.success
+                    and result.template_path
+                    and _as_bool(
+                        _ts_cfg.get("alignment_verify_independent", False),
+                        False,
+                    )
+                ):
+                    try:
+                        from utils.alignment_verification import (
+                            AlignmentVerifier,
+                        )
+
+                        _vres = AlignmentVerifier(
+                            verbose_level=0
+                        ).verify_precise_alignment(
+                            str(scienceFpath), str(result.template_path)
+                        )
+                        _vscore = float(
+                            _vres.get("alignment_score", float("nan"))
+                        )
+                        _vlabel = str(
+                            _vres.get("alignment_quality", "unknown")
+                        )
+                        _wcs_based = any(
+                            tok in str(result.method_used or "").lower()
+                            for tok in ("swarp", "reproject", "tweakwcs")
+                        )
+                        _qstats = dict(result.quad_stats or {})
+                        _qstats["independent_score"] = _vscore
+                        _qstats["independent_label"] = _vlabel
+                        _q_new = result.quality
+                        if (
+                            _wcs_based
+                            and _q_new == "pass"
+                            and _vlabel in ("poor", "failed")
+                        ):
+                            _q_new = "warn"
+                            logger.warning(
+                                "Independent alignment verification scored "
+                                "'%s' (%.2f) for a WCS-based product; "
+                                "demoting alignment quality pass -> warn.",
+                                _vlabel, _vscore,
+                            )
+                        else:
+                            logger.info(
+                                "Independent alignment verification: %s "
+                                "(score=%.2f).",
+                                _vlabel, _vscore,
+                            )
+                        result = result._replace(
+                            quality=_q_new, quad_stats=_qstats
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Independent alignment verification failed",
+                            exc_info=True,
+                        )
                 # Stamp the shared gate classification onto the aligned
                 # template so downstream provenance does not depend on which
                 # backend produced the file.
@@ -6015,6 +6338,30 @@ class Templates:
                                     int(result.n_matches),
                                     "Matched alignment sources",
                                 )
+                            if result.verification:
+                                _h["ALIGVER"] = (
+                                    str(result.verification),
+                                    "Alignment verification tier",
+                                )
+                            if result.quad_stats:
+                                _iscore = result.quad_stats.get(
+                                    "independent_score"
+                                )
+                                if _iscore is not None and np.isfinite(
+                                    float(_iscore)
+                                ):
+                                    _h["ALIGSCOR"] = (
+                                        float(_iscore),
+                                        "Independent alignment score (0-1)",
+                                    )
+                                _ilabel = result.quad_stats.get(
+                                    "independent_label"
+                                )
+                                if _ilabel:
+                                    _h["ALIGLABL"] = (
+                                        str(_ilabel),
+                                        "Independent alignment quality label",
+                                    )
                             _hdl.flush()
                         invalidate_fits_cache(result.template_path)
                     except Exception:
@@ -6118,6 +6465,18 @@ class Templates:
                         _smed, _srms, _sp90,
                         _squad_rms.get("coverage_ok") if _squad_rms else None,
                         *_gates,
+                        n_matched=(
+                            _squad_rms.get("n_matched") if _squad_rms else None
+                        ),
+                        min_n_field_gate=_gate_min_n,
+                        translation_only=bool(
+                            _squad_rms.get("coherent_cluster")
+                        ) if _squad_rms else False,
+                        wrms_norm=(
+                            _squad_rms.get("wrms_norm")
+                            if _squad_rms else None
+                        ),
+                        max_wrms_norm=_gate_max_wrms,
                     )
                     if _squality == "fail":
                         logger.warning(
@@ -6175,6 +6534,13 @@ class Templates:
                             int(bool(_squad_rms.get("coverage_ok", True))),
                             "Matched-source coverage adequate (1=yes, 0=clustered)",
                         )
+                    _alig_kw["ALIGVER"] = (
+                        _alignment_verification_tier(
+                            _squad_rms, min_spatial=_gate_min_n,
+                            input_yaml=self.input_yaml,
+                        ),
+                        "Alignment verification tier",
+                    )
                     if _alig_kw and os.path.isfile(ref_al):
                         with fits.open(ref_al, mode="update", memmap=False) as _hdl:
                             for _k, _v in _alig_kw.items():
@@ -6195,6 +6561,11 @@ class Templates:
                     ),
                     quality=_squality,
                     message="; ".join(_sreasons),
+                    verification=_alignment_verification_tier(
+                        _squad_rms, min_spatial=_gate_min_n,
+                        input_yaml=self.input_yaml,
+                    ),
+                    quad_stats=_squad_rms,
                 )
 
             def _astroalign() -> AlignmentResult:
@@ -6232,6 +6603,17 @@ class Templates:
                         _amed, _arms, _ap90,
                         _aa_quad.get("coverage_ok") if _aa_quad else None,
                         *_gates,
+                        n_matched=(
+                            _aa_quad.get("n_matched") if _aa_quad else None
+                        ),
+                        min_n_field_gate=_gate_min_n,
+                        translation_only=bool(
+                            _aa_quad.get("coherent_cluster")
+                        ) if _aa_quad else False,
+                        wrms_norm=(
+                            _aa_quad.get("wrms_norm") if _aa_quad else None
+                        ),
+                        max_wrms_norm=_gate_max_wrms,
                     )
                     if _aquality == "fail":
                         logger.warning(
@@ -6302,6 +6684,11 @@ class Templates:
                     ),
                     quality=_aquality,
                     message="; ".join(_areasons),
+                    verification=_alignment_verification_tier(
+                        _aa_quad, min_spatial=_gate_min_n,
+                        input_yaml=self.input_yaml,
+                    ),
+                    quad_stats=_aa_quad,
                 )
 
             def _reproject() -> AlignmentResult:
@@ -6325,6 +6712,13 @@ class Templates:
                 _quality, _reasons = _classify_alignment_quality(
                     result.median_offset_px, result.rms_px, result.p90_px,
                     result.coverage_ok, *_gates,
+                    n_matched=result.n_matches,
+                    min_n_field_gate=_gate_min_n,
+                    translation_only=bool(
+                        (result.quad_stats or {}).get("coherent_cluster")
+                    ),
+                    wrms_norm=(result.quad_stats or {}).get("wrms_norm"),
+                    max_wrms_norm=_gate_max_wrms,
                 )
                 if _quality == "unverified":
                     logger.warning(
@@ -6350,6 +6744,11 @@ class Templates:
                     science_path=scienceFpath,
                     quality=_quality,
                     message="; ".join(_reasons),
+                    verification=_alignment_verification_tier(
+                        result.quad_stats, wcs_based=True,
+                        min_spatial=_gate_min_n,
+                        input_yaml=self.input_yaml,
+                    ),
                 )
 
             def _spalipy() -> AlignmentResult:
@@ -6391,6 +6790,12 @@ class Templates:
                         _sp_pix_scale = float(self.input_yaml.get("pixel_scale", 1.0) or 1.0)
                         _sp_match_radius = max(3.0 * fwhm_pix * _sp_pix_scale, 10.0)
 
+                    # Set only when the catalogues handed to spalipy are
+                    # mutual RA/DEC pairs: the pairing is then already
+                    # trusted, so match tolerances can be sized to the
+                    # measured residual spread instead of the PSF.
+                    _pair_resid_p90 = None
+
                     def _detect_for_spalipy(data, min_sources=20):
                         """Detect sources via SExtractor, return spalipy-format Table.
 
@@ -6400,12 +6805,24 @@ class Templates:
                         profiles.  When the pool is thinner than ``min_sources``
                         a deeper pass is run and merged (deduplicated) so it can
                         only add anchors.
+
+                        Deep-pass detections are marked in the ``det_tier``
+                        column (1 = found only at the lowered threshold): they
+                        are candidate anchors, not evidence -- a match list
+                        dominated by them is weaker than its size suggests.
+                        Centroid errors (errx/erry) are kept for downstream
+                        uncertainty-aware weighting.
                         """
-                        xy, flux, fwhm = _detect_sextractor_sources(
+                        _det = _detect_sextractor_sources(
                             data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
                             thresh=_sp_detect_thresh, ell_max=0.9,
+                            return_errors=True,
                         )
+                        xy, flux, fwhm = _det[0], _det[1], _det[2]
+                        errx = _det[3] if len(_det) >= 5 else None
+                        erry = _det[4] if len(_det) >= 5 else None
                         _xy_len = len(xy) if xy is not None else 0
+                        _n_primary = _xy_len
                         if _xy_len < min_sources and _sp_detect_thresh > 0.5:
                             _low_thresh = max(0.5, _sp_detect_thresh * 0.5)
                             logger.info(
@@ -6413,29 +6830,72 @@ class Templates:
                                 "lower detection threshold (%.1f -> %.1f).",
                                 _xy_len, _sp_detect_thresh, _low_thresh,
                             )
-                            xy_low, flux_low, fwhm_low = _detect_sextractor_sources(
+                            _det_low = _detect_sextractor_sources(
                                 data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
                                 thresh=_low_thresh, ell_max=0.9,
+                                return_errors=True,
                             )
+                            xy_low, flux_low, fwhm_low = (
+                                _det_low[0], _det_low[1], _det_low[2]
+                            )
+                            ex_low = _det_low[3] if len(_det_low) >= 5 else None
+                            ey_low = _det_low[4] if len(_det_low) >= 5 else None
                             _n_low = len(xy_low) if xy_low is not None else 0
+                            # Rows the merge will actually add: deep
+                            # detections farther than the 1.5 px dedup
+                            # radius from every primary-pass source.
+                            _new_rows = None
+                            if (
+                                xy is not None and len(xy)
+                                and xy_low is not None and len(xy_low)
+                            ):
+                                _dd, _ = cKDTree(xy).query(
+                                    xy_low, k=1, distance_upper_bound=1.5
+                                )
+                                _new_rows = np.isinf(_dd)
                             xy, flux, fwhm = _merge_detection_lists(
                                 xy, flux, fwhm, xy_low, flux_low, fwhm_low,
                             )
+                            # Keep the centroid errors aligned with the
+                            # merged positions (None-safe: errors are
+                            # auxiliary and may be unavailable).
+                            if (
+                                errx is not None and erry is not None
+                                and ex_low is not None and ey_low is not None
+                                and _new_rows is not None
+                            ):
+                                errx = np.concatenate(
+                                    [errx, np.asarray(ex_low)[_new_rows]]
+                                )
+                                erry = np.concatenate(
+                                    [erry, np.asarray(ey_low)[_new_rows]]
+                                )
                             _xy_len = len(xy) if xy is not None else 0
                             logger.info(
                                 "spalipy: low-threshold pass found %d sources; "
-                                "merged pool now %d.",
-                                _n_low, _xy_len,
+                                "merged pool now %d (%d primary, %d deep).",
+                                _n_low, _xy_len, _n_primary,
+                                max(0, _xy_len - _n_primary),
                             )
                         if xy is None or len(xy) < 4:
                             return None
-                        return Table({
+                        _det_tier = np.zeros(len(xy), dtype=int)
+                        _det_tier[_n_primary:] = 1
+                        _cols = {
                             "x": xy[:, 0],
                             "y": xy[:, 1],
                             "flux": flux,
                             "fwhm": fwhm,
                             "flag": np.zeros(len(xy), dtype=int),
-                        })
+                            "det_tier": _det_tier,
+                        }
+                        if (
+                            errx is not None and erry is not None
+                            and len(errx) == len(xy) and len(erry) == len(xy)
+                        ):
+                            _cols["errx"] = np.asarray(errx, float)
+                            _cols["erry"] = np.asarray(erry, float)
+                        return Table(_cols)
 
                     def _dedup_close_pairs(det, min_sep):
                         """Subset a detection table to its brightest-per-close-group
@@ -6599,6 +7059,44 @@ class Templates:
                         else:
                             sci_det = _sci_matched
                             tpl_det = _tpl_matched
+                            # Measure the residual spread under the best-fit
+                            # affine between the known pairs.  Sparse fields
+                            # with real WCS/SIP disagreement can sit at
+                            # several px here - a PSF-sized match tolerance
+                            # would reject every quad seed even though the
+                            # correspondence is already known.
+                            try:
+                                _tp_xy = np.column_stack([
+                                    np.asarray(tpl_det["x"], float),
+                                    np.asarray(tpl_det["y"], float),
+                                    np.ones(len(tpl_det)),
+                                ])
+                                _sc_xy = np.column_stack([
+                                    np.asarray(sci_det["x"], float),
+                                    np.asarray(sci_det["y"], float),
+                                ])
+                                _coef, *_ = np.linalg.lstsq(
+                                    _tp_xy, _sc_xy, rcond=None,
+                                )
+                                _res = _sc_xy - _tp_xy @ _coef
+                                _res = np.hypot(_res[:, 0], _res[:, 1])
+                                _rmed = float(np.median(_res))
+                                _rmad = float(
+                                    np.median(np.abs(_res - _rmed))
+                                ) * 1.4826
+                                _keep = _res <= _rmed + 3.0 * max(_rmad, 0.5)
+                                if 4 <= int(_keep.sum()) < len(_res):
+                                    _coef, *_ = np.linalg.lstsq(
+                                        _tp_xy[_keep], _sc_xy[_keep],
+                                        rcond=None,
+                                    )
+                                    _res = _sc_xy - _tp_xy @ _coef
+                                    _res = np.hypot(_res[:, 0], _res[:, 1])
+                                _pair_resid_p90 = float(
+                                    np.percentile(_res, 90)
+                                )
+                            except Exception:
+                                _pair_resid_p90 = None
 
                     except Exception as _match_err:
                         logger.warning(
@@ -6719,6 +7217,19 @@ class Templates:
                     # rejected.  Clamp to [2, 5] px.
                     if _yaml_max_match_dist is not None:
                         _max_match_dist = float(_yaml_max_match_dist)
+                    elif _pair_resid_p90 is not None:
+                        # Matched-pair lists: widen the inlier radius to the
+                        # measured misregistration (with headroom).  A larger
+                        # window cannot admit false matches because the
+                        # correspondence is fixed by the mutual sky match.
+                        _pair_cap = float(
+                            _sp_cfg.get("spalipy_pair_match_dist_cap", 30.0)
+                            or 30.0
+                        )
+                        _max_match_dist = float(np.clip(
+                            max(0.5 * _med_fwhm, 1.5 * _pair_resid_p90),
+                            2.0, _pair_cap,
+                        ))
                     else:
                         _max_match_dist = float(np.clip(0.5 * _med_fwhm, 2.0, 5.0))
 
@@ -6728,6 +7239,10 @@ class Templates:
                     # logic (min_sep defaults to 2*max_match_dist when None).
                     if _yaml_min_sep is not None:
                         _det_sep = float(_yaml_min_sep)
+                    elif _pair_resid_p90 is not None:
+                        # Paired lists do not need the anti-ambiguity
+                        # separation; crowding dedup still guards centroids.
+                        _det_sep = float(_med_fwhm)
                     else:
                         _det_sep = max(float(_med_fwhm), 2.0 * _max_match_dist)
 
@@ -6746,6 +7261,26 @@ class Templates:
                     sci_det = _dedup_close_pairs(sci_det, _det_sep)
                     _tpl_det = _dedup_close_pairs(_tpl_det, _det_sep)
                     _n_sources = min(len(sci_det), len(_tpl_det))
+
+                    # Fraction of the usable science pool found only in the
+                    # deeper, lower-significance detection pass.  These are
+                    # candidate anchors of uncertain reliability - a match
+                    # dominated by them is weaker evidence than the raw
+                    # count suggests.
+                    _sp_deep_frac = 0.0
+                    try:
+                        if "det_tier" in sci_det.colnames and len(sci_det):
+                            _sp_deep_frac = float(
+                                np.mean(np.asarray(sci_det["det_tier"]) > 0)
+                            )
+                            if _sp_deep_frac > 0:
+                                logger.info(
+                                    "spalipy: %.0f%% of the matched pool comes "
+                                    "from the deep low-threshold pass.",
+                                    100.0 * _sp_deep_frac,
+                                )
+                    except Exception:
+                        _sp_deep_frac = 0.0
                     if len(sci_det) < _n_sci_dedup or len(_tpl_det) < _n_tpl_dedup:
                         logger.info(
                             "spalipy: crowding dedup (min_sep=%.1f px) "
@@ -6785,6 +7320,16 @@ class Templates:
                     # instead of failing immediately.
                     if _yaml_min_match is not None:
                         _min_match = int(_yaml_min_match)
+                    elif _pair_resid_p90 is not None:
+                        # Known pairs: require most - not all - to inlier so a
+                        # single distorted anchor cannot veto the affine seed.
+                        _pair_frac = float(
+                            _sp_cfg.get("spalipy_pair_min_match_frac", 0.7)
+                            or 0.7
+                        )
+                        _min_match = max(
+                            4, int(np.ceil(_pair_frac * _n_sources))
+                        )
                     else:
                         _min_match = max(6, min(_n_sources // 3, 20))
                     if _min_match > _n_sources:
@@ -6831,9 +7376,23 @@ class Templates:
                             _tw3 = _WCS3(templateHeader)
                             _sci_corners = _sw3.calc_footprint()
                             _tpl_corners = _tw3.calc_footprint()
-                            _tpl_in_sci = _sw3.all_world2pix(
-                                _tpl_corners[:, 0], _tpl_corners[:, 1], 0
-                            )
+                            # quiet=True: distorted SIP inverses return NaN at
+                            # non-converging corners instead of raising.
+                            try:
+                                _tpl_in_sci = _sw3.all_world2pix(
+                                    _tpl_corners[:, 0],
+                                    _tpl_corners[:, 1],
+                                    0,
+                                    quiet=True,
+                                )
+                            except TypeError:
+                                _tpl_in_sci = _sw3.all_world2pix(
+                                    _tpl_corners[:, 0], _tpl_corners[:, 1], 0
+                                )
+                            if not np.all(np.isfinite(_tpl_in_sci)):
+                                raise ValueError(
+                                    "template corner world2pix did not converge"
+                                )
                             _tpl_x_min = float(np.min(_tpl_in_sci[0]))
                             _tpl_x_max = float(np.max(_tpl_in_sci[0]))
                             _tpl_y_min = float(np.min(_tpl_in_sci[1]))
@@ -7248,9 +7807,42 @@ class Templates:
                             _med_off, _rms_off, _p90_off,
                             _quad_rms.get("coverage_ok") if _quad_rms else None,
                             *_gates,
+                            n_matched=(
+                                _quad_rms.get("n_matched")
+                                if _quad_rms else None
+                            ),
+                            min_n_field_gate=_gate_min_n,
+                            translation_only=bool(
+                                _quad_rms.get("coherent_cluster")
+                            ) if _quad_rms else False,
+                            wrms_norm=(
+                                _quad_rms.get("wrms_norm")
+                                if _quad_rms else None
+                            ),
+                            max_wrms_norm=_gate_max_wrms,
                         )
                     except Exception:
                         logger.debug("spalipy: quality measurement failed", exc_info=True)
+
+                    # A 'pass' resting mostly on deep low-threshold
+                    # detections is candidate-driven, not verified:
+                    # demote to warn so downstream consumers treat the
+                    # alignment as limited evidence.
+                    _deep_warn_frac = float(
+                        _sp_cfg.get("spalipy_deep_match_frac_warn", 0.5)
+                        or 0.5
+                    )
+                    if (
+                        _sp_quality == "pass"
+                        and _sp_deep_frac > _deep_warn_frac
+                    ):
+                        _sp_quality = "warn"
+                        _sp_reasons.append(
+                            "matched pool %.0f%% deep-pass detections "
+                            "(> %.0f%%) - low-significance anchors" % (
+                                100.0 * _sp_deep_frac, 100.0 * _deep_warn_frac
+                            )
+                        )
 
                     if not _alignment_gate_accept(_sp_quality, self.input_yaml):
                         logger.warning(
@@ -7302,6 +7894,13 @@ class Templates:
                                 int(bool(_quad_rms.get("coverage_ok", True))),
                                 "Matched-source coverage adequate (1=yes, 0=clustered)",
                             )
+                        hdr["ALIGVER"] = (
+                            _alignment_verification_tier(
+                                _quad_rms, min_spatial=_gate_min_n,
+                                input_yaml=self.input_yaml,
+                            ),
+                            "Alignment verification tier",
+                        )
                     except Exception:
                         logger.debug("spalipy: failed to write quality header", exc_info=True)
                     _atomic_fits_write(new_templateFpath, aligned_template, hdr)
@@ -7383,6 +7982,11 @@ class Templates:
                         finite_fraction=_finite_frac,
                         quality=_sp_quality,
                         message="; ".join(_sp_reasons),
+                        verification=_alignment_verification_tier(
+                            _quad_rms, min_spatial=_gate_min_n,
+                            input_yaml=self.input_yaml,
+                        ),
+                        quad_stats=_quad_rms,
                     )
 
                 except Exception as _e:
@@ -7550,6 +8154,17 @@ class Templates:
                             _tmed, _trms, _tp90,
                             _tquad.get("coverage_ok") if _tquad else None,
                             *_gates,
+                            n_matched=(
+                                _tquad.get("n_matched") if _tquad else None
+                            ),
+                            min_n_field_gate=_gate_min_n,
+                            translation_only=bool(
+                                _tquad.get("coherent_cluster")
+                            ) if _tquad else False,
+                            wrms_norm=(
+                                _tquad.get("wrms_norm") if _tquad else None
+                            ),
+                            max_wrms_norm=_gate_max_wrms,
                         )
                         if _tquality == "fail":
                             logger.warning(
@@ -7605,6 +8220,14 @@ class Templates:
                         if _tp90 is not None and np.isfinite(_tp90):
                             hdr["ALIGP90"] = (float(_tp90), "Alignment P90 offset (px)")
                         hdr["ALIGMETH"] = ("tweakwcs", "Alignment method used")
+                        hdr["ALIGVER"] = (
+                            _alignment_verification_tier(
+                                _tquad, wcs_based=True,
+                                min_spatial=_gate_min_n,
+                                input_yaml=self.input_yaml,
+                            ),
+                            "Alignment verification tier",
+                        )
                     except Exception:
                         pass
                     _atomic_fits_write(new_templateFpath, to_write, hdr)
@@ -7631,6 +8254,12 @@ class Templates:
                         ),
                         quality=_tquality,
                         message="; ".join(_treasons),
+                        verification=_alignment_verification_tier(
+                            _tquad, wcs_based=True,
+                            min_spatial=_gate_min_n,
+                            input_yaml=self.input_yaml,
+                        ),
+                        quad_stats=_tquad,
                     )
 
                 except Exception as _e:
@@ -7799,6 +8428,17 @@ class Templates:
                             _cmed, _crms, _cp90,
                             _cquad.get("coverage_ok") if _cquad else None,
                             *_gates,
+                            n_matched=(
+                                _cquad.get("n_matched") if _cquad else None
+                            ),
+                            min_n_field_gate=_gate_min_n,
+                            translation_only=bool(
+                                _cquad.get("coherent_cluster")
+                            ) if _cquad else False,
+                            wrms_norm=(
+                                _cquad.get("wrms_norm") if _cquad else None
+                            ),
+                            max_wrms_norm=_gate_max_wrms,
                         )
                     else:
                         # chi2_shift exists for source-free fields where no
@@ -7813,6 +8453,14 @@ class Templates:
                         if _cp90 is not None and np.isfinite(_cp90):
                             hdr["ALIGP90"] = (float(_cp90), "Alignment P90 offset (px)")
                         hdr["ALIGMETH"] = ("chi2_shift", "Alignment method used")
+                        hdr["ALIGVER"] = (
+                            _alignment_verification_tier(
+                                _cquad, wcs_based=True,
+                                min_spatial=_gate_min_n,
+                                input_yaml=self.input_yaml,
+                            ) if _cquad else "translation_verified",
+                            "Alignment verification tier",
+                        )
                     except Exception:
                         pass
                     _atomic_fits_write(new_templateFpath, aligned_tpl, hdr)
@@ -7837,6 +8485,16 @@ class Templates:
                         finite_fraction=float(np.mean(np.isfinite(aligned_tpl))),
                         quality=_cquality,
                         message="; ".join(_creasons),
+                        verification=(
+                            _alignment_verification_tier(
+                                _cquad, wcs_based=True,
+                                min_spatial=_gate_min_n,
+                                input_yaml=self.input_yaml,
+                            )
+                            if _cquad
+                            else "translation_verified"
+                        ),
+                        quad_stats=_cquad,
                     )
 
                 except Exception as _e:
@@ -10085,7 +10743,9 @@ class Templates:
         scienceFpath, templateFpath : str
             Input FITS file paths.
         method : str
-            Initial backend choice ('sfft', 'hotpants', 'zogy').
+            Initial backend choice ('sfft', 'hotpants', 'zogy', or 'auto').
+            'auto' selects ZOGY for well-sampled, PSF-matched frames and SFFT
+            otherwise, from the measured science/template FWHM.
         kernel_order : int
             Spatial-variation polynomial order.
         matching_sources : list of (x, y) or None
@@ -10135,7 +10795,7 @@ class Templates:
         # lowercase names, so a config value like "SFFT" would otherwise be
         # silently skipped and fall through to the validation failure.
         method = str(method or "sfft").strip().lower()
-        if method not in ("sfft", "hotpants", "zogy"):
+        if method not in ("sfft", "hotpants", "zogy", "auto"):
             logger.warning(
                 "Unknown subtraction method %r; defaulting to 'sfft'.", method
             )
@@ -10309,6 +10969,63 @@ class Templates:
                 science_fwhm = science_fwhm_orig
                 template_fwhm = template_fwhm_orig
 
+            # --- FWHM sanity / cross-check --------------------------------
+            # A non-finite or non-positive FWHM (bad header, None config)
+            # propagates straight into kernel sizing and the forceconv
+            # decision; coerce to a safe default rather than raising or
+            # driving an absurd kernel.
+            def _finite_pos_fwhm(value, fallback, label):
+                try:
+                    fv = float(value)
+                except (TypeError, ValueError):
+                    fv = float("nan")
+                if not (np.isfinite(fv) and fv > 0):
+                    logger.warning(
+                        "%s FWHM %r is not finite/positive; using %.2f px.",
+                        label, value, fallback,
+                    )
+                    return float(fallback)
+                return fv
+
+            science_fwhm = _finite_pos_fwhm(science_fwhm, 3.0, "science")
+            template_fwhm = _finite_pos_fwhm(
+                template_fwhm, science_fwhm, "template"
+            )
+
+            # Cross-check the PSF measurement against the alignment
+            # residuals.  A wildly different science/template FWHM, or
+            # alignment residuals larger than the PSF itself, cannot yield a
+            # flux-conserving difference image.  Flag it so the conservative
+            # kernel sizing / PSF-plausibility repair downstream (and the
+            # quality audit) know the inputs are suspect.
+            _ts_cfg_ck = self.input_yaml.get("template_subtraction", {}) or {}
+            try:
+                _aligrms_ck = float(templateHeader.get("ALIGRMS", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                _aligrms_ck = 0.0
+            _fwhm_broad_ck = max(science_fwhm, template_fwhm)
+            _fwhm_narrow_ck = max(min(science_fwhm, template_fwhm), 1e-6)
+            _fwhm_ratio_ck = _fwhm_broad_ck / _fwhm_narrow_ck
+            _ratio_max = float(
+                _ts_cfg_ck.get("fwhm_crosscheck_max_ratio", 4.0) or 4.0
+            )
+            if _fwhm_ratio_ck > _ratio_max:
+                logger.warning(
+                    "FWHM cross-check: science/template FWHM ratio %.2f "
+                    "(sci=%.2f, tpl=%.2f px) exceeds %.1f - one measurement "
+                    "is likely contaminated (saturation/crowding/few stars). "
+                    "Kernel sizing and PSF validation will be conservative.",
+                    _fwhm_ratio_ck, science_fwhm, template_fwhm, _ratio_max,
+                )
+            if np.isfinite(_aligrms_ck) and _aligrms_ck > _fwhm_broad_ck:
+                logger.warning(
+                    "FWHM cross-check: alignment RMS %.2f px exceeds the PSF "
+                    "FWHM %.2f px - the frames are misregistered beyond the "
+                    "PSF, so the difference image will be dominated by "
+                    "alignment residuals rather than transient flux.",
+                    _aligrms_ck, _fwhm_broad_ck,
+                )
+
             from aperture import gain_e_per_adu_from_header, resolve_gain_e_per_adu
 
             try:
@@ -10463,25 +11180,27 @@ class Templates:
             fwhm_narrow = min(fwhm_ref, fwhm_sci)
 
             # BUG 120: Estimate effective source count early for kernel floor
-            # adaptation.  SFFT self-matches when pipeline provides too few
-            # sources.  SFFT's SExtractor typically finds 25-35 sources, but
-            # after cross-matching and quality filtering only ~15-20 survive
-            # for kernel fitting.
+            # adaptation.  SFFT self-matches when the pipeline provides too
+            # few prior sources; the count it will actually retain is unknown
+            # until the run finishes.
             #
-            # When the pipeline provides too few priors, SFFT will self-match
-            # using its own SExtractor detection.  Using n_eff=10 (the old
-            # default) when SFFT actually has 20+ sources causes:
-            #   - kernel_order=0 (too rigid for large PSF differences)
-            #   - floor_mult=1.5 (too small to contain PSF wings)
-            #   - source-count cap too aggressive (shrinks kernel below PSF)
-            #
-            # Use 20 as the self-match estimate, which matches the typical
-            # post-filtering source count.  This prevents under-sizing the
-            # kernel in the common case where SFFT self-matches successfully.
+            # The old code assumed 20 self-match sources.  In a genuinely
+            # sparse field SFFT may retain far fewer after cross-matching and
+            # quality cuts, so that estimate silently over-provisions the
+            # kernel (more pixels and spatial terms than the constraints
+            # support).  The provisional count is now conservative
+            # (sfft_self_match_est_sources, default 10) and the realized
+            # NKERSRC written into the difference header is checked after
+            # the run; when SFFT retained fewer sources than assumed, the
+            # solve is flagged under-constrained so the kernel-quality retry
+            # can fall back to a source-budgeted size.
             _n_matched_early = len(matching_sources) if matching_sources else 0
             _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 3) or 3)
             _sfft_self_match_early = _n_matched_early < _min_prior_early
-            n_eff = 20 if _sfft_self_match_early else _n_matched_early
+            _self_match_est = int(
+                ts_cfg_ker.get("sfft_self_match_est_sources", 10) or 10
+            )
+            n_eff = _self_match_est if _sfft_self_match_early else _n_matched_early
 
             # Override: user directly specifies kernel half-width in pixels
             _ker_hw_override = ts_cfg_ker.get("kernel_hw_override", None)
@@ -10601,29 +11320,36 @@ class Templates:
                 )
                 ker_hw = max(ker_hw_from_conv, _hw_floor_capped)
 
-                # For sparse fields, also cap the convolution term.
+                # Source-budget cap for the convolution term too.
                 # A large under-constrained kernel (e.g., 55x55=3025 params
                 # for 8 sources = 378 params/source) fits noise rather than
                 # the PSF, producing worse residuals than a smaller kernel
                 # that under-fits the PSF but is better constrained.
                 # The physical minimum is a hard constraint -- never go below
                 # it regardless of source count.
-                _sparse_cap_thresh = int(
-                    ts_cfg_ker.get("sfft_sparse_field_threshold", 10) or 10
+                #
+                # This previously triggered only below
+                # sfft_sparse_field_threshold=10, which left 10-30 source
+                # fields with a large FWHM mismatch (e.g. FWHM_conv~10 ->
+                # hw~25) dominated by an under-constrained conv term.  The
+                # cap now applies below sfft_sources_cap_threshold (default
+                # 30).
+                _sources_cap_thresh = int(
+                    ts_cfg_ker.get("sfft_sources_cap_threshold", 30) or 30
                 )
-                if n_eff < _sparse_cap_thresh:
-                    _ker_hw_before_sparse_cap = ker_hw
+                if n_eff < _sources_cap_thresh:
+                    _ker_hw_before_source_cap = ker_hw
                     ker_hw = max(
                         _phys_min_hw,
                         min(ker_hw, _max_hw_from_sources),
                     )
-                    if ker_hw != _ker_hw_before_sparse_cap:
+                    if ker_hw != _ker_hw_before_source_cap:
                         logger.info(
-                            "Kernel sizing: sparse field (%d sources < %d) -- "
+                            "Kernel sizing: source-budget cap (%d sources < %d) -- "
                             "capping kernel_hw at %d px (was %d, max_hw_sources=%d) "
                             "to prevent under-constrained kernel fit.",
-                            n_eff, _sparse_cap_thresh,
-                            ker_hw, _ker_hw_before_sparse_cap, _max_hw_from_sources,
+                            n_eff, _sources_cap_thresh,
+                            ker_hw, _ker_hw_before_source_cap, _max_hw_from_sources,
                         )
 
                 ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, ker_hw))
@@ -10681,6 +11407,22 @@ class Templates:
                             )
                         _ker_hw_before_boost = ker_hw
                         ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, ker_hw + _align_rms_boost))
+                        # Re-apply the source-budget cap after the boost: a
+                        # poor alignment in a sparse/small-source field must
+                        # not push the kernel back past the constraint budget
+                        # the cap above established.
+                        if n_eff < _sources_cap_thresh:
+                            _ker_hw_capped = max(
+                                _phys_min_hw,
+                                min(ker_hw, _max_hw_from_sources),
+                            )
+                            if _ker_hw_capped != ker_hw:
+                                logger.info(
+                                    "Kernel sizing: alignment-RMS boost capped by "
+                                    "source budget (%d sources): %d -> %d px.",
+                                    n_eff, ker_hw, _ker_hw_capped,
+                                )
+                            ker_hw = _ker_hw_capped
                         if ker_hw != _ker_hw_before_boost:
                             logger.info(
                                 "Kernel sizing: alignment RMS=%.3f px (qmax=%.3f) -> "
@@ -10749,6 +11491,29 @@ class Templates:
             template_psf = template_psf or _pick_psf_file(
                 template_psf_files, templateFpath
             )
+
+            # --- Auto backend selection (opt-in via method: "auto") -------
+            # Pick the first backend from the measured image quality; the
+            # in-subtract cascade still falls through on failure.  ZOGY is
+            # the best-conditioned choice for well-sampled data with a
+            # matched PSF and a usable noise model; SFFT handles large PSF
+            # mismatch / undersampling (and starves less in sparse fields).
+            # Resolved *after* PSF discovery so _has_psfs reflects the
+            # auto-picked PSF stamps, not just caller-supplied paths.
+            if method == "auto":
+                _auto_ratio = _fwhm_broad_ck / _fwhm_narrow_ck
+                _auto_n_eff = len(matching_sources) if matching_sources else 0
+                _has_psfs = science_psf is not None and template_psf is not None
+                if _has_psfs and _auto_ratio < 1.5 and _fwhm_broad_ck >= 2.5:
+                    method = "zogy"
+                else:
+                    method = "sfft"
+                logger.info(
+                    "Subtraction backend auto-selected: %s (FWHM ratio=%.2f, "
+                    "FWHM_broad=%.2f px, n_matched=%d, PSFs=%s).",
+                    method, _auto_ratio, _fwhm_broad_ck, _auto_n_eff,
+                    "present" if _has_psfs else "absent",
+                )
 
             # =============================================================
             # 3. Build masks
@@ -11270,6 +12035,37 @@ class Templates:
                     f", SFFT self-match ~{n_eff}" if _sfft_self_match else "",
                 )
 
+            # --- Weak-alignment kernel-order cap --------------------------
+            # A spatially-varying kernel (order > 0) is only meaningful when
+            # the matched sources constrain a spatially-varying transform.
+            # When the alignment verification tier is known to be weak
+            # (unverified, or translation-only evidence), extra spatial terms
+            # fit alignment systematics / edge noise rather than a real
+            # kernel gradient and re-introduce dipole residuals.  Cap at the
+            # constant kernel.  Only acts on an explicitly weak tier; an
+            # absent tier is left to the caller's existing policy, and the
+            # cap can be disabled for debugging.
+            _alig_ver_raw = str(
+                templateHeader.get("ALIGVER", "") or ""
+            ).strip().lower()
+            _cap_order_on_weak = _as_bool(
+                ts_cfg_ker.get("sfft_cap_order_on_weak_alignment", True), True
+            )
+            if (
+                _cap_order_on_weak
+                and kernel_order > 0
+                and _alig_ver_raw in ("unverified", "translation_verified")
+            ):
+                logger.warning(
+                    "Kernel order capped to 0: alignment verification tier is "
+                    "'%s' (matched sources do not constrain rotation/scale/"
+                    "distortion across the field), so a spatially-varying "
+                    "kernel would fit alignment systematics. Disable via "
+                    "template_subtraction.sfft_cap_order_on_weak_alignment=false.",
+                    _alig_ver_raw,
+                )
+                kernel_order = 0
+
             # Validate background polynomial order (bg_order)
             bg_order = ts_cfg.get("sfft_bg_order", 0)
             if bg_order is None:
@@ -11751,6 +12547,21 @@ class Templates:
                     kernel_negfrac_downgrade=float(
                         _ts_cfg_q.get("diffqual_kernel_negfrac_downgrade", 0.5)
                     ),
+                    kernel_conc_min_downgrade=float(
+                        _ts_cfg_q.get("diffqual_kernel_conc_min_downgrade", 1.3)
+                    ),
+                    min_checked_for_pass=int(
+                        _ts_cfg_q.get("diffqual_min_checked_for_pass", 8)
+                    ),
+                    min_checked_quadrants_pass=int(
+                        _ts_cfg_q.get("diffqual_min_checked_quadrants_pass", 2)
+                    ),
+                    alignment_unverified_downgrade=_as_bool(
+                        _ts_cfg_q.get(
+                            "diffqual_alignment_unverified_downgrade", True
+                        ),
+                        True,
+                    ),
                 )
 
                 # Sources to check for structured residuals: the matched
@@ -11799,9 +12610,24 @@ class Templates:
                 if _diff_fwhm_hdr > 0:
                     _diff_fwhm = _diff_fwhm_hdr
 
+                # Alignment verification tier: propagates the limited-evidence
+                # label set during align() into the subtraction quality grade
+                # so an unverified transform cannot produce a "pass" diff.
+                _alig_ver = str(diff_header.get("ALIGVER", "") or "")
+                if not _alig_ver:
+                    try:
+                        _alig_ver = str(
+                            fits.getheader(str(templateFpath)).get(
+                                "ALIGVER", ""
+                            ) or ""
+                        )
+                    except Exception:
+                        _alig_ver = ""
+
                 # Metadata for provenance
                 _qmeta = {
                     "algorithm": str(backend_used or "unknown"),
+                    "alignment_verification": _alig_ver,
                     "forceconv": str(diff_header.get("FORCECON", "")),
                     "kernel_order": int(kernel_order),
                     # KERHW is authoritative: a kernel-size retry adopts a
@@ -11811,6 +12637,7 @@ class Templates:
                     ),
                     "kernel_noise": float(diff_header.get("KERNOISE", 0.0) or 0.0),
                     "kernel_negfrac": float(diff_header.get("KERNEG", 0.0) or 0.0),
+                    "kernel_conc": float(diff_header.get("KERCONC", 0.0) or 0.0),
                     "science_fwhm": float(science_fwhm),
                     "template_fwhm": float(template_fwhm),
                     "n_matching_sources": _n_matching_sources,
@@ -11829,6 +12656,199 @@ class Templates:
                     cfg=_qcfg,
                     metadata=_qmeta,
                 )
+
+                # --- Quality-driven backend retry (bounded: one try) ---
+                # The cascade above retries on EXECUTION failure.  A backend
+                # can also exit cleanly while producing a scientifically poor
+                # difference image; when the audit fails the product and
+                # HOTPANTS is still untried, attempt it once and keep
+                # whichever product scores better under the same mask and
+                # validation sources - quality decides, not exit status.
+                # Sparse-evidence classes ("downgrade_sparse", "unverified")
+                # are not retried: swapping kernels cannot add sources.
+                _qretry_on = _as_bool(
+                    _ts_cfg_q.get("diffqual_retry_on_fail", True), True
+                )
+                if (
+                    _qretry_on
+                    and diff_quality_metrics.quality_class == "fail"
+                    and backend_used in ("sfft", "zogy")
+                ):
+                    try:
+                        _hp_exe = (
+                            _ts_cfg_q.get("hotpants_exe_loc") or "hotpants"
+                        )
+                        _hp_ok = shutil.which(str(_hp_exe)) is not None
+                    except Exception:
+                        _hp_ok = False
+                    if _hp_ok:
+                        _bak_diff = f"{differenceFpath}.qretry"
+                        _mask_sci_q = _mask_tpl_q = None
+                        try:
+                            shutil.copy2(differenceFpath, _bak_diff)
+                            _sci_mask_q = np.clip(
+                                science_mask_nans.astype(np.int32)
+                                + science_seg_mask.astype(np.int32)
+                                + (
+                                    background_defects_mask.astype(np.int32)
+                                    if background_defects_mask is not None
+                                    else 0
+                                ),
+                                0, 1,
+                            )
+                            _tpl_mask_q = np.clip(
+                                template_mask_nans.astype(np.int32)
+                                + template_seg_mask.astype(np.int32),
+                                0, 1,
+                            )
+                            _mask_sci_q = os.path.join(
+                                scienceDir,
+                                f"hotpants_mask_sci_q_{base_name}",
+                            )
+                            _mask_tpl_q = os.path.join(
+                                scienceDir,
+                                f"hotpants_mask_tpl_q_{base_name}",
+                            )
+                            save_to_fits(_sci_mask_q.astype(int), _mask_sci_q)
+                            save_to_fits(_tpl_mask_q.astype(int), _mask_tpl_q)
+                            # Noise maps are validated on the same grids as
+                            # the primary hotpants branch; compute them here
+                            # because that branch did not run.
+                            _sci_noise_q = _validate_noise_map(
+                                scienceNoise, scienceImage.shape, "science",
+                                ref_wcs=_sci_wcs_v,
+                            )
+                            _tpl_noise_q = _validate_noise_map(
+                                templateNoise, templateImage.shape, "template",
+                                ref_wcs=_tpl_wcs_v,
+                            )
+                            logger.warning(
+                                "Difference quality FAILED under %s "
+                                "(score=%.3f): retrying once with HOTPANTS.",
+                                backend_used,
+                                diff_quality_metrics.quality_score,
+                            )
+                            _ok_q = self._subtract_hotpants(
+                                scienceFpath,
+                                template_work_fpath,
+                                differenceFpath,
+                                mask_loc,
+                                scienceDir,
+                                base_name,
+                                scienceMedian,
+                                scienceSTD,
+                                templateMedian,
+                                templateSTD,
+                                science_saturate,
+                                template_saturate,
+                                science_readnoise,
+                                template_readnoise,
+                                science_fwhm,
+                                template_fwhm,
+                                kernel_order,
+                                stamp_loc,
+                                _sci_noise_q,
+                                sfft_kernel_hw,
+                                templateNoise=_tpl_noise_q,
+                                sci_mask_loc=_mask_sci_q,
+                                tpl_mask_loc=_mask_tpl_q,
+                                matching_sources=matching_sources,
+                                target_xy=(
+                                    target_location[0]
+                                    if target_location else None
+                                ),
+                                masked_sources=masked_sources,
+                            )
+                            _adopted_q = False
+                            if _ok_q and os.path.isfile(differenceFpath):
+                                _d2, _h2 = read_fits(differenceFpath)
+                                if _d2.shape == scienceImage.shape:
+                                    _h2 = _ensure_diff_wcs(
+                                        _h2, scienceHeader, _d2.shape,
+                                        target_xy=(
+                                            target_location[0]
+                                            if target_location else None
+                                        ),
+                                    )
+                                    _h2["SUBALGO"] = "hotpants"
+                                    _h2["SUBQRETRY"] = (
+                                        True,
+                                        "Quality-driven backend retry",
+                                    )
+                                    _qm2_mask = (
+                                        ~np.isfinite(_d2)
+                                        | (np.abs(_d2) < 1.1e-20)
+                                        | universal_mask.astype(bool)
+                                    )
+                                    _qmeta2 = dict(_qmeta)
+                                    _qmeta2["algorithm"] = "hotpants"
+                                    _qmeta2["kernel_noise"] = float(
+                                        _h2.get("KERNOISE", 0.0) or 0.0
+                                    )
+                                    _qmeta2["kernel_negfrac"] = float(
+                                        _h2.get("KERNEG", 0.0) or 0.0
+                                    )
+                                    _qmeta2["kernel_conc"] = float(
+                                        _h2.get("KERCONC", 0.0) or 0.0
+                                    )
+                                    _qm2 = assess_difference_image(
+                                        _d2, _qm2_mask,
+                                        source_positions=_dipole_sources,
+                                        bright_star_positions=_bright_stars,
+                                        fwhm=_diff_fwhm,
+                                        cfg=_qcfg,
+                                        metadata=_qmeta2,
+                                    )
+                                    if (
+                                        _qm2.quality_score
+                                        > diff_quality_metrics.quality_score
+                                    ):
+                                        _score_before = (
+                                            diff_quality_metrics.quality_score
+                                        )
+                                        diff_data, diff_header = _d2, _h2
+                                        diff_quality_metrics = _qm2
+                                        backend_used = "hotpants"
+                                        _adopted_q = True
+                                        logger.info(
+                                            "HOTPANTS quality retry adopted: "
+                                            "score %.3f -> %.3f, class=%s.",
+                                            _score_before,
+                                            _qm2.quality_score,
+                                            _qm2.quality_class,
+                                        )
+                            if not _adopted_q:
+                                # Keep the first product: the alternative did
+                                # not beat it on the same evidence.
+                                if os.path.isfile(_bak_diff):
+                                    os.replace(_bak_diff, differenceFpath)
+                                    _bak_diff = None
+                                logger.warning(
+                                    "HOTPANTS quality retry did not improve "
+                                    "the difference image; keeping the %s "
+                                    "product marked as failed.",
+                                    backend_used,
+                                )
+                        except Exception as _qr_e:
+                            if os.path.isfile(_bak_diff):
+                                os.replace(_bak_diff, differenceFpath)
+                                _bak_diff = None
+                            logger.warning(
+                                "Quality-driven HOTPANTS retry failed "
+                                "(%s); keeping first product.", _qr_e,
+                            )
+                        finally:
+                            if _bak_diff and os.path.isfile(_bak_diff):
+                                try:
+                                    os.remove(_bak_diff)
+                                except OSError:
+                                    pass
+                            for _mq in (_mask_sci_q, _mask_tpl_q):
+                                try:
+                                    if _mq and os.path.isfile(_mq):
+                                        os.remove(_mq)
+                                except OSError:
+                                    pass
 
                 # Write quality keywords to the difference image FITS header
                 # NOTE: The actual write is deferred to after the final
@@ -11852,6 +12872,7 @@ class Templates:
                     ),
                     "kernel_noise": float(diff_header.get("KERNOISE", 0.0) or 0.0),
                     "kernel_negfrac": float(diff_header.get("KERNEG", 0.0) or 0.0),
+                    "kernel_conc": float(diff_header.get("KERCONC", 0.0) or 0.0),
                     "n_matching_sources": _n_matching_sources,
                     "n_matching_priors": len(_matching_priors),
                     "n_masked_sources": len(masked_sources) if masked_sources else 0,
@@ -11879,7 +12900,9 @@ class Templates:
                         diff_quality_metrics.background_spatial_std,
                         diff_quality_metrics.edge_std_ratio,
                     )
-                elif diff_quality_metrics.quality_class == "downgrade":
+                elif diff_quality_metrics.quality_class in (
+                    "downgrade", "downgrade_sparse", "unverified",
+                ):
                     logger.warning(
                         "Subtraction quality DOWNGRADED (score=%.3f): "
                         "dipoles=%d/%d checked (%.1f%%), bright_star_resid=%.1f sigma, "
@@ -12900,6 +13923,7 @@ class Templates:
             _fill_regions = (
                 _nan_regions | _um if _um is not None else _nan_regions
             )
+            _ref_fill_val = 0.0
 
             if _fill_regions.any():
                 _fill_method = str(
@@ -12934,6 +13958,7 @@ class Templates:
                     _ref_clean = np.where(
                         _fill_regions, _ref_med, reference_data
                     )
+                    _ref_fill_val = _ref_med
                     _sci_clean = np.where(
                         np.isfinite(_sci_clean), _sci_clean, _sci_med
                     )
@@ -12957,6 +13982,50 @@ class Templates:
             else:
                 _sci_clean = science_data.copy()
                 _ref_clean = reference_data.copy()
+
+            # -----------------------------------------------------------------
+            # Residual astrometric shift (ZOGY section III.4): a bulk
+            # translation left by the global registration would otherwise
+            # be absorbed into the matching kernel, where it couples into
+            # the flux-scale gates and the kernel-noise audit.  Measure it
+            # on the cleaned frames and Fourier-shift the reference so the
+            # array reaching _zogy_subtract is already aligned.  Done
+            # before the kernel solve and pre-convolution so both see the
+            # corrected pair.
+            # -----------------------------------------------------------------
+            _zogy_shift_dx = 0.0
+            _zogy_shift_dy = 0.0
+            if _as_bool(ts_cfg.get("zogy_astrometric_shift", True), True):
+                try:
+                    _shift_max = float(
+                        ts_cfg.get("zogy_shift_max_px", 3.0) or 3.0
+                    )
+                except (TypeError, ValueError):
+                    _shift_max = 3.0
+                _sdy, _sdx, _sh_info = _zogy_residual_shift(
+                    _sci_clean, _ref_clean, ~_fill_regions,
+                    max_shift=_shift_max,
+                )
+                if _sh_info.get("applied"):
+                    _ref_clean = _fourier_shift2(_ref_clean, _sdy, _sdx)
+                    # The Fourier wrap smears frame-edge content into the
+                    # filled footprint; re-fill so the mask footprint is
+                    # unchanged for the kernel stamps and the diff.
+                    if _fill_regions.any():
+                        _ref_clean = np.where(
+                            _fill_regions, _ref_fill_val, _ref_clean
+                        )
+                    _zogy_shift_dy, _zogy_shift_dx = _sdy, _sdx
+                    logger.info(
+                        "ZOGY: applied residual astrometric shift "
+                        "dx=%+.3f dy=%+.3f px (post-corr residual %.3f px).",
+                        _sdx, _sdy, _sh_info.get("residual", np.nan),
+                    )
+                else:
+                    logger.info(
+                        "ZOGY: residual astrometric shift skipped (%s).",
+                        _sh_info.get("reason", "?"),
+                    )
 
             # -----------------------------------------------------------------
             # Pre-convolution: convolve one image to match the other's PSF
@@ -13915,6 +14984,14 @@ class Templates:
             _zogy_hdr["FSCAL_DISC"] = (
                 _fs_disc,
                 "photometric vs convolution flux scale discrepancy [%]",
+            )
+            _zogy_hdr["ZSHFT_DX"] = (
+                float(_zogy_shift_dx),
+                "residual astrometric x-shift applied to template [px]",
+            )
+            _zogy_hdr["ZSHFT_DY"] = (
+                float(_zogy_shift_dy),
+                "residual astrometric y-shift applied to template [px]",
             )
             if _zogy_convolved == "REF":
                 # Reference was convolved to science PSF -> diff has science PSF
@@ -15704,7 +16781,7 @@ class Templates:
                 )
             except (TypeError, ValueError):
                 _knoise_thresh = 0.12
-            _knoise_now = _kerhw_now = None
+            _knoise_now = _kerhw_now = _nkersrc = None
             try:
                 if outputFpath and os.path.isfile(outputFpath):
                     _khdr = fits.getheader(outputFpath)
@@ -15712,8 +16789,31 @@ class Templates:
                     _kw = _khdr.get("KERHW", None)
                     _knoise_now = float(_kn) if _kn is not None else None
                     _kerhw_now = int(_kw) if _kw is not None else None
+                    _nks = _khdr.get("NKERSRC", None)
+                    _nkersrc = int(_nks) if _nks is not None else None
             except Exception:
-                _knoise_now = _kerhw_now = None
+                _knoise_now = _kerhw_now = _nkersrc = None
+
+            # Measured constraint count.  The kernel was provisioned before
+            # SFFT ran from prior sources (or a provisional self-match
+            # estimate); the realized NKERSRC replaces that estimate when
+            # available so the retry decision uses evidence, not hope.
+            _min_prior_rt = int(
+                ts_sub.get("sfft_min_prior_sources", 3) or 3
+            )
+            _self_match_rt = _n_matched_local < _min_prior_rt
+            _est_n_rt = int(
+                ts_sub.get("sfft_self_match_est_sources", 10) or 10
+            )
+            _n_constraints = _n_matched_local
+            if _self_match_rt:
+                if _nkersrc is not None and _nkersrc > 0:
+                    _n_constraints = _nkersrc
+                else:
+                    _n_constraints = _est_n_rt
+            elif _nkersrc is not None and _nkersrc > 0:
+                _n_constraints = min(_n_matched_local, _nkersrc)
+
             _fwhm_conv_rt = float(
                 np.sqrt(
                     max(
@@ -15724,30 +16824,53 @@ class Templates:
                 )
             )
             _hw_retry = _sfft_retry_kernel_hw(
-                _n_matched_local,
+                _n_constraints,
                 _fwhm_conv_rt,
                 ts_sub.get("sfft_kernel_pix_per_source", 35.0),
+                fwhm_broad=max(float(science_fwhm), float(template_fwhm)),
             )
+            # Require a real size reduction: when the constraint budget is
+            # below the PSF floor, the retry kernel lands at the same
+            # physical minimum and a rerun buys nothing.
             _do_ksize_retry = (
                 _knoise_now is not None
                 and np.isfinite(_knoise_now)
                 and _knoise_thresh > 0
                 and _knoise_now > _knoise_thresh
                 and _kerhw_now is not None
-                and _kerhw_now > _hw_retry
-                and _n_matched_local >= 3
+                and _kerhw_now > _hw_retry + 1
+                and _n_constraints >= 3
             )
+            # Self-match shortfall: SFFT retained fewer sources than the
+            # provisional estimate used to size the kernel, so the solve is
+            # under-constrained even if KERNOISE stayed below the retry cut.
+            _selfmatch_short = (
+                _self_match_rt
+                and _nkersrc is not None
+                and 0 < _nkersrc < _est_n_rt
+                and _kerhw_now is not None
+                and _kerhw_now > _hw_retry
+                and _n_constraints >= 3
+            )
+            if _selfmatch_short:
+                logger.warning(
+                    "SFFT retained only %d kernel sources (provisional "
+                    "estimate=%d): the kernel was sized for more "
+                    "constraints than the field provides.",
+                    _nkersrc, _est_n_rt,
+                )
+                _do_ksize_retry = True
             if _do_ksize_retry:
                 logger.warning(
                     "SFFT kernel is under-constrained (wing noise/peak="
                     "%.2f > %.2f): retrying with kernel_hw=%d (was %d, "
                     "%d matched sources) -- a smaller, better-conditioned "
                     "solve.",
-                    _knoise_now,
+                    _knoise_now if _knoise_now is not None else float("nan"),
                     _knoise_thresh,
                     _hw_retry,
-                    _kerhw_now,
-                    _n_matched_local,
+                    _kerhw_now if _kerhw_now is not None else -1,
+                    _n_constraints,
                 )
                 _saved_khw = _sfft_pass_kernel_hw
                 _sfft_pass_kernel_hw = _hw_retry
@@ -15793,6 +16916,15 @@ class Templates:
                             _orig_matching_sources,
                             radius=_resid_r,
                         )
+                        _knoise_new = None
+                        try:
+                            _kn2 = fits.getheader(outputFpath).get(
+                                "KERNOISE", None
+                            )
+                            if _kn2 is not None:
+                                _knoise_new = float(_kn2)
+                        except Exception:
+                            pass
                         if (
                             _resid_first is not None
                             and _resid_retry is not None
@@ -15806,18 +16938,26 @@ class Templates:
                                 _resid_retry,
                             )
                             _restore_sfft_outputs(_bak_ks)
+                        elif (
+                            _knoise_now is not None
+                            and _knoise_new is not None
+                            and _knoise_new > 1.25 * _knoise_now
+                            and _knoise_new > _knoise_thresh
+                        ):
+                            logger.warning(
+                                "SFFT kernel-size retry raised KERNOISE "
+                                "(%.3f -> %.3f); restoring the larger "
+                                "kernel - a smaller solve that only adds "
+                                "kernel noise is not a repair.",
+                                _knoise_now,
+                                _knoise_new,
+                            )
+                            _restore_sfft_outputs(_bak_ks)
                         else:
-                            _knoise_new = None
-                            try:
-                                _knoise_new = fits.getheader(
-                                    outputFpath
-                                ).get("KERNOISE", None)
-                            except Exception:
-                                pass
                             logger.info(
                                 "SFFT kernel-size retry adopted "
                                 "(kernel_hw=%d): matched-source resid "
-                                "%s -> %s, KERNOISE %.3f -> %s.",
+                                "%s -> %s, KERNOISE %s -> %s.",
                                 _hw_retry,
                                 f"{_resid_first:.2f}"
                                 if _resid_first is not None
@@ -15825,7 +16965,9 @@ class Templates:
                                 f"{_resid_retry:.2f}"
                                 if _resid_retry is not None
                                 else "n/a",
-                                _knoise_now,
+                                f"{_knoise_now:.3f}"
+                                if _knoise_now is not None
+                                else "n/a",
                                 f"{float(_knoise_new):.3f}"
                                 if _knoise_new is not None
                                 else "n/a",

@@ -99,9 +99,10 @@ def get_coords(objname, TNS_BOT_ID=None, TNS_BOT_NAME=None, TNS_BOT_API=None):
     if not all([TNS_BOT_ID, TNS_BOT_NAME, TNS_BOT_API]):
         raise ValueError("You must provide TNS_BOT_ID, TNS_BOT_NAME, and TNS_BOT_API")
 
-    objname = objname.strip()
+    objname = "" if objname is None else str(objname).strip()
+    # "SN 2024aifs" -> "2024aifs": strip the prefix and the separating space.
     if objname.lower().startswith(("sn", "at")):
-        objname = objname[2:]
+        objname = objname[2:].strip()
 
     url = "https://www.wis-tns.org/api/get/object"
     headers = {

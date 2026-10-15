@@ -1044,7 +1044,9 @@ def _drop_fainter_blended_neighbors(
     col_idx = np.arange(n)
     for s in range(0, n, block):
         e = min(s + block, n)
-        dra = (ra[s:e, None] - ra[None, :]) * cosd[None, :]
+        # Wrap the RA difference to [-180, 180) so pairs straddling RA=0 not
+        # rejected as ~360 deg apart.
+        dra = ((ra[s:e, None] - ra[None, :] + 180.0) % 360.0 - 180.0) * cosd[None, :]
         ddec = dec[s:e, None] - dec[None, :]
         sep_deg = np.hypot(dra, ddec)
         # dm[i, j] < 0 means neighbour j is brighter than source i.
@@ -5507,18 +5509,36 @@ class Catalog:
                         )
                         catalog = catalog[~threshold_cut]
 
-            flux = catalog["flux_AP"].values
-            flux_err = catalog["flux_AP_err"].values
+            # Catalog columns can arrive with object dtype (mixed strings/NaN
+            # from upstream merges); coerce so np.isfinite and friends work.
+            flux = pd.to_numeric(catalog["flux_AP"], errors="coerce").to_numpy(
+                dtype=float
+            )
+            flux_err = pd.to_numeric(
+                catalog["flux_AP_err"], errors="coerce"
+            ).to_numpy(dtype=float)
             # NaN for non-positive fluxes (same convention as functions.mag)
-            flux_safe = flux.astype(float).copy()
+            flux_safe = flux.copy()
             flux_safe[flux_safe <= 0] = np.nan
             inst_mag = -2.5 * np.log10(flux_safe)
             inst_mag_err = 2.5 / np.log(10) * (flux_err / flux_safe)
-            catalog_mag = catalog[use_filter].values
-            catalog_mag_err = catalog[f"{use_filter}_err"].values
+            catalog_mag = pd.to_numeric(
+                catalog[use_filter], errors="coerce"
+            ).to_numpy(dtype=float)
+            catalog_mag_err = pd.to_numeric(
+                catalog[f"{use_filter}_err"], errors="coerce"
+            ).to_numpy(dtype=float)
 
             # 0.5 mag combined-error cut matches the _prepare_catalog threshold.
-            error_mask = np.sqrt(catalog_mag_err**2 + inst_mag_err**2) < 0.5
+            finite_mask = (
+                np.isfinite(inst_mag)
+                & np.isfinite(inst_mag_err)
+                & np.isfinite(catalog_mag)
+                & np.isfinite(catalog_mag_err)
+            )
+            error_mask = finite_mask & (
+                np.sqrt(catalog_mag_err**2 + inst_mag_err**2) < 0.5
+            )
             clean_catalog = catalog[error_mask].copy()
 
             if len(clean_catalog) < 2:
@@ -5969,7 +5989,10 @@ class Catalog:
 
                     # Apply flux range cuts (bright_cut_idx to faint_cut_idx).
                     if bright_cut_idx > 0 or faint_cut_idx < len(sorted_flux):
-                        min_linear_flux = sorted_flux[min(faint_cut_idx, len(sorted_flux)-1)]
+                        # faint_cut_idx is the first *cut* (fainter) source, so
+                        # the faintest retained source is one index brighter.
+                        _faint_keep = max(min(faint_cut_idx, len(sorted_flux)) - 1, 0)
+                        min_linear_flux = sorted_flux[_faint_keep]
                         max_linear_flux = sorted_flux[bright_cut_idx] if bright_cut_idx < len(sorted_flux) else sorted_flux[0]
 
                         if min_linear_flux < max_linear_flux:

@@ -6811,13 +6811,38 @@ def run_photometry():
 
         if len(variable_sources) > 0:
             try:
-                xpix_variable_sources, ypix_variable_sources = imageWCS.all_world2pix(
-                    variable_sources["RA"].values,
-                    variable_sources["DEC"].values,
-                    wcs_origin,
-                )
+                # quiet=True returns NaN at non-converging SIP inverses
+                # instead of raising NoConvergence.
+                try:
+                    xpix_variable_sources, ypix_variable_sources = (
+                        imageWCS.all_world2pix(
+                            variable_sources["RA"].values,
+                            variable_sources["DEC"].values,
+                            wcs_origin,
+                            quiet=True,
+                        )
+                    )
+                except TypeError:
+                    xpix_variable_sources, ypix_variable_sources = (
+                        imageWCS.all_world2pix(
+                            variable_sources["RA"].values,
+                            variable_sources["DEC"].values,
+                            wcs_origin,
+                        )
+                    )
                 variable_sources["x_pix"] = xpix_variable_sources
                 variable_sources["y_pix"] = ypix_variable_sources
+                _conv_ok = np.isfinite(xpix_variable_sources) & np.isfinite(
+                    ypix_variable_sources
+                )
+                if not _conv_ok.all():
+                    logging.info(
+                        "Dropped %d/%d variable sources with non-convergent "
+                        "WCS distortion inversion.",
+                        int((~_conv_ok).sum()),
+                        len(variable_sources),
+                    )
+                    variable_sources = variable_sources[_conv_ok]
             except Exception as e:
                 logging.warning(
                     f"WCS coordinate conversion failed for variable sources: {e}. "
@@ -9314,6 +9339,21 @@ def run_photometry():
                                     x0 = max(0, int(cx) - radius)
                                     x1 = min(nx, int(cx) + radius + 1)
                                     cutout = img_arr[y0:y1, x0:x1]
+                                    full = 2 * radius + 1
+                                    if cutout.shape != (full, full):
+                                        # Edge-truncated cutout: pad with NaN to
+                                        # a fixed shape so the per-source stack
+                                        # in _compute_fft_metrics stays uniform.
+                                        padded = np.full(
+                                            (full, full), np.nan
+                                        )
+                                        py0 = y0 - (int(cy) - radius)
+                                        px0 = x0 - (int(cx) - radius)
+                                        padded[
+                                            py0 : py0 + cutout.shape[0],
+                                            px0 : px0 + cutout.shape[1],
+                                        ] = cutout
+                                        cutout = padded
                                     if (
                                         cutout.shape[0] < 5
                                         or cutout.shape[1] < 5
@@ -9806,13 +9846,38 @@ def run_photometry():
             #  Variable Sources
             # stamp_loc = None
             if len(variable_sources) > 0:
-                xpix_variable_sources, ypix_variable_sources = imageWCS.all_world2pix(
-                    variable_sources["RA"].values,
-                    variable_sources["DEC"].values,
-                    wcs_origin,
-                )
+                # quiet=True: SIP distortion inverses return NaN at
+                # non-converging coordinates instead of raising NoConvergence.
+                try:
+                    xpix_variable_sources, ypix_variable_sources = (
+                        imageWCS.all_world2pix(
+                            variable_sources["RA"].values,
+                            variable_sources["DEC"].values,
+                            wcs_origin,
+                            quiet=True,
+                        )
+                    )
+                except TypeError:
+                    xpix_variable_sources, ypix_variable_sources = (
+                        imageWCS.all_world2pix(
+                            variable_sources["RA"].values,
+                            variable_sources["DEC"].values,
+                            wcs_origin,
+                        )
+                    )
                 variable_sources["x_pix"] = xpix_variable_sources
                 variable_sources["y_pix"] = ypix_variable_sources
+                _conv_ok = np.isfinite(variable_sources["x_pix"]) & np.isfinite(
+                    variable_sources["y_pix"]
+                )
+                if not _conv_ok.all():
+                    logging.info(
+                        "Dropped %d/%d variable sources with non-convergent "
+                        "WCS distortion inversion.",
+                        int((~_conv_ok).sum()),
+                        len(variable_sources),
+                    )
+                    variable_sources = variable_sources[_conv_ok]
                 border = 1.5 * ImageFWHM
                 height, width = image.shape
                 mask_x = (variable_sources["x_pix"] >= border) & (

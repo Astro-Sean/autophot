@@ -609,10 +609,13 @@ def _compute_detection_mask(
 
     mag = pd.to_numeric(df[mag_col], errors="coerce").to_numpy(dtype=float, copy=False)
     err = pd.to_numeric(df[err_col], errors="coerce").to_numpy(dtype=float, copy=False)
+    # ``mag`` is compared against an *apparent* limit here, so prefer the
+    # already-converted apparent ``lmag`` column; ``limiting_inst_mag`` is the
+    # raw instrumental limit and would be off by the band zeropoint.
     lim_col = (
-        "limiting_inst_mag"
-        if "limiting_inst_mag" in df.columns
-        else ("lmag" if "lmag" in df.columns else None)
+        "lmag"
+        if "lmag" in df.columns
+        else ("limiting_inst_mag" if "limiting_inst_mag" in df.columns else None)
     )
     lmag = (
         pd.to_numeric(df[lim_col], errors="coerce").to_numpy(dtype=float, copy=False)
