@@ -190,7 +190,12 @@ def create_image_mask(filename, layers=None):
 
     for layer in selected_layers:
         logger.info("\t> Adding %s layer to mask", layer[1])
-        mask += imgs[layer[0]]
+        # Non-finite pixels (chip gaps / bad columns) are not flags: treat
+        # them as unset so they do not poison the sum with NaN and reach the
+        # final astype(int) below.
+        mask += np.nan_to_num(
+            imgs[layer[0]], nan=0.0, posinf=0.0, neginf=0.0
+        )
 
     mask[mask > 1] = 1
     return mask.astype(int)

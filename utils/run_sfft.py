@@ -2440,6 +2440,7 @@ def run_sfft() -> Optional[int]:
                     log_warning(f"Could not realize SFFT matching kernel: {_e}")
 
                 _ker_l2 = None
+                _ker_noise = _ker_negfrac = _ker_conc = None
                 if _ker_2d is not None:
                     _ker_l2 = float(np.sqrt(np.nansum(_ker_2d ** 2)))
                     if not np.isfinite(_ker_l2) or _ker_l2 <= 0:
@@ -2478,6 +2479,40 @@ def run_sfft() -> Optional[int]:
                             if _kabs > 0
                             else None
                         )
+                        # Kernel concentration: |kernel| mass inside the
+                        # expected support (r <= FWHM_conv) divided by the
+                        # area fraction inside that radius.  A real
+                        # broadening kernel piles mass in the centre
+                        # (KERCONC ~1.7+); an under-constrained solve
+                        # spreads mass uniformly so mass tracks area and
+                        # KERCONC ~1.0 - no coherent core exists at all,
+                        # which KERNOISE alone does not distinguish.
+                        _ker_conc = None
+                        try:
+                            _fs = float(diff_hdr.get("FWHM_SCI", 0) or 0)
+                            _fr = float(diff_hdr.get("FWHM_REF", 0) or 0)
+                            _fconv = float(np.sqrt(max(
+                                max(_fs, _fr) ** 2 - min(_fs, _fr) ** 2, 0.0
+                            )))
+                            _rc = max(3.0, _fconv) if _fconv > 0 else (
+                                0.4 * _khalf
+                            )
+                            _kin = np.abs(_ker_2d[_kr <= _rc])
+                            _kin = _kin[np.isfinite(_kin)]
+                            _n_in = int(np.count_nonzero(_kr <= _rc))
+                            _n_tot = int(np.count_nonzero(np.isfinite(_kr)))
+                            if _kabs > 0 and _kin.size and _n_tot > 0:
+                                _ker_conc = float(
+                                    (np.nansum(_kin) / _kabs)
+                                    / (_n_in / _n_tot)
+                                )
+                        except Exception:
+                            _ker_conc = None
+                        if _ker_conc is not None and np.isfinite(_ker_conc):
+                            diff_hdr["KERCONC"] = (
+                                round(_ker_conc, 4),
+                                "Kernel core-mass concentration (uniform=1)",
+                            )
                         if _ker_noise is not None and np.isfinite(_ker_noise):
                             diff_hdr["KERNOISE"] = (
                                 round(_ker_noise, 4),
@@ -2502,6 +2537,91 @@ def run_sfft() -> Optional[int]:
                     log_warning(
                         f"Kernel-quality audit failed ({_kq_e}); skipping."
                     )
+
+                # --- Kernel PNG ---
+                # The realized matching kernel is the direct evidence for
+                # under-constrained solves (noisy wings), undersized kernels
+                # (clipped core), and sidelobes (dipole residuals) - write it
+                # whenever the kernel was realized, not just on -plot runs.
+                try:
+                    if _ker_2d is not None:
+                        import matplotlib
+
+                        matplotlib.use("agg")
+                        import matplotlib.pyplot as plt
+                        from matplotlib.colors import SymLogNorm
+
+                        _kfig, _kax = plt.subplots(
+                            1, 2, figsize=(8.0, 3.6), dpi=150
+                        )
+                        _kpeak_v = float(np.nanmax(np.abs(_ker_2d)))
+                        _norm = SymLogNorm(
+                            linthresh=max(_kpeak_v * 1e-3, 1e-12),
+                            vmin=-_kpeak_v,
+                            vmax=_kpeak_v,
+                        )
+                        _im = _kax[0].imshow(
+                            _ker_2d, norm=_norm, cmap="RdBu_r",
+                            origin="lower", interpolation="nearest",
+                        )
+                        _kax[0].set_title("SFFT matching kernel", fontsize=9)
+                        _kax[0].set_xlabel("x [px]", fontsize=8)
+                        _kax[0].set_ylabel("y [px]", fontsize=8)
+                        _kfig.colorbar(_im, ax=_kax[0], fraction=0.046)
+
+                        # Radial profile: the wing level vs radius is what
+                        # KERNOISE measures.
+                        _Lk = _ker_2d.shape[0]
+                        _khalf = (_Lk - 1) / 2.0
+                        _ky, _kx = np.mgrid[0:_Lk, 0:_Lk]
+                        _kr = np.hypot(_ky - _khalf, _kx - _khalf).ravel()
+                        _kv = _ker_2d.ravel()
+                        _finite = np.isfinite(_kr) & np.isfinite(_kv)
+                        _kax[1].axhline(0.0, color="k", lw=0.6, alpha=0.5)
+                        _kax[1].plot(
+                            _kr[_finite], _kv[_finite], ".",
+                            ms=2.5, alpha=0.6,
+                        )
+                        _kax[1].set_title("Radial kernel profile", fontsize=9)
+                        _kax[1].set_xlabel("radius [px]", fontsize=8)
+                        _kax[1].set_ylabel("kernel value", fontsize=8)
+                        _kax[1].tick_params(labelsize=7)
+
+                        _kstats = f"hw={_kerhw}"
+                        if _ker_noise is not None:
+                            _kstats += f"  KERNOISE={_ker_noise:.3f}"
+                        if _ker_negfrac is not None:
+                            _kstats += f"  KERNEG={_ker_negfrac:.2f}"
+                        if _ker_conc is not None:
+                            _kstats += f"  KERCONC={_ker_conc:.2f}"
+                        _kfig.suptitle(_kstats, fontsize=10)
+                        _kfig.tight_layout()
+                        _kfig.savefig(
+                            os.path.join(
+                                out_dir, f"SFFT_Kernel_{out_base}.png"
+                            ),
+                            bbox_inches="tight", facecolor="white",
+                        )
+                        plt.close(_kfig)
+                except Exception as _kpng_e:
+                    log_warning(f"Kernel PNG failed ({_kpng_e}); skipping.")
+
+                # Realized kernel-fit source count.  templates.py provisions
+                # kernel size/order from priors before SFFT runs; this
+                # measured count lets the pipeline re-check that provisioning
+                # instead of trusting an assumed self-match total.
+                try:
+                    _n_kersrc = (
+                        len(matched_sources)
+                        if isinstance(matched_sources, pd.DataFrame)
+                        else 0
+                    )
+                    diff_hdr["NKERSRC"] = (
+                        int(_n_kersrc),
+                        "Sources retained for SFFT kernel fit",
+                    )
+                except Exception:
+                    pass
 
                 # Which image was convolved?  CONVD records the actual
                 # direction (also resolves AUTO); fall back to ForceConv.

@@ -2716,12 +2716,13 @@ class Limits:
                             m_bright, c_bright, f_bright = prev_m, prev_c, prev_f
                             break
                     else:
-                        # Stepping brighter: m_faint stays the undetected end.
+                        # Stepping brighter: advance the bright frontier on
+                        # every trial, otherwise m_test (anchored on m_bright)
+                        # retries the same magnitude each iteration.  m_faint
+                        # stays the undetected (fainter) end.
+                        m_bright, c_bright, f_bright = m_test, c_test, f_test
                         if c_test >= completeness_target:
-                            m_bright, c_bright = m_test, c_test
-                            f_bright = f_test
                             break
-                        # else: keep stepping brighter; do NOT break
 
                 bracketed = (c_bright >= completeness_target) and (
                     c_faint < completeness_target
@@ -2754,13 +2755,12 @@ class Limits:
                                     m_bright, c_bright, f_bright = prev_m, prev_c, prev_f
                                     break
                             else:
-                                # Stepping brighter: m_faint stays the
-                                # undetected end.
+                                # Stepping brighter: advance the bright
+                                # frontier every trial (see above); m_faint
+                                # stays the undetected end.
+                                m_bright, c_bright, f_bright = m_test, c_test, f_test
                                 if c_test >= completeness_target:
-                                    m_bright, c_bright = m_test, c_test
-                                    f_bright = f_test
                                     break
-                                # else: keep stepping brighter; do NOT break
                         bracketed = (c_bright >= completeness_target) and (
                             c_faint < completeness_target
                         )

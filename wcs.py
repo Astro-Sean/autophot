@@ -2173,10 +2173,17 @@ class WCSSolver:
             else _wcs_cfg_int(wcs_cfg, "downsample", 2)
         )
 
-        # --- Prepare paths (fixed temp names to avoid collisions) ---
+        # --- Prepare paths ---
+        # The output WCS file must be unique per invocation: a fixed name is
+        # shared by every image in the directory, so a concurrent solve
+        # (nCPU>1) or a leftover file from an interrupted run would otherwise
+        # be adopted as this image's WCS.
         dirname = os.path.dirname(self.fpath)
         base = os.path.splitext(os.path.basename(self.fpath))[0]
-        wcs_file = os.path.join(dirname, "astrometry_temp.wcs.fits")
+        _tmp_tag = f"{base}_{os.getpid()}"
+        wcs_file = os.path.join(dirname, f"astrometry_{_tmp_tag}.wcs.fits")
+        if os.path.isfile(wcs_file):
+            os.remove(wcs_file)
         astrometry_log_fpath = os.path.join(dirname, f"Astrometry_{base}.log")
         sextractor_exe = (
             wcs_cfg.get("sextractor_exe_loc")
@@ -2347,12 +2354,14 @@ class WCSSolver:
 
             if os.path.exists(astrometry_log_fpath):
                 os.remove(astrometry_log_fpath)
-            new_fits_temp = os.path.join(dirname, "astrometry_newfits_temp.fits")
-            scamp_temp = os.path.join(dirname, "astrometry_temp_scamp")
-            corr_temp = os.path.join(dirname, "astrometry_temp.corr")
-            rdl_temp = os.path.join(dirname, "astrometry_temp.rdls")
-            match_temp = os.path.join(dirname, "astrometry_temp.match")
-            solved_temp = os.path.join(dirname, "astrometry_temp.solved")
+            # Per-invocation temp names (see wcs_file above): avoid collisions
+            # between concurrent solves sharing an image directory.
+            new_fits_temp = os.path.join(dirname, f"astrometry_{_tmp_tag}_newfits.fits")
+            scamp_temp = os.path.join(dirname, f"astrometry_{_tmp_tag}_scamp")
+            corr_temp = os.path.join(dirname, f"astrometry_{_tmp_tag}.corr")
+            rdl_temp = os.path.join(dirname, f"astrometry_{_tmp_tag}.rdls")
+            match_temp = os.path.join(dirname, f"astrometry_{_tmp_tag}.match")
+            solved_temp = os.path.join(dirname, f"astrometry_{_tmp_tag}.solved")
             common_args = [
                 str(solvefield_exe),
                 "--no-remove-lines",

@@ -1846,7 +1846,8 @@ class Plot:
             ax11 = ax1.twinx()
             ax11.set_xlim(ax1.get_xlim())
 
-            ax11.set_ylim(ax1.get_ylim() - dm)
+            _app_ymin, _app_ymax = ax1.get_ylim()
+            ax11.set_ylim(_app_ymax - dm, _app_ymin - dm)
             ax11.set_ylabel("Absolute Magnitude [mag]")
 
         ax1.set_ylabel("Apparent Magnitude [mag]")
@@ -2001,8 +2002,18 @@ class Plot:
 
             # Only PSF fit errors are used; catalog position errors are not
             # propagated into the error bars.
-            dx_err = df.get("x_fit_err", np.nan).copy()
-            dy_err = df.get("y_fit_err", np.nan).copy()
+            # `.get(..., np.nan)` returns a scalar when the column is absent,
+            # and a float has no `.copy()`; fall back to an all-NaN Series.
+            dx_err = (
+                pd.to_numeric(df["x_fit_err"], errors="coerce")
+                if "x_fit_err" in df.columns
+                else pd.Series(np.nan, index=df.index)
+            )
+            dy_err = (
+                pd.to_numeric(df["y_fit_err"], errors="coerce")
+                if "y_fit_err" in df.columns
+                else pd.Series(np.nan, index=df.index)
+            )
 
             finite_err = dx_err.notna() & dy_err.notna()
             has_errors = finite_err.any()

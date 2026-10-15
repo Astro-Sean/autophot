@@ -443,8 +443,15 @@ class RemoveCosmicRays:
         """
         self.logger.info("Starting cosmic ray removal")
 
-        # Preserve NaNs (chip gaps) before cosmic ray removal
-        nan_mask = np.isnan(self.image)
+        # --- Input Validation (must precede any array operation) ---
+        if not isinstance(self.image, np.ndarray):
+            self.logger.error("Input image must be a numpy array")
+            _empty = np.zeros_like(self.image, dtype=bool)
+            return self.image, _empty, _empty
+
+        # Preserve all non-finite pixels (chip gaps, bad pixels), not just
+        # NaN: an inf left in the frame would otherwise reach astroscrappy.
+        nan_mask = ~np.isfinite(self.image)
 
         # Work in float64 so the CR step does not quantize inputs that are
         # already higher precision; the rest of the pipeline measures in
@@ -461,12 +468,6 @@ class RemoveCosmicRays:
             bkg = bkg.astype(np.float64)
         if bkg_rms is not None:
             bkg_rms = bkg_rms.astype(np.float64)
-
-        # --- Input Validation ---
-        if not isinstance(self.image, np.ndarray):
-            self.logger.error("Input image must be a numpy array")
-            _empty = np.zeros_like(self.image, dtype=bool)
-            return self.image, _empty, _empty
 
         # --- Read Noise Handling ---
         if readnoise is None:
@@ -560,6 +561,17 @@ class RemoveCosmicRays:
             invar = np.asarray(sigma, dtype=np.float64) ** 2
             self.logger.debug("Computed variance map from total error.")
 
+        # --- Saturation level units ---
+        # astroscrappy/ccdproc convert the data to electrons internally
+        # (gain is passed below), so the saturation threshold they compare
+        # against must also be in electrons.  SATURATE from the header is in
+        # ADU, hence the multiplication by gain.  ``_create_mask`` above used
+        # the ADU value directly, which is correct for the raw frame.
+        try:
+            _satlevel_electrons = float(satlevel) * float(gain)
+        except (TypeError, ValueError):
+            _satlevel_electrons = satlevel
+
         # --- PSF Size Calculation ---
         psf_size = int(np.ceil(3 * psf_fwhm))
         if psf_size % 2 == 0:
@@ -607,7 +619,7 @@ class RemoveCosmicRays:
                     objlim=objlim,
                     gain=gain,
                     readnoise=readnoise,
-                    satlevel=satlevel,
+                    satlevel=_satlevel_electrons,
                     pssl=0.0,
                     niter=4,
                     sepmed=True,
@@ -653,7 +665,7 @@ class RemoveCosmicRays:
                             else np.asarray(invar, np.float32)
                         ),
                         readnoise=readnoise,
-                        satlevel=satlevel,
+                        satlevel=_satlevel_electrons,
                         sepmed=True,
                         cleantype="medmask",
                         fsmode="median",

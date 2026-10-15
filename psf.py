@@ -13374,7 +13374,7 @@ class PSF:
                         log.warning(
                             "PSF fit: %d source(s) have non-finite local background "
                             "(NON_FINITE_LOCALBKG flag); fitting proceeded without background subtraction.",
-                            int(np.sum([2048 & v for v in nonzero_flags])),
+                            int(np.sum([bool(2048 & v) for v in nonzero_flags])),
                         )
             except Exception:
                 pass

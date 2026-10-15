@@ -190,7 +190,7 @@ def from_diff_quality(quality_class: str) -> QualityFlag:
     qc = str(quality_class).lower().strip()
     if qc == "fail":
         return QualityFlag.SUBTRACTION_FAIL
-    elif qc == "downgrade":
+    elif qc in ("downgrade", "downgrade_sparse", "unverified"):
         return QualityFlag.SUBTRACTION_DOWNGRADE
     else:
         return QualityFlag.OK

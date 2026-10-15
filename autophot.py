@@ -185,7 +185,7 @@ def list_parameters(
         m = key_re.match(raw)
         if not m:
             continue
-        indent = len(m.group("indent").replace("\\t", "    "))
+        indent = len(m.group("indent").replace("\t", "    "))
         key = str(m.group("key")).strip()
         rest = str(m.group("rest")).strip()
         value_part, comment_part = rest, ""

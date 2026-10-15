@@ -223,18 +223,21 @@ class AlignmentVerifier:
         
         for x, y in test_points:
             try:
-                sci_world = sci_wcs.all_pix2world([[x]], [[y]], 0)
-                ref_world = ref_wcs.all_pix2world([[x]], [[y]], 0)
+                # Scalar pixel -> world for each frame (ra, dec).
+                sci_world = sci_wcs.all_pix2world(x, y, 0)
+                ref_world = ref_wcs.all_pix2world(x, y, 0)
 
-                # Map back through the *opposite* WCS, so the residual
-                # measures inter-WCS disagreement rather than round-trip error.
-                sci_back_to_ref = ref_wcs.all_world2pix(sci_world[0, 0], sci_world[1, 0], 0)
-                ref_back_to_sci = sci_wcs.all_world2pix(ref_world[0, 0], ref_world[1, 0], 0)
+                # Map the science-frame world position back through the
+                # *reference* WCS, so the residual measures inter-WCS
+                # disagreement rather than round-trip error.
+                sci_back_to_ref = ref_wcs.all_world2pix(
+                    float(sci_world[0]), float(sci_world[1]), 0
+                )
 
-                offset_x = abs(sci_back_to_ref[0] - x)
-                offset_y = abs(sci_back_to_ref[1] - y)
-                offset_total = np.sqrt(offset_x**2 + offset_y**2)
-                
+                offset_x = abs(float(sci_back_to_ref[0]) - float(x))
+                offset_y = abs(float(sci_back_to_ref[1]) - float(y))
+                offset_total = float(np.hypot(offset_x, offset_y))
+
                 offsets.append(offset_total)
                 results['test_points'].append({
                     'position': (x, y),
@@ -327,10 +330,19 @@ class AlignmentVerifier:
         if not results['pixel_alignment']['consistent']:
             score -= 0.25
         
-        # Coordinate accuracy (30% weight)
+        # Coordinate accuracy (30% weight). A WCS that cannot even be
+        # evaluated across the grid (consistent=False) is a hard failure:
+        # apply the full penalty and also expose it as an issue so callers
+        # that inspect only the issues list still see the problem.
         if 'coordinate_accuracy' in results:
-            coord_max_offset = results['coordinate_accuracy'].get('max_offset_pixels', 0)
+            coord = results['coordinate_accuracy']
+            coord_max_offset = coord.get('max_offset_pixels', 0)
             score -= min(coord_max_offset * 0.6, 0.3)  # 0.5 px offset = 0.3 penalty
+            if not coord.get('consistent', True) and coord_max_offset <= 0.5:
+                score -= 0.3
+                issues = results.setdefault('coordinate_accuracy', {}).setdefault('issues', [])
+                if "WCS coordinate grid did not evaluate consistently" not in issues:
+                    issues.append("WCS coordinate grid did not evaluate consistently")
         
         # Resampling quality (15% weight)
         if 'resampling_quality' in results:

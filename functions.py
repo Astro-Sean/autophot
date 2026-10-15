@@ -2418,7 +2418,7 @@ _CONFIG_DEPRECATED_KEYS = {
 # case-insensitive.  A bad value otherwise degrades silently (forceconv maps
 # to REF) or to a mid-run warning (finder, alignment_method).
 _CONFIG_ENUM_VALUES = {
-    "template_subtraction.method": {"sfft", "hotpants", "zogy"},
+    "template_subtraction.method": {"sfft", "hotpants", "zogy", "auto"},
     "template_subtraction.forceconv": {"auto", "ref", "sci"},
     "template_subtraction.zogy_nan_fill": {"median", "zero"},
     "template_subtraction.alignment_method": {
@@ -3443,6 +3443,13 @@ def remove_wcs_from_header(header):
             continue
         remove = False
         for prefix in wcs_prefixes:
+            if prefix == "PC":
+                # PC matrix keys are PC001001 / PC1_1 / PC01_01; the bare
+                # "PC" prefix would also swallow the unrelated PCOUNT keyword.
+                if key.startswith("PC") and len(key) > 2 and key[2].isdigit():
+                    remove = True
+                    break
+                continue
             if key.startswith(prefix):
                 remove = True
                 break
@@ -3577,8 +3584,12 @@ def nan_crop(data, header, cx, cy, ny, nx):
     """
     src_ny, src_nx = data.shape
 
-    # Output array, filled with NaN
-    out = np.full((ny, nx), np.nan, dtype=data.dtype)
+    # Output array, filled with NaN.  Integer input cannot represent NaN, so
+    # promote to float (keeping float32 sources as float32).
+    _out_dtype = (
+        data.dtype if np.issubdtype(data.dtype, np.floating) else np.float32
+    )
+    out = np.full((ny, nx), np.nan, dtype=_out_dtype)
 
     # Source slice that maps into the output.
     # Use (nx-1)/2 (0-based pixel centre) not nx/2 (geometric centre between

@@ -95,9 +95,19 @@ class QualityMetrics:
     quality_score: float = 1.0
     quality_class: str = "unknown"  # "pass", "downgrade", "fail"
     # False when no dipole/bright-star residual check could run - the
-    # classification then caps at "downgrade" because the subtraction's
-    # fidelity is unverified rather than verified clean.
+    # classification then caps at "unverified" because the subtraction's
+    # fidelity was never tested rather than verified clean.
     residual_checks_verified: bool = True
+
+    # Where the subtraction was actually tested: sources whose residual
+    # stamp was evaluated, and how they cover the frame.  A clean score
+    # from checks confined to one corner does not verify the field.
+    n_independent_checked: int = 0
+    checked_coverage_quadrants: int = 0  # populated quadrants, of 4
+    checked_coverage_span: float = 0.0  # min fractional x/y span, 0-1
+    # Verification tier propagated from the alignment stage
+    # (e.g. "affine_verified", "translation_verified", "unverified").
+    alignment_verification: str = ""
 
     # Metadata
     algorithm: str = ""
@@ -114,6 +124,11 @@ class QualityMetrics:
     # Zero when the backend did not solve a delta-basis kernel.
     kernel_noise: float = 0.0
     kernel_negfrac: float = 0.0
+    # Kernel concentration index: |kernel| mass inside r <= FWHM_conv over
+    # the area fraction of that circle.  0 means no measurement (backend did
+    # not realize a kernel); ~1.0 means mass tracks area uniformly - the
+    # solve produced noise with no coherent core; ~1.7+ is a real bump.
+    kernel_conc: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -171,6 +186,18 @@ class QualityConfig:
     pass_threshold: float = 0.75
     downgrade_threshold: float = 0.50
 
+    # Evidence coverage for a full "pass": the residual probes must have
+    # examined at least this many sources, spread over at least this many
+    # image quadrants.  A clean score on fewer/weaker evidence is labelled
+    # "downgrade_sparse" - usable, but limited.
+    min_checked_for_pass: int = 8
+    min_checked_quadrants_pass: int = 2
+
+    # When the alignment stage could not verify its transform at all
+    # (tier "unverified"/"wcs_only"), a clean-looking difference image
+    # cannot certify field-wide fidelity - cap the class below "pass".
+    alignment_unverified_downgrade: bool = True
+
     # Kernel-quality caps: a noise-dominated or majority-negative matching
     # kernel leaves sidelobe residuals at every source, but the sparse
     # checked-source set cannot detect them all.  Cap the class at
@@ -178,6 +205,11 @@ class QualityConfig:
     # (0 disables each cap; only SFFT writes these cards).
     kernel_noise_downgrade: float = 0.15
     kernel_negfrac_downgrade: float = 0.5
+    # Kernel concentration floor: below this the kernel's mass tracks the
+    # stamp area uniformly (no coherent convolution core).  A real
+    # broadening kernel concentrates mass centrally (~1.7+); pure solve
+    # noise sits at ~1.0.  0 disables.
+    kernel_conc_min_downgrade: float = 1.3
 
 
 # ===========================================================================
@@ -223,6 +255,7 @@ def detect_dipoles(
     noise_sigma: float,
     fwhm: float,
     cfg: QualityConfig,
+    return_checked: bool = False,
 ) -> Tuple[int, float, float, float]:
     """Detect dipole residuals around known source positions.
 
@@ -254,9 +287,13 @@ def detect_dipoles(
     (dipole_count, dipole_fraction, mean_amplitude, max_amplitude, n_checked)
         ``n_checked`` is the number of sources actually examined (edge-skipped
         sources are excluded), so the fraction reflects the evaluated sample.
+        With ``return_checked=True`` a sixth element lists the pixel
+        coordinates that were actually checked, for spatial-coverage
+        accounting upstream.
     """
+    _empty = (0, 0.0, 0.0, 0.0, 0, []) if return_checked else (0, 0.0, 0.0, 0.0, 0)
     if not source_positions or noise_sigma <= 0 or fwhm <= 0:
-        return 0, 0.0, 0.0, 0.0, 0
+        return _empty
 
     ny, nx = diff_data.shape
     radius = max(int(cfg.dipole_radius_fwhm * fwhm), 3)
@@ -266,6 +303,7 @@ def detect_dipoles(
     dipole_count = 0
     amplitudes = []
     n_checked = 0
+    checked_xy = []
 
     for x, y in source_positions:
         xi, yi = int(round(x)), int(round(y))
@@ -283,6 +321,7 @@ def detect_dipoles(
         if np.count_nonzero(~stamp_mask & np.isfinite(stamp)) < 8:
             continue
         n_checked += 1
+        checked_xy.append((x, y))
 
         stamp_clean = stamp.copy()
         stamp_clean[stamp_mask] = 0.0
@@ -337,6 +376,11 @@ def detect_dipoles(
     mean_amp = float(np.mean(amplitudes)) if amplitudes else 0.0
     max_amp = float(np.max(amplitudes)) if amplitudes else 0.0
 
+    if return_checked:
+        return (
+            dipole_count, dipole_fraction, mean_amp, max_amp,
+            n_checked, checked_xy,
+        )
     return dipole_count, dipole_fraction, mean_amp, max_amp, n_checked
 
 
@@ -577,7 +621,7 @@ def compute_quality_score(metrics: QualityMetrics, cfg: QualityConfig) -> None:
     # the dipole and bright-star measurements are the only evidence the
     # subtraction actually removed flux, and scoring them 1.0 for
     # "nothing to check" would certify a diff no source ever tested.
-    # Cap at "downgrade" so photometry picks up the configured
+    # Label it "unverified" so photometry picks up the configured
     # systematic instead of a clean bill.  Skipped only when the user
     # deliberately disabled both residual checks.
     metrics.residual_checks_verified = (
@@ -588,11 +632,59 @@ def compute_quality_score(metrics: QualityMetrics, cfg: QualityConfig) -> None:
         and not metrics.residual_checks_verified
         and (cfg.dipole_check_sources or cfg.bright_star_check)
     ):
+        metrics.quality_class = "unverified"
+        logger.info(
+            "Difference-image quality unverified: no residual checks "
+            "were possible (dipole_checked=0, bright_star_count=0) - "
+            "subtraction fidelity was never tested."
+        )
+
+    # A "pass" resting on too few independently checked sources, or on
+    # checks confined to one part of the frame, is sparse evidence.  The
+    # subtraction is usable but the field-wide fidelity is limited -
+    # label it distinctly so downstream consumers can tell "verified
+    # clean" from "clean where we could look".
+    if (
+        metrics.quality_class == "pass"
+        and metrics.residual_checks_verified
+    ):
+        _sparse_reasons = []
+        if metrics.n_independent_checked < cfg.min_checked_for_pass:
+            _sparse_reasons.append(
+                f"only {metrics.n_independent_checked} sources checked "
+                f"(< {cfg.min_checked_for_pass})"
+            )
+        if (
+            cfg.min_checked_quadrants_pass > 0
+            and 0 < metrics.checked_coverage_quadrants
+            < cfg.min_checked_quadrants_pass
+        ):
+            _sparse_reasons.append(
+                f"checks confined to {metrics.checked_coverage_quadrants} "
+                f"quadrant(s) (< {cfg.min_checked_quadrants_pass})"
+            )
+        if _sparse_reasons:
+            metrics.quality_class = "downgrade_sparse"
+            logger.info(
+                "Difference-image quality downgrade_sparse: %s - "
+                "subtraction is usable but validation evidence is limited.",
+                "; ".join(_sparse_reasons),
+            )
+
+    # An unverified alignment cannot underwrite a verified subtraction:
+    # the residual probes may all sit inside the one well-registered
+    # region while the rest of the frame is poorly matched.
+    if (
+        metrics.quality_class == "pass"
+        and cfg.alignment_unverified_downgrade
+        and metrics.alignment_verification in ("unverified", "wcs_only")
+    ):
         metrics.quality_class = "downgrade"
         logger.info(
-            "Difference-image quality downgraded: no residual checks "
-            "were possible (dipole_checked=0, bright_star_count=0) - "
-            "subtraction fidelity is unverified, not verified clean."
+            "Difference-image quality downgraded: alignment verification "
+            "is '%s' - residual checks cannot certify a transform the "
+            "alignment stage could not verify.",
+            metrics.alignment_verification,
         )
 
     # A "pass" on a kernel the solve itself flagged as noise-dominated or
@@ -619,6 +711,15 @@ def compute_quality_score(metrics: QualityMetrics, cfg: QualityConfig) -> None:
                 f"kernel negative-mass fraction "
                 f"{metrics.kernel_negfrac:.2f} > "
                 f"{cfg.kernel_negfrac_downgrade:.2f}"
+            )
+        if (
+            cfg.kernel_conc_min_downgrade > 0
+            and metrics.kernel_conc > 0
+            and metrics.kernel_conc < cfg.kernel_conc_min_downgrade
+        ):
+            _kcap.append(
+                f"kernel concentration {metrics.kernel_conc:.2f} < "
+                f"{cfg.kernel_conc_min_downgrade:.2f}"
             )
         if _kcap:
             metrics.quality_class = "downgrade"
@@ -696,6 +797,7 @@ def assess_difference_image(
     metrics.flux_scale_discrep_pct = float(metadata.get("flux_scale_discrep_pct", 0.0))
     metrics.kernel_noise = float(metadata.get("kernel_noise", 0.0))
     metrics.kernel_negfrac = float(metadata.get("kernel_negfrac", 0.0))
+    metrics.kernel_conc = float(metadata.get("kernel_conc", 0.0) or 0.0)
 
     # --- Global statistics ---
     # Guard against shape mismatch between diff_data and quality_mask
@@ -744,18 +846,24 @@ def assess_difference_image(
     except Exception as e:
         logger.debug("Spatial background computation failed: %s", e)
 
+    metrics.alignment_verification = str(
+        metadata.get("alignment_verification", "") or ""
+    )
+
     # --- Dipole detection ---
+    _checked_xy: List[Tuple[float, float]] = []
     if cfg.dipole_check_sources and source_positions:
         try:
-            n_dip, frac, mean_amp, max_amp, n_chk = detect_dipoles(
+            n_dip, frac, mean_amp, max_amp, n_chk, chk_xy = detect_dipoles(
                 diff_data, source_positions, quality_mask,
-                noise_sigma, fwhm, cfg,
+                noise_sigma, fwhm, cfg, return_checked=True,
             )
             metrics.dipole_count = n_dip
             metrics.dipole_fraction = frac
             metrics.dipole_checked = n_chk
             metrics.dipole_mean_amplitude = mean_amp
             metrics.dipole_max_amplitude = max_amp
+            _checked_xy.extend(chk_xy)
         except Exception as e:
             logger.debug("Dipole detection failed: %s", e)
 
@@ -769,8 +877,39 @@ def assess_difference_image(
             metrics.bright_star_residual_median = med_res
             metrics.bright_star_residual_rms = rms_res
             metrics.bright_star_count = n_bs
+            # Bright-star checks apply the same edge bound as the
+            # measurement; count only positions that could be tested.
+            _ny_bs, _nx_bs = diff_data.shape
+            _outer = max(int(cfg.bright_star_radius_fwhm * fwhm),
+                         int(fwhm) + 2, 5)
+            _checked_xy.extend(
+                (x, y) for x, y in bright_star_positions
+                if _outer <= x < _nx_bs - _outer
+                and _outer <= y < _ny_bs - _outer
+            )
         except Exception as e:
             logger.debug("Bright-star residual measurement failed: %s", e)
+
+    # --- Coverage of the residual checks ---
+    # Where in the frame the subtraction was actually tested.  A handful
+    # of checked sources clustered near the target verifies local
+    # fidelity only; quadrant count and span record that explicitly.
+    metrics.n_independent_checked = len(_checked_xy)
+    try:
+        if _checked_xy:
+            _cx = np.asarray([p[0] for p in _checked_xy], float)
+            _cy = np.asarray([p[1] for p in _checked_xy], float)
+            _ny_c, _nx_c = diff_data.shape
+            _qx = (_cx >= 0.5 * _nx_c).astype(int)
+            _qy = (_cy >= 0.5 * _ny_c).astype(int)
+            metrics.checked_coverage_quadrants = int(
+                np.unique(_qy * 2 + _qx).size
+            )
+            _span_x = float(np.ptp(_cx)) / max(float(_nx_c), 1.0)
+            _span_y = float(np.ptp(_cy)) / max(float(_ny_c), 1.0)
+            metrics.checked_coverage_span = min(_span_x, _span_y)
+    except Exception as e:
+        logger.debug("Checked-source coverage failed: %s", e)
 
     # --- Edge artifacts ---
     try:
@@ -881,6 +1020,11 @@ def write_quality_to_fits_header(
             hdr["DIFFACOR"] = float(metrics.autocorr_peak)
             hdr["DIFFBSR"] = float(metrics.bright_star_residual_rms)
             hdr["DIFFBSN"] = int(metrics.bright_star_count)
+            hdr["DIFFNCHK"] = int(metrics.n_independent_checked)
+            hdr["DIFFNQUA"] = int(metrics.checked_coverage_quadrants)
+            hdr["DIFFCSPN"] = float(metrics.checked_coverage_span)
+            if metrics.alignment_verification:
+                hdr["ALIGVER"] = metrics.alignment_verification
             hdul.flush()
     except Exception as e:
         logger.warning("Failed to write quality keywords to FITS header: %s", e)

@@ -174,7 +174,13 @@ def _recover_psf_mcmc_snr(
     except Exception:
         flux_hat, flux_err = np.nan, np.nan
 
-    snr = np.abs(flux_hat) / flux_err if np.isfinite(flux_hat) and np.isfinite(flux_err) and flux_err > 0 else np.nan
+    # Signed S/N: a negative flux excursion is noise, not a recovery (matches
+    # the signed criterion used by limits.py).
+    snr = (
+        flux_hat / flux_err
+        if np.isfinite(flux_hat) and np.isfinite(flux_err) and flux_err > 0
+        else np.nan
+    )
     return float(snr), float(flux_hat)
 
 
@@ -232,6 +238,20 @@ def main() -> int:
 
     rng = np.random.default_rng(args.seed)
 
+    # Minimal config for the aperture measurement helper.  Aperture.measure
+    # reads fwhm, imageFilter, gain, exposure_time and the aperture radius
+    # from this mapping (see aperture.Aperture.measure).
+    ap_input_yaml = {
+        "fwhm": float(args.fwhm_px),
+        "imageFilter": "R",
+        "gain": float(args.gain),
+        "exposure_time": 1.0,
+        "read_noise": float(args.read_noise),
+        "photometry": {
+            "aperture_radius": max(1.5 * float(args.fwhm_px), 2.0),
+        },
+    }
+
     # Use a cutout for speed.
     cut_half = int(np.ceil(max(20.0, 8.0 * float(args.fwhm_px))))
     cut, xoff, yoff = _extract_stamp(img, args.x, args.y, half=cut_half)
@@ -248,7 +268,7 @@ def main() -> int:
     inj_dist = float(args.inject_radius_fwhm) * float(args.fwhm_px)
     pts = points_in_circum(inj_dist, center=(x_c, y_c), n=int(args.n_sites))
     df_sites = pd.DataFrame({"x_pix": [p[0] for p in pts], "y_pix": [p[1] for p in pts]})
-    ini_ap = Aperture(input_yaml={"fwhm": float(args.fwhm_px), "photometry": {}}, image=cut)
+    ini_ap = Aperture(input_yaml=ap_input_yaml, image=cut)
     df_meas = ini_ap.measure(sources=df_sites, plot=False, background_rms=rms_cut, verbose=0)
     p_det = df_meas.apply(
         lambda row: beta_aperture(n=3.0, flux_aperture=row["flux_AP"], sigma=row["noiseSky"], npix=row["area"]),
@@ -298,7 +318,7 @@ def main() -> int:
                 new_img = cut + psf_img
 
                 # Beta (aperture-based)
-                ap0 = Aperture(input_yaml={"fwhm": float(args.fwhm_px), "photometry": {}}, image=new_img)
+                ap0 = Aperture(input_yaml=ap_input_yaml, image=new_img)
                 mres = ap0.measure(pd.DataFrame({"x_pix": [x_inj], "y_pix": [y_inj]}), plot=False, background_rms=rms_cut, verbose=0)
                 beta_p = beta_aperture(
                     n=3.0,
