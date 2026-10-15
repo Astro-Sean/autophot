@@ -83,3 +83,7 @@ agents.md
 
 # Test suite (local validation only)
 tests/
+
+# Build artifacts
+dist/
+build/
