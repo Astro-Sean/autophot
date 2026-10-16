@@ -3081,6 +3081,142 @@ def _alignment_gate_accept(
     return True
 
 
+def _resolve_target_xy(
+    input_yaml: Optional[Dict[str, Any]],
+    science_shape: Tuple[int, int],
+) -> Optional[Tuple[float, float]]:
+    """Resolve the target position in 0-based pixel coordinates.
+
+    Reads ``target_x_pix``/``target_y_pix`` from ``input_yaml`` (set by
+    main.py from RA/Dec via the image WCS).  Returns None when unavailable
+    or out of bounds.
+    """
+    if not input_yaml:
+        return None
+    tx = input_yaml.get("target_x_pix")
+    ty = input_yaml.get("target_y_pix")
+    if tx is None or ty is None:
+        return None
+    try:
+        tx_f, ty_f = float(tx), float(ty)
+    except (TypeError, ValueError):
+        return None
+    ny, nx = science_shape[:2]
+    if not (np.isfinite(tx_f) and np.isfinite(ty_f)):
+        return None
+    if tx_f < 0 or tx_f >= nx or ty_f < 0 or ty_f >= ny:
+        return None
+    return tx_f, ty_f
+
+
+def _target_xy_available(
+    input_yaml: Optional[Dict[str, Any]],
+    science_shape: Tuple[int, int],
+) -> bool:
+    """Return True when a valid target position is configured."""
+    return _resolve_target_xy(input_yaml, science_shape) is not None
+
+
+def _wcs_offset_at_position(
+    wcs_a, wcs_b, target_xy: Tuple[float, float], radius_px: float = 10.0
+) -> Optional[float]:
+    """Compute the WCS agreement offset (arcsec -> pixels) at a position.
+
+    Samples several points within ``radius_px`` of ``target_xy`` and returns
+    the median angular separation between the two WCS predictions, converted
+    to pixels using the local pixel scale from ``wcs_a``.  Returns None when
+    the computation cannot run.
+
+    Used by reproject target-region validation to detect locally-wrong WCS
+    that would pass a global check but misalign at the transient position.
+    """
+    try:
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+
+        tx, ty = target_xy
+        ny, nx = getattr(wcs_a, "array_shape", None) or (0, 0)
+        if ny == 0 or nx == 0:
+            return None
+
+        # Sample points in a small circle around the target
+        n_pts = 7
+        angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
+        radii = np.linspace(0.0, radius_px, n_pts)
+
+        offsets_arcsec = []
+        for r in radii:
+            for a in angles:
+                x = tx + r * np.cos(a)
+                y = ty + r * np.sin(a)
+                if x < 0 or x >= nx or y < 0 or y >= ny:
+                    continue
+                ra_a, dec_a = wcs_a.all_pix2world(x, y, 0)
+                ra_b, dec_b = wcs_b.all_world2pix(
+                    wcs_b.all_pix2world(x, y, 0)[0],
+                    wcs_b.all_pix2world(x, y, 0)[1],
+                    0,
+                )
+                # Convert wcs_b's sky back through wcs_a to compare pixel positions
+                ra_a2, dec_a2 = wcs_b.all_pix2world(x, y, 0)
+                c_a = SkyCoord(ra_a * u.deg, dec_a * u.deg, frame="icrs")
+                c_b = SkyCoord(ra_a2 * u.deg, dec_a2 * u.deg, frame="icrs")
+                sep = c_a.separation(c_b).to(u.arcsec).value
+                offsets_arcsec.append(sep)
+
+        if not offsets_arcsec:
+            return None
+
+        med_offset_arcsec = float(np.median(offsets_arcsec))
+        # Convert arcsec to pixels using local pixel scale from wcs_a
+        try:
+            scales = wcs_a.proj_plane_pixel_scales()
+            pix_scale_arcsec = float(scales[0]) * 3600.0
+        except Exception:
+            pix_scale_arcsec = 1.0
+        if pix_scale_arcsec <= 0:
+            return None
+        return med_offset_arcsec / pix_scale_arcsec
+    except Exception:
+        return None
+
+
+def _prioritize_sources_near_target(
+    xy: np.ndarray,
+    target_xy: Optional[Tuple[float, float]],
+    radius_px: float,
+) -> np.ndarray:
+    """Return source indices re-ranked so target-near sources come first.
+
+    Sources within ``radius_px`` of the target are ranked before those
+    outside; within each group sources are sorted by distance to target.
+    This lets source-based alignment methods (spalipy, tweakwcs) build a
+    match pool anchored at the transient position when sources are scarce,
+    preventing a distant anchor from dominating the fit and degrading
+    local alignment at the target.
+
+    Parameters
+    ----------
+    xy : (N, 2) array of source (x, y) pixel positions
+    target_xy : (tx, ty) target position, or None (no re-ranking)
+    radius_px : preference radius; sources within this distance are
+        considered "near" the target
+
+    Returns
+    -------
+    (N,) int array of indices into ``xy`` in priority order.
+    """
+    n = len(xy)
+    if target_xy is None or n == 0:
+        return np.arange(n)
+    tx, ty = target_xy
+    d = np.hypot(xy[:, 0] - tx, xy[:, 1] - ty)
+    near = d <= radius_px
+    # Stable sort: near sources first, then by distance within each group
+    order = np.lexsort((d, ~near))
+    return order
+
+
 def verify_common_grid(
     sci_header: fits.Header,
     tpl_header: fits.Header,
@@ -3638,6 +3774,54 @@ def _reproject_template(
         return _FAIL
 
     logger.info("Reproject footprint coverage: %s/%s pixels (%.1f%)", n_footprint, n_total, 100*n_footprint/n_total)
+
+    # ------------------------------------------------------------------
+    # Target-region WCS validation (sparse-field safety net)
+    # ------------------------------------------------------------------
+    # reproject is WCS-based and needs no sources, so it works well in
+    # sparse fields.  But a globally-correct WCS can still be wrong at the
+    # transient position (e.g. local distortion unmodeled by a linear
+    # WCS).  Validate the WCS agreement near the target and reject if the
+    # local offset exceeds the alignment gate, so the cascade falls back
+    # to a source-based method that can measure the true residual there.
+    _target_validated = False
+    _target_offset_px = None
+    try:
+        _ts_cfg_rp = (input_yaml or {}).get("template_subtraction", {}) or {}
+        _rp_validate = bool(_ts_cfg_rp.get("reproject_target_validate", True))
+        _rp_radius_cfg = _ts_cfg_rp.get("reproject_target_radius_px", None)
+        if _rp_validate and _target_xy_available(input_yaml, science_image.shape):
+            _txy = _resolve_target_xy(input_yaml, science_image.shape)
+            if _txy is not None:
+                _rp_radius = float(_rp_radius_cfg) if _rp_radius_cfg is not None else max(3.0 * fwhm_pixels, 0.25 * float(min(science_image.shape)))
+                _target_offset_px = _wcs_offset_at_position(
+                    template_proj, science_proj, _txy, radius_px=_rp_radius
+                )
+                _max_offset_gate = float(
+                    _ts_cfg_rp.get("alignment_max_offset_px", 0.5) or 0.5
+                )
+                scale = max(0.5, min(3.0, float(fwhm_pixels) / 3.0))
+                _max_offset_gate *= scale
+                if _target_offset_px is not None and np.isfinite(_target_offset_px):
+                    _target_validated = True
+                    if _target_offset_px > _max_offset_gate:
+                        logger.warning(
+                            "Reproject target-region validation failed: "
+                            "WCS offset at target (%.2f px) exceeds gate "
+                            "(%.2f px) within radius %.1f px.  Rejecting "
+                            "reproject; cascade will try source-based backends.",
+                            _target_offset_px, _max_offset_gate, _rp_radius,
+                        )
+                        return _FAIL
+                    logger.info(
+                        "Reproject target-region validation passed: "
+                        "WCS offset at target = %.2f px (gate %.2f px, "
+                        "radius %.1f px).",
+                        _target_offset_px, _max_offset_gate, _rp_radius,
+                    )
+    except Exception:
+        _target_validated = False
+        logger.debug("Reproject target-region validation skipped", exc_info=True)
 
     # Mask non-footprint pixels with NaN (preserves chip gaps)
     aligned[~fp_mask] = np.nan
@@ -6144,6 +6328,7 @@ class Templates:
         imageCatalog: Optional[Any] = None,
         center: Optional[Any] = None,
         method: str = "spalipy",
+        target_xy: Optional[Tuple[float, float]] = None,
     ) -> AlignmentResult:
         """
         Align science and template images to a common pixel grid.
@@ -6159,6 +6344,15 @@ class Templates:
         Images are loaded once and passed to module-level helpers to avoid
         redundant FITS I/O. ReprojectConfig and projection headers are built
         once per call and shared across fallback attempts.
+
+        Parameters
+        ----------
+        target_xy : (tx, ty) target position in 0-based science-image pixels,
+            or None to read ``target_x_pix``/``target_y_pix`` from
+            ``input_yaml``.  When provided and the source pool is small
+            (<= ``alignment_sparse_field_threshold``), source-based methods
+            (spalipy, tweakwcs) prefer sources nearest the target for the
+            match pool so local alignment at the transient is optimized.
 
         Returns
         -------
@@ -6213,6 +6407,56 @@ class Templates:
             except (TypeError, ValueError):
                 pass
             _ts_cfg = self.input_yaml.get("template_subtraction", {}) or {}
+
+            # Resolve target position for target-prioritized alignment.
+            # Reads from the explicit parameter or input_yaml (set by main.py
+            # from RA/Dec via the image WCS).  Used by source-based methods
+            # (spalipy, tweakwcs) to bias the match pool toward the transient
+            # position when sources are scarce.
+            _target_xy = target_xy
+            if _target_xy is None:
+                _target_xy = _resolve_target_xy(
+                    self.input_yaml, scienceImage.shape
+                )
+            _ts_cfg_sparse = (
+                self.input_yaml.get("template_subtraction", {}) or {}
+            )
+            _sparse_threshold = int(
+                _ts_cfg_sparse.get("alignment_sparse_field_threshold", 12)
+            )
+            _prioritize_target = bool(
+                _ts_cfg_sparse.get("alignment_prioritize_target", True)
+            )
+            if _target_xy is not None:
+                logger.info(
+                    "Target-prioritized alignment: target at (%.1f, %.1f) px, "
+                    "sparse threshold=%d, prioritize=%s.",
+                    _target_xy[0], _target_xy[1], _sparse_threshold,
+                    _prioritize_target,
+                )
+
+            # Target preference radius for source-based alignment methods.
+            # null = auto: max(3*FWHM, min(frame_dim)/4).  Sources within this
+            # radius are ranked before distant ones when building the match
+            # pool; distant sources remain eligible if the in-radius pool is
+            # too small.
+            _target_radius_cfg = _ts_cfg_sparse.get(
+                "alignment_target_radius_px", None
+            )
+            if _target_radius_cfg is not None:
+                _target_radius_px = float(_target_radius_cfg)
+            else:
+                _min_frame_dim = float(
+                    min(scienceImage.shape[0], scienceImage.shape[1])
+                )
+                _target_radius_px = max(
+                    3.0 * fwhm_pix, 0.25 * _min_frame_dim
+                )
+            if _target_xy is not None:
+                logger.debug(
+                    "Target alignment radius: %.1f px (FWHM=%.2f, min_dim=%.0f).",
+                    _target_radius_px, fwhm_pix, _min_frame_dim,
+                )
 
             # Shared by every reproject attempt below.
             reproject_cfg = ReprojectConfig.from_yaml(self.input_yaml)
@@ -6945,6 +7189,38 @@ class Templates:
                         )
                         return _fail("spalipy", "too few sources")
 
+                    # --- Target-prioritized source ranking (sparse fields) ---
+                    # When sources are scarce and target prioritization is
+                    # enabled, re-rank both detection lists by distance to the
+                    # transient position.  The RA/DEC match below then builds
+                    # the pool from target-near anchors first, so local
+                    # alignment at the transient is optimized even when the
+                    # global match pool is small.  Distant sources remain
+                    # eligible if the in-radius pool is too small.
+                    if (
+                        _prioritize_target
+                        and _target_xy is not None
+                        and min(len(sci_det), len(tpl_det)) <= _sparse_threshold
+                    ):
+                        _tx, _ty = _target_xy
+                        _sci_d = np.hypot(
+                            np.asarray(sci_det["x"], float) - _tx,
+                            np.asarray(sci_det["y"], float) - _ty,
+                        )
+                        _tpl_d = np.hypot(
+                            np.asarray(tpl_det["x"], float) - _tx,
+                            np.asarray(tpl_det["y"], float) - _ty,
+                        )
+                        _sci_order = np.lexsort((_sci_d,))
+                        _tpl_order = np.lexsort((_tpl_d,))
+                        sci_det = sci_det[_sci_order]
+                        tpl_det = tpl_det[_tpl_order]
+                        logger.debug(
+                            "spalipy: re-ranked %d sci / %d tpl detections by "
+                            "distance to target (%.1f, %.1f) px.",
+                            len(sci_det), len(tpl_det), _tx, _ty,
+                        )
+
                     # --- RA/DEC source matching ---
                     # Detect sources in the science image, convert to RA/DEC
                     # using the science WCS, then match with template sources
@@ -7494,6 +7770,24 @@ class Templates:
                             if _n_sources >= _min_detected_for_order.get(_o, 0):
                                 _spline_order = _o
                                 break
+                    # Sparse-field cap: with few matched sources, high-order
+                    # splines overfit the residual field between anchors.
+                    # When target prioritization is active and the pool is
+                    # small (<= sparse threshold), cap at linear (order<=1) so
+                    # the transform is constrained by the target-near anchors
+                    # rather than inventing distortion between them.
+                    if (
+                        _prioritize_target
+                        and _target_xy is not None
+                        and _yaml_spline is None
+                        and _n_sources <= _sparse_threshold
+                    ):
+                        _spline_order = min(_spline_order, 1)
+                        logger.debug(
+                            "spalipy: sparse-field spline cap applied "
+                            "(n_sources=%d <= threshold=%d) -> order=%d.",
+                            _n_sources, _sparse_threshold, _spline_order,
+                        )
 
                     logger.debug(
                         "spalipy: hash_dist=%.4f match_dist=%.2f min_quad_sep=%.1f "
@@ -8033,6 +8327,70 @@ class Templates:
                         logger.info("tweakwcs: insufficient sources for alignment.")
                         return _fail("tweakwcs", "insufficient sources")
 
+                    # --- Sparse-field adaptive parameters ---
+                    # With few sources, fixed tweakwcs thresholds can reject
+                    # all matches: 10 arcsec search radius may find nothing
+                    # when positions are poorly plate-solved, and separation=5
+                    # px is too strict for subpixel centroid noise.
+                    _tweak_n_sources = min(len(sci_cat), len(tpl_cat))
+                    _sparse = _tweak_n_sources <= _sparse_threshold
+                    _sp_pix_scale = float(
+                        self.input_yaml.get("pixel_scale", 1.0) or 1.0
+                    )
+                    _searchrad = float(
+                        _ts_cfg_sparse.get("tweakwcs_searchrad_arcsec", 15.0)
+                    )
+                    if _sparse:
+                        _searchrad = max(_searchrad, 3.0 * fwhm_pix * _sp_pix_scale)
+                        logger.info(
+                            "tweakwcs: sparse field (%d sources) - widening "
+                            "search radius to %.1f arcsec.", _tweak_n_sources,
+                            _searchrad,
+                        )
+                    _separation = float(
+                        _ts_cfg_sparse.get("tweakwcs_separation_px", 3.0)
+                    )
+                    _tolerance = float(
+                        _ts_cfg_sparse.get("tweakwcs_tolerance_px", 2.5)
+                    )
+
+                    # --- Target-prioritized source ranking ---
+                    # Rank sources by distance to target so the match pool is
+                    # anchored near the transient when sources are scarce.
+                    if (
+                        _prioritize_target
+                        and _target_xy is not None
+                        and _sparse
+                    ):
+                        _tx, _ty = _target_xy
+                        _sci_xy_arr = np.column_stack([
+                            np.asarray(sci_cat["x"], float),
+                            np.asarray(sci_cat["y"], float),
+                        ])
+                        _tpl_xy_arr = np.column_stack([
+                            np.asarray(tpl_cat["x"], float),
+                            np.asarray(tpl_cat["y"], float),
+                        ])
+                        _sci_d = np.hypot(_sci_xy_arr[:, 0] - _tx,
+                                          _sci_xy_arr[:, 1] - _ty)
+                        _tpl_d = np.hypot(_tpl_xy_arr[:, 0] - _tx,
+                                          _tpl_xy_arr[:, 1] - _ty)
+                        _sci_order = np.argsort(_sci_d)
+                        _tpl_order = np.argsort(_tpl_d)
+                        sci_cat = Table({
+                            "x": _sci_xy_arr[_sci_order, 0],
+                            "y": _sci_xy_arr[_sci_order, 1],
+                        })
+                        tpl_cat = Table({
+                            "x": _tpl_xy_arr[_tpl_order, 0],
+                            "y": _tpl_xy_arr[_tpl_order, 1],
+                        })
+                        logger.debug(
+                            "tweakwcs: re-ranked %d sci / %d tpl sources by "
+                            "distance to target (%.1f, %.1f) px.",
+                            len(sci_cat), len(tpl_cat), _tx, _ty,
+                        )
+
                     logger.info(
                         "Attempting tweakwcs alignment (sci=%d sources, tpl=%d sources).",
                         len(sci_cat), len(tpl_cat),
@@ -8068,9 +8426,9 @@ class Templates:
 
                     # Match and align: template is aligned to science reference
                     match = XYXYMatch(
-                        searchrad=10.0,
-                        separation=5.0,
-                        tolerance=2.0,
+                        searchrad=_searchrad,
+                        separation=_separation,
+                        tolerance=_tolerance,
                         use2dhist=True,
                     )
                     align_wcs(

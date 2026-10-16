@@ -720,6 +720,20 @@ default_input:
     spalipy_patience_quad_cand: null # int|null --- Stop the affine-seed search after this many consecutive non-improving quad candidates. null=auto (4; spalipy default 2 can abort before ambiguous hash-order lists are explored).
     spalipy_pair_match_dist_cap: 30.0 # float --- Upper bound (px) on spalipy_max_match_dist when the detection lists are mutual RA/DEC pairs.  With a trusted correspondence the inlier radius is sized to 1.5x the measured pair-residual P90 (floored at 0.5xFWHM) so real WCS/SIP disagreement does not veto every affine seed; false matches cannot sneak in because the pairing is already fixed.
     spalipy_pair_min_match_frac: 0.7 # float --- Fraction of the matched-pair pool spalipy must reproduce as inliers when the lists come from the RA/DEC mutual match (floor 4).  Lets one distorted anchor fail without vetoing the seed; ignored for unmatched lists.
+    # --- Target-prioritized alignment (few-source fields) ---
+    # When matched sources are scarce, alignment quality should be optimized
+    # near the transient position rather than globally.  A source-based method
+    # that matches a distant anchor can report excellent global RMS while the
+    # transform is wrong at the target.  These keys bias source selection and
+    # matching toward the target location when the source pool is small.
+    alignment_prioritize_target: True # bool --- When True, source-based alignment methods (spalipy, tweakwcs, scamp+swarp) prefer sources closest to the target position for the match pool.  With few sources this prevents a distant anchor from dominating the fit and degrading local alignment at the transient.  Set False to use all detected sources regardless of distance.
+    alignment_target_radius_px: null # float|null --- Radius (pixels) around the target within which sources are preferred for alignment matching.  null = auto (max(3*FWHM, min(frame_dim)/4)).  Sources outside this radius are still eligible if the pool inside is too small; they are simply ranked after target-near sources.
+    alignment_sparse_field_threshold: 12 # int --- Source count below which sparse-field mode activates: lower min_match, wider detection ladder, relaxed spline-order requirements, and target-weighted source selection take effect.  Below this count the pipeline cannot verify field-wide rotation/scale/distortion and the alignment tier is demoted accordingly.
+    tweakwcs_searchrad_arcsec: 15.0 # float --- tweakwcs cross-match search radius (arcsec).  Widened in sparse-field mode (to max(this, 3*FWHM*scale)) so poorly plate-solved fields still find matches.
+    tweakwcs_separation_px: 3.0 # float --- tweakwcs minimum source separation (pixels) for matching.  Lowered in sparse-field mode so close pairs are not rejected.
+    tweakwcs_tolerance_px: 2.5 # float --- tweakwcs matching tolerance (pixels).  Relaxed in sparse-field mode to tolerate subpixel centroid noise.
+    reproject_target_validate: True # bool --- For WCS-based reproject alignment, validate that the WCS agreement is good near the target position (not just globally).  Rejects reproject when the target-region offset exceeds alignment_max_offset_px, preventing subtraction on a globally-good but locally-wrong WCS.
+    reproject_target_radius_px: null # float|null --- Radius (pixels) around the target for reproject target-region validation.  null = auto (max(3*FWHM, min(frame_dim)/4)).
     skip_resampling: True # bool --- DEPRECATED: use resample_mode instead. If True, maps to resample_mode="wcs_only".
     resample_mode: common_grid # str --- SWarp resampling mode: "common_grid" (both to science grid), "native_scale" (each keeps own pixel scale), "wcs_only" (no resampling).
     science_first_astrometry: False # bool --- If True, distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then use the corrected catalog as astrometric reference for the reference image. Disabled: science-first astrometry adds an extra SCAMP+SWarp step that can introduce overfitting on sparse fields. Direct reference-to-science alignment is more reliable.
