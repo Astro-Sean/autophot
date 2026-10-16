@@ -550,6 +550,21 @@ default_input:
     random_state: 42 # int --- Seed for the MCMC zeropoint fit's walker initialisation and sampler draws. The same image then yields a bit-identical zeropoint and error across runs; set to null for the old non-deterministic behaviour.
     systematic_err: 0.02 # float --- Field-level zeropoint systematic (mag) folded in quadrature into the reported zeropoint_error. The fit statistical error (scatter/sqrt(N)) only sees per-source dispersion; calibration systematics that correlate across the field - reference-catalog ties, bandpass mismatch, spatially correlated flat-field residuals - do not average down with N and would otherwise be invisible. Typical single-epoch ground-based value: 0.01-0.03 mag. Set 0 to disable.
 
+    # --- Magnitude-dependent ZP check ---
+    # Bins calibrators in instrumental magnitude and measures ZP in each bin.
+    # A significant ZP trend vs magnitude indicates detector non-linearity,
+    # an unapplied colour term, or PSF model brightness dependence - the
+    # slope=1 fit assumption fails at some magnitudes.  Flagged via
+    # reliability_flags and the mag_dependent_zp_significant key.
+    magnitude_dependent_zp:
+      enabled: True # bool --- Run the magnitude-dependent ZP trend check.
+      n_bins: 5 # int --- Number of magnitude bins (equal-count).  Fewer bins
+        # for sparse fields; must be >= 2.
+      min_per_bin: 3 # int --- Minimum calibrators per bin to use it.
+      max_zp_trend_mag: 0.05 # float --- Maximum allowed |ZP trend| per
+        # magnitude (mag/mag).  A trend larger than this, or a slope >3 sigma
+        # from zero, flags magnitude-dependent ZP.
+
   cosmic_rays:
     remove_cmrays: False # bool --- Enable cosmic-ray removal (astroscrappy) in preprocessing. Astroscrappy is the single CR detector: it interpolates CR pixels and its detection mask (plus cr_defect_margin_px) is unioned into the defect mask (an interpolated pixel is not real data). MaxiMask's default classes exclude CR for this reason.
     use_lacosmic: False # bool --- Use L.A.Cosmic-style algorithm (if available/configured).
