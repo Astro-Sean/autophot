@@ -19,6 +19,7 @@ import sys
 import time
 import traceback
 import warnings
+from typing import Optional
 
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -1536,6 +1537,186 @@ class Zeropoint:
         return float(rhat)
 
     # -----------------------------------------------------------------------
+    # Magnitude-dependent ZP check
+    # -----------------------------------------------------------------------
+
+    def _magnitude_dependent_zp_check(
+        self,
+        inst_mag: np.ndarray,
+        delta_mag: np.ndarray,
+        inlier_mask: np.ndarray,
+        delta_mag_err: Optional[np.ndarray] = None,
+        n_bins: int = 5,
+        min_per_bin: int = 3,
+        max_zp_trend_mag: float = 0.05,
+    ) -> dict:
+        """
+        Check for magnitude-dependent ZP trends by binning calibrators in
+        instrumental magnitude and measuring ZP in each bin.
+
+        A flat ZP vs m_inst locus (slope consistent with 0) is required for
+        the slope=1 fit assumption.  A significant trend means the zeropoint
+        is magnitude-dependent - the signature of detector non-linearity,
+        an unapplied colour term, or PSF model mismatch that varies with
+        source brightness.  The trend is reported per flux type and folded
+        into reliability flags by the caller.
+
+        Parameters
+        ----------
+        inst_mag : ndarray
+            Instrumental magnitudes of calibrators.
+        delta_mag : ndarray
+            m_cal - m_inst deltas.
+        inlier_mask : ndarray
+            Boolean inlier mask from the ZP fit.
+        delta_mag_err : ndarray or None
+            Per-delta uncertainties (for weighted bin means).
+        n_bins : int
+            Number of magnitude bins (default 5).
+        min_per_bin : int
+            Minimum sources required in a bin to use it (default 3).
+        max_zp_trend_mag : float
+            Maximum allowed |ZP trend| per magnitude (default 0.05 mag/mag).
+            A trend larger than this, or a slope >3 sigma from zero, is
+            flagged as magnitude-dependent ZP.
+
+        Returns
+        -------
+        dict with keys:
+          zps_per_bin : list of (mag_center, zp, zp_err, n) tuples
+          trend_slope : float or nan  (mag ZP change per mag inst)
+          trend_slope_err : float or nan
+          trend_significant : bool
+          flags : list of str
+        """
+        result = {
+            "zps_per_bin": [],
+            "trend_slope": np.nan,
+            "trend_slope_err": np.nan,
+            "trend_significant": False,
+            "flags": [],
+        }
+
+        x = np.asarray(inst_mag, float)
+        y = np.asarray(delta_mag, float)
+        mask = np.asarray(inlier_mask, bool)
+        if delta_mag_err is not None:
+            yerr = np.asarray(delta_mag_err, float)
+        else:
+            yerr = None
+
+        ok = mask & np.isfinite(x) & np.isfinite(y)
+        if yerr is not None:
+            ok &= np.isfinite(yerr) & (yerr > 0)
+        if int(ok.sum()) < min_per_bin * 2:
+            result["flags"].append(
+                f"too few inliers ({int(ok.sum())}) for magnitude-dependent ZP check"
+            )
+            return result
+
+        x_in, y_in = x[ok], y[ok]
+        yerr_in = yerr[ok] if yerr is not None else None
+
+        # Equal-count bins so sparse faint end still gets a bin.
+        n_ok = int(ok.sum())
+        n_bins_eff = min(n_bins, max(2, n_ok // min_per_bin))
+        if n_bins_eff < 2:
+            result["flags"].append(
+                f"too few inliers ({n_ok}) for {n_bins} magnitude bins"
+            )
+            return result
+
+        bin_edges = np.percentile(x_in, np.linspace(0, 100, n_bins_eff + 1))
+        bin_edges[0] = np.nextafter(bin_edges[0], -np.inf)
+        bin_edges[-1] = np.nextafter(bin_edges[-1], np.inf)
+        bin_idx = np.digitize(x_in, bin_edges) - 1
+        bin_idx = np.clip(bin_idx, 0, n_bins_eff - 1)
+
+        bin_centers = []
+        bin_zps = []
+        bin_zp_errs = []
+        bin_ns = []
+
+        for b in range(n_bins_eff):
+            sel = bin_idx == b
+            if int(sel.sum()) < min_per_bin:
+                continue
+            yb = y_in[sel]
+            if yerr_in is not None:
+                eb = yerr_in[sel]
+                w = 1.0 / np.clip(eb**2, 1e-12, None)
+                zp_b = float(np.average(yb, weights=w))
+                zp_err_b = float(np.sqrt(1.0 / w.sum()))
+            else:
+                zp_b = float(np.nanmedian(yb))
+                mad_b = float(median_abs_deviation(yb, nan_policy="omit"))
+                nb = int(sel.sum())
+                zp_err_b = float(1.858 * mad_b / np.sqrt(nb)) if nb >= 2 else mad_b
+                if np.isfinite(zp_err_b) and nb >= 1:
+                    zp_err_b = max(
+                        zp_err_b, max(0.001, 0.02 * max(0, 5 - nb) / 5.0)
+                    )
+            xc = float(np.median(x_in[sel]))
+            bin_centers.append(xc)
+            bin_zps.append(zp_b)
+            bin_zp_errs.append(zp_err_b)
+            bin_ns.append(int(sel.sum()))
+            result["zps_per_bin"].append((xc, zp_b, zp_err_b, int(sel.sum())))
+
+        if len(bin_centers) < 2:
+            result["flags"].append(
+                f"only {len(bin_centers)} populated magnitude bins; "
+                "trend check skipped"
+            )
+            return result
+
+        # Linear trend: ZP vs m_inst.  Weighted by 1/zp_err^2.
+        bc = np.asarray(bin_centers, float)
+        bz = np.asarray(bin_zps, float)
+        be = np.asarray(bin_zp_errs, float)
+        w = 1.0 / np.clip(be**2, 1e-12, None)
+
+        # Weighted least squares: y = a*x + b
+        Aw = np.vstack([bc, np.ones_like(bc)]).T * np.sqrt(w)[:, None]
+        yw = bz * np.sqrt(w)
+        try:
+            coef, _, _, _ = np.linalg.lstsq(Aw, yw, rcond=None)
+            slope, intercept = float(coef[0]), float(coef[1])
+        except np.linalg.LinAlgError:
+            result["flags"].append("magnitude trend fit failed (singular matrix)")
+            return result
+
+        # Slope error from covariance.
+        resid = bz - (slope * bc + intercept)
+        chi2 = float(np.sum(w * resid**2))
+        dof = max(1, len(bc) - 2)
+        sigma2 = chi2 / dof
+        cov = np.linalg.inv(Aw.T @ Aw) * sigma2
+        slope_err = float(np.sqrt(max(cov[0, 0], 0)))
+
+        result["trend_slope"] = slope
+        result["trend_slope_err"] = slope_err
+
+        # Significance: slope != 0 at >3 sigma, or |slope| > max_zp_trend_mag.
+        trend_sig = (
+            abs(slope) / slope_err if slope_err > 0 else np.inf
+        )
+        result["trend_significant"] = bool(
+            (np.isfinite(slope_err) and slope_err > 0 and trend_sig > 3.0)
+            or abs(slope) > max_zp_trend_mag
+        )
+
+        if result["trend_significant"]:
+            result["flags"].append(
+                f"magnitude-dependent ZP: trend={slope:+.4f} +/- "
+                f"{slope_err:.4f} mag/mag "
+                f"({trend_sig:.1f} sigma from zero; "
+                f"|slope| > {max_zp_trend_mag} mag/mag threshold)"
+            )
+
+        return result
+
+    # -----------------------------------------------------------------------
     # MCMC fit helper (default): Bayesian fitting with X,Y errors
     # -----------------------------------------------------------------------
 
@@ -2576,6 +2757,9 @@ class Zeropoint:
                 color_corr_err = np.zeros_like(delta_mag)
                 _median_color = 0.0
                 _color_scatter = 0.0
+                _cal_mag_min = np.nan
+                _cal_mag_max = np.nan
+                _cal_mag_med = np.nan
                 if has_color_term and fixed_color_coeffs is not None:
                     delta_mag, color_corr_err = self._apply_color_correction(
                         delta_mag,
@@ -2598,6 +2782,15 @@ class Zeropoint:
                         _color_scatter = float(
                             median_abs_deviation(_finite_color, nan_policy="omit")
                         )
+                    # Calibrator magnitude range: report so users can tell
+                    # whether the target lies inside the calibration locus.
+                    # Extrapolation beyond the calibrator magnitude range is
+                    # a leading source of zeropoint systematic error.
+                    _inst_finite = inst_mag[np.isfinite(inst_mag)]
+                    if _inst_finite.size > 0:
+                        _cal_mag_min = float(np.min(_inst_finite))
+                        _cal_mag_max = float(np.max(_inst_finite))
+                        _cal_mag_med = float(np.median(_inst_finite))
 
                 # Select fitting method: MCMC (default), ODR, or RANSAC.
                 # Use a per-flux-type copy so the auto-fallback doesn't leak
@@ -2811,6 +3004,38 @@ class Zeropoint:
                 # to the scatter floor, so they enter in quadrature here.
                 # Both components are reported separately below.
                 zp_stat_err = zp_std
+
+                # Colour-term coefficient uncertainty: the colour correction
+                # (delta_corr = delta_mag - slope * colour_diff) shifts the
+                # ZP by -slope * median_colour.  Uncertainty in the fitted
+                # slope/intercept therefore propagates into the ZP error.
+                # Added in quadrature (conservative; coefficient errors are
+                # typically negatively correlated, so this overstates slightly).
+                if (
+                    has_color_term
+                    and fixed_color_coeff_errors is not None
+                    and len(fixed_color_coeff_errors) >= 2
+                    and np.isfinite(_median_color)
+                ):
+                    _ct_intercept_err, _ct_slope_err = (
+                        fixed_color_coeff_errors[0],
+                        fixed_color_coeff_errors[1],
+                    )
+                    _ct_err_sq = _ct_intercept_err**2 + (
+                        _ct_slope_err * _median_color
+                    ) ** 2
+                    _ct_err = float(np.sqrt(max(_ct_err_sq, 0.0)))
+                    if _ct_err > 0 and np.isfinite(zp_std):
+                        zp_std = float(np.hypot(zp_std, _ct_err))
+                        logger.debug(
+                            f"[{flux_type}] ZP error raised by colour-term "
+                            f"coefficient uncertainty: "
+                            f"intercept_err={_ct_intercept_err:.4f}, "
+                            f"slope_err={_ct_slope_err:.4f}, "
+                            f"median_color={_median_color:.3f} -> "
+                            f"+{_ct_err:.4f} mag"
+                        )
+
                 _sys_zp = float(zp_cfg.get("systematic_err", 0.0) or 0.0)
                 if _sys_zp > 0 and np.isfinite(zp_std):
                     zp_std = float(np.hypot(zp_std, _sys_zp))
@@ -2883,6 +3108,9 @@ class Zeropoint:
                         "has_color_term": bool(
                             has_color_term and fixed_color_coeffs is not None
                         ),
+                        "calibrator_mag_min": _cal_mag_min,
+                        "calibrator_mag_max": _cal_mag_max,
+                        "calibrator_mag_median": _cal_mag_med,
                     }
                 )
                 if has_color_term and fixed_color_coeffs is not None:
@@ -3144,6 +3372,56 @@ class Zeropoint:
                         f"{abs(_fs - 1.0) / _fs_e:.1f} sigma"
                     )
 
+                # Magnitude-dependent ZP check: bin calibrators in
+                # instrumental magnitude and measure ZP in each bin.
+                # A significant trend means the slope=1 assumption fails
+                # at some magnitudes (non-linearity, unapplied colour term,
+                # PSF model brightness dependence).
+                _md_cfg = zp_cfg.get("magnitude_dependent_zp", {}) or {}
+                _md_enabled = bool(_md_cfg.get("enabled", True))
+                _md_n_bins = int(_md_cfg.get("n_bins", 5))
+                _md_min_per_bin = int(_md_cfg.get("min_per_bin", 3))
+                _md_max_trend = float(
+                    _md_cfg.get("max_zp_trend_mag", 0.05)
+                )
+                if (
+                    _md_enabled
+                    and np.isfinite(ZP)
+                    and int(np.sum(inlier_short)) >= _md_min_per_bin * 2
+                ):
+                    _md_result = self._magnitude_dependent_zp_check(
+                        inst_mag[inlier_short],
+                        delta_mag[inlier_short],
+                        inlier_short[inlier_short]
+                        if inlier_short.dtype == bool
+                        else inlier_short,
+                        delta_mag_err=None,
+                        n_bins=_md_n_bins,
+                        min_per_bin=_md_min_per_bin,
+                        max_zp_trend_mag=_md_max_trend,
+                    )
+                    fit_params[flux_type]["mag_dependent_zp"] = (
+                        _md_result["trend_slope"]
+                    )
+                    fit_params[flux_type][
+                        "mag_dependent_zp_err"
+                    ] = _md_result["trend_slope_err"]
+                    fit_params[flux_type][
+                        "mag_dependent_zp_significant"
+                    ] = _md_result["trend_significant"]
+                    fit_params[flux_type]["mag_dependent_zp_bins"] = (
+                        _md_result["zps_per_bin"]
+                    )
+                    if _md_result["trend_significant"]:
+                        _zp_flags.append(
+                            "magnitude-dependent ZP: trend "
+                            f"{_md_result['trend_slope']:+.4f} +/- "
+                            f"{_md_result['trend_slope_err']:.4f} "
+                            f"mag/mag ({_md_result['zps_per_bin']})"
+                        )
+                    for _f in _md_result["flags"]:
+                        _zp_flags.append(f"mag-dependent ZP: {_f}")
+
                 # Spatial coherence: a mis-stacked or mis-registered
                 # frame produces a ZP gradient across the detector rather
                 # than a flat 1:1 locus.  Check the inlier residual slope
@@ -3402,6 +3680,96 @@ class Zeropoint:
                             _cross_flag
                         )
                         _fp["reliable"] = False
+
+                # Robust AP/PSF combined zeropoint: when both estimates are
+                # available and agree (or disagree within tolerance), compute
+                # an inverse-variance weighted combination on the common
+                # (PSF/total) flux scale.  The combined ZP is more precise
+                # than either alone and provides a cross-check when one
+                # estimator is quietly biased.
+                _zp_combined = np.nan
+                _zp_combined_err = np.nan
+                _zp_combined_n = 0
+                if np.all(np.isfinite([_zp_ap, _zp_psf, _e_ap, _e_psf])):
+                    # Place both on the PSF (total flux) scale using the
+                    # measured shared-star offset as the bridge.
+                    _zp_ap_on_psf = _zp_ap - _delta_emp if np.isfinite(
+                        _delta_emp
+                    ) else _zp_ap - _ap_corr
+                    _e_ap_on_psf = np.sqrt(_e_ap**2 + _se_delta**2) if np.isfinite(
+                        _se_delta
+                    ) else _e_ap
+                    # Weight by inverse variance; downweight the noisier
+                    # estimator (typically AP on crowded fields).
+                    _w_ap = 1.0 / max(_e_ap_on_psf**2, 1e-12)
+                    _w_psf = 1.0 / max(_e_psf**2, 1e-12)
+                    _w_sum = _w_ap + _w_psf
+                    _zp_combined = (
+                        _w_ap * _zp_ap_on_psf + _w_psf * _zp_psf
+                    ) / _w_sum
+                    _zp_combined_err = float(np.sqrt(1.0 / _w_sum))
+                    _zp_combined_n = 2
+                    # Floor the combined error at the scatter SE so it
+                    # doesn't claim sub-millimag precision from two points.
+                    _d_in_all = []
+                    for _m in ("AP", "PSF"):
+                        _fp2 = fit_params.get(_m) or {}
+                        if "zeropoint_scatter" in _fp2 and np.isfinite(
+                            _fp2["zeropoint_scatter"]
+                        ):
+                            _d_in_all.append(_fp2["zeropoint_scatter"])
+                    if _d_in_all:
+                        _scatter_se = 1.858 * np.median(
+                            _d_in_all
+                        ) / np.sqrt(max(_n_inl, 1))
+                        if np.isfinite(_scatter_se) and _zp_combined_err < _scatter_se:
+                            _zp_combined_err = float(_scatter_se)
+                    fit_params["COMBINED"] = {
+                        "zeropoint": _zp_combined,
+                        "zeropoint_error": _zp_combined_err,
+                        "zeropoint_error_stat": _zp_combined_err,
+                        "zeropoint_scatter": float(
+                            np.median(_d_in_all)
+                        )
+                        if _d_in_all
+                        else np.nan,
+                        "bootstrap_se": np.nan,
+                        "n_eff": np.nan,
+                        "n_sources": int(_n_inl),
+                        "n_inliers": int(_n_inl),
+                        "fit_method": "ap_psf_combined",
+                        "has_color_term": bool(
+                            has_color_term
+                            and fixed_color_coeffs is not None
+                        ),
+                        "ap_zp": _zp_ap,
+                        "ap_zp_err": _e_ap,
+                        "psf_zp": _zp_psf,
+                        "psf_zp_err": _e_psf,
+                        "ap_psf_offset": _delta_emp
+                        if np.isfinite(_delta_emp)
+                        else np.nan,
+                        "ap_psf_offset_err": _se_delta
+                        if np.isfinite(_se_delta)
+                        else np.nan,
+                        "ap_psf_offset_n": int(_okf.sum())
+                        if "_okf" in dir()
+                        else 0,
+                        "reliable": all(
+                            fit_params.get(_m, {}).get("reliable", False)
+                            for _m in ("AP", "PSF")
+                        ),
+                        "reliability_flags": [],
+                    }
+                    # Inherit flags from both components.
+                    for _m in ("AP", "PSF"):
+                        _fp2 = fit_params.get(_m) or {}
+                        if "reliability_flags" in _fp2:
+                            fit_params["COMBINED"][
+                                "reliability_flags"
+                            ].extend(_fp2["reliability_flags"])
+                        if not _fp2.get("reliable", True):
+                            fit_params["COMBINED"]["reliable"] = False
 
             if global_xmins:
                 xr = max(global_xmaxs) - min(global_xmins)
