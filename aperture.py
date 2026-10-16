@@ -55,6 +55,7 @@ from photutils.aperture import (
     AperturePhotometry,
     CircularAperture,
     CircularAnnulus,
+    decode_aperture_flags,
 )
 from photutils.utils import calc_total_error
 from photutils.profiles import CurveOfGrowth
@@ -1206,6 +1207,41 @@ class Aperture:
         annulusIN = float(np.ceil(ap_size + gap_fwhm * fwhm))
         annulusOUT = float(np.ceil(annulusIN + width_fwhm * fwhm))
         
+        # --- Undersampled-data aperture floor ----------------------------------
+        # On undersampled data (FWHM ~2 px) a sub-FWHM aperture throws away a
+        # large fraction of the PSF core and biases fluxes/colors.  Enforce a
+        # minimum radius relative to FWHM so even compact sources are measured
+        # over a meaningful fraction of the core.
+        _min_ap_rad_fwhm = float(
+            phot_cfg.get("min_aperture_radius_fwhm", 0.75)
+        )
+        _min_ap_rad = _min_ap_rad_fwhm * fwhm
+        if ap_size < _min_ap_rad:
+            logger.info(
+                "Aperture radius %.2f px < %.2f x FWHM (%.2f px); "
+                "increasing to %.2f px for undersampled-source robustness.",
+                ap_size, _min_ap_rad_fwhm, fwhm, _min_ap_rad,
+            )
+            ap_size = _min_ap_rad
+
+        # --- Undersampled-data annulus sanity check ----------------------------
+        # A thin annulus (few pixels) gives a noisy/biased background median,
+        # which is especially damaging on undersampled data where the annulus
+        # is naturally small.  Validate the pixel count and widen outward if
+        # needed; do not shrink the aperture.
+        _annulus_pix = int(np.floor(np.pi * (annulusOUT**2 - annulusIN**2)))
+        _ann_min_pix = int(phot_cfg.get("annulus_min_pixels", 20))
+        if _annulus_pix < _ann_min_pix:
+            logger.warning(
+                "Annulus has only %d pixels (< %d minimum) for aperture "
+                "r=%.2f, FWHM=%.2f; background median may be noisy. "
+                "Widening annulus outward.",
+                _annulus_pix, _ann_min_pix, ap_size, fwhm,
+            )
+            annulusOUT = float(
+                np.ceil(np.sqrt(annulusIN**2 + _ann_min_pix / np.pi) + 1)
+            )
+
         area = np.pi * ap_size**2
 
         image_e = self.image * gain
@@ -1236,7 +1272,7 @@ class Aperture:
             "area",
             "ap_flags",
         ]
-        str_cols = ["bkg_std_method", "fail_reason"]
+        str_cols = ["bkg_std_method", "fail_reason", "ap_flags_decoded"]
         for col in float_cols:
             if col not in sources.columns:
                 sources[col] = np.nan
@@ -1327,6 +1363,19 @@ class Aperture:
                 columns={"flux": "aperture_sum", "flux_err": "aperture_sum_err"}
             )
         )
+        # Decode the photutils aperture quality flags into human-readable
+        # names (partial_overlap, masked_pixels, non_finite_data, ...) so
+        # downstream QC and logging can identify bad aperture measurements
+        # instead of interpreting a raw bitmask.  The raw bitmask is kept in
+        # ap_flags; the decoded names ride in ap_flags_decoded.
+        try:
+            _flag_vals = np.asarray(phot["flags"], dtype=int)
+            _flag_names = decode_aperture_flags(_flag_vals)
+            phot["ap_flags_decoded"] = [
+                "; ".join(names) for names in _flag_names
+            ]
+        except Exception:
+            phot["ap_flags_decoded"] = [""] * len(phot)
         # Use unweighted (center) pixel inclusion for consistency across the pipeline.
         # This avoids fractional-weight median biases and makes AP/PSF background
         # conventions comparable on difference images.
