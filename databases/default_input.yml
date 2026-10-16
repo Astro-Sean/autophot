@@ -358,6 +358,22 @@ default_input:
     solve_field_crpix_center: False # bool --- If True, pass astrometry.net `--crpix-center` (forces CRPIX at image center).
     refine_after_solve: False # bool --- If True, run an additional WCS refinement pass after a successful solve.
 
+    # --- Solved-WCS sanity validation ---
+    # After solve-field produces a WCS, reject it as a catastrophic
+    # mis-solve if its pixel scale or sky position disagrees too strongly
+    # with the expected scale / requested position.
+    solved_scale_tolerance: 2.0 # float --- Allowed ratio solved_scale / expected_scale. Reject the solve if outside [1/tol, tol]. Set to 0 to disable scale validation.
+    solved_position_tolerance_arcsec: null # float|null --- Max allowed offset (arcsec) of the solved CRVAL from the requested (target_ra, target_dec). null uses wcs.search_radius. Set to 0 to disable position validation.
+    solve_field_downsample_max: 8 # int --- If solve-field fails at the configured downsample, retry with progressively coarser downsampling (x2) up to this value to rescue large images.
+
+    # --- Linear WCS refinement from matched stars ---
+    # Robust least-squares refit of the solved WCS linear terms (center,
+    # scale, rotation) from solve-field matched (pixel, sky) pairs with
+    # sigma-clipping.  astropy 8 removed WCS.fit_wcs_from_points, so a full
+    # SIP polynomial refit is unavailable; this refits linear terms only and
+    # leaves solve-field's distortion (SIP/PV) terms in place.
+    refit_wcs_from_points: True # bool --- If True and solve-field matched stars are available, refit the solved WCS linear terms from the matched points.
+
     scamp_exe_loc: null # str|null --- Optional explicit path to `scamp` executable.
     sextractor_exe_loc: null # str|null --- Optional explicit path to SExtractor executable.
     scamp_astref_catalog: GAIA-DR3 # str --- Reference catalog name for SCAMP (if used).

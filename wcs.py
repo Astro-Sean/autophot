@@ -107,6 +107,18 @@ def _wcs_cfg_int(cfg: dict, key: str, default: int) -> int:
     return int(v)
 
 
+def _wcs_cfg_bool(cfg: dict, key: str, default: bool = False) -> bool:
+    """Read *key* from *cfg* as a bool, tolerating YAML bools and "true/false"
+    strings.  Returns *default* when the key is absent or None."""
+    v = cfg.get(key, default)
+    if v is None:
+        return bool(default)
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+    return int(v)
+
+
 @contextmanager
 def silence_astropy_wcs_info():
     """
@@ -2031,6 +2043,119 @@ class WCSSolver:
         logger.warning("SCAMP unavailable/failed after solve-field; keeping solve-field WCS.")
         return np.nan
 
+    # --- Robust linear plate-model refinement from matched (pixel, sky) points ---
+    def _fit_wcs_from_points(
+        self,
+        x_pix: np.ndarray,
+        y_pix: np.ndarray,
+        ra_deg: np.ndarray,
+        dec_deg: np.ndarray,
+    ) -> dict | None:
+        """
+        Fit a linear tangent-plane WCS (CD + CRPIX + CRVAL) from matched
+        (pixel, sky) pairs using a sigma-clipped least-squares plate model.
+
+        astropy 8 removed ``WCS.fit_wcs_from_points``, so a full SIP
+        polynomial refit is unavailable here.  This method robustly refits
+        the *linear* terms (center, scale, rotation) which is the dominant
+        source of residual offset when solve-field's pixel-scale hint or a
+        small zero-point offset biases the solution.  Distortion (SIP/PV)
+        terms already present in the solved header are left untouched.
+
+        Returns a dict with ``keywords`` (CD1_1, CD1_2, CD2_1, CD2_2,
+        CRPIX1, CRPIX2, CRVAL1, CRVAL2), ``n_used``, and ``rms_arcsec``, or
+        ``None`` when there are too few points or the fit fails.
+        """
+        x = np.asarray(x_pix, dtype=float)
+        y = np.asarray(y_pix, dtype=float)
+        ra = np.asarray(ra_deg, dtype=float)
+        dec = np.asarray(dec_deg, dtype=float)
+        try:
+            keep = np.isfinite(x) & np.isfinite(y) & np.isfinite(ra) & np.isfinite(dec)
+            keep &= (ra >= 0.0) & (ra <= 360.0) & (dec >= -90.0) & (dec <= 90.0)
+            x, y, ra, dec = x[keep], y[keep], ra[keep], dec[keep]
+            if x.size < 3:
+                return None
+
+            xc, yc = float(np.median(x)), float(np.median(y))
+            ra0, dec0 = float(np.median(ra)), float(np.median(dec))
+            cos_dec0 = float(np.cos(np.deg2rad(dec0)))
+            if cos_dec0 <= 1e-6:
+                cos_dec0 = 1e-6
+
+            # Tangent-plane sky offsets (degrees) about (ra0, dec0).
+            xi = (ra - ra0) * cos_dec0   # xi ~ dRA * cos(dec)
+            eta = dec - dec0             # eta ~ dDec
+            dx = x - xc
+            dy = y - yc
+
+            idx = np.arange(x.size)
+            for _iteration in range(3):
+                if idx.size < 3:
+                    return None
+                # Design matrix [1, dx, dy] -> [xi, eta].
+                A = np.column_stack([np.ones(idx.size), dx[idx], dy[idx]])
+                try:
+                    coef_xi, _, _, _ = np.linalg.lstsq(A, xi[idx], rcond=None)
+                    coef_eta, _, _, _ = np.linalg.lstsq(A, eta[idx], rcond=None)
+                except np.linalg.LinAlgError:
+                    return None
+                pred_xi = A @ coef_xi
+                pred_eta = A @ coef_eta
+                # Residual arcsec on the sky (projected by cos(dec0) for RA).
+                res_ra = (pred_xi - xi[idx]) / cos_dec0
+                res_dec = pred_eta - eta[idx]
+                res_arcsec = np.hypot(res_ra * cos_dec0, res_dec) * 3600.0
+                sigma = float(np.nanmedian(np.abs(res_arcsec - np.nanmedian(res_arcsec))) / 0.6745 * 1.4826)
+                if not np.isfinite(sigma) or sigma <= 0:
+                    break
+                good = res_arcsec <= 3.0 * sigma
+                if good.all():
+                    idx = np.arange(x.size)
+                    break
+                idx = idx[good]
+            if idx.size < 3:
+                return None
+
+            # Final fit on the retained inliers.
+            A = np.column_stack([np.ones(idx.size), dx[idx], dy[idx]])
+            coef_xi, _, _, _ = np.linalg.lstsq(A, xi[idx], rcond=None)
+            coef_eta, _, _, _ = np.linalg.lstsq(A, eta[idx], rcond=None)
+            pred_xi = A @ coef_xi
+            pred_eta = A @ coef_eta
+            res_ra = (pred_xi - xi[idx]) / cos_dec0
+            res_dec = pred_eta - eta[idx]
+            rms_arcsec = float(
+                np.sqrt(np.mean((res_ra * cos_dec0) ** 2 + res_dec**2)) * 3600.0
+            )
+
+            # CD maps pixel -> tangent-plane degrees (xi, eta).
+            cd11, cd12 = float(coef_xi[1]), float(coef_xi[2])
+            cd21, cd22 = float(coef_eta[1]), float(coef_eta[2])
+            # CRVAL is the sky at CRPIX=(xc, yc) where dx=dy=0.
+            crval1 = ra0 + float(coef_xi[0]) / cos_dec0
+            crval2 = dec0 + float(coef_eta[0])
+
+            return {
+                "keywords": {
+                    "CD1_1": cd11,
+                    "CD1_2": cd12,
+                    "CD2_1": cd21,
+                    "CD2_2": cd22,
+                    "CRPIX1": xc,
+                    "CRPIX2": yc,
+                    "CRVAL1": crval1,
+                    "CRVAL2": crval2,
+                },
+                "n_used": int(idx.size),
+                "rms_arcsec": rms_arcsec,
+            }
+        except Exception as exc:
+            log_warning_from_exception(
+                logger, "_fit_wcs_from_points failed", exc
+            )
+            return None
+
     # --- Plate Solve ---
     def plate_solve(
         self,
@@ -2899,94 +3024,172 @@ class WCSSolver:
                         "No solution (%s) with tweak order %s", label, tweak_order
                     )
 
-            # First attempt: use the pixel-scale hint when available
-            _attempt_solve_with_args(
-                scale_args,
-                label=(
-                    "with pixel-scale hint"
-                    if (pixel_scale and pixel_scale > 0)
-                    else "wide scale"
-                ),
-            )
+            # --- Progressive downsample retry: rescue large images that time
+            # out at the configured downsample by retrying with coarser
+            # sampling (each level solves a smaller image). ---
+            _downsample_levels = []
+            _ds = max(1, int(downsample))
+            _max_ds = int(wcs_cfg.get("solve_field_downsample_max", 8) or 8)
+            while _ds <= _max_ds:
+                if _ds not in _downsample_levels:
+                    _downsample_levels.append(_ds)
+                _ds *= 2
+            if not _downsample_levels:
+                _downsample_levels = [max(1, int(downsample))]
+            # Split common_args around its --downsample value so we can rebuild
+            # it with a different downsample level on each retry.
+            _ds_marker = common_args.index("--downsample")
+            _common_args_prefix = common_args[: _ds_marker + 1]
+            _common_args_suffix = common_args[_ds_marker + 2 :]
 
-            # If still not solved and we had a pixel-scale hint, drop it and retry once.
-            if not os.path.isfile(wcs_file) and (pixel_scale and pixel_scale > 0):
-                logger.warning(
-                    "WCS not solved with pixel-scale hint (%.4g arcsec/pix). Dropping pixel scale constraint and retrying with 0.1--5 arcsec/pix.",
-                    float(pixel_scale),
+            _solved = False
+
+            def _try_level(_level: int) -> bool:
+                """Run the full solve-field attempt sequence at one downsample.
+
+                Rebuilds ``common_args`` with the requested --downsample so the
+                verify / blind / no-SExtractor retries all run at that level.
+                """
+                nonlocal common_args
+                _saved_common_args = common_args
+                common_args = (
+                    _common_args_prefix + [str(_level)] + _common_args_suffix
                 )
-                scale_args = scale_args_wide
-                scale_only_args = scale_only_args_wide
-                _attempt_solve_with_args(
-                    scale_args, label="wide scale (dropped pixel-scale hint)"
-                )
-
-            # --- Step 3: Retry without SExtractor ---
-            if not os.path.isfile(wcs_file):
-                logger.warning("Retrying without SExtractor")
-                for tweak_order in tweak_orders:
+                _sa = scale_args
+                _soa = scale_only_args
+                try:
+                    # Step 1: solve with (optional) SExtractor, tweak orders.
+                    _label = (
+                        "with pixel-scale hint"
+                        if (pixel_scale and pixel_scale > 0)
+                        else "wide scale"
+                    )
+                    _attempt_solve_with_args(_sa, label=_label)
                     if os.path.isfile(wcs_file):
-                        break
-                    logger.info(
-                        "Attempting WCS solve without SExtractor (tweak order %s)",
-                        tweak_order,
-                    )
-                    args_no_sex = (
-                        common_args
-                        + ["--tweak-order", str(tweak_order), "--no-verify"]
-                        + scale_args
-                    )
-                    if self._run_solve_field(
-                        args_no_sex, wcs_file, timeout_sec, astrometry_log_fpath
+                        return True
+                    # Step 1b: drop the pixel-scale hint and retry wide.
+                    if not os.path.isfile(wcs_file) and (
+                        pixel_scale and pixel_scale > 0
                     ):
-                        logger.log(
-                            STATUS,
-                            "WCS solved without SExtractor (tweak order %s)",
-                            tweak_order,
+                        logger.warning(
+                            "WCS not solved with pixel-scale hint "
+                            "(%.4g arcsec/pix). Dropping pixel scale constraint "
+                            "and retrying with 0.1--5 arcsec/pix.",
+                            float(pixel_scale),
                         )
-                        break
-                    logger.warning(
-                        "No solution without SExtractor (tweak order %s)", tweak_order
-                    )
+                        _sa = scale_args_wide
+                        _soa = scale_only_args_wide
+                        _attempt_solve_with_args(
+                            _sa, label="wide scale (dropped pixel-scale hint)"
+                        )
+                        if os.path.isfile(wcs_file):
+                            return True
+                    # Step 3: retry without SExtractor.
+                    if not os.path.isfile(wcs_file):
+                        logger.warning("Retrying without SExtractor")
+                        for tweak_order in tweak_orders:
+                            if os.path.isfile(wcs_file):
+                                return True
+                            logger.info(
+                                "Attempting WCS solve without SExtractor "
+                                "(tweak order %s)", tweak_order
+                            )
+                            args_no_sex = (
+                                common_args
+                                + [
+                                    "--tweak-order",
+                                    str(tweak_order),
+                                    "--no-verify",
+                                ]
+                                + _sa
+                            )
+                            if self._run_solve_field(
+                                args_no_sex,
+                                wcs_file,
+                                timeout_sec,
+                                astrometry_log_fpath,
+                            ):
+                                logger.log(
+                                    STATUS,
+                                    "WCS solved without SExtractor "
+                                    "(tweak order %s)", tweak_order,
+                                )
+                                return True
+                            logger.warning(
+                                "No solution without SExtractor "
+                                "(tweak order %s)", tweak_order
+                            )
+                    # Step 4: blind solve (no position constraint).
+                    if (
+                        not os.path.isfile(wcs_file)
+                        and ra is not None
+                        and dec is not None
+                    ):
+                        logger.warning(
+                            "Retrying with blind solve (no position constraint)."
+                        )
+                        for tweak_order in tweak_orders:
+                            if os.path.isfile(wcs_file):
+                                return True
+                            logger.info(
+                                "Blind solve with tweak order %s", tweak_order
+                            )
+                            args_blind = (
+                                common_args
+                                + [
+                                    "--tweak-order",
+                                    str(tweak_order),
+                                    "--no-verify",
+                                ]
+                                + _soa
+                            )
+                            if use_sextractor and sextractor_cmd:
+                                args_blind += [
+                                    "--use-source-extractor",
+                                    "--source-extractor-path",
+                                    sextractor_cmd,
+                                    "--source-extractor-config",
+                                    str(config_file),
+                                    "--x-column",
+                                    "XWIN_IMAGE",
+                                    "--y-column",
+                                    "YWIN_IMAGE",
+                                    "--sort-column",
+                                    "MAG_AUTO",
+                                    "--sort-ascending",
+                                ]
+                            if self._run_solve_field(
+                                args_blind,
+                                wcs_file,
+                                timeout_sec,
+                                astrometry_log_fpath,
+                            ):
+                                logger.log(
+                                    STATUS,
+                                    "WCS solved with blind solve "
+                                    "(tweak order %s)", tweak_order,
+                                )
+                                return True
+                            logger.warning(
+                                "No solution with blind solve "
+                                "(tweak order %s)", tweak_order
+                            )
+                    return False
+                finally:
+                    common_args = _saved_common_args
 
-            # --- Step 4: If position-constrained solve failed, retry blind (no RA/Dec/radius) ---
-            if not os.path.isfile(wcs_file) and ra is not None and dec is not None:
-                logger.warning("Retrying with blind solve (no position constraint).")
-                for tweak_order in tweak_orders:
-                    if os.path.isfile(wcs_file):
-                        break
-                    logger.info("Blind solve with tweak order %s", tweak_order)
-                    args_blind = (
-                        common_args
-                        + ["--tweak-order", str(tweak_order), "--no-verify"]
-                        + scale_only_args
-                    )
-                    if use_sextractor and sextractor_cmd:
-                        args_blind += [
-                            "--use-source-extractor",
-                            "--source-extractor-path",
-                            sextractor_cmd,
-                            "--source-extractor-config",
-                            str(config_file),
-                            "--x-column",
-                            "XWIN_IMAGE",
-                            "--y-column",
-                            "YWIN_IMAGE",
-                            "--sort-column",
-                            "MAG_AUTO",
-                            "--sort-ascending",
-                        ]
-                    if self._run_solve_field(
-                        args_blind, wcs_file, timeout_sec, astrometry_log_fpath
-                    ):
-                        logger.log(
-                            STATUS,
-                            "WCS solved with blind solve (tweak order %s)", tweak_order,
-                        )
-                        break
+            for _level in _downsample_levels:
+                if _level != downsample:
                     logger.warning(
-                        "No solution with blind solve (tweak order %s)", tweak_order
+                        "WCS not solved at downsample %s; retrying with "
+                        "downsample %s.",
+                        downsample if downsample else _level // 2,
+                        _level,
                     )
+                if _try_level(_level):
+                    _solved = True
+                    break
+
 
             # --- If WCS still not solved, try SCAMP as fallback (e.g. crowded or IR fields) ---
             if not os.path.isfile(wcs_file):
@@ -3027,6 +3230,121 @@ class WCSSolver:
                     if os.path.isfile(f):
                         os.remove(f)
                 logger.warning("\tCould not solve WCS - returning NaN")
+                return np.nan
+
+            # --- Solved-WCS sanity validation: reject catastrophic mis-solves ---
+            # A solve-field exit code of 0 is not sufficient: the solver can
+            # converge to the wrong scale or the wrong sky position.  Validate
+            # the solved WCS against the expected pixel scale and, when a
+            # position constraint was used, the requested sky position before
+            # trusting it.
+            _solved_scale_ok = True
+            _solved_pos_ok = True
+            try:
+                with fits.open(wcs_file) as _vh:
+                    _solved_hdr = _vh[0].header
+                _solved_wcs = get_wcs(_solved_hdr)
+                if _solved_wcs is not None:
+                    _scale = pixel_area_scale_arcsec(
+                        _solved_wcs,
+                        (
+                            int(_solved_hdr.get("NAXIS2", 0) or 0),
+                            int(_solved_hdr.get("NAXIS1", 0) or 0),
+                        ),
+                    )
+                    _scale_tol = float(
+                        wcs_cfg.get("solved_scale_tolerance", 2.0) or 2.0
+                    )
+                    _expected_scale = float(pixel_scale) if pixel_scale else 0.0
+                    if (
+                        _scale_tol > 0
+                        and np.isfinite(_scale)
+                        and _scale > 0
+                        and _expected_scale
+                        and _expected_scale > 0
+                    ):
+                        _ratio = _scale / _expected_scale
+                        if not (1.0 / _scale_tol <= _ratio <= _scale_tol):
+                            _solved_scale_ok = False
+                            logger.warning(
+                                "Solved WCS pixel scale (%.4g arcsec/pix) "
+                                "differs from expected (%.4g arcsec/pix) by "
+                                "ratio %.2f (tolerance %.1f); rejecting solve.",
+                                _scale,
+                                _expected_scale,
+                                _ratio,
+                                _scale_tol,
+                            )
+                    # Position check: only meaningful when a position
+                    # constraint was passed to solve-field (--ra/--dec/--radius).
+                    _pos_tol = wcs_cfg.get("solved_position_tolerance_arcsec", None)
+                    if _pos_tol is None:
+                        _pos_tol = (
+                            float(radius_deg) * 3600.0 if radius_deg else 0.0
+                        )
+                    _pos_tol = float(_pos_tol or 0.0)
+                    if (
+                        _pos_tol > 0
+                        and ra is not None
+                        and dec is not None
+                        and np.isfinite(ra)
+                        and np.isfinite(dec)
+                    ):
+                        _solved_crval1 = float(
+                            _solved_hdr.get("CRVAL1", np.nan) or np.nan
+                        )
+                        _solved_crval2 = float(
+                            _solved_hdr.get("CRVAL2", np.nan) or np.nan
+                        )
+                        if np.isfinite(_solved_crval1) and np.isfinite(
+                            _solved_crval2
+                        ):
+                            _dra = (
+                                (_solved_crval1 - float(ra) + 180.0) % 360.0
+                            ) - 180.0
+                            _ddec = _solved_crval2 - float(dec)
+                            _pos_off = np.hypot(
+                                _dra * np.cos(np.deg2rad(float(dec))), _ddec
+                            ) * 3600.0
+                            if _pos_off > _pos_tol:
+                                _solved_pos_ok = False
+                                logger.warning(
+                                    "Solved WCS position is %.1f arcsec from "
+                                    "requested position (tolerance %.1f arcsec); "
+                                    "rejecting solve.",
+                                    _pos_off,
+                                    _pos_tol,
+                                )
+            except Exception as _val_exc:
+                log_warning_from_exception(
+                    logger, "Solved-WCS sanity validation skipped", _val_exc
+                )
+            if not (_solved_scale_ok and _solved_pos_ok):
+                logger.warning(
+                    "Solved WCS failed sanity validation; treating solve as failed."
+                )
+                try:
+                    _ = get_wcs(self.header)
+                    logger.warning(
+                        "Solved WCS rejected; falling back to original header WCS."
+                    )
+                    for f in [
+                        new_fits_temp,
+                        scamp_temp,
+                        os.path.join(dirname, "none"),
+                    ]:
+                        if os.path.isfile(f):
+                            os.remove(f)
+                    return self.header
+                except Exception:
+                    pass
+                for f in [
+                    new_fits_temp,
+                    scamp_temp,
+                    os.path.join(dirname, "none"),
+                ]:
+                    if os.path.isfile(f):
+                        os.remove(f)
                 return np.nan
 
             # --- Clean up temporary files ---
@@ -3189,6 +3507,72 @@ class WCSSolver:
                                 float(p95_in),
                                 float(med_sv),
                                 float(p95_sv),
+                            )
+                    # --- Robust linear WCS refinement from matched stars ---
+                    # Refit the solved WCS linear terms (center, scale, rotation)
+                    # from the solve-field matched (pixel, sky) pairs with
+                    # sigma-clipping.  astropy 8 removed WCS.fit_wcs_from_points,
+                    # so a full SIP polynomial refit is unavailable here; we
+                    # refit linear terms only and leave solve-field's distortion
+                    # (SIP/PV) terms in place.  This corrects small zero-point /
+                    # scale / rotation biases in the solved WCS.
+                    if (
+                        matched_points_for_refine is not None
+                        and not keep_input_wcs_full
+                        and _wcs_cfg_bool(
+                            wcs_cfg, "refit_wcs_from_points", True
+                        )
+                    ):
+                        _fit = self._fit_wcs_from_points(
+                            matched_points_for_refine[0],
+                            matched_points_for_refine[1],
+                            matched_points_for_refine[2],
+                            matched_points_for_refine[3],
+                        )
+                        if _fit is not None:
+                            _before = np.nan
+                            _after = np.nan
+                            try:
+                                _before_wcs = get_wcs(wcs_header)
+                                if _before_wcs is not None:
+                                    _before = (
+                                        _best_wcs_match_separation_stats_arcsec(
+                                            _before_wcs,
+                                            matched_points_for_refine[0],
+                                            matched_points_for_refine[1],
+                                            matched_points_for_refine[2],
+                                            matched_points_for_refine[3],
+                                        )[0]
+                                    )
+                            except Exception:
+                                _before = np.nan
+                            for _fk, _fv in _fit["keywords"].items():
+                                wcs_header[_fk] = _fv
+                            wcs_header["CTYPE1"] = "RA---TAN"
+                            wcs_header["CTYPE2"] = "DEC--TAN"
+                            _normalize_projection_codes(
+                                wcs_header, inplace=True
+                            )
+                            try:
+                                _after_wcs = get_wcs(wcs_header)
+                                if _after_wcs is not None:
+                                    _after = (
+                                        _best_wcs_match_separation_stats_arcsec(
+                                            _after_wcs,
+                                            matched_points_for_refine[0],
+                                            matched_points_for_refine[1],
+                                            matched_points_for_refine[2],
+                                            matched_points_for_refine[3],
+                                        )[0]
+                                    )
+                            except Exception:
+                                _after = np.nan
+                            logger.info(
+                                "WCS linear refinement from %d matched stars: "
+                                "rms %.3f -> %.3f arcsec.",
+                                _fit["n_used"],
+                                float(_before),
+                                float(_after),
                             )
                     ctype1_in = str(self.header.get("CTYPE1", ""))
                     ctype2_in = str(self.header.get("CTYPE2", ""))
