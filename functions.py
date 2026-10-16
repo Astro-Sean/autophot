@@ -2431,6 +2431,7 @@ _CONFIG_ENUM_VALUES = {
     },
     "alignment.reproject_method": {"exact", "adaptive", "interp"},
     "wcs.solver": {"astrometry", "astrometry.net", "scamp"},
+    "background.fwhm_unit": {"pixels", "arcsec"},
     "source_detection.finder": {
         "dao",
         "daofind",

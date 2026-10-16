@@ -833,16 +833,36 @@ class BackgroundSubtractor:
     # Saturation mask (NEW - bright star ghosts)
     # -------------------------------------------------------------------------
     def _make_saturation_mask(
-        self, image: np.ndarray, saturate: float, dilate_radius: int = 8
+        self,
+        image: np.ndarray,
+        saturate: float,
+        dilate_radius: int = 8,
+        saturate_frac: float | None = None,
     ) -> np.ndarray:
         """
         Mask saturated pixels and their immediate surroundings.
+
+        Parameters
+        ----------
+        saturate_frac : float or None
+            Fraction of ``saturate`` at or above which a pixel is flagged
+            saturated.  Defaults to ``background.saturation_mask_frac`` from
+            config (0.90), or 0.90 when unset.
         """
         # A missing or nonpositive level cannot delimit real saturation;
         # treating it literally would flag every pixel as saturated.
         if not np.isfinite(saturate) or saturate <= 0:
             return np.zeros(image.shape, dtype=bool)
-        sat_mask = image >= 0.90 * saturate
+        if saturate_frac is None:
+            cfg_bkg = (
+                (self.config.get("background", {}) or {})
+                if isinstance(self.config, dict)
+                else {}
+            )
+            saturate_frac = float(
+                cfg_bkg.get("saturation_mask_frac", 0.90)
+            )
+        sat_mask = image >= saturate_frac * saturate
         if np.any(sat_mask):
             selem = _disk_structuring_element(dilate_radius)
             sat_mask = binary_dilation(sat_mask, structure=selem, iterations=1)
@@ -920,7 +940,7 @@ class BackgroundSubtractor:
         self,
         image: np.ndarray,
         saturate: float,
-        saturate_frac: float = 0.90,
+        saturate_frac: float | None = None,
         bleed_half_length: int = 100,
         use_principal_axis: bool = True,
         follow_curved: bool = True,
@@ -933,9 +953,25 @@ class BackgroundSubtractor:
         streak along a path that can curve (e.g. tracking drift), by stepping
         toward the brightest pixel in a narrow cone ahead. Handles non-straight
         trails. If False, use straight-line extension along principal axes.
+
+        Parameters
+        ----------
+        saturate_frac : float or None
+            Fraction of ``saturate`` defining the saturated core.  Defaults to
+            ``background.saturation_mask_frac`` from config (0.90), or 0.90
+            when unset.
         """
         if not np.isfinite(saturate) or saturate <= 0 or not np.any(np.isfinite(image)):
             return np.zeros_like(image, dtype=bool)
+        cfg_bkg = (
+            (self.config.get("background", {}) or {})
+            if isinstance(self.config, dict)
+            else {}
+        )
+        if saturate_frac is None:
+            saturate_frac = float(
+                cfg_bkg.get("saturation_mask_frac", 0.90)
+            )
         sat_core = np.asarray(image >= (saturate_frac * saturate), dtype=bool)
         if not np.any(sat_core):
             return np.zeros_like(image, dtype=bool)
@@ -961,6 +997,27 @@ class BackgroundSubtractor:
         labels, n_comp = ndi_label(sat_core, structure=struct)
 
         blob_slices = find_objects(labels, int(n_comp))
+        # Performance guard: on crowded frames with many saturated stars the
+        # per-blob streak-following loop is O(n_blobs * max_steps).  Process
+        # only the largest blobs (a streak's core is its brightest part) and
+        # skip the rest; small saturated cores without trails add little
+        # background bias.
+        max_blobs = int(cfg_bkg.get("max_defect_blobs", 500))
+        if max_blobs > 0 and len(blob_slices) > max_blobs:
+            # Rank blobs by pixel count (largest first) and truncate.
+            sized = []
+            for j, sl in enumerate(blob_slices):
+                if sl is None:
+                    continue
+                sub_lbl = labels[sl]
+                sized.append((int((sub_lbl == j + 1).sum()), j))
+            sized.sort(reverse=True)
+            keep_idx = {j for _, j in sized[:max_blobs]}
+            blob_slices = [sl for j, sl in enumerate(blob_slices) if j in keep_idx]
+            self.logger.debug(
+                "Saturation streak mask: capping to %d of %d blobs (largest first).",
+                len(blob_slices), n_comp,
+            )
         for idx, sl in enumerate(blob_slices, start=1):
             if sl is None:
                 continue
@@ -1082,12 +1139,35 @@ class BackgroundSubtractor:
         if not np.any(bright):
             return np.zeros_like(img, dtype=bool)
 
+        # Config for blob-count cap (shared with streak/column masks).
+        cfg_bkg = (
+            (self.config.get("background", {}) or {})
+            if isinstance(self.config, dict)
+            else {}
+        )
+        max_blobs = int(cfg_bkg.get("max_defect_blobs", 500))
+
         struct = np.ones((3, 3), dtype=int)
         labels, n_comp = ndi_label(bright, structure=struct)
         trail_mask = np.zeros_like(img, dtype=bool)
         n_trails = 0
         min_area = max(3, min_area_px)
         blob_slices = find_objects(labels, int(n_comp))
+        # Performance guard: cap blobs processed (largest first).
+        if max_blobs > 0 and len(blob_slices) > max_blobs:
+            sized = []
+            for j, sl in enumerate(blob_slices):
+                if sl is None:
+                    continue
+                sub_lbl = labels[sl]
+                sized.append((int((sub_lbl == j + 1).sum()), j))
+            sized.sort(reverse=True)
+            keep_idx = {j for _, j in sized[:max_blobs]}
+            blob_slices = [sl for j, sl in enumerate(blob_slices) if j in keep_idx]
+            self.logger.debug(
+                "Satellite trail mask: capping to %d of %d blobs (largest first).",
+                len(blob_slices), n_comp,
+            )
         for idx, sl in enumerate(blob_slices, start=1):
             if sl is None:
                 continue
@@ -1170,12 +1250,35 @@ class BackgroundSubtractor:
         if not np.any(bright):
             return np.zeros_like(img, dtype=bool)
 
+        # Config for blob-count cap (shared with streak/trail masks).
+        cfg_bkg = (
+            (self.config.get("background", {}) or {})
+            if isinstance(self.config, dict)
+            else {}
+        )
+        max_blobs = int(cfg_bkg.get("max_defect_blobs", 500))
+
         struct = np.ones((3, 3), dtype=int)
         labels, n_comp = ndi_label(bright, structure=struct)
         col_mask = np.zeros_like(img, dtype=bool)
         n_cols = 0
         tol = np.radians(float(axis_tolerance_deg))
         blob_slices = find_objects(labels, int(n_comp))
+        # Performance guard: cap blobs processed (largest first).
+        if max_blobs > 0 and len(blob_slices) > max_blobs:
+            sized = []
+            for j, sl in enumerate(blob_slices):
+                if sl is None:
+                    continue
+                sub_lbl = labels[sl]
+                sized.append((int((sub_lbl == j + 1).sum()), j))
+            sized.sort(reverse=True)
+            keep_idx = {j for _, j in sized[:max_blobs]}
+            blob_slices = [sl for j, sl in enumerate(blob_slices) if j in keep_idx]
+            self.logger.debug(
+                "Defect column mask: capping to %d of %d blobs (largest first).",
+                len(blob_slices), n_comp,
+            )
         for idx, sl in enumerate(blob_slices, start=1):
             if sl is None:
                 continue
@@ -1942,8 +2045,24 @@ class BackgroundSubtractor:
             self.logger.info(f"NaN pixels: {n_nan} ({100.0 * n_nan / total:.2f}%)")
 
         # Derive FWHM in pixels (if provided); otherwise allow helper to estimate.
+        # background.fwhm_unit declares whether the input FWHM is already in
+        # pixels or in arcsec (needs pixel_scale to convert).  If pixel_scale
+        # is missing and the unit is arcsec, fall back to treating FWHM as
+        # pixels and log a warning rather than silently mis-sizing the mesh.
         if fwhm is not None:
-            fwhm_pixels = fwhm / pixel_scale if pixel_scale else fwhm
+            fwhm_unit = str(
+                cfg_bkg.get("fwhm_unit", "pixels")
+            ).strip().lower()
+            if fwhm_unit == "arcsec" and pixel_scale:
+                fwhm_pixels = float(fwhm) / float(pixel_scale)
+            elif fwhm_unit == "arcsec" and not pixel_scale:
+                self.logger.warning(
+                    "FWHM given in arcsec but no pixel_scale available; "
+                    "treating FWHM as pixels (mesh sizing may be off)."
+                )
+                fwhm_pixels = float(fwhm)
+            else:
+                fwhm_pixels = float(fwhm)
         else:
             fwhm_pixels = None
         fwhm_pixels = self._cap_fwhm_for_background_mesh(fwhm_pixels)
@@ -2010,14 +2129,26 @@ class BackgroundSubtractor:
             _eff_sat = self._estimate_effective_saturation(image, _bkg_med, _bkg_std)
             if np.isfinite(_eff_sat) and _eff_sat > 0:
                 _saturate_for_mask = _eff_sat
-                # Also update config so the streak mask uses the same value
+                # Also update config so the streak mask uses the same value.
+                # SIDE EFFECT: this mutates self.config["saturate"] for the
+                # lifetime of the BackgroundSubtractor instance; a second
+                # remove() call on a different image will see the updated
+                # value.  Callers that reuse one subtractor across images
+                # with different saturation levels should pass a fresh config
+                # dict or reset self.config["saturate"] between calls.
                 self.config["saturate"] = _eff_sat
                 self.logger.info(
                     f"Using data-driven saturation ({_eff_sat:.1f} ADU) for "
                     f"saturation/streak masks (header value was {_saturate_for_mask:.1e})."
                 )
 
-        sat_mask = self._make_saturation_mask(image, _saturate_for_mask)
+        sat_mask = self._make_saturation_mask(
+            image,
+            _saturate_for_mask,
+            saturate_frac=float(
+                cfg_bkg.get("saturation_mask_frac", 0.90)
+            ),
+        )
         # ---- Saturation streak / bleed mask (avoid regions from saturated stars) ----
         bleed_half = int(self.config.get("saturate_streak_bleed_half_length", 100))
         use_pa = self.config.get("saturate_streak_principal_axis", True)
@@ -2027,7 +2158,9 @@ class BackgroundSubtractor:
             streak_mask = self._make_saturation_streak_mask(
                 image,
                 _saturate_for_mask,
-                saturate_frac=0.90,
+                saturate_frac=float(
+                    cfg_bkg.get("saturation_mask_frac", 0.90)
+                ),
                 bleed_half_length=bleed_half,
                 use_principal_axis=use_pa,
                 follow_curved=follow_curved,
@@ -2254,6 +2387,9 @@ class BackgroundSubtractor:
         # Ensure background surface preserves NaNs from original image (chip gaps)
         bkg_surface = np.where(np.isnan(image), np.nan, bkg_surface)
         sub = image - bkg_surface
+        # SIDE EFFECT: may downgrade self.config["saturate"] to 1e12 (effectively
+        # disabling saturation clipping) when the background median is within
+        # 5% of the saturation level.  See _check_saturation().
         self.config["saturate"] = self._check_saturation(
             bkg_median, self.config["saturate"]
         )
