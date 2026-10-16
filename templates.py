@@ -17259,12 +17259,24 @@ class Templates:
                         exe,
                     )
                     return False
+                if not os.access(exe, os.X_OK):
+                    logger.warning(
+                        "HOTPANTS executable '%s' is not executable.",
+                        exe,
+                    )
+                    return False
             else:
                 which = shutil.which(exe)
                 if which is None:
                     logger.warning(
                         "HOTPANTS executable '%s' not found on PATH. Install HOTPANTS and/or set template_subtraction.hotpants_exe_loc to its full path.",
                         exe,
+                    )
+                    return False
+                if not os.access(which, os.X_OK):
+                    logger.warning(
+                        "HOTPANTS executable '%s' found on PATH but is not executable.",
+                        which,
                     )
                     return False
                 resolved_exe = which
@@ -17350,6 +17362,25 @@ class Templates:
                 )
             rss = ensure_odd(max(3 * r, 11))
 
+            # Kernel polynomial order: HOTPANTS only supports low orders
+            # safely; higher orders overfit noise and can introduce ring
+            # artifacts that mimic transient residuals.  Clamp to a safe
+            # range regardless of the value computed upstream.
+            HOTPANTS_MAX_KO = 5
+            try:
+                _ko = int(kernel_order) if kernel_order is not None else 0
+            except (TypeError, ValueError):
+                _ko = 0
+            if _ko < 0:
+                logger.warning("HOTPANTS: negative kernel_order clamped to 0.")
+                _ko = 0
+            elif _ko > HOTPANTS_MAX_KO:
+                logger.warning(
+                    "HOTPANTS: kernel_order %d clamped to max %d to avoid "
+                    "kernel overfit.", kernel_order, HOTPANTS_MAX_KO,
+                )
+                _ko = HOTPANTS_MAX_KO
+            kernel_order = _ko
 
             # Guard against non-finite background statistics (e.g. when every
             # pixel is masked upstream): NaN lower-limit arguments would make
@@ -17378,12 +17409,26 @@ class Templates:
             # Per-image masks (-imi/-tmi) when the caller built them; a
             # shared mask misattributes science-only defects to the
             # template and vice versa.
-            imi_abs = (
+            imi_candidate = (
                 os.path.abspath(sci_mask_loc) if sci_mask_loc else mask_abs
             )
-            tmi_abs = (
+            tmi_candidate = (
                 os.path.abspath(tpl_mask_loc) if tpl_mask_loc else mask_abs
             )
+            # Only pass masks that actually exist: HOTPANTS fails with an
+            # opaque error when -imi/-tmi point to a missing file.
+            imi_abs = imi_candidate if os.path.isfile(imi_candidate) else None
+            tmi_abs = tmi_candidate if os.path.isfile(tmi_candidate) else None
+            if imi_abs is None:
+                logger.warning(
+                    "HOTPANTS: science mask %s missing; omitting -imi.",
+                    imi_candidate,
+                )
+            if tmi_abs is None:
+                logger.warning(
+                    "HOTPANTS: template mask %s missing; omitting -tmi.",
+                    tmi_candidate,
+                )
 
             # Stamp positions for the kernel fit.  The target must never be
             # a stamp position: a bright transient in the kernel solution
@@ -17516,10 +17561,6 @@ class Templates:
                 str(template_readnoise),
                 "-ir",
                 str(science_readnoise),
-                "-imi",
-                imi_abs,
-                "-tmi",
-                tmi_abs,
                 "-n",
                 "i",
                 "-c",
@@ -17548,6 +17589,10 @@ class Templates:
                 args += ["-ini", str(scienceNoise)]
             if templateNoise:
                 args += ["-tni", str(templateNoise)]
+            if imi_abs:
+                args += ["-imi", imi_abs]
+            if tmi_abs:
+                args += ["-tmi", tmi_abs]
 
             log_path = scienceDir / f"HOTPANTS_{Path(base_name).stem}.txt"
             with open(log_path, "w") as lf:
@@ -17560,6 +17605,39 @@ class Templates:
                     timeout=timeout_sec,
                 )
             clean_subprocess_log(log_path)
+
+            # Post-execution validation: HOTPANTS can exit 0 yet write an
+            # empty or all-invalid difference image.  Reject it here so the
+            # caller falls back / records failure rather than passing a bad
+            # product to photometry.
+            if (
+                not os.path.isfile(differenceFpath)
+                or os.path.getsize(differenceFpath) == 0
+            ):
+                logger.warning(
+                    "HOTPANTS: no difference output written; "
+                    "treating as failure."
+                )
+                return False
+            try:
+                _out_data = fits.getdata(differenceFpath)
+            except Exception as _gd_e:
+                logger.warning(
+                    "HOTPANTS: difference output unreadable: %s", _gd_e
+                )
+                return False
+            if _out_data is None or _out_data.size == 0:
+                logger.warning(
+                    "HOTPANTS: difference output is empty; "
+                    "treating as failure."
+                )
+                return False
+            if not np.isfinite(_out_data).any():
+                logger.warning(
+                    "HOTPANTS: difference output has no finite pixels; "
+                    "treating as failure."
+                )
+                return False
 
             logger.info("HOTPANTS subtraction succeeded")
 
