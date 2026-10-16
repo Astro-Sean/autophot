@@ -67,7 +67,8 @@ from photutils.background import (Background2D, BiweightLocationBackground,
                                   BiweightScaleBackgroundRMS, MedianBackground)
 
 from photutils.segmentation import detect_sources, detect_threshold
-from scipy.ndimage import binary_dilation, find_objects, gaussian_filter
+from scipy.ndimage import (binary_dilation, distance_transform_edt,
+                           find_objects, gaussian_filter)
 from scipy.ndimage import label as ndi_label
 from scipy.ndimage import uniform_filter
 
@@ -165,6 +166,47 @@ _MAXIMASK_CLASS_COLORS = {
 def _disk_structuring_element(r: int) -> np.ndarray:
     y, x = np.ogrid[-r : r + 1, -r : r + 1]
     return (x * x + y * y) <= r * r
+
+
+def _smooth_for_detection(
+    data: np.ndarray, sigma: float, fallback_kernel=None
+) -> np.ndarray:
+    """Gaussian-smooth *data* for source detection.
+
+    scipy's ``gaussian_filter`` is separable and matches the astropy 2-D
+    Gaussian convolution used previously to a small fraction of the pixel
+    noise, while being several times faster on megapixel frames (the gap
+    widens for large FWHM values).  Non-finite pixels are handled with the
+    same weight-normalized scheme astropy uses for
+    ``nan_treatment='interpolate'`` (convolution of the zeroed data and of
+    the finite-pixel weight map), so chip gaps and padded regions cannot
+    leak zeros into neighbouring detections.
+
+    ``fallback_kernel`` is the equivalent astropy ``Gaussian2DKernel``; it
+    is only used if the scipy path fails.
+    """
+    try:
+        finite = np.isfinite(data)
+        if finite.all():
+            return gaussian_filter(data, sigma=sigma, mode="nearest")
+        num = gaussian_filter(
+            np.where(finite, data, 0.0), sigma=sigma, mode="nearest"
+        )
+        den = gaussian_filter(finite.astype(np.float64), sigma=sigma, mode="nearest")
+        work = num / np.maximum(den, 1e-12)
+        work[~finite] = np.nan
+        return work
+    except Exception:
+        if fallback_kernel is None:
+            raise
+        return convolve(
+            data,
+            fallback_kernel,
+            boundary="extend",
+            nan_treatment="interpolate",
+            preserve_nan=True,
+            normalize_kernel=True,
+        )
 
 
 # Removed dead code _constant_region_mask function - was never used in the codebase
@@ -696,15 +738,10 @@ class BackgroundSubtractor:
                 ):
                     try:
                         # Smooth only for detection; do not change the data used
-                        # for Background2D later.
-                        work = convolve(
-                            residual,
-                            kern,
-                            boundary="extend",
-                            nan_treatment="interpolate",
-                            preserve_nan=True,
-                            normalize_kernel=True,
-                        )
+                        # for Background2D later.  scipy's separable filter is
+                        # ~10x faster than the astropy 2-D convolution at
+                        # equal smoothing; the astropy kernel is the fallback.
+                        work = _smooth_for_detection(residual, sigma, kern)
                     except Exception:
                         work = residual
 
@@ -730,17 +767,32 @@ class BackgroundSubtractor:
                 # least their cores) while preserving background pixels for
                 # Background2D.  In dense fields this prevents the mask from
                 # consuming most of the image.
+                #
+                # One O(N) Euclidean distance transform from the nearest source
+                # pixel replaces the repeated O(N * footprint) binary_dilation
+                # passes: dilating by a disk of radius R is exactly the set of
+                # pixels within R of a source, so each budget candidate is a
+                # cheap threshold of this one map (identical for single
+                # iterations; a sub-pixel approximation at the rim for the
+                # multi-iteration candidates).
                 target_frac = max_mask_fraction
                 best_new_mask = None
                 cur_r = r_dilate
                 cur_iters = dilate_iterations
+                dist_to_src = (
+                    distance_transform_edt(~new_mask) if np.any(new_mask) else None
+                )
+                n_mask_px = int(np.count_nonzero(mask))
                 while cur_r >= 1:
-                    trial_selem = _disk_structuring_element(cur_r)
-                    trial_mask = binary_dilation(
-                        new_mask, structure=trial_selem, iterations=cur_iters
-                    )
-                    trial_combined = mask | trial_mask
-                    trial_frac = trial_combined.mean()
+                    if dist_to_src is None:
+                        trial_mask = new_mask
+                        trial_frac = (n_mask_px + 0) / mask.size
+                    else:
+                        trial_mask = dist_to_src <= float(cur_r * cur_iters)
+                        trial_frac = (
+                            n_mask_px
+                            + int(np.count_nonzero(trial_mask & ~mask))
+                        ) / mask.size
                     if trial_frac <= target_frac:
                         best_new_mask = trial_mask
                         break
@@ -1113,6 +1165,8 @@ class BackgroundSubtractor:
         min_aspect_ratio: float = 5.0,
         min_area_px: int = 100,
         dilate_iterations: int = 2,
+        image_median: float | None = None,
+        image_sigma: float | None = None,
     ) -> np.ndarray:
         """
         Mask satellite trails: long, thin linear features that need not be saturated.
@@ -1128,10 +1182,20 @@ class BackgroundSubtractor:
         """
         img = np.asarray(image, dtype=float)
         ny, nx = img.shape
-        med = float(np.nanmedian(img))
-        # Biweight scale resists the bright sources this mask is trying to
-        # find and stays continuous on heavily quantized (compressed) images.
-        sig = biweight_sky_sigma(img) if np.any(np.isfinite(img)) else 0.0
+        # image_median / image_sigma let remove() share one full-image
+        # statistic pair with the other defect masks; computed here when a
+        # caller invokes the mask standalone.
+        med = (
+            float(image_median)
+            if image_median is not None
+            else float(np.nanmedian(img))
+        )
+        if image_sigma is not None:
+            sig = float(image_sigma)
+        else:
+            # Biweight scale resists the bright sources this mask is trying to
+            # find and stays continuous on heavily quantized (compressed) images.
+            sig = biweight_sky_sigma(img) if np.any(np.isfinite(img)) else 0.0
         if sig <= 0:
             return np.zeros_like(img, dtype=bool)
         thresh = med + n_sigma * sig
@@ -1226,6 +1290,8 @@ class BackgroundSubtractor:
         max_width_px: float = 3.0,
         axis_tolerance_deg: float = 20.0,
         dilate_iterations: int = 1,
+        image_median: float | None = None,
+        image_sigma: float | None = None,
     ) -> np.ndarray:
         """
         Mask hot-pixel columns/rows: short, narrow, axis-aligned ridges that
@@ -1241,8 +1307,17 @@ class BackgroundSubtractor:
         mask.
         """
         img = np.asarray(image, dtype=float)
-        med = float(np.nanmedian(img))
-        sig = biweight_sky_sigma(img) if np.any(np.isfinite(img)) else 0.0
+        # image_median / image_sigma let remove() share one full-image
+        # statistic pair with the other defect masks.
+        med = (
+            float(image_median)
+            if image_median is not None
+            else float(np.nanmedian(img))
+        )
+        if image_sigma is not None:
+            sig = float(image_sigma)
+        else:
+            sig = biweight_sky_sigma(img) if np.any(np.isfinite(img)) else 0.0
         if sig <= 0:
             return np.zeros_like(img, dtype=bool)
         thresh = med + n_sigma * sig
@@ -1616,6 +1691,8 @@ class BackgroundSubtractor:
         image: np.ndarray,
         mask: np.ndarray,
         fwhm_pixels: float | None = None,
+        image_median: float | None = None,
+        image_sigma: float | None = None,
     ) -> dict:
         """
         Classify the field regime and derive background parameters.
@@ -1624,6 +1701,12 @@ class BackgroundSubtractor:
         - bright_frac      : fraction of pixels > median + 4 * MAD  (crowding)
         - large_scale_ratio: fraction of variance on large spatial scales
                              (diffuse nebulosity / strong gradients)
+
+        ``image_median`` / ``image_sigma`` let ``remove()`` supply the
+        already-computed full-image median and biweight sigma when the
+        classified pixel subset (finite, unmasked) is identical to the one
+        those statistics were measured on; this skips a redundant
+        ``biweight_scale`` pass over every megapixel.
         """
         finite = np.isfinite(image) & ~mask
         if not np.any(finite):
@@ -1639,8 +1722,12 @@ class BackgroundSubtractor:
             }
 
         data = image[finite]
-        med = np.nanmedian(data)
-        scatter = biweight_sky_sigma(data)
+        if image_median is not None and image_sigma is not None:
+            med = float(image_median)
+            scatter = float(image_sigma)
+        else:
+            med = np.nanmedian(data)
+            scatter = biweight_sky_sigma(data)
         if not np.isfinite(scatter) or scatter <= 0:
             scatter = np.nanstd(data)
             if not np.isfinite(scatter) or scatter <= 0:
@@ -2033,6 +2120,7 @@ class BackgroundSubtractor:
             image = np.where(np.abs(image) < zero_threshold, np.nan, image)
 
         # ---- Build combined mask ----
+        _user_mask_provided = mask is not None
         if mask is None:
             mask = np.zeros(image.shape, dtype=bool)
 
@@ -2067,6 +2155,44 @@ class BackgroundSubtractor:
             fwhm_pixels = None
         fwhm_pixels = self._cap_fwhm_for_background_mesh(fwhm_pixels)
 
+        # ---- Shared full-image sky statistics ----
+        # The regime classifier, the data-driven saturation estimate and the
+        # trail / defect-column masks all threshold on the same full-image
+        # median + biweight sigma.  biweight_scale is the most expensive
+        # scalar statistic on megapixel frames, so compute the pair once and
+        # pass it down instead of paying for it in every stage.
+        _saturate_cfg_raw = self.config["saturate"]
+        _needs_data_saturation = not (
+            np.isfinite(_saturate_cfg_raw) and _saturate_cfg_raw <= 0
+        ) and (not np.isfinite(_saturate_cfg_raw) or _saturate_cfg_raw > 1e8)
+        skip_trail = fast_mode and bool(
+            cfg_bkg.get("fast_mode_skip_trail_mask", True)
+        )
+        run_trail = bool(self.config.get("mask_satellite_trails", True)) and not (
+            skip_trail
+        )
+        run_columns = bool(cfg_bkg.get("mask_defect_columns", True))
+        # The classifier measures the median/sigma of the finite, unmasked
+        # pixels; that subset equals the finite pixels when the caller passed
+        # no mask and no exact-zero pixels exist, so it can reuse the pair.
+        _share_classify_stats = (not _user_mask_provided) and not np.any(zero_mask)
+        image_med = image_sig = None
+        if (
+            _needs_data_saturation
+            or run_trail
+            or run_columns
+            or _share_classify_stats
+        ):
+            _finite_vals = image[np.isfinite(image)]
+            if _finite_vals.size:
+                image_med = float(np.median(_finite_vals))
+                image_sig = biweight_sky_sigma(_finite_vals)
+            else:
+                # No usable sky pixels (e.g. fully non-finite frame); keep
+                # neutral values so callers degrade gracefully.
+                image_med = 0.0
+                image_sig = 0.0
+
         # Classify field regime (sparse / crowded / nebulous) and derive
         # dynamic parameters for masking and Background2D. If config marks
         # the image as crowded, use crowded regime so background is crowd-safe.
@@ -2074,6 +2200,8 @@ class BackgroundSubtractor:
             image,
             mask | nan_mask | zero_mask,
             fwhm_pixels=fwhm_pixels,
+            image_median=image_med if _share_classify_stats else None,
+            image_sigma=image_sig if _share_classify_stats else None,
         )
         if self.config.get("photometry", {}).get("crowded_field", False):
             regime_params = {
@@ -2121,12 +2249,10 @@ class BackgroundSubtractor:
             )
             _saturate_for_mask = np.inf
             _saturate_disabled = True
-        if not _saturate_disabled and (
-            not np.isfinite(_saturate_for_mask) or _saturate_for_mask > 1e8
-        ):
-            _bkg_med = float(np.nanmedian(image[np.isfinite(image)]))
-            _bkg_std = biweight_sky_sigma(image)
-            _eff_sat = self._estimate_effective_saturation(image, _bkg_med, _bkg_std)
+        if _needs_data_saturation:
+            _eff_sat = self._estimate_effective_saturation(
+                image, image_med, image_sig
+            )
             if np.isfinite(_eff_sat) and _eff_sat > 0:
                 _saturate_for_mask = _eff_sat
                 # Also update config so the streak mask uses the same value.
@@ -2171,8 +2297,7 @@ class BackgroundSubtractor:
 
         # ---- Satellite trail mask (long thin ridges, no saturation required) ----
         trail_mask = np.zeros_like(image, dtype=bool)
-        skip_trail = fast_mode and bool(cfg_bkg.get("fast_mode_skip_trail_mask", True))
-        if self.config.get("mask_satellite_trails", True) and not skip_trail:
+        if run_trail:
             trail_n_sigma = float(self.config.get("satellite_trail_n_sigma", 3.0))
             trail_min_length = int(self.config.get("satellite_trail_min_length_px", 40))
             trail_min_aspect = float(
@@ -2186,6 +2311,8 @@ class BackgroundSubtractor:
                 min_aspect_ratio=trail_min_aspect,
                 min_area_px=trail_min_area,
                 dilate_iterations=2,
+                image_median=image_med,
+                image_sigma=image_sig,
             )
         elif skip_trail:
             self.logger.debug(
@@ -2200,7 +2327,7 @@ class BackgroundSubtractor:
         # them from cfg_bkg (not self.config) is required for user settings
         # to take effect.
         column_mask = np.zeros_like(image, dtype=bool)
-        if cfg_bkg.get("mask_defect_columns", True):
+        if run_columns:
             column_mask = self._make_defect_column_mask(
                 image,
                 n_sigma=float(cfg_bkg.get("defect_column_n_sigma", 3.0)),
@@ -2213,6 +2340,8 @@ class BackgroundSubtractor:
                     cfg_bkg.get("defect_column_axis_tolerance_deg", 20.0)
                 ),
                 dilate_iterations=1,
+                image_median=image_med,
+                image_sigma=image_sig,
             )
 
         # ---- MaxiMask defect mask (optional deep-learning stage) ----
@@ -2301,19 +2430,24 @@ class BackgroundSubtractor:
 
         self.logger.debug("box_size=%s  filter_size=%s", box_size, filter_size)
 
-        # ---- Global fallback statistics ----
-        stats_maxiters = 3 if fast_mode else 5
-        gmean, gmed, gstd = sigma_clipped_stats(
-            image,
-            sigma=3.0,
-            mask=mask,
-            cenfunc=np.nanmedian,
-            stdfunc=biweight_stdfunc,
-            maxiters=stats_maxiters,
-        )
-        self.logger.debug(
-            f"Global stats: mean={gmean:.3e} med={gmed:.3e} std={gstd:.3e}"
-        )
+        # ---- Global fallback statistics (diagnostic only) ----
+        # This sigma-clipped biweight pass costs ~1 s on 3 MP frames and its
+        # results feed only the debug log; the retry chain inside
+        # _estimate_background computes its own statistics when it needs a
+        # flat fallback.  Skip it entirely unless DEBUG logging is active.
+        if self.logger.isEnabledFor(logging.DEBUG):
+            stats_maxiters = 3 if fast_mode else 5
+            gmean, gmed, gstd = sigma_clipped_stats(
+                image,
+                sigma=3.0,
+                mask=mask,
+                cenfunc=np.nanmedian,
+                stdfunc=biweight_stdfunc,
+                maxiters=stats_maxiters,
+            )
+            self.logger.debug(
+                f"Global stats: mean={gmean:.3e} med={gmed:.3e} std={gstd:.3e}"
+            )
 
         # ---- Background estimation (with built-in retry chain) ----
         success, bkg_surface, bkg_rms, bkg_median = self._estimate_background(

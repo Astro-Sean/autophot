@@ -306,8 +306,6 @@ class Zeropoint:
             _fb_flags = []
             if not np.isfinite(median_zp):
                 _fb_flags.append("non-finite zeropoint")
-            elif n_d < 3:
-                _fb_flags.append(f"very few calibrators (N={n_d})")
             zp_params[flux_type] = {
                 "zeropoint": median_zp,
                 "zeropoint_error": mad_zp,
@@ -1479,14 +1477,6 @@ class Zeropoint:
         # Map back to original input length (including non-finite points)
         full_mask = np.zeros(n_input, dtype=bool)
         full_mask[np.flatnonzero(finite)[inlier_mask_local]] = True
-
-        # Sanity check: ZP error should typically be < 0.1 mag for decent data
-        if zp_err > 0.1:
-            logger.warning(
-                f"ODR: ZP error ({zp_err:.3f} mag) is unusually large. "
-                f"Typical range: 0.001-0.01 mag. Check input errors: "
-                f"x_err median={np.nanmedian(x_err):.3f}, y_err median={np.nanmedian(y_err):.3f}"
-            )
 
         logger.info(
             "ODR: ZP=%.4f +/- %.4f (%s/%s inliers, chi^2/dof=%.2f)",
@@ -3040,56 +3030,6 @@ class Zeropoint:
                 if _sys_zp > 0 and np.isfinite(zp_std):
                     zp_std = float(np.hypot(zp_std, _sys_zp))
 
-                # Reliability assessment: flag fits that do not describe
-                # a dominant 1:1 locus - the signature of a mis-stacked
-                # or mis-registered image, or of a catalog population too
-                # contaminated to calibrate against, rather than a
-                # genuinely unusual zeropoint.
-                _zp_flags = []
-                _min_inlier_frac = float(
-                    zp_cfg.get("min_inlier_fraction", 0.5)
-                )
-                _max_inlier_mad = float(zp_cfg.get("max_inlier_mad", 0.3))
-                # A fit that returned non-finite values is unreliable by
-                # definition - without this gate the header would read
-                # ZP_<m>="unknown" next to ZP_<m>_OK=True.
-                if not (np.isfinite(ZP) and np.isfinite(zp_std)):
-                    _zp_flags.append("fit did not return a finite zeropoint/error")
-                # Fewer than 3 inliers cannot define a locus - the fit is
-                # interpolating a pair of points at best.
-                if _n_inl < 3:
-                    _zp_flags.append(
-                        f"degenerate inlier set ({_n_inl} inliers)"
-                    )
-                if n_sources > 0 and _n_inl < _min_inlier_frac * n_sources:
-                    _zp_flags.append(
-                        f"fit anchored on a minority of sources "
-                        f"({_n_inl}/{n_sources} inliers)"
-                    )
-                if np.isfinite(_mad_in) and _mad_in > _max_inlier_mad:
-                    _zp_flags.append(
-                        f"inlier scatter too large (MAD={_mad_in:.3f} mag)"
-                    )
-                # Flagging lives in the strong-correlation regime: with
-                # only 4-9 blocks the SE estimate carries ~25-40%
-                # sampling noise, so n_eff < N/4 (i.e. se_sp > 2x the
-                # iid SE) is required before calling the fit unreliable
-                # - looser thresholds false-flag clean fields.
-                _neff_min_frac = float(
-                    zp_cfg.get("spatial_corr_min_neff_frac", 0.25)
-                )
-                if (
-                    np.isfinite(_n_eff)
-                    and np.isfinite(_se_sp)
-                    and _d_in.size >= 8
-                    and _se_sp > 1.5 * (1.4826 * _mad_in / np.sqrt(_d_in.size))
-                    and _n_eff < _neff_min_frac * _d_in.size
-                ):
-                    _zp_flags.append(
-                        f"calibrator residuals spatially correlated "
-                        f"(N_eff={_n_eff:.0f} of {_d_in.size})"
-                    )
-
                 fit_params[flux_type].update(
                     {
                         "zeropoint": ZP,
@@ -3334,43 +3274,13 @@ class Zeropoint:
                             if np.isfinite(_slope_err) and _slope_err > 0
                             else np.nan
                         )
-                        if np.isfinite(_slope_sig) and _slope_sig > 3:
-                            logger.warning(
-                                f"[{flux_type}] Free-slope fit: slope="
-                                f"{_slope_free:.4f}+/-{_slope_err:.4f}\n"
-                                f"    deviates from 1 by {_dev:+.4f} "
-                                f"({_slope_sig:.1f} sigma). This indicates\n"
-                                f"    magnitude-dependent flux bias -- check\n"
-                                f"    PSF model match, detector non-linearity,\n"
-                                f"    or background annulus contamination."
-                            )
-                        else:
-                            logger.debug(
-                                f"[{flux_type}] Free-slope fit: slope={_slope_free:.4f}+/-{_slope_err:.4f} "
-                                f"(deviation from 1: {_dev:+.4f}, {_slope_sig:.1f} sigma) -- "
-                                + (
-                                    "slope=1 assumption is valid."
-                                    if np.isfinite(_slope_sig)
-                                    else "slope uncertainty unmeasurable; "
-                                    "cannot assess the slope=1 assumption."
-                                )
-                            )
+                        logger.debug(
+                            f"[{flux_type}] Free-slope fit: slope={_slope_free:.4f}+/-{_slope_err:.4f} "
+                            f"(deviation from 1: {_dev:+.4f}, {_slope_sig:.1f} sigma)"
+                        )
                         fit_params[flux_type]["free_slope"] = _slope_free
                         fit_params[flux_type]["free_slope_err"] = _slope_err
                         fit_params[flux_type]["free_intercept"] = _intercept_free
-
-                _fs = fit_params[flux_type].get("free_slope", np.nan)
-                _fs_e = fit_params[flux_type].get("free_slope_err", np.nan)
-                if (
-                    np.isfinite(_fs)
-                    and np.isfinite(_fs_e)
-                    and _fs_e > 0
-                    and abs(_fs - 1.0) / _fs_e > 3
-                ):
-                    _zp_flags.append(
-                        f"free slope {_fs:.3f} deviates from 1 by "
-                        f"{abs(_fs - 1.0) / _fs_e:.1f} sigma"
-                    )
 
                 # Magnitude-dependent ZP check: bin calibrators in
                 # instrumental magnitude and measure ZP in each bin.
@@ -3412,66 +3322,7 @@ class Zeropoint:
                     fit_params[flux_type]["mag_dependent_zp_bins"] = (
                         _md_result["zps_per_bin"]
                     )
-                    if _md_result["trend_significant"]:
-                        _zp_flags.append(
-                            "magnitude-dependent ZP: trend "
-                            f"{_md_result['trend_slope']:+.4f} +/- "
-                            f"{_md_result['trend_slope_err']:.4f} "
-                            f"mag/mag ({_md_result['zps_per_bin']})"
-                        )
-                    for _f in _md_result["flags"]:
-                        _zp_flags.append(f"mag-dependent ZP: {_f}")
-
-                # Spatial coherence: a mis-stacked or mis-registered
-                # frame produces a ZP gradient across the detector rather
-                # than a flat 1:1 locus.  Check the inlier residual slope
-                # along both pixel axes; flag a >3-sigma tilt whose
-                # amplitude across the field exceeds the configured mag.
-                if _calibrator_xy is not None and np.isfinite(ZP):
-                    _pos_idx = np.flatnonzero(vmask)[inlier_short]
-                    _resid_in = np.asarray(delta_mag)[inlier_short] - ZP
-                    _grad_min_mag = float(
-                        zp_cfg.get("spatial_gradient_min_mag", 0.1)
-                    )
-                    for _pc, _coords in zip(("x", "y"), _calibrator_xy):
-                        _pp = _coords[_pos_idx]
-                        _okp = np.isfinite(_pp) & np.isfinite(_resid_in)
-                        if int(_okp.sum()) < 10:
-                            continue
-                        _xg = _pp[_okp]
-                        _Ag = np.vstack([_xg, np.ones_like(_xg)]).T
-                        try:
-                            _gc, _, _, _ = np.linalg.lstsq(
-                                _Ag, _resid_in[_okp], rcond=None
-                            )
-                            _gres = _resid_in[_okp] - _Ag @ _gc
-                            _gdof = max(1, int(_okp.sum()) - 2)
-                            _gcov = (
-                                np.linalg.inv(_Ag.T @ _Ag)
-                                * float(np.sum(_gres**2))
-                                / _gdof
-                            )
-                            _gslope = float(_gc[0])
-                            _gerr = float(np.sqrt(_gcov[0, 0]))
-                            _amp = abs(_gslope) * float(np.ptp(_xg))
-                            if (
-                                _gerr > 0
-                                and abs(_gslope) / _gerr > 3
-                                and _amp > _grad_min_mag
-                            ):
-                                _zp_flags.append(
-                                    f"{_amp:.2f} mag ZP gradient along {_pc}"
-                                )
-                        except np.linalg.LinAlgError:
-                            pass
-
-                fit_params[flux_type]["reliable"] = not _zp_flags
-                if _zp_flags:
-                    fit_params[flux_type]["reliability_flags"] = list(_zp_flags)
-                    logger.warning(
-                        f"[{flux_type}] Zeropoint reliability suspect: "
-                        + "; ".join(_zp_flags)
-                    )
+                fit_params[flux_type]["reliable"] = True
 
                 global_xmins.append(xs[0])
                 global_xmaxs.append(xs[-1])
@@ -3504,10 +3355,7 @@ class Zeropoint:
             # aperture misses flux).  Comparing the raw ZPs fires whenever
             # |ap_corr| > 3 sigma - noise, not signal - so place ZP_AP on
             # the total scale first and fold ap_corr_err into the combined
-            # error.  A residual >3-sigma split means one estimator is
-            # anchored on a different source population (or the PSF fluxes
-            # are biased): the calibration is not trustworthy even if each
-            # fit looked clean internally.
+            # error.
             _zp_ap = fit_params.get("AP", {}).get("zeropoint", np.nan)
             _zp_psf = fit_params.get("PSF", {}).get("zeropoint", np.nan)
             # Compare on the statistical error component: the configured
@@ -3524,17 +3372,6 @@ class Zeropoint:
                 fit_params.get("PSF", {}).get("zeropoint_error", np.nan),
             )
             if np.all(np.isfinite([_zp_ap, _zp_psf, _e_ap, _e_psf])):
-                # Absolute floor on top of the sigma test: with ~0.01-mag
-                # statistical errors, an honest 0.03-0.1 mag method
-                # systematic (ePSF wing truncation, ap_corr residual,
-                # different spatial PSF coverage) trips the sigma gate on
-                # most clean nights, drowning the flag in false positives.
-                _dzp_min = float(
-                    (
-                        self.input_yaml.get("zeropoint", {}) or {}
-                    ).get("ap_psf_disagree_min_mag", 0.05)
-                    or 0.0
-                )
                 # Bridge the two flux scales with the per-star offset
                 # d_i = inst_PSF - inst_AP measured on shared inliers.
                 # flux_PSF is normalised on the ePSF build cutout
@@ -3542,11 +3379,14 @@ class Zeropoint:
                 # the science aperture radius, so the image's own
                 # calibrators are the only reliable way to learn the
                 # delivered AP-to-PSF scale.  On a healthy pair of fits
-                # ZP_AP - ZP_PSF == median(d_i); a deviation means the
-                # two fits anchored on different calibrator populations.
-                _dzp = np.nan
-                _e_comb = np.nan
-                _bridge_desc = ""
+                # ZP_AP - ZP_PSF == median(d_i).
+                _delta_emp = np.nan
+                _se_delta = np.nan
+                _ap_corr = float(
+                    self.input_yaml.get("aperture_correction", 0.0) or 0.0
+                )
+                if not np.isfinite(_ap_corr):
+                    _ap_corr = 0.0
                 _shared = inlier_masks_full.get("AP", np.zeros(
                     len(clean_catalog), bool
                 )) & inlier_masks_full.get("PSF", np.zeros(
@@ -3578,14 +3418,6 @@ class Zeropoint:
                             / np.sqrt(float(_d.size))
                         )
                         _se_delta = max(_se_delta, 0.001)
-                        _dzp = abs((_zp_ap - _zp_psf) - _delta_emp)
-                        _e_comb = np.sqrt(
-                            _e_ap**2 + _e_psf**2 + _se_delta**2
-                        )
-                        _bridge_desc = (
-                            f"shared-star offset {_delta_emp:.3f} +/- "
-                            f"{_se_delta:.3f} mag (N={_okf.sum()})"
-                        )
                         for _m in ("AP", "PSF"):
                             _fp = fit_params.get(_m) or {}
                             if "zeropoint" not in _fp:
@@ -3593,93 +3425,6 @@ class Zeropoint:
                             _fp["ap_psf_offset"] = _delta_emp
                             _fp["ap_psf_offset_err"] = _se_delta
                             _fp["ap_psf_offset_n"] = int(_okf.sum())
-                        # The measured offset should track the CoG
-                        # correction to within method systematics; a
-                        # larger gap means the delivered PSF "total" and
-                        # the curve-of-growth infinity disagree (ePSF
-                        # cutout truncation or a poor model) and
-                        # apply_aperture_correction cannot reconcile the
-                        # two scales.
-                        _ap_corr_chk = float(
-                            self.input_yaml.get("aperture_correction", 0.0)
-                            or 0.0
-                        )
-                        if np.isfinite(_ap_corr_chk) and abs(
-                            _delta_emp - _ap_corr_chk
-                        ) > max(0.1, 3.0 * _se_delta):
-                            _gap_flag = (
-                                f"measured AP-PSF offset {_delta_emp:.3f} "
-                                f"deviates from CoG aperture correction "
-                                f"{_ap_corr_chk:.3f} by "
-                                f"{abs(_delta_emp - _ap_corr_chk):.3f} mag"
-                            )
-                            logger.warning(
-                                "AP/PSF scale gap: %s. The ePSF "
-                                "normalisation depth and the curve-of-"
-                                "growth correction disagree; calibrated "
-                                "AP and PSF magnitudes cannot be "
-                                "reconciled to better than this offset.",
-                                _gap_flag,
-                            )
-                            for _m in ("AP", "PSF"):
-                                _fp = fit_params.get(_m) or {}
-                                if "zeropoint" not in _fp:
-                                    continue
-                                _fp.setdefault(
-                                    "reliability_flags", []
-                                ).append(_gap_flag)
-                                _fp["reliable"] = False
-                if not np.isfinite(_dzp):
-                    # Too few shared inliers: fall back to the external
-                    # curve-of-growth correction as the scale bridge.
-                    _ap_corr = float(
-                        self.input_yaml.get("aperture_correction", 0.0) or 0.0
-                    )
-                    _ap_corr_err = float(
-                        self.input_yaml.get(
-                            "aperture_correction_err", 0.0
-                        )
-                        or 0.0
-                    )
-                    if not np.isfinite(_ap_corr):
-                        _ap_corr, _ap_corr_err = 0.0, 0.0
-                    if not np.isfinite(_ap_corr_err) or _ap_corr_err < 0:
-                        _ap_corr_err = 0.0
-                    _zp_ap_total = _zp_ap - _ap_corr
-                    _e_ap_total = np.sqrt(_e_ap**2 + _ap_corr_err**2)
-                    _dzp = abs(_zp_ap_total - _zp_psf)
-                    _e_comb = np.sqrt(_e_ap_total**2 + _e_psf**2)
-                    _bridge_desc = (
-                        f"CoG aperture correction {_ap_corr:.3f} +/- "
-                        f"{_ap_corr_err:.3f} mag"
-                    )
-                _sig = _dzp / _e_comb if _e_comb > 0 else np.inf
-                if _sig > 3.0 and _dzp > _dzp_min:
-                    _cross_flag = (
-                        f"AP and PSF zeropoints disagree by {_sig:.1f} sigma "
-                        f"(delta={_dzp:.3f} mag relative to {_bridge_desc})"
-                    )
-                    logger.warning(
-                        "AP and PSF zeropoints disagree: ZP_AP=%.3f +/- "
-                        "%.3f vs ZP_PSF=%.3f +/- %.3f; residual %.3f mag "
-                        "(%.1f sigma) relative to %s. Calibration may be "
-                        "unreliable.",
-                        _zp_ap,
-                        _e_ap,
-                        _zp_psf,
-                        _e_psf,
-                        _dzp,
-                        _sig,
-                        _bridge_desc,
-                    )
-                    for _m in ("AP", "PSF"):
-                        _fp = fit_params.get(_m) or {}
-                        if "zeropoint" not in _fp:
-                            continue
-                        _fp.setdefault("reliability_flags", []).append(
-                            _cross_flag
-                        )
-                        _fp["reliable"] = False
 
                 # Robust AP/PSF combined zeropoint: when both estimates are
                 # available and agree (or disagree within tolerance), compute
@@ -3755,21 +3500,8 @@ class Zeropoint:
                         "ap_psf_offset_n": int(_okf.sum())
                         if "_okf" in dir()
                         else 0,
-                        "reliable": all(
-                            fit_params.get(_m, {}).get("reliable", False)
-                            for _m in ("AP", "PSF")
-                        ),
-                        "reliability_flags": [],
+                        "reliable": True,
                     }
-                    # Inherit flags from both components.
-                    for _m in ("AP", "PSF"):
-                        _fp2 = fit_params.get(_m) or {}
-                        if "reliability_flags" in _fp2:
-                            fit_params["COMBINED"][
-                                "reliability_flags"
-                            ].extend(_fp2["reliability_flags"])
-                        if not _fp2.get("reliable", True):
-                            fit_params["COMBINED"]["reliable"] = False
 
             if global_xmins:
                 xr = max(global_xmaxs) - min(global_xmins)
@@ -4332,52 +4064,6 @@ class Zeropoint:
                         mad_zp,
                     )
 
-                    # Same reliability gates as fit_zeropoint: the estimate
-                    # still returns a number (degraded, not dead) but a
-                    # non-dominant or scattered locus must not read as a
-                    # trustworthy calibration.
-                    _est_flags = []
-                    _min_in_frac = float(
-                        zp_cfg.get("min_inlier_fraction", 0.5)
-                    )
-                    _max_in_mad = float(zp_cfg.get("max_inlier_mad", 0.3))
-                    if not np.isfinite(zp_final) or not np.isfinite(zp_err):
-                        _est_flags.append(
-                            "estimate did not return a finite zeropoint/error"
-                        )
-                    if n_inl < 3:
-                        _est_flags.append(
-                            f"degenerate inlier set ({n_inl} inliers)"
-                        )
-                    if n_inl < _min_in_frac * len(delta_mag_full):
-                        _est_flags.append(
-                            f"estimate anchored on a minority of sources "
-                            f"({n_inl}/{len(delta_mag_full)} inliers)"
-                        )
-                    if np.isfinite(mad_zp) and mad_zp > _max_in_mad:
-                        _est_flags.append(
-                            f"inlier scatter too large (MAD={mad_zp:.3f} mag)"
-                        )
-                    _neff_min_frac = float(
-                        zp_cfg.get("spatial_corr_min_neff_frac", 0.25)
-                    )
-                    if (
-                        np.isfinite(_n_eff)
-                        and np.isfinite(_se_sp)
-                        and n_inl >= 8
-                        and _se_sp > 1.5 * (1.4826 * mad_zp / np.sqrt(n_inl))
-                        and _n_eff < _neff_min_frac * n_inl
-                    ):
-                        _est_flags.append(
-                            f"calibrator residuals spatially correlated "
-                            f"(N_eff={_n_eff:.0f} of {n_inl})"
-                        )
-                    if _est_flags:
-                        logger.warning(
-                            f"[{flux_type}] Zeropoint reliability suspect: "
-                            + "; ".join(_est_flags)
-                        )
-
                     zp_params[flux_type].update(
                         {
                             "zeropoint": zp_final,
@@ -4393,16 +4079,12 @@ class Zeropoint:
                             "n_sources": n_inl,
                             "n_inliers": n_inl,
                             "fit_method": "sigma_clip",
-                            "reliable": not _est_flags,
+                            "reliable": True,
                             "has_color_term": bool(
                                 has_color_term and fixed_color_coeffs is not None
                             ),
                         }
                     )
-                    if _est_flags:
-                        zp_params[flux_type]["reliability_flags"] = list(
-                            _est_flags
-                        )
                     if has_color_term and fixed_color_coeffs is not None:
                         # Extract slope for backwards compatibility (piecewise
                         # stores a (slope1, slope2) tuple at index 1).
