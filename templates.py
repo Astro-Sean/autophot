@@ -2617,17 +2617,58 @@ def compute_alignment_rms(
                     # product.
                     _mut_idx = np.where(_coh)[0]
                     d_mut = np.hypot(_dx_all[_coh], _dy_all[_coh])
-                    # The surviving evidence is a common translation on a
-                    # small cluster - it says nothing about rotation, scale
-                    # or distortion elsewhere in the field.
+                    # Offset coherence alone does not mean translation-only
+                    # evidence.  When the cluster's sources also sit in a
+                    # small region of the detector, the common offset says
+                    # nothing about rotation, scale or distortion beyond the
+                    # matched region -> translation_verified at best.  But
+                    # the SAME coherent offset recovered from sources that
+                    # span the field constrains the whole transform: a
+                    # rotation or scale error would decorrelate the offsets.
+                    # Without this distinction every good sparse-field
+                    # alignment (fewer than ~10 mutual pairs) demoted itself
+                    # to warn and died on the strict gate (J2344 GROND TDP4:
+                    # spalipy and SWarp rejected at rms<=0.3 px).
+                    _clu_xy = sci_xy[mutual][_mut_idx]
+                    _ny_c, _nx_c = sci_data.shape[:2]
                     _coherent_cluster = True
-                    logger.info(
-                        "Alignment RMS: coherent offset cluster found "
-                        "(n=%d of %d mutual pairs, median offset=%.2f px, "
-                        "max_sep=%.1f px).",
-                        _n_coh, len(_dx_all), float(np.hypot(_mdx, _mdy)),
-                        max_sep,
-                    )
+                    if len(_clu_xy) >= 2:
+                        _clu_span_x = (
+                            float(np.ptp(_clu_xy[:, 0]))
+                            / max(float(_nx_c), 1.0)
+                        )
+                        _clu_span_y = (
+                            float(np.ptp(_clu_xy[:, 1]))
+                            / max(float(_ny_c), 1.0)
+                        )
+                        _clu_q = set(
+                            zip(
+                                (_clu_xy[:, 0] < _nx_c / 2.0).tolist(),
+                                (_clu_xy[:, 1] < _ny_c / 2.0).tolist(),
+                            )
+                        )
+                        _coherent_cluster = (
+                            _clu_span_x < 0.25
+                            or _clu_span_y < 0.25
+                            or len(_clu_q) < 2
+                        )
+                    if _coherent_cluster:
+                        logger.info(
+                            "Alignment RMS: coherent offset cluster found "
+                            "(n=%d of %d mutual pairs, median offset=%.2f "
+                            "px, max_sep=%.1f px, spatially confined).",
+                            _n_coh, len(_dx_all),
+                            float(np.hypot(_mdx, _mdy)), max_sep,
+                        )
+                    else:
+                        logger.info(
+                            "Alignment RMS: coherent offsets across a "
+                            "field-spanning match set (n=%d of %d mutual "
+                            "pairs, median offset=%.2f px) - the transform "
+                            "is verified, not translation-only.",
+                            _n_coh, len(_dx_all),
+                            float(np.hypot(_mdx, _mdy)),
+                        )
                 else:
                     return None
             else:
@@ -2889,6 +2930,12 @@ def _compute_per_quadrant_rms(
 
 _P95_KEY_DEPRECATION_WARNED = False
 
+# Marker carried in a 'warn' reason when the verdict was demoted from 'fail'
+# on a sparse matched sample.  _alignment_gate_accept uses it to tell
+# evidence-limited warns (good metrics, thin coverage - acceptable) from
+# demoted failures (metrics over the gates - never acceptable).
+_WARN_DEMOTED_FROM_FAIL = "field-gate demoted to warn"
+
 
 def _alignment_gate_thresholds(
     input_yaml: Optional[Dict[str, Any]],
@@ -2982,8 +3029,8 @@ def _classify_alignment_quality(
             r.startswith("offset=") for r in reasons
         ):
             return "warn", [
-                "%s (n=%s matched; field-gate demoted to warn)" % (
-                    "; ".join(reasons), n_matched
+                "%s (n=%s matched; %s)" % (
+                    "; ".join(reasons), n_matched, _WARN_DEMOTED_FROM_FAIL
                 )
             ]
         return "fail", reasons
@@ -3060,12 +3107,22 @@ def _alignment_verification_tier(
 def _alignment_gate_accept(
     quality: str,
     input_yaml: Optional[Dict[str, Any]],
+    reasons: Optional[List[str]] = None,
 ) -> bool:
     """Decide whether an alignment of the given quality may be used.
 
     'fail' always rejects.  'unverified' and 'warn' are accepted by default
     (best-available fallback) unless the caller opts into strict mode via
     ``alignment_require_verification`` / ``alignment_fail_on_poor_coverage``.
+
+    A 'warn' carries two very different meanings.  An evidence-limited warn
+    (metrics inside the gates but thin/clustered coverage, translation-only
+    verification, or noisy residuals) is the best alignment the field can
+    offer - rejecting it produces no subtraction at all, so it is accepted
+    and the ALIGVER tier keeps downstream consumers honest.  A warn demoted
+    from 'fail' (``_WARN_DEMOTED_FROM_FAIL``) means the measured offsets
+    exceeded the gates and the small sample merely softened the verdict to
+    warn: that is a bad alignment, not a sparse one, and it always rejects.
     """
     ts_cfg = (input_yaml or {}).get("template_subtraction", {}) or {}
     if quality == "fail":
@@ -3074,10 +3131,13 @@ def _alignment_gate_accept(
         ts_cfg.get("alignment_require_verification", False)
     ):
         return False
-    if quality == "warn" and bool(
-        ts_cfg.get("alignment_fail_on_poor_coverage", False)
-    ):
-        return False
+    if quality == "warn":
+        if reasons is not None and any(
+            _WARN_DEMOTED_FROM_FAIL in r for r in reasons
+        ):
+            return False
+        if bool(ts_cfg.get("alignment_fail_on_poor_coverage", False)):
+            return False
     return True
 
 
@@ -4139,10 +4199,15 @@ def _sfft_retry_kernel_hw(
     Sizes the retry kernel to the constraint budget instead of the PSF:
     (2*hw+1)^2 delta-basis pixels stay within pix_per_source per matched
     source.  ~35 px/source keeps the solved kernel's wing noise near
-    10% of its peak on sparse fields.  The floor is the same physical
-    minimum used by the primary sizing (1.5x the broader PSF): a kernel
-    smaller than the PSF wings cannot represent the transform at any
-    noise level, it just trades variance for dipole residuals.
+    10% of its peak on sparse fields.  The floor is anchored to the
+    convolution kernel (ceil(FWHM_conv)): the matching kernel maps the
+    narrower PSF onto the broader, so its support is set by FWHM_conv,
+    not FWHM_broad.  Anchoring the floor to the broader PSF made the
+    retry a no-op in exactly the regime it was built for -- a sparse
+    field with a large broad FWHM floors at the same oversized kernel
+    that just failed (J2344 TDP6: floor 15 px for 8 priors, KERNEG 0.46).
+    fwhm_broad now only caps the budget-sized half-width, so a retry can
+    never grow past the old physical minimum.
     """
     try:
         n = max(int(n_matched), 1)
@@ -4167,7 +4232,7 @@ def _sfft_retry_kernel_hw(
     if np.isfinite(fc) and fc > 0:
         floor = max(floor, int(np.ceil(fc)))
     if np.isfinite(fb) and fb > 0:
-        floor = max(floor, int(np.ceil(1.5 * fb)))
+        hw = min(hw, int(np.ceil(1.5 * fb)))
     return max(floor, hw)
 
 
@@ -6746,7 +6811,9 @@ class Templates:
                     logger.debug("swarp: quality measurement failed", exc_info=True)
                 if not _swarp_ok:
                     return _fail("swarp", "; ".join(_sreasons))
-                if not _alignment_gate_accept(_squality, self.input_yaml):
+                if not _alignment_gate_accept(
+                    _squality, self.input_yaml, _sreasons
+                ):
                     logger.warning(
                         "SCAMP+SWarp alignment rejected: quality=%s "
                         "(strict verification gate enabled).",
@@ -6883,7 +6950,9 @@ class Templates:
                     logger.debug("astroalign: quality measurement failed", exc_info=True)
                 if not _aa_ok:
                     return _fail("astroalign", "; ".join(_areasons))
-                if not _alignment_gate_accept(_aquality, self.input_yaml):
+                if not _alignment_gate_accept(
+                    _aquality, self.input_yaml, _areasons
+                ):
                     logger.warning(
                         "AstroAlign alignment rejected: quality=%s "
                         "(strict verification gate enabled).",
@@ -6969,7 +7038,9 @@ class Templates:
                         "Reproject alignment quality could not be verified "
                         "(insufficient sources); accepting as best available fallback."
                     )
-                if not _alignment_gate_accept(_quality, self.input_yaml):
+                if not _alignment_gate_accept(
+                    _quality, self.input_yaml, _reasons
+                ):
                     logger.warning(
                         "Reproject alignment rejected: %s. "
                         "Falling back to next alignment method.",
@@ -8138,7 +8209,9 @@ class Templates:
                             )
                         )
 
-                    if not _alignment_gate_accept(_sp_quality, self.input_yaml):
+                    if not _alignment_gate_accept(
+                        _sp_quality, self.input_yaml, _sp_reasons
+                    ):
                         logger.warning(
                             "spalipy alignment rejected: %s. "
                             "Falling back to next alignment method.",
@@ -8555,7 +8628,9 @@ class Templates:
                             "tweakwcs",
                             "; ".join(_treasons) or "coverage/quality gate",
                         )
-                    if not _alignment_gate_accept(_tquality, self.input_yaml):
+                    if not _alignment_gate_accept(
+                        _tquality, self.input_yaml, _treasons
+                    ):
                         logger.warning(
                             "tweakwcs alignment rejected: quality=%s "
                             "(strict verification gate enabled).",
@@ -11664,14 +11739,31 @@ class Templates:
                 # For n_eff=50: max kernel pixels = 5000 -> hw <= 35
                 _max_hw_pixels = 100 * max(n_eff, 5)
                 _max_hw_from_sources = int((np.sqrt(_max_hw_pixels) - 1) / 2)
-                # Enforce a PHYSICAL MINIMUM: the kernel must contain at least
-                # ceil(1.5 * fwhm_broad) to enclose the broader PSF's core.
-                # The source-count cap can only reduce the floor down to this
-                # minimum, never below it.  A kernel smaller than the PSF
-                # itself cannot model the PSF difference, causing dipoles and
-                # flux scaling mismatch regardless of how few sources are
-                # available.
+                # Enforce a PHYSICAL MINIMUM: the kernel should enclose the
+                # convolution kernel that maps the narrower PSF onto the
+                # broader one, i.e. ~1.5 * fwhm_conv.  When the field supplies
+                # enough matched sources, keep the more generous 1.5 *
+                # fwhm_broad minimum so PSF-shape wings stay covered; when
+                # that floor alone exceeds the per-source constraint budget
+                # (sfft_kernel_pix_per_source), holding it would force a
+                # solve the sources cannot constrain -- the kernel fits noise
+                # and deposits dipole/sidelobe residuals (J2344 TDP6: 31x31
+                # kernel for 8 priors, KERNEG=0.46).  In that regime the
+                # minimum is re-anchored to the convolution kernel; a kernel
+                # covering ~1.5 * fwhm_conv still holds the transform core.
                 _phys_min_hw = int(np.ceil(1.5 * fwhm_broad))
+                try:
+                    _pps_min = float(
+                        ts_cfg_ker.get("sfft_kernel_pix_per_source", 35.0)
+                    )
+                    if not np.isfinite(_pps_min) or _pps_min <= 0:
+                        _pps_min = 35.0
+                except (TypeError, ValueError):
+                    _pps_min = 35.0
+                if (2 * _phys_min_hw + 1) ** 2 > _pps_min * max(n_eff, 1):
+                    _phys_min_hw = max(
+                        KER_HW_MIN, int(np.ceil(1.5 * fwhm_conv))
+                    )
                 _hw_floor_capped = max(
                     _phys_min_hw,
                     min(ker_hw_floor, _max_hw_from_sources),
@@ -17139,7 +17231,13 @@ class Templates:
                 )
             except (TypeError, ValueError):
                 _knoise_thresh = 0.12
-            _knoise_now = _kerhw_now = _nkersrc = None
+            try:
+                _kneg_thresh = float(
+                    ts_sub.get("sfft_kernel_negfrac_retry", 0.40)
+                )
+            except (TypeError, ValueError):
+                _kneg_thresh = 0.40
+            _knoise_now = _kneg_now = _kerhw_now = _nkersrc = None
             try:
                 if outputFpath and os.path.isfile(outputFpath):
                     _khdr = fits.getheader(outputFpath)
@@ -17147,10 +17245,12 @@ class Templates:
                     _kw = _khdr.get("KERHW", None)
                     _knoise_now = float(_kn) if _kn is not None else None
                     _kerhw_now = int(_kw) if _kw is not None else None
+                    _kng = _khdr.get("KERNEG", None)
+                    _kneg_now = float(_kng) if _kng is not None else None
                     _nks = _khdr.get("NKERSRC", None)
                     _nkersrc = int(_nks) if _nks is not None else None
             except Exception:
-                _knoise_now = _kerhw_now = _nkersrc = None
+                _knoise_now = _kneg_now = _kerhw_now = _nkersrc = None
 
             # Measured constraint count.  The kernel was provisioned before
             # SFFT ran from prior sources (or a provisional self-match
@@ -17187,14 +17287,44 @@ class Templates:
                 ts_sub.get("sfft_kernel_pix_per_source", 35.0),
                 fwhm_broad=max(float(science_fwhm), float(template_fwhm)),
             )
-            # Require a real size reduction: when the constraint budget is
-            # below the PSF floor, the retry kernel lands at the same
-            # physical minimum and a rerun buys nothing.
-            _do_ksize_retry = (
+            # Retry evidence.  KERNOISE (wing MAD/peak) catches a solve that
+            # deposits noise in the kernel wings, but a wing MAD can stay low
+            # while the kernel is still badly under-constrained -- the failed
+            # solve then shows up as a large negative-mass fraction (KERNEG,
+            # J2344 TDP6: 0.46 at KERNOISE=0.079) or simply as a kernel whose
+            # pixel count the matched sources cannot budget.  Any of the
+            # three qualifies; the residual-gated adoption below decides
+            # whether the retry actually helped.
+            _knoise_trig = (
                 _knoise_now is not None
                 and np.isfinite(_knoise_now)
                 and _knoise_thresh > 0
                 and _knoise_now > _knoise_thresh
+            )
+            _kneg_trig = (
+                _kneg_now is not None
+                and np.isfinite(_kneg_now)
+                and _kneg_thresh > 0
+                and _kneg_now > _kneg_thresh
+            )
+            try:
+                _pps_rt = float(
+                    ts_sub.get("sfft_kernel_pix_per_source", 35.0)
+                )
+                if not np.isfinite(_pps_rt) or _pps_rt <= 0:
+                    _pps_rt = 35.0
+            except (TypeError, ValueError):
+                _pps_rt = 35.0
+            _over_budget = (
+                _kerhw_now is not None
+                and _n_constraints >= 3
+                and (2 * _kerhw_now + 1) ** 2 > _pps_rt * _n_constraints
+            )
+            # Require a real size reduction: when the constraint budget is
+            # below the PSF floor, the retry kernel lands at the same
+            # physical minimum and a rerun buys nothing.
+            _do_ksize_retry = (
+                (_knoise_trig or _kneg_trig or _over_budget)
                 and _kerhw_now is not None
                 and _kerhw_now > _hw_retry + 1
                 and _n_constraints >= 3
@@ -17220,15 +17350,19 @@ class Templates:
                 _do_ksize_retry = True
             if _do_ksize_retry:
                 logger.warning(
-                    "SFFT kernel is under-constrained (wing noise/peak="
-                    "%.2f > %.2f): retrying with kernel_hw=%d (was %d, "
-                    "%d matched sources) -- a smaller, better-conditioned "
-                    "solve.",
-                    _knoise_now if _knoise_now is not None else float("nan"),
-                    _knoise_thresh,
+                    "SFFT kernel is under-constrained (KERNOISE=%s "
+                    "KERNEG=%s %d kernel px vs %d px budget for %d "
+                    "sources): retrying with kernel_hw=%d (was %d) -- "
+                    "a smaller, better-conditioned solve.",
+                    f"{_knoise_now:.2f}"
+                    if _knoise_now is not None
+                    else "n/a",
+                    f"{_kneg_now:.2f}" if _kneg_now is not None else "n/a",
+                    (2 * _kerhw_now + 1) ** 2 if _kerhw_now is not None else -1,
+                    int(_pps_rt * _n_constraints),
+                    _n_constraints,
                     _hw_retry,
                     _kerhw_now if _kerhw_now is not None else -1,
-                    _n_constraints,
                 )
                 _saved_khw = _sfft_pass_kernel_hw
                 _sfft_pass_kernel_hw = _hw_retry
