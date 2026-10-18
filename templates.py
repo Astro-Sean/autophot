@@ -2025,8 +2025,11 @@ def _zogy_subtract(
             )
             z_block = binary_dilation(z_neighbour > 0.6, iterations=2)
             mask_zero |= z & z_block
-    N = np.where(mask_zero, 0.0, N)
-    R = np.where(mask_zero, 0.0, R)
+    # Zero masked pixels in-place to avoid a full-image copy (np.where
+    # allocates a brand-new array).  N and R are local working arrays, so
+    # in-place assignment is bit-for-bit identical to np.where(mask_zero, 0.0, N).
+    N[mask_zero] = 0.0
+    R[mask_zero] = 0.0
 
     sn2 = sn ** 2
     sr2 = sr ** 2
@@ -13628,37 +13631,77 @@ class Templates:
                 except (TypeError, ValueError):
                     continue
             if _ban_xy and matching_sources:
-                _excl_r = max(3.0 * max(_fs_f, _ft_f), 15.0)
+                _excl_r0 = max(3.0 * max(_fs_f, _ft_f), 15.0)
                 _ban = np.asarray(_ban_xy)
-                _kept_b = []
-                for _msrc in matching_sources:
-                    try:
-                        _mxy = np.asarray(
-                            [_msrc["x"], _msrc["y"]], dtype=float
-                        )
-                    except (TypeError, IndexError, KeyError):
-                        _mxy = np.asarray(_msrc, dtype=float)
-                    if _mxy.size < 2 or not np.isfinite(_mxy[:2]).all():
-                        continue
-                    if (
-                        np.min(
-                            np.hypot(
-                                _ban[:, 0] - _mxy[0], _ban[:, 1] - _mxy[1]
-                            )
-                        )
-                        <= _excl_r
-                    ):
-                        continue
-                    _kept_b.append(_msrc)
-                _n_ban = len(matching_sources) - len(_kept_b)
-                if _n_ban:
-                    logger.info(
-                        "ZOGY: excluded %d matched source(s) within %.1f px "
-                        "of variable/target positions.",
-                        _n_ban,
-                        _excl_r,
+                # Minimum number of vetted priors to preserve.  On a sparse
+                # field centred on the target every match can sit inside the
+                # exclusion radius, which would starve the LSQ kernel solve and
+                # degrade it to the (unvetted) extra pool.  Shrink the radius
+                # toward one FWHM until the floor is met; keep all if even the
+                # FWHM radius cannot.
+                # Guard against shrinking the exclusion radius so far that the
+                # LSQ kernel solve is starved (falls back to the unvetted extra
+                # pool).  Default 2: enough to keep a genuine solve while still
+                # allowing a lone variable/target source to be banned on the
+                # minimal 3-source sparse field.
+                _min_keep_z = int(
+                    (self.input_yaml.get("template_subtraction", {}) or {}).get(
+                        "zogy_min_prior_sources", 2
                     )
-                    matching_sources = _kept_b
+                    or 2
+                )
+                _min_keep_z = min(_min_keep_z, len(matching_sources))
+                _fwhm_floor_z = max(float(_fs_f or 0.0), float(_ft_f or 0.0), 1.0)
+
+                def _keep_outside_excl(_radius):
+                    _kept = []
+                    for _msrc in matching_sources:
+                        try:
+                            _mxy = np.asarray(
+                                [_msrc["x"], _msrc["y"]], dtype=float
+                            )
+                        except (TypeError, IndexError, KeyError):
+                            _mxy = np.asarray(_msrc, dtype=float)
+                        if _mxy.size < 2 or not np.isfinite(_mxy[:2]).all():
+                            continue
+                        if (
+                            np.min(
+                                np.hypot(
+                                    _ban[:, 0] - _mxy[0],
+                                    _ban[:, 1] - _mxy[1],
+                                )
+                            )
+                            <= _radius
+                        ):
+                            continue
+                        _kept.append(_msrc)
+                    return _kept
+
+                _excl_r = _excl_r0
+                _kept_b = _keep_outside_excl(_excl_r)
+                while (
+                    len(_kept_b) < _min_keep_z
+                    and _excl_r > _fwhm_floor_z
+                ):
+                    _excl_r = max(_excl_r * 0.75, _fwhm_floor_z)
+                    _kept_b = _keep_outside_excl(_excl_r)
+                if len(_kept_b) < _min_keep_z:
+                    logger.warning(
+                        "ZOGY: target/variable ban would leave %d/%d matched "
+                        "sources (< %d minimum); keeping all sources.",
+                        len(_kept_b), len(matching_sources), _min_keep_z,
+                    )
+                else:
+                    _n_ban = len(matching_sources) - len(_kept_b)
+                    if _n_ban:
+                        logger.info(
+                            "ZOGY: excluded %d matched source(s) within %.1f px "
+                            "of variable/target positions (radius shrunk from "
+                            "%.1f px to preserve %d priors).",
+                            _n_ban, _excl_r, _excl_r0,
+                            min(_min_keep_z, len(_kept_b)),
+                        )
+                        matching_sources = _kept_b
 
             # Field PSF measured directly off the bright matched stars.  It
             # is the most truthful width available to this routine: header/
