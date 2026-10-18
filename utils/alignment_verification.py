@@ -169,6 +169,13 @@ class AlignmentVerifier:
                         results['consistent'] = False
                         results['issues'].append(f"{param} differs by {diff:.8f} deg/px")
                     results['differences'][param] = diff
+
+                elif param.startswith('CD'):  # CD matrix - rotation/scale/orientation
+                    tolerance = 1e-5  # direction-cosine element
+                    if diff > tolerance:
+                        results['consistent'] = False
+                        results['issues'].append(f"{param} differs by {diff:.8f}")
+                    results['differences'][param] = diff
         
         sci_ctype1 = str(sci_header.get('CTYPE1', '')).upper()
         ref_ctype1 = str(ref_header.get('CTYPE1', '')).upper()
