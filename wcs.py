@@ -2106,7 +2106,14 @@ class WCSSolver:
                 res_ra = (pred_xi - xi[idx]) / cos_dec0
                 res_dec = pred_eta - eta[idx]
                 res_arcsec = np.hypot(res_ra * cos_dec0, res_dec) * 3600.0
-                sigma = float(np.nanmedian(np.abs(res_arcsec - np.nanmedian(res_arcsec))) / 0.6745 * 1.4826)
+                # Robust sigma from MAD: sigma = 1.4826 * MAD.  Dividing by
+                # 0.6745 (= 1/1.4826) AND multiplying by 1.4826 applied the
+                # conversion twice, inflating the clip threshold from ~4.4*MAD
+                # to ~6.6*MAD and letting astrometric outliers into the fit.
+                sigma = float(
+                    1.4826
+                    * np.nanmedian(np.abs(res_arcsec - np.nanmedian(res_arcsec)))
+                )
                 if not np.isfinite(sigma) or sigma <= 0:
                     break
                 good = res_arcsec <= 3.0 * sigma
@@ -2873,7 +2880,42 @@ class WCSSolver:
                                     _ny = _mhdr.get("NAXIS2", 2048)
                                     _nx = _mhdr.get("NAXIS1", 2048)
                                     _max_sip_px = 0.0
-                                    _pixscale = abs(_mhdr.get("CD1_1", 1e-4)) * 3600
+                                    # True pixel scale = sqrt(|det(CD)|) for a
+                                    # rotated CD matrix; CD1_1 alone
+                                    # under-estimates it when the matrix has a
+                                    # rotation cross-term, which inflates the
+                                    # measured SIP correction in pixels and
+                                    # falsely rejects a valid solution.  Fall
+                                    # back to CD1_1/CDELT only when the
+                                    # determinant is unusable.
+                                    _cd11 = _mhdr.get("CD1_1")
+                                    _cd12 = _mhdr.get("CD1_2", 0.0)
+                                    _cd21 = _mhdr.get("CD2_1", 0.0)
+                                    _cd22 = _mhdr.get("CD2_2")
+                                    _det_cd = None
+                                    if (
+                                        _cd11 is not None
+                                        and _cd22 is not None
+                                    ):
+                                        _det_cd = abs(
+                                            float(_cd11) * float(_cd22)
+                                            - float(_cd12) * float(_cd21)
+                                        )
+                                    if (
+                                        _det_cd is not None
+                                        and np.isfinite(_det_cd)
+                                        and _det_cd > 0
+                                    ):
+                                        _pixscale = float(np.sqrt(_det_cd)) * 3600
+                                    else:
+                                        _pixscale = abs(
+                                            float(
+                                                _mhdr.get(
+                                                    "CD1_1",
+                                                    _mhdr.get("CDELT1", 1e-4),
+                                                )
+                                            )
+                                        ) * 3600
                                     _sip_thresh_px = 0.05 * max(_nx, _ny)
                                     for _cx, _cy in [(0,0), (_nx-1,0), (0,_ny-1), (_nx-1,_ny-1)]:
                                         _ra_s, _dec_s = _mw.all_pix2world(_cx, _cy, 0)
