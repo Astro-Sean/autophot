@@ -1007,9 +1007,10 @@ def run_sfft() -> Optional[int]:
         n_priors = len(matching_sources)
         log_warning(
             f"Only {n_priors} vetted prior sources (minimum {MIN_PRIOR_SOURCES}); "
-            "discarding priors -- SFFT will perform its own source matching."
+            "keeping them anyway -- pipeline-vetted priors are higher quality "
+            "than SFFT's loose SExtractor matching, and SFFT will supplement "
+            "with its own detections if needed."
         )
-        matching_sources = None
     elif matching_sources is not None and len(matching_sources) < 10:
         log_info(
             f"Using {len(matching_sources)} vetted prior sources (< 10; sparse field). "
@@ -1955,13 +1956,18 @@ def run_sfft() -> Optional[int]:
                     # - No background estimation params (BSP models background internally)
                     # - FITS_mREF/FITS_mSCI are required mask file paths (not None)
                     from astropy.io import fits as _fits_bsp
-                    _ref_data = _fits_bsp.getdata(FITS_REF)
+                    # BSP only needs the image *shape* for its mask files, not
+                    # the pixel data.  Read the header (NAXIS) instead of
+                    # decoding the full image via getdata.
+                    _ref_hdr = _fits_bsp.getheader(FITS_REF)
+                    _ref_shape = (int(_ref_hdr["NAXIS2"]), int(_ref_hdr["NAXIS1"]))
                     _bsp_mref = FITS_REF.replace(".fits", "_bsp_mask.fits")
                     _bsp_msci = FITS_SCI.replace(".fits", "_bsp_mask.fits")
-                    _ones_mask = np.ones_like(_ref_data, dtype=np.float32)
+                    _ones_mask = np.ones(_ref_shape, dtype=np.float32)
                     _fits_bsp.writeto(_bsp_mref, _ones_mask, overwrite=True)
-                    _sci_data = _fits_bsp.getdata(FITS_SCI)
-                    _ones_mask_sci = np.ones_like(_sci_data, dtype=np.float32)
+                    _sci_hdr = _fits_bsp.getheader(FITS_SCI)
+                    _sci_shape = (int(_sci_hdr["NAXIS2"]), int(_sci_hdr["NAXIS1"]))
+                    _ones_mask_sci = np.ones(_sci_shape, dtype=np.float32)
                     _fits_bsp.writeto(_bsp_msci, _ones_mask_sci, overwrite=True)
                     _bsp_kwargs = dict(
                         FITS_REF=FITS_REF,
@@ -2701,21 +2707,35 @@ def run_sfft() -> Optional[int]:
                                 f"kernel-L2 expectation vs sigma_sci={_explained:.3f}x "
                                 f"(VSCALE={_vscale:.4f})."
                             )
-                        if 1.05 < _vscale <= 5.0:
+                        # Record the measured factor up to the same generous
+                        # sanity cap the ZOGY backend uses (1e4).  The old 5.0
+                        # cap silently left VSCALE=1.0 - understating the
+                        # uncertainty by up to the true factor - for a merely
+                        # noisy subtraction while ZOGY reported the same data
+                        # faithfully.  Values above 5x are still flagged.
+                        if 1.05 < _vscale < 1e4:
                             diff_hdr["VSCALE"] = (
                                 round(float(_vscale), 6),
                                 "Noise-model factor sigma_diff/sigma_sci (IQR)",
                             )
                             _applied_vscale = True
-                            log_info(
-                                f"Variance calibration: VSCALE={_vscale:.4f} written "
-                                "to header; background_rms will be rescaled to "
-                                "match the measured difference-image noise."
-                            )
-                        elif _vscale > 5.0:
+                            if _vscale > 5.0:
+                                log_warning(
+                                    f"Difference-image noise is {_vscale:.1f}x the "
+                                    "science noise model - suspiciously large "
+                                    "(check subtraction quality); VSCALE written "
+                                    "to header regardless."
+                                )
+                            else:
+                                log_info(
+                                    f"Variance calibration: VSCALE={_vscale:.4f} written "
+                                    "to header; background_rms will be rescaled to "
+                                    "match the measured difference-image noise."
+                                )
+                        elif _vscale >= 1e4:
                             log_warning(
                                 f"Difference-image noise is {_vscale:.1f}x the science "
-                                "noise model - suspiciously large; leaving VSCALE=1.0 "
+                                "noise model - implausibly large; leaving VSCALE=1.0 "
                                 "(check subtraction quality)."
                             )
                         else:

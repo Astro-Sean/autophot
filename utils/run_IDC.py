@@ -946,15 +946,14 @@ class ImageDistortionCorrector:
             stem = Path(fits_image).stem
             conv_path = str(Path(output_dir) / f"{stem}_default.conv")
 
-            # Get FWHM: prefer explicit parameter, then header, then default
-            # Header FWHM can be stale from previous runs or instrument defaults
-            if fwhm_pixels is None or fwhm_pixels <= 0:
-                with fits.open(fits_image) as hdul:
-                    fwhm_pixels = self._header_fwhm_pixels(hdul[0].header)
-
+            # Get FWHM and pixel scale from a single FITS open (avoids
+            # re-parsing the same file multiple times in run_sextractor).
+            header = None
             pixel_scale_header = None
             with fits.open(fits_image) as hdul:
                 header = hdul[0].header
+                if fwhm_pixels is None or fwhm_pixels <= 0:
+                    fwhm_pixels = self._header_fwhm_pixels(header)
                 pixel_scale_header = header.get("PIXSCALE", header.get("CDELT2", 0))
                 if pixel_scale_header:
                     pixel_scale_header = abs(float(pixel_scale_header)) * 3600.0
@@ -1275,6 +1274,7 @@ class ImageDistortionCorrector:
                     # (degrees) using the actual image pixel scale; fall back
                     # to a nominal value only if the WCS is unusable.
                     pixel_scale = 0.1585 / 3600.0
+                    _pixscale_src = "nominal fallback (0.1585 arcsec/px)"
                     try:
                         from wcs import get_wcs as _get_wcs_for_err
                         _wcs_err = _get_wcs_for_err(fits.getheader(fits_image))
@@ -1284,8 +1284,24 @@ class ImageDistortionCorrector:
                             )
                             if np.all(np.isfinite(_ps)) and np.all(_ps > 0):
                                 pixel_scale = float(np.mean(_ps))
+                                _pixscale_src = "image WCS"
                     except Exception:
                         pass
+                    if _pixscale_src.startswith("nominal"):
+                        # A wrong pixel scale mis-scales ERRA_WORLD/ERRB_WORLD
+                        # and therefore SCAMP's astrometric weighting.
+                        logging.warning(
+                            "SCAMP error columns: WCS pixel scale unavailable; "
+                            "using the nominal %.4f arcsec/px fallback - world "
+                            "coordinate errors may be wrong for this instrument.",
+                            0.1585,
+                        )
+                    else:
+                        logging.debug(
+                            "SCAMP error columns: world errors from %s "
+                            "(%.4f arcsec/px).",
+                            _pixscale_src, pixel_scale * 3600.0,
+                        )
                     if 'ERRA_WORLD' not in cleaned.colnames:
                         cleaned['ERRA_WORLD'] = cleaned['ERRAWIN_IMAGE'] * pixel_scale
                     if 'ERRDEC_WORLD' not in cleaned.colnames:
@@ -1868,11 +1884,13 @@ class ImageDistortionCorrector:
             sci_hdr_fwhm = None
             ref_hdr_fwhm = None
             try:
-                sci_hdr_fwhm = float(fits.getheader(str(sci_image_copy)).get("FWHM", fits.getheader(str(sci_image_copy)).get("fwhm")))
+                _sci_hdr = fits.getheader(str(sci_image_copy))
+                sci_hdr_fwhm = float(_sci_hdr.get("FWHM", _sci_hdr.get("fwhm")))
             except Exception:
                 pass
             try:
-                ref_hdr_fwhm = float(fits.getheader(str(ref_image_copy)).get("FWHM", fits.getheader(str(ref_image_copy)).get("fwhm")))
+                _ref_hdr = fits.getheader(str(ref_image_copy))
+                ref_hdr_fwhm = float(_ref_hdr.get("FWHM", _ref_hdr.get("fwhm")))
             except Exception:
                 pass
 

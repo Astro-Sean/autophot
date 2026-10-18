@@ -2999,7 +2999,9 @@ def run_photometry():
         # =============================================================================
         if "target_x_pix" in input_yaml and "target_y_pix" in input_yaml:
             try:
-                check_image = get_image(fpath)
+                # `image` is the preprocessed science frame already in memory;
+                # re-reading it from disk via get_image(fpath) is redundant.
+                check_image = image
                 tx = int(round(float(input_yaml["target_x_pix"])))
                 ty = int(round(float(input_yaml["target_y_pix"])))
 
@@ -8031,8 +8033,13 @@ def run_photometry():
                             # than a configurable factor (default 5x).  This is
                             # intentionally permissive -- the RANSAC fit in
                             # find_flux_consistent_sources does the fine filtering.
+                            # Default 5.0 (permissive): a source whose sci/tpl
+                            # flux ratio deviates by more than 5x from the field
+                            # median is almost certainly an artifact, variable, or
+                            # mismatched detection.  A default of 0.0 silently
+                            # disabled the guard entirely.
                             _flux_max_dev = float(
-                                _ts_cfg.get("sfft_flux_ratio_max_deviation", 0.0)
+                                _ts_cfg.get("sfft_flux_ratio_max_deviation", 5.0)
                             )
                             if _flux_max_dev > 0:
                                 _flux_bad = _flux_finite & (
