@@ -1586,31 +1586,21 @@ def plot_lightcurve(
                     snr1 = np.asarray(d1["snr"], dtype=float)
                     snr2 = np.asarray(d2["snr"], dtype=float)
                 else:
-                    snr1 = np.divide(
-                        d1["mag"],
-                        d1["err"],
-                        out=np.zeros_like(d1["mag"]),
-                        where=d1["err"] > 0,
-                    )
-                    snr2 = np.divide(
-                        d2["mag"],
-                        d2["err"],
-                        out=np.zeros_like(d2["mag"]),
-                        where=d2["err"] > 0,
-                    )
+                    # mag/err is NOT S/N: magnitude is inverted (faint -> large
+                    # mag), so a faint non-detection scored a huge "SNR" and a
+                    # bright source a small one.  From m = -2.5*log10(F)+const,
+                    # sigma_m = c/SNR with c = 2.5/ln(10), so SNR = c/sigma_m.
+                    _c = 2.5 / np.log(10.0)
+                    _e1 = np.asarray(d1["err"], dtype=float)
+                    _e2 = np.asarray(d2["err"], dtype=float)
+                    snr1 = np.divide(_c, _e1, out=np.zeros_like(_e1), where=_e1 > 0)
+                    snr2 = np.divide(_c, _e2, out=np.zeros_like(_e2), where=_e2 > 0)
             else:
-                snr1 = np.divide(
-                    d1["mag"],
-                    d1["err"],
-                    out=np.zeros_like(d1["mag"]),
-                    where=d1["err"] > 0,
-                )
-                snr2 = np.divide(
-                    d2["mag"],
-                    d2["err"],
-                    out=np.zeros_like(d2["mag"]),
-                    where=d2["err"] > 0,
-                )
+                _c = 2.5 / np.log(10.0)
+                _e1 = np.asarray(d1["err"], dtype=float)
+                _e2 = np.asarray(d2["err"], dtype=float)
+                snr1 = np.divide(_c, _e1, out=np.zeros_like(_e1), where=_e1 > 0)
+                snr2 = np.divide(_c, _e2, out=np.zeros_like(_e2), where=_e2 > 0)
             if use_SNR_limit:
                 d1["det"] = (
                     np.isfinite(d1["mag"])
@@ -1856,7 +1846,9 @@ def generate_photometry_table(
         data = complete_data[np.isfinite(complete_data[zp_col])].copy()
         fcol = photometry_filter_series(data)
         if fcol is not None:
-            mask = fcol.map(lambda rv: filter_value_matches_band(band, rv))
+            # Vectorized: pre-compute canonical mapping per unique filter
+            # value instead of calling _heuristic_filter_mapping per row.
+            mask = _filter_series_matches_band(band, fcol)
             data = data[mask.fillna(False)].copy()
             if data.empty:
                 continue
@@ -2180,31 +2172,21 @@ def generate_photometry_table(
                     snr1 = np.asarray(d1["snr"], dtype=float)
                     snr2 = np.asarray(d2["snr"], dtype=float)
                 else:
-                    snr1 = np.divide(
-                        d1["mag"],
-                        d1["err"],
-                        out=np.zeros_like(d1["mag"]),
-                        where=d1["err"] > 0,
-                    )
-                    snr2 = np.divide(
-                        d2["mag"],
-                        d2["err"],
-                        out=np.zeros_like(d2["mag"]),
-                        where=d2["err"] > 0,
-                    )
+                    # mag/err is NOT S/N: magnitude is inverted (faint -> large
+                    # mag), so a faint non-detection scored a huge "SNR" and a
+                    # bright source a small one.  From m = -2.5*log10(F)+const,
+                    # sigma_m = c/SNR with c = 2.5/ln(10), so SNR = c/sigma_m.
+                    _c = 2.5 / np.log(10.0)
+                    _e1 = np.asarray(d1["err"], dtype=float)
+                    _e2 = np.asarray(d2["err"], dtype=float)
+                    snr1 = np.divide(_c, _e1, out=np.zeros_like(_e1), where=_e1 > 0)
+                    snr2 = np.divide(_c, _e2, out=np.zeros_like(_e2), where=_e2 > 0)
             else:
-                snr1 = np.divide(
-                    d1["mag"],
-                    d1["err"],
-                    out=np.zeros_like(d1["mag"]),
-                    where=d1["err"] > 0,
-                )
-                snr2 = np.divide(
-                    d2["mag"],
-                    d2["err"],
-                    out=np.zeros_like(d2["mag"]),
-                    where=d2["err"] > 0,
-                )
+                _c = 2.5 / np.log(10.0)
+                _e1 = np.asarray(d1["err"], dtype=float)
+                _e2 = np.asarray(d2["err"], dtype=float)
+                snr1 = np.divide(_c, _e1, out=np.zeros_like(_e1), where=_e1 > 0)
+                snr2 = np.divide(_c, _e2, out=np.zeros_like(_e2), where=_e2 > 0)
             if use_SNR_limit:
                 d1["det"] = (
                     np.isfinite(d1["mag"])
@@ -3224,6 +3206,9 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
 
     assigned_group_by_src = {}
     copied_pairs = set()
+    # Cache glob results per (directory, prefix) so rows sharing the same
+    # plot directory don't re-scan the filesystem on every iteration.
+    _glob_cache = {}
 
     for row in data.to_dict("records"):
         try:
@@ -3252,7 +3237,9 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
             candidates = []
             for pfx in prefixes:
                 search = os.path.join(loc, f"{pfx}*")
-                candidates.extend(glob.glob(search))
+                if search not in _glob_cache:
+                    _glob_cache[search] = glob.glob(search)
+                candidates.extend(_glob_cache[search])
 
             pdfs = [f for f in candidates if f.lower().endswith((".png", ".svg"))]
             files = sorted(pdfs)
