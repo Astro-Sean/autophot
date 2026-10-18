@@ -1465,12 +1465,15 @@ def _zogy_lsq_kernel(
                 Lap[i, i + 1] = -1.0
     P = Lap.T @ Lap
 
-    def _solve(pt_list, lam):
+    def _solve(pt_list, lam, cache=None):
         C = np.zeros((n_aug, n_aug))
         d = np.zeros(n_aug)
         n_rows = 0
         for cy, cx in pt_list:
-            rows = _stamp_rows(cy, cx)
+            if cache is not None:
+                rows = cache.get((cy, cx))
+            else:
+                rows = _stamp_rows(cy, cx)
             if rows is None:
                 continue
             A, y = rows
@@ -1499,7 +1502,7 @@ def _zogy_lsq_kernel(
                 return None, n_rows, 0.0
         return x, n_rows, lam_eff
 
-    def _finalize(x, n_pix, lam_eff, lam):
+    def _finalize(x, n_pix, lam_eff, lam, cache=None):
         """Rejection re-solve, kernel sanity gates, info fill."""
         # One rejection pass: a stamp dominated by a masked neighbour, an
         # unlisted variable, or a resampling edge inflates its residual RMS;
@@ -1507,7 +1510,10 @@ def _zogy_lsq_kernel(
         kept = pts
         res_rms = []
         for cy, cx in pts:
-            rows = _stamp_rows(cy, cx)
+            if cache is not None:
+                rows = cache.get((cy, cx))
+            else:
+                rows = _stamp_rows(cy, cx)
             if rows is None:
                 res_rms.append(np.inf)
                 continue
@@ -1525,7 +1531,7 @@ def _zogy_lsq_kernel(
                 if np.isfinite(r) and r <= cut
             ]
             if len(kept) >= min_stamps and len(kept) < len(pts):
-                x, n_pix, lam_eff = _solve(kept, lam)
+                x, n_pix, lam_eff = _solve(kept, lam, cache)
                 if x is None:
                     return None, info
 
@@ -1566,12 +1572,17 @@ def _zogy_lsq_kernel(
     lams = [float(lam_rel)]
     if _cap is not None:
         lams += [float(lam_rel) * m for m in (10.0, 100.0, 1000.0)]
+    # Precompute stamp design rows once; they depend only on (cy, cx), not on
+    # the damping level, so reusing them across the lam-escalation solves and
+    # the _finalize rejection pass avoids redundant cutout extraction and
+    # sliding-window construction.  Bit-for-bit identical to recomputing.
+    _stamp_cache = {p: _stamp_rows(*p) for p in pts}
     best = (None, np.inf, dict(info))
     for lam_eff_rel in lams:
-        x, n_pix, lam_eff = _solve(pts, lam_eff_rel)
+        x, n_pix, lam_eff = _solve(pts, lam_eff_rel, _stamp_cache)
         if x is None:
             continue
-        k, i2 = _finalize(x, n_pix, lam_eff, lam_eff_rel)
+        k, i2 = _finalize(x, n_pix, lam_eff, lam_eff_rel, _stamp_cache)
         if k is None:
             continue
         i2["lam_rel"] = lam_eff_rel
