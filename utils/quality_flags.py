@@ -198,6 +198,10 @@ def from_diff_quality(quality_class: str) -> QualityFlag:
 
 def from_snr(snr: float, detection_limit: float = 3.0) -> QualityFlag:
     """Map S/N to quality flag."""
+    # A NaN S/N is not a valid measurement: without this guard the comparison
+    # ``NaN < limit`` is False and the row is flagged OK.
+    if snr is None or not np.isfinite(snr):
+        return QualityFlag.LOW_SN
     if snr < detection_limit:
         return QualityFlag.LOW_SN
     return QualityFlag.OK
@@ -205,6 +209,10 @@ def from_snr(snr: float, detection_limit: float = 3.0) -> QualityFlag:
 
 def from_chi2(reduced_chi2: float, threshold: float = 5.0) -> QualityFlag:
     """Map reduced chi-squared to quality flag."""
+    # A non-finite chi-squared must not pass as OK (``NaN > threshold`` is
+    # False).
+    if reduced_chi2 is None or not np.isfinite(reduced_chi2):
+        return QualityFlag.SUSPICIOUS_RESIDUALS
     if reduced_chi2 > threshold:
         return QualityFlag.SUSPICIOUS_RESIDUALS
     return QualityFlag.OK

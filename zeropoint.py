@@ -3464,7 +3464,13 @@ class Zeropoint:
                         ):
                             _d_in_all.append(_fp2["zeropoint_scatter"])
                     if _d_in_all:
-                        _scatter_se = 1.858 * np.median(
+                        # The scatter SE of the median for a normal sample is
+                        # 1.2533*sigma/sqrt(N).  ``_d_in_all`` holds
+                        # ``zeropoint_scatter``, which is already sigma-scaled
+                        # (1.4826*MAD), so the 1.2533 factor alone is correct;
+                        # the old 1.858 (=1.2533*1.4826) double-counted the
+                        # MAD->sigma constant and inflated the floor by 1.4826x.
+                        _scatter_se = 1.2533 * np.median(
                             _d_in_all
                         ) / np.sqrt(max(_n_inl, 1))
                         if np.isfinite(_scatter_se) and _zp_combined_err < _scatter_se:
