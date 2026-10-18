@@ -2471,6 +2471,7 @@ class Catalog:
         include_IR_sequence_data=True,
         max_sources=None,
         region=None,
+        _stale_retry=False,
     ):
         """
         Download and process catalog data for a given target.
@@ -2687,21 +2688,32 @@ class Catalog:
                 }
                 _need = _quality_cols.get(catalogName, set())
                 if _need and not _need.issubset(selectedCatalog.columns):
-                    logger.info(
-                        "Cached %s catalog lacks quality columns %s; re-downloading",
+                    if not _stale_retry:
+                        logger.info(
+                            "Cached %s catalog lacks quality columns %s; re-downloading",
+                            catalogName.upper(),
+                            sorted(_need),
+                        )
+                        os.remove(_cache_hit)
+                        return self.download(
+                            target_coords=target_coords,
+                            catalogName=catalogName,
+                            radius=radius,
+                            target_name=target_name,
+                            catalog_custom_fpath=catalog_custom_fpath,
+                            include_IR_sequence_data=include_IR_sequence_data,
+                            max_sources=max_sources,
+                            region=region,
+                            _stale_retry=True,
+                        )
+                    # Re-downloaded once already and the columns are still
+                    # missing: the upstream service does not provide them.
+                    # Return the catalog we have rather than recursing forever.
+                    logger.warning(
+                        "Re-downloaded %s catalog still lacks quality columns "
+                        "%s; keeping the cached catalog.",
                         catalogName.upper(),
                         sorted(_need),
-                    )
-                    os.remove(_cache_hit)
-                    return self.download(
-                        target_coords=target_coords,
-                        catalogName=catalogName,
-                        radius=radius,
-                        target_name=target_name,
-                        catalog_custom_fpath=catalog_custom_fpath,
-                        include_IR_sequence_data=include_IR_sequence_data,
-                        max_sources=max_sources,
-                        region=region,
                     )
                 # Dedup cached catalog: earlier runs may have written duplicates.
                 if not selectedCatalog.empty and {"RA", "DEC"}.issubset(selectedCatalog.columns):
@@ -4097,16 +4109,17 @@ class Catalog:
         if catalog.empty:
             return catalog
 
-        # Small-angle approximation is fine here: tolerance is in arcsec,
-        # so separations are always << 1 degree.
-        dec_rad = np.radians(dec)
-        ra_vals = catalog["RA"].values
-        dec_vals = catalog["DEC"].values
-
-        delta_ra = (ra_vals - ra) * np.cos(dec_rad)   # cos(dec) correction
-        delta_dec = dec_vals - dec
-        separation_deg = np.sqrt(delta_ra**2 + delta_dec**2)
-        separation_arcsec = separation_deg * 3600.0
+        # Exact great-circle separation.  Using the target's declination for the
+        # cos(dec) projection (the previous small-angle approximation) biases the
+        # RA offset for every source whose own declination differs from the
+        # target's - a systematic error across a wide field.  SkyCoord handles
+        # the per-source cos(dec) and the RA wrap correctly.
+        target = SkyCoord(ra=ra * u.degree, dec=dec * u.degree)
+        sources = SkyCoord(
+            ra=catalog["RA"].values * u.degree,
+            dec=catalog["DEC"].values * u.degree,
+        )
+        separation_arcsec = target.separation(sources).arcsec
 
         match_mask = separation_arcsec <= tolerance
         return catalog[match_mask]
@@ -4268,7 +4281,16 @@ class Catalog:
                 )
                 idx_match, sep2d, _ = coords_new.match_to_catalog_sky(coords_existing)
                 tol_deg = tolerance_arcsec / 3600.0
-                matched = sep2d.deg < tol_deg
+                within = sep2d.deg < tol_deg
+                # Mutual nearest-neighbour match: a new source counts as already
+                # present only when the existing source it points at points back
+                # to it.  A one-way match suppresses genuine new sources whenever
+                # two new detections share the same nearest existing source (more
+                # likely in sparse fields), and can accept a source whose true
+                # counterpart is a different, closer entry.
+                _idx_rev, _, _ = coords_existing.match_to_catalog_sky(coords_new)
+                _back = _idx_rev[idx_match] == np.arange(len(coords_new))
+                matched = within & _back
 
                 # New (unmatched) sources via boolean mask - no iterrows().
                 new_mask = ~matched
