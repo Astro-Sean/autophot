@@ -224,6 +224,8 @@ If you use AutoPhOT in your research, please cite:
 
 > Brennan, S. J., & Fraser, M. 2022, A&A, 667, A62
 
+AutoPhOT has been used in <!-- citation-count -->29<!-- /citation-count --> papers: [see them here](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)
+
 ```bibtex
 @ARTICLE{2022A&A...667A..62B,
        author = {{Brennan}, S.~J. and {Fraser}, M.},
