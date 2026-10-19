@@ -143,7 +143,7 @@ from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        get_image, get_image_and_header, get_instrument_config,
                        load_telescope_config, log_exception, log_status,
                        log_step, log_warning_from_exception, metrics_table,
-                       canonical_target_name, odd,
+                       canonical_target_name, display_target_name, odd,
                        pix_dist, quadrature_add,
                        resolve_verbose_level, safe_fits_write,
                        silence_noisy_loggers, strict_config_enabled,
@@ -2676,11 +2676,8 @@ def run_photometry():
         #  fallback as the driver pre-fetch so catalog cache keys agree.
         #  Keep the user-facing name (with its SN/AT prefix) for plot
         #  labels: canonical_target_name strips the prefix for cache keys.
-        _raw_target_name = input_yaml.get("target_name")
-        if _raw_target_name is not None and str(_raw_target_name).strip():
-            input_yaml.setdefault(
-                "target_name_display", str(_raw_target_name).strip()
-            )
+        #  Prefer the TNS-resolved name_prefix + objname when present.
+        input_yaml["target_name_display"] = display_target_name(input_yaml)
         input_yaml["target_name"] = canonical_target_name(input_yaml)
 
         #  Update Input YAML with Image and Filter Metadata
@@ -3736,7 +3733,7 @@ def run_photometry():
             input_yaml["target_ra"], input_yaml["target_dec"], 0
         )
         logging.info(
-            f"TNS check:\t{input_yaml.get('target_name', 'Transient')} | "
+            f"TNS check:\t{input_yaml.get('target_name_display', 'Transient')} | "
             f"RA/Dec: {input_yaml['target_ra']:.6f}, {input_yaml['target_dec']:.6f} | "
             f"Pixel: ({target_x_expected:.2f}, {target_y_expected:.2f})"
         )
@@ -3905,17 +3902,17 @@ def run_photometry():
                 ):
                     logging.error("Target is OUTSIDE image bounds!")
                     raise Exception(
-                        f"Target {input_yaml['target_name']} is outside image boundaries "
+                        f"Target {input_yaml['target_name_display']} is outside image boundaries "
                         f"at pixel ({target_x_pix:.1f}, {target_y_pix:.1f})"
                     )
             except Exception as e:
                 log_exception(
                     e,
-                    f"FAILED to determine target position for {input_yaml['target_name']}",
+                    f"FAILED to determine target position for {input_yaml['target_name_display']}",
                 )
                 raise Exception(
                     f"{e}\nFailed to converge on target position!\n"
-                    f"Are you sure {input_yaml['target_name']} is in this image?"
+                    f"Are you sure {input_yaml['target_name_display']} is in this image?"
                 )
         else:
             try:
@@ -12958,7 +12955,11 @@ def run_photometry():
         # =============================================================================
 
         #  Log Start of Targeted Photometry
-        log_status(border_msg(f"Target photometry: {input_yaml['target_name']}"))
+        log_status(
+            border_msg(
+                f"Target photometry: {input_yaml.get('target_name_display', input_yaml['target_name'])}"
+            )
+        )
 
         # Sets the detection limit used for target detection decisions elsewhere
         # (this is distinct from limiting-magnitude recovery gating below).
