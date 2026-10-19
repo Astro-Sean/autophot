@@ -1,35 +1,39 @@
-![AutoPhOT logo](logo.png)
+<div align="center">
+
+<img src="logo.png" alt="AutoPhOT logo" width="420">
+
+<h1>AutoPhOT: Automated Photometry Of Transients</h1>
+
+**Point it at your FITS frames, give it a target, get back a calibrated light curve.**
 
 [![Anaconda Version](https://anaconda.org/astro-sean/autophot/badges/version.svg)](https://anaconda.org/astro-sean/autophot)
 [![Latest Release Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot)
 [![License](https://anaconda.org/astro-sean/autophot/badges/license.svg)](https://anaconda.org/astro-sean/autophot)
 [![Downloads](https://anaconda.org/astro-sean/autophot/badges/downloads.svg)](https://anaconda.org/astro-sean/autophot)
 
-# AutoPhOT: Automated Photometry Of Transients
+[Conda package](https://anaconda.org/astro-sean/autophot) · [Paper](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B) · [Report an issue](https://github.com/Astro-Sean/autophot/issues)
 
-AutoPhOT is a photometry pipeline for following up transients and variable sources, built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/). It takes FITS frames from any telescope, filter, and pixel scale, finds the target in each frame, and produces a calibrated light curve.
+</div>
 
-- Conda package: [anaconda.org/astro-sean/autophot](https://anaconda.org/astro-sean/autophot)
-- Paper: [A&A 667, A62 (2022)](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
-- Issues: [GitHub Issues](https://github.com/Astro-Sean/autophot/issues)
+---
 
-AutoPhOT has been used in <!-- citation-count -->70<!-- /citation-count --> papers (updated: <!-- citation-date -->19-10-2026<!-- /citation-date -->): [see them on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)
+AutoPhOT is a photometry pipeline for transients and variable sources, built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/). Feed it FITS images from any telescope, filter, or pixel scale and it will find your target in each frame, do the photometry, calibrate it against survey catalogs, and hand you one clean light curve.
 
+It has been used in <!-- citation-count -->70<!-- /citation-count --> papers so far (updated: <!-- citation-date -->19-10-2026<!-- /citation-date -->) - [see them on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc).
 
 > [!NOTE]
-> I am the sole developer and maintainer of AutoPhOT and also a [full-time researcher](https://astro-sean.github.io/index.html) at [MPE](https://www.mpe.mpg.de/person/144270/1302618).
-> Please open issues on GitHub and I will do my best to resolve them as soon as possible.
+> AutoPhOT is developed and maintained by one person, a [full-time researcher](https://astro-sean.github.io/index.html) at [MPE](https://www.mpe.mpg.de/person/144270/1302618). If you hit a problem, please open an issue on GitHub and I will get to it as soon as I can.
 
-## What it does
+<h2 align="center">What it does</h2>
 
-1. Sorts frames by telescope, instrument, and filter; checks or re-solves the WCS with astrometry.net and Gaia DR3. SIP and TPV distortion are handled.
-2. Prepares each image: cosmic-ray rejection, satellite-trail detection, background estimation, FWHM measurement.
-3. Runs aperture and PSF photometry at the target position, with an empirical ePSF built from in-frame stars.
-4. Calibrates against a catalog (Gaia DR3, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and more), with per-filter routing and Gaia XP synthetic photometry.
+1. Sorts your frames by telescope, instrument, and filter, then checks or re-solves the WCS with astrometry.net and Gaia DR3. SIP and TPV distortion are handled.
+2. Cleans each image: cosmic-ray rejection, satellite-trail detection, background estimation, FWHM measurement.
+3. Runs aperture and PSF photometry at the target position, using an empirical PSF built from stars in the frame itself.
+4. Calibrates against Gaia DR3, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and more, with per-filter routing and Gaia XP synthetic photometry.
 5. Optionally subtracts a template (SFFT, HOTPANTS, or ZOGY) and scores every difference image for quality.
 6. Measures limiting magnitudes by injecting and recovering artificial sources.
 
-## Installation
+<h2 align="center">Installation</h2>
 
 ### Conda (recommended)
 
@@ -43,9 +47,7 @@ conda activate autophot
 pip install sfft==1.7.3 sip_tpv==1.1  # not on conda channels
 ```
 
-AutoPhOT requires Python 3.12 and photutils>=3.1 (the pipeline uses its compiled aperture photometry and PSF machinery). The conda package and pip installs resolve it automatically.
-
-Check the install:
+AutoPhOT needs Python 3.12 and photutils>=3.1, which the conda package and pip installs pull in automatically. To check everything is working:
 
 ```bash
 python -c "from autophot import AutomatedPhotometry; print('OK')"
@@ -60,9 +62,9 @@ cd autophot
 pip install .
 ```
 
-For a development (editable) checkout use `pip install -e .`. Optional extras cover RefCAT2 queries and the non-default aligners: `pip install ".[refcat,aafitrans,spalipy,tweakwcs,chi2-shift]"` or `pip install ".[all]"`.
+For a development checkout use `pip install -e .`. Optional extras cover RefCAT2 queries and the non-default aligners: `pip install ".[refcat,aafitrans,spalipy,tweakwcs,chi2-shift]"` or `pip install ".[all]"`.
 
-`environment.yml` pins every dependency for a reproducible setup:
+`environment.yml` pins every dependency if you want a fully reproducible setup:
 
 ```bash
 conda env create -f environment.yml
@@ -70,7 +72,7 @@ conda activate autophot
 pip install -e .
 ```
 
-## Quick start
+<h2 align="center">Quick start</h2>
 
 ```python
 from autophot import AutomatedPhotometry
@@ -91,7 +93,7 @@ A few things worth knowing up front:
 - `config["nCPU"] = 4` (or `AUTOPHOT_NCPU=4`) processes images in parallel, each with its own log. Worker settings like `photometry.aperture_n_jobs` multiply `nCPU`, so keep the product at or below your core count.
 - `python batch_main.py -f im1.fits im2.fits -c config.yml --jobs 4` runs a file list without a driver script.
 
-## Command-line tools
+<h2 align="center">Command-line tools</h2>
 
 | Command | Purpose |
 |---------|---------|
@@ -100,18 +102,20 @@ A few things worth knowing up front:
 | `autophot-gaia-curves` | Build a Gaia custom catalog from transmission curves |
 | `autophot-inspect-telescope` | Inspect telescope header keywords |
 
-## Optional dependencies
+<h2 align="center">Optional dependencies</h2>
 
-- **astrometry.net** (`solve-field`): needed when frames have no WCS. `conda install conda-forge::astrometry`; index files from [astrometry.net](https://astrometry.net/data.html). [repo](https://github.com/dstndstn/astrometry.net) - [Lang et al. 2010, AJ 139, 1782](https://ui.adsabs.harvard.edu/abs/2010AJ....139.1782L/abstract)
+None of these are needed for a basic run, but each unlocks part of the pipeline:
+
+- **astrometry.net** (`solve-field`): for frames with no WCS. `conda install conda-forge::astrometry`; index files from [astrometry.net](https://astrometry.net/data.html). [repo](https://github.com/dstndstn/astrometry.net) - [Lang et al. 2010, AJ 139, 1782](https://ui.adsabs.harvard.edu/abs/2010AJ....139.1782L/abstract)
 - **Astromatic suite** (SExtractor, SCAMP, SWarp): `conda install -c conda-forge astromatic-source-extractor astromatic-scamp astromatic-swarp` - [astromatic.net](https://www.astromatic.net/) - SExtractor: [Bertin & Arnouts 1996](https://ui.adsabs.harvard.edu/abs/1996A%26AS..117..393B/abstract); SCAMP: [Bertin 2006](https://ui.adsabs.harvard.edu/abs/2006ASPC..351..112B/abstract); SWarp: [Bertin et al. 2002](https://ui.adsabs.harvard.edu/abs/2002ASPC..281..228B/abstract)
 - **SFFT**: `pip install sfft==1.7.3` - [repo](https://github.com/thomasvrussell/sfft) - [Hu et al. 2022, ApJ 936, 157](https://ui.adsabs.harvard.edu/abs/2022ApJ...936..157H/abstract)
 - **HOTPANTS**: needs cfitsio; `git clone https://github.com/Astro-Sean/hotpants && cd hotpants && make` - [repo](https://github.com/Astro-Sean/hotpants) (fork of acbecker/hotpants with the build fixed for macOS and modern GCC/Clang) - [Becker 2015, ascl:1504.004](https://ui.adsabs.harvard.edu/abs/2015ascl.soft04004B/abstract); method from [Alard & Lupton 1998, ApJ 503, 325](https://ui.adsabs.harvard.edu/abs/1998ApJ...503..325A/abstract)
-- **ZOGY**: built in (self-contained numpy implementation, nothing to install) - based on [pmvreeswijk/ZOGY](https://github.com/pmvreeswijk/ZOGY) - [Zackay, Ofek & Gal-Yam 2016, ApJ 830, 27](https://ui.adsabs.harvard.edu/abs/2016ApJ...830...27Z/abstract)
-- **MaxiMask**: CNN defect mask that catches contaminants the heuristic masks miss - worthwhile in complex/crowded fields. Inference is slow on CPU (order a minute per frame) but can run on GPU (`maximask_allow_gpu`). `pip install maximask-and-maxitrack tensorflow`, enable with `use_maximask: True` - [repo](https://github.com/mpaillassa/MaxiMask) - [Paillassa, Bertin & Bouy 2020, A&A 634, A49](https://ui.adsabs.harvard.edu/abs/2020A%26A...634A..49P/abstract)
+- **ZOGY**: nothing to install, it is built in (self-contained numpy implementation) - based on [pmvreeswijk/ZOGY](https://github.com/pmvreeswijk/ZOGY) - [Zackay, Ofek & Gal-Yam 2016, ApJ 830, 27](https://ui.adsabs.harvard.edu/abs/2016ApJ...830...27Z/abstract)
+- **MaxiMask**: CNN defect mask that catches contaminants the heuristic masks miss - worthwhile in crowded fields. Inference is slow on CPU (order a minute per frame) but can run on GPU (`maximask_allow_gpu`). `pip install maximask-and-maxitrack tensorflow`, enable with `use_maximask: True` - [repo](https://github.com/mpaillassa/MaxiMask) - [Paillassa, Bertin & Bouy 2020, A&A 634, A49](https://ui.adsabs.harvard.edu/abs/2020A%26A...634A..49P/abstract)
 
-## Alignment
+<h2 align="center">Alignment</h2>
 
-The template is registered to the science image before subtraction. `spalipy` is the default; the pipeline checks each result against offset, RMS, and p90 gates scaled to the image FWHM, and falls through the remaining methods on failure.
+Before subtraction, the template is registered to the science image. `spalipy` is the default; every result is checked against offset, RMS, and p90 gates scaled to the image FWHM, and the pipeline falls through the remaining methods if one fails.
 
 | Method | `alignment_method` | Install |
 |--------|--------------------|---------|
@@ -124,13 +128,13 @@ The template is registered to the science image before subtraction. `spalipy` is
 
 Gate thresholds live under `template_subtraction` (`alignment_max_offset_px`, `alignment_max_rms_px`, `alignment_max_p90_px`). Install all optional methods with `pip install -e ".[spalipy,tweakwcs,chi2-shift]"`.
 
-## Template subtraction
+<h2 align="center">Template subtraction</h2>
 
 | Method | `method` | Notes |
 |--------|----------|-------|
 | SFFT (default) | `sfft` | Spatially varying kernel; variable-star rejection; optional B-spline refinement |
 | HOTPANTS | `hotpants` | Classic kernel matching; build from source |
-| ZOGY | `zogy` | PSF-matched subtraction; built-in implementation, no external package needed |
+| ZOGY | `zogy` | PSF-matched subtraction; built in, nothing to install |
 
 Shared options under `template_subtraction`:
 
@@ -142,7 +146,7 @@ Sources on masked pixels are dropped before the kernel fit, and variable sources
 
 Set `do_subtraction: True`, then place one template FITS per filter in `fits_dir/templates/<filter>_template/` (`prepare_template_directory()` builds the layout for you).
 
-## Photometry
+<h2 align="center">Photometry</h2>
 
 The PSF is an empirical ePSF built with photutils; oversampling is raised automatically on undersampled images (FWHM < 2.5 px). PSF stars are cut on saturation, elongation, isolation, FWHM consistency, and concentration, plus an FFT check for close companions.
 
@@ -154,7 +158,7 @@ The PSF is an empirical ePSF built with photutils; oversampling is raised automa
 
 On difference images, `photometry.check_inverted_image: True` recovers a fading source as a negative PSF dip; those rows carry an `_inverted_fit` flag.
 
-## Catalogs
+<h2 align="center">Catalogs</h2>
 
 | Catalog | `use_catalog` | Magnitude system | Notes |
 |---------|---------------|------------------|-------|
@@ -171,7 +175,7 @@ On difference images, `photometry.check_inverted_image: True` recovers a fading 
 | Gaia + custom curves | `gaia_custom` | `abmag` | User transmission curves; magnitudes synthesized in AB |
 | Auto-select | `auto` | per resolved catalog | Picks the best catalog per band |
 
-The system of the calibrating magnitudes is resolved per band for the mixed catalogs above, printed in the run log next to the catalog choice and the zeropoint table, and written to `output.csv` as `magsys` (`abmag`, `vegamag`, `mixed`, or `unknown`). For a `custom` catalog the system cannot be inferred, so `magsys` reports `unknown` unless you are certain of the convention your columns follow.
+The magnitude system of the calibrators is resolved per band for the mixed catalogs above, printed in the run log next to the catalog choice and the zeropoint table, and written to `output.csv` as `magsys` (`abmag`, `vegamag`, `mixed`, or `unknown`). A `custom` catalog cannot be inferred, so `magsys` reports `unknown` unless you are certain of the convention your columns follow.
 
 Different catalogs can serve different filters in one run:
 
@@ -188,11 +192,11 @@ Mapping keys take single bands (`u`), families (`UBVRI`, `JHK`), mixes (`uRI`), 
 
 With `use_catalog: auto`, the pipeline scans every image footprint once before processing, downloads each feasible catalog, and keeps the one with the most usable calibrators per band. The resolved mapping is cached under `<wdir>/catalog_queries/` so restarts skip the rescan; Gaia stays available as a fallback but is excluded from the bulk scan to protect the archive servers. If a selected catalog fails at query time, the run demotes it to the best still-working candidate for that band instead of stopping (a genuine 0-source answer is also demoted in the cache; transient query failures fall back for that run only). For non-standard filters, supply curve files via `gaia_custom` and `catalog.transmission_curve_map`.
 
-## Limiting magnitudes
+<h2 align="center">Limiting magnitudes</h2>
 
 Measured by injecting artificial sources and checking recovery, at one or more S/N thresholds. Defaults write `Limit_3p0S2N` and `Limit_5p0S2N` columns; thresholds and injection strategy live under `limiting_magnitude`.
 
-## Post-processing
+<h2 align="center">Post-processing</h2>
 
 ```python
 from lightcurve import (
@@ -208,9 +212,9 @@ check_detection_plots(detections_loc, method="PSF")          # sort plots into f
 
 The output CSV is long-form: one row per image with a `filter` column. Lightcurve x-axes default to MJD and switch to minutes or hours for spans under a day. `plot_variability_check` removes each epoch's common-mode drift before comparing the target to the reference ensemble.
 
-## Environment variables
+<h2 align="center">Environment variables</h2>
 
-Needed for TNS lookups and RefCAT2;
+Only needed for TNS lookups and RefCAT2:
 
 ```bash
 export MASTCASJOBS_WSID="..."
@@ -220,10 +224,9 @@ export TNS_BOT_NAME="..."
 export TNS_BOT_API="..."
 ```
 
+<h2 align="center">Citation</h2>
 
-## Citation
-
-If you use AutoPhOT in your research, please cite:
+If AutoPhOT earns a place in your paper, please cite:
 
 > Brennan, S. J., & Fraser, M. 2022, A&A, 667, A62
 

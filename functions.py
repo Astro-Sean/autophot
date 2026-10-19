@@ -1118,6 +1118,30 @@ def canonical_target_name(input_yaml):
     return "Center of Field"
 
 
+def display_target_name(input_yaml):
+    """Return the most complete target name for user-facing output.
+
+    Prefers the TNS-resolved ``name_prefix`` + ``objname`` pair (e.g.
+    ``SN 2024pba``) over the configured ``target_name``, which may be a
+    bare IAU name like ``2024pba``.  A user-supplied prefix is also
+    normalised to ``SN 2024pba`` style (prefix, space, name).  Falls back
+    to :func:`canonical_target_name` when no name is available.
+    """
+    objname = str(input_yaml.get("objname") or "").strip()
+    prefix = str(input_yaml.get("name_prefix") or "").strip()
+    if objname:
+        return f"{prefix} {objname}" if prefix else objname
+
+    name = input_yaml.get("target_name")
+    if name is not None and str(name).strip() != "":
+        name = str(name).strip()
+        m = re.match(r"^(SN|AT|TDE)\s*(\S.*)$", name, flags=re.IGNORECASE)
+        if m:
+            return f"{m.group(1).upper()} {m.group(2).strip()}"
+        return name
+    return canonical_target_name(input_yaml)
+
+
 def format_exception_origin(exc: BaseException) -> str:
     """
     Return ``path:lineno`` for the stack frame where *exc* was raised.
