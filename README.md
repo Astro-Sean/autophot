@@ -7,13 +7,13 @@
 
 # AutoPhOT: Automated Photometry Of Transients
 
-AutoPhOT is a photometry pipeline for following up transients and variable sources, built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/). It takes FITS frames from any telescope, filter, and pixel scale, finds the target in each frame, and produces one calibrated light curve.
+AutoPhOT is a photometry pipeline for following up transients and variable sources, built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/). It takes FITS frames from any telescope, filter, and pixel scale, finds the target in each frame, and produces a calibrated light curve.
 
 - Conda package: [anaconda.org/astro-sean/autophot](https://anaconda.org/astro-sean/autophot)
 - Paper: [A&A 667, A62 (2022)](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
 - Issues: [GitHub Issues](https://github.com/Astro-Sean/autophot/issues)
 
-AutoPhOT has been used in <!-- citation-count -->29<!-- /citation-count --> papers: [see them here](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)
+AutoPhOT has been used in <!-- citation-count -->70<!-- /citation-count --> papers (updated: <!-- citation-date -->19-10-2026<!-- /citation-date -->): [see them on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)
 
 
 > [!NOTE]
