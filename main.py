@@ -625,6 +625,33 @@ def _sparse_prior_supplement(
     return cand[order][: int(max_add)]
 
 
+def _additional_target_sfft_ban_xy(
+    input_yaml, image_wcs, image_shape, image_fwhm, wcs_origin
+):
+    """Return 1-based additional-target positions for SFFT's prior ban."""
+    try:
+        ny, nx = image_shape
+        border = 1.5 * float(image_fwhm)
+    except (TypeError, ValueError):
+        return []
+    ban_xy = []
+    for target in input_yaml.get("_additional_targets_resolved") or []:
+        try:
+            ra = float(target["ra"])
+            dec = float(target["dec"])
+            x, y = image_wcs.all_world2pix(ra, dec, wcs_origin)
+        except Exception:
+            continue
+        if (
+            np.isfinite(x)
+            and np.isfinite(y)
+            and border <= x < nx - border
+            and border <= y < ny - border
+        ):
+            ban_xy.append([float(x) + 1.0, float(y) + 1.0])
+    return ban_xy
+
+
 def _header_numeric_value(cfg_value, header):
     """
     Resolve a telescope.yml keyword entry to a numeric value, or None.
@@ -2647,6 +2674,13 @@ def run_photometry():
 
         #  Set Target Name - canonical_target_name applies the same
         #  fallback as the driver pre-fetch so catalog cache keys agree.
+        #  Keep the user-facing name (with its SN/AT prefix) for plot
+        #  labels: canonical_target_name strips the prefix for cache keys.
+        _raw_target_name = input_yaml.get("target_name")
+        if _raw_target_name is not None and str(_raw_target_name).strip():
+            input_yaml.setdefault(
+                "target_name_display", str(_raw_target_name).strip()
+            )
         input_yaml["target_name"] = canonical_target_name(input_yaml)
 
         #  Update Input YAML with Image and Filter Metadata
@@ -9904,6 +9938,23 @@ def run_photometry():
             else:
                 masked_sources = []
 
+            # Prior-free SFFT retries bypass the vetted-source list, so every
+            # configured transient must remain banned even when it is absent
+            # from the variable-source catalog.
+            _additional_mask_xy = _additional_target_sfft_ban_xy(
+                input_yaml,
+                imageWCS,
+                image.shape,
+                ImageFWHM,
+                wcs_origin,
+            )
+            if _additional_mask_xy:
+                masked_sources.extend(_additional_mask_xy)
+                logging.info(
+                    "Added %d additional target position(s) to the SFFT prior ban.",
+                    len(_additional_mask_xy),
+                )
+
             #  ZOGY Method: build science and template PSF.
             # The template PSF is best built from stars selected
             # independently on the (usually deeper) reference - that
@@ -10694,59 +10745,8 @@ def run_photometry():
                 else:
                     PreformSubtraction = True
 
-                    # Read difference-image quality classification from header.
-                    # The quality metrics are written by utils.difference_quality
-                    # via write_quality_to_fits_header() in templates.subtract().
-                    try:
-                        _diff_hdr = get_header(fpath)
-                        _diff_qual_class = (
-                            str(_diff_hdr.get("DIFFQUAL", "")).strip().lower()
-                        )
-                        _diff_qual_score = float(_diff_hdr.get("DIFFQSCR", -1.0))
-                        _diff_dipoles = int(_diff_hdr.get("DIFFDIPO", 0))
-                        _diff_dip_frac = float(_diff_hdr.get("DIFFDIPF", 0.0))
-                        if _diff_qual_class == "fail":
-                            logging.error(
-                                "Difference-image quality FAILED (score=%.3f, "
-                                "dipoles=%d (%.1f%%). Photometry on this difference "
-                                "image is unreliable; results should be flagged.",
-                                _diff_qual_score,
-                                _diff_dipoles,
-                                _diff_dip_frac * 100,
-                            )
-                            input_yaml["diff_quality_class"] = "fail"
-                            input_yaml["diff_quality_score"] = _diff_qual_score
-                        elif _diff_qual_class == "downgrade":
-                            logging.warning(
-                                "Difference-image quality DOWNGRADED (score=%.3f, "
-                                "dipoles=%d (%.1f%%). Photometry results should be "
-                                "treated with caution.",
-                                _diff_qual_score,
-                                _diff_dipoles,
-                                _diff_dip_frac * 100,
-                            )
-                            input_yaml["diff_quality_class"] = "downgrade"
-                            input_yaml["diff_quality_score"] = _diff_qual_score
-                        elif _diff_qual_class == "pass":
-                            # The detailed quality line already reports the
-                            # score; PASS needs no extra user-facing line.
-                            logging.debug(
-                                "Difference-image quality PASSED (score=%.3f, "
-                                "dipoles=%d (%.1f%%)).",
-                                _diff_qual_score,
-                                _diff_dipoles,
-                                _diff_dip_frac * 100,
-                            )
-                            input_yaml["diff_quality_class"] = "pass"
-                            input_yaml["diff_quality_score"] = _diff_qual_score
-                    except Exception as _dq_e:
-                        logging.debug(
-                            "Could not read difference-image quality from header: %s",
-                            _dq_e,
-                        )
-
-                    # Stage-closing summary: method, matched priors, global
-                    # difference statistics, and the quality classification.
+                    # Stage-closing summary: method, matched priors, and
+                    # global difference statistics.
                     try:
                         _diff_arr = get_image(fpath)
                         _dmed = float(np.nanmedian(_diff_arr))
@@ -10770,13 +10770,6 @@ def run_photometry():
                                 _n_match = int(len(_sfft_used.dropna(how="all")))
                         except Exception:
                             pass
-                        _qclass = input_yaml.get("diff_quality_class")
-                        _qscore = input_yaml.get("diff_quality_score")
-                        _qtxt = (
-                            f"{_qclass} ({_qscore:.3f})"
-                            if _qclass and _qscore is not None and np.isfinite(_qscore)
-                            else (_qclass or "n/a")
-                        )
                         # Report the direction actually applied: the ZOGY
                         # branch can override the configured forceconv when
                         # it would require a deconvolving kernel.
@@ -10792,7 +10785,7 @@ def run_photometry():
                         log_status(
                             "Subtraction: OK | %s (forceconv=%s, kernel=%s) | "
                             "matched=%d | diff med=%.2f std=%.2f ADU | "
-                            "masked=%.1f%% | quality=%s",
+                            "masked=%.1f%%",
                             _ts_cfg.get("method", "?"),
                             _convd_rep,
                             _ts_cfg.get("kernel_order", "?"),
@@ -10800,7 +10793,6 @@ def run_photometry():
                             _dmed,
                             _dstd,
                             _dnan,
-                            _qtxt,
                         )
                         del _diff_arr
                     except Exception as _se:
@@ -12594,6 +12586,14 @@ def run_photometry():
                     e,
                 )
 
+        # The injection/recovery limiting-magnitude trials run later on this
+        # same difference image; stash the LPI floor so recovered errors carry
+        # the same systematic term the real photometry does, otherwise the
+        # reported limit is deeper than a real source could reach.
+        input_yaml["_lpi_extra_flux_err_for_limits"] = (
+            float(lpi_extra_flux_err) if np.isfinite(lpi_extra_flux_err) else np.nan
+        )
+
         # Optional uniform DC lift in the local subtract box (see `background:` YAML).
         # We also reuse the *same* local-fit cutout for target AP, target PSF,
         # and injected limiting magnitude so these measurements are consistent.
@@ -13641,6 +13641,10 @@ def run_photometry():
                 masked_source_centers=masked_centers,
                 kernel_half_width=kernel_half_width,
                 diff_decorrelated=diff_decorrelated,
+                additional_locations=[
+                    (_a.get("x_pix", np.nan), _a.get("y_pix", np.nan))
+                    for _a in (_additional_targets_for_fit or [])
+                ],
             )
 
         # Target FWHM should reflect the *measured target* width on this frame,
@@ -13945,28 +13949,6 @@ def run_photometry():
             ):
                 logging.warning(
                     "%s zeropoint not available - magnitudes stay instrumental", method
-                )
-                continue
-            # Strict subtraction quality mode: block photometry on failed
-            # subtraction rather than returning unreliable measurements.
-            _strict_sub = bool(
-                (input_yaml.get("photometry") or {}).get(
-                    "strict_subtraction_quality", False
-                )
-            )
-            if (
-                PreformSubtraction
-                and _strict_sub
-                and str(input_yaml.get("diff_quality_class", "unknown")) == "fail"
-            ):
-                logging.error(
-                    "%s: Strict subtraction quality mode enabled and difference "
-                    "image quality is FAILED. Returning NaN for photometry.",
-                    method,
-                )
-                TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}"] = np.nan
-                TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}_err"] = (
-                    np.nan
                 )
                 continue
             inst_col = f"inst_{input_yaml['imageFilter']}_{method}"
@@ -14303,44 +14285,15 @@ def run_photometry():
                 )
                 if _sys_floor > 0:
                     errorTerms.append(_sys_floor)
-                # Subtraction-quality-dependent systematic error.
-                # When the difference image is downgraded or failed, the
-                # subtraction residuals (dipoles, correlated noise) add
-                # an untracked systematic to the photometry.  Add it in
-                # quadrature so users see inflated errors rather than
-                # falsely precise measurements.
-                _diff_qual = str(input_yaml.get("diff_quality_class", "unknown"))
-                _sub_sys_cfg = float(
-                    (input_yaml.get("photometry") or {}).get(
-                        "subtraction_downgrade_sys_err_mag", 0.05
-                    )
-                )
-                _sub_fail_cfg = float(
-                    (input_yaml.get("photometry") or {}).get(
-                        "subtraction_fail_sys_err_mag", 0.15
-                    )
-                )
-                if (
-                    PreformSubtraction
-                    and _diff_qual == "downgrade"
-                    and _sub_sys_cfg > 0
-                ):
-                    errorTerms.append(_sub_sys_cfg)
-                    logging.info(
-                        "%s: Adding %.3f mag systematic for downgraded subtraction quality.",
-                        method,
-                        _sub_sys_cfg,
-                    )
-                elif PreformSubtraction and _diff_qual == "fail" and _sub_fail_cfg > 0:
-                    errorTerms.append(_sub_fail_cfg)
-                    logging.warning(
-                        "%s: Adding %.3f mag systematic for FAILED subtraction quality. "
-                        "Photometry is unreliable.",
-                        method,
-                        _sub_fail_cfg,
-                    )
+                # A finite error on a NaN magnitude is meaningless: quadrature_add
+                # skips NaN terms, so a failed fit (cal_mag NaN) would otherwise
+                # still report a finite error from the zeropoint/systematic
+                # terms.  Keep value and error null together.
+                _cal_err = quadrature_add(errorTerms)
+                if not np.isfinite(cal_mag):
+                    _cal_err = np.nan
                 TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}_err"] = (
-                    quadrature_add(errorTerms)
+                    _cal_err
                 )
                 inst_err_col = f"{inst_col}_err"
                 cal_mag_col = f"{input_yaml['imageFilter']}_{method}"
@@ -14389,6 +14342,61 @@ def run_photometry():
                 TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}_err"] = (
                     np.nan
                 )
+
+        # ------------------------------------------------------------------
+        # Propagate the difference-image systematic terms into the inverted
+        # (fading-source) error columns.  The primary AP/PSF columns above
+        # receive the SFFT kernel-model, flux-scale, and LPI background-infill
+        # terms; the inverted measurements are separate fits on the same
+        # difference image and would otherwise be reported as more precise.
+        # These are fractional/systematic terms, folded in quadrature.
+        # ------------------------------------------------------------------
+        if PreformSubtraction and idx in TargetPosition.index:
+            _ker_frac_inv = float(
+                input_yaml.get("psf_kernel_model_err_frac", 0.0) or 0.0
+            )
+            _fscal_frac_inv = float(
+                input_yaml.get("flux_scale_discrep_frac", 0.0) or 0.0
+            )
+            _inv_mag_sys = (2.5 / np.log(10.0)) * (
+                max(_ker_frac_inv, 0.0) + max(_fscal_frac_inv, 0.0)
+            )
+            if "inst_inverted_err" in TargetPosition.columns:
+                _iie = float(TargetPosition.at[idx, "inst_inverted_err"])
+                if np.isfinite(_iie) and _inv_mag_sys > 0:
+                    TargetPosition.at[idx, "inst_inverted_err"] = float(
+                        np.hypot(_iie, _inv_mag_sys)
+                    )
+            _inv_flux = (
+                float(TargetPosition.at[idx, "flux_PSF_inverted"])
+                if "flux_PSF_inverted" in TargetPosition.columns
+                else np.nan
+            )
+            if (
+                np.isfinite(lpi_extra_flux_err)
+                and np.isfinite(_inv_flux)
+                and abs(_inv_flux) > 0
+                and "inst_inverted_err" in TargetPosition.columns
+            ):
+                _iie = float(TargetPosition.at[idx, "inst_inverted_err"])
+                if np.isfinite(_iie):
+                    TargetPosition.at[idx, "inst_inverted_err"] = float(
+                        np.hypot(
+                            _iie,
+                            (2.5 / np.log(10.0))
+                            * float(lpi_extra_flux_err)
+                            / abs(_inv_flux),
+                        )
+                    )
+            if (
+                np.isfinite(lpi_extra_flux_err)
+                and "flux_AP_err_inverted" in TargetPosition.columns
+            ):
+                _fae = float(TargetPosition.at[idx, "flux_AP_err_inverted"])
+                if np.isfinite(_fae):
+                    TargetPosition.at[idx, "flux_AP_err_inverted"] = float(
+                        np.hypot(_fae, float(lpi_extra_flux_err))
+                    )
 
         # =============================================================================
         # Other Transients Photometry (optional, default False)
@@ -14588,36 +14596,6 @@ def run_photometry():
                                 )
                                 if _o_floor > 0:
                                     _ot_terms.append(_o_floor)
-                                if PreformSubtraction:
-                                    _dq_ot = str(
-                                        input_yaml.get(
-                                            "diff_quality_class", "unknown"
-                                        )
-                                    )
-                                    if _dq_ot == "downgrade":
-                                        _ot_terms.append(
-                                            float(
-                                                (
-                                                    input_yaml.get("photometry")
-                                                    or {}
-                                                ).get(
-                                                    "subtraction_downgrade_sys_err_mag",
-                                                    0.05,
-                                                )
-                                            )
-                                        )
-                                    elif _dq_ot == "fail":
-                                        _ot_terms.append(
-                                            float(
-                                                (
-                                                    input_yaml.get("photometry")
-                                                    or {}
-                                                ).get(
-                                                    "subtraction_fail_sys_err_mag",
-                                                    0.15,
-                                                )
-                                            )
-                                        )
                                 _cal_err = (
                                     quadrature_add(_ot_terms)
                                     if _ot_terms
@@ -14829,6 +14807,14 @@ def run_photometry():
                                 _lp_y,
                             )
                         lim_pos = (_lp_x, _lp_y)
+                        _lim_avoid_positions = []
+                        for _a in _additional_targets_for_fit or []:
+                            _ax = _a.get("x_pix", np.nan)
+                            _ay = _a.get("y_pix", np.nan)
+                            if np.isfinite(_ax) and np.isfinite(_ay):
+                                _lim_avoid_positions.append(
+                                    (float(_ax), float(_ay))
+                                )
                         # A GriddedPSFModel selects the ePSF cell from the
                         # (x_0, y_0) passed to evaluate(), but the injection
                         # machinery renders on cutout-local coordinates - pin
@@ -14980,6 +14966,7 @@ def run_photometry():
                                         plot=True,
                                         n_jobs=lim_n_jobs,
                                         image_zeropoint=image_zeropoint,
+                                        avoid_positions=_lim_avoid_positions,
                                     )
                                 )
 
@@ -15040,6 +15027,7 @@ def run_photometry():
                                     n_jobs=lim_n_jobs,
                                     image_zeropoint=image_zeropoint,
                                     _return_details=True,
+                                    avoid_positions=_lim_avoid_positions,
                                 )
                                 if isinstance(_lim_details, dict):
                                     InjectedLimit = float(
@@ -15626,15 +15614,6 @@ def run_photometry():
         )
         output["sampling_regime"] = str(input_yaml.get("sampling_regime", "unknown"))
 
-        # Subtraction quality provenance (from difference_quality.py assessment).
-        # Stored in input_yaml by the post-subtraction quality readback above.
-        output["diff_quality_class"] = str(
-            input_yaml.get("diff_quality_class", "unknown")
-        )
-        _diff_score = input_yaml.get("diff_quality_score", np.nan)
-        output["diff_quality_score"] = (
-            float(_diff_score) if np.isfinite(_diff_score) else np.nan
-        )
         # Flux scaling discrepancy from SFFT (FSCAL_DISC header keyword).
         if PreformSubtraction:
             try:
@@ -15646,6 +15625,19 @@ def run_photometry():
                 output["flux_scale_discrep_pct"] = np.nan
         else:
             output["flux_scale_discrep_pct"] = np.nan
+
+        # Compact-core artifacts masked after subtraction.  These pixels are
+        # NaN in the delivered difference image; expose the count so summary
+        # products retain the provenance.
+        if PreformSubtraction:
+            try:
+                output["subtraction_artifact_regions"] = int(
+                    header.get("NARTMSK", 0) or 0
+                )
+            except (TypeError, ValueError):
+                output["subtraction_artifact_regions"] = 0
+        else:
+            output["subtraction_artifact_regions"] = 0
 
         # Alignment quality provenance from the aligned template header.
         # The alignment RMS keywords (ALIGRMS, ALIGMED, etc.) are written
@@ -15925,6 +15917,52 @@ def run_photometry():
                         idx, f"{inst_prefix}_err"
                     ]
 
+        # --- Limiting-magnitude consistency check -----------------------
+        # A non-detection whose measured magnitude is brighter than the
+        # reported limiting magnitude is contradictory: either the limit is
+        # too deep (recovery trials miss the systematic error budget or the
+        # detection vetoes) or the detection was vetoed for a non-SNR reason.
+        # Flag it so downstream products do not present an optimistic limit
+        # as the source's detection status.
+        try:
+            if not bool(output.get("is_detection", False)):
+                _lim_app = float(output.get("limiting_mag", np.nan))
+                _meas_mag = float(
+                    output.get(
+                        f"mag_{output.get('photometry_method', 'psf')}",
+                        np.nan,
+                    )
+                )
+                _lim_margin = float(
+                    input_yaml.get("photometry", {}).get(
+                        "limit_consistency_margin_mag", 0.0
+                    )
+                    or 0.0
+                )
+                if (
+                    np.isfinite(_lim_app)
+                    and np.isfinite(_meas_mag)
+                    and _meas_mag < _lim_app - _lim_margin
+                ):
+                    output["limit_consistent"] = False
+                    logging.warning(
+                        "Limiting magnitude (%.2f) is fainter than the "
+                        "measured source (%.2f) while is_detection=False -- "
+                        "the reported limit is over-optimistic for this "
+                        "epoch (snr=%.2f, thresh=%.1f). Check the detection "
+                        "veto log lines above for the rejection reason.",
+                        _lim_app,
+                        _meas_mag,
+                        float(output.get("snr", np.nan)),
+                        detection_limit,
+                    )
+                else:
+                    output["limit_consistent"] = True
+            else:
+                output["limit_consistent"] = True
+        except Exception:
+            output["limit_consistent"] = np.nan
+
         # Normalise column headers to lowercase for consistent downstream use (lightcurve, etc.).
         output_normalised = {str(k).strip().lower(): v for k, v in output.items()}
 
@@ -15950,6 +15988,7 @@ def run_photometry():
             "threshold",
             "beta",
             "is_detection",
+            "limit_consistent",
             "prob_detect",
             "mf_snr",
             "delta_chi2",
@@ -16260,36 +16299,6 @@ def run_photometry():
                             )
                             if _sys_floor_at > 0:
                                 _err_terms.append(_sys_floor_at)
-                            if PreformSubtraction:
-                                _dq_at = str(
-                                    input_yaml.get(
-                                        "diff_quality_class", "unknown"
-                                    )
-                                )
-                                if _dq_at == "downgrade":
-                                    _err_terms.append(
-                                        float(
-                                            (
-                                                input_yaml.get("photometry")
-                                                or {}
-                                            ).get(
-                                                "subtraction_downgrade_sys_err_mag",
-                                                0.05,
-                                            )
-                                        )
-                                    )
-                                elif _dq_at == "fail":
-                                    _err_terms.append(
-                                        float(
-                                            (
-                                                input_yaml.get("photometry")
-                                                or {}
-                                            ).get(
-                                                "subtraction_fail_sys_err_mag",
-                                                0.15,
-                                            )
-                                        )
-                                    )
                             _at_out[f"mag_{_m_low}_err"] = (
                                 quadrature_add(
                                     [e for e in _err_terms if np.isfinite(e)]

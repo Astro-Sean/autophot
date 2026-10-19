@@ -1086,7 +1086,7 @@ def odd(n: int) -> int:
 
 
 def normalize_target_name(name):
-    """Strip transient-name prefixes (SN, AT) so catalog cache keys are stable.
+    """Strip transient-name prefixes (SN, AT, TDE) so catalog cache keys are stable.
 
     Both autophot.py (pre-fetch) and main.py (per-image) must use the same
     normalized name, otherwise the cached CSV is saved under one directory
@@ -1094,7 +1094,7 @@ def normalize_target_name(name):
     causing redundant Gaia archive downloads.
     """
     if name and isinstance(name, str):
-        return name.replace("SN", "").replace("AT", "")
+        return name.replace("TDE", "").replace("SN", "").replace("AT", "")
     return name
 
 
@@ -3081,11 +3081,21 @@ def gauss_1d(x, A, x0, sigma):
 
 
 def snr(maxPixel, noiseBkg):
-    """Return the simple signal-to-noise ratio ``maxPixel / noiseBkg``."""
+    """Return the simple signal-to-noise ratio ``maxPixel / noiseBkg``.
+
+    Guards against a zero or non-finite noise term (which would produce Inf
+    or NaN) by returning NaN instead of raising a divide-by-zero warning.
+    """
+    maxPixel = np.asarray(maxPixel, dtype=float)
+    noiseBkg = np.asarray(noiseBkg, dtype=float)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        snr_value = maxPixel / noiseBkg
-
+        snr_value = np.divide(
+            maxPixel,
+            noiseBkg,
+            out=np.full(np.broadcast(maxPixel, noiseBkg).shape, np.nan),
+            where=np.isfinite(noiseBkg) & (noiseBkg > 0),
+        )
     return snr_value
 
 

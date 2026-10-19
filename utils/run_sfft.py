@@ -687,7 +687,7 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-self_match_min_sources",
         type=int,
-        default=10,
+        default=20,
         help=(
             "If SFFT keeps fewer matches than this after a prior run, "
             "try one self-match run."
@@ -1814,7 +1814,7 @@ def run_sfft() -> Optional[int]:
             _min_matched = 2 if constant_phot_ratio else 3
             _self_match_min = max(
                 _min_matched,
-                int(getattr(args, "self_match_min_sources", 10) or 10),
+                int(getattr(args, "self_match_min_sources", 20) or 20),
             )
             if (
                 _n_matched < _self_match_min
@@ -2555,58 +2555,163 @@ def run_sfft() -> Optional[int]:
 
                         matplotlib.use("agg")
                         import matplotlib.pyplot as plt
-                        from matplotlib.colors import SymLogNorm
+                        from astropy.visualization import ZScaleInterval
+                        from matplotlib.colors import (
+                            LinearSegmentedColormap,
+                            TwoSlopeNorm,
+                        )
+                        from plotting_utils import (
+                            apply_autophot_mplstyle,
+                            get_divergent_color,
+                            get_plot_color,
+                            safe_tight_layout,
+                        )
 
+                        apply_autophot_mplstyle()
                         _kfig, _kax = plt.subplots(
-                            1, 2, figsize=(8.0, 3.6), dpi=150
+                            1,
+                            2,
+                            figsize=set_size(540, aspect=0.8),
+                            dpi=150,
+                            gridspec_kw={"width_ratios": (1.0, 1.2)},
                         )
-                        _kpeak_v = float(np.nanmax(np.abs(_ker_2d)))
-                        _norm = SymLogNorm(
-                            linthresh=max(_kpeak_v * 1e-3, 1e-12),
-                            vmin=-_kpeak_v,
-                            vmax=_kpeak_v,
-                        )
-                        _im = _kax[0].imshow(
-                            _ker_2d, norm=_norm, cmap="RdBu_r",
-                            origin="lower", interpolation="nearest",
-                        )
-                        _kax[0].set_title("SFFT matching kernel", fontsize=9)
-                        _kax[0].set_xlabel("x [px]", fontsize=8)
-                        _kax[0].set_ylabel("y [px]", fontsize=8)
-                        _kfig.colorbar(_im, ax=_kax[0], fraction=0.046)
-
-                        # Radial profile: the wing level vs radius is what
-                        # KERNOISE measures.
                         _Lk = _ker_2d.shape[0]
                         _khalf = (_Lk - 1) / 2.0
-                        _ky, _kx = np.mgrid[0:_Lk, 0:_Lk]
-                        _kr = np.hypot(_ky - _khalf, _kx - _khalf).ravel()
-                        _kv = _ker_2d.ravel()
-                        _finite = np.isfinite(_kr) & np.isfinite(_kv)
-                        _kax[1].axhline(0.0, color="k", lw=0.6, alpha=0.5)
-                        _kax[1].plot(
-                            _kr[_finite], _kv[_finite], ".",
-                            ms=2.5, alpha=0.6,
+                        _finite_kernel = _ker_2d[np.isfinite(_ker_2d)]
+                        _kzmin, _kzmax = ZScaleInterval().get_limits(
+                            _finite_kernel
                         )
-                        _kax[1].set_title("Radial kernel profile", fontsize=9)
-                        _kax[1].set_xlabel("radius [px]", fontsize=8)
-                        _kax[1].set_ylabel("kernel value", fontsize=8)
-                        _kax[1].tick_params(labelsize=7)
+                        _kvlim = max(abs(_kzmin), abs(_kzmax))
+                        if not np.isfinite(_kvlim) or _kvlim <= 0:
+                            _kvlim = float(np.nanmax(np.abs(_finite_kernel)))
+                        if not np.isfinite(_kvlim) or _kvlim <= 0:
+                            _kvlim = 1.0
+                        _norm = TwoSlopeNorm(
+                            vcenter=0.0, vmin=-_kvlim, vmax=_kvlim
+                        )
+                        _div_cmap = LinearSegmentedColormap.from_list(
+                            "autophot_divergent",
+                            [
+                                get_divergent_color("negative"),
+                                get_divergent_color("neutral"),
+                                get_divergent_color("positive"),
+                            ],
+                        )
+                        _im = _kax[0].imshow(
+                            _ker_2d,
+                            norm=_norm,
+                            cmap=_div_cmap,
+                            origin="lower",
+                            interpolation="nearest",
+                            extent=(
+                                -_khalf - 0.5,
+                                _khalf + 0.5,
+                                -_khalf - 0.5,
+                                _khalf + 0.5,
+                            ),
+                        )
+                        _kax[0].axhline(
+                            0.0,
+                            color=get_plot_color("error_bar"),
+                            lw=0.6,
+                            alpha=0.6,
+                        )
+                        _kax[0].axvline(
+                            0.0,
+                            color=get_plot_color("error_bar"),
+                            lw=0.6,
+                            alpha=0.6,
+                        )
+                        _kax[0].set_title("2-D Matching Kernel")
+                        _kax[0].set_xlabel("X offset [px]")
+                        _kax[0].set_ylabel("Y offset [px]")
+                        _kax[0].set_aspect("equal", adjustable="box")
+                        _kax[0].locator_params(axis="both", nbins=5)
+                        _kcbar = _kfig.colorbar(
+                            _im,
+                            ax=_kax[0],
+                            fraction=0.046,
+                            pad=0.03,
+                            ticks=np.linspace(-_kvlim, _kvlim, 5),
+                            format="%.2g",
+                        )
+                        _kcbar.set_label("Amplitude")
 
-                        _kstats = f"hw={_kerhw}"
-                        if _ker_noise is not None:
-                            _kstats += f"  KERNOISE={_ker_noise:.3f}"
-                        if _ker_negfrac is not None:
-                            _kstats += f"  KERNEG={_ker_negfrac:.2f}"
-                        if _ker_conc is not None:
-                            _kstats += f"  KERCONC={_ker_conc:.2f}"
-                        _kfig.suptitle(_kstats, fontsize=10)
-                        _kfig.tight_layout()
+                        # Axis-aligned cuts show the signed kernel profile
+                        # without assuming azimuthal symmetry.
+                        _c = int(round(_khalf))
+                        _offsets = np.arange(-_c, _c + 1)
+                        _kax[1].axhline(
+                            0.0,
+                            color=get_plot_color("zero_line"),
+                            lw=0.8,
+                            alpha=0.5,
+                        )
+                        _kax[1].axvline(
+                            0.0,
+                            color=get_plot_color("error_bar"),
+                            lw=0.6,
+                            alpha=0.6,
+                        )
+                        _profiles = (
+                            (
+                                "X",
+                                _ker_2d[_c, :],
+                                "o",
+                                get_plot_color("negative"),
+                            ),
+                            (
+                                "Y",
+                                _ker_2d[:, _c],
+                                "s",
+                                get_plot_color("threshold_line"),
+                            ),
+                        )
+                        for _label, _vals, _marker, _color in _profiles:
+                            _keep = np.isfinite(_vals)
+                            _kax[1].step(
+                                _offsets[_keep],
+                                _vals[_keep],
+                                where="mid",
+                                color=_color,
+                                lw=1.0,
+                                marker=_marker,
+                                ms=3.6,
+                                mfc="none",
+                                mec=_color,
+                                mew=0.9,
+                                alpha=0.95,
+                                label=_label,
+                                zorder=3,
+                            )
+                        _tick_mid = max(1, int(round(_c / 2.0)))
+                        _xticks = np.array(
+                            [-_c, -_tick_mid, 0, _tick_mid, _c]
+                        )
+                        _kax[1].set_xlim(-_c - 0.5, _c + 0.5)
+                        _kax[1].set_xticks(_xticks)
+                        _kax[1].set_box_aspect(1)
+                        _kax[1].set_title("Kernel Profile")
+                        _kax[1].set_xlabel("Offset from centre [px]")
+                        _kax[1].set_ylabel("Kernel value")
+                        _kax[1].grid(
+                            True,
+                            which="both",
+                            linestyle=":",
+                            linewidth=0.5,
+                            alpha=0.7,
+                        )
+                        _kax[1].legend(
+                            loc="best", frameon=False, fontsize=8, ncol=2
+                        )
+
+                        safe_tight_layout(_kfig)
                         _kfig.savefig(
                             os.path.join(
                                 out_dir, f"SFFT_Kernel_{out_base}.png"
                             ),
-                            bbox_inches="tight", facecolor="white",
+                            bbox_inches="tight",
+                            facecolor="white",
                         )
                         plt.close(_kfig)
                 except Exception as _kpng_e:

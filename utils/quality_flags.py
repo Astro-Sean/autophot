@@ -2,7 +2,7 @@
 
 Provides a composable bitmask that distinguishes all failure modes
 identified in the photometry pipeline.  This does NOT replace existing
-flags (photutils flags, diff_quality_class, is_detection); it provides
+flags (photutils flags, is_detection); it provides
 an additional structured field that unifies them.
 
 Flag bits are organised into sections:
@@ -62,8 +62,6 @@ class QualityFlag(IntFlag):
     # ---- Pipeline / calibration (0x1000000+) ----
     NO_ZEROPPOINT = 1 << 26           # No zeropoint available
     ZEROPPOINT_FEW_STARS = 1 << 27    # Too few stars for zeropoint
-    SUBTRACTION_DOWNGRADE = 1 << 28   # Difference image quality: downgrade
-    SUBTRACTION_FAIL = 1 << 29        # Difference image quality: fail
     ALIGNMENT_POOR = 1 << 30          # Template alignment quality poor
     # Bit 31 reserved (sign bit in some contexts)
 
@@ -76,7 +74,6 @@ class QualityFlag(IntFlag):
             | cls.PSF_POOR_FIT
             | cls.OPTIMIZER_NON_CONVERGENCE
             | cls.MCMC_NON_CONVERGENCE
-            | cls.SUBTRACTION_FAIL
             | cls.NEGATIVE_FLUX
         )
 
@@ -100,7 +97,6 @@ class QualityFlag(IntFlag):
             | cls.POSTERIOR_DEGENERACY
             | cls.NO_ZEROPPOINT
             | cls.ZEROPPOINT_FEW_STARS
-            | cls.SUBTRACTION_DOWNGRADE
             | cls.ALIGNMENT_POOR
         )
 
@@ -181,19 +177,6 @@ def from_photutils_flags(flags: int) -> QualityFlag:
     if flags & (1 | 2 | 64):
         qf |= QualityFlag.EDGE_PROXIMITY
     return qf
-
-
-def from_diff_quality(quality_class: str) -> QualityFlag:
-    """Map difference-image quality classification to QualityFlag."""
-    if quality_class is None:
-        return QualityFlag.OK
-    qc = str(quality_class).lower().strip()
-    if qc == "fail":
-        return QualityFlag.SUBTRACTION_FAIL
-    elif qc in ("downgrade", "downgrade_sparse", "unverified"):
-        return QualityFlag.SUBTRACTION_DOWNGRADE
-    else:
-        return QualityFlag.OK
 
 
 def from_snr(snr: float, detection_limit: float = 3.0) -> QualityFlag:

@@ -47,9 +47,6 @@ from astropy.wcs import WCS
 
 from astroquery.vizier import Vizier
 
-# Photutils imports
-from photutils.centroids import centroid_sources, centroid_com, centroid_2dg
-
 # Scikit-learn imports
 from sklearn.linear_model import RANSACRegressor
 from sklearn.base import BaseEstimator, RegressorMixin
@@ -1157,6 +1154,30 @@ def _sky_uniform_subsample(df, nmax, center_ra=None):
         rest = np.setdiff1d(np.arange(len(df)), np.asarray(picked))
         picked.extend(rest[: nmax - len(picked)].tolist())
     return df.iloc[np.asarray(picked[:nmax])]
+
+
+def _legacy_ivar_to_mag_err(mag, flux_ivar):
+    """Per-source Legacy Survey magnitude error from the Tractor inverse variance.
+
+    ``mag`` is the Tractor model magnitude (AB, nanomaggies) and
+    ``flux_ivar`` the inverse variance of the model flux.  With
+    ``sigma_f = 1/sqrt(flux_ivar)``, ``f = 10**((22.5 - mag)/2.5)`` and
+    ``sigma_m = (2.5/ln 10) * sigma_f / f``.  Returns NaN wherever the flux
+    or variance is unusable (missing sky coverage in the combined DR10 table
+    is encoded as -9999).
+    """
+    _mag = np.asarray(mag, float)
+    _ivar = np.asarray(flux_ivar, float)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        _flux = np.power(10.0, (22.5 - _mag) / 2.5)
+        _flux_err = np.where(
+            _ivar > 0, 1.0 / np.sqrt(np.clip(_ivar, 1e-300, None)), np.nan
+        )
+        return np.where(
+            np.isfinite(_flux) & (_flux > 0) & np.isfinite(_flux_err),
+            (2.5 / np.log(10.0)) * _flux_err / _flux,
+            np.nan,
+        )
 
 
 def _field_coverage_fraction(
@@ -2269,6 +2290,7 @@ class Catalog:
         # extended objects (REX, EXP, DEV, SER = galaxies/resolved sources).
         query = f"""
             SELECT TOP {fetch_n} ra, dec, type, mag_g, mag_r, mag_i, mag_z,
+                flux_ivar_g, flux_ivar_r, flux_ivar_i, flux_ivar_z,
                 sqrt(power(ra - {ra}, 2) + power(dec - {dec}, 2)) AS angular_distance
             FROM ls_dr10.tractor
             WHERE 't'= Q3C_RADIAL_QUERY(ra, dec, {ra}, {dec}, {radius})
@@ -2312,8 +2334,29 @@ class Catalog:
 
             filters = ["g", "r", "i", "z"]
 
+            # Per-source magnitude errors from the Tractor inverse variances.
+            # A fixed placeholder (previously 0.01 mag for every source) is
+            # magnitude-independent and corrupts the inverse-variance
+            # zeropoint fit and the target's error budget.  Recover the real
+            # uncertainty:
+            #     sigma_f = 1 / sqrt(flux_ivar)
+            #     sigma_m = (2.5/ln 10) * sigma_f / f   with  mag = 22.5 - 2.5 log10 f
             for f in filters:
-                table[f"mag_{f}_e"] = [0.01] * len(table)
+                mag_col = f"mag_{f}"
+                ivar_col = f"flux_ivar_{f}"
+                if mag_col not in table.columns or ivar_col not in table.columns:
+                    logger.warning(
+                        "Legacy Survey: missing %s/%s columns; %s magnitude "
+                        "errors set to NaN.",
+                        mag_col,
+                        ivar_col,
+                        f,
+                    )
+                    table[f"mag_{f}_e"] = np.nan
+                    continue
+                _mag = pd.to_numeric(table[mag_col], errors="coerce").to_numpy(float)
+                _ivar = pd.to_numeric(table[ivar_col], errors="coerce").to_numpy(float)
+                table[f"mag_{f}_e"] = _legacy_ivar_to_mag_err(_mag, _ivar)
 
             return table
 
@@ -3808,8 +3851,11 @@ class Catalog:
         Recenter sources in an image, selecting centroiding method from FWHM.
         Undersampled (FWHM <= undersampled_fwhm_threshold, default 2.5 px): 2D Gaussian fit for subpixel accuracy.
         Well-sampled (FWHM > threshold): center-of-mass. Tolerates fully masked cutouts.
-        Error-weighted centroiding was removed; this routine always uses
-        unweighted centroiding for stability across diverse background/error maps.
+        When an error map is supplied (e.g. background_rms), centroid positions use
+        noise-weighted centroiding and x_pix_err/y_pix_err are propagated from the
+        per-pixel error array using the photutils 3.1 SourceCatalog centroid_err
+        formula (with its single-pixel variance floor); without an error map the
+        centroid errors are NaN, matching photutils semantics.
         """
         try:
             num_sources = len(selectedCatalog)
@@ -3889,74 +3935,48 @@ class Catalog:
             old_x_valid = old_x[valid_sources]
             old_y_valid = old_y[valid_sources]
 
-            # Undersampled: 2D Gaussian for subpixel accuracy; else COM.
-            if undersampled:
-                centroid_method = "2D Gaussian"
-                centroid_func = centroid_2dg
-            else:
-                centroid_method = "center-of-mass"
-                centroid_func = centroid_com
-            # An image-shaped error map switches to the 4-tuple centroid
-            # path so x_pix_err/y_pix_err carry propagated 1-sigma
-            # centroid uncertainties rather than NaN.
-            err_map = None
-            if error is not None:
-                err_map = np.asarray(error, dtype=float)
-                if err_map.shape != image.shape:
-                    logger.warning(
-                        "recenter: error map shape %s != image shape %s; "
-                        "centroid errors skipped",
-                        err_map.shape,
-                        image.shape,
-                    )
-                    err_map = None
-            try:
-                if err_map is not None:
-                    from psf import (
-                        _centroid_sources_with_error_impl,
-                        centroid_2dg_with_error,
-                        centroid_com_with_error,
-                    )
+            # Always use the error-aware centroid path so x_pix_err/y_pix_err
+            # are reported (from the noise-propagated error map when one is
+            # supplied, or from the flux-moment proxy when it is not).  This
+            # also routes centroid_2dg through centroid_2dg_with_error, which
+            # wraps the astropy-modelling Gaussian fit so its cov_x overflow
+            # / divide-by-zero warnings are contained and a clean NaN is
+            # returned on a degenerate fit instead of poisoning the source.
+            from psf import (
+                _centroid_sources_with_error_impl,
+                centroid_2dg_with_error,
+                centroid_com_with_error,
+            )
 
-                    (
-                        x_valid,
-                        y_valid,
-                        x_err_valid,
-                        y_err_valid,
-                    ) = _centroid_sources_with_error_impl(
-                        image,
-                        old_x_valid,
-                        old_y_valid,
-                        box_size=boxsize,
-                        centroid_func=(
-                            centroid_2dg_with_error
-                            if undersampled
-                            else centroid_com_with_error
-                        ),
-                        mask=nan_mask,
-                        error=err_map,
-                    )
-                else:
-                    x_valid, y_valid = centroid_sources(
-                        image,
-                        old_x_valid,
-                        old_y_valid,
-                        box_size=boxsize,
-                        centroid_func=centroid_func,
-                        mask=nan_mask,
-                    )
-                    x_err_valid = np.full(len(x_valid), np.nan)
-                    y_err_valid = np.full(len(y_valid), np.nan)
-                x_valid = np.asarray(x_valid)
-                y_valid = np.asarray(y_valid)
-            except Exception as e:
-                log_warning_from_exception(
-                    logger, "Centroiding failed even on valid sources", e
+            # A mis-shaped error map would silently broadcast wrong; drop it
+            # so centroid errors are NaN rather than garbage.
+            if error is not None and np.shape(error) != image.shape:
+                logger.warning(
+                    "recenter: error map shape %s != image shape %s; "
+                    "centroid errors skipped",
+                    np.shape(error),
+                    image.shape,
                 )
-                x_valid = old_x_valid.copy()
-                y_valid = old_y_valid.copy()
-                x_err_valid = np.full(len(x_valid), np.nan)
-                y_err_valid = np.full(len(y_valid), np.nan)
+                error = None
+
+            (
+                x_valid,
+                y_valid,
+                x_err_valid,
+                y_err_valid,
+            ) = _centroid_sources_with_error_impl(
+                image,
+                old_x_valid,
+                old_y_valid,
+                box_size=boxsize,
+                centroid_func=(
+                    centroid_2dg_with_error
+                    if undersampled
+                    else centroid_com_with_error
+                ),
+                mask=nan_mask,
+                error=error,
+            )
 
             # NaN-fill invalid sources so indices stay aligned.
             x = np.full(len(old_x), np.nan)
@@ -3968,6 +3988,37 @@ class Catalog:
             y_err = np.full(len(old_y), np.nan)
             x_err[valid_sources] = x_err_valid
             y_err[valid_sources] = y_err_valid
+
+            # Gaussian fits fail on faint or crowded cutouts; retry those
+            # with COM rather than dropping the source.
+            if undersampled:
+                failed_idx = np.where(valid_sources)[0][
+                    ~np.isfinite(x_valid) | ~np.isfinite(y_valid)
+                ]
+                if failed_idx.size:
+                    (
+                        x_fb,
+                        y_fb,
+                        xerr_fb,
+                        yerr_fb,
+                    ) = _centroid_sources_with_error_impl(
+                        image,
+                        old_x[failed_idx],
+                        old_y[failed_idx],
+                        box_size=boxsize,
+                        centroid_func=centroid_com_with_error,
+                        mask=nan_mask,
+                        error=error,
+                    )
+                    x[failed_idx] = x_fb
+                    y[failed_idx] = y_fb
+                    x_err[failed_idx] = xerr_fb
+                    y_err[failed_idx] = yerr_fb
+                    logger.debug(
+                        "%d sources fell back to COM centroiding after "
+                        "2dg fit failure",
+                        failed_idx.size,
+                    )
 
             selectedCatalog.loc[:, "x_pix"] = x
             selectedCatalog.loc[:, "y_pix"] = y
@@ -3988,7 +4039,19 @@ class Catalog:
             mask = mask_x & mask_y
 
             if sum(~mask) > 0:
-                logger.warning("Failed to recenter %s sources - ignoring", sum(~mask))
+                n_nan = int(
+                    (
+                        ~np.isfinite(selectedCatalog["x_pix"])
+                        | ~np.isfinite(selectedCatalog["y_pix"])
+                    ).sum()
+                )
+                logger.warning(
+                    "Failed to recenter %s sources "
+                    "(%d centroid fit failures, %d outside border) - ignoring",
+                    sum(~mask),
+                    n_nan,
+                    int(sum(~mask)) - n_nan,
+                )
                 selectedCatalog = selectedCatalog.loc[mask].copy()
 
             valid = (
@@ -4016,7 +4079,7 @@ class Catalog:
             logger.info(
                 "Recentered %d sources (%s centroiding%s)",
                 len(selectedCatalog),
-                centroid_method,
+                "2dg" if undersampled else "com",
                 offset_txt,
             )
 

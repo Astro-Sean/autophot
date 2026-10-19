@@ -210,6 +210,23 @@ def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> f
     return ref_e_in_frame / float(counts_ref)
 
 
+def _combine_limit_errors(err_boot, err_other):
+    """Quadrature-combine the site-bootstrap and solver limiting-mag errors.
+
+    Either term may be non-finite (e.g. a logistic/emcee fallback leaves the
+    bisection error NaN).  A valid term must never be discarded by an invalid
+    one, so each is treated independently; NaN is returned only when both are
+    unusable.
+    """
+    _b = float(err_boot) if np.isfinite(err_boot) else np.nan
+    _o = float(err_other) if np.isfinite(err_other) else np.nan
+    if np.isfinite(_b) and np.isfinite(_o):
+        return float(np.sqrt(_b**2 + _o**2))
+    if np.isfinite(_b):
+        return _b
+    return _o
+
+
 def _ap_diff_resid(input_yaml: dict) -> float:
     """Residual aperture correction for rescaled diff apertures (mag).
 
@@ -517,6 +534,36 @@ def _recovered_detection_flags(flux, err, F_amp, snr_thresh, lim_cfg):
     else:
         snr_gate = np.isfinite(snr) & (snr >= float(snr_thresh))
     return np.asarray(ok & snr_gate, dtype=bool)
+
+
+def _recovery_systematic_flux_err(input_yaml: dict, flux: float) -> float:
+    """Systematic flux error the real detection SNR carries.
+
+    The injected-trial S/N gate must answer the same question the
+    detection decision asks of a real source.  main.py folds the SFFT
+    kernel-model fraction, the flux-scale discrepancy, and the LPI
+    background-infill floor into the measured flux errors; without the
+    same terms the recovered S/N is optimistic and the reported
+    limiting magnitude is deeper than a real source could reach.
+    """
+    if not np.isfinite(flux):
+        return np.nan
+    frac = 0.0
+    for key in ("psf_kernel_model_err_frac", "flux_scale_discrep_frac"):
+        try:
+            frac = np.hypot(
+                frac, max(float(input_yaml.get(key, 0.0) or 0.0), 0.0)
+            )
+        except (TypeError, ValueError):
+            continue
+    sys_err = abs(float(flux)) * frac
+    try:
+        lpi_err = float(input_yaml.get("_lpi_extra_flux_err_for_limits", np.nan))
+    except (TypeError, ValueError):
+        lpi_err = np.nan
+    if np.isfinite(lpi_err) and lpi_err > 0:
+        sys_err = np.hypot(sys_err, lpi_err)
+    return float(sys_err)
 
 
 def _injection_worker(args):
@@ -884,6 +931,23 @@ def _injection_worker(args):
         # recovery_use_absolute_snr controls only the S/N sign convention
         # (signed vs |SNR|); it is independent of the flux-sign requirement.
         lim_cfg_det = input_yaml.get("limiting_magnitude") or {}
+
+        # Mirror the systematic error budget the real target carries
+        # (kernel-model fraction, flux-scale discrepancy, LPI floor).  Without
+        # it injected trials clear the S/N gate more easily than a real source
+        # of the same brightness and the limit reads deeper than the pipeline
+        # can actually detect.
+        _sys_err = _recovery_systematic_flux_err(input_yaml, recovered_flux)
+        if (
+            np.isfinite(_sys_err)
+            and _sys_err > 0
+            and np.isfinite(recovered_flux_err)
+            and recovered_flux_err > 0
+        ):
+            recovered_flux_err = float(np.hypot(recovered_flux_err, _sys_err))
+            if np.isfinite(recovered_flux):
+                snr_val = float(recovered_flux) / recovered_flux_err
+
         use_absolute_snr = bool(lim_cfg_det.get("recovery_use_absolute_snr", False))
         require_positive_flux = bool(
             lim_cfg_det.get("recovery_require_positive_flux", True)
@@ -1089,6 +1153,7 @@ class Limits:
         n_jobs: int = None,
         image_zeropoint: dict = None,
         _return_details: bool = False,
+        avoid_positions=None,
     ) -> float:
         """
         Bracket-and-bisect search for the limiting magnitude by injecting
@@ -1111,6 +1176,8 @@ class Limits:
         subtraction_ready: unused placeholder
         zeropoint       : adds an apparent-magnitude axis to the plot
         n_jobs          : worker processes; None defaults to 1 (serial)
+        avoid_positions : additional full-frame ``(x, y)`` transient positions
+                          that injected sources must not overlap
 
         Returns
         -------
@@ -1212,6 +1279,27 @@ class Limits:
             _orig_position = [float(position[0]), float(position[1])]  # full-frame coords (target position)
             _orig_background_rms = background_rms  # full-frame RMS map
 
+            _avoid_positions_full = []
+            if avoid_positions is not None:
+                try:
+                    _avoid_iter = np.asarray(avoid_positions, dtype=float).reshape(-1, 2)
+                except (TypeError, ValueError):
+                    _avoid_iter = []
+                    logger.warning(
+                        "Ignoring invalid limit avoid_positions=%r", avoid_positions
+                    )
+                for _ax, _ay in _avoid_iter:
+                    if not (np.isfinite(_ax) and np.isfinite(_ay)):
+                        continue
+                    # The primary already has its own exclusion; adding a
+                    # duplicate centre would only duplicate plot markers.
+                    if np.hypot(
+                        float(_ax) - _orig_position[0],
+                        float(_ay) - _orig_position[1],
+                    ) <= 0.5:
+                        continue
+                    _avoid_positions_full.append((float(_ax), float(_ay)))
+
             def _extract_cutouts(scale_px: float):
                 result = self.get_cutout(
                     image=_orig_frame, position=_orig_position, scale_override=scale_px
@@ -1254,7 +1342,16 @@ class Limits:
 
             # Target is at the true centre returned by get_cutout (accounts for partial cutouts)
             H, W = cutout.shape
-            
+
+            def _avoid_positions_cutout() -> list:
+                """Map full-frame transient exclusions onto this cutout."""
+                ox = _orig_position[0] - float(cutout_cx)
+                oy = _orig_position[1] - float(cutout_cy)
+                return [
+                    (float(px - ox), float(py - oy))
+                    for px, py in _avoid_positions_full
+                ]
+
             # A configured aperture_radius equal to the FWHM is the fallback
             # sentinel; the optimum-radius measurement runs further below.
             fwhm = float(self.input_yaml.get("fwhm", 3.0))
@@ -1286,20 +1383,32 @@ class Limits:
                                          target_cx: float,
                                          target_cy: float,
                                          exclusion_r: float) -> pd.DataFrame:
+                return _exclude_positions_overlap(
+                    df, [(target_cx, target_cy)], exclusion_r
+                )
+
+            def _exclude_positions_overlap(
+                df: pd.DataFrame,
+                positions,
+                exclusion_r: float,
+            ) -> pd.DataFrame:
                 """
-                Remove any injection sites whose aperture could overlap with the
-                transient aperture at (target_cx, target_cy).
+                Remove sites whose aperture could overlap any transient
+                aperture in ``positions``.
 
                 exclusion_r = aperture_radius (transient) + aperture_radius (injected)
                               + fwhm (PSF wing buffer)
-                Sites within exclusion_r pixels of the target are removed.
                 """
-                if len(df) == 0:
+                if len(df) == 0 or positions is None:
                     return df
-                dx = df["x_pix"].to_numpy() - target_cx
-                dy = df["y_pix"].to_numpy() - target_cy
+                pos = np.asarray(positions, dtype=float).reshape(-1, 2)
+                pos = pos[np.isfinite(pos).all(axis=1)]
+                if pos.size == 0:
+                    return df
+                dx = df["x_pix"].to_numpy(float)[:, None] - pos[None, :, 0]
+                dy = df["y_pix"].to_numpy(float)[:, None] - pos[None, :, 1]
                 dist = np.sqrt(dx**2 + dy**2)
-                return df[dist >= exclusion_r].copy()
+                return df[np.min(dist, axis=1) >= exclusion_r].copy()
 
             def _filter_edge_clearance(df: pd.DataFrame,
                                       cutout_w: float,
@@ -1857,9 +1966,20 @@ class Limits:
                 r_max = r_min + max(fwhm_px, 2.0)
                         
             # The cutout must fit: target exclusion zone + injection radius +
-            # edge clearance.
+            # edge clearance.  A nearby companion can sit outside the initial
+            # stamp but still overlap a valid injection aperture near the edge;
+            # grow the stamp until every transient exclusion is represented.
             edge_margin = max(3.0 * fwhm_px, 2.0 * aperture_radius_local)
             min_half_size = target_exclusion_r + r_max + edge_margin
+            for _ax, _ay in _avoid_positions_cutout():
+                _companion_dist = np.hypot(
+                    _ax - float(cutout_cx), _ay - float(cutout_cy)
+                )
+                if np.isfinite(_companion_dist):
+                    min_half_size = max(
+                        min_half_size,
+                        float(_companion_dist) + target_exclusion_r + edge_margin,
+                    )
             min_cutout_size = 2 * min_half_size
             
             # Cutout size implied by the current scale.
@@ -1932,6 +2052,14 @@ class Limits:
                     pts = points_in_circum(probe_r, center=[cutout_cx, cutout_cy], n=probe_n)
                     probe_df = pd.DataFrame(
                         {"x_pix": [p[0] for p in pts], "y_pix": [p[1] for p in pts]}
+                    )
+                    probe_df = _exclude_positions_overlap(
+                        probe_df,
+                        [
+                            (float(cutout_cx), float(cutout_cy)),
+                            *_avoid_positions_cutout(),
+                        ],
+                        target_exclusion_r,
                     )
                     probe_df = _filter_aperture_validity(
                         probe_df, cutout, aperture_radius_pix=float(aperture_radius_local)
@@ -2224,8 +2352,12 @@ class Limits:
 
             # Geometric constraints first (cheapest).
             n0 = int(len(cand_df))
-            cand_df = _exclude_target_overlap(
-                cand_df, cutout_cx, cutout_cy, target_exclusion_r
+            _transient_positions_cut = [
+                (float(cutout_cx), float(cutout_cy)),
+                *_avoid_positions_cutout(),
+            ]
+            cand_df = _exclude_positions_overlap(
+                cand_df, _transient_positions_cut, target_exclusion_r
             )
             n1 = int(len(cand_df))
             cand_df = _filter_edge_clearance(cand_df, W, H, edge_margin)
@@ -3156,11 +3288,22 @@ class Limits:
                             group=int(redo_default),
                         )
                         if np.isfinite(err_boot) and err_boot > 0:
-                            # Bootstrap (site resampling) subsumes the binomial
-                            # interpolation error -- same underlying uncertainty.
-                            inject_lmag_err = float(err_boot)
+                            # Bootstrap (site resampling) captures site-to-site
+                            # variability; the emcee/bisection error captures
+                            # parameter and interpolation uncertainty given the
+                            # observed data.  These are independent sources, so
+                            # combine in quadrature rather than replacing one
+                            # with the other (which could underestimate the total
+                            # limiting-magnitude error).  A non-finite bisection
+                            # error (e.g. a logistic fallback) must not turn the
+                            # whole combination into NaN - fall back to the
+                            # bootstrap term alone.
+                            inject_lmag_err = _combine_limit_errors(
+                                err_boot, inject_lmag_err
+                            )
                             logger.info(
-                                "    m50 site-bootstrap error: +/- %.4f mag",
+                                "    m50 site-bootstrap error: +/- %.4f mag "
+                                "(combined with emcee/bisection error)",
                                 float(err_boot),
                             )
 
@@ -3201,6 +3344,7 @@ class Limits:
                             cutout_cy=cutout_cy,
                             snr_limit=effective_snr_limit,
                             snr_gate_factor=_snr_gate_factor,
+                            avoid_positions=_avoid_positions_cutout(),
                         )
                     except Exception as exc:
                         logger.warning(
@@ -3225,6 +3369,7 @@ class Limits:
                             position=position,
                             m_inj=float(inject_lmag),
                             flux_for_mag=flux_for_mag,
+                            avoid_positions=_avoid_positions_cutout(),
                         )
                     except Exception:
                         pass
@@ -3362,6 +3507,7 @@ class Limits:
                     "exposure_time": exposure_time,
                     "cutout_cx": cutout_cx,
                     "cutout_cy": cutout_cy,
+                    "avoid_positions": _avoid_positions_cutout(),
                     # Empirical uncertainty calibration (or None when skipped).
                     "uncal": (
                         self.last_uncal["result"].to_dict()
@@ -3402,6 +3548,7 @@ class Limits:
         position,
         m_inj: float,
         flux_for_mag,
+        avoid_positions=None,
     ) -> None:
         """
         Save a simple emcee diagnostic plot (trace + marginal histograms)
@@ -3412,7 +3559,7 @@ class Limits:
         lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
         phot_cfg = self.input_yaml.get("photometry") or {}
 
-        # Inject off-target: the transient position is never a trial site.
+        # Inject off-target: no transient position is ever a trial site.
         H, W = cutout.shape
         # Target is at the cutout centre by construction.
         x0c = (W - 1) / 2.0
@@ -3421,8 +3568,43 @@ class Limits:
         r_min = float(lim_cfg.get("inject_min_radius_fwhm", 2.0)) * fwhm_px
         r_base = float(lim_cfg.get("inject_source_location", 3.0)) * fwhm_px
         r_inj = float(max(r_min, r_base))
-        pts = points_in_circum(r_inj, center=(x0c, y0c), n=8)
-        x0, y0 = float(pts[0][0]), float(pts[0][1])
+        pts = np.asarray(
+            points_in_circum(r_inj, center=(x0c, y0c), n=16), dtype=float
+        )
+        try:
+            _avoid = np.asarray(avoid_positions, dtype=float).reshape(-1, 2)
+            _avoid = _avoid[np.isfinite(_avoid).all(axis=1)]
+        except (TypeError, ValueError):
+            _avoid = np.empty((0, 2), dtype=float)
+        _ap_r = float(phot_cfg.get("aperture_radius", fwhm_px))
+        _min_sep = 2.0 * _ap_r + fwhm_px
+        _in_bounds = (
+            (pts[:, 0] >= _ap_r)
+            & (pts[:, 0] <= W - 1 - _ap_r)
+            & (pts[:, 1] >= _ap_r)
+            & (pts[:, 1] <= H - 1 - _ap_r)
+        )
+        _d_primary = np.hypot(pts[:, 0] - x0c, pts[:, 1] - y0c)
+        _d_min = _d_primary.copy()
+        if _avoid.size:
+            _d_min = np.minimum(
+                _d_min,
+                np.min(
+                    np.hypot(
+                        pts[:, 0, None] - _avoid[None, :, 0],
+                        pts[:, 1, None] - _avoid[None, :, 1],
+                    ),
+                    axis=1,
+                ),
+            )
+        _allowed = _in_bounds & (_d_min >= _min_sep)
+        if np.any(_allowed):
+            _pick = int(np.argmax(np.where(_allowed, _d_min, -np.inf)))
+        elif np.any(_in_bounds):
+            _pick = int(np.argmax(np.where(_in_bounds, _d_min, -np.inf)))
+        else:
+            _pick = int(np.argmax(_d_min))
+        x0, y0 = float(pts[_pick, 0]), float(pts[_pick, 1])
         F = float(flux_for_mag(float(m_inj)))
         raw_os = getattr(epsf_model, "oversampling", 1)
         if isinstance(raw_os, (list, tuple, np.ndarray)):
@@ -4051,6 +4233,7 @@ class Limits:
         cutout_cy=None,
         snr_limit=None,
         snr_gate_factor=None,
+        avoid_positions=None,
         multi_snr_details=None,
         fig=None,
         gs=None,
@@ -4414,6 +4597,23 @@ class Limits:
             min_sep   = 2.0 * aperture_radius + fwhm
             px_margin = float(np.ceil(fwhm))
             inj_dist  = float(lim_cfg.get("inject_source_location", 3.0)) * fwhm
+            try:
+                _avoid_plot = np.asarray(avoid_positions, dtype=float).reshape(-1, 2)
+                _avoid_plot = _avoid_plot[np.isfinite(_avoid_plot).all(axis=1)]
+            except (TypeError, ValueError):
+                _avoid_plot = np.empty((0, 2), dtype=float)
+
+            def _clear_of_transients(sx, sy):
+                if float(np.hypot(sx - target_x, sy - target_y)) < min_sep:
+                    return False
+                if _avoid_plot.size:
+                    _d = np.hypot(
+                        _avoid_plot[:, 0] - float(sx),
+                        _avoid_plot[:, 1] - float(sy),
+                    )
+                    if float(np.min(_d)) < min_sep:
+                        return False
+                return True
 
             demo_x = demo_y = None
 
@@ -4427,7 +4627,7 @@ class Limits:
                         and px_margin <= sy <= ny_c - 1 - px_margin
                     ):
                         continue
-                    if float(np.hypot(sx - target_x, sy - target_y)) < min_sep:
+                    if not _clear_of_transients(sx, sy):
                         continue
                     # Skip sites on invalid/no-data pixels.
                     xi = int(np.round(sx))
@@ -4458,8 +4658,11 @@ class Limits:
                 for rng_idx in self._rng.permutation(len(pts)).tolist():
                     cx_try = float(pts[rng_idx][0])
                     cy_try = float(pts[rng_idx][1])
-                    if (annulus_margin <= cx_try <= nx_c - 1 - annulus_margin and
-                            annulus_margin <= cy_try <= ny_c - 1 - annulus_margin):
+                    if (
+                        annulus_margin <= cx_try <= nx_c - 1 - annulus_margin
+                        and annulus_margin <= cy_try <= ny_c - 1 - annulus_margin
+                        and _clear_of_transients(cx_try, cy_try)
+                    ):
                         xi = int(np.round(cx_try))
                         yi = int(np.round(cy_try))
                         if 0 <= xi < nx_c and 0 <= yi < ny_c:
@@ -4470,13 +4673,43 @@ class Limits:
                         demo_y = cy_try
                         break
                 if demo_x is None:
-                    # Last resort: use a point 3 FWHM from center in x direction
-                    demo_x = float(np.clip(target_x + 3.0 * fwhm, annulus_margin,
-                                           nx_c - 1 - annulus_margin))
-                    demo_y = float(np.clip(target_y, annulus_margin,
-                                           ny_c - 1 - annulus_margin))
+                    # Last resort: choose the in-bounds circumference point with
+                    # the largest clearance to every transient.
+                    _best = None
+                    _best_sep = -np.inf
+                    for cx_try, cy_try in np.asarray(pts, dtype=float):
+                        if not (
+                            annulus_margin <= cx_try <= nx_c - 1 - annulus_margin
+                            and annulus_margin <= cy_try <= ny_c - 1 - annulus_margin
+                        ):
+                            continue
+                        _seps = [
+                            float(np.hypot(cx_try - target_x, cy_try - target_y))
+                        ]
+                        if _avoid_plot.size:
+                            _seps.append(
+                                float(
+                                    np.min(
+                                        np.hypot(
+                                            _avoid_plot[:, 0] - cx_try,
+                                            _avoid_plot[:, 1] - cy_try,
+                                        )
+                                    )
+                                )
+                            )
+                        _sep = min(_seps)
+                        if _sep > _best_sep:
+                            _best_sep = _sep
+                            _best = (cx_try, cy_try)
+                    if _best is None:
+                        _best = (target_x, target_y)
+                    demo_x, demo_y = float(_best[0]), float(_best[1])
                     logger.warning(
-                        "All circumference fallback points too close to edge; using offset demo site (%.1f, %.1f)", demo_x, demo_y,
+                        "Circumference demo sites constrained; using best-clearance "
+                        "site (%.1f, %.1f), nearest transient %.1f px",
+                        demo_x,
+                        demo_y,
+                        float(_best_sep),
                     )
 
             # Initialize per-panel locals before the loop so a failed panel
@@ -4693,6 +4926,18 @@ class Limits:
                     transient_marker = Circle((x_center, y_center), radius=aperture_radius,
                                             edgecolor=PLOT_COLORS.get('target', '#FF0000'), facecolor='none', linestyle='-', linewidth=0.5)
                     ax_inject.add_patch(transient_marker)
+                    if _avoid_plot.size:
+                        for _ax0, _ay0 in _avoid_plot:
+                            ax_inject.add_patch(
+                                Circle(
+                                    (_ax0, _ay0),
+                                    radius=aperture_radius,
+                                    edgecolor="#17A2B8",
+                                    facecolor="none",
+                                    linestyle=":",
+                                    linewidth=0.5,
+                                )
+                            )
                     # Label with target_name (TNS-prefixed) or '1' as fallback.
                     if target_name and target_name.strip():
                         name_prefix = self.input_yaml.get("name_prefix", "")
@@ -4967,6 +5212,18 @@ class Limits:
                 target_marker = Circle((target_x, target_y), radius=aperture_radius,
                                       edgecolor=PLOT_COLORS.get('target', '#FF0000'), facecolor='none', linestyle='-', linewidth=0.5)
                 ax_sites.add_patch(target_marker)
+                if _avoid_plot.size:
+                    for _ax0, _ay0 in _avoid_plot:
+                        ax_sites.add_patch(
+                            Circle(
+                                (_ax0, _ay0),
+                                radius=aperture_radius,
+                                edgecolor="#17A2B8",
+                                facecolor="none",
+                                linestyle=":",
+                                linewidth=0.8,
+                            )
+                        )
                 _stx, _sty, _stha, _stva = _confined(
                     ax_sites, target_x, target_y + aperture_radius,
                     transient_label, 8, 'center', 'bottom')
@@ -5489,6 +5746,7 @@ class Limits:
             cutout_cx=primary.get("cutout_cx"),
             cutout_cy=primary.get("cutout_cy"),
             snr_limit=primary.get("snr_limit"),
+            avoid_positions=primary.get("avoid_positions"),
             multi_snr_details=all_details,
             fig=fig,
             gs=gs,
@@ -5525,6 +5783,9 @@ class Limits:
                 cutout_cx=primary.get("cutout_cx"),
                 cutout_cy=primary.get("cutout_cy"),
                 snr_limit=detail.get("snr_limit"),
+                avoid_positions=detail.get(
+                    "avoid_positions", primary.get("avoid_positions")
+                ),
                 multi_snr_details=None,
                 fig=fig,
                 gs=gs,
@@ -5571,6 +5832,7 @@ class Limits:
         zeropoint: float = None,
         n_jobs: int = None,
         image_zeropoint: dict = None,
+        avoid_positions=None,
     ) -> dict:
         """
         Calculate limiting magnitudes for multiple S/N thresholds using injection/recovery.
@@ -5591,6 +5853,8 @@ class Limits:
         subtraction_ready: unused placeholder
         zeropoint       : adds an apparent-magnitude axis to the plot
         n_jobs          : worker processes; None defaults to 1 (serial)
+        avoid_positions : additional full-frame ``(x, y)`` transient positions
+                          that injected sources must not overlap
 
         Returns
         -------
@@ -5643,6 +5907,7 @@ class Limits:
                     n_jobs=n_jobs,
                     image_zeropoint=image_zeropoint,
                     _return_details=True,
+                    avoid_positions=avoid_positions,
                 )
                 limit = detail["inject_lmag"]
                 all_details.append(detail)

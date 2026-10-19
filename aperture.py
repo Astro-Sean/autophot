@@ -671,7 +671,7 @@ def _measure_worker(args):
             # is used only as a FLOOR -- an unusually quiet or sparse
             # annulus should never imply less noise than read noise alone.
             # Do NOT add it on top; that would double-count.
-            source_flux = abs(aperture_sum)
+            source_flux = max(aperture_sum, 0.0)
             sky_var = max(empirical_std**2, read_noise_sq)
             total_var = source_flux + effective_area * sky_var
             if total_var > 0 and np.isfinite(total_var):
@@ -1522,7 +1522,7 @@ class Aperture:
         # ---- Per-source diagnostic plots -----------------------------------
         if plot:
             # When saveTarget=True and there are multiple target rows, produce
-            # a single multi-target plot (1 row x N columns) instead of
+            # a single multi-target plot (N rows x 1 column) instead of
             # individual per-source plots that would overwrite each other.
             _multi_target = (
                 saveTarget
@@ -1595,7 +1595,7 @@ class Aperture:
         return sources
 
     # -----------------------------------------------------------------------
-    # Multi-target diagnostic plot (1 row x N columns, one per target)
+    # Multi-target diagnostic plot (N rows x 1 column, one row per target)
     # -----------------------------------------------------------------------
 
     def _generate_multi_target_plot(
@@ -1611,9 +1611,9 @@ class Aperture:
         mask=None,
     ):
         """
-        Multi-target diagnostic: 1 row x N columns, one column per target.
+        Multi-target diagnostic: N rows x 1 column, one row per target.
 
-        Each column has the same 3-panel layout (main image + right profile +
+        Each row has the same 3-panel layout (main image + right profile +
         bottom profile) zoomed around that target.  All other target positions
         are marked with crosshairs on every panel so contamination is visible.
 
@@ -1645,36 +1645,40 @@ class Aperture:
             y_max = min(image.shape[0], int(np.ceil(cy + zoom_size)))
             zoom_bounds.append((x_min, x_max, y_min, y_max))
 
-        # Size the figure from the cutout aspect so the equal-aspect
+        # Size the figure from the widest cutout aspect so the equal-aspect
         # image panels keep square pixels; a fixed figsize would stretch
-        # or shrink them inside mismatched cells. Each gridspec cell
-        # holds the main panel plus the 20% side/bottom profiles the
-        # divider carves out of it: cell = 1.2 * main + pad.
+        # or shrink them inside mismatched cells. Each gridspec row holds
+        # the main panel plus the 20% side/bottom profiles the divider
+        # carves out of it: row = 1.2 * main + pad.
         ax_h = 2.8
         pad_in = 0.15
-        main_w = [
+        main_w = max(
             ax_h * (x1 - x0) / max(y1 - y0, 1)
             for (x0, x1, y0, y1) in zoom_bounds
-        ]
-        col_w = [1.2 * w + pad_in for w in main_w]
-        cell_h = 1.2 * ax_h + pad_in
+        )
+        col_w = 1.2 * main_w + pad_in
+        row_h = 1.2 * ax_h + pad_in
         gap_in = 0.60
         left_in, right_in = 0.62, 0.72
         bottom_in, top_in = 0.78, 0.45
-        fig_w = left_in + sum(col_w) + gap_in * (n_targets - 1) + right_in
-        fig_h = bottom_in + cell_h + top_in
+        fig_w = left_in + col_w + right_in
+        fig_h = (
+            bottom_in
+            + row_h * n_targets
+            + gap_in * (n_targets - 1)
+            + top_in
+        )
 
         fig = plt.figure(figsize=(fig_w, fig_h))
         gs = GridSpec(
-            1,
             n_targets,
+            1,
             figure=fig,
-            width_ratios=col_w,
             left=left_in / fig_w,
             right=1.0 - right_in / fig_w,
             bottom=bottom_in / fig_h,
             top=1.0 - top_in / fig_h,
-            wspace=gap_in / (sum(col_w) / n_targets),
+            hspace=gap_in / row_h,
         )
 
         # Use a shared normalisation computed from ALL target zoom regions
@@ -1703,8 +1707,8 @@ class Aperture:
         # Target marker colors: primary=white, others=muted teal (was neon cyan)
         _target_colors = ["white"] + ["#17A2B8"] * (n_targets - 1)
 
-        for col_idx, (cx, cy) in enumerate(target_centers):
-            x_min, x_max, y_min, y_max = zoom_bounds[col_idx]
+        for row_idx, (cx, cy) in enumerate(target_centers):
+            x_min, x_max, y_min, y_max = zoom_bounds[row_idx]
             zoom_image = image[y_min:y_max, x_min:x_max]
             zoom_error = (
                 error[y_min:y_max, x_min:x_max]
@@ -1717,7 +1721,7 @@ class Aperture:
                 else None
             )
 
-            ax_main = fig.add_subplot(gs[0, col_idx])
+            ax_main = fig.add_subplot(gs[row_idx, 0])
             divider = make_axes_locatable(ax_main)
             ax_right = divider.append_axes("right", size="20%", pad=0.15, sharey=ax_main)
             ax_bottom = divider.append_axes("bottom", size="20%", pad=0.15, sharex=ax_main)
@@ -1732,7 +1736,11 @@ class Aperture:
             ax_bottom.tick_params(axis="x", labelrotation=30)
             ax_right.tick_params(axis="x", labelrotation=30)
 
-            _title = target_names[col_idx] if col_idx < len(target_names) else f"Target {col_idx}"
+            _title = (
+                target_names[row_idx]
+                if row_idx < len(target_names)
+                else f"Target {row_idx}"
+            )
             ax_main.set_title(_title, fontsize=9, pad=4)
 
             # Guard: skip profiles for tiny regions
@@ -1798,7 +1806,7 @@ class Aperture:
 
             # Mark ALL other targets with crosshairs on this panel
             for _ti, (_tcx, _tcy) in enumerate(target_centers):
-                if _ti == col_idx:
+                if _ti == row_idx:
                     continue
                 _tcx_local = _tcx - x_min
                 _tcy_local = _tcy - y_min
@@ -1895,7 +1903,7 @@ class Aperture:
             ax_right.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=False))
 
             # Add legend to the first panel only
-            if col_idx == 0:
+            if row_idx == 0:
                 from matplotlib.lines import Line2D as _Line2D
                 from matplotlib.patches import Patch as _Patch
                 _legend_handles = [
@@ -2062,11 +2070,12 @@ class Aperture:
                 fontsize=8,
                 frameon=False,
             )
-            label = base if saveTarget else index
+            target_label = base if index == 0 else f"{base}_{index}"
+            label = target_label if saveTarget else index
             from plotting_utils import get_plot_ext
             _ext = get_plot_ext(self.input_yaml)
             save_name = (
-                f"Aperture_Target_{base}{_ext}" if saveTarget
+                f"Aperture_Target_{target_label}{_ext}" if saveTarget
                 else f"Aperture_Source_{label}{_ext}"
             )
             save_name = os.path.join(write_dir, save_name)
@@ -2236,11 +2245,12 @@ class Aperture:
             frameon=False,
         )
 
-        label = base if saveTarget else index
+        target_label = base if index == 0 else f"{base}_{index}"
+        label = target_label if saveTarget else index
         from plotting_utils import get_plot_ext
         _ext = get_plot_ext(self.input_yaml)
         save_name = (
-            f"Aperture_Target_{base}{_ext}" if saveTarget
+            f"Aperture_Target_{target_label}{_ext}" if saveTarget
             else f"Aperture_Source_{label}{_ext}"
         )
         save_name = os.path.join(write_dir, save_name)
