@@ -1263,7 +1263,13 @@ def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
             fwhm,
         )
         fwhm = 2.0
-    ctr = (osamp * cutout_n - 1) / 2.0
+    # EPSFBuilder requires shape >= osamp * star_dim, plus one along an
+    # axis where that product is even (its own compute_epsf_shape
+    # convention); keep the stamp odd so the peak centres on a sample.
+    n_stamp = int(osamp * cutout_n)
+    if n_stamp % 2 == 0:
+        n_stamp += 1
+    ctr = (n_stamp - 1) / 2.0
     if MoffatPRF is not None:
         # photutils >=3.1.dev integrates the analytic Moffat over the
         # detector pixel with Gauss-Legendre quadrature - exact where the
@@ -1274,8 +1280,7 @@ def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
         alpha_native = float(fwhm) / (
             2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0)
         )
-        n = osamp * cutout_n
-        yy, xx = np.indices((n, n))
+        yy, xx = np.indices((n_stamp, n_stamp))
         model = MoffatPRF(
             flux=1.0,
             x_0=ctr / osamp,
@@ -1293,8 +1298,8 @@ def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
     kernel = Moffat2DKernel(
         gamma=max(float(gamma), 1e-6),
         alpha=float(beta),
-        x_size=osamp * cutout_n,
-        y_size=osamp * cutout_n,
+        x_size=n_stamp,
+        y_size=n_stamp,
     )
     data = pixel_integrate_oversampled(kernel.array, osamp)
     data = data * float(osamp) ** 2
@@ -1927,7 +1932,12 @@ def _composite_moffat_psf(components, oversampling, cutout_n, ellipticity=None):
     PSFBUILD/psf_model provenance record.
     """
     osamp = max(1, int(oversampling))
+    # EPSFBuilder requires the ePSF grid to span each star cutout, plus one
+    # along an axis where osamp * star_dim is even (its compute_epsf_shape
+    # convention); keep the stamp odd so the peak centres on a sample.
     n = int(osamp * cutout_n)
+    if n % 2 == 0:
+        n += 1
     ctr = (n - 1) / 2.0
     yy, xx = np.indices((n, n))
     data = None
@@ -2070,6 +2080,44 @@ def _analytic_psf_stamp(
     stamp._autophot_fitted = fitted
     stamp._autophot_star_fits = sfits
     return stamp, comps
+
+
+def _connected_source_groups(x, y, min_separation):
+    """Integer group IDs for positions linked by pairwise proximity.
+
+    photutils uses connected groups for blended-source PSF fits.  Computing
+    the same components here lets target fits keep held/free centroid bounds
+    separate only when sources are far enough apart to be independent.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n = len(x)
+    parent = np.arange(n, dtype=int)
+
+    def _find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def _union(i, j):
+        ri, rj = _find(i), _find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    sep2 = float(min_separation) ** 2
+    for i in range(n):
+        if not (np.isfinite(x[i]) and np.isfinite(y[i])):
+            continue
+        d2 = (x[i + 1 :] - x[i]) ** 2 + (y[i + 1 :] - y[i]) ** 2
+        near = np.flatnonzero(d2 <= sep2) + i + 1
+        for j in near:
+            if np.isfinite(x[j]) and np.isfinite(y[j]):
+                _union(i, int(j))
+
+    roots = np.array([_find(i) for i in range(n)], dtype=int)
+    _, group_ids = np.unique(roots, return_inverse=True)
+    return group_ids.astype(int)
 
 
 def _psf_pair_separation_drop(xy, min_sep_px, dup_px, rank):
@@ -3087,7 +3135,11 @@ def _propagated_centroid_err(flux, error, xcen, ycen):
         np.sqrt(np.nansum(np.where(ok, err**2 * (yy - ycen) ** 2, 0.0)))
         / total
     )
-    return float(xerr), float(yerr)
+    # photutils 3.1 centroid_err floor: the error cannot fall below the
+    # variance of a uniform distribution across one pixel, which prevents
+    # a near-zero error when the flux carrying the noise spans <1 pixel.
+    floor = np.sqrt(np.nansum(np.where(ok, err**2, 0.0)) / 12.0) / total
+    return float(max(xerr, floor)), float(max(yerr, floor))
 
 
 def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None):
@@ -3130,18 +3182,25 @@ def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None)
     xcen = float(np.nansum(flux * xx) / total)
     ycen = float(np.nansum(flux * yy) / total)
 
-    # Prefer noise-propagated errors when an error map was supplied;
-    # the flux-moment proxy below stays as the no-error fallback.
+    # Noise-propagated errors only: without an error array the 1-sigma
+    # errors are NaN, matching photutils 3.1 SourceCatalog centroid_err
+    # semantics.
     xerr, yerr = _propagated_centroid_err(flux, error, xcen, ycen)
-    if not (np.isfinite(xerr) and np.isfinite(yerr)):
-        xvar = float(np.nansum(flux * (xx - xcen) ** 2) / total)
-        yvar = float(np.nansum(flux * (yy - ycen) ** 2) / total)
-
-        # COM uncertainty proxy; preserve original behaviour/scale.
-        xerr = float(np.sqrt(xvar / total)) if xvar >= 0 else np.nan
-        yerr = float(np.sqrt(yvar / total)) if yvar >= 0 else np.nan
 
     return xcen, ycen, xerr, yerr
+
+
+def _centroid_2dg_quiet(data, **kwargs):
+    """2D Gaussian centroid with singular-fit covariance warnings contained."""
+    with warnings.catch_warnings(), np.errstate(
+        divide="ignore", over="ignore", invalid="ignore"
+    ):
+        warnings.filterwarnings(
+            "ignore",
+            category=RuntimeWarning,
+            module=r"astropy\.modeling\.fitting",
+        )
+        return centroid_2dg(data, **kwargs)
 
 
 def centroid_2dg_with_error(data, mask=None, error=None, xpeak=None, ypeak=None):
@@ -3151,7 +3210,7 @@ def centroid_2dg_with_error(data, mask=None, error=None, xpeak=None, ypeak=None)
     same propagated-noise term as centroid_com_with_error (Gaussian-fit
     covariances are not exposed by centroid_2dg).
     """
-    xcen, ycen = centroid_2dg(data, mask=mask, error=error)
+    xcen, ycen = _centroid_2dg_quiet(data, mask=mask, error=error)
     xcen = float(np.atleast_1d(xcen)[0])
     ycen = float(np.atleast_1d(ycen)[0])
     xerr = yerr = np.nan
@@ -3242,7 +3301,17 @@ def _centroid_sources_with_error_impl(
         centroid_kwargs.pop("ypeak", None)
 
         try:
-            xcen, ycen, xerr, yerr = centroid_func(data_cutout, **centroid_kwargs)
+            with warnings.catch_warnings(), np.errstate(
+                divide="ignore", over="ignore", invalid="ignore"
+            ):
+                warnings.filterwarnings(
+                    "ignore",
+                    category=RuntimeWarning,
+                    module=r"astropy\.modeling\.fitting",
+                )
+                xcen, ycen, xerr, yerr = centroid_func(
+                    data_cutout, **centroid_kwargs
+                )
         except (ValueError, TypeError):
             xcen, ycen, xerr, yerr = np.nan, np.nan, np.nan, np.nan
 
@@ -4428,9 +4497,20 @@ class PoissonLikelihoodFitter:
         # Hessian-based error estimation.  Without this, the Poisson-only
         # Hessian misses background noise and underestimates errors for
         # faint sources where background dominates.
+        #
+        # The weights are built from ``calc_total_error``, so their variance
+        # already contains the source Poisson term ``max(data, 0)`` on top of
+        # the background+read variance.  ``_compute_derivatives`` adds n_bar
+        # for the source, so strip the observed source term here to leave
+        # noise_variance as the background+read variance only - otherwise the
+        # source photons are counted twice in the Fisher curvature.
         if noise_variance is None and weights is not None:
             w = np.asarray(weights, float)
-            noise_variance = 1.0 / np.clip(w, 1e-30, None) ** 2
+            total_var = 1.0 / np.clip(w, 1e-30, None) ** 2
+            _source_var = np.clip(np.asarray(data, float), 0.0, None)
+            if _source_var.shape == total_var.shape:
+                total_var = total_var - _source_var
+            noise_variance = np.clip(total_var, 1e-30, None)
         
         if initial_params is None:
             initial_params = np.array(model.parameters, float)
@@ -5316,7 +5396,7 @@ class PSF:
                 # First pass: 2*FWHM (min 5) to get close; second pass: 1.5*FWHM (min 5) to refine.
                 cen_box_1 = _odd(max(5, int(np.ceil(2.0 * fwhm_eff))))
                 cen_box_2 = _odd(max(5, int(np.ceil(1.5 * fwhm_eff))))
-                cen_func = centroid_2dg
+                cen_func = _centroid_2dg_quiet
             else:
                 # Well-sampled: larger boxes are safe.
                 cen_box_1 = _odd(max(7, int(np.ceil(3.0 * fwhm_eff))))
@@ -8165,7 +8245,9 @@ class PSF:
             # not get dragged by asymmetric structure around the core the
             # way a centre of mass is - fitted positions sit up to ~0.1 px
             # closer to the optical-model centre on asymmetric PSFs.
-            recenter_func = centroid_2dg if undersampled else centroid_symmetry
+            recenter_func = (
+                _centroid_2dg_quiet if undersampled else centroid_symmetry
+            )
 
             # Centroid and fit windows scale with FWHM, but must remain odd.
             # For undersampled data, use a smaller recentering box to avoid
@@ -9214,8 +9296,8 @@ class PSF:
                         "fitted=%s, size=%dx%d",
                         len(_analytic_comps),
                         _analytic_fitted,
-                        int(osamp_c * cutout_n),
-                        int(osamp_c * cutout_n),
+                        init_epsf_c.data.shape[1],
+                        init_epsf_c.data.shape[0],
                     )
 
                 epsf_c = fitted_c = None
@@ -13061,9 +13143,37 @@ class PSF:
 
         # In undersampled data, the effective PSF footprint in pixels is
         # small; use a more conservative grouping distance to avoid
-        # over-merging genuinely distinct neighbours.
+        # over-merging genuinely distinct neighbours.  The explicit
+        # FWHM-relative override keeps the target-pair criterion adjustable
+        # without changing the catalog-fit defaults.
         group_sep = 3.0 * fwhm if undersampled else 2.0 * fwhm
-        group_maker = SourceGrouper(min_separation=max(group_sep, 1.0))
+        try:
+            _group_sep_fwhm = phot_cfg.get("psf_group_separation_fwhm", None)
+            if _group_sep_fwhm is not None:
+                group_sep = float(_group_sep_fwhm) * fwhm
+        except (TypeError, ValueError):
+            log.warning(
+                "Invalid photometry.psf_group_separation_fwhm=%r; using %.2f px.",
+                _group_sep_fwhm,
+                group_sep,
+            )
+        group_sep = max(float(group_sep), 1.0)
+        group_maker = SourceGrouper(min_separation=group_sep)
+        target_group_ids = (
+            _connected_source_groups(x, y, group_sep)
+            if is_target_fit and len(init_params) > 1
+            else np.zeros(len(init_params), dtype=int)
+        )
+        if is_target_fit and len(init_params) > 1:
+            _n_target_groups = int(np.max(target_group_ids) + 1)
+            log.info(
+                "Target PSF grouping: %d source(s) -> %d fit group(s) "
+                "(joint separation %.2f px = %.2f FWHM).",
+                len(init_params),
+                _n_target_groups,
+                group_sep,
+                group_sep / max(float(fwhm), 1e-12),
+            )
 
         # Note: planar background fitting/subtraction has been removed from this
         # fitter (we rely on photutils' annulus-based LocalBackground instead).
@@ -13580,6 +13690,19 @@ class PSF:
                         res["x_fit_err"] = _x_errs
                         res["y_fit_err"] = _y_errs
                         res["flux_fit_err"] = _flux_errs
+                elif isinstance(per_src, (list, tuple)):
+                    # A source was skipped/reordered between the fit call and
+                    # the result frame, so the record-to-row mapping is
+                    # ambiguous.  Never map errors positionally (that would
+                    # attach one source's error to another); warn instead so
+                    # the NaN errors downstream are not silent.
+                    log.warning(
+                        "MCMC error propagation: %d new per-source record(s) "
+                        "for %d source row(s); MCMC flux/centroid errors left "
+                        "NaN for the unmatched rows.",
+                        _n_new,
+                        len(res),
+                    )
 
             return res, psfphot
 
@@ -13658,24 +13781,19 @@ class PSF:
                 vf_outer = vf_inner + width_fwhm * fwhm
 
         # ---- Dispatch per SNR tier -----------------------------------------
-        # For multi-target fits (primary + additional targets), ALL targets
-        # must be fit in a single PSFPhotometry call so that:
-        #   1. SourceGrouper sees all targets and can handle blending
-        #   2. make_residual_image() subtracts ALL fitted PSFs
-        # Tier splitting would break this by fitting each tier separately.
+        # Nearby targets must share a PSFPhotometry call so the group model
+        # subtracts every overlapping PSF.  Targets farther than group_sep
+        # receive different SourceGrouper components inside that call and are
+        # fitted independently.
         results = []
         psfphot_last = None
 
         if (is_target_fit and len(init_params) > 1) or not any_emcee_used:
-            # ---- Single-call fit ------------------------------------------
-            # When no tier uses MCMC (always the case for catalog fits --
-            # MCMC is restricted to target fits), a single PSFPhotometry call
-            # over all sources is both cheaper (one SourceGrouper pass, one
-            # background-model setup) and more correct: neighbours that fall
-            # in different SNR tiers are grouped and deblended jointly
-            # instead of being fit independently.  Multi-target fits must
-            # stay single-call because photutils only assigns group_id when
-            # multiple sources are passed together.
+            # ---- Group-aware fit ------------------------------------------
+            # A single call remains cheapest for catalog sources.  For target
+            # fits, the held/free split must not divide a connected group:
+            # the held companion still contributes flux and must be modelled
+            # with the free source.
             all_mask = np.ones(len(init_params), dtype=bool)
             # Decide fitter: use MCMC if any target has SNR below threshold,
             # otherwise LSQ.  This keeps simultaneous fitting while still
@@ -13688,17 +13806,38 @@ class PSF:
             use_emcee_all = _any_low_snr and emcee_fitter is not None
             tier_fitter_all = emcee_fitter if use_emcee_all else lsq_fitter
             log.debug(
-                "[PSF photometry: %d sources] (%s, single-call for simultaneous fit)",
+                "[PSF photometry: %d sources] (%s, group-aware fit)",
                 len(init_params),
                 "MCMC" if use_emcee_all else "LSQ",
             )
-            # photutils takes one scalar xy_bounds per call, so held
-            # (undetected) sources are fit in a second call.  A held source
-            # carries ~zero flux, so dropping it from the joint group fit
-            # costs little deblending accuracy.
-            _bounds_plan = [(all_mask & ~xy_hold_arr, _free_xy_bound)]
-            if np.any(all_mask & xy_hold_arr):
-                _bounds_plan.append((all_mask & xy_hold_arr, _hold_px_eff))
+            _bounds_plan = []
+            _xy_hold_for_call = xy_hold_arr.copy()
+            if is_target_fit and len(init_params) > 1:
+                _promoted_groups = []
+                for _gid in np.unique(target_group_ids):
+                    _gmask = all_mask & (target_group_ids == _gid)
+                    _gheld = xy_hold_arr[_gmask]
+                    if np.any(_gheld) and not np.all(_gheld):
+                        # photutils accepts one scalar bound per call.  A mixed
+                        # blended group gets the free bound so both PSFs are
+                        # fitted together; splitting it would let the detected
+                        # source absorb the companion's flux.
+                        _xy_hold_for_call[_gmask] = False
+                        _promoted_groups.append(int(_gid))
+                if _promoted_groups:
+                    log.warning(
+                        "Target PSF group(s) %s mix held and free sources; "
+                        "fitting each blended group jointly with free centroid "
+                        "bounds.",
+                        _promoted_groups,
+                    )
+            _bounds_plan = [
+                (all_mask & ~_xy_hold_for_call, _free_xy_bound)
+            ]
+            if np.any(all_mask & _xy_hold_for_call):
+                _bounds_plan.append(
+                    (all_mask & _xy_hold_for_call, _hold_px_eff)
+                )
             for _sub_mask, _xb in _bounds_plan:
                 if not np.any(_sub_mask):
                     continue
@@ -13850,21 +13989,28 @@ class PSF:
         psfphot_inverted = None  # Store the psfphot object from inverted fit
         if check_inverted and ndimage_inverted is not None and np.any(needs_inverted_retry):
             if is_target_fit and len(init_params) > 1:
-                # Multi-target: fit all needing retry in a single call
+                # Multi-target: retry whole proximity groups when any member
+                # needs the inverted image; the positive companion still has
+                # to be modelled so the negative source is not absorbed by it.
                 retry_mask_all = np.isin(idx_keep, idx_out[needs_inverted_retry])
                 if np.any(retry_mask_all):
+                    _retry_gids = np.unique(target_group_ids[retry_mask_all])
+                    retry_mask_all = np.isin(target_group_ids, _retry_gids)
                     _any_low_snr = np.any(psf_snr[retry_mask_all] < emcee_s2n) if emcee_s2n > 0 else False
                     use_emcee_inv = _any_low_snr and emcee_fitter is not None
                     tier_fitter_inv = emcee_fitter if use_emcee_inv else lsq_fitter
-                    log.debug("Fitting %d sources on inverted image (single-call fallback)...", int(retry_mask_all.sum()))
-                    for _sm, _xb in [
-                        (retry_mask_all & ~xy_hold_arr, _free_xy_bound),
-                        (retry_mask_all & xy_hold_arr, _hold_px_eff),
-                    ]:
-                        if not np.any(_sm):
+                    log.debug("Fitting %d sources on inverted image (group-aware fallback)...", int(retry_mask_all.sum()))
+                    for _gid in np.unique(target_group_ids):
+                        _gm = retry_mask_all & (target_group_ids == _gid)
+                        if not np.any(_gm):
                             continue
+                        _gheld = _xy_hold_for_call[_gm]
+                        # A blended group stays together on the inverted image;
+                        # otherwise the retried source is measured against a
+                        # residual still containing its companion.
+                        _xb = _hold_px_eff if np.all(_gheld) else _free_xy_bound
                         res_inv, psfphot_inv = _psf_fit(
-                            _sm, bright_inner, bright_outer,
+                            _gm, bright_inner, bright_outer,
                             fit_shape, tier_fitter_inv, use_emcee_inv,
                             nd_override=ndimage_inverted, xy_bound=_xb,
                         )
@@ -14813,40 +14959,45 @@ class PSF:
                         )
                         break
 
-            # Detect multiple targets for multi-column target plot.
-            # Each target gets its own science column zoomed around it.
-            _target_mask = None
-            if "_is_additional_target" in sources.columns:
-                _target_mask = sources["_is_additional_target"].astype(bool)
-                _target_rows = sources[~_target_mask]
-            else:
-                _target_rows = sources
-            _n_target_cols = 1
-            _target_centers = []  # list of (x, y) per target column
-            _target_names = []    # labels per target column
+            # Detect multiple targets for a row-per-target plot.  Each row
+            # carries that target's science stamp, residual stamp, and the ePSF
+            # when one is supplied.
+            _n_target_rows = 1
+            _target_centers = []  # list of (x, y) per target row
+            _target_names = []    # labels per target row
             if plotTarget and len(sources) > 1 and "x_pix" in sources.columns:
-                # Primary target = row 0; additional targets = rows with _is_additional_target
+                # Primary target is row 0; additional targets use their
+                # resolved names when available.
                 for _i in range(len(sources)):
                     _tx = float(sources.at[sources.index[_i], "x_pix"])
                     _ty = float(sources.at[sources.index[_i], "y_pix"])
                     if not np.isfinite(_tx) or not np.isfinite(_ty):
                         continue
-                    _tn = sources.at[sources.index[_i], "_additional_target_name"] if "_additional_target_name" in sources.columns else None
+                    _tn = (
+                        sources.at[sources.index[_i], "_additional_target_name"]
+                        if "_additional_target_name" in sources.columns
+                        else None
+                    )
                     if not _tn or str(_tn) == "nan":
                         if _i == 0:
                             _tn = self.input_yaml.get("target_name", "Main target")
                             # Use "Main target" for generic placeholder names
-                            if _tn in ("Transient", "Center of Field", "Primary", None, "nan"):
+                            if _tn in (
+                                "Transient",
+                                "Center of Field",
+                                "Primary",
+                                None,
+                                "nan",
+                            ):
                                 _tn = "Main target"
                         else:
                             _tn = f"Sub target {_i}"
                     _target_centers.append((_tx, _ty))
                     _target_names.append(str(_tn))
-                _n_target_cols = len(_target_centers) if _target_centers else 1
+                _n_target_rows = len(_target_centers) if _target_centers else 1
 
             # Compute per-target zoom bounds.  When multiple targets are
-            # present, each gets its own science column zoomed around it.
-            # The primary target's zoom is also used for the residual panel.
+            # present, each gets its own row zoomed around it.
             if not _target_centers:
                 _tcx = (
                     np.nanmean(sources["x_pix"])
@@ -14860,7 +15011,7 @@ class PSF:
                 )
                 _target_centers = [(_tcx, _tcy)]
                 _target_names = ["Main target"]
-                _n_target_cols = 1
+                _n_target_rows = 1
 
             _target_zooms = []
             for _tcx, _tcy in _target_centers:
@@ -14870,38 +15021,37 @@ class PSF:
                 _y1 = min(int(np.ceil(_tcy + scale)), ndimage.data.shape[0])
                 _target_zooms.append((_x0, _x1, _y0, _y1))
 
-            # Primary target zoom (used by residual panel)
-            x0, x1, y0, y1 = _target_zooms[0]
-
             ncols = (
-                _n_target_cols + (1 if psfphot is not None else 0) + (1 if epsf is not None else 0)
+                1
+                + int(psfphot is not None)
+                + int(epsf is not None)
             )
 
             # Equal-aspect image panels shrink inside mismatched figure
-            # cells, leaving gaps no wspace can remove.  Size the figure
-            # from each column's image aspect (science columns use their
-            # zoom window, the residual shares the primary target's, the
-            # ePSF uses the model shape) and give the gridspec columns the
-            # same proportions so every panel fills its cell.
-            _col_aspects = [
+            # cells, leaving gaps no spacing parameter can remove.  The science
+            # and residual columns use the widest target zoom so rows with a
+            # narrower field do not distort the shared grid.
+            _target_aspect = max(
                 (zx1 - zx0) / max(zy1 - zy0, 1)
                 for (zx0, zx1, zy0, zy1) in _target_zooms
-            ]
+            )
+            _col_aspects = [_target_aspect]
             if psfphot is not None:
-                _col_aspects.append((x1 - x0) / max(y1 - y0, 1))
+                _col_aspects.append(_target_aspect)
             if epsf is not None:
                 _esh, _esw = np.shape(epsf.data)
                 _col_aspects.append(_esw / max(_esh, 1))
 
             apply_autophot_mplstyle()
-            # Each column packs the main image plus appended axes: right
+            # Each cell packs the main image plus appended axes: right
             # projection 20% + 0.15 pad, bottom projection 20% + 0.15 pad,
             # top colorbar 5% + 0.05 pad, all fractions of the main axes.
             ax_h = 3.4
             _col_w_factor = 1.0 + 0.15 + 0.20
-            _col_h_factor = 1.0 + 0.15 + 0.20 + 0.05 + 0.05
+            _row_h_factor = 1.0 + 0.15 + 0.20 + 0.05 + 0.05
             left, right, bottom, top = 0.05, 0.98, 0.15, 0.90
             wspace = 0.08
+            hspace = 0.35
             fig_w = (
                 _col_w_factor
                 * ax_h
@@ -14909,13 +15059,20 @@ class PSF:
                 * (1 + wspace * (ncols - 1) / ncols)
                 / (right - left)
             )
-            fig_h = _col_h_factor * ax_h / (top - bottom)
+            fig_h = (
+                _row_h_factor
+                * ax_h
+                * _n_target_rows
+                * (1 + hspace * (_n_target_rows - 1) / _n_target_rows)
+                / (top - bottom)
+            )
             fig = plt.figure(figsize=(fig_w, fig_h))
             gs = GridSpec(
-                1,
+                _n_target_rows,
                 ncols,
                 width_ratios=_col_aspects,
                 wspace=wspace,
+                hspace=hspace,
                 left=left,
                 right=right,
                 bottom=bottom,
@@ -14923,25 +15080,32 @@ class PSF:
             )
 
             ax_list, cax_list = [], []
-            for k in range(ncols):
-                ax = fig.add_subplot(gs[0, k])
-                divider = make_axes_locatable(ax)
-                ax_R = divider.append_axes("right", size="20%", pad=0.15, sharey=ax)
-                ax_B = divider.append_axes("bottom", size="20%", pad=0.15, sharex=ax)
-                cax = divider.append_axes("top", size="5%", pad=0.05)
-                ax.tick_params(axis="x", labelbottom=False)
-                ax_R.tick_params(axis="y", labelleft=False)
-                if k > 0:
-                    ax.tick_params(axis="y", labelleft=False)
-                ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
-                ax.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
-                for _a in (ax_R, ax_B):
-                    _a.tick_params(axis="both", labelsize=8)
-                # Rotate tick labels on projection axes to avoid overlap
-                ax_B.tick_params(axis="x", labelrotation=30)
-                ax_R.tick_params(axis="x", labelrotation=30)
-                ax_list.append((ax, ax_R, ax_B))
-                cax_list.append(cax)
+            for _row in range(_n_target_rows):
+                _row_axes = []
+                _row_caxes = []
+                for _col in range(ncols):
+                    ax = fig.add_subplot(gs[_row, _col])
+                    divider = make_axes_locatable(ax)
+                    ax_R = divider.append_axes("right", size="20%", pad=0.15, sharey=ax)
+                    ax_B = divider.append_axes(
+                        "bottom", size="20%", pad=0.15, sharex=ax
+                    )
+                    cax = divider.append_axes("top", size="5%", pad=0.05)
+                    ax.tick_params(axis="x", labelbottom=False)
+                    ax_R.tick_params(axis="y", labelleft=False)
+                    if _col > 0:
+                        ax.tick_params(axis="y", labelleft=False)
+                    ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+                    ax.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+                    for _a in (ax_R, ax_B):
+                        _a.tick_params(axis="both", labelsize=8)
+                    # Rotate tick labels on projection axes to avoid overlap
+                    ax_B.tick_params(axis="x", labelrotation=30)
+                    ax_R.tick_params(axis="x", labelrotation=30)
+                    _row_axes.append((ax, ax_R, ax_B))
+                    _row_caxes.append(cax)
+                ax_list.append(_row_axes)
+                cax_list.append(_row_caxes)
 
             # ---- Projections helper (defined early, used by all panels) -----
             def _proj(main_ax, ax_R, ax_B, data, color="blue", draw_right=True):
@@ -14979,7 +15143,9 @@ class PSF:
                 ax_R.plot(x_step, y_edges, color=color, lw=lw, alpha=alpha)
 
             # Target marker colors: primary=white, others=muted teal (was neon cyan)
-            _tc_colors = ["white"] + [PLOT_COLORS.get('target_secondary', '#17A2B8')] * (len(_target_centers) - 1)
+            _tc_colors = ["white"] + [
+                PLOT_COLORS.get('target_secondary', '#17A2B8')
+            ] * (len(_target_centers) - 1)
 
             kw_bottom = dict(
                 facecolor="dodgerblue", edgecolor="none", alpha=0.5, step="mid"
@@ -14988,15 +15154,15 @@ class PSF:
                 facecolor="dodgerblue", edgecolor="none", alpha=0.5, step="mid"
             )
 
-            # ---- Science panels (one per target) ---------------------------
-            im1 = None  # keep reference for colorbar
-            ax1 = ax1_R = ax1_B = None  # primary science axes (for labels/legend)
-            _primary_mask_cut = None  # saved for residual panel
-            _primary_unc_cut = None   # saved for residual panel
+            # ---- Science panels (first column, one row per target) ---------
+            ax1 = ax1_R = ax1_B = None  # first science axes (for labels/legend)
+            _science_mask_cuts = []    # saved for matching residual rows
+            _science_unc_cuts = []
+            _science_images = []
             _all_science_axes = []     # saved for model overlay on all targets
-            for _tcol, (_tx0, _tx1, _ty0, _ty1) in enumerate(_target_zooms):
-                _ax, _ax_R, _ax_B = ax_list[_tcol]
-                if _tcol == 0:
+            for _trow, (_tx0, _tx1, _ty0, _ty1) in enumerate(_target_zooms):
+                _ax, _ax_R, _ax_B = ax_list[_trow][0]
+                if _trow == 0:
                     ax1, ax1_R, ax1_B = _ax, _ax_R, _ax_B
                 _all_science_axes.append((_ax, _ax_R, _ax_B))
                 _cutout = first_image[_ty0:_ty1, _tx0:_tx1]
@@ -15006,12 +15172,16 @@ class PSF:
                     if getattr(nd_for_plot, "mask", None) is not None
                     else None
                 )
-                if _tcol == 0:
-                    _primary_mask_cut = _mask_cut
-                    _primary_unc_cut = _unc_cut
+                _science_mask_cuts.append(_mask_cut)
+                _science_unc_cuts.append(_unc_cut)
 
-                _tname = _target_names[_tcol] if _tcol < len(_target_names) else f"Target {_tcol}"
+                _tname = (
+                    _target_names[_trow]
+                    if _trow < len(_target_names)
+                    else f"Target {_trow}"
+                )
                 _ax.set_title(_tname, fontsize=8, pad=3)
+                _ax.set_ylabel(_tname, fontsize=8, labelpad=4)
 
                 if plotTarget:
                     if is_inverted:
@@ -15038,8 +15208,7 @@ class PSF:
                     interpolation=None,
                 )
                 overlay_mask_hatch(_ax, ~np.isfinite(first_image))
-                if _tcol == 0:
-                    im1 = _im  # colorbar reference from primary
+                _science_images.append(_im)
 
                 # Mark all input positions
                 if "x_pix" in sources and "y_pix" in sources:
@@ -15111,7 +15280,7 @@ class PSF:
                         np.column_stack([xf, xf]).T,
                         np.column_stack([yf - r, yf + r]).T,
                         color=PLOT_COLORS.get('target', '#E31B23'), lw=1.2, alpha=0.9, zorder=11,
-                        label="Fitted position" if _tcol == 0 else None,
+                        label="Fitted position" if _trow == 0 else None,
                     )
                     _ap_circles = [Circle((x, y), aperture_radius) for x, y in zip(xf, yf)]
                     if _ap_circles:
@@ -15135,7 +15304,7 @@ class PSF:
 
                 # Mark other target centers with colored crosshairs + labels
                 for _oi, (_ocx, _ocy) in enumerate(_target_centers):
-                    if _oi == _tcol:
+                    if _oi == _trow:
                         continue
                     if (_tx0 <= _ocx < _tx1 and _ty0 <= _ocy < _ty1):
                         _r = fwhm / 2.0 if "fwhm" in locals() else 1.5
@@ -15190,158 +15359,215 @@ class PSF:
                 )
                 _ax_R.set_xlim(_lo_r - _margin_r, _hi_r + _margin_r)
 
-            # ---- Residual panel (after science columns) --------------------
-            idx = _n_target_cols
+            # ---- Residual panels (second column, one row per target) -------
+            _residual_images = []
             if psfphot is not None:
-                ax2, ax2_R, ax2_B = ax_list[idx]
-                ax2.set_title("Residual", fontsize=8, pad=3)
-                cutout2 = second_image[y0:y1, x0:x1]
-                if plotTarget:
-                    _, med2, std2 = sigma_clipped_stats(cutout2, sigma=3, maxiters=5)
-                    std2 = max(std2, np.finfo(float).tiny)
-                    vmin2 = med2 - 3 * std2
-                    vmax2 = med2 + 3 * std2
-                    norm2 = ImageNormalize(
-                        vmin=vmin2, vmax=vmax2, stretch=LinearStretch()
+                for _trow, (x0, x1, y0, y1) in enumerate(_target_zooms):
+                    ax2, ax2_R, ax2_B = ax_list[_trow][1]
+                    _rname = (
+                        _target_names[_trow]
+                        if _trow < len(_target_names)
+                        else f"Target {_trow}"
                     )
-                else:
-                    norm2 = ImageNormalize(
-                        cutout2, interval=ZScaleInterval(), stretch=LinearStretch()
+                    ax2.set_title(f"Residual - {_rname}", fontsize=8, pad=3)
+                    cutout2 = second_image[y0:y1, x0:x1]
+                    if plotTarget:
+                        _, med2, std2 = sigma_clipped_stats(
+                            cutout2, sigma=3, maxiters=5
+                        )
+                        std2 = max(std2, np.finfo(float).tiny)
+                        norm2 = ImageNormalize(
+                            vmin=med2 - 3 * std2,
+                            vmax=med2 + 3 * std2,
+                            stretch=LinearStretch(),
+                        )
+                    else:
+                        norm2 = ImageNormalize(
+                            cutout2,
+                            interval=ZScaleInterval(),
+                            stretch=LinearStretch(),
+                        )
+                    cmap_vir = plt.get_cmap("viridis").copy()
+                    cmap_vir = cmap_vir.with_extremes(bad="none")
+                    im2 = ax2.imshow(
+                        np.ma.array(second_image, mask=~np.isfinite(second_image)),
+                        origin="lower",
+                        cmap=cmap_vir,
+                        norm=norm2,
+                        interpolation=None,
                     )
-                cmap_vir = plt.get_cmap("viridis").copy()
-                cmap_vir = cmap_vir.with_extremes(bad="none")
-                im2 = ax2.imshow(
-                np.ma.array(second_image, mask=~np.isfinite(second_image)),
-                origin="lower",
-                cmap=cmap_vir,
-                    norm=norm2,
-                    interpolation=None,
-                )
-                overlay_mask_hatch(ax2, ~np.isfinite(second_image))
-                # Same cutout window as the science panels so the residual
-                # stamp and its projections cover an identical x/y region.
-                ax2.set_xlim(x0, x1)
-                ax2.set_ylim(y0, y1)
-                _proj(ax2, ax2_R, ax2_B, second_image, draw_right=False)
+                    _residual_images.append(im2)
+                    overlay_mask_hatch(ax2, ~np.isfinite(second_image))
+                    ax2.set_xlim(x0, x1)
+                    ax2.set_ylim(y0, y1)
+                    _proj(ax2, ax2_R, ax2_B, second_image, draw_right=False)
 
-                # y-values for residual panel error shading (primary target zoom)
-                y_vals = np.arange(y0, y1, dtype=float)
+                    y_vals = np.arange(y0, y1, dtype=float)
+                    finite2 = np.isfinite(cutout2)
+                    _mask_cut = _science_mask_cuts[_trow]
+                    if _mask_cut is not None:
+                        finite2 &= ~_mask_cut
+                    hx2 = np.nanmean(cutout2, axis=0)
+                    hy2 = np.nanmean(cutout2, axis=1)
+                    # Recompute SE-of-mean using this row's uncertainty map;
+                    # residual NaN patterns can differ from the science cutout.
+                    unc2_2 = np.where(
+                        finite2,
+                        np.nan_to_num(
+                            np.asarray(_science_unc_cuts[_trow], dtype=float),
+                            nan=0.0, posinf=0.0, neginf=0.0,
+                        ) ** 2,
+                        0.0,
+                    )
+                    n_col2 = np.sum(finite2, axis=0).astype(float)
+                    n_row2 = np.sum(finite2, axis=1).astype(float)
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        exh2 = np.sqrt(np.sum(unc2_2, axis=0)) / np.where(
+                            n_col2 > 0, n_col2, np.nan
+                        )
+                        eyh2 = np.sqrt(np.sum(unc2_2, axis=1)) / np.where(
+                            n_row2 > 0, n_row2, np.nan
+                        )
+                    ax2_B.fill_between(
+                        np.arange(x0, x1),
+                        hx2 - exh2,
+                        hx2 + exh2,
+                        **kw_bottom,
+                    )
+                    ax2_B.step(
+                        np.arange(x0, x1), hx2 - exh2,
+                        color="dodgerblue", lw=0.3, alpha=0.7, where="mid",
+                    )
+                    ax2_B.step(
+                        np.arange(x0, x1), hx2 + exh2,
+                        color="dodgerblue", lw=0.3, alpha=0.7, where="mid",
+                    )
+                    ax2_R.fill_betweenx(
+                        y_vals, hy2 - eyh2, hy2 + eyh2, **kw_right
+                    )
+                    _draw_right_step(
+                        ax2_R, hy2 - eyh2, y0, y1,
+                        color="dodgerblue", lw=0.3, alpha=0.7,
+                    )
+                    _draw_right_step(
+                        ax2_R, hy2 + eyh2, y0, y1,
+                        color="dodgerblue", lw=0.3, alpha=0.7,
+                    )
+                    _draw_right_step(
+                        ax2_R, hy2, y0, y1,
+                        color=PLOT_COLORS.get('psf', '#00AA00'),
+                    )
 
-                # Error shading on residual panel (same SE of mean as science).
-                finite2 = np.isfinite(cutout2)
-                if _primary_mask_cut is not None:
-                    finite2 &= ~_primary_mask_cut
-                hx2 = np.nanmean(cutout2, axis=0)
-                hy2 = np.nanmean(cutout2, axis=1)
-                # Recompute SE-of-mean using the same uncertainty map but the
-                # residual panel's finite mask (NaN patterns can differ).
-                unc2_2 = np.where(
-                    finite2,
-                    np.nan_to_num(
-                        np.asarray(_primary_unc_cut, dtype=float),
-                        nan=0.0, posinf=0.0, neginf=0.0,
-                    ) ** 2,
-                    0.0,
-                )
-                n_col2 = np.sum(finite2, axis=0).astype(float)
-                n_row2 = np.sum(finite2, axis=1).astype(float)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    exh2 = np.sqrt(np.sum(unc2_2, axis=0)) / np.where(n_col2 > 0, n_col2, np.nan)
-                    eyh2 = np.sqrt(np.sum(unc2_2, axis=1)) / np.where(n_row2 > 0, n_row2, np.nan)
-                ax2_B.fill_between(np.arange(x0, x1), hx2 - exh2, hx2 + exh2, **kw_bottom)
-                ax2_B.step(np.arange(x0, x1), hx2 - exh2, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
-                ax2_B.step(np.arange(x0, x1), hx2 + exh2, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
-                ax2_R.fill_betweenx(y_vals, hy2 - eyh2, hy2 + eyh2, **kw_right)
-                _draw_right_step(ax2_R, hy2 - eyh2, y0, y1, color="dodgerblue", lw=0.3, alpha=0.7)
-                _draw_right_step(ax2_R, hy2 + eyh2, y0, y1, color="dodgerblue", lw=0.3, alpha=0.7)
-                _draw_right_step(ax2_R, hy2, y0, y1, color=PLOT_COLORS.get('psf', '#00AA00'))
+                    _lo_b = np.nanmin(hx2 - exh2)
+                    _hi_b = np.nanmax(hx2 + exh2)
+                    _margin_b = (
+                        max((_hi_b - _lo_b) * 0.05, 1e-9)
+                        if np.isfinite(_hi_b - _lo_b)
+                        else 0.1
+                    )
+                    ax2_B.set_ylim(_lo_b - _margin_b, _hi_b + _margin_b)
+                    _lo_r = np.nanmin(hy2 - eyh2)
+                    _hi_r = np.nanmax(hy2 + eyh2)
+                    _margin_r = (
+                        max((_hi_r - _lo_r) * 0.05, 1e-9)
+                        if np.isfinite(_hi_r - _lo_r)
+                        else 0.1
+                    )
+                    ax2_R.set_xlim(_lo_r - _margin_r, _hi_r + _margin_r)
 
-                # Zoom bottom and right panels onto the fit profile (scale to data range).
-                _lo_b = np.nanmin(hx2 - exh2)
-                _hi_b = np.nanmax(hx2 + exh2)
-                _margin_b = (
-                    max((_hi_b - _lo_b) * 0.05, 1e-9)
-                    if np.isfinite(_hi_b - _lo_b)
-                    else 0.1
-                )
-                ax2_B.set_ylim(_lo_b - _margin_b, _hi_b + _margin_b)
-                _lo_r = np.nanmin(hy2 - eyh2)
-                _hi_r = np.nanmax(hy2 + eyh2)
-                _margin_r = (
-                    max((_hi_r - _lo_r) * 0.05, 1e-9)
-                    if np.isfinite(_hi_r - _lo_r)
-                    else 0.1
-                )
-                ax2_R.set_xlim(_lo_r - _margin_r, _hi_r + _margin_r)
-
-                # Overlay the fitted PSF model (red) on EVERY target's
-                # profile panels, not just the primary.  _proj reads
-                # xlim/ylim from each panel's main axes to extract the
-                # correct zoom region from the full-image fitted_model.
+                # Overlay the fitted PSF model on every science profile.  _proj
+                # reads each row's xlim/ylim and extracts the matching stamp.
                 for _sci_ax, _sci_ax_R, _sci_ax_B in _all_science_axes:
-                    _proj(_sci_ax, _sci_ax_R, _sci_ax_B, fitted_model, color="#D94F4F")
-                idx += 1
+                    _proj(
+                        _sci_ax,
+                        _sci_ax_R,
+                        _sci_ax_B,
+                        fitted_model,
+                        color="#D94F4F",
+                    )
 
-            # ---- Panel 3: ePSF ---------------------------------------------
+            # ---- ePSF panels (last column, repeated on each target row) ----
+            _epsf_images = []
             if epsf is not None:
-                ax3, ax3_R, ax3_B = ax_list[idx]
-                norm3 = ImageNormalize(
-                    epsf.data, interval=ZScaleInterval(), stretch=LinearStretch()
-                )
-                cmap_vir = plt.get_cmap("viridis").copy()
-                cmap_vir = cmap_vir.with_extremes(bad="none")
-                im3 = ax3.imshow(
-                np.ma.array(epsf.data, mask=~np.isfinite(epsf.data)),
-                origin="lower",
-                cmap=cmap_vir,
-                    norm=norm3,
-                    interpolation=None,
-                )
-                overlay_mask_hatch(ax3, ~np.isfinite(epsf.data))
-                ax3.set_title(
-                    f"Oversampled ePSF (x{epsf.oversampling})", fontsize=7, pad=2
-                )
+                _epsf_col = 1 + int(psfphot is not None)
+                for _trow in range(_n_target_rows):
+                    ax3, ax3_R, ax3_B = ax_list[_trow][_epsf_col]
+                    norm3 = ImageNormalize(
+                        epsf.data,
+                        interval=ZScaleInterval(),
+                        stretch=LinearStretch(),
+                    )
+                    cmap_vir = plt.get_cmap("viridis").copy()
+                    cmap_vir = cmap_vir.with_extremes(bad="none")
+                    im3 = ax3.imshow(
+                        np.ma.array(epsf.data, mask=~np.isfinite(epsf.data)),
+                        origin="lower",
+                        cmap=cmap_vir,
+                        norm=norm3,
+                        interpolation=None,
+                    )
+                    _epsf_images.append(im3)
+                    overlay_mask_hatch(ax3, ~np.isfinite(epsf.data))
+                    ax3.set_title(
+                        f"Oversampled ePSF (x{epsf.oversampling})",
+                        fontsize=7,
+                        pad=2,
+                    )
 
             # ---- Colorbars -------------------------------------------------
-            # Science colorbars: one per target column (all use the same image/norm)
-            for _ci in range(_n_target_cols):
+            # Every row gets its own colorbar so each target keeps the limits
+            # used by its science and residual stamps.
+            for _trow, _im1 in enumerate(_science_images):
                 _cbar = fig.colorbar(
-                    im1,
-                    cax=cax_list[_ci],
+                    _im1,
+                    cax=cax_list[_trow][0],
                     orientation="horizontal",
                 )
-                _cbar.set_label("Inverted Science Flux [e$^-$]" if is_inverted else "Science Flux [e$^-$]")
-                cax_list[_ci].xaxis.set_ticks_position("top")
-                cax_list[_ci].xaxis.set_label_position("top")
+                _cbar.set_label(
+                    "Inverted Science Flux [e$^-$]"
+                    if is_inverted
+                    else "Science Flux [e$^-$]"
+                )
+                cax_list[_trow][0].xaxis.set_ticks_position("top")
+                cax_list[_trow][0].xaxis.set_label_position("top")
 
             if psfphot is not None:
-                _residual_cax = cax_list[_n_target_cols]
-                cbar2 = fig.colorbar(im2, cax=_residual_cax, orientation="horizontal")
-                cbar2.set_label(
-                    "Inverted Residual Flux [e$^-$]" if is_inverted else second_label
-                )
-                _residual_cax.xaxis.set_ticks_position("top")
-                _residual_cax.xaxis.set_label_position("top")
+                for _trow, _im2 in enumerate(_residual_images):
+                    _residual_cax = cax_list[_trow][1]
+                    cbar2 = fig.colorbar(
+                        _im2, cax=_residual_cax, orientation="horizontal"
+                    )
+                    cbar2.set_label(
+                        "Inverted Residual Flux [e$^-$]"
+                        if is_inverted
+                        else second_label
+                    )
+                    _residual_cax.xaxis.set_ticks_position("top")
+                    _residual_cax.xaxis.set_label_position("top")
 
             if epsf is not None:
-                cbar3 = fig.colorbar(im3, cax=cax_list[-1], orientation="horizontal")
-                cbar3.set_label("Normalised PSF")
-                cax_list[-1].xaxis.set_ticks_position("top")
-                cax_list[-1].xaxis.set_label_position("top")
+                _epsf_col = 1 + int(psfphot is not None)
+                for _trow, _im3 in enumerate(_epsf_images):
+                    _epsf_cax = cax_list[_trow][_epsf_col]
+                    cbar3 = fig.colorbar(
+                        _im3, cax=_epsf_cax, orientation="horizontal"
+                    )
+                    cbar3.set_label("Normalised PSF")
+                    _epsf_cax.xaxis.set_ticks_position("top")
+                    _epsf_cax.xaxis.set_label_position("top")
 
-            for _ax, _ax_R, _ax_B in ax_list:
-                _ax_B.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
-                _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=False))
-            # Axis labels on profile panels (consistent with Aperture plot)
-            ax1_B.set_xlabel("X position (pixels)")
-            ax1_B.set_ylabel("Flux [e$^-$]")
-            ax1_R.set_xlabel("Flux [e$^-$]")
-            ax1_R.yaxis.set_label_position("right")
-            if psfphot is not None:
-                ax2_B.set_xlabel("X position (pixels)")
-                ax2_B.set_ylabel("Flux [e$^-$]")
-                ax2_R.set_xlabel("Flux [e$^-$]")
-                ax2_R.yaxis.set_label_position("right")
+            for _row_axes in ax_list:
+                for _ax, _ax_R, _ax_B in _row_axes:
+                    _ax_B.yaxis.set_major_locator(
+                        MaxNLocator(nbins=5, integer=False)
+                    )
+                    _ax_R.xaxis.set_major_locator(
+                        MaxNLocator(nbins=3, integer=False)
+                    )
+                    _ax_B.set_xlabel("X position (pixels)")
+                    _ax_B.set_ylabel("Flux [e$^-$]")
+                    _ax_R.set_xlabel("Flux [e$^-$]")
+                    _ax_R.yaxis.set_label_position("right")
             # Build legend only from handle types that matplotlib can render
             # (PatchCollection / QuadMesh are not supported by legend and
             # trigger a UserWarning).

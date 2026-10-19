@@ -223,6 +223,7 @@ class Plot:
         masked_source_centers=None,
         kernel_half_width=None,
         diff_decorrelated=None,
+        additional_locations=None,
     ):
         """
         Perform and visualize a subtraction check of astronomical images using zscale with percentile cleaning.
@@ -246,6 +247,8 @@ class Plot:
         diff_decorrelated (ndarray or None): Decorrelated difference image for additional panel (SFFT v1.5.0+). 
                                               If provided, main diff is non-decorrelated (for photometry), 
                                               diff_decorrelated is decorrelated (for detection).
+        additional_locations (list or None): Additional full-frame ``(x, y)``
+            transient positions to mark and keep inside the target inset.
         """
         import matplotlib.pyplot as plt
         from functions import set_size
@@ -342,6 +345,16 @@ class Plot:
                     inset = 1.0 if side == "high" else 0.0
                     return side, main, inset
 
+            try:
+                _additional_locs = np.asarray(
+                    additional_locations, dtype=float
+                ).reshape(-1, 2)
+            except (TypeError, ValueError):
+                _additional_locs = np.empty((0, 2), dtype=float)
+            _additional_locs = _additional_locs[
+                np.isfinite(_additional_locs).all(axis=1)
+            ]
+
             image_titles = list(images.keys())
             # All panels share the first image's shape so display axes are identical.
             if "Image" not in images:
@@ -364,7 +377,8 @@ class Plot:
                     vmin=vmins[title],
                     vmax=vmaxs[title],
                 )
-                overlay_mask_hatch(ax, ~np.isfinite(np.asarray(img_data)))
+                if title != "Difference":
+                    overlay_mask_hatch(ax, ~np.isfinite(np.asarray(img_data)))
                 ax.set_xlim(0, ref_width)
                 ax.set_ylim(0, ref_height)
                 ax.set_title(title, fontsize=10, pad=5)
@@ -375,6 +389,23 @@ class Plot:
                     # Panels share the same y limits; repeat labels add clutter.
                     ax.set_ylabel("")
                     ax.tick_params(axis="y", labelleft=False)
+
+            if _additional_locs.size:
+                for _panel_idx, ax in enumerate(axes):
+                    if _panel_idx == 2:
+                        continue
+                    for ax_x, ax_y in _additional_locs:
+                        ax.add_patch(
+                            mpatches.Circle(
+                                (ax_x, ax_y),
+                                aperture_size,
+                                edgecolor="#17A2B8",
+                                facecolor="none",
+                                linestyle=":",
+                                linewidth=0.8,
+                                zorder=4,
+                            )
+                        )
 
             # Marker box shows the full kernel when known, else the inset extent.
             if kernel_half_width is not None and kernel_half_width > 0:
@@ -417,6 +448,8 @@ class Plot:
                     panel_names = list(images.keys())
 
                     for panel_idx, ax in enumerate(axes):
+                        if panel_idx == 2:
+                            continue
                         panel_name = panel_names[panel_idx]
                         panel_width, panel_height = image_dims[panel_name]
                         valid_markers = 0
@@ -552,7 +585,9 @@ class Plot:
                         x = x_plot
                         y = y_plot
 
-                        for ax in axes:
+                        for _panel_idx, ax in enumerate(axes):
+                            if _panel_idx == 2:
+                                continue
                             ax.plot(
                                 [x - cross_len, x + cross_len],
                                 [y - cross_len, y + cross_len],
@@ -575,22 +610,58 @@ class Plot:
 
                 if expected_location and len(expected_location) == 2:
                     try:
-                        x, y = map(int, expected_location)
-                        x = max(inset_size, min(x, img_width - inset_size))
-                        y = max(inset_size, min(y, img_height - inset_size))
+                        exp_x, exp_y = map(float, expected_location)
+                        if not (np.isfinite(exp_x) and np.isfinite(exp_y)):
+                            continue
+                        zoom_pts = [[exp_x, exp_y]]
+                        if _additional_locs.size:
+                            # Include only targets that can share a readable
+                            # inset.  Far-apart targets still get main-panel
+                            # markers above without turning the zoom into a
+                            # field map.
+                            _near = _additional_locs[
+                                np.max(
+                                    np.abs(
+                                        _additional_locs
+                                        - np.asarray([exp_x, exp_y])
+                                    ),
+                                    axis=1,
+                                )
+                                <= 4.0 * inset_size
+                            ]
+                            zoom_pts.extend(_near.tolist())
+                        zoom_pts = np.asarray(zoom_pts, dtype=float)
+                        pad = aperture_size + 1.0
+                        zoom_half = max(
+                            float(inset_size),
+                            float(np.ptp(zoom_pts[:, 0]) / 2.0 + pad),
+                            float(np.ptp(zoom_pts[:, 1]) / 2.0 + pad),
+                        )
+                        zoom_half = min(zoom_half, 4.0 * float(inset_size))
+                        x = float(
+                            0.5
+                            * (np.min(zoom_pts[:, 0]) + np.max(zoom_pts[:, 0]))
+                        )
+                        y = float(
+                            0.5
+                            * (np.min(zoom_pts[:, 1]) + np.max(zoom_pts[:, 1]))
+                        )
+                        x = max(zoom_half, min(x, img_width - zoom_half))
+                        y = max(zoom_half, min(y, img_height - zoom_half))
                     except (ValueError, TypeError) as e:
                         logger.warning("subtraction_check: invalid expected_location format: %s", e)
                         continue
 
                     x_side, con_x_main, con_x_inset = get_inset_side(
-                        x, inset_size, img_width
+                        x, zoom_half, img_width
                     )
                     y_side, con_y_main, con_y_inset = get_inset_side(
-                        y, inset_size, img_height
+                        y, zoom_half, img_height
                     )
                     inset_loc = f'{"upper" if y_side == "high" else "lower"} {"right" if x_side == "high" else "left"}'
 
-                    ax_inset = inset_axes(ax, width="30%", height="30%", loc=inset_loc)
+                    inset_pct = float(np.clip(30.0 * zoom_half / inset_size, 30.0, 55.0))
+                    ax_inset = inset_axes(ax, width=f"{inset_pct:.0f}%", height=f"{inset_pct:.0f}%", loc=inset_loc)
                     cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
                     cmap = cmap.with_extremes(bad="none")
                     ax_inset.imshow(
@@ -601,9 +672,32 @@ class Plot:
                         vmin=vmins[title],
                         vmax=vmaxs[title],
                     )
-                    overlay_mask_hatch(ax_inset, ~np.isfinite(np.asarray(img_data)))
-                    ax_inset.set_xlim(x - inset_size, x + inset_size)
-                    ax_inset.set_ylim(y - inset_size, y + inset_size)
+                    if i != 2:
+                        overlay_mask_hatch(
+                            ax_inset, ~np.isfinite(np.asarray(img_data))
+                        )
+                    ax_inset.set_xlim(x - zoom_half, x + zoom_half)
+                    ax_inset.set_ylim(y - zoom_half, y + zoom_half)
+                    ax_inset.add_patch(
+                        mpatches.Circle(
+                            (exp_x, exp_y),
+                            aperture_size,
+                            edgecolor=PLOT_COLORS.get("target", "#FF0000"),
+                            facecolor="none",
+                            linewidth=0.6,
+                        )
+                    )
+                    for ax_x, ax_y in _additional_locs:
+                        ax_inset.add_patch(
+                            mpatches.Circle(
+                                (ax_x, ax_y),
+                                aperture_size,
+                                edgecolor="#17A2B8",
+                                facecolor="none",
+                                linestyle=":",
+                                linewidth=0.6,
+                            )
+                        )
                     ax_inset.set_xticks([])
                     ax_inset.set_yticks([])
                     # Red frame ties the inset to the red zoom rectangle
@@ -615,9 +709,9 @@ class Plot:
                     panel_to_inset[i] = ax_inset
 
                     rect = Rectangle(
-                        (x - inset_size, y - inset_size),
-                        2 * inset_size,
-                        2 * inset_size,
+                        (x - zoom_half, y - zoom_half),
+                        2 * zoom_half,
+                        2 * zoom_half,
                         linewidth=0.5,
                         edgecolor=PLOT_COLORS.get('target', '#FF0000'),
                         facecolor="none",
@@ -627,23 +721,23 @@ class Plot:
                     # Connect matching rectangle/inset corners for each inset location.
                     if inset_loc == "upper left":
                         corners = [
-                            ((x - inset_size, y - inset_size), (0, 0)),
-                            ((x + inset_size, y + inset_size), (1, 1)),
+                            ((x - zoom_half, y - zoom_half), (0, 0)),
+                            ((x + zoom_half, y + zoom_half), (1, 1)),
                         ]
                     elif inset_loc == "upper right":
                         corners = [
-                            ((x + inset_size, y - inset_size), (1, 0)),
-                            ((x - inset_size, y + inset_size), (0, 1)),
+                            ((x + zoom_half, y - zoom_half), (1, 0)),
+                            ((x - zoom_half, y + zoom_half), (0, 1)),
                         ]
                     elif inset_loc == "lower left":
                         corners = [
-                            ((x + inset_size, y - inset_size), (1, 0)),
-                            ((x - inset_size, y + inset_size), (0, 1)),
+                            ((x + zoom_half, y - zoom_half), (1, 0)),
+                            ((x - zoom_half, y + zoom_half), (0, 1)),
                         ]
                     elif inset_loc == "lower right":
                         corners = [
-                            ((x - inset_size, y - inset_size), (0, 0)),
-                            ((x + inset_size, y + inset_size), (1, 1)),
+                            ((x - zoom_half, y - zoom_half), (0, 0)),
+                            ((x + zoom_half, y + zoom_half), (1, 1)),
                         ]
 
                     for main_pt, inset_pt in corners:
@@ -660,18 +754,18 @@ class Plot:
                             )
                         )
 
-            # Optional mask overlay (skip difference and decorrelated main
-            # panels; their insets still get it so the zoomed view flags the
-            # masked region around the target).
+            # Optional mask overlay. The Difference panel and its inset stay
+            # clean; the decorrelated panel only carries it in the inset.
             if mask is not None:
-                for i, ax in enumerate(fig.axes[:-1]):
-                    if ax not in inset_axes_list:
-                        ax_inset = panel_to_inset.get(i)
-                        if ax_inset is not None:
-                            overlay_mask_hatch(ax_inset, mask)
-                        if i == 2 or (n_images == 4 and i == 3):
-                            continue
-                        overlay_mask_hatch(ax, mask)
+                for i, ax in enumerate(axes):
+                    if i == 2:
+                        continue
+                    ax_inset = panel_to_inset.get(i)
+                    if ax_inset is not None:
+                        overlay_mask_hatch(ax_inset, mask)
+                    if n_images == 4 and i == 3:
+                        continue
+                    overlay_mask_hatch(ax, mask)
 
             if fitted_location and len(fitted_location) == 2:
                 radius = aperture_size
@@ -2312,6 +2406,59 @@ class Plot:
             sci_wcs = WCS(sci_header, naxis=2)
             ref_wcs = WCS(ref_header, naxis=2)
 
+            try:
+                _target_plot_xy = np.asarray(
+                    self.input_yaml.get("_alignment_target_positions") or [],
+                    dtype=float,
+                ).reshape(-1, 2)
+            except (TypeError, ValueError):
+                _target_plot_xy = np.empty((0, 2), dtype=float)
+            _target_labels = list(
+                self.input_yaml.get("_alignment_target_names") or []
+            )
+            if len(_target_plot_xy) == 0:
+                _resolved_targets = []
+                _tx = self.input_yaml.get("target_x_pix")
+                _ty = self.input_yaml.get("target_y_pix")
+                if _tx is not None and _ty is not None:
+                    _resolved_targets.append(
+                        (
+                            float(_tx), float(_ty),
+                            str(self.input_yaml.get("target_name", "Target")),
+                        )
+                    )
+                for _target in (
+                    self.input_yaml.get("_additional_targets_resolved") or []
+                ):
+                    try:
+                        _ax, _ay = sci_wcs.all_world2pix(
+                            float(_target["ra"]), float(_target["dec"]), 0
+                        )
+                    except Exception:
+                        continue
+                    _resolved_targets.append(
+                        (
+                            float(_ax), float(_ay),
+                            str(_target.get("name", "AdditionalTarget")),
+                        )
+                    )
+                _target_plot_xy = np.asarray(
+                    [[row[0], row[1]] for row in _resolved_targets], dtype=float
+                ).reshape(-1, 2)
+                _target_labels = [row[2] for row in _resolved_targets]
+            _target_plot_xy = _target_plot_xy[
+                np.all(np.isfinite(_target_plot_xy), axis=1)
+            ]
+            if _target_labels:
+                # Prefer the user-facing name: it keeps the SN/AT prefix
+                # that canonical_target_name strips from target_name.
+                _target_labels[0] = str(
+                    self.input_yaml.get(
+                        "target_name_display",
+                        self.input_yaml.get("target_name", _target_labels[0]),
+                    )
+                )
+
             # SExtractor centroids are 0-based; errors come from its error
             # ellipse decomposition.
             sci_x, sci_y = sci_xy[:, 0], sci_xy[:, 1]
@@ -2438,13 +2585,14 @@ class Plot:
 
             has_errors = np.all(np.isfinite(dx_err_plot)) and np.all(np.isfinite(dy_err_plot))
 
-            # Color points by distance from target.
-            _target_x = self.input_yaml.get("target_x_pix")
-            _target_y = self.input_yaml.get("target_y_pix")
-            if _target_x is not None and _target_y is not None and np.isfinite(_target_x) and np.isfinite(_target_y):
-                _dist_from_target = np.sqrt(
-                    (sci_x_plot - float(_target_x)) ** 2
-                    + (sci_y_plot - float(_target_y)) ** 2
+            # Color points by distance to the nearest requested target.
+            if len(_target_plot_xy):
+                _dist_from_target = np.min(
+                    np.hypot(
+                        sci_x_plot[:, None] - _target_plot_xy[None, :, 0],
+                        sci_y_plot[:, None] - _target_plot_xy[None, :, 1],
+                    ),
+                    axis=1,
                 )
             else:
                 _dist_from_target = None
@@ -2650,7 +2798,10 @@ class Plot:
                 )
                 _fs2 = set_size(width_pt, aspect=1.55 * _panel_ar)
                 fig2, (ax2, ax3) = plt.subplots(
-                    1, 2, figsize=(_fs2[0] * 2.0, _fs2[1])
+                    1,
+                    2,
+                    figsize=(_fs2[0] * 2.0, _fs2[1]),
+                    gridspec_kw={"wspace": 0.28},
                 )
                 # Underlay the science image so coherent residual
                 # structure can be tied to detector features (edges,
@@ -2694,13 +2845,29 @@ class Plot:
                 ax2.set_xlabel(r"$x$ [px]")
                 ax2.set_ylabel(r"$y$ [px]")
                 ax2.set_aspect("equal", adjustable="box")
+                for _ti, (_tx, _ty) in enumerate(_target_plot_xy):
+                    ax2.scatter(
+                        _tx, _ty, marker="s", s=70,
+                        facecolor="none",
+                        edgecolor=PLOT_COLORS.get("variable", "#FFD700"),
+                        linewidths=1.6, zorder=5,
+                    )
+                    if _ti < len(_target_labels):
+                        ax2.text(
+                            _tx + 4, _ty + 4, _target_labels[_ti],
+                            color=PLOT_COLORS.get(
+                                "variable_label", "#B8860B"
+                            ),
+                            fontsize="x-small", fontweight="bold",
+                            ha="left", va="bottom", zorder=6,
+                        )
                 # Anchor the colorbar to the axes so it matches the plot
                 # height exactly (the aspect-equal axes is shorter than
                 # the figure for non-square frames).
                 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
                 _cax2 = make_axes_locatable(ax2).append_axes(
-                    "right", size="4%", pad=0.08
+                    "right", size="4%", pad=0.12
                 )
                 _cb2 = fig2.colorbar(_qv, cax=_cax2)
                 _cb2.set_label("residual [px]", fontsize="small")
@@ -2816,7 +2983,7 @@ class Plot:
                             zorder=2,
                         )
                         _cax3 = make_axes_locatable(ax3).append_axes(
-                            "right", size="4%", pad=0.08
+                            "right", size="4%", pad=0.12
                         )
                         _cb3 = fig2.colorbar(_sf, cax=_cax3)
                         _cb3.set_label("residual [px]", fontsize="small")
@@ -2865,8 +3032,11 @@ class Plot:
                         fontsize="x-small",
                     )
                 fig2.subplots_adjust(
-                    left=0.08, right=0.98, top=0.98, bottom=0.11,
-                    wspace=0.05,
+                    left=0.07,
+                    right=0.96,
+                    top=0.96,
+                    bottom=0.12,
+                    wspace=0.28,
                 )
                 _vec_path = os.path.join(
                     write_dir,
@@ -2902,6 +3072,9 @@ class Plot:
         method_label="spalipy",
         sci_fwhm=None,
         tpl_fwhm=None,
+        sci_target_xy=None,
+        tpl_target_xy=None,
+        target_names=None,
     ):
         """Side-by-side plot of matched sources on science and template images.
 
@@ -2932,6 +3105,11 @@ class Plot:
         tpl_fwhm : float or None
             FWHM in pixels for the template image.  Circle radius is 3*FWHM.
             Falls back to ``self.input_yaml["fwhm"]`` if None.
+        sci_target_xy, tpl_target_xy : array-like, optional
+            Requested target positions in each panel's pixel frame. The
+            primary position is used as a fallback when omitted.
+        target_names : sequence of str, optional
+            Labels matching ``sci_target_xy``.
         """
         try:
             import matplotlib.pyplot as plt
@@ -3030,10 +3208,6 @@ class Plot:
                 # >1 px from any matched source = unmatched.
                 return np.where(d > 1.0)[0]
 
-            # Track which overlays were drawn so the figure legend lists only
-            # markers that are actually visible.
-            _drew_unmatched = False
-            _drew_target = False
             if sci_all_xy is not None:
                 sci_all = np.asarray(sci_all_xy, float)
                 _sci_unmatched = _find_unmatched(sci_all, sci_matched_xy)
@@ -3044,7 +3218,6 @@ class Plot:
                         marker="x", s=12, c=PLOT_COLORS.get('unmatched', '#FF0000'), alpha=0.6,
                         linewidths=0.5, zorder=3,
                     )
-                    _drew_unmatched = True
             if tpl_all_xy is not None:
                 tpl_all = np.asarray(tpl_all_xy, float)
                 _tpl_unmatched = _find_unmatched(tpl_all, tpl_matched_xy)
@@ -3055,7 +3228,6 @@ class Plot:
                         marker="x", s=12, c=PLOT_COLORS.get('unmatched', '#FF0000'), alpha=0.6,
                         linewidths=0.5, zorder=3,
                     )
-                    _drew_unmatched = True
 
             for (sx, sy) in sci_matched_xy:
                 ax1.add_patch(Circle(
@@ -3081,86 +3253,111 @@ class Plot:
                          color=PLOT_COLORS.get('matched', '#0072B2'), fontsize=4, ha="center", va="bottom")
 
             from matplotlib.patches import Rectangle as _Rect
-            from matplotlib.lines import Line2D as _L2
+
             _target_x = self.input_yaml.get("target_x_pix")
             _target_y = self.input_yaml.get("target_y_pix")
-            _target_name = self.input_yaml.get("target_name", "")
-            _name_prefix = self.input_yaml.get("name_prefix", "")
-            _objname = self.input_yaml.get("objname", _target_name)
-            if _name_prefix and _name_prefix.strip() and not str(_target_name).startswith(_name_prefix):
-                _display_name = f"{_name_prefix}{_objname}"
-            else:
-                _display_name = str(_target_name) if _target_name else ""
-            _box_size = 4.0 * _fwhm_default
-            _box_half = _box_size / 2.0
-            _target_xy_tpl = None
-            if _target_x is not None and _target_y is not None and np.isfinite(_target_x) and np.isfinite(_target_y):
-                ax1.add_patch(_Rect(
-                    (_target_x - _box_half, _target_y - _box_half),
-                    _box_size, _box_size,
-                    edgecolor=PLOT_COLORS.get('variable', '#FFD700'), facecolor="none",
-                    linewidth=1.5, linestyle="-", zorder=10,
-                ))
-                _drew_target = True
-                if _display_name:
-                    ax1.text(
-                        _target_x, _target_y + _box_half + 2,
-                        _display_name,
-                        color=PLOT_COLORS.get('variable_label', '#B8860B'), fontsize=5, fontweight="bold",
-                        ha="center", va="bottom", zorder=11,
+            if sci_target_xy is None:
+                if (
+                    _target_x is not None
+                    and _target_y is not None
+                    and np.isfinite(_target_x)
+                    and np.isfinite(_target_y)
+                ):
+                    _sci_targets = np.array(
+                        [[float(_target_x), float(_target_y)]]
                     )
-                # Template image needs WCS conversion from the science frame.
+                else:
+                    _sci_targets = np.empty((0, 2))
+            else:
+                _sci_targets = np.asarray(sci_target_xy, dtype=float).reshape(-1, 2)
+            _sci_targets = _sci_targets[
+                np.all(np.isfinite(_sci_targets), axis=1)
+            ]
+            if target_names is None:
+                _target_labels = list(
+                    self.input_yaml.get("_alignment_target_names") or []
+                )
+                if len(_target_labels) < len(_sci_targets):
+                    _target_labels.extend(
+                        ["Target"] * (len(_sci_targets) - len(_target_labels))
+                    )
+            else:
+                _target_labels = [str(name) for name in target_names]
+            if _target_labels:
+                # Prefer the user-facing name: it keeps the SN/AT prefix
+                # that canonical_target_name strips from target_name.
+                _target_labels[0] = str(
+                    self.input_yaml.get(
+                        "target_name_display",
+                        self.input_yaml.get("target_name", _target_labels[0]),
+                    )
+                )
+
+            if tpl_target_xy is not None:
+                _tpl_targets = np.asarray(tpl_target_xy, dtype=float).reshape(-1, 2)
+            else:
+                _tpl_targets = np.empty((0, 2))
+            if len(_tpl_targets) != len(_sci_targets):
+                _tpl_targets = np.empty((0, 2))
                 try:
                     from astropy.wcs import WCS
                     from astropy.io import fits as _fits
-                    _fpath = self.input_yaml["fpath"]
-                    with _fits.open(_fpath, memmap=False) as _hdul:
+
+                    with _fits.open(
+                        self.input_yaml["fpath"], memmap=False
+                    ) as _hdul:
                         _sci_wcs = WCS(_hdul[0].header, fix=True, relax=True)
-                    _ra, _dec = _sci_wcs.all_pix2world(_target_x, _target_y, 0)
-                    _tpl_fpath = self.input_yaml.get("template_path") or self.input_yaml.get("templateFpath")
+                    _tpl_fpath = (
+                        self.input_yaml.get("template_path")
+                        or self.input_yaml.get("templateFpath")
+                    )
                     if _tpl_fpath and os.path.exists(_tpl_fpath):
                         with _fits.open(_tpl_fpath, memmap=False) as _hdul2:
-                            _tpl_wcs = WCS(_hdul2[0].header, fix=True, relax=True)
-                        _tx, _ty = _tpl_wcs.all_world2pix(_ra, _dec, 0)
-                        if np.isfinite(_tx) and np.isfinite(_ty):
-                            _target_xy_tpl = (_tx, _ty)
-                            ax2.add_patch(_Rect(
-                                (_tx - _box_half, _ty - _box_half),
-                                _box_size, _box_size,
-                                edgecolor=PLOT_COLORS.get('variable', '#FFD700'), facecolor="none",
-                                linewidth=1.5, linestyle="-", zorder=10,
-                            ))
-                            if _display_name:
-                                ax2.text(
-                                    _tx, _ty + _box_half + 2,
-                                    _display_name,
-                                    color=PLOT_COLORS.get('variable_label', '#B8860B'), fontsize=5, fontweight="bold",
-                                    ha="center", va="bottom", zorder=11,
-                                )
+                            _tpl_wcs = WCS(
+                                _hdul2[0].header, fix=True, relax=True
+                            )
+                        _trd = _sci_wcs.all_pix2world(_sci_targets, 0)
+                        _tpl_targets = np.asarray(
+                            _tpl_wcs.all_world2pix(_trd, 0), dtype=float
+                        ).reshape(-1, 2)
                 except Exception:
                     pass
+            _tpl_targets = _tpl_targets[
+                np.all(np.isfinite(_tpl_targets), axis=1)
+            ]
 
-            _legend_handles = []
-            # Matched count already appears in the stats box, so no legend
-            # entry is needed for the matched circles.
-            if _drew_unmatched:
-                _legend_handles.append(_L2([0], [0], marker="x", color=PLOT_COLORS.get('unmatched', '#FF0000'),
-                                           markersize=5, linestyle="None",
-                                           label="Unmatched"))
-            if _drew_target:
-                _legend_handles.append(_L2([0], [0], marker="s", color=PLOT_COLORS.get('variable', '#FFD700'),
-                                           markerfacecolor="none", markersize=5,
-                                           linestyle="None", label="Transient"))
-            if _legend_handles:
-                # Figure-level legend keeps marker overlays from covering it.
-                fig.legend(
-                    handles=_legend_handles,
-                    loc="upper center",
-                    bbox_to_anchor=(0.5, 1.0),
-                    ncol=len(_legend_handles),
-                    fontsize=8,
-                    frameon=False,
-                )
+            _box_size = 4.0 * _fwhm_default
+            _box_half = _box_size / 2.0
+            for _ti, (_tx, _ty) in enumerate(_sci_targets):
+                ax1.add_patch(_Rect(
+                    (_tx - _box_half, _ty - _box_half),
+                    _box_size, _box_size,
+                    edgecolor=PLOT_COLORS.get('variable', '#FFD700'),
+                    facecolor="none", linewidth=1.5, linestyle="-", zorder=10,
+                ))
+                if _ti < len(_target_labels) and _target_labels[_ti]:
+                    ax1.text(
+                        _tx, _ty + _box_half + 2,
+                        _target_labels[_ti],
+                        color=PLOT_COLORS.get('variable_label', '#B8860B'),
+                        fontsize=5, fontweight="bold",
+                        ha="center", va="bottom", zorder=11,
+                    )
+            for _ti, (_tx, _ty) in enumerate(_tpl_targets):
+                ax2.add_patch(_Rect(
+                    (_tx - _box_half, _ty - _box_half),
+                    _box_size, _box_size,
+                    edgecolor=PLOT_COLORS.get('variable', '#FFD700'),
+                    facecolor="none", linewidth=1.5, linestyle="-", zorder=10,
+                ))
+                if _ti < len(_target_labels) and _target_labels[_ti]:
+                    ax2.text(
+                        _tx, _ty + _box_half + 2,
+                        _target_labels[_ti],
+                        color=PLOT_COLORS.get('variable_label', '#B8860B'),
+                        fontsize=5, fontweight="bold",
+                        ha="center", va="bottom", zorder=11,
+                    )
 
             _n_sci_unmatched = len(_find_unmatched(
                 np.asarray(sci_all_xy, float) if sci_all_xy is not None else np.empty((0, 2)),
@@ -3180,6 +3377,7 @@ class Plot:
                 0.02, 0.98, _stats,
                 transform=ax1.transAxes, fontsize=6,
                 verticalalignment="top", horizontalalignment="left",
+                zorder=100,
                 bbox=dict(facecolor=PLOT_COLORS.get('stats_bbox', 'white'), edgecolor=PLOT_COLORS.get('legend_edgecolor', '#999999'), alpha=0.9, boxstyle="round,pad=0.3"),
             )
 

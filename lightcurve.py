@@ -1157,10 +1157,36 @@ def plot_lightcurve(
                 if not is_apparent and zp_col in df.columns:
                     # Instrumental: convert to apparent by adding the zeropoint.
                     df.loc[inverted_only, "inv_apparent_mag"] = df.loc[inverted_only, inv_mag_col] + df.loc[inverted_only, zp_col]
+                    # The zeropoint itself carries an uncertainty; the apparent
+                    # error must be the quadrature sum of the instrumental
+                    # magnitude error and the zeropoint error, matching the
+                    # normal-detection path (whose *_err already includes the
+                    # zeropoint term).
+                    _zp_err_col = None
+                    for _cand in (
+                        f"{zp_col}_err",
+                        f"zp_{str(method).strip().lower()}_err",
+                    ):
+                        if _cand in df.columns:
+                            _zp_err_col = _cand
+                            break
                     if inv_err_col and inv_err_col in df.columns:
-                        df.loc[inverted_only, "inv_apparent_mag_err"] = df.loc[inverted_only, inv_err_col]
+                        _base_err = pd.to_numeric(
+                            df.loc[inverted_only, inv_err_col], errors="coerce"
+                        )
                     else:
-                        df.loc[inverted_only, "inv_apparent_mag_err"] = np.nan
+                        _base_err = pd.Series(
+                            np.nan, index=df.index[inverted_only]
+                        )
+                    if _zp_err_col is not None:
+                        _zp_err = pd.to_numeric(
+                            df.loc[inverted_only, _zp_err_col], errors="coerce"
+                        ).abs()
+                        df.loc[inverted_only, "inv_apparent_mag_err"] = np.sqrt(
+                            _base_err**2 + _zp_err**2
+                        )
+                    else:
+                        df.loc[inverted_only, "inv_apparent_mag_err"] = _base_err
                     df.loc[inverted_only, "plot_mag"] = df.loc[inverted_only, "inv_apparent_mag"] + band_offset
                     df.loc[inverted_only, "plot_err"] = df.loc[inverted_only, "inv_apparent_mag_err"]
                 else:
@@ -2015,11 +2041,32 @@ def generate_photometry_table(
                 else:
                     mag_value = inv_detects[inv_mag_col] + inv_detects[zp_col]
 
-                _err_s = (
-                    pd.to_numeric(inv_detects[inv_err_col], errors="coerce").round(3)
+                _base_err_s = (
+                    pd.to_numeric(inv_detects[inv_err_col], errors="coerce")
                     if inv_err_col and inv_err_col in inv_detects.columns
                     else pd.Series(np.nan, index=inv_detects.index, dtype=float)
                 )
+                if not is_apparent:
+                    # Instrumental -> apparent; add the zeropoint uncertainty
+                    # in quadrature so upper-limit/table errors are not
+                    # optimistic relative to the normal-detection path.
+                    _zp_err_col = None
+                    for _cand in (
+                        f"{zp_col}_err",
+                        f"zp_{str(method).strip().lower()}_err",
+                    ):
+                        if _cand in inv_detects.columns:
+                            _zp_err_col = _cand
+                            break
+                    if _zp_err_col is not None:
+                        _base_err_s = np.sqrt(
+                            _base_err_s**2
+                            + pd.to_numeric(
+                                inv_detects[_zp_err_col], errors="coerce"
+                            ).abs()
+                            ** 2
+                        )
+                _err_s = _base_err_s.round(3)
                 limiting_mags_inv = _lmag_to_apparent_multi_snr(inv_detects, zp_col, input_yaml=input_yaml)
 
                 inv_row_data = {

@@ -1877,6 +1877,267 @@ def _zogy_residual_shift(sci, ref, valid, max_shift=3.0):
     return dy, dx, info
 
 
+def _compact_core_dipole_mask(
+    diff,
+    science,
+    reference,
+    invalid_mask=None,
+    protected_xy=None,
+    fwhm=3.0,
+    config=None,
+):
+    """Mask compact dipole residuals at bright static cores.
+
+    Subpixel registration errors leave paired positive/negative lobes on
+    bright galaxies and stars.  A real transient is protected by position and
+    normally lacks the opposite-sign lobe, so the detector requires a bright
+    static core, two significant lobes, and a local translation model that
+    reduces the residual RMS.
+    """
+    from scipy.ndimage import gaussian_filter, maximum_filter, sobel
+
+    cfg = config or {}
+    artifact_mask = np.zeros_like(diff, dtype=bool)
+    diagnostics = []
+    empty = (artifact_mask, diagnostics)
+    if not _as_bool(cfg.get("residual_artifact_mask", True), True):
+        return empty
+
+    d = np.asarray(diff, dtype=np.float64)
+    sci = np.asarray(science, dtype=np.float64)
+    ref = np.asarray(reference, dtype=np.float64)
+    if d.shape != sci.shape or d.shape != ref.shape or d.ndim != 2:
+        return empty
+
+    invalid = np.zeros(d.shape, dtype=bool)
+    if invalid_mask is not None:
+        _invalid = np.asarray(invalid_mask, dtype=bool)
+        if _invalid.shape == d.shape:
+            invalid |= _invalid
+    valid = np.isfinite(d) & np.isfinite(sci) & np.isfinite(ref) & ~invalid
+    if np.count_nonzero(valid) < 100:
+        return empty
+
+    try:
+        _, _, diff_sigma = sigma_clipped_stats(d[valid], sigma=3.0)
+    except Exception:
+        diff_sigma = np.nanstd(d[valid])
+    if not np.isfinite(diff_sigma) or diff_sigma <= 0:
+        return empty
+
+    try:
+        fwhm = float(fwhm)
+    except (TypeError, ValueError):
+        fwhm = 3.0
+    if not np.isfinite(fwhm) or fwhm <= 0:
+        fwhm = 3.0
+
+    fit_radius = int(
+        np.ceil(
+            max(
+                4.0,
+                float(cfg.get("residual_artifact_fit_radius_fwhm", 4.0)) * fwhm,
+            )
+        )
+    )
+    mask_radius = int(
+        np.ceil(
+            max(
+                3.0,
+                float(cfg.get("residual_artifact_mask_radius_fwhm", 2.5)) * fwhm,
+            )
+        )
+    )
+    protect_radius = int(
+        np.ceil(
+            max(
+                float(mask_radius),
+                float(cfg.get("residual_artifact_protect_radius_fwhm", 4.0))
+                * fwhm,
+            )
+        )
+    )
+    candidate_sep = int(
+        np.ceil(
+            max(
+                float(fit_radius),
+                float(cfg.get("residual_artifact_candidate_sep_fwhm", 4.0))
+                * fwhm,
+            )
+        )
+    )
+    max_regions = max(
+        1, int(cfg.get("residual_artifact_max_regions", 4) or 4)
+    )
+    min_static_snr = float(cfg.get("residual_artifact_min_static_snr", 50.0))
+    min_core_radius = max(
+        0.0,
+        float(cfg.get("residual_artifact_min_core_radius_px", 1.4) or 0.0),
+    )
+    min_peak_sigma = float(cfg.get("residual_artifact_min_peak_sigma", 5.0))
+    min_rms_sigma = float(cfg.get("residual_artifact_min_rms_sigma", 0.5))
+    lobe_sigma = float(cfg.get("residual_artifact_lobe_sigma", 3.0))
+    min_lobe_pixels = max(
+        1, int(cfg.get("residual_artifact_min_lobe_pixels", 2) or 2)
+    )
+    min_rms_drop = float(cfg.get("residual_artifact_min_rms_drop", 0.20))
+    min_shift = float(cfg.get("residual_artifact_min_shift_px", 0.02))
+    max_shift = float(cfg.get("residual_artifact_max_shift_px", 1.0))
+
+    sci_med = float(np.nanmedian(sci[valid]))
+    ref_med = float(np.nanmedian(ref[valid]))
+    try:
+        _, _, sci_sigma = sigma_clipped_stats(sci[valid], sigma=3.0)
+        _, _, ref_sigma = sigma_clipped_stats(ref[valid], sigma=3.0)
+    except Exception:
+        sci_sigma = np.nanstd(sci[valid])
+        ref_sigma = np.nanstd(ref[valid])
+    static_sigma = max(sci_sigma, ref_sigma, 1e-10)
+    static = np.minimum(np.abs(sci - sci_med), np.abs(ref - ref_med))
+    static[~valid] = np.nan
+    score = gaussian_filter(
+        np.where(np.isfinite(static), static, 0.0),
+        sigma=max(0.75, 0.35 * fwhm),
+    )
+    score[~valid] = -np.inf
+    size = max(3, int(np.ceil(fwhm)) * 2 + 1)
+    candidates = (
+        (score == maximum_filter(score, size=size, mode="nearest"))
+        & np.isfinite(score)
+        & (score >= min_static_snr * static_sigma)
+    )
+    cand_y, cand_x = np.nonzero(candidates)
+    if cand_y.size == 0:
+        return empty
+    order = np.argsort(score[cand_y, cand_x])[::-1]
+
+    protected = []
+    for pos in protected_xy or []:
+        try:
+            px, py = float(pos[0]), float(pos[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if np.isfinite(px) and np.isfinite(py):
+            protected.append((px, py))
+    protected = np.asarray(protected, dtype=float)
+
+    gx = sobel(np.where(np.isfinite(ref), ref, ref_med), axis=1) / 8.0
+    gy = sobel(np.where(np.isfinite(ref), ref, ref_med), axis=0) / 8.0
+    yy, xx = np.indices(d.shape)
+    accepted_centers = []
+    evaluated_centers = []
+
+    for idx in order:
+        if len(accepted_centers) >= max_regions:
+            break
+        cy, cx = int(cand_y[idx]), int(cand_x[idx])
+        if any(
+            np.hypot(cx - ex, cy - ey) <= candidate_sep
+            for ex, ey in evaluated_centers
+        ):
+            continue
+        evaluated_centers.append((cx, cy))
+        if protected.size:
+            if np.any(
+                np.hypot(protected[:, 0] - cx, protected[:, 1] - cy)
+                <= protect_radius
+            ):
+                continue
+
+        x0, x1 = max(0, cx - fit_radius), min(d.shape[1], cx + fit_radius + 1)
+        y0, y1 = max(0, cy - fit_radius), min(d.shape[0], cy + fit_radius + 1)
+        rr = np.hypot(xx[y0:y1, x0:x1] - cx, yy[y0:y1, x0:x1] - cy)
+        fit = (rr <= fit_radius) & valid[y0:y1, x0:x1]
+        if protected.size:
+            for px, py in protected:
+                fit &= np.hypot(
+                    xx[y0:y1, x0:x1] - px, yy[y0:y1, x0:x1] - py
+                ) > protect_radius
+        if np.count_nonzero(fit) < max(16, int(0.35 * np.pi * fit_radius**2)):
+            continue
+
+        # Isolated stars are already handled by the universal saturation and
+        # source masks.  This post-pass is for unresolved-by-kernel residuals
+        # on broader static cores, where a small registration lag leaves a
+        # paired lobe the normal point-source checks do not cover.
+        static_fit = static[y0:y1, x0:x1][fit]
+        static_fit = static_fit[np.isfinite(static_fit)]
+        if static_fit.size == 0:
+            continue
+        static_peak = float(np.max(static_fit))
+        core_radius = float(
+            np.sqrt(np.count_nonzero(static_fit >= 0.5 * static_peak) / np.pi)
+        )
+        if not np.isfinite(core_radius) or core_radius < min_core_radius:
+            continue
+
+        vals = d[y0:y1, x0:x1][fit]
+        rms_before = float(np.std(vals))
+        peak_abs = float(np.max(np.abs(vals)))
+        if (
+            rms_before < min_rms_sigma * diff_sigma
+            or peak_abs < min_peak_sigma * diff_sigma
+        ):
+            continue
+
+        design = np.column_stack(
+            [
+                -gx[y0:y1, x0:x1][fit],
+                -gy[y0:y1, x0:x1][fit],
+                np.ones(np.count_nonzero(fit)),
+            ]
+        )
+        if not np.isfinite(design).all():
+            continue
+        try:
+            coeff, *_ = np.linalg.lstsq(design, vals, rcond=None)
+        except np.linalg.LinAlgError:
+            continue
+        dx, dy = float(coeff[0]), float(coeff[1])
+        shift_mag = float(np.hypot(dx, dy))
+        if not (
+            np.isfinite(dx)
+            and np.isfinite(dy)
+            and min_shift <= shift_mag <= max_shift
+        ):
+            continue
+        model = design @ coeff
+        residual = vals - model
+        rms_after = float(np.std(residual))
+        rms_drop = 1.0 - rms_after / max(rms_before, 1e-10)
+        if rms_drop < min_rms_drop:
+            continue
+
+        core = (rr <= mask_radius) & valid[y0:y1, x0:x1]
+        core_vals = d[y0:y1, x0:x1][core]
+        if core_vals.size == 0:
+            continue
+        n_pos = int(np.count_nonzero(core_vals >= lobe_sigma * diff_sigma))
+        n_neg = int(np.count_nonzero(core_vals <= -lobe_sigma * diff_sigma))
+        if min(n_pos, n_neg) < min_lobe_pixels:
+            continue
+
+        artifact_mask[y0:y1, x0:x1] |= (rr <= mask_radius) & ~invalid[y0:y1, x0:x1]
+        accepted_centers.append((cx, cy))
+        diagnostics.append(
+            {
+                "x": float(cx),
+                "y": float(cy),
+                "dx": dx,
+                "dy": dy,
+                "shift": shift_mag,
+                "peak_sigma": peak_abs / diff_sigma,
+                "rms_before": rms_before,
+                "rms_after": rms_after,
+                "rms_drop": rms_drop,
+                "core_radius": core_radius,
+                "mask_radius": mask_radius,
+            }
+        )
+
+    return artifact_mask, diagnostics
+
+
 def _pack_lsq_kernel(kernel, shape):
     """Pack a centred (nk, nk) LSQ kernel into the FFT convolution layout.
 
@@ -3191,6 +3452,54 @@ def _target_xy_available(
     return _resolve_target_xy(input_yaml, science_shape) is not None
 
 
+def _resolve_alignment_target_positions(
+    input_yaml: Optional[Dict[str, Any]],
+    science_shape: Tuple[int, int],
+    science_header: fits.Header,
+) -> List[Dict[str, Any]]:
+    """Return every requested target position in science pixels."""
+    targets = []
+    primary_xy = _resolve_target_xy(input_yaml, science_shape)
+    if primary_xy is not None:
+        targets.append(
+            {
+                "x": float(primary_xy[0]),
+                "y": float(primary_xy[1]),
+                "name": str((input_yaml or {}).get("target_name", "Target")),
+            }
+        )
+    if not input_yaml:
+        return targets
+
+    resolved = input_yaml.get("_additional_targets_resolved") or []
+    if not resolved:
+        return targets
+    wcs = get_wcs(science_header)
+    if wcs is None:
+        return targets
+    ny, nx = science_shape[:2]
+    for target in resolved:
+        try:
+            ra = float(target["ra"])
+            dec = float(target["dec"])
+            x, y = wcs.all_world2pix(ra, dec, 0)
+            name = str(target.get("name", "AdditionalTarget"))
+        except Exception:
+            continue
+        if not (np.isfinite(x) and np.isfinite(y)):
+            continue
+        if x < 0 or x >= nx or y < 0 or y >= ny:
+            continue
+        # Duplicate coordinates occasionally occur when a requested source is
+        # also the primary target; one marker is enough for both paths.
+        if any(
+            np.hypot(x - row["x"], y - row["y"]) < 0.5 for row in targets
+        ):
+            continue
+        targets.append({"x": float(x), "y": float(y), "name": name})
+    return targets
+
+
 def _wcs_offset_at_position(
     wcs_a, wcs_b, target_xy: Tuple[float, float], radius_px: float = 10.0
 ) -> Optional[float]:
@@ -3643,6 +3952,231 @@ def _close_group_survivor_indices(xy, flux, min_sep):
         idxs = np.asarray(idxs)
         keep.append(int(idxs[np.argmax(flux[idxs])]))
     return np.sort(np.asarray(keep))
+
+
+def _paired_detection_subsets(sci_det, tpl_det):
+    """Return matched detection tables in one-to-one ``pair_id`` order."""
+    if (
+        sci_det is None
+        or tpl_det is None
+        or "pair_id" not in getattr(sci_det, "colnames", [])
+        or "pair_id" not in getattr(tpl_det, "colnames", [])
+    ):
+        return None, None
+    sci_ids = np.asarray(sci_det["pair_id"], dtype=np.int64)
+    tpl_ids = np.asarray(tpl_det["pair_id"], dtype=np.int64)
+    tpl_index = {int(pair_id): i for i, pair_id in enumerate(tpl_ids)}
+    common = [int(pair_id) for pair_id in sci_ids if int(pair_id) in tpl_index]
+    if len(common) < 4:
+        return None, None
+    sci_index = {int(pair_id): i for i, pair_id in enumerate(sci_ids)}
+    return (
+        sci_det[[sci_index[pair_id] for pair_id in common]],
+        tpl_det[[tpl_index[pair_id] for pair_id in common]],
+    )
+
+
+def _fit_spalipy_paired_affine(
+    source_xy,
+    template_xy,
+    clip_px=None,
+    sigma=4.0,
+    min_points=4,
+    max_iter=3,
+):
+    """Fit spalipy's similarity transform to trusted one-to-one pairs.
+
+    RA/DEC matching already fixes the correspondence; proximity rematching can
+    replace it with a nearer, wrong source when WCS residuals are large.  The
+    iterative clip removes those mismatches before the spline fit.
+    """
+    if not _HAS_SPALIPY:
+        return None, None, None
+    try:
+        from spalipy.spalipy import calc_affine_transform
+    except (ImportError, AttributeError):
+        return None, None, None
+
+    src = np.asarray(source_xy, dtype=float)
+    tpl = np.asarray(template_xy, dtype=float)
+    if (
+        src.ndim != 2
+        or tpl.ndim != 2
+        or src.shape[1] != 2
+        or tpl.shape[1] != 2
+        or len(src) != len(tpl)
+        or len(src) < int(min_points)
+    ):
+        return None, None, None
+
+    finite = np.all(np.isfinite(src), axis=1) & np.all(np.isfinite(tpl), axis=1)
+    keep = finite.copy()
+    transform = None
+    residual = np.full(len(src), np.inf)
+    limit = np.inf
+    for _ in range(max(1, int(max_iter))):
+        if np.count_nonzero(keep) < int(min_points):
+            return None, None, None
+        try:
+            transform = calc_affine_transform(src[keep], tpl[keep])
+            predicted = transform.apply_transform(src)
+        except Exception:
+            return None, None, None
+        residual = np.hypot(tpl[:, 0] - predicted[:, 0], tpl[:, 1] - predicted[:, 1])
+        residual[~finite] = np.inf
+        good = np.isfinite(residual[keep])
+        if np.count_nonzero(good) < int(min_points):
+            return None, None, None
+        kept_residual = residual[keep][good]
+        median = float(np.median(kept_residual))
+        mad = float(np.median(np.abs(kept_residual - median))) * 1.4826
+        robust_limit = median + float(sigma) * max(mad, 0.05)
+        limit = float(clip_px) if clip_px is not None else robust_limit
+        limit = min(limit, max(0.25, robust_limit)) if clip_px is not None else limit
+        limit = max(0.25, limit)
+        next_keep = finite & (residual <= limit)
+        if np.count_nonzero(next_keep) < int(min_points):
+            break
+        if np.array_equal(next_keep, keep):
+            break
+        keep = next_keep
+
+    if np.count_nonzero(keep) < int(min_points):
+        return None, None, None
+    try:
+        transform = calc_affine_transform(src[keep], tpl[keep])
+        predicted = transform.apply_transform(src)
+        residual = np.hypot(
+            tpl[:, 0] - predicted[:, 0], tpl[:, 1] - predicted[:, 1]
+        )
+        residual[~finite] = np.inf
+    except Exception:
+        return None, None, None
+    return transform, keep, residual
+
+
+def _spalipy_target_quad_flux(
+    det, target_xy, n_quad, target_frac, exclude_px=0.0
+):
+    """Return a detection table whose flux column ranks quad anchors.
+
+    spalipy only uses ``flux`` to order detections before taking the first
+    ``n_quad_det`` rows. Replace it on a copy with an anchor rank: a bounded
+    local set around every requested target first, then the brightest global
+    anchors. The exclusion prevents a variable target becoming an anchor.
+    """
+    if det is None or len(det) == 0 or target_xy is None or int(n_quad) <= 0:
+        return det
+    try:
+        targets = np.asarray(target_xy, dtype=float).reshape(-1, 2)
+    except (TypeError, ValueError):
+        return det
+    targets = targets[np.all(np.isfinite(targets), axis=1)]
+    if len(targets) == 0:
+        return det
+
+    xy = np.column_stack(
+        [np.asarray(det["x"], float), np.asarray(det["y"], float)]
+    )
+    finite = np.all(np.isfinite(xy), axis=1)
+    if not finite.any():
+        return det
+    dist = np.hypot(
+        xy[None, :, 0] - targets[:, None, 0],
+        xy[None, :, 1] - targets[:, None, 1],
+    )
+    eligible = finite & np.all(dist > float(exclude_px), axis=0)
+    if np.count_nonzero(eligible) < 4:
+        return det
+
+    n_quad = min(int(n_quad), int(np.count_nonzero(eligible)))
+    n_local = int(np.clip(round(float(target_frac) * n_quad), 0, n_quad))
+    rank = np.zeros(len(det), dtype=float)
+    score = float(len(det) + n_quad + 1)
+
+    # Give each target an even share of the local quota. Sources remain
+    # unique across targets, so two nearby transients cannot reserve the
+    # same anchor twice.
+    used = np.zeros(len(det), dtype=bool)
+    local_order = []
+    n_targets = len(targets)
+    quota = np.full(n_targets, n_local // n_targets, dtype=int)
+    quota[: n_local % n_targets] += 1
+    for target_idx, n_take in enumerate(quota):
+        order = np.argsort(dist[target_idx])
+        order = order[eligible[order] & ~used[order]][:n_take]
+        local_order.extend(int(idx) for idx in order)
+        used[order] = True
+    if len(local_order) < n_local:
+        nearest_dist = np.min(dist, axis=0)
+        order = np.argsort(nearest_dist)
+        order = order[eligible[order] & ~used[order]][: n_local - len(local_order)]
+        local_order.extend(int(idx) for idx in order)
+        used[order] = True
+    local_order = np.asarray(local_order, dtype=int)
+    for i, idx in enumerate(local_order):
+        rank[int(idx)] = score - i
+
+    flux = np.asarray(det["flux"], float)
+    global_order = np.argsort(-flux)
+    global_order = global_order[
+        np.isin(global_order, local_order, assume_unique=False, invert=True)
+        & eligible[global_order]
+    ][: max(0, n_quad - n_local)]
+    for i, idx in enumerate(global_order):
+        rank[int(idx)] = float(n_quad - i)
+
+    out = det.copy()
+    out["flux"] = rank
+    return out
+
+
+def _target_region_alignment_stats(dxy, anchor_xy, target_xy, radius_px):
+    """Return worst post-fit residual statistics around requested targets."""
+    if dxy is None or anchor_xy is None or target_xy is None:
+        return None
+    dxy = np.asarray(dxy, dtype=float)
+    anchor_xy = np.asarray(anchor_xy, dtype=float)
+    targets = np.asarray(target_xy, dtype=float).reshape(-1, 2)
+    finite = (
+        np.all(np.isfinite(dxy), axis=1)
+        & np.all(np.isfinite(anchor_xy), axis=1)
+    )
+    targets = targets[np.all(np.isfinite(targets), axis=1)]
+    if len(targets) == 0 or np.count_nonzero(finite) == 0:
+        return None
+
+    per_target = []
+    for idx, (tx, ty) in enumerate(targets):
+        dist = np.hypot(anchor_xy[:, 0] - tx, anchor_xy[:, 1] - ty)
+        sel = finite & (dist <= float(radius_px))
+        n = int(np.count_nonzero(sel))
+        if n == 0:
+            continue
+        local_dxy = dxy[sel]
+        mag = np.hypot(local_dxy[:, 0], local_dxy[:, 1])
+        med_vec = np.nanmedian(local_dxy, axis=0)
+        per_target.append(
+            {
+                "target_index": int(idx),
+                "x": float(tx),
+                "y": float(ty),
+                "n": n,
+                "median": float(np.hypot(med_vec[0], med_vec[1])),
+                "rms": float(np.sqrt(np.nanmean(mag**2))),
+                "p90": float(np.nanpercentile(mag, 90)),
+                "max": float(np.nanmax(mag)),
+            }
+        )
+    if not per_target:
+        return None
+    worst = max(
+        per_target,
+        key=lambda row: (
+            row["median"], row["rms"], row["p90"], row["n"]
+        ),
+    )
+    return {"per_target": per_target, "worst": worst, "radius_px": float(radius_px)}
 
 
 def _finite_coverage_floor(cfg_min_ff, src_finite_px, out_size):
@@ -6408,6 +6942,7 @@ class Templates:
         center: Optional[Any] = None,
         method: str = "spalipy",
         target_xy: Optional[Tuple[float, float]] = None,
+        target_locations: Optional[Any] = None,
     ) -> AlignmentResult:
         """
         Align science and template images to a common pixel grid.
@@ -6426,12 +6961,14 @@ class Templates:
 
         Parameters
         ----------
-        target_xy : (tx, ty) target position in 0-based science-image pixels,
-            or None to read ``target_x_pix``/``target_y_pix`` from
-            ``input_yaml``.  When provided and the source pool is small
-            (<= ``alignment_sparse_field_threshold``), source-based methods
-            (spalipy, tweakwcs) prefer sources nearest the target for the
-            match pool so local alignment at the transient is optimized.
+        target_xy : (tx, ty) primary target position in 0-based science-image
+            pixels, or None to read ``target_x_pix``/``target_y_pix`` from
+            ``input_yaml``.
+        target_locations : iterable of (x, y), optional
+            Complete requested-target list in science pixels. When absent, the
+            primary target and resolved additional targets are taken from
+            ``input_yaml``. Target-near anchors are preferred in sparse fields
+            without allowing a variable source to become an alignment anchor.
 
         Returns
         -------
@@ -6487,16 +7024,65 @@ class Templates:
                 pass
             _ts_cfg = self.input_yaml.get("template_subtraction", {}) or {}
 
-            # Resolve target position for target-prioritized alignment.
-            # Reads from the explicit parameter or input_yaml (set by main.py
-            # from RA/Dec via the image WCS).  Used by source-based methods
-            # (spalipy, tweakwcs) to bias the match pool toward the transient
-            # position when sources are scarce.
+            # Resolve every requested target position for target-prioritized
+            # alignment. The primary stays first; resolved additional targets
+            # are converted through the science WCS and included only when they
+            # land on the frame.
             _target_xy = target_xy
             if _target_xy is None:
                 _target_xy = _resolve_target_xy(
                     self.input_yaml, scienceImage.shape
                 )
+            _target_rows = []
+            if target_locations is not None:
+                try:
+                    _loc_arr = np.asarray(target_locations, dtype=float).reshape(-1, 2)
+                    _ny_t, _nx_t = scienceImage.shape[:2]
+                    for _loc_i, (_lx, _ly) in enumerate(_loc_arr):
+                        if (
+                            np.isfinite(_lx)
+                            and np.isfinite(_ly)
+                            and 0 <= _lx < _nx_t
+                            and 0 <= _ly < _ny_t
+                        ):
+                            _target_rows.append(
+                                {
+                                    "x": float(_lx),
+                                    "y": float(_ly),
+                                    "name": "Target"
+                                    if _loc_i == 0
+                                    else f"Target {_loc_i + 1}",
+                                }
+                            )
+                except (TypeError, ValueError):
+                    _target_rows = []
+            if not _target_rows:
+                _target_rows = _resolve_alignment_target_positions(
+                    self.input_yaml, scienceImage.shape, scienceHeader
+                )
+            if _target_xy is not None:
+                _txf, _tyf = float(_target_xy[0]), float(_target_xy[1])
+                if not _target_rows or np.hypot(
+                    _txf - _target_rows[0]["x"], _tyf - _target_rows[0]["y"]
+                ) >= 0.5:
+                    _target_rows.insert(
+                        0,
+                        {
+                            "x": _txf,
+                            "y": _tyf,
+                            "name": str(
+                                self.input_yaml.get("target_name", "Target")
+                            ),
+                        },
+                    )
+            _target_points = np.asarray(
+                [[row["x"], row["y"]] for row in _target_rows], dtype=float
+            ).reshape(-1, 2)
+            _target_names = [str(row.get("name", "Target")) for row in _target_rows]
+            if len(_target_points):
+                _target_xy = tuple(_target_points[0])
+            self.input_yaml["_alignment_target_positions"] = _target_points.tolist()
+            self.input_yaml["_alignment_target_names"] = _target_names
             _ts_cfg_sparse = (
                 self.input_yaml.get("template_subtraction", {}) or {}
             )
@@ -6506,11 +7092,16 @@ class Templates:
             _prioritize_target = bool(
                 _ts_cfg_sparse.get("alignment_prioritize_target", True)
             )
-            if _target_xy is not None:
+            if len(_target_points):
                 logger.info(
-                    "Target-prioritized alignment: target at (%.1f, %.1f) px, "
+                    "Target-prioritized alignment: %d target(s) at %s; "
                     "sparse threshold=%d, prioritize=%s.",
-                    _target_xy[0], _target_xy[1], _sparse_threshold,
+                    len(_target_points),
+                    "; ".join(
+                        "%s=(%.1f, %.1f)" % (name, xy[0], xy[1])
+                        for name, xy in zip(_target_names, _target_points)
+                    ),
+                    _sparse_threshold,
                     _prioritize_target,
                 )
 
@@ -7124,6 +7715,7 @@ class Templates:
                     # trusted, so match tolerances can be sized to the
                     # measured residual spread instead of the PSF.
                     _pair_resid_p90 = None
+                    _paired_catalog_match = False
 
                     def _detect_for_spalipy(data, min_sources=20):
                         """Detect sources via SExtractor, return spalipy-format Table.
@@ -7420,6 +8012,10 @@ class Templates:
                         else:
                             sci_det = _sci_matched
                             tpl_det = _tpl_matched
+                            _pair_ids = np.arange(len(sci_det), dtype=np.int64)
+                            sci_det["pair_id"] = _pair_ids
+                            tpl_det["pair_id"] = _pair_ids
+                            _paired_catalog_match = True
                             # Measure the residual spread under the best-fit
                             # affine between the known pairs.  Sparse fields
                             # with real WCS/SIP disagreement can sit at
@@ -7518,6 +8114,7 @@ class Templates:
                     # convert the reflection into a rotation spalipy can handle.
                     _tpl_img = templateImage
                     _tpl_det = tpl_det
+                    _tpl_reflected = False
                     try:
                         from astropy.wcs import WCS as _WCS2
                         _sw = _WCS2(scienceHeader)
@@ -7532,6 +8129,7 @@ class Templates:
                             _tpl_img = np.fliplr(templateImage).copy()
                             _tpl_det = tpl_det.copy()
                             _tpl_det["x"] = (templateImage.shape[1] - 1) - tpl_det["x"]
+                            _tpl_reflected = True
                     except Exception as _refl_exc:
                         # Reflection check is best-effort, but a broken
                         # WCS read should still be diagnosable.
@@ -7621,7 +8219,74 @@ class Templates:
                     _n_tpl_dedup = len(_tpl_det)
                     sci_det = _dedup_close_pairs(sci_det, _det_sep)
                     _tpl_det = _dedup_close_pairs(_tpl_det, _det_sep)
-                    _n_sources = min(len(sci_det), len(_tpl_det))
+
+                    _sp_source_det = _tpl_det
+                    _sp_template_det = sci_det
+                    _paired_affine = None
+                    if (
+                        _paired_catalog_match
+                        and bool(
+                            _sp_cfg.get("spalipy_use_matched_pairs", True)
+                        )
+                    ):
+                        _pair_tpl_det, _pair_src_det = _paired_detection_subsets(
+                            sci_det, _tpl_det
+                        )
+                        if _pair_src_det is not None:
+                            _pair_clip_cfg = _sp_cfg.get(
+                                "spalipy_pair_clip_px", None
+                            )
+                            _pair_clip_px = (
+                                float(_pair_clip_cfg)
+                                if _pair_clip_cfg is not None
+                                else max(1.0, float(_med_fwhm))
+                            )
+                            (
+                                _paired_affine,
+                                _pair_keep,
+                                _,
+                            ) = _fit_spalipy_paired_affine(
+                                np.column_stack([
+                                    np.asarray(_pair_src_det["x"], float),
+                                    np.asarray(_pair_src_det["y"], float),
+                                ]),
+                                np.column_stack([
+                                    np.asarray(_pair_tpl_det["x"], float),
+                                    np.asarray(_pair_tpl_det["y"], float),
+                                ]),
+                                clip_px=_pair_clip_px,
+                            )
+                            # The clip may remove a sizeable tail of false
+                            # sky matches; it only has to leave enough
+                            # anchors to identify the transform.  The spatial
+                            # residual gate below decides whether the result
+                            # is usable.
+                            _pair_min_keep = max(
+                                4,
+                                min(
+                                    10,
+                                    int(np.ceil(0.5 * len(_pair_src_det))),
+                                ),
+                            )
+                            if (
+                                _paired_affine is not None
+                                and np.count_nonzero(_pair_keep) >= _pair_min_keep
+                            ):
+                                _sp_source_det = _pair_src_det[_pair_keep]
+                                _sp_template_det = _pair_tpl_det[_pair_keep]
+                                logger.info(
+                                    "spalipy: using %d/%d trusted RA/DEC pairs "
+                                    "directly (clip=%.2f px); bypassing quad rematch.",
+                                    len(_sp_source_det), len(_pair_src_det),
+                                    _pair_clip_px,
+                                )
+                            else:
+                                _paired_affine = None
+                                logger.info(
+                                    "spalipy: trusted pair fit retained too few "
+                                    "anchors; using quad matching instead."
+                                )
+                    _n_sources = min(len(_sp_template_det), len(_sp_source_det))
 
                     # Fraction of the usable science pool found only in the
                     # deeper, lower-significance detection pass.  These are
@@ -7630,9 +8295,14 @@ class Templates:
                     # count suggests.
                     _sp_deep_frac = 0.0
                     try:
-                        if "det_tier" in sci_det.colnames and len(sci_det):
+                        if (
+                            "det_tier" in _sp_template_det.colnames
+                            and len(_sp_template_det)
+                        ):
                             _sp_deep_frac = float(
-                                np.mean(np.asarray(sci_det["det_tier"]) > 0)
+                                np.mean(
+                                    np.asarray(_sp_template_det["det_tier"]) > 0
+                                )
                             )
                             if _sp_deep_frac > 0:
                                 logger.info(
@@ -7887,6 +8557,77 @@ class Templates:
                     # spalipy only catches dfitpackError internally, not
                     # ValueError, so we catch it here and retry.
                     _spalipy_orders_to_try = [o for o in (3, 2, 1, 0) if o <= _spline_order]
+
+                    # Quad seeding only runs for unmatched lists. Keep most
+                    # anchors global, but split a bounded local fraction evenly
+                    # across every requested target. The field anchors still
+                    # carry rotation and scale while the target regions get
+                    # local constraints.
+                    _quad_target_frac = float(
+                        _sp_cfg.get("spalipy_quad_target_frac", 0.35) or 0.0
+                    )
+                    _tpl_target_points = np.empty((0, 2), dtype=float)
+                    if len(_target_points):
+                        try:
+                            from astropy.wcs import WCS as _WCS4
+
+                            _sw4 = _WCS4(scienceHeader)
+                            _tw4 = _WCS4(templateHeader)
+                            _trd = _sw4.all_pix2world(_target_points, 0)
+                            _ttp = _tw4.all_world2pix(_trd, 0)
+                            _ttp = np.asarray(_ttp, dtype=float).reshape(-1, 2)
+                            if _tpl_reflected:
+                                _ttp[:, 0] = (
+                                    templateImage.shape[1] - 1
+                                ) - _ttp[:, 0]
+                            _tpl_target_points = _ttp[
+                                np.all(np.isfinite(_ttp), axis=1)
+                            ]
+                        except Exception as _tgt_exc:
+                            logger.debug(
+                                "spalipy: target coordinate mapping skipped: %s",
+                                _tgt_exc,
+                            )
+                    if (
+                        _paired_affine is None
+                        and _prioritize_target
+                        and len(_target_points)
+                        and _n_sources <= _sparse_threshold
+                        and _quad_target_frac > 0
+                    ):
+                        _quad_target_exclude = max(
+                            1.0,
+                            float(
+                                _sp_cfg.get(
+                                    "spalipy_quad_target_exclude_fwhm", 2.0
+                                )
+                                or 2.0
+                            )
+                            * _med_fwhm,
+                        )
+                        _sp_template_det = _spalipy_target_quad_flux(
+                            _sp_template_det,
+                            _target_points,
+                            _n_quad,
+                            _quad_target_frac,
+                            exclude_px=_quad_target_exclude,
+                        )
+                        _sp_source_det = _spalipy_target_quad_flux(
+                            _sp_source_det,
+                            _tpl_target_points,
+                            _n_quad,
+                            _quad_target_frac,
+                            exclude_px=_quad_target_exclude,
+                        )
+                        logger.info(
+                            "spalipy: quad anchors reserve %.0f%% of %d "
+                            "detections near %d target(s) (exclude=%.1f px).",
+                            100.0 * _quad_target_frac,
+                            _n_quad,
+                            len(_target_points),
+                            _quad_target_exclude,
+                        )
+
                     sp = None
                     _try_sub_tile = _sub_tile
                     _aligned_ok = False
@@ -7924,8 +8665,8 @@ class Templates:
                             _sp_kwargs = {
                                 "source_mask": _tpl_nan if _tpl_nan.any() else None,
                                 "template_data": _sci_fill,
-                                "source_det": _tpl_det,
-                                "template_det": sci_det,
+                                "source_det": _sp_source_det,
+                                "template_det": _sp_template_det,
                                 "output_shape": scienceImage.shape,
                                 "min_n_match": _min_match,
                                 "n_quad_det": _n_quad,
@@ -7951,10 +8692,25 @@ class Templates:
                                 sp = Spalipy(_tpl_fill, **_sp_kwargs)
                             try:
                                 with quiet_root_logger():
-                                    sp.align()
+                                    if _paired_affine is not None:
+                                        sp._alignment_failed[0] = False
+                                        sp._affine_transform = [_paired_affine]
+                                        sp._source_det_matched = [
+                                            _sp_source_det
+                                        ]
+                                        sp._template_det_matched = [
+                                            _sp_template_det
+                                        ]
+                                        sp.fit_spline_transform()
+                                        sp.transform_data()
+                                    else:
+                                        sp.align()
                             except Exception as _spalipy_err:
                                 _err_msg = str(_spalipy_err)
-                                if "length of x, y and z" in _err_msg and _try_order > 0:
+                                if (
+                                    "length of x, y and z" in _err_msg
+                                    or "spline transform" in _err_msg
+                                ) and _try_order > 0:
                                     logger.info(
                                         "spalipy: spline_order=%d failed (not enough "
                                         "matched sources); retrying with order=%d.",
@@ -8029,6 +8785,8 @@ class Templates:
                         logger.info("spalipy did not produce aligned output.")
                         return _fail("spalipy", "no aligned output")
 
+                    _postfit_anchor_xy = None
+                    _postfit_dxy = None
                     try:
                         _n_matched = 0
                         _sdm = getattr(sp, "_source_det_matched", None)
@@ -8073,6 +8831,8 @@ class Templates:
                                 _dy = _dy - _sbsy[0].ev(
                                     _tpl_coo[:, 0], _tpl_coo[:, 1]
                                 )
+                            _postfit_anchor_xy = _tpl_coo
+                            _postfit_dxy = np.column_stack([_dx, _dy])
                             logger.info(
                                 "spalipy: post-fit residuals "
                                 "dx=%.3f+/-%.3f px dy=%.3f+/-%.3f px.",
@@ -8203,6 +8963,93 @@ class Templates:
                     except Exception:
                         logger.debug("spalipy: quality measurement failed", exc_info=True)
 
+                    # Target-region verification uses the post-spline matched
+                    # residuals directly. A field-wide pass is not enough when
+                    # the transform is systematically offset beside a requested
+                    # transient; a thin local sample is recorded but not failed.
+                    _target_stats = None
+                    if (
+                        bool(_ts_cfg.get("alignment_target_verify", True))
+                        and len(_target_points)
+                        and _postfit_anchor_xy is not None
+                        and _postfit_dxy is not None
+                    ):
+                        _target_verify_radius = float(
+                            _ts_cfg.get(
+                                "alignment_target_verify_radius_fwhm", 10.0
+                            )
+                            or 10.0
+                        ) * fwhm_pix
+                        _target_stats = _target_region_alignment_stats(
+                            _postfit_dxy,
+                            _postfit_anchor_xy,
+                            _target_points,
+                            _target_verify_radius,
+                        )
+                    if _target_stats:
+                        if _quad_rms is None:
+                            _quad_rms = {}
+                        _quad_rms["target_region"] = _target_stats
+                        _target_min_anchors = int(
+                            _ts_cfg.get("alignment_target_min_anchors", 4) or 4
+                        )
+                        _tw = _target_stats["worst"]
+                        _t_max_off = float(
+                            _ts_cfg.get("alignment_target_max_offset_px")
+                            or _gates[0]
+                        )
+                        _t_max_rms = float(
+                            _ts_cfg.get("alignment_target_max_rms_px")
+                            or _gates[1]
+                        )
+                        _t_max_p90 = float(
+                            _ts_cfg.get("alignment_target_max_p90_px")
+                            or _gates[2]
+                        )
+                        if _tw["n"] >= _target_min_anchors:
+                            _t_name = (
+                                _target_names[_tw["target_index"]]
+                                if _tw["target_index"] < len(_target_names)
+                                else "target"
+                            )
+                            if _tw["median"] > _t_max_off:
+                                _sp_quality = "fail"
+                                _sp_reasons.append(
+                                    "target-region offset=%.3f px (> %.2f px) "
+                                    "near %s (n=%d, r=%.1f px)"
+                                    % (
+                                        _tw["median"], _t_max_off, _t_name,
+                                        _tw["n"], _target_stats["radius_px"],
+                                    )
+                                )
+                            elif (
+                                _tw["rms"] > _t_max_rms
+                                or _tw["p90"] > _t_max_p90
+                            ):
+                                if _sp_quality == "pass":
+                                    _sp_quality = "warn"
+                                _sp_reasons.append(
+                                    "target-region scatter near %s: rms=%.3f "
+                                    "px p90=%.3f px (n=%d)"
+                                    % (
+                                        _t_name, _tw["rms"], _tw["p90"],
+                                        _tw["n"],
+                                    )
+                                )
+                            logger.info(
+                                "Target-region alignment near %s: n=%d "
+                                "median=%.3f px rms=%.3f px p90=%.3f px.",
+                                _t_name, _tw["n"], _tw["median"],
+                                _tw["rms"], _tw["p90"],
+                            )
+                        else:
+                            _quad_rms["target_local_unverified"] = True
+                            logger.info(
+                                "Target-region alignment unverified: only %d "
+                                "anchor(s) within %.1f px of the nearest target.",
+                                _tw["n"], _target_stats["radius_px"],
+                            )
+
                     # A 'pass' resting mostly on deep low-threshold
                     # detections is candidate-driven, not verified:
                     # demote to warn so downstream consumers treat the
@@ -8259,6 +9106,35 @@ class Templates:
                             hdr["ALIGRMS"] = (float(_rms_off), "Alignment RMS (px)")
                         if _p90_off is not None and np.isfinite(_p90_off):
                             hdr["ALIGP90"] = (float(_p90_off), "Alignment P90 offset (px)")
+                        if _target_stats and _target_stats.get("worst"):
+                            _tw_hdr = _target_stats["worst"]
+                            hdr["ALIGTMED"] = (
+                                float(_tw_hdr["median"]),
+                                "Worst target-region median offset (px)",
+                            )
+                            hdr["ALIGTRMS"] = (
+                                float(_tw_hdr["rms"]),
+                                "Worst target-region RMS (px)",
+                            )
+                            hdr["ALIGTP90"] = (
+                                float(_tw_hdr["p90"]),
+                                "Worst target-region P90 (px)",
+                            )
+                            hdr["ALIGTN"] = (
+                                int(_tw_hdr["n"]),
+                                "Target-region alignment anchors",
+                            )
+                            hdr["ALIGTRAD"] = (
+                                float(_target_stats["radius_px"]),
+                                "Target-region verification radius (px)",
+                            )
+                            hdr["ALIGTXY"] = (
+                                ";".join(
+                                    "%.2f,%.2f" % (xy[0], xy[1])
+                                    for xy in _target_points
+                                ),
+                                "Requested target pixel positions",
+                            )
                         hdr["ALIGMETH"] = ("spalipy", "Alignment method used")
                         # Per-quadrant RMS: store the maximum quadrant RMS
                         # so SFFT can boost the kernel in regions with
@@ -8343,6 +9219,9 @@ class Templates:
                                 method_label="spalipy",
                                 sci_fwhm=float(np.median(sci_det["fwhm"])),
                                 tpl_fwhm=float(np.median(_tpl_det["fwhm"])),
+                                sci_target_xy=_target_points,
+                                tpl_target_xy=_tpl_target_points,
+                                target_names=_target_names,
                             )
                     except Exception as _plot_err:
                         logger.debug("Match sources plot skipped: %s", _plot_err)
@@ -12948,6 +13827,82 @@ class Templates:
                 # Non-fatal: continue with raw backend output.
                 pass
 
+            # Bright static cores can retain a compact positive/negative
+            # residual when the local registration error is a small fraction
+            # of a pixel.  That feature fails every backend-level quality
+            # check but can still contaminate nearby photometry, so mask only
+            # cores whose residual is explained by a local translation and
+            # never mask the protected transient/variable positions.
+            try:
+                _artifact_cfg = self.input_yaml.get("template_subtraction", {})
+                _protected_xy = []
+                for _pos in target_location or []:
+                    try:
+                        _protected_xy.append((float(_pos[0]), float(_pos[1])))
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                for _pos in masked_sources or []:
+                    try:
+                        # SFFT prior bans are 1-based FITS/SExtractor pixels.
+                        _protected_xy.append(
+                            (float(_pos[0]) - 1.0, float(_pos[1]) - 1.0)
+                        )
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                _artifact_mask, _artifact_info = _compact_core_dipole_mask(
+                    diff_data,
+                    scienceImage,
+                    templateImage,
+                    invalid_mask=diff_invalid_mask,
+                    protected_xy=_protected_xy,
+                    fwhm=science_fwhm,
+                    config=_artifact_cfg,
+                )
+                if np.any(_artifact_mask):
+                    diff_data = np.asarray(diff_data, dtype=float)
+                    diff_data[_artifact_mask] = np.nan
+                    if diff_invalid_mask is None:
+                        diff_invalid_mask = _artifact_mask.copy()
+                    else:
+                        diff_invalid_mask |= _artifact_mask
+                    universal_mask[_artifact_mask] = 1
+                    visualization_mask[_artifact_mask] = 1
+                    try:
+                        save_to_fits(universal_mask.astype(int), mask_loc)
+                    except Exception as _mask_write_exc:
+                        logger.warning(
+                            "Could not update universal mask with residual "
+                            "artifact regions: %s",
+                            _mask_write_exc,
+                        )
+                    for _info in _artifact_info:
+                        masked_centers.append((_info["x"], _info["y"]))
+                    diff_header["ARTMASK"] = True
+                    diff_header["NARTMSK"] = len(_artifact_info)
+                    diff_header["ARTXY"] = ";".join(
+                        f"{_info['x']:.2f},{_info['y']:.2f}"
+                        for _info in _artifact_info[:4]
+                    )
+                    logger.warning(
+                        "Masked %d compact subtraction artifact region(s): %s",
+                        len(_artifact_info),
+                        "; ".join(
+                            "({x:.1f},{y:.1f}) shift={shift:.2f}px "
+                            "peak={peak_sigma:.1f}sigma rms_drop={rms_drop:.2f}".format(
+                                **_info
+                            )
+                            for _info in _artifact_info
+                        ),
+                    )
+                else:
+                    diff_header["ARTMASK"] = False
+                    diff_header["NARTMSK"] = 0
+            except Exception as _artifact_exc:
+                logger.warning(
+                    "Residual artifact mask failed (non-fatal): %s",
+                    _artifact_exc,
+                )
+
             _finite_diff = np.isfinite(diff_data)
             if not _finite_diff.any() or np.std(diff_data[_finite_diff]) < 1e-5:
                 logger.error(
@@ -12957,456 +13912,30 @@ class Templates:
                 return None, None, None, None
 
             # =============================================================
-            # 6a. Subtraction quality validation
+            # 6a. Subtraction statistics
             # =============================================================
-            # Comprehensive difference-image quality assessment including:
-            #   - Global statistics (median, std, RMS)
-            #   - Dipole detection around known sources
-            #   - Bright-star residual flux
-            #   - Spatial background variation
-            #   - Residual autocorrelation
-            #   - Edge artifacts
-            #   - Structured quality score with pass/downgrade/fail classification
-            #   - Machine-readable JSON manifest for provenance
-            diff_quality_metrics = None
+            # Basic sanity stats only: the delivered product is whatever the
+            # selected backend produced -- there is no score-driven
+            # classification or backend swap.
             try:
-                from utils.difference_quality import (
-                    assess_difference_image,
-                    write_quality_manifest,
-                    write_quality_to_fits_header,
-                    QualityConfig,
-                )
-
-                # Build quality mask: NaN, universal mask, target region
                 quality_mask = ~np.isfinite(diff_data) | (np.abs(diff_data) < 1.1e-20) | universal_mask.astype(bool)
-                try:
-                    _tx = float(self.input_yaml.get("target_x_pix", np.nan))
-                    _ty = float(self.input_yaml.get("target_y_pix", np.nan))
-                    _fwhm_excl = float(self.input_yaml.get("fwhm", science_fwhm))
-                    _excl_r = max(3.0 * _fwhm_excl, 15.0)
-                    if np.isfinite(_tx) and np.isfinite(_ty):
-                        yy, xx = np.ogrid[:diff_data.shape[0], :diff_data.shape[1]]
-                        target_mask = (xx - _tx) ** 2 + (yy - _ty) ** 2 < _excl_r ** 2
-                        quality_mask = quality_mask | target_mask
-                except Exception:
-                    pass  # Non-fatal: skip target exclusion if it fails
-
-                # Build quality config from pipeline config
-                _ts_cfg_q = self.input_yaml.get("template_subtraction", {}) or {}
-                _qcfg = QualityConfig(
-                    dipole_n_sigma=float(_ts_cfg_q.get("diffqual_dipole_n_sigma", 5.0)),
-                    dipole_radius_fwhm=float(_ts_cfg_q.get("diffqual_dipole_radius_fwhm", 1.5)),
-                    dipole_max_fraction_pass=float(_ts_cfg_q.get("diffqual_dipole_max_frac_pass", 0.05)),
-                    dipole_max_fraction_fail=float(_ts_cfg_q.get("diffqual_dipole_max_frac_fail", 0.20)),
-                    dipole_min_checked=int(_ts_cfg_q.get("diffqual_dipole_min_checked", 10)),
-                    dipole_wilson_z=float(_ts_cfg_q.get("diffqual_dipole_wilson_z", 1.645)),
-                    bright_star_n_sigma=float(_ts_cfg_q.get("diffqual_bright_star_n_sigma", 50.0)),
-                    bright_star_max_residual_sigma=float(_ts_cfg_q.get("diffqual_bright_star_max_resid_sigma", 3.0)),
-                    edge_max_std_ratio=float(_ts_cfg_q.get("diffqual_edge_max_std_ratio", 2.0)),
-                    pass_threshold=float(_ts_cfg_q.get("diffqual_pass_threshold", 0.75)),
-                    downgrade_threshold=float(_ts_cfg_q.get("diffqual_downgrade_threshold", 0.50)),
-                    kernel_noise_downgrade=float(
-                        _ts_cfg_q.get("diffqual_kernel_noise_downgrade", 0.15)
-                    ),
-                    kernel_negfrac_downgrade=float(
-                        _ts_cfg_q.get("diffqual_kernel_negfrac_downgrade", 0.5)
-                    ),
-                    kernel_conc_min_downgrade=float(
-                        _ts_cfg_q.get("diffqual_kernel_conc_min_downgrade", 1.3)
-                    ),
-                    min_checked_for_pass=int(
-                        _ts_cfg_q.get("diffqual_min_checked_for_pass", 8)
-                    ),
-                    min_checked_quadrants_pass=int(
-                        _ts_cfg_q.get("diffqual_min_checked_quadrants_pass", 2)
-                    ),
-                    alignment_unverified_downgrade=_as_bool(
-                        _ts_cfg_q.get(
-                            "diffqual_alignment_unverified_downgrade", True
-                        ),
-                        True,
-                    ),
-                )
-
-                # Sources to check for structured residuals: the matched
-                # calibrators AND the masked (bright/saturated) centers.
-                # The worst kernel-sidelobe residuals appear at the
-                # bright stars, whose cores are masked but whose
-                # sidelobe rings are not -- checking only the clean
-                # matched calibrators let a deconvolving-kernel diff
-                # pass QA (SN2024pba 2025-02-22 r).
-                _matching_priors = list(matching_sources or [])
-                _matching_for_quality = _matching_priors
-                if backend_used == "sfft":
-                    _sfft_base = (
-                        Path(base_name).stem.replace(" ", "_")
-                        .replace(".", "_")
-                        .replace("_APT", "")
-                        .replace("_ERROR", "")
+                valid_pixels = diff_data[~quality_mask]
+                valid_pixels = valid_pixels[np.isfinite(valid_pixels)]
+                if len(valid_pixels) > 0:
+                    diff_median = np.median(valid_pixels)
+                    diff_std = np.nanstd(valid_pixels)
+                    diff_rms = np.sqrt(np.mean(valid_pixels ** 2))
+                    logger.info(
+                        "Subtraction stats: median=%.3f std=%.3f rms=%.3f | valid=%d px",
+                        diff_median, diff_std, diff_rms, len(valid_pixels)
                     )
-                    _sfft_match_csv = scienceDir / (
-                        f"SFFT_Matching_Sources_{_sfft_base}.csv"
-                    )
-                    _sfft_actual_sources = _read_sfft_matching_positions(
-                        str(_sfft_match_csv)
-                    )
-                    if _sfft_actual_sources is not None:
-                        _matching_for_quality = _sfft_actual_sources
-                        logger.info(
-                            "SFFT kernel sources: %d pipeline priors -> %d "
-                            "sources used by the adopted run.",
-                            len(_matching_priors),
-                            len(_matching_for_quality),
+                    if abs(diff_median) > 0.1 * diff_std:
+                        logger.warning(
+                            "Subtraction has systematic offset (median=%.3f, std=%.3f).",
+                            diff_median, diff_std
                         )
-                _n_matching_sources = len(_matching_for_quality)
-
-                _dipole_sources = list(_matching_for_quality)
-                if masked_centers:
-                    _dipole_sources = deduplicate_points(
-                        _dipole_sources + list(masked_centers), min_sep=2.0
-                    )
-                _bright_stars = _dipole_sources
-
-                # Determine the difference-image FWHM for quality checks
-                _diff_fwhm = science_fwhm
-                _convd_hdr = str(diff_header.get("CONVD", "")).strip().upper()
-                _diff_fwhm_hdr = float(diff_header.get("DIFFFWHM", 0.0))
-                if _diff_fwhm_hdr > 0:
-                    _diff_fwhm = _diff_fwhm_hdr
-
-                # Alignment verification tier: propagates the limited-evidence
-                # label set during align() into the subtraction quality grade
-                # so an unverified transform cannot produce a "pass" diff.
-                _alig_ver = str(diff_header.get("ALIGVER", "") or "")
-                if not _alig_ver:
-                    try:
-                        _alig_ver = str(
-                            fits.getheader(str(templateFpath)).get(
-                                "ALIGVER", ""
-                            ) or ""
-                        )
-                    except Exception:
-                        _alig_ver = ""
-
-                # Metadata for provenance
-                _qmeta = {
-                    "algorithm": str(backend_used or "unknown"),
-                    "alignment_verification": _alig_ver,
-                    "forceconv": str(diff_header.get("FORCECON", "")),
-                    "kernel_order": int(kernel_order),
-                    # KERHW is authoritative: a kernel-size retry adopts a
-                    # smaller half-width than the configured value.
-                    "kernel_half_width": int(
-                        diff_header.get("KERHW") or kernel_half_width or 0
-                    ),
-                    "kernel_noise": float(diff_header.get("KERNOISE", 0.0) or 0.0),
-                    "kernel_negfrac": float(diff_header.get("KERNEG", 0.0) or 0.0),
-                    "kernel_conc": float(diff_header.get("KERCONC", 0.0) or 0.0),
-                    "science_fwhm": float(science_fwhm),
-                    "template_fwhm": float(template_fwhm),
-                    "n_matching_sources": _n_matching_sources,
-                    "n_matching_priors": len(_matching_priors),
-                    "flux_scale_conv": float(diff_header.get("FSCAL_CONV", 0.0)),
-                    "flux_scale_phot": float(diff_header.get("FSCAL_PHOT", 0.0)),
-                    "flux_scale_discrep_pct": float(diff_header.get("FSCAL_DISC", 0.0)),
-                }
-
-                diff_quality_metrics = assess_difference_image(
-                    diff_data,
-                    quality_mask,
-                    source_positions=_dipole_sources,
-                    bright_star_positions=_bright_stars,
-                    fwhm=_diff_fwhm,
-                    cfg=_qcfg,
-                    metadata=_qmeta,
-                )
-
-                # --- Quality-driven backend retry (bounded: one try) ---
-                # The cascade above retries on EXECUTION failure.  A backend
-                # can also exit cleanly while producing a scientifically poor
-                # difference image; when the audit fails the product and
-                # HOTPANTS is still untried, attempt it once and keep
-                # whichever product scores better under the same mask and
-                # validation sources - quality decides, not exit status.
-                # Sparse-evidence classes ("downgrade_sparse", "unverified")
-                # are not retried: swapping kernels cannot add sources.
-                _qretry_on = _as_bool(
-                    _ts_cfg_q.get("diffqual_retry_on_fail", True), True
-                )
-                if (
-                    _qretry_on
-                    and diff_quality_metrics.quality_class == "fail"
-                    and backend_used in ("sfft", "zogy")
-                ):
-                    try:
-                        _hp_exe = (
-                            _ts_cfg_q.get("hotpants_exe_loc") or "hotpants"
-                        )
-                        _hp_ok = shutil.which(str(_hp_exe)) is not None
-                    except Exception:
-                        _hp_ok = False
-                    if _hp_ok:
-                        _bak_diff = f"{differenceFpath}.qretry"
-                        _mask_sci_q = _mask_tpl_q = None
-                        try:
-                            shutil.copy2(differenceFpath, _bak_diff)
-                            _sci_mask_q = np.clip(
-                                science_mask_nans.astype(np.int32)
-                                + science_seg_mask.astype(np.int32)
-                                + (
-                                    background_defects_mask.astype(np.int32)
-                                    if background_defects_mask is not None
-                                    else 0
-                                ),
-                                0, 1,
-                            )
-                            _tpl_mask_q = np.clip(
-                                template_mask_nans.astype(np.int32)
-                                + template_seg_mask.astype(np.int32),
-                                0, 1,
-                            )
-                            _mask_sci_q = os.path.join(
-                                scienceDir,
-                                f"hotpants_mask_sci_q_{base_name}",
-                            )
-                            _mask_tpl_q = os.path.join(
-                                scienceDir,
-                                f"hotpants_mask_tpl_q_{base_name}",
-                            )
-                            save_to_fits(_sci_mask_q.astype(int), _mask_sci_q)
-                            save_to_fits(_tpl_mask_q.astype(int), _mask_tpl_q)
-                            # Noise maps are validated on the same grids as
-                            # the primary hotpants branch; compute them here
-                            # because that branch did not run.
-                            _sci_noise_q = _validate_noise_map(
-                                scienceNoise, scienceImage.shape, "science",
-                                ref_wcs=_sci_wcs_v,
-                            )
-                            _tpl_noise_q = _validate_noise_map(
-                                templateNoise, templateImage.shape, "template",
-                                ref_wcs=_tpl_wcs_v,
-                            )
-                            logger.warning(
-                                "Difference quality FAILED under %s "
-                                "(score=%.3f): retrying once with HOTPANTS.",
-                                backend_used,
-                                diff_quality_metrics.quality_score,
-                            )
-                            _ok_q = self._subtract_hotpants(
-                                scienceFpath,
-                                template_work_fpath,
-                                differenceFpath,
-                                mask_loc,
-                                scienceDir,
-                                base_name,
-                                scienceMedian,
-                                scienceSTD,
-                                templateMedian,
-                                templateSTD,
-                                science_saturate,
-                                template_saturate,
-                                science_readnoise,
-                                template_readnoise,
-                                science_fwhm,
-                                template_fwhm,
-                                kernel_order,
-                                stamp_loc,
-                                _sci_noise_q,
-                                sfft_kernel_hw,
-                                templateNoise=_tpl_noise_q,
-                                sci_mask_loc=_mask_sci_q,
-                                tpl_mask_loc=_mask_tpl_q,
-                                matching_sources=matching_sources,
-                                target_xy=(
-                                    target_location[0]
-                                    if target_location else None
-                                ),
-                                masked_sources=masked_sources,
-                            )
-                            _adopted_q = False
-                            if _ok_q and os.path.isfile(differenceFpath):
-                                _d2, _h2 = read_fits(differenceFpath)
-                                if _d2.shape == scienceImage.shape:
-                                    _h2 = _ensure_diff_wcs(
-                                        _h2, scienceHeader, _d2.shape,
-                                        target_xy=(
-                                            target_location[0]
-                                            if target_location else None
-                                        ),
-                                    )
-                                    _h2["SUBALGO"] = "hotpants"
-                                    _h2["SUBQRETRY"] = (
-                                        True,
-                                        "Quality-driven backend retry",
-                                    )
-                                    _qm2_mask = (
-                                        ~np.isfinite(_d2)
-                                        | (np.abs(_d2) < 1.1e-20)
-                                        | universal_mask.astype(bool)
-                                    )
-                                    _qmeta2 = dict(_qmeta)
-                                    _qmeta2["algorithm"] = "hotpants"
-                                    _qmeta2["kernel_noise"] = float(
-                                        _h2.get("KERNOISE", 0.0) or 0.0
-                                    )
-                                    _qmeta2["kernel_negfrac"] = float(
-                                        _h2.get("KERNEG", 0.0) or 0.0
-                                    )
-                                    _qmeta2["kernel_conc"] = float(
-                                        _h2.get("KERCONC", 0.0) or 0.0
-                                    )
-                                    _qm2 = assess_difference_image(
-                                        _d2, _qm2_mask,
-                                        source_positions=_dipole_sources,
-                                        bright_star_positions=_bright_stars,
-                                        fwhm=_diff_fwhm,
-                                        cfg=_qcfg,
-                                        metadata=_qmeta2,
-                                    )
-                                    if (
-                                        _qm2.quality_score
-                                        > diff_quality_metrics.quality_score
-                                    ):
-                                        _score_before = (
-                                            diff_quality_metrics.quality_score
-                                        )
-                                        diff_data, diff_header = _d2, _h2
-                                        diff_quality_metrics = _qm2
-                                        backend_used = "hotpants"
-                                        _adopted_q = True
-                                        logger.info(
-                                            "HOTPANTS quality retry adopted: "
-                                            "score %.3f -> %.3f, class=%s.",
-                                            _score_before,
-                                            _qm2.quality_score,
-                                            _qm2.quality_class,
-                                        )
-                            if not _adopted_q:
-                                # Keep the first product: the alternative did
-                                # not beat it on the same evidence.
-                                if os.path.isfile(_bak_diff):
-                                    os.replace(_bak_diff, differenceFpath)
-                                    _bak_diff = None
-                                logger.warning(
-                                    "HOTPANTS quality retry did not improve "
-                                    "the difference image; keeping the %s "
-                                    "product marked as failed.",
-                                    backend_used,
-                                )
-                        except Exception as _qr_e:
-                            if os.path.isfile(_bak_diff):
-                                os.replace(_bak_diff, differenceFpath)
-                                _bak_diff = None
-                            logger.warning(
-                                "Quality-driven HOTPANTS retry failed "
-                                "(%s); keeping first product.", _qr_e,
-                            )
-                        finally:
-                            if _bak_diff and os.path.isfile(_bak_diff):
-                                try:
-                                    os.remove(_bak_diff)
-                                except OSError:
-                                    pass
-                            for _mq in (_mask_sci_q, _mask_tpl_q):
-                                try:
-                                    if _mq and os.path.isfile(_mq):
-                                        os.remove(_mq)
-                                except OSError:
-                                    pass
-
-                # Write quality keywords to the difference image FITS header
-                # NOTE: The actual write is deferred to after the final
-                # write_fits() call below, because write_fits would
-                # overwrite the header and lose these keywords.
-                pass
-
-                # Write machine-readable JSON manifest
-                _manifest_path = os.path.join(
-                    str(scienceDir), f"diff_quality_{base_name}.json"
-                )
-                _manifest_meta = {
-                    "science_file": str(scienceFpath),
-                    "template_file": str(templateFpath),
-                    "difference_file": str(differenceFpath),
-                    "science_fwhm": float(science_fwhm),
-                    "template_fwhm": float(template_fwhm),
-                    "kernel_order": int(kernel_order),
-                    "kernel_half_width": int(
-                        diff_header.get("KERHW") or kernel_half_width or 0
-                    ),
-                    "kernel_noise": float(diff_header.get("KERNOISE", 0.0) or 0.0),
-                    "kernel_negfrac": float(diff_header.get("KERNEG", 0.0) or 0.0),
-                    "kernel_conc": float(diff_header.get("KERCONC", 0.0) or 0.0),
-                    "n_matching_sources": _n_matching_sources,
-                    "n_matching_priors": len(_matching_priors),
-                    "n_masked_sources": len(masked_sources) if masked_sources else 0,
-                    "masked_percentage": float(masked_percentage),
-                    "universal_mask_frac": float(np.mean(universal_mask)),
-                }
-                write_quality_manifest(
-                    diff_quality_metrics, _manifest_path, extra_metadata=_manifest_meta
-                )
-
-                # Log warnings for degraded quality
-                if diff_quality_metrics.quality_class == "fail":
-                    logger.error(
-                        "Subtraction quality FAILED (score=%.3f):\n"
-                        "    dipoles=%d/%d checked (%.1f%%),\n"
-                        "    bright_star_resid=%.1f sigma,\n"
-                        "    bg_spatial_std=%.3f, edge_ratio=%.2f.\n"
-                        "    Downstream photometry should be treated with\n"
-                        "    caution.",
-                        diff_quality_metrics.quality_score,
-                        diff_quality_metrics.dipole_count,
-                        diff_quality_metrics.dipole_checked,
-                        diff_quality_metrics.dipole_fraction * 100,
-                        diff_quality_metrics.bright_star_residual_rms,
-                        diff_quality_metrics.background_spatial_std,
-                        diff_quality_metrics.edge_std_ratio,
-                    )
-                elif diff_quality_metrics.quality_class in (
-                    "downgrade", "downgrade_sparse", "unverified",
-                ):
-                    logger.warning(
-                        "Subtraction quality DOWNGRADED (score=%.3f): "
-                        "dipoles=%d/%d checked (%.1f%%), bright_star_resid=%.1f sigma, "
-                        "bg_spatial_std=%.3f, edge_ratio=%.2f.",
-                        diff_quality_metrics.quality_score,
-                        diff_quality_metrics.dipole_count,
-                        diff_quality_metrics.dipole_checked,
-                        diff_quality_metrics.dipole_fraction * 100,
-                        diff_quality_metrics.bright_star_residual_rms,
-                        diff_quality_metrics.background_spatial_std,
-                        diff_quality_metrics.edge_std_ratio,
-                    )
-
-            except ImportError:
-                logger.debug(
-                    "utils.difference_quality not available; "
-                    "falling back to basic quality checks."
-                )
-                # Fallback: basic checks (original behaviour)
-                try:
-                    quality_mask = ~np.isfinite(diff_data) | (np.abs(diff_data) < 1.1e-20) | universal_mask.astype(bool)
-                    valid_pixels = diff_data[~quality_mask]
-                    valid_pixels = valid_pixels[np.isfinite(valid_pixels)]
-                    if len(valid_pixels) > 0:
-                        diff_median = np.median(valid_pixels)
-                        diff_std = np.nanstd(valid_pixels)
-                        diff_rms = np.sqrt(np.mean(valid_pixels ** 2))
-                        logger.info(
-                            "Subtraction quality (basic): median=%.3f std=%.3f rms=%.3f | valid=%d px",
-                            diff_median, diff_std, diff_rms, len(valid_pixels)
-                        )
-                        if abs(diff_median) > 0.1 * diff_std:
-                            logger.warning(
-                                "Subtraction has systematic offset (median=%.3f, std=%.3f).",
-                                diff_median, diff_std
-                            )
-                except Exception as e:
-                    logger.warning("Subtraction quality validation failed (non-fatal): %s", e)
             except Exception as e:
-                logger.warning("Subtraction quality validation failed (non-fatal): %s", e)
+                logger.warning("Subtraction statistics failed (non-fatal): %s", e)
 
             # Write the masked difference image back (no background zeroing --
             # the subtraction backend's native output is preserved so photometry
@@ -13424,20 +13953,6 @@ class Templates:
             write_fits(_diff_part_path, diff_data, diff_header)
             os.replace(_diff_part_path, differenceFpath)
             _diff_part_path = None
-
-            # Write quality keywords to the difference image FITS header
-            # AFTER the final write_fits so they are not overwritten.
-            if diff_quality_metrics is not None:
-                try:
-                    from utils.difference_quality import (
-                        write_quality_to_fits_header as _wqfh,
-                    )
-                    _wqfh(differenceFpath, diff_quality_metrics)
-                except Exception as _wq_e:
-                    logger.warning(
-                        "Failed to write quality keywords to FITS header: %s",
-                        _wq_e,
-                    )
 
             elapsed = time.time() - t0
             logger.info("Image subtraction completed in %.1f s", elapsed)
