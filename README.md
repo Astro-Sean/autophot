@@ -13,6 +13,9 @@ AutoPhOT is a photometry pipeline for following up transients and variable sourc
 - Paper: [A&A 667, A62 (2022)](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
 - Issues: [GitHub Issues](https://github.com/Astro-Sean/autophot/issues)
 
+AutoPhOT has been used in <!-- citation-count -->29<!-- /citation-count --> papers: [see them here](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)
+
+
 > [!NOTE]
 > I am the sole developer and maintainer of AutoPhOT and also a [full-time researcher](https://astro-sean.github.io/index.html) at [MPE](https://www.mpe.mpg.de/person/144270/1302618).
 > Please open issues on GitHub and I will do my best to resolve them as soon as possible.
@@ -223,8 +226,6 @@ export TNS_BOT_API="..."
 If you use AutoPhOT in your research, please cite:
 
 > Brennan, S. J., & Fraser, M. 2022, A&A, 667, A62
-
-AutoPhOT has been used in <!-- citation-count -->29<!-- /citation-count --> papers: [see them here](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)
 
 ```bibtex
 @ARTICLE{2022A&A...667A..62B,
