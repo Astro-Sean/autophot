@@ -19,7 +19,7 @@
 
 AutoPhOT is a photometry pipeline for transients and variable sources, built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/). Feed it FITS images from any telescope, filter, or pixel scale and it will find your target in each frame, do the photometry, calibrate it against survey catalogs, and hand you one clean light curve.
 
-It has been used in <!-- citation-count -->70<!-- /citation-count --> papers so far (updated: <!-- citation-date -->19-10-2026<!-- /citation-date -->) - [see them on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc).
+It has been used in <!-- citation-count -->60<!-- /citation-count --> papers so far (updated: <!-- citation-date -->29-10-2026<!-- /citation-date -->) - [see them on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc).
 
 > [!NOTE]
 > AutoPhOT is developed and maintained by one person only. If you hit a problem, please open an issue on GitHub and I will get to it as soon as I can.
