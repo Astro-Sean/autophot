@@ -1,0 +1,42 @@
+2021qmf:
+  class_ads_bibcodes: null
+  dec: '+14:51:47.68'
+  decdeg: 14.8632455336
+  decdeg_err: 0
+  discmagfilter:
+    family: P1
+    id: '26'
+    name: w
+  discoverer: K. C. Chambers, T. de Boer, J. Bulger, J. Fairlamb, M. Huber, C.-C.
+    Lin, T. Lowe, E. Magnier, A. Schultz, R. J. Wainscoat, M. Willman (IfA, University
+    of Hawaii), K. W. Smith, D. R. Young, O. McBrien, J. Gillanders, S. Srivastav,
+    M. Fulton, S. J. Smartt, D. O'Neill, P. Clark, S. Sim (Queen's University Belfast),
+    D. E. Wright (University of Minnesota)
+  discoverer_internal_name: PS21ggp
+  discovery_ads_bibcode: 2021TNSTR2135....1C
+  discovery_data_source:
+    group_name: Pan-STARRS
+    groupid: 4
+  discoverydate: '2021-06-01 06:54:43.200'
+  discoverymag: 21.76
+  end_prop_period: null
+  host_redshift: null
+  hostname: null
+  internal_names: PS21ggp
+  name_prefix: AT
+  object_type:
+    id: null
+    name: null
+  objid: 86600
+  objname: 2021qmf
+  public: 1
+  ra: '15:44:50.663'
+  radeg: 236.211096452
+  radeg_err: 0
+  redshift: null
+  reporter: PS1_Bot1
+  reporterid: 35588
+  reporting_group:
+    group_name: Pan-STARRS
+    groupid: 4
+  source: bot

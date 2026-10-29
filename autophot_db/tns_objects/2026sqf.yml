@@ -1,0 +1,39 @@
+2026sqf:
+  class_ads_bibcodes: 2026TNSCR2843....1B, 2026TNSCR2847....1W, 2026TNSCR3037....1L,
+    2026TNSCR3212....1R
+  dec: '+53:30:34.10'
+  decdeg: 53.5094715
+  decdeg_err: 5.5555555555556e-05
+  discmagfilter:
+    family: ''
+    id: '1'
+    name: Clear
+  discoverer: Patrick Wiggins
+  discoverer_internal_name: ''
+  discovery_ads_bibcode: 2026TNSTR2837....1W
+  discovery_data_source:
+    group_name: None
+    groupid: 0
+  discoverydate: '2026-07-08 06:01:09.000'
+  discoverymag: 12.9
+  end_prop_period: null
+  host_redshift: null
+  hostname: NGC 3310
+  internal_names: ',ZTF26abfmmvq,DRSN135-20260716,SN 2026sqf'
+  name_prefix: SN
+  object_type:
+    id: 106
+    name: SN Ia-CSM
+  objid: 213247
+  objname: 2026sqf
+  public: 1
+  ra: '10:38:47.961'
+  radeg: 159.6998395
+  radeg_err: 5.5555555555556e-05
+  redshift: 0.003312
+  reporter: ' Patrick Wiggins'
+  reporterid: 531
+  reporting_group:
+    group_name: None
+    groupid: 0
+  source: user

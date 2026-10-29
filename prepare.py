@@ -699,6 +699,26 @@ class Prepare:
             else:
                 available_filters = list(catalog_input.keys())
 
+        if (self.input_yaml.get("catalog") or {}).get(
+            "allow_filter_transformations", False
+        ):
+            # Bands a catalog can synthesize (e.g. BVRI for sdss) count as
+            # servable too, so images in those bands are not dropped here.
+            from filter_transformations import transformable_bands
+
+            if isinstance(selected_catalog, dict):
+                _ft_cats = {
+                    str(v).strip()
+                    for v in selected_catalog.values()
+                    if v is not None and str(v).strip()
+                }
+            else:
+                _ft_cats = {str(selected_catalog_resolved).strip()}
+            for _c in _ft_cats:
+                for _b in transformable_bands(_c):
+                    if _b not in available_filters:
+                        available_filters.append(_b)
+
         if self.input_yaml["catalog"].get("include_IR_sequence_data", False):
             available_filters += ["J", "H", "K"]
         available_filters, dropped_filters = sanitize_photometric_filters(

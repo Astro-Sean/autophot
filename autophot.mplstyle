@@ -1,0 +1,158 @@
+# =============================================================================
+# Tufte-Inspired Matplotlib Style for AutoPhOT
+# =============================================================================
+# Principles from Edward Tufte's "The Visual Display of Quantitative Information":
+# 1. Maximize data-ink ratio (minimize non-data ink)
+# 2. Erase non-data ink (chartjunk)
+# 3. Erase redundant data-ink
+# 4. Revise and edit
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# FONTS - Small, efficient, LaTeX-compatible
+# -----------------------------------------------------------------------------
+font.size: 9
+font.family: sans-serif
+font.sans-serif: DejaVu Sans, Arial, Helvetica, sans-serif
+
+# LaTeX for publication quality (optional, slower)
+text.usetex: False
+
+# -----------------------------------------------------------------------------
+# AXES - Minimal borders, data-first
+# -----------------------------------------------------------------------------
+# Spine width - thinner = more data, less ink
+axes.linewidth: 0.4
+axes.edgecolor: "333333"
+
+# Keep top and right spines visible (user preference)
+axes.spines.top: True
+axes.spines.right: True
+axes.spines.left: True
+axes.spines.bottom: True
+
+# Labels close to data
+axes.labelsize: 9
+axes.labelpad: 4
+axes.labelcolor: "333333"
+
+# Titles - small, efficient
+axes.titlesize: 10
+axes.titlepad: 8
+axes.titleweight: normal
+
+# Ticks inside (reduces chartjunk, points to data)
+xtick.direction: in
+ytick.direction: in
+xtick.major.size: 3
+ytick.major.size: 3
+xtick.minor.size: 1.5
+ytick.minor.size: 1.5
+
+# Tick labels
+xtick.labelsize: 8
+ytick.labelsize: 8
+xtick.major.pad: 2
+ytick.major.pad: 2
+
+# Keep top/right ticks visible (matching visible spines)
+xtick.top: True
+ytick.right: True
+
+# Minor ticks for precision (Tufte: more data resolution)
+xtick.minor.visible: True
+ytick.minor.visible: True
+xtick.minor.width: 0.3
+ytick.minor.width: 0.3
+
+# -----------------------------------------------------------------------------
+# GRIDS - Minimal, only when needed
+# -----------------------------------------------------------------------------
+# Grid off by default (chartjunk), enable with explicit linestyle
+axes.grid: False
+grid.color: "CCCCCC"
+grid.linewidth: 0.3
+grid.alpha: 0.5
+grid.linestyle: -
+
+# -----------------------------------------------------------------------------
+# LINES - Thin, precise
+# -----------------------------------------------------------------------------
+lines.linewidth: 0.8
+lines.markersize: 3
+lines.markeredgewidth: 0.3
+lines.solid_capstyle: butt
+lines.solid_joinstyle: miter
+
+# -----------------------------------------------------------------------------
+# COLORS - Muted, professional palette
+# -----------------------------------------------------------------------------
+axes.prop_cycle: cycler('color', ['1f77b4', 'ff7f0e', '2ca02c', 'd62728', '9467bd', '8c564b', 'e377c2', '7f7f7f', 'bcbd22', '17becf'])
+
+# -----------------------------------------------------------------------------
+# LEGEND - Small, tight, borderless
+# -----------------------------------------------------------------------------
+legend.fontsize: 8
+legend.title_fontsize: 8
+legend.frameon: False          # No box (chartjunk)
+legend.framealpha: 0
+legend.borderpad: 0.3
+legend.labelspacing: 0.3
+legend.handletextpad: 0.4
+legend.handlelength: 1.5
+legend.loc: best
+
+# -----------------------------------------------------------------------------
+# FIGURE - Tight, efficient
+# -----------------------------------------------------------------------------
+figure.figsize: 6, 4           # Compact default
+figure.dpi: 150
+figure.facecolor: white
+figure.edgecolor: none
+
+# Subplots - minimal spacing for small multiples
+figure.subplot.left: 0.12
+figure.subplot.right: 0.95
+figure.subplot.bottom: 0.12
+figure.subplot.top: 0.95
+figure.subplot.wspace: 0.15
+figure.subplot.hspace: 0.15
+
+# -----------------------------------------------------------------------------
+# SAVE - High resolution, tight layout
+# -----------------------------------------------------------------------------
+savefig.dpi: 300
+savefig.format: pdf
+savefig.bbox: tight
+savefig.pad_inches: 0.02       # Minimal padding
+savefig.facecolor: white
+savefig.edgecolor: none
+savefig.transparent: False
+
+# -----------------------------------------------------------------------------
+# SCATTER/PATCHES
+# -----------------------------------------------------------------------------
+scatter.marker: o
+patch.linewidth: 0.3
+
+# -----------------------------------------------------------------------------
+# IMAGES - High quality
+# -----------------------------------------------------------------------------
+image.origin: lower
+image.aspect: equal
+image.interpolation: nearest
+
+# -----------------------------------------------------------------------------
+# ERROR BARS - Minimal ink
+# -----------------------------------------------------------------------------
+errorbar.capsize: 0             # No caps (reduces ink)
+
+# -----------------------------------------------------------------------------
+# HISTOGRAM - Efficient
+# -----------------------------------------------------------------------------
+hist.bins: auto
+
+# -----------------------------------------------------------------------------
+# TEXT - Efficient positioning
+# -----------------------------------------------------------------------------
+text.color: "333333"

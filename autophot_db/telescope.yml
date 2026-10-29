@@ -1,0 +1,781 @@
+MPI-2.2:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    GROND:
+      Name: MPI-2.2+GROND
+      pixel_scale: 0.2
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      g: g
+      h: H
+      i: i
+      r: r
+      k: K
+      j: J
+      z: z
+      H: H
+      K: K
+      J: J
+ESO-VISTA:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    VIRCAM:
+      Name: ESO-VISTA+VIRCAM
+      pixel_scale: 0.4
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: AIRMASS
+      mjd: MJD-MID
+      date: DATE-OBS
+      exptime: EXPTIME
+      ks: K
+      Ks: K
+      j: J
+      h: H
+PanSTARRs:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    default:
+      Name: PanSTARRs+default
+      pixel_scale: 0.4
+      filter_key_0: FILTER
+      gain: not_given_by_user
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: not_given_by_user
+      mjd: not_given_by_user
+      date: not_given_by_user
+      exptime: EXPTIME
+      i: i
+1m0-12:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    fa06:
+      Name: 1m0-12+fa06
+      pixel_scale: 0.38961259694171746
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      b: B
+      gp: g
+      rp: r
+      ip: i
+      v: V
+      B: B
+      V: V
+1m0-03:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    fa19:
+      Name: 1m0-03+fa19
+      pixel_scale: 0.38941340549278525
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      rp: r
+      b: B
+      ip: i
+      v: V
+      gp: g
+      B: B
+      V: V
+ESO-NTT:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    EFOSC:
+      Name: ESO-NTT+EFOSC
+      pixel_scale: 0.2405439293736248
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      g782: g
+      r784: r
+      z623: z
+      i705: i
+    SOFI:
+      Name: ESO-NTT+SOFI
+      pixel_scale: 0.292
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      J: J
+      H: H
+      Ks: K
+1m0-13:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    fa14:
+      Name: 1m0-13+fa14
+      pixel_scale: 0.3896617576533327
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      b: B
+      ip: i
+      rp: r
+      gp: g
+      v: V
+      B: B
+      V: V
+1m0-08:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    fa05:
+      Name: 1m0-08+fa05
+      pixel_scale: 0.38956352621124896
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      ip: i
+      b: B
+      gp: g
+      v: V
+      rp: r
+      B: B
+      V: V
+1m0-06:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    fa07:
+      Name: 1m0-06+fa07
+      pixel_scale: 0.38995151150059704
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      gp: g
+      ip: i
+      b: B
+      rp: r
+      v: V
+      B: B
+      V: V
+VLT:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    FORS2:
+      Name: VLT+FORS2
+      pixel_scale: 0.2520615175080228
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      z_special: z
+      b_high: B
+      r_special: R
+      v_high: V
+      i_bess: I
+      Z_SPECIAL: z
+      I_BESS: I
+      V_HIGH: V
+      B_HIGH: B
+      R_SPECIAL: R
+1m0-10:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    fa16:
+      Name: 1m0-10+fa16
+      pixel_scale: 0.3899889612376765
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      rp: r
+      gp: g
+      ip: i
+      b: B
+      v: V
+      B: B
+      V: V
+1m0-11:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    fa12:
+      Name: 1m0-11+fa12
+      pixel_scale: 0.38950944946209043
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      gp: g
+      b: B
+      ip: i
+      rp: r
+      v: V
+      B: B
+      V: V
+1m0-01:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    fa11:
+      Name: 1m0-01+fa11
+      pixel_scale: 0.3898663822457125
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      v: V
+      rp: r
+      ip: i
+      b: B
+      gp: g
+      V: V
+      B: B
+1m0-05:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    fa15:
+      Name: 1m0-05+fa15
+      pixel_scale: 0.38962988392618547
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      v: V
+      ip: i
+      gp: g
+      rp: r
+      b: B
+      V: V
+      B: B
+1m0-04:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    fa03:
+      Name: 1m0-04+fa03
+      pixel_scale: 0.3895307762265639
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      b: B
+      ip: i
+      gp: g
+      v: V
+      rp: r
+      B: B
+      V: V
+LS:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    IMAGER:
+      Name: LS+IMAGER
+      pixel_scale: 0.24999999999999986
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: not_given_by_user
+      mjd: MJD-OBS
+      date: DATE
+      exptime: EXPTIME
+      i: i
+      g: g
+      r: r
+      z: z
+Palomar Observatory:
+  INSTRUME:
+    ZTF/MOSAIC:
+      Name: Palomar Observatory+ZTF/MOSAIC
+      pixel_scale: 1.013
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: READNOI
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: OBSMJD
+      date: DEC_RATE
+      exptime: EXPTIME
+      ztf_r: r
+      ztf_g: g
+      ztf_i: i
+      ZTF_r: r
+      ZTF_g: g
+      ZTF_i: i
+Palomar 48-inch:
+  INSTRUME:
+    ZTF/MOSAIC:
+      pixel_scale: 1.0126686896883281
+      gain: GAIN
+      readnoise: READNOI
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: OBSMJD
+      date: DEC_RATE
+      exptime: EXPTIME
+      ztf_g: g
+      ztf_r: r
+      ztf_i: i
+      ZTF_g: g
+      ZTF_r: r
+      ZTF_i: i
+ZTF:
+  INSTRUME:
+    REF:
+      Name: ZTF+REF
+      pixel_scale: 1.0
+      filter_key_0: FILTER
+      gain: not_given_by_user
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: not_given_by_user
+      mjd: not_given_by_user
+      date: not_given_by_user
+      exptime: EXTEND
+      g: g
+      r: r
+      i: i
+    DEEPREF:
+      Name: ZTF+DEEPREF
+      pixel_scale: 1.0
+      filter_key_0: FILTER
+      gain: not_given_by_user
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: not_given_by_user
+      mjd: not_given_by_user
+      date: not_given_by_user
+      exptime: EXTEND
+      g: g
+SDSS:
+  INSTRUME:
+    SDSS:
+      Name: SDSS
+      pixel_scale: 0.213
+      filter_key_0: FILTER
+      gain: GAINCOR
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: not_given_by_user
+      mjd: not_given_by_user
+      date: DATE
+      exptime: EXPTIME
+      i: i
+      r: r
+ESO-VST:
+  INSTRUME:
+    OMEGACAM:
+      Name: ESO-VST+OMEGACAM
+      pixel_scale: 0.4
+      filter_key_0: FILTER
+      gain: GAINCOR
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: not_given_by_user
+      mjd: not_given_by_user
+      date: DATE
+      exptime: EXPTIME
+      u_sdss: u
+LEGACY:
+  INSTRUME:
+    SURVEY:
+      Name: LEGACY+SURVEY
+      pixel_scale: 0.262
+      filter_key_0: FILTER
+      gain: not_given_by_user
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: not_given_by_user
+      mjd: not_given_by_user
+      date: not_given_by_user
+      exptime: not_given_by_user
+      r: r
+      i: i
+      g: g
+PS1:
+  INSTRUME:
+    GPC1:
+      Name: PS1+GPC1
+      pixel_scale: 0.25
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: not_given_by_user
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      i: i
+      g: g
+      z: z
+      r: r
+      w: w
+      y: Y
+      filter_key_1: FPA.FILTERID
+      g.00000: g
+      filter_key_2: FPA.FILTERID
+      filter_key_3: FPA.FILTERID
+      filter_key_4: FPA.FILTERID
+      filter_key_5: FPA.FILTERID
+      filter_key_6: FPA.FILTERID
+      filter_key_7: FPA.FILTERID
+      filter_key_8: FPA.FILTERID
+      filter_key_9: FPA.FILTERID
+      filter_key_10: FPA.FILTERID
+      filter_key_11: FPA.FILTERID
+      filter_key_12: FPA.FILTERID
+      filter_key_13: FPA.FILTERID
+      filter_key_14: FPA.FILTERID
+      filter_key_15: FPA.FILTERID
+      filter_key_16: FPA.FILTERID
+      filter_key_17: FPA.FILTERID
+      filter_key_18: FPA.FILTERID
+      filter_key_19: FPA.FILTERID
+      filter_key_20: FPA.FILTERID
+Pan-STARRS1:
+  INSTRUME:
+    GPC1:
+      Name: Pan-STARRS1+GPC1
+      pixel_scale: 0.25
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: CELL.SATURATION
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: not_given_by_user
+      exptime: EXPTIME
+      w.00000: w
+      w.00002: w
+      i.00000: i
+      z.00000: z
+      r.00000: r
+      g.00000: g
+      y.00000: Y
+      W: w
+      Z: z
+      I: i
+      R: r
+      G: g
+      Y: y
+      z: z
+      w: w
+      i: i
+      r: r
+      y: y
+SLT:
+  INSTRUME:
+    Andor CCD/EMCCD (SDK2):
+      Name: SLT+Andor CCD/EMCCD (SDK2)
+      pixel_scale: 0.789
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RMSNOISE
+      saturate: SWCREATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      gp_astrodon_2018: g
+      gp_Astrodon_2018: g
+      rp_Astrodon_2018: r
+      ip_Astrodon_2018: i
+      zp_Astrodon_2018: z
+LOT:
+  INSTRUME:
+    Driver for Teledyne Princeton Instruments cameras:
+      Name: LOT+Driver for Teledyne Princeton Instruments cameras
+      pixel_scale: 0.38380222995032637
+      filter_key_0: FILTER
+      zp_Astrodon_2019: z
+      rp_Astrodon_2019: r
+      up_Astrodon_2017: u
+      ip_Astrodon_2019: i
+      gp_Astrodon_2019: g
+VISTA:
+  INSTRUME:
+    VIRCAM:
+      Name: VISTA+VIRCAM
+      pixel_scale: 0.34128213154421105
+      filter_key_0: FILTER
+      filter_key_1: SIMPLE
+      'True': 'True'
+      filter_key_2: SIMPLE
+      filter_key_3: SIMPLE
+      filter_key_4: SIMPLE
+      filter_key_5: SIMPLE
+      filter_key_6: SIMPLE
+      filter_key_7: SIMPLE
+      filter_key_8: SIMPLE
+      filter_key_9: SIMPLE
+      filter_key_10: SIMPLE
+Unknown_reference:
+  INSTRUME:
+    Unknown_instrument:
+      Name: Unknown_reference+Unknown_instrument
+      pixel_scale: 0.251889496576056
+      filter_key_0: FILTER
+      B: B
+      V: V
+      R: R
+      I: I
+      g: g
+      r: r
+      i: i
+      z: z
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+LBT:
+  INSTRUME:
+    LBC-BLUE:
+      Name: LBT+LBC-BLUE
+      pixel_scale: 0.22735990933142403
+      filter_key_0: FILTER
+      g_sdss: g
+      r_sdss: r
+      u_sdss: u
+      date: DATE-OBS
+      mjd: MJD-OBS
+      exptime: EXPTIME
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: AIRMASS
+    LBC-RED:
+      Name: LBT+LBC-RED
+      pixel_scale: 0.22704055882059598
+      filter_key_0: FILTER
+      z_sdss: z
+      i_sdss: i
+      r_sdss: r
+      date: DATE-OBS
+      mjd: MJD-OBS
+      exptime: EXPTIME
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: AIRMASS
+    MODS:
+      Name: LBT+MODS
+      pixel_scale: 0.12
+      filter_key_0: FILTER
+      g_sdss: g
+      r_sdss: r
+      date: DATE-OBS
+      mjd: MJD-OBS
+      exptime: EXPTIME
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: AIRMASS
+    LUCI:
+      Name: LBT+LUCI
+      pixel_scale: 0.119
+      filter_key_0: FILTER
+      J: J
+      H: H
+      Ks: K
+      date: DATE-OBS
+      mjd: MJD-OBS
+      exptime: EXPTIME
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: AIRMASS
+    LUCI1:
+      Name: LBT+LUCI1
+      pixel_scale: 0.118
+      filter_key_0: FILTER
+      J: J
+      H: H
+      Ks: K
+      date: DATE-OBS
+      mjd: MJD-OBS
+      exptime: EXPTIME
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: AIRMASS
+    LUCI2:
+      Name: LBT+LUCI2
+      pixel_scale: 0.119
+      filter_key_0: FILTER
+      J: J
+      H: H
+      Ks: K
+      date: DATE-OBS
+      mjd: MJD-OBS
+      exptime: EXPTIME
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: AIRMASS
+NOT:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    ALFOSC:
+      Name: NOT+ALFOSC
+      pixel_scale: 0.2139
+      filter_key_0: FILTER
+      g_sdss: g
+      r_sdss: r
+      i_sdss: i
+      z_sdss: z
+      date: DATE-OBS
+      mjd: MJD-OBS
+      exptime: EXPTIME
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: AIRMASS
+PanSTARRS1:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    IMAGER:
+      Name: PanSTARRS1+IMAGER
+      pixel_scale: 0.25
+      filter_key_0: FILTER
+      g: g
+      r: r
+      i: i
+      z: z
+      y: Y
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: AIRMASS

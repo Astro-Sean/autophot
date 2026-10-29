@@ -71,6 +71,11 @@ from functions import (
     SUPPORTED_PHOTOMETRIC_FILTERS,
 )
 from aperture import Aperture
+from filter_transformations import (
+    apply_filter_transformations,
+    transformable_bands,
+    transformations_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,9 +166,44 @@ CATALOG_MAGSYS = {
         "I": "vegamag",
     },
     "gaia_custom": "abmag",
-    "pan_starrs": "abmag",
-    "sdss": "abmag",
-    "legacy": "abmag",
+    "pan_starrs": {
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "Y": "abmag",
+        "w": "abmag",
+        "default": "abmag",
+        # BVRI synthesized by filter transformations are Vega-system.
+        "B": "vegamag",
+        "V": "vegamag",
+        "R": "vegamag",
+        "I": "vegamag",
+    },
+    "sdss": {
+        "u": "abmag",
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "default": "abmag",
+        "U": "vegamag",
+        "B": "vegamag",
+        "V": "vegamag",
+        "R": "vegamag",
+        "I": "vegamag",
+    },
+    "legacy": {
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "default": "abmag",
+        "B": "vegamag",
+        "V": "vegamag",
+        "R": "vegamag",
+        "I": "vegamag",
+    },
     "skymapper": "abmag",
     "refcat": {
         "g": "abmag",
@@ -222,6 +262,9 @@ def catalog_magsys(catalog_name, band=None):
         key = str(key).strip()
         if key in entry:
             return entry[key]
+    default = entry.get("default")
+    if default is not None:
+        return default
     systems = set(entry.values())
     return systems.pop() if len(systems) == 1 else "mixed"
 
@@ -3710,7 +3753,24 @@ class Catalog:
                     outputCatalog[col] = selectedCatalog[col].values
                     logger.debug("Copied %s directly from catalog", col)
                 else:
-                    logger.warning("Could not find column %s in catalog; available columns: %s", col, list(selectedCatalog.columns))
+                    _missing_band = col[:-4] if col.endswith("_err") else col
+                    _can_synth = (
+                        not col.endswith("_err")
+                        and transformations_enabled(self.input_yaml)
+                        and _missing_band
+                        in transformable_bands(
+                            catalogName
+                            if not isinstance(catalogName, dict)
+                            else self._resolve_catalog_for_filter(catalogName)
+                        )
+                    )
+                    if _can_synth:
+                        logger.info(
+                            "Column %s not in catalog; it will be synthesized by filter transformations",
+                            col,
+                        )
+                    else:
+                        logger.warning("Could not find column %s in catalog; available columns: %s", col, list(selectedCatalog.columns))
 
             # --- Retrieve all available filters ---
             baseDatabase = os.path.join(
@@ -3735,6 +3795,32 @@ class Catalog:
                         outputCatalog[col] = selectedCatalog[col].values
                     # NOTE: no case-insensitive fallback - it would conflate
                     # different photometric systems (e.g. SDSS r vs Cousins R).
+
+            # --- Published band transformations ---------------------------
+            # Optionally synthesize bands the survey does not carry (e.g.
+            # Johnson-Cousins BVRI for SDSS/PS1/LEGACY) so the image filter
+            # and its color-term bands can still be populated.
+            if transformations_enabled(self.input_yaml):
+                try:
+                    _ft_name = catalogName
+                    if isinstance(_ft_name, dict):
+                        _ft_name = self._resolve_catalog_for_filter(_ft_name)
+                    _ft_report = apply_filter_transformations(
+                        outputCatalog, _ft_name
+                    )
+                    for _fb, (_fl, _fn) in sorted(_ft_report.items()):
+                        logger.info(
+                            "Synthesized %s-band magnitudes for %d sources (%s)",
+                            _fb,
+                            _fn,
+                            _fl,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "allow_filter_transformations is set but the "
+                        "transformation failed: %s",
+                        exc,
+                    )
 
             # --- Early return if only updating names ---
             if update_names_only:
@@ -4508,6 +4594,10 @@ class Catalog:
                     if f"{c}_err" in csv_cols
                     and normalize_photometric_filter_name(c) is not None
                 }
+            # With transformations enabled a catalog also serves the bands
+            # it can synthesize (e.g. BVRI for sdss/panstarrs/legacy).
+            if cat_cfg.get("allow_filter_transformations", False):
+                bands_i |= set(transformable_bands(name))
             supported_bands[name] = bands_i
         return supported_bands, skipped
 

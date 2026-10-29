@@ -1,0 +1,32 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{natbib}
+\bibliographystyle{naturemag}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{Automated Photometric Reduction and Image Subtraction with SFFT}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{Photometric Data Reduction}
+
+All science and template images were processed through the AutoPhOT pipeline\cite{brennan2022autophot}. Following standard bias subtraction and flat fielding, astrometric calibration was performed using \texttt{astrometry.net}\cite{lang2010astrometry} to align the World Coordinate System to the Gaia DR3 reference frame\cite{gaia2023dr3}. Template images were aligned to the science frame using SCAMP\cite{bertin2006scamp} for astrometric refinement and SWarp\cite{bertin2010swarp} for resampling onto the science pixel grid, with distortion corrections applied for SIP and TPV polynomial terms. Alignment quality was verified through the rms scatter of matched sources. Point spread functions were constructed empirically using PhotUtils\cite{bradley2022photutils} from isolated, high signal-to-noise stellar sources identified by SExtractor\cite{bertin1996sextractor}. Image subtraction was performed using the Sparse Field Flux Transport algorithm\cite{russell2022sfft}, which determines an optimal convolution kernel to match the template PSF to the science image. The template was convolved to match the science PSF such that transient sources retain the science frame characteristics in the difference image. SFFT operates in either sparse-field or crowded-field mode depending on the stellar density. Photometric calibration was propagated through the subtraction process, and difference image quality was assessed via background statistics and photometric consistency of non-variable sources.
+
+Photometric calibration was performed using synthetic photometry from Gaia DR3 spectrophotometry. Reference star magnitudes in the target filter system were derived using GaiaXPy\cite{weiler2023gaiaxpy} to convolve the Gaia low-resolution spectra with filter transmission curves obtained from the Spanish Virtual Observatory (SVO) Filter Profile Service\cite{rodrigo2012svo}. This approach provides accurate synthetic magnitudes for calibration stars across a wide range of colours and spectral types, enabling consistent zero-point determination for each image.
+
+Limiting magnitudes were determined using a photometric injection and recovery framework. Artificial point sources with magnitudes spanning the expected detection threshold were generated using the empirical PSF and added at random positions across the difference image. The injection procedure accounts for the local background noise and PSF variation across the field. The $5\sigma$ limiting magnitude was defined as the faintest injected magnitude at which sources were recovered with signal-to-noise ratio $\geq 5$ and positional accuracy within $0.5$ pixels. This empirical approach captures the full depth of the observation including variations in sky background, image quality, and template subtraction residuals.
+
+\vspace{1em}
+\noindent\textbf{Code availability.} The reduction pipeline AutoPhOT is publicly available at \url{https://github.com/Astro-Sean/autophot}. SFFT is available at \url{https://github.com/thomasvrussell/sfft}. GaiaXPy is available at \url{https://gaia-dpci.github.io/GaiaXPy-website/}.
+
+\bibliography{references}
+
+\end{document}
