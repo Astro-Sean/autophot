@@ -18305,6 +18305,10 @@ class Templates:
         """Attempt HOTPANTS subtraction. Returns True on success."""
         logger.info("Starting HOTPANTS subtraction...")
         try:
+            # Bound early so the finally-block cleanup can compare paths
+            # even on the executable-check early returns below.
+            original_sci_path = scienceFpath
+            original_ref_path = templateFpath
             ts = self.input_yaml.get("template_subtraction", {})
             exe_cfg = ts.get("hotpants_exe_loc")
             exe = exe_cfg.strip() if isinstance(exe_cfg, str) else ""
@@ -18342,8 +18346,6 @@ class Templates:
                     return False
                 resolved_exe = which
 
-            original_sci_path = scienceFpath
-            original_ref_path = templateFpath
             scienceFpath = clean_fits_nans(scienceFpath, str(scienceDir))
             templateFpath = clean_fits_nans(templateFpath, str(scienceDir))
 

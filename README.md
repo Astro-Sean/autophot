@@ -22,7 +22,7 @@ AutoPhOT is a photometry pipeline for transients and variable sources, built on 
 It has been used in <!-- citation-count -->70<!-- /citation-count --> papers so far (updated: <!-- citation-date -->19-10-2026<!-- /citation-date -->) - [see them on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc).
 
 > [!NOTE]
-> AutoPhOT is developed and maintained by one person, a [full-time researcher](https://astro-sean.github.io/index.html) at [MPE](https://www.mpe.mpg.de/person/144270/1302618). If you hit a problem, please open an issue on GitHub and I will get to it as soon as I can.
+> AutoPhOT is developed and maintained by one person only. If you hit a problem, please open an issue on GitHub and I will get to it as soon as I can.
 
 <h2 align="center">What it does</h2>
 
@@ -90,7 +90,7 @@ A few things worth knowing up front:
 
 - `from autophot import list_parameters; list_parameters()` prints every config key and its default.
 - FITS headers must carry `TELESCOP`, `INSTRUME`, and a bandpass keyword (e.g. `FILTER`); images without them are skipped.
-- `config["nCPU"] = 4` (or `AUTOPHOT_NCPU=4`) processes images in parallel, each with its own log. Worker settings like `photometry.aperture_n_jobs` multiply `nCPU`, so keep the product at or below your core count.
+- `config["nCPU"] = 4` (or `AUTOPHOT_NCPU=4`, which takes precedence) processes images in parallel, each with its own log. Worker settings like `photometry.aperture_n_jobs` multiply `nCPU`, so keep the product at or below your core count. `nGPU` / `AUTOPHOT_NGPU` pins workers to GPUs round-robin.
 - `python batch_main.py -f im1.fits im2.fits -c config.yml --jobs 4` runs a file list without a driver script.
 
 <h2 align="center">Command-line tools</h2>
@@ -135,6 +135,7 @@ Gate thresholds live under `template_subtraction` (`alignment_max_offset_px`, `a
 | SFFT (default) | `sfft` | Spatially varying kernel; variable-star rejection; optional B-spline refinement |
 | HOTPANTS | `hotpants` | Classic kernel matching; build from source |
 | ZOGY | `zogy` | PSF-matched subtraction; built in, nothing to install |
+| Auto-select | `auto` | Picks ZOGY for well-sampled frames with matched PSFs, SFFT otherwise |
 
 Shared options under `template_subtraction`:
 
@@ -142,13 +143,13 @@ Shared options under `template_subtraction`:
 - `kernel_order`: SFFT kernel polynomial degree, or `"auto"` (default).
 - `inpaint_template_cores`: fill saturated template cores before subtraction.
 
-Sources on masked pixels are dropped before the kernel fit, and variable sources and the target itself are excluded from scale and PSF estimation. Every difference image gets a structured quality check - dipoles, bright-star residuals, background variation, autocorrelation, edge artifacts - written to the FITS header (`DIFFQUAL`, `DIFFQSCR`) and a `diff_quality_<base>.json` manifest.
+Sources on masked pixels are dropped before the kernel fit, and variable sources and the target itself are excluded from scale and PSF estimation. Residual dipoles at bright static cores are caught by `residual_artifact_mask` (on by default): they are masked only when a subpixel misregistration model explains the paired positive/negative lobes, and protected positions - the target plus any variable or additional targets - are never masked. Every alignment attempt is recorded in an `Alignment_<base>.json` manifest next to the science image.
 
-Set `do_subtraction: True`, then place one template FITS per filter in `fits_dir/templates/<filter>_template/` (`prepare_template_directory()` builds the layout for you).
+Set `do_subtraction: True`, then place one template FITS per filter in `fits_dir/templates/<filter>_template/` - `prepare_template_directory()` builds the layout for you, and `download_panstarrs_template()`, `download_sdss_template()`, `download_legacy_template()`, and `download_2mass_template()` in `templates.py` can fetch them for you.
 
 <h2 align="center">Photometry</h2>
 
-The PSF is an empirical ePSF built with photutils; oversampling is raised automatically on undersampled images (FWHM < 2.5 px). PSF stars are cut on saturation, elongation, isolation, FWHM consistency, and concentration, plus an FFT check for close companions.
+The PSF is an empirical ePSF built with photutils; `photometry.oversample_psf: True` switches on adaptive oversampling for undersampled images. PSF stars are cut on saturation, elongation, isolation, FWHM consistency, and concentration, plus an FFT check for close companions.
 
 | Fitter | Config | When to use |
 |--------|--------|-------------|
@@ -157,6 +158,8 @@ The PSF is an empirical ePSF built with photutils; oversampling is raised automa
 | emcee (MCMC) | `perform_emcee_fitting_s2n: 10` | S/N below threshold; Bayesian uncertainties, adaptive chains |
 
 On difference images, `photometry.check_inverted_image: True` recovers a fading source as a negative PSF dip; those rows carry an `_inverted_fit` flag.
+
+Other transients in the frame can be photometered alongside the main target: set `additional_targets` (names resolved via TNS/SIMBAD) or `additional_targets_ra_dec` (explicit [RA, Dec] pairs).
 
 <h2 align="center">Catalogs</h2>
 

@@ -2990,8 +2990,9 @@ class AutomatedPhotometry:
                         for _c in _AUTO_CATALOGS:
                             if _c not in _AUTO_EXCLUDED:
                                 _push(_c)
-                        # Gaia sits last: excluded from the bulk auto scan to
-                        # protect the archive, but still a valid last resort.
+                        # Gaia is already in the scan list; the explicit
+                        # push keeps it as a valid last resort even if it
+                        # is re-excluded from the bulk scan later.
                         _push("gaia")
                         return _ordered
 

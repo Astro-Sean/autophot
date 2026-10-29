@@ -3273,6 +3273,7 @@ def _centroid_sources_with_error_impl(
     centroid_kwargs = {k: v for k, v in kwargs.items() if k in spec.parameters}
 
     xcentroids, ycentroids, xerrs, yerrs = [], [], [], []
+    n_fully_masked = 0
 
     for xp, yp in zip(xpos, ypos, strict=True):
         slices_large, slices_small = overlap_slices(
@@ -3288,9 +3289,15 @@ def _centroid_sources_with_error_impl(
         )
 
         if np.all(mask_cutout):
-            raise ValueError(
-                f"Cutout for source at ({xp:.1f}, {yp:.1f}) is fully masked."
-            )
+            # A fully masked cutout has no centroid information; mark it
+            # NaN like a failed fit and continue so one bad source does
+            # not abort centroids for the rest of the list.
+            n_fully_masked += 1
+            xcentroids.append(np.nan)
+            ycentroids.append(np.nan)
+            xerrs.append(np.nan)
+            yerrs.append(np.nan)
+            continue
 
         centroid_kwargs["mask"] = mask_cutout
         err_arr = centroid_kwargs.get("error")
@@ -3319,6 +3326,13 @@ def _centroid_sources_with_error_impl(
         ycentroids.append(ycen + slices_large[0].start)
         xerrs.append(xerr)
         yerrs.append(yerr)
+
+    if n_fully_masked:
+        logger.debug(
+            "%d of %d centroid cutouts were fully masked; centroids set to NaN.",
+            n_fully_masked,
+            len(xpos),
+        )
 
     return (
         np.array(xcentroids),

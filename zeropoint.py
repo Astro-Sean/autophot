@@ -306,6 +306,18 @@ class Zeropoint:
             _fb_flags = []
             if not np.isfinite(median_zp):
                 _fb_flags.append("non-finite zeropoint")
+            # A zeropoint anchored on one or two stars is not a
+            # calibration: report it, but never as trustworthy.
+            _fb_min = int(
+                (self.input_yaml.get("zeropoint", {}) or {}).get(
+                    "min_source_no", 3
+                )
+            )
+            if n_d < _fb_min:
+                _fb_flags.append(
+                    f"too few calibrators ({n_d} < {_fb_min}) for a "
+                    "trustworthy fallback zeropoint"
+                )
             zp_params[flux_type] = {
                 "zeropoint": median_zp,
                 "zeropoint_error": mad_zp,
@@ -633,7 +645,9 @@ class Zeropoint:
         )
         if vmask.sum() < 2:
             logger.warning(
-                "%s: only %s valid sources; skipping.", flux_type, vmask.sum()
+                "%s: only %s valid sources; skipping model fit.",
+                flux_type,
+                vmask.sum(),
             )
             return None
 
@@ -644,6 +658,51 @@ class Zeropoint:
             catmag_err[vmask],
             vmask,
         )
+
+    def _sparse_source_zeropoint(
+        self, clean_catalog: pd.DataFrame, flux_type: str, use_filter: str
+    ):
+        """
+        Direct median-delta zeropoint for a flux type whose clean_catalog
+        rows are too sparse or incomplete for _finite_vmask (< 2 rows).
+
+        A single calibrator still anchors a zeropoint; the model fitters
+        (MCMC/ODR/RANSAC) are the only parts that need >= 2 points.
+
+        Returns
+        -------
+        (entry, ok_mask) or (None, None)
+            ``entry`` is the _fallback_zeropoint dict for ``flux_type``
+            (reliability flags included).  ``ok_mask`` marks the
+            clean_catalog rows that produced the estimate so callers can
+            retain them as inliers.
+        """
+        if clean_catalog is None or len(clean_catalog) == 0:
+            return None, None
+        fcol = f"flux_{flux_type}"
+        if (
+            fcol not in clean_catalog.columns
+            or use_filter not in clean_catalog.columns
+        ):
+            return None, None
+        flux = pd.to_numeric(
+            clean_catalog[fcol], errors="coerce"
+        ).to_numpy(dtype=float)
+        catmag = pd.to_numeric(
+            clean_catalog[use_filter], errors="coerce"
+        ).to_numpy(dtype=float)
+        ok = np.isfinite(flux) & (flux > 0) & np.isfinite(catmag)
+        if not np.any(ok):
+            return None, None
+        entry = (
+            self._fallback_zeropoint(clean_catalog[ok], use_filter).get(
+                flux_type
+            )
+            or {}
+        )
+        if not np.isfinite(entry.get("zeropoint", np.nan)):
+            return None, None
+        return entry, ok
 
     # -----------------------------------------------------------------------
     # Public: quality filter
@@ -724,12 +783,59 @@ class Zeropoint:
                 )
                 n_def = int(_d.sum())
                 if n_def > 0:
-                    sources = sources.loc[~_d].copy()
-                    logger.info(
-                        "Dropped %d defect-overlapping sources; %d remain.",
-                        n_def,
-                        len(sources),
+                    # Keep-floor for sparse fields: dropping every flagged
+                    # row can empty the calibrator pool entirely, and a
+                    # defect-adjacent source still constrains the ZP
+                    # better than no calibrator at all.  The resulting ZP
+                    # is flagged unreliable by the fit.
+                    _min_keep = int(
+                        zp_cfg.get("defect_reject_min_keep", 3)
                     )
+                    n_unflagged = len(sources) - n_def
+                    n_rescue = min(n_def, max(0, _min_keep - n_unflagged))
+                    if n_rescue <= 0:
+                        sources = sources.loc[~_d].copy()
+                        logger.info(
+                            "Dropped %d defect-overlapping sources; %d remain.",
+                            n_def,
+                            len(sources),
+                        )
+                    else:
+                        _flag_pos = np.flatnonzero(_d.to_numpy())
+                        _snr_col = next(
+                            (
+                                c
+                                for c in ("threshold", "snr", "SNR")
+                                if c in sources.columns
+                            ),
+                            None,
+                        )
+                        if _snr_col is not None:
+                            _score = pd.to_numeric(
+                                sources[_snr_col], errors="coerce"
+                            ).to_numpy(dtype=float)
+                            _flag_pos = _flag_pos[
+                                np.argsort(
+                                    -np.nan_to_num(
+                                        _score[_flag_pos], nan=-np.inf
+                                    ),
+                                    kind="stable",
+                                )
+                            ]
+                        _rescue = np.zeros(len(sources), dtype=bool)
+                        _rescue[_flag_pos[:n_rescue]] = True
+                        sources = sources.loc[
+                            (~_d.to_numpy()) | _rescue
+                        ].copy()
+                        logger.warning(
+                            "Only %d unflagged calibrators; keeping %d "
+                            "highest-S/N defect-overlapping sources "
+                            "(defect_reject_min_keep=%d) rather than "
+                            "emptying the ZP calibrator pool.",
+                            n_unflagged,
+                            n_rescue,
+                            _min_keep,
+                        )
 
             if not filter_col:
                 logger.warning(
@@ -990,6 +1096,46 @@ class Zeropoint:
                 & (~psf_q_mask)
             )
             cleaned = sources.loc[mask].copy()
+
+            # Keep-floor on the combined mask: each individual cut is
+            # reasonable, but on a sparse field their union can empty the
+            # calibrator pool.  Rescue the highest-S/N rows that could
+            # still calibrate - a finite catalog magnitude is required
+            # and definitively saturated rows stay excluded; everything
+            # else is a soft quality preference.  The fit flags the
+            # result unreliable.
+            _min_keep = int(zp_cfg.get("clean_min_keep", 3))
+            n_rescue = _min_keep - len(cleaned)
+            if n_rescue > 0:
+                _resc_eligible = (
+                    valid_mags.to_numpy()
+                    & (~mask.to_numpy())
+                    & (~saturated_mask)
+                )
+                _resc_idx = np.flatnonzero(_resc_eligible)
+                if _resc_idx.size:
+                    _resc_idx = _resc_idx[
+                        np.argsort(
+                            -np.nan_to_num(
+                                _det_snr[_resc_idx], nan=-np.inf
+                            ),
+                            kind="stable",
+                        )
+                    ]
+                    _resc = np.zeros(len(sources), dtype=bool)
+                    _resc[_resc_idx[:n_rescue]] = True
+                    mask = mask | _resc
+                    cleaned = sources.loc[mask].copy()
+                    logger.warning(
+                        "Only %d calibrators survive all quality cuts; "
+                        "keeping %d highest-S/N rejected sources "
+                        "(clean_min_keep=%d) rather than leaving the ZP "
+                        "fit with too few calibrators.",
+                        int((~_resc & mask.to_numpy()).sum()),
+                        int(_resc.sum()),
+                        _min_keep,
+                    )
+
             detail = f" (removed: {', '.join(removed_parts)})" if removed_parts else ""
             logger.info(
                 "ZP cleaning: %d -> %d sources%s",
@@ -1254,6 +1400,65 @@ class Zeropoint:
         if not np.isfinite(best) or best <= 0:
             return np.nan, np.nan
         return best, float(min(n, (sig / best) ** 2))
+
+    @staticmethod
+    def _spatial_gradient_check(resid, x, y):
+        """
+        Linear-plane diagnostic fit of ZP residuals across the detector.
+
+        A ZP residual that tilts smoothly across the field is the
+        signature of mis-stacking or mis-registration rather than
+        random noise; this diagnostic quantifies that tilt.
+
+        Returns
+        -------
+        (tilt_mag, tilt_sigma) : (float, float)
+            tilt_mag  - magnitude change of the residual across the
+                        full detector extent, |a|*dx + |b|*dy.
+            tilt_sigma - significance of that tilt from the plane-fit
+                        covariance with a MAD-based residual scale
+                        (a population-level diagnostic; per-point
+                        errors are intentionally ignored).  NaNs when
+                        the geometry or sample is unusable.
+        """
+        r = np.asarray(resid, float)
+        x = np.asarray(x, float)
+        y = np.asarray(y, float)
+        ok = np.isfinite(r) & np.isfinite(x) & np.isfinite(y)
+        r, x, y = r[ok], x[ok], y[ok]
+        n = r.size
+        dx = float(np.ptp(x)) if n else 0.0
+        dy = float(np.ptp(y)) if n else 0.0
+        if n < 4 or dx <= 0.0 or dy <= 0.0:
+            return np.nan, np.nan
+
+        # Recentre for conditioning.
+        xs = x - float(np.median(x))
+        ys = y - float(np.median(y))
+        A = np.vstack([xs, ys, np.ones(n)]).T
+        try:
+            coef, _, _, _ = np.linalg.lstsq(A, r, rcond=None)
+            resid_fit = r - A @ coef
+            _sig = 1.4826 * float(
+                np.median(np.abs(resid_fit - np.median(resid_fit)))
+            )
+            if not np.isfinite(_sig) or _sig <= 0:
+                return np.nan, np.nan
+            cov = np.linalg.inv(A.T @ A) * (_sig**2)
+        except np.linalg.LinAlgError:
+            return np.nan, np.nan
+
+        a, b = float(coef[0]), float(coef[1])
+        tilt = abs(a) * dx + abs(b) * dy
+        var_tilt = max(
+            cov[0, 0] * dx**2
+            + cov[1, 1] * dy**2
+            + 2.0 * abs(cov[0, 1]) * dx * dy,
+            0.0,
+        )
+        sig_tilt = float(np.sqrt(var_tilt))
+        tilt_sigma = float(tilt / sig_tilt) if sig_tilt > 0 else np.inf
+        return float(tilt), tilt_sigma
 
     def _odr_slope1_fit(
         self,
@@ -2736,6 +2941,24 @@ class Zeropoint:
                 )
                 pack = self._finite_vmask(clean_catalog, flux_type, use_filter)
                 if pack is None:
+                    # A sparse calibrator pool still anchors a zeropoint:
+                    # take the direct median estimate (flagged unreliable)
+                    # instead of leaving 'unknown' in the header.
+                    _entry, _ok = self._sparse_source_zeropoint(
+                        clean_catalog, flux_type, use_filter
+                    )
+                    if _entry is not None:
+                        fit_params[flux_type].update(_entry)
+                        inlier_masks_full[flux_type] |= _ok
+                        logger.warning(
+                            "%s: too few valid calibrators for a model "
+                            "fit; using direct zeropoint ZP=%.3f +/- %.3f "
+                            "(N=%s, unreliable).",
+                            flux_type,
+                            float(_entry["zeropoint"]),
+                            float(_entry.get("zeropoint_error", np.nan)),
+                            _entry.get("n_sources", 0),
+                        )
                     continue
                 flux, flux_err, catmag_v, catmag_err_v, vmask = pack
 
@@ -3322,7 +3545,139 @@ class Zeropoint:
                     fit_params[flux_type]["mag_dependent_zp_bins"] = (
                         _md_result["zps_per_bin"]
                     )
-                fit_params[flux_type]["reliable"] = True
+
+                # ---- Per-image reliability gates -----------------------
+                # A finite ZP is not automatically a trustworthy ZP.
+                # These gates implement the reliability policy
+                # documented in default_input.yml (min_inlier_fraction,
+                # max_inlier_mad, spatial_gradient_min_mag,
+                # spatial_corr_min_neff_frac, magnitude_dependent_zp)
+                # and surface via the "reliable" column of the
+                # Zeropoint table and the ZP_<m>_OK header card.  They
+                # are pure reporting: the fitted ZP itself is not
+                # modified.
+                _rel_flags: list[str] = []
+                if not np.isfinite(ZP):
+                    _rel_flags.append(
+                        "fit returned a non-finite zeropoint"
+                    )
+                else:
+                    # A zeropoint anchored on fewer than min_source_no
+                    # calibrators is an estimate, not a calibration:
+                    # report it but never as trustworthy (same flag as
+                    # _fallback_zeropoint).
+                    _min_src = int(zp_cfg.get("min_source_no", 3))
+                    if _min_src > 0 and _n_inl < _min_src:
+                        _rel_flags.append(
+                            f"too few calibrators ({_n_inl} < {_min_src}) "
+                            "for a trustworthy zeropoint"
+                        )
+                    # No tight 1:1 locus: an inlier sigmaMAD above
+                    # max_inlier_mad means the deltas do not scatter
+                    # about a single calibration level.
+                    _sig_mad = (
+                        float(1.4826 * _mad_in)
+                        if np.isfinite(_mad_in)
+                        else np.nan
+                    )
+                    _max_mad = float(zp_cfg.get("max_inlier_mad", 0.3))
+                    if (
+                        np.isfinite(_sig_mad)
+                        and _max_mad > 0
+                        and _sig_mad > _max_mad
+                    ):
+                        _rel_flags.append(
+                            f"inlier scatter {_sig_mad:.3f} mag exceeds "
+                            f"max_inlier_mad {_max_mad:.3f}: no coherent "
+                            "1:1 calibration locus on this image"
+                        )
+                    # Minority locus: the fitter converged on a small
+                    # subset of the finite calibrators (e.g. locked on
+                    # a contaminating cluster).
+                    _min_frac = float(
+                        zp_cfg.get("min_inlier_fraction", 0.5)
+                    )
+                    if (
+                        _min_frac > 0
+                        and n_sources > 0
+                        and _n_inl < _min_frac * n_sources
+                    ):
+                        _rel_flags.append(
+                            f"minority inlier locus: {_n_inl}/{n_sources} "
+                            "finite calibrators kept, below "
+                            f"min_inlier_fraction {_min_frac:.2f}; the "
+                            "fit did not find a dominant locus"
+                        )
+                    # Spatial gradient: a >3-sigma ZP residual tilt
+                    # across the detector is the signature of
+                    # mis-stacking / mis-registration.
+                    _grad_mag, _grad_sig = np.nan, np.nan
+                    if _calibrator_xy is not None and _n_inl >= 4:
+                        _grad_idx = np.flatnonzero(vmask)[inlier_short]
+                        _grad_mag, _grad_sig = self._spatial_gradient_check(
+                            np.asarray(delta_mag)[inlier_short] - ZP,
+                            _calibrator_xy[0][_grad_idx],
+                            _calibrator_xy[1][_grad_idx],
+                        )
+                        _grad_min = float(
+                            zp_cfg.get("spatial_gradient_min_mag", 0.1)
+                        )
+                        if np.isfinite(_grad_mag) and _grad_min > 0:
+                            _grad_signif = (
+                                not np.isfinite(_grad_sig) or _grad_sig > 3.0
+                            )
+                            if _grad_mag > _grad_min and _grad_signif:
+                                _rel_flags.append(
+                                    f"spatial gradient: ZP residual tilt "
+                                    f"{_grad_mag:.3f} mag across the "
+                                    f"detector ({_grad_sig:.1f} sigma) "
+                                    "exceeds spatial_gradient_min_mag "
+                                    f"{_grad_min:.3f}"
+                                )
+                    # Spatially correlated calibrator residuals: the
+                    # block-bootstrap effective calibrator count far
+                    # below N means neighbouring stars share a
+                    # field-dependent deviation.
+                    _neff_frac = float(
+                        zp_cfg.get("spatial_corr_min_neff_frac", 0.25)
+                    )
+                    if (
+                        np.isfinite(_n_eff)
+                        and _neff_frac > 0
+                        and _n_inl > 0
+                        and _n_eff < _neff_frac * _n_inl
+                    ):
+                        _rel_flags.append(
+                            "calibrator residuals spatially correlated: "
+                            f"n_eff={_n_eff:.0f} of {_n_inl} inliers is "
+                            "below spatial_corr_min_neff_frac "
+                            f"{_neff_frac:.2f}"
+                        )
+                    # Magnitude-dependent ZP: the slope=1 assumption
+                    # fails at some magnitudes (non-linearity, an
+                    # unapplied colour term, PSF brightness
+                    # dependence).
+                    if fit_params[flux_type].get(
+                        "mag_dependent_zp_significant", False
+                    ):
+                        _mdz_slope = fit_params[flux_type].get(
+                            "mag_dependent_zp", np.nan
+                        )
+                        _rel_flags.append(
+                            "magnitude-dependent ZP: trend "
+                            f"{_mdz_slope:+.4f} mag/mag (slope=1 "
+                            "assumption fails; check non-linearity, "
+                            "colour term, PSF model)"
+                        )
+
+                fit_params[flux_type]["reliable"] = not _rel_flags
+                if _rel_flags:
+                    fit_params[flux_type]["reliability_flags"] = _rel_flags
+                    logger.warning(
+                        "[%s] ZP flagged unreliable: %s",
+                        flux_type,
+                        "; ".join(_rel_flags),
+                    )
 
                 global_xmins.append(xs[0])
                 global_xmaxs.append(xs[-1])
@@ -3508,6 +3863,62 @@ class Zeropoint:
                         else 0,
                         "reliable": True,
                     }
+
+            # AP/PSF disagreement gate (ap_psf_disagree_min_mag):
+            # aperture and PSF fluxes of the same stars must agree on
+            # the zeropoint once the external aperture correction is
+            # accounted for (ZP_AP - ZP_PSF ~ aperture_correction by
+            # construction).  A residual offset the correction cannot
+            # explain means one of the two flux scales is broken, so
+            # both fits are flagged.  The comparison uses the
+            # statistical error components only: the configured field
+            # systematic is common-mode between the two measurements
+            # of the same stars and cancels in the difference.
+            _dz_ap = fit_params.get("AP", {}).get("zeropoint", np.nan)
+            _dz_psf = fit_params.get("PSF", {}).get("zeropoint", np.nan)
+            if np.all(np.isfinite([_dz_ap, _dz_psf, _e_ap, _e_psf])):
+                _apcorr_dz = float(
+                    self.input_yaml.get("aperture_correction", 0.0) or 0.0
+                )
+                if not np.isfinite(_apcorr_dz):
+                    _apcorr_dz = 0.0
+                _apcorr_dz_err = float(
+                    self.input_yaml.get("aperture_correction_err", 0.0)
+                    or 0.0
+                )
+                _dz_resid = (_dz_ap - _dz_psf) - _apcorr_dz
+                _dz_sigma = float(
+                    np.sqrt(_e_ap**2 + _e_psf**2 + _apcorr_dz_err**2)
+                )
+                _dz_min = float(
+                    (self.input_yaml.get("zeropoint", {}) or {}).get(
+                        "ap_psf_disagree_min_mag", 0.05
+                    )
+                )
+                _dz_tol = (
+                    max(3.0 * _dz_sigma, _dz_min)
+                    if _dz_min > 0
+                    else 3.0 * _dz_sigma
+                )
+                if np.isfinite(_dz_sigma) and abs(_dz_resid) > _dz_tol:
+                    _dz_flag = (
+                        f"AP/PSF zeropoint disagreement: ZP_AP - ZP_PSF = "
+                        f"{_dz_ap - _dz_psf:+.3f} mag differs from the "
+                        f"aperture correction {_apcorr_dz:+.3f} mag by "
+                        f"{_dz_resid:+.3f} mag (tolerance {_dz_tol:.3f}); "
+                        "one of the two flux scales is inconsistent"
+                    )
+                    logger.warning(
+                        "AP/PSF zeropoint disagreement: %s", _dz_flag
+                    )
+                    for _m in ("AP", "PSF"):
+                        _fp_dz = fit_params.get(_m) or {}
+                        if "zeropoint" not in _fp_dz:
+                            continue
+                        _fp_dz["reliable"] = False
+                        _fp_dz.setdefault("reliability_flags", []).append(
+                            _dz_flag
+                        )
 
             if global_xmins:
                 xr = max(global_xmaxs) - min(global_xmins)
@@ -3797,20 +4208,36 @@ class Zeropoint:
                     )
                     pack = self._finite_vmask(clean_catalog, flux_type, use_filter)
                     if pack is None:
-                        zp_params[flux_type] = {
-                            "zeropoint": np.nan,
-                            "zeropoint_error": np.nan,
-                            "zeropoint_error_stat": np.nan,
-                            "zeropoint_scatter": np.nan,
-                            "bootstrap_se": np.nan,
-                            "n_eff": np.nan,
-                            "n_sources": 0,
-                            "n_inliers": 0,
-                            "fit_method": "sigma_clip",
-                            "reliable": False,
-                            "reliability_flags": ["no finite calibrators"],
-                            "has_color_term": False,
-                        }
+                        _entry, _ok = self._sparse_source_zeropoint(
+                            clean_catalog, flux_type, use_filter
+                        )
+                        if _entry is not None:
+                            zp_params[flux_type] = dict(_entry)
+                            inlier_masks_full[flux_type] |= _ok
+                            logger.warning(
+                                "%s: too few valid calibrators for "
+                                "sigma-clip; using direct zeropoint "
+                                "ZP=%.3f +/- %.3f (N=%s, unreliable).",
+                                flux_type,
+                                float(_entry["zeropoint"]),
+                                float(_entry.get("zeropoint_error", np.nan)),
+                                _entry.get("n_sources", 0),
+                            )
+                        else:
+                            zp_params[flux_type] = {
+                                "zeropoint": np.nan,
+                                "zeropoint_error": np.nan,
+                                "zeropoint_error_stat": np.nan,
+                                "zeropoint_scatter": np.nan,
+                                "bootstrap_se": np.nan,
+                                "n_eff": np.nan,
+                                "n_sources": 0,
+                                "n_inliers": 0,
+                                "fit_method": "sigma_clip",
+                                "reliable": False,
+                                "reliability_flags": ["no finite calibrators"],
+                                "has_color_term": False,
+                            }
                         continue
 
                     flux, flux_err, catmag_v, catmag_err_v, vmask = pack
@@ -4070,6 +4497,51 @@ class Zeropoint:
                         mad_zp,
                     )
 
+                    # Per-image reliability gates (same policy as
+                    # fit_zeropoint): a finite ZP from a locus with no
+                    # coherent 1:1 relation must not read as
+                    # trustworthy.
+                    _rel_flags: list[str] = []
+                    if not np.isfinite(zp_final):
+                        _rel_flags.append("zeropoint is not finite")
+                    _min_src = int(zp_cfg.get("min_source_no", 3))
+                    if _min_src > 0 and n_inl < _min_src:
+                        _rel_flags.append(
+                            f"too few calibrators ({n_inl} < {_min_src}) "
+                            "for a trustworthy zeropoint"
+                        )
+                    _sig_mad = (
+                        float(1.4826 * mad_zp)
+                        if np.isfinite(mad_zp)
+                        else np.nan
+                    )
+                    _max_mad = float(zp_cfg.get("max_inlier_mad", 0.3))
+                    if (
+                        np.isfinite(_sig_mad)
+                        and _max_mad > 0
+                        and _sig_mad > _max_mad
+                    ):
+                        _rel_flags.append(
+                            f"inlier scatter {_sig_mad:.3f} mag exceeds "
+                            f"max_inlier_mad {_max_mad:.3f}: no coherent "
+                            "1:1 calibration locus on this image"
+                        )
+                    _min_frac = float(
+                        zp_cfg.get("min_inlier_fraction", 0.5)
+                    )
+                    _n_finite_pre = len(delta_mag_full)
+                    if (
+                        _min_frac > 0
+                        and _n_finite_pre > 0
+                        and n_inl < _min_frac * _n_finite_pre
+                    ):
+                        _rel_flags.append(
+                            f"minority inlier locus: {n_inl}/"
+                            f"{_n_finite_pre} finite calibrators survived "
+                            "clipping, below min_inlier_fraction "
+                            f"{_min_frac:.2f}"
+                        )
+
                     zp_params[flux_type].update(
                         {
                             "zeropoint": zp_final,
@@ -4085,12 +4557,21 @@ class Zeropoint:
                             "n_sources": n_inl,
                             "n_inliers": n_inl,
                             "fit_method": "sigma_clip",
-                            "reliable": True,
+                            "reliable": not _rel_flags,
                             "has_color_term": bool(
                                 has_color_term and fixed_color_coeffs is not None
                             ),
                         }
                     )
+                    if _rel_flags:
+                        zp_params[flux_type]["reliability_flags"] = (
+                            _rel_flags
+                        )
+                        logger.warning(
+                            "[%s] ZP flagged unreliable: %s",
+                            flux_type,
+                            "; ".join(_rel_flags),
+                        )
                     if has_color_term and fixed_color_coeffs is not None:
                         # Extract slope for backwards compatibility (piecewise
                         # stores a (slope1, slope2) tuple at index 1).

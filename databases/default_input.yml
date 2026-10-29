@@ -300,6 +300,10 @@ default_input:
     # MCMC (emcee) tuning for PSF fits.
     perform_emcee_fitting_s2n: 10 # float --- If >0, run emcee PSF/MAG fitting when target PSF S/N is below this value. Uses PSF fitting S/N (not aperture S/N) for the trigger. Set to 0 to disable MCMC entirely.
     check_inverted_image: False # bool --- If True, also fit target on image multiplied by -1 to detect negative PSF dips (fading sources in template subtraction).
+    use_poisson_likelihood_fitter: False # bool --- If True, fit PSFs by maximising the Poisson likelihood instead of least-squares. Best suited to low-count data; requires non-negative counts, so the fitter falls back to LSQ with a warning on difference images or data containing negative pixels.
+    poisson_maxiters: 20 # int --- Maximum iterations for the Poisson likelihood fitter.
+    poisson_lnl_tolerance: 0.0001 # float --- Log-likelihood convergence tolerance for the Poisson fitter.
+    poisson_max_step_cuts: 7 # int --- Maximum step-halving cuts allowed during Poisson fitter line search.
     aperture_n_jobs: 1 # int --- Worker processes for aperture photometry loops (per-image). 1 = serial; >1 can speed up large source lists.
     photutils_n_threads: 1 # int --- Threads for photutils compiled paths (AperturePhotometry, LocalBackground, Background2D, SourceCatalog, deblend_sources; PSFPhotometry only benefits on free-threaded CPython). 1 = serial.
     emcee_nwalkers: 32 # int --- Number of emcee walkers (minimum 2*ndim recommended; 32 balances quality and speed).
@@ -348,7 +352,7 @@ default_input:
     # old distortion is NOT preserved.
     preserve_distortion_on_redo: False # bool --- If True, attempt to preserve existing non-linear distortion keywords (PV/SIP) when redoing WCS.
     compare_input_vs_solved_wcs: True # bool --- Log input-vs-solved WCS quality/parameter deltas on solve-field matched stars.
-    keep_input_wcs_if_solved_not_better: True # bool --- If solve-field WCS is not better than input on matched points, keep original full input WCS for this frame.
+    keep_input_wcs_if_solved_not_better: True # bool --- Keep the original input WCS when the fresh solve is not demonstrably better: worse matched-point residuals, or a degraded solve that drops the input's distortion model (e.g. TAN-only result replacing SIP/TPV input when too few stars matched for the tweak order).
     trust_input_distortion_model: False # bool --- If True, keep input distortion model (PV/SIP) and solve only linear WCS terms.
     fit_wcs_from_points_max_points: 1000 # int --- Max matched points to use in the refined SIP fit.
     fit_wcs_from_points_max_match_lines: 20000 # int --- Max solve-field .match file lines to scan for matched source pairs.
@@ -455,12 +459,15 @@ default_input:
     TNS_BOT_API: null # str|null --- Optional TNS API key/token (if querying TNS).
 
   catalog:
-    use_catalog: null # str|dict|null --- Catalog backend for calibration (e.g. `"refcat"`), per-filter mapping (e.g. `{"ugriz":"sdss","UBVRI":"apass","default":"gaia"}`), or `"auto"` to pick the best catalog per band automatically (Gaia is excluded from the auto scan - bulk queries overload the archive).
+    use_catalog: null # str|dict|null --- Catalog backend for calibration (e.g. `"refcat"`), per-filter mapping (e.g. `{"ugriz":"sdss","UBVRI":"apass","default":"gaia"}`), or `"auto"` to pick the best catalog per band automatically.
       # `"auto"` scans every image footprint, downloads each feasible catalog once, and keeps
       # the backend with the most usable calibrators (on-detector, finite magnitude inside the
       # zeropoint bright/faint window) per band. A per-band coverage CSV is written under
       # `<wdir>/catalog_queries/`. Only resolvable backends are tried: refcat needs MAST
-      # credentials, custom needs catalog_custom_fpath.
+      # credentials, custom needs catalog_custom_fpath, tic is untested and skipped.
+      # Gaia joins the scan but is gated by a cheap COUNT(*) of XP-spectra sources in the
+      # reachable cone - the ADQL + GaiaXPy synthetic-photometry build only runs when the
+      # field can plausibly supply enough calibrators.
       # Mapping keys are flexible band sets: single bands ("g"), family groups ("ugriz","UBVRI","JHK"),
       # mixed sets ("uRI" = u+R+I), and separators ("u,RI"). Case is exact - "r" is SDSS r, "R" is
       # Johnson-Cousins R - so "bvri" is rejected (write "BVRI"); only keys with no valid band letters
@@ -529,6 +536,8 @@ default_input:
     variable_source_match_radius_pix: 5.0 # float --- Matching radius (pixels) for removing known variable sources (from SIMBAD) from the ZP calibration catalog. Sources within this distance of a known variable are excluded from the zeropoint fit.
     defect_exclusion_fwhm: 2.0 # float --- Calibrators within this distance (in FWHM units) of hardware_defects_mask pixels (trails, bad columns, saturation, MaxiMask classes) get a defect_flag and are rejected from the ZP fit: masked pixels in the aperture/PSF footprint bias measured flux even when the fit converged. The flag is kept on the CALIB output catalog. Set to 0 to disable flagging.
     reject_defect_sources: True # bool --- Drop defect_flagged calibrators in Zeropoint.clean() (see defect_exclusion_fwhm). When False the flag is still written to the CALIB catalog but not used as a rejection.
+    defect_reject_min_keep: 3 # int --- Keep-floor for reject_defect_sources: if dropping defect-flagged calibrators would leave fewer than this, the highest-S/N flagged sources are kept instead. Prevents the defect veto from emptying the ZP calibrator pool on sparse fields; rescued sources still produce a ZP flagged unreliable.
+    clean_min_keep: 3 # int --- Keep-floor for the combined quality mask in Zeropoint.clean(): if the union of all cuts would leave fewer than this, the highest-S/N rejected sources with a finite catalog magnitude are rescued (saturated rows stay excluded). Prevents sparse fields from losing all calibrators to a pile-up of soft cuts.
     min_source_no: 3 # int --- Minimum number of sources required for color-term fitting.
     mcmc_n_walkers: 32 # int --- Number of emcee walkers for ZP MCMC fit. 32 is sufficient for the 2-parameter (ZP + f_out) model. Increase for better posterior sampling.
     mcmc_n_burn: 500 # int --- Burn-in steps for ZP MCMC. 500 is sufficient for the simple 2-parameter model.
