@@ -1,0 +1,39 @@
+2021gmj:
+  class_ads_bibcodes: 2021TNSCR.849....1P, 2021TNSCR.864....1C
+  dec: '+53:30:30.31'
+  decdeg: 53.508419
+  decdeg_err: 2.7777777777778e-05
+  discmagfilter:
+    family: Sloan
+    id: '22'
+    name: r
+  discoverer: S. Valenti, D.J.Sand, S. Wyatt, M. Lundquist, R. Amaro, J. Andrews,
+    J. Jencson, Y. Dong, S. Davis, D. Janzen
+  discoverer_internal_name: ''
+  discovery_ads_bibcode: 2021TNSTR.837....1V
+  discovery_data_source:
+    group_name: DLT40
+    groupid: 30
+  discoverydate: '2021-03-20 07:40:48.000'
+  discoverymag: 15.982
+  end_prop_period: null
+  host_redshift: null
+  hostname: null
+  internal_names: ',ZTF21aaqgmjt,ATLAS21izq,PS21cjy,Gaia21fms'
+  name_prefix: SN
+  object_type:
+    id: 10
+    name: SN II
+  objid: 79703
+  objname: 2021gmj
+  public: 1
+  ra: '10:38:47.270'
+  radeg: 159.696958
+  radeg_err: 2.7777777777778e-05
+  redshift: 0.0034
+  reporter: Prof. Stefano Valenti
+  reporterid: 57
+  reporting_group:
+    group_name: DLT40
+    groupid: 30
+  source: user

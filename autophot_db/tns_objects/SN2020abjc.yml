@@ -1,0 +1,41 @@
+SN2020abjc:
+  class_ads_bibcodes: 2020TNSCR3871....1B
+  dec: '+14:07:16.62'
+  decdeg: 14.1212839616
+  decdeg_err: 0
+  discmagfilter:
+    family: ZTF
+    id: '111'
+    name: r
+  discoverer: ' I. Perez-Fournon, C. Jimenez Angel, F. Poidevin (IAC & ULL), R. Shirley
+    (Univ. of Southampton), R. Marques-Chaves (Univ. of Geneva), S. Geier (GRANTECAN
+    & IAC), Y. Shu (MPA), S. Rodney, J. Roberts-Pierel (Univ. of South Carolina),
+    A. Bolton (NSF''s NOIRLab), S. Chakrabarti, P. Craig, and B. Alamiri (RIT)'
+  discoverer_internal_name: ZTF20acpyldh
+  discovery_ads_bibcode: 2020TNSTR3620....1P
+  discovery_data_source:
+    group_name: ZTF
+    groupid: 48
+  discoverydate: '2020-10-21 11:43:00.000'
+  discoverymag: 20.804
+  end_prop_period: null
+  host_redshift: null
+  hostname: null
+  internal_names: ZTF20acpyldh,PS20mny,ATLAS21atn
+  name_prefix: SN
+  object_type:
+    id: 18
+    name: SLSN-I
+  objid: 72118
+  objname: 2020abjc
+  public: 1
+  ra: '09:28:00.274'
+  radeg: 142.001139801
+  radeg_err: 0
+  redshift: 0.219
+  reporter: Dr. Ismael Perez-Fournon
+  reporterid: 977
+  reporting_group:
+    group_name: SGLF
+    groupid: 81
+  source: user
