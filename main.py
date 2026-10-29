@@ -3518,22 +3518,38 @@ def run_photometry():
         apply_solved_to_fits = input_yaml["wcs"].get("apply_solved_to_fits", True)
         wcs_updated = False
         while input_yaml["wcs"].get("redo_wcs", False):
-            with SuppressStdout():
-                updated_header = imageWCS_obj.plate_solve(
-                    solvefield_exe=input_yaml["wcs"].get("solve_field_exe_loc"),
-                    n_detected_sources=(
-                        len(FWHMSources) if FWHMSources is not None else None
-                    ),
+            allow_fallback_on_fail = bool(
+                input_yaml.get("wcs", {}).get(
+                    "allow_fallback_to_existing_on_solve_fail", False
                 )
+            )
+            with SuppressStdout():
+                try:
+                    updated_header = imageWCS_obj.plate_solve(
+                        solvefield_exe=input_yaml["wcs"].get("solve_field_exe_loc"),
+                        n_detected_sources=(
+                            len(FWHMSources) if FWHMSources is not None else None
+                        ),
+                    )
+                except Exception as solve_exc:
+                    # A crashing solver must not kill a frame that already
+                    # carries usable astrometry; fall back to it.
+                    if existingWCS and allow_fallback_on_fail:
+                        logging.warning(
+                            "Plate solve raised %r; falling back to pre-existing WCS",
+                            solve_exc,
+                        )
+                        from functions import update_header_from_wcs
+
+                        update_header_from_wcs(header, WCSvalues_old)
+                        invalidate_wcs_cache()
+                        updated_header = header
+                    else:
+                        raise
             if updated_header is None or (
                 isinstance(updated_header, float) and np.isnan(updated_header)
             ):
                 logging.info("Plate solve returned NaN or None")
-                allow_fallback_on_fail = bool(
-                    input_yaml.get("wcs", {}).get(
-                        "allow_fallback_to_existing_on_solve_fail", False
-                    )
-                )
                 if existingWCS and allow_fallback_on_fail:
                     logging.info("Falling back to pre-existing WCS")
                     from functions import update_header_from_wcs
@@ -6532,7 +6548,8 @@ def run_photometry():
                     if _n_def:
                         logging.info(
                             "Flagged %d catalog sources within %.1f px (%.2f FWHM) "
-                            "of masked pixels; they are excluded from the ZP fit.",
+                            "of masked pixels; they are excluded from the ZP fit "
+                            "unless the sparse-pool floor applies.",
                             _n_def,
                             _zp_def_r,
                             _zp_def_fwhm,

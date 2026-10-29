@@ -30,7 +30,7 @@ from astropy.table import Table
 
 # --- Local Imports (optional) ---
 try:
-    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, cap_console_lines, STATUS  # type: ignore
+    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, copy_wcs_from_header, cap_console_lines, STATUS  # type: ignore
 except (ModuleNotFoundError, ImportError):
     # Minimal fallback for environments missing the full photometry stack.
     STATUS = logging.INFO  # degrade STATUS to INFO when functions is absent
@@ -50,6 +50,9 @@ except (ModuleNotFoundError, ImportError):
 
     def remove_wcs_from_header(header):
         raise RuntimeError("remove_wcs_from_header not available: functions module not found")
+
+    def copy_wcs_from_header(src_header, dst_header):
+        raise RuntimeError("copy_wcs_from_header not available: functions module not found")
 
     def clean_subprocess_log(path):
         return None
@@ -659,7 +662,9 @@ def _extract_match_points_from_solve_field(
             if len(pix_x) >= max_points:
                 break
 
-    if len(pix_x) < 10:
+    # Sparse fields can legitimately have <10 matched stars; a coarse
+    # median/p95 comparison is still useful for the keep-input decision.
+    if len(pix_x) < 5:
         return None
 
     return (
@@ -744,7 +749,7 @@ def _extract_corr_points_from_solve_field(
     ra = ra[finite]
     dec = dec[finite]
 
-    if len(x) < 10:
+    if len(x) < 5:
         return None
 
     # Cap the point count for the downstream fit; sample evenly by row order.
@@ -986,6 +991,37 @@ def _has_nonzero_sip(header: fits.Header) -> bool:
                 except (ValueError, TypeError):
                     pass
                 break
+    return False
+
+
+def _has_nonzero_distortion(header: fits.Header) -> bool:
+    """
+    Check whether a FITS header carries any non-zero non-linear distortion
+    coefficients, covering SIP (A_/B_/AP_/BP_) and TPV-style polynomial
+    terms (PVi_j, D_i_j, DP_i_j).
+
+    Used to decide whether a solved WCS downgrades the distortion model of
+    the input WCS (e.g. a TAN-only solve replacing a TPV/SIP input).
+    """
+    if header is None:
+        return False
+    coeff_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_")
+    for key in header.keys():
+        ks = str(key)
+        if ks.endswith("_ORDER"):
+            continue
+        is_coeff = ks.startswith(coeff_stems)
+        if not is_coeff and ks.startswith("PV") and "_" in ks:
+            # PVi_j distortion terms (TPV/SCAMP convention); plain "PV"
+            # or keywords like PVERSION are not coefficients.
+            is_coeff = True
+        if not is_coeff:
+            continue
+        try:
+            if float(header[ks]) != 0.0:
+                return True
+        except (ValueError, TypeError):
+            pass
     return False
 
 
@@ -2268,6 +2304,11 @@ class WCSSolver:
                 "    Then ensure 'solve-field' is on PATH or set\n"
                 "    wcs.solve_field_exe_loc in your YAML."
             )
+            if get_wcs(self.header) is not None:
+                logger.warning(
+                    "Falling back to existing header WCS (no solver available)."
+                )
+                return self.header
             return np.nan
         else:
             logger.debug("Using solve-field executable: %s", solvefield_exe)
@@ -2504,8 +2545,9 @@ class WCSSolver:
                 new_fits_temp,
                 "--wcs",
                 str(wcs_file),
-                "--scamp",
-                scamp_temp,
+                # --scamp output is never consumed by the pipeline and its
+                # writer raises a harmless but alarming "Column FLUX not
+                # found" fitstable error on SExtractor-derived .axy tables.
                 "--corr",
                 corr_temp,
                 "--rdls",
@@ -3415,6 +3457,18 @@ class WCSSolver:
                     os.remove(f)
 
             # --- Update FITS header with WCS from the .wcs.fits file ---
+            # Snapshot the input header so a failed or degraded merge can
+            # restore the original WCS instead of returning NaN.
+            input_header_backup = self.header.copy()
+            _input_header_wcs_valid = get_wcs(input_header_backup) is not None
+
+            def _restore_input_wcs_inplace() -> None:
+                # Restore WCS keywords on the SAME header object: callers
+                # hold a reference to self.header, so rebinding it would
+                # leave them pointing at a WCS-stripped header.
+                remove_wcs_from_header(self.header)
+                copy_wcs_from_header(input_header_backup, self.header)
+
             try:
                 with fits.open(wcs_file) as wcs_hdul:
                     wcs_header = wcs_hdul[0].header
@@ -3460,6 +3514,12 @@ class WCSSolver:
                                 wcs_cfg.get("fit_wcs_from_points_max_sep_arcsec", 3.0)
                             ),
                         )
+                    keep_if_not_better = bool(
+                        wcs_cfg.get(
+                            "keep_input_wcs_if_solved_not_better", True
+                        )
+                    )
+                    clear_gain = False
                     if diag_points is not None:
                         x_d, y_d, ra_d, dec_d = diag_points
                         matched_points_for_refine = (
@@ -3528,11 +3588,6 @@ class WCSSolver:
                                     float(med_sv),
                                     float(p95_sv),
                                 )
-                        keep_if_not_better = bool(
-                            wcs_cfg.get(
-                                "keep_input_wcs_if_solved_not_better", True
-                            )
-                        )
                         solved_not_better = bool(
                             np.isfinite(med_in)
                             and np.isfinite(med_sv)
@@ -3549,6 +3604,36 @@ class WCSSolver:
                                 float(p95_in),
                                 float(med_sv),
                                 float(p95_sv),
+                            )
+                    # Distortion downgrade: a degraded solve (e.g. TAN-only
+                    # because too few stars matched for the requested SIP
+                    # order) must not strip a usable input distortion model.
+                    # This fires even when too few matched points exist for
+                    # the input-vs-solved comparison to run.
+                    _input_has_distortion = _has_nonzero_distortion(self.header)
+                    _solved_has_distortion = _has_nonzero_distortion(wcs_header)
+                    if (
+                        keep_if_not_better
+                        and not keep_input_wcs_full
+                        and not force_preserve_input_distortion
+                        and input_wcs_for_compare is not None
+                        and _input_has_distortion
+                        and not _solved_has_distortion
+                    ):
+                        if clear_gain:
+                            force_preserve_input_distortion = True
+                            logger.info(
+                                "Solved WCS lost the input distortion model but "
+                                "shows a clear matched-point gain: preserving "
+                                "input distortion with solved linear terms."
+                            )
+                        else:
+                            keep_input_wcs_full = True
+                            logger.warning(
+                                "Solved WCS has no usable distortion model but "
+                                "the input WCS does (too few matched stars for "
+                                "the requested tweak order): keeping original "
+                                "input WCS for this frame."
                             )
                     # --- Robust linear WCS refinement from matched stars ---
                     # Refit the solved WCS linear terms (center, scale, rotation)
@@ -3878,6 +3963,15 @@ class WCSSolver:
                     merged_wcs = get_wcs(self.header)
                     if merged_wcs is None:
                         logger.warning("Merged WCS is None after get_wcs - cannot validate pixel scale")
+                        if _input_header_wcs_valid:
+                            logger.warning(
+                                "Restoring original input WCS (merged solve unusable)."
+                            )
+                            try:
+                                _restore_input_wcs_inplace()
+                            except Exception:
+                                return np.nan
+                            return self.header
                     else:
                         try:
                             scale = pixel_area_scale_arcsec(
@@ -3895,6 +3989,16 @@ class WCSSolver:
                                     "Merged WCS has invalid pixel scale (%.6f); rejecting",
                                     scale,
                                 )
+                                if _input_header_wcs_valid:
+                                    logger.warning(
+                                        "Restoring original input WCS "
+                                        "(merged solve invalid)."
+                                    )
+                                    try:
+                                        _restore_input_wcs_inplace()
+                                    except Exception:
+                                        return np.nan
+                                    return self.header
                                 return np.nan
                         except Exception as ev:
                             log_warning_from_exception(
@@ -3929,4 +4033,25 @@ class WCSSolver:
                         except OSError:
                             pass
                 logger.exception("Failed to update header from WCS file: %s", e)
+                if _input_header_wcs_valid:
+                    # The merge may have stripped WCS keywords from
+                    # self.header before failing; restore the input WCS so
+                    # the image keeps its original astrometry.
+                    logger.warning(
+                        "Restoring original input WCS after merge failure."
+                    )
+                    try:
+                        _restore_input_wcs_inplace()
+                    except Exception:
+                        return np.nan
+                    try:
+                        # A partial merge may already be on disk; rewrite so
+                        # the file matches the restored header.
+                        safe_fits_write(
+                            self.fpath, self.image, self.header,
+                            output_verify="ignore",
+                        )
+                    except Exception:
+                        pass
+                    return self.header
                 return np.nan
