@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Optimized and human-readable version of the `prepare` class for AutoPHOT.
-This class handles:
-- Loading and validating configuration
-- Cleaning and filtering image files
-- Checking catalogs, TNS, and filters
-- Finding and validating template files
-
-All function names and core logic are preserved.
+Input preparation for AutoPHOT: load configuration, clean and validate the
+FITS file list, check catalogs/TNS/filters, and discover template files.
 """
 
 import os
@@ -16,19 +10,19 @@ import sys
 import pathlib
 import logging
 import glob
+import hashlib
 import shutil
 import numpy as np
 import pandas as pd
 import yaml
+from collections import defaultdict
 from functools import reduce
 from typing import List, Dict, Optional, Tuple, Union
 
 import astropy.wcs as WCS
 
-# Project-specific helpers (assumed to be in your codebase)
 from functions import (
     AutophotYaml,
-    border_msg,
     get_header,
     get_instrument_config,
     load_telescope_config,
@@ -37,11 +31,75 @@ from functions import (
     normalize_photometric_filter_name,
     sanitize_photometric_filters,
     parse_supported_filter_group_key,
+    invalid_use_catalog_keys,
+    SUPPORTED_PHOTOMETRIC_FILTERS,
+    log_step,
     log_warning_from_exception,
+    ascii_table,
+    ascii_kv,
+    border_msg,
 )
 from check import FitsInfo
-from tns import get_coords
-from wcs import get_wcs
+from tns import get_coords, get_coords_simbad
+from wcs import get_wcs, pixel_area_scale_arcsec
+
+
+def _dedupe_identical_files(file_list):
+    """Remove byte-identical copies from a list of file paths.
+
+    Two files are duplicates when they share a size and full content hash;
+    hashing is only attempted within size-colliding groups so unique-size
+    files cost nothing.  For each duplicate set the first path in sorted
+    order is kept.
+
+    Parameters
+    ----------
+    file_list : list of str
+
+    Returns
+    -------
+    (kept, dropped) : tuple
+        ``kept`` preserves the original order minus duplicates; ``dropped``
+        is a list of ``(kept_path, dropped_path)`` pairs for logging.
+    """
+    by_size = {}
+    for path in file_list:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = None
+        by_size.setdefault(size, []).append(path)
+
+    if not any(len(v) > 1 for v in by_size.values()):
+        return list(file_list), []
+
+    content_owner = {}
+    dropped = []
+    dropped_set = set()
+
+    def _content_key(path, size):
+        h = hashlib.md5()  # noqa: S324 - identity hash, not security
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return (size, h.digest())
+
+    for size, paths in by_size.items():
+        if len(paths) < 2 or size is None:
+            continue
+        for path in sorted(paths):
+            try:
+                key = _content_key(path, size)
+            except OSError:
+                continue
+            if key in content_owner:
+                dropped.append((content_owner[key], path))
+                dropped_set.add(path)
+            else:
+                content_owner[key] = path
+
+    kept = [p for p in file_list if p not in dropped_set]
+    return kept, dropped
 
 
 class Prepare:
@@ -58,20 +116,18 @@ class Prepare:
             default_input (Dict): Configuration dictionary for the AutoPHOT pipeline.
         """
         self.input_yaml = default_input
+        # Absolute path -> resolved band for every file that passed
+        # check_filters(); consumed by the catalog optimizer to attach a
+        # band to each image footprint.
+        self.file_filter_map: Dict[str, str] = {}
         logging.basicConfig(
             level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
+            format="%(message)s",
         )
-        # Ensure console messages have unique color highlights.
+        # Colored level names on console output.
         root_logger = logging.getLogger()
         for handler in root_logger.handlers:
-            handler.setFormatter(
-                ColoredLevelFormatter(
-                    fmt="%(asctime)s - %(levelname)s - %(message)s",
-                    datefmt="%H:%M:%S",
-                    use_color=True,
-                )
-            )
+            handler.setFormatter(ColoredLevelFormatter(use_color=True))
         self.logger = logging.getLogger(__name__)
 
     # --- Load Configuration ---
@@ -83,17 +139,10 @@ class Prepare:
         Returns:
             Dict: Parsed YAML configuration.
         """
-        # Get the directory of this script
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        # Construct the path to the default input YAML
         default_input_path = os.path.join(script_dir, "databases", "default_input.yml")
-        # Load and return the YAML configuration
         default_input_yaml = AutophotYaml(default_input_path, "default_input").load()
-        logging.info(
-            border_msg(
-                f"Default input loaded from: {default_input_path}", body="-", corner="+"
-            )
-        )
+        logging.info(log_step(f"Default input: {default_input_path}"))
         return default_input_yaml
 
     def clean(self) -> List[str]:
@@ -119,18 +168,16 @@ class Prepare:
         files_removed = 0
         total_candidates = 0
         valid_files = []
-        # Normalize the FITS directory path
         self.input_yaml["fits_dir"] = self.input_yaml["fits_dir"].rstrip("/")
-        # Set up the root output directory, mirroring main.py's layout:
-        # new_output_dir = os.path.join(os.path.dirname(fits_dir),
-        #                               os.path.basename(fits_dir) + f"_{outdir_name}")
+        # Output root must mirror main.py's layout:
+        # dirname(fits_dir) / (basename(fits_dir) + "_" + outdir_name)
         fits_dir = self.input_yaml["fits_dir"]
         new_dir = f"_{self.input_yaml['outdir_name']}"
         base_dir = os.path.basename(fits_dir).replace(new_dir, "")
         work_loc = f"{base_dir}{new_dir}"
         work_root = os.path.join(os.path.dirname(fits_dir), work_loc)
         pathlib.Path(work_root).mkdir(parents=True, exist_ok=True)
-        # Define forbidden substrings and valid extensions
+        # Skip pipeline products (subtractions, templates, WCS/PSF/catalog outputs).
         forbidden_substrings = [
             "subtraction",
             "template",
@@ -153,12 +200,11 @@ class Prepare:
             return (
                 filename.endswith(valid_extensions)
                 and not any(substring in filename for substring in forbidden_substrings)
-                and not any(substring in root for substring in forbidden_substrings)
+                and not any(substring in root for substring in root_forbidden_substrings)
             )
 
-        # Determine the root directory to search (templates or main FITS directory).
-        # `template_subtraction.prepare_templates` was removed from the public config;
-        # keep the behavior behind a safe lookup so older configs won't crash.
+        # `template_subtraction.prepare_templates` was removed from the public
+        # config; the .get default keeps older configs working.
         ts_cfg = self.input_yaml.get("template_subtraction") or {}
         prepare_templates = bool(ts_cfg.get("prepare_templates", False))
         search_root = (
@@ -166,17 +212,23 @@ class Prepare:
             if prepare_templates
             else self.input_yaml["fits_dir"]
         )
+        # The templates/ root path itself contains the "template" token, which
+        # would otherwise veto every candidate file when deliberately
+        # scanning it.  The filename check still applies.
+        root_forbidden_substrings = forbidden_substrings
+        if prepare_templates:
+            root_forbidden_substrings = [
+                s for s in forbidden_substrings if s != "template"
+            ]
 
-        # Populate the list of valid files
         for root, _, files in os.walk(search_root):
             for filename in files:
                 if _is_valid_file(filename, root):
                     filepath = os.path.join(root, filename)
                     total_candidates += 1
-                    # Construct the expected output directory for this file.
-                    # IMPORTANT: mirror main.py's directory logic so that restart
-                    # checks are consistent and we don't re-run files that already
-                    # have OUTPUT_{base}.csv.
+                    # IMPORTANT: mirror main.py's directory logic so restart
+                    # checks agree and files with an existing Output_{base}.csv
+                    # are not re-run.
                     base = (
                         os.path.splitext(filename)[0]
                         .replace(" ", "_")
@@ -208,41 +260,69 @@ class Prepare:
                         # CSV; use the generated template catalog as the completion
                         # marker.
                         output_csv_path = os.path.join(
-                            cur_dir, f"imageCalib_template_{base}.csv"
+                            cur_dir, f"ImageCalib_Template_{base}.csv"
                         )
                     else:
                         output_csv_path = os.path.join(
-                            cur_dir, f"OUTPUT_{base}.csv"
+                            cur_dir, f"Output_{base}.csv"
                         )
 
-                    # Honour the restart flag (default True = redo all):
-                    # - restart=True  -> include file (reprocess even if output exists)
-                    # - restart=False -> skip files that already have OUTPUT_{base}.csv
-                    if os.path.exists(output_csv_path) and not self.input_yaml.get(
-                        "restart", True
-                    ):
-                        files_removed += 1
-                        continue
+                    valid_files.append((filepath, output_csv_path))
 
-                    valid_files.append(filepath)
+        # Drop byte-identical inputs before the restart check: a copy under a
+        # different name must not be processed just because its own output
+        # directory does not exist yet.
+        n_duplicates = 0
+        output_lookup = {fp: out for fp, out in valid_files}
+        candidate_files = [fp for fp, _ in valid_files]
+        if candidate_files:
+            dedup_enabled = bool(
+                (self.input_yaml.get("preprocessing") or {}).get(
+                    "deduplicate_input_files", True
+                )
+            )
+            if dedup_enabled:
+                candidate_files, dup_map = _dedupe_identical_files(candidate_files)
+                n_duplicates = len(dup_map)
+                for kept, dropped in dup_map:
+                    self.logger.warning(
+                        "Duplicate input skipped: %s (identical to %s)",
+                        os.path.basename(dropped),
+                        os.path.basename(kept),
+                    )
+
+        # restart=False skips files whose output CSV already exists.
+        pending_files = []
+        for filepath in candidate_files:
+            if (
+                os.path.exists(output_lookup.get(filepath, ""))
+                and not self.input_yaml.get("restart", True)
+            ):
+                files_removed += 1
+                continue
+            pending_files.append(filepath)
+
         restart = self.input_yaml.get("restart", True)
+        self.logger.info(border_msg("Scanning FITS files"))
         self.logger.info(
             "Restart = %s -> %s",
             restart,
             (
-                "reprocess all files (ignore existing OUTPUT_{base}.csv)"
+                "reprocess all files (ignore existing Output_{base}.csv)"
                 if restart
-                else "skip files that already have OUTPUT_{base}.csv (only process new/unprocessed)"
+                else "skip files that already have Output_{base}.csv (only process new/unprocessed)"
             ),
         )
         self.logger.info(
-            "Scanned %d FITS file(s): %d completed (OUTPUT present), %d pending.",
+            "Scanned %d FITS file(s): %d completed (OUTPUT present), "
+            "%d duplicate(s) skipped, %d pending.",
             total_candidates,
             files_removed,
-            len(valid_files),
+            n_duplicates,
+            len(pending_files),
         )
 
-        return valid_files
+        return pending_files
 
     # --- Check Files ---
     def check_files(self, flist: List[str], template_files: bool = False) -> List[str]:
@@ -261,6 +341,177 @@ class Prepare:
             input_yaml=self.input_yaml, flist=flist, template_files=template_files
         ).check()
 
+    # --- Validate FITS Headers ---
+    def validate_fits_headers(self, flist: List[str], template_files: bool = False) -> List[str]:
+        """
+        Review all FITS files for required header keywords.
+
+        Critical keywords (file rejected if missing):
+            FILTER (or alias: FILTERS, FLTRNAM, FILNAM1, FILTNAM1, FILTER1)
+
+        TELESCOP and INSTRUME are already checked by ``check_files`` (FitsInfo),
+        so they are NOT re-checked here to avoid redundant I/O.
+
+        Important keywords (file flagged with warning, user asked to continue):
+            EXPTIME (or alias), GAIN (or alias, unless telescope.yml provides
+            a numeric gain), MJD-OBS or DATE-OBS (or alias),
+            WCS keywords (CRPIX + CRVAL + CTYPE at minimum)
+
+        Args:
+            flist: List of FITS file paths to validate.
+            template_files: If True, relax checks for template images
+                (FILTER may be inferred from path; EXPTIME may be absent).
+
+        Returns:
+            List of file paths that passed validation.
+        """
+        FILTER_ALIASES = ["FILTER", "FILTERS", "FLTRNAM", "FILNAM1", "FILTNAM1", "FILTER1", "FILTER2", "FILTERID", "INSFILTE"]
+        IMPORTANT_KEYS = {
+            "EXPTIME": ["EXPTIME", "EXPOSURE", "TEXP", "EXPTIME0", "TEXPTIME", "INTTIME", "EXPTIM"],
+            "GAIN": ["GAIN", "EGAIN", "CONADU", "CELL.GAIN", "DET.GAIN"],
+            "MJD/DATE": ["MJD-OBS", "MJD_OBS", "MJD", "MJDSTART", "OBSMJD", "DATE-OBS", "DATEOBS", "UTC-OBS", "OBS-DATE"],
+        }
+        WCS_REQUIRED = ["CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CTYPE1", "CTYPE2"]
+
+        self.logger.info(border_msg(f"FITS header validation: {len(flist)} files"))
+
+        # Check if telescope.yml provides a numeric gain for any instrument,
+        # in which case missing GAIN header keyword is not a warning.
+        gain_provided_by_telescope_yml = False
+        try:
+            tele_data = load_telescope_config(self.input_yaml.get("wdir", "."))
+            for _tele, tele_block in tele_data.items():
+                if not isinstance(tele_block, dict):
+                    continue
+                for _block_key, inst_block in tele_block.items():
+                    if not isinstance(inst_block, dict):
+                        continue
+                    for _inst, inst_cfg in inst_block.items():
+                        if not isinstance(inst_cfg, dict):
+                            continue
+                        gain_val = inst_cfg.get("gain")
+                        if isinstance(gain_val, (int, float)) and gain_val > 0:
+                            gain_provided_by_telescope_yml = True
+                            break
+        except Exception:
+            pass
+
+        rejected = []
+        warnings_list = []
+        accepted = []
+
+        for fpath in flist:
+            is_template = template_files or ("templates" in os.path.normpath(fpath))
+            reasons = []
+
+            try:
+                header = get_header(fpath)
+            except Exception as e:
+                reasons.append(f"Cannot read FITS header: {e}")
+                rejected.append((fpath, reasons))
+                continue
+
+            if not header:
+                reasons.append("Empty or unreadable FITS header")
+                rejected.append((fpath, reasons))
+                continue
+
+            # --- Critical: FILTER (or alias) ---
+            # Templates may have FILTER inferred from path by main.py, so only
+            # reject if no alias is present AND it's not a template.
+            has_filter = any(alias in header for alias in FILTER_ALIASES)
+            if not has_filter:
+                filter_val = None
+                for alias in FILTER_ALIASES:
+                    if alias in header:
+                        filter_val = header[alias]
+                        break
+                if filter_val is not None and isinstance(filter_val, str) and filter_val.strip():
+                    has_filter = True
+
+            if not has_filter and not is_template:
+                reasons.append(
+                    f"missing critical keyword FILTER (tried: {', '.join(FILTER_ALIASES[:5])})"
+                )
+
+            if reasons:
+                rejected.append((fpath, reasons))
+                continue
+
+            # --- Important keywords (warnings only) ---
+            file_warnings = []
+            for label, aliases in IMPORTANT_KEYS.items():
+                found = any(alias in header for alias in aliases)
+                if not found:
+                    if is_template and label == "EXPTIME":
+                        continue
+                    if label == "GAIN" and gain_provided_by_telescope_yml:
+                        continue
+                    file_warnings.append(f"missing {label} (tried: {', '.join(aliases[:4])})")
+
+            # --- WCS keywords ---
+            missing_wcs = [k for k in WCS_REQUIRED if k not in header]
+            if missing_wcs:
+                # CD matrix or CDELT can substitute for each other, but CTYPE/CRPIX/CRVAL are mandatory
+                has_cd = "CD1_1" in header and "CD2_2" in header
+                has_cdelt = "CDELT1" in header and "CDELT2" in header
+                if not (has_cd or has_cdelt):
+                    file_warnings.append(
+                        f"missing WCS keywords: {', '.join(missing_wcs)}"
+                    )
+
+            if file_warnings:
+                warnings_list.append((fpath, file_warnings))
+
+            accepted.append(fpath)
+
+        if rejected:
+            self.logger.warning(
+                ascii_table(
+                    f"FITS header validation: {len(rejected)} file(s) REJECTED",
+                    ["File", "Reason"],
+                    [
+                        [os.path.basename(fpath), "; ".join(reasons)]
+                        for fpath, reasons in rejected
+                    ],
+                )
+            )
+
+        if warnings_list:
+            self.logger.warning(
+                ascii_table(
+                    f"FITS header validation: {len(warnings_list)} file(s) "
+                    "with MISSING important keywords",
+                    ["File", "Issue"],
+                    [
+                        [os.path.basename(fpath), "; ".join(warns)]
+                        for fpath, warns in warnings_list
+                    ],
+                )
+            )
+
+            if not self.input_yaml.get("validate_fits_headers_non_interactive", False):
+                try:
+                    response = input(
+                        f"\n  {len(warnings_list)} file(s) have missing important header keywords.\n"
+                        f"  These files may cause issues during processing.\n"
+                        f"  Continue anyway? [y/N]: "
+                    ).strip().lower()
+                    if response not in ("y", "yes"):
+                        self.logger.info("User chose to stop. Exiting.")
+                        sys.exit("Stopped: FITS header validation failed (missing important keywords).")
+                    self.logger.info("User chose to continue despite missing keywords.")
+                except (EOFError, OSError):
+                    self.logger.info(
+                        "Non-interactive mode: continuing despite missing important keywords."
+                    )
+
+        self.logger.info(
+            "FITS header validation complete: %d accepted, %d rejected, %d warnings.",
+            len(accepted), len(rejected), len(warnings_list),
+        )
+        return accepted
+
     # --- Check Catalog ---
     def check_catalog(self) -> List[str]:
         """
@@ -273,11 +524,28 @@ class Prepare:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         catalog_yml_path = os.path.join(script_dir, "databases", "catalog.yml")
 
+        # Keys that parse to no supported band never match and silently
+        # fall back to "default" - warn once here.
+        bad_keys = invalid_use_catalog_keys(selected_catalog)
+        if bad_keys:
+            self.logger.warning(
+                "catalog.use_catalog keys never match any filter band "
+                "(unknown band letters): %s. Valid bands: %s. Images in "
+                "those bands fall back to the 'default' entry.",
+                bad_keys,
+                " ".join(sorted(SUPPORTED_PHOTOMETRIC_FILTERS)),
+            )
+
         def _resolve_catalog_for_filter(catalog_choice, image_filter=None):
             if not isinstance(catalog_choice, dict):
                 return catalog_choice
             use_filter = str(image_filter or "").strip()
             use_filter_norm = normalize_photometric_filter_name(use_filter)
+            # Canonical band for group membership (e.g. imageFilter "h" -> "H"),
+            # matching the runtime resolver in catalog.py.
+            band_for_group = (
+                use_filter_norm if use_filter_norm is not None else use_filter
+            )
             if use_filter:
                 membership_matches = []
                 for k, v in catalog_choice.items():
@@ -288,12 +556,11 @@ class Prepare:
                     if key_l in {"default", "*", "all"}:
                         continue
                     key_bands = parse_supported_filter_group_key(key_s)
-                    if key_bands and use_filter in key_bands:
+                    if key_bands and band_for_group in key_bands:
                         membership_matches.append(str(k))
                 if len(membership_matches) > 1:
                     self.logger.warning(
-                        "catalog.use_catalog mapping is ambiguous for filter '%s': matched keys=%s. "
-                        "Using precedence: exact key > first membership key > default.",
+                        "catalog.use_catalog mapping is ambiguous for filter '%s': matched keys=%s. Using precedence: exact key > first membership key > default.",
                         image_filter,
                         membership_matches,
                     )
@@ -323,7 +590,7 @@ class Prepare:
                     if key_l in {"default", "*", "all"}:
                         continue
                     key_bands = parse_supported_filter_group_key(key_s)
-                    if v is not None and key_bands and use_filter in key_bands:
+                    if v is not None and key_bands and band_for_group in key_bands:
                         return v
             for dkey in ("default", "*", "all"):
                 if dkey in catalog_choice and catalog_choice[dkey] is not None:
@@ -336,6 +603,12 @@ class Prepare:
         selected_catalog_resolved = _resolve_catalog_for_filter(
             selected_catalog, self.input_yaml.get("imageFilter")
         )
+        if str(selected_catalog_resolved).strip().lower() == "auto":
+            # "auto" is resolved into a per-band mapping during the catalog
+            # pre-fetch (Catalog.find_optimized_catalog); until then every
+            # supported band is eligible so check_filters keeps all science
+            # images.
+            return sorted(set(SUPPORTED_PHOTOMETRIC_FILTERS))
         catalog_input = AutophotYaml(catalog_yml_path, selected_catalog_resolved).load()
 
         if self.input_yaml["catalog"].get("build_catalog", False):
@@ -356,8 +629,7 @@ class Prepare:
                 custom_table = pd.read_csv(fname)
             except pd.errors.EmptyDataError:
                 self.logger.error(
-                    "Custom catalog CSV is empty or has no parseable header. "
-                    "Remove the file to force a rebuild, or fix the path: %s",
+                    "Custom catalog CSV is empty or has no parseable header. Remove the file to force a rebuild, or fix the path: %s",
                     fname,
                 )
                 sys.exit(1)
@@ -367,32 +639,26 @@ class Prepare:
                     fname,
                 )
                 sys.exit(1)
-            # Dynamic filter discovery: accept any filter that exists in custom catalog
-            # This enables completely arbitrary filter names
+            # Custom catalogs can carry arbitrary filter names; a column counts
+            # as a filter if it is photometric (has a matching _err column) or
+            # at least holds numeric data.
             available_filters = []
-            
-            # First, add standard filters from catalog_input
+
             for f in catalog_input.keys():
                 if f in custom_table.columns:
                     available_filters.append(f)
-            
-            # Then, discover additional filters from custom catalog columns
-            # Look for columns that might be photometric (have corresponding _err columns)
+
             for col in custom_table.columns:
                 col_str = str(col).strip()
-                # Skip non-photometric columns
                 if col_str in ['ra', 'dec', 'RA', 'DEC', 'name', 'objname', 'id', 'ID']:
                     continue
-                # Skip error columns
                 if col_str.endswith('_err') or col_str.endswith('err'):
                     continue
-                # Skip if already added
                 if col_str in available_filters:
                     continue
-                # Check if this looks like a photometric filter (has corresponding error column)
                 err_col_candidates = [f"{col_str}_err", f"{col_str}err", f"{col_str}_ERROR", f"{col_str}ERROR"]
                 has_error_col = any(err_col in custom_table.columns for err_col in err_col_candidates)
-                
+
                 if has_error_col:
                     available_filters.append(col_str)
                     self.logger.info(
@@ -400,11 +666,9 @@ class Prepare:
                         col_str
                     )
                 else:
-                    # Even without error column, include if it has numeric data
                     try:
-                        # Check if column contains numeric data
                         numeric_data = pd.to_numeric(custom_table[col_str], errors='coerce')
-                        if numeric_data.notna().sum() > 0:  # Has some valid numeric data
+                        if numeric_data.notna().sum() > 0:
                             available_filters.append(col_str)
                             self.logger.info(
                                 "Discovered dynamic filter '%s' from custom catalog (numeric data)",
@@ -435,7 +699,26 @@ class Prepare:
             else:
                 available_filters = list(catalog_input.keys())
 
-        # Include IR sequence data if specified
+        if (self.input_yaml.get("catalog") or {}).get(
+            "allow_filter_transformations", False
+        ):
+            # Bands a catalog can synthesize (e.g. BVRI for sdss) count as
+            # servable too, so images in those bands are not dropped here.
+            from filter_transformations import transformable_bands
+
+            if isinstance(selected_catalog, dict):
+                _ft_cats = {
+                    str(v).strip()
+                    for v in selected_catalog.values()
+                    if v is not None and str(v).strip()
+                }
+            else:
+                _ft_cats = {str(selected_catalog_resolved).strip()}
+            for _c in _ft_cats:
+                for _b in transformable_bands(_c):
+                    if _b not in available_filters:
+                        available_filters.append(_b)
+
         if self.input_yaml["catalog"].get("include_IR_sequence_data", False):
             available_filters += ["J", "H", "K"]
         available_filters, dropped_filters = sanitize_photometric_filters(
@@ -457,6 +740,50 @@ class Prepare:
         Returns:
             Dict: Dictionary containing RA, DEC, and object information.
         """
+        # A real target_name together with explicit coordinates is a
+        # conflict: the name requests a TNS/SIMBAD position lookup while
+        # target_ra/target_dec would silently override it, so a stale
+        # coordinate pair under the right name runs photometry at the
+        # wrong position.  "Transient" is the placeholder default (main.py
+        # assigns it when only coordinates exist), not a real identifier.
+        name = self.input_yaml.get("target_name")
+        name_given = (
+            name is not None
+            and str(name).strip() != ""
+            and str(name).strip().lower() != "transient"
+        )
+        coords_given = (
+            self.input_yaml.get("target_ra") is not None
+            or self.input_yaml.get("target_dec") is not None
+        )
+        if name_given and coords_given:
+            self.logger.error(
+                "Conflicting target identification: target_name='%s' set "
+                "alongside explicit coordinates (target_ra=%s, "
+                "target_dec=%s).",
+                name,
+                self.input_yaml.get("target_ra"),
+                self.input_yaml.get("target_dec"),
+            )
+            print(
+                f"\n{'='*60}\n"
+                f"ERROR: target_name and explicit coordinates conflict.\n\n"
+                f"  target_name : {name}\n"
+                f"  target_ra   : {self.input_yaml.get('target_ra')}\n"
+                f"  target_dec  : {self.input_yaml.get('target_dec')}\n\n"
+                f"target_name requests a TNS/SIMBAD position lookup, but\n"
+                f"explicit coordinates silently override it.\n\n"
+                f"To fix this, either:\n"
+                f"  a) Remove target_ra and target_dec to resolve '{name}'\n"
+                f"     via TNS/SIMBAD, or\n"
+                f"  b) Remove target_name to use the manual coordinates.\n"
+                f"{'='*60}\n"
+            )
+            sys.exit(
+                "Stopped: target_name conflicts with explicit "
+                "target_ra/target_dec."
+            )
+
         # If the user already provided coordinates, do NOT query TNS.
         # Treat target_ra/target_dec as authoritative (degrees, FK5/J2000).
         if (
@@ -476,65 +803,89 @@ class Prepare:
         target_name = self.input_yaml.get("target_name", None)
         tns_dir = pathlib.Path(self.input_yaml["wdir"]) / "tns_objects"
         tns_dir.mkdir(parents=True, exist_ok=True)
-        if target_name is None or (isinstance(target_name, str) and target_name.strip() == ""):
+        if (
+            target_name is None
+            or (isinstance(target_name, str) and target_name.strip() == "")
+            or str(target_name).strip().lower() == "transient"
+        ):
             # No name and no coordinates; caller decides whether to continue.
+            # The "Transient" placeholder is not a real lookup target.
             return {}
 
         transient_path = tns_dir / f"{target_name}.yml"
 
         def _log_tns_summary(tns_data: Dict, source: str) -> None:
-            """Log a concise TNS summary each time coordinates are used."""
+            """Log a TNS summary table each time coordinates are used."""
             try:
                 objname = tns_data.get("objname", target_name)
                 prefix = str(tns_data.get("name_prefix", "") or "").strip()
                 display_name = f"{prefix}{objname}" if prefix else str(objname)
-                ra_val = tns_data.get("radeg", tns_data.get("ra"))
-                dec_val = tns_data.get("decdeg", tns_data.get("dec"))
-                obj_type = tns_data.get("type", tns_data.get("object_type", "unknown"))
-                if ra_val is not None and dec_val is not None:
-                    self.logger.info(
-                        "TNS info (%s): %s  RA=%.6f  Dec=%.6f  Type=%s",
-                        source,
-                        display_name,
-                        float(ra_val),
-                        float(dec_val),
-                        obj_type,
-                    )
+
+                # TNS returns object_type as {"id": ..., "name": "SN IIn"};
+                # SIMBAD/manual fallbacks may carry a plain string in "type".
+                obj_type = tns_data.get("object_type", tns_data.get("type"))
+                if isinstance(obj_type, dict):
+                    obj_type = obj_type.get("name", "unknown")
+                elif obj_type is None:
+                    obj_type = "unknown"
                 else:
-                    self.logger.info(
-                        "TNS info (%s): %s  Type=%s",
-                        source,
-                        display_name,
-                        obj_type,
+                    obj_type = str(obj_type)
+
+                pairs = [
+                    ("Name", display_name),
+                    ("Source", source),
+                    ("Type", obj_type),
+                ]
+                # Prefer decimal degrees; ra/dec keys may hold sexagesimal
+                # strings which cannot be floated - try/except covers both.
+                try:
+                    ra_deg = float(tns_data.get("radeg"))
+                    dec_deg = float(tns_data.get("decdeg"))
+                except (TypeError, ValueError):
+                    try:
+                        ra_deg = float(tns_data.get("ra"))
+                        dec_deg = float(tns_data.get("dec"))
+                    except (TypeError, ValueError):
+                        ra_deg = dec_deg = None
+                if ra_deg is not None and dec_deg is not None:
+                    pairs.append(
+                        ("RA / Dec", f"{ra_deg:.6f} / {dec_deg:.6f} deg")
                     )
+                    ra_hms = tns_data.get("ra")
+                    dec_dms = tns_data.get("dec")
+                    if (
+                        isinstance(ra_hms, str)
+                        and isinstance(dec_dms, str)
+                        and ":" in ra_hms
+                        and ":" in dec_dms
+                    ):
+                        pairs.append(("RA / Dec (hms)", f"{ra_hms} / {dec_dms}"))
+                redshift = tns_data.get("redshift") or tns_data.get("host_redshift")
+                if redshift is not None:
+                    pairs.append(("Redshift", str(redshift)))
+                if tns_data.get("discoverydate"):
+                    pairs.append(("Discovered", str(tns_data["discoverydate"])))
+                if tns_data.get("discoverymag") is not None:
+                    filt = tns_data.get("discmagfilter") or {}
+                    filt_name = filt.get("name", "") if isinstance(filt, dict) else ""
+                    pairs.append(
+                        (
+                            "Disc. mag",
+                            f"{tns_data['discoverymag']}"
+                            + (f" ({filt_name})" if filt_name else ""),
+                        )
+                    )
+                internal = tns_data.get("internal_names")
+                if internal:
+                    # TNS internal_names is a comma list with empty slots.
+                    ids = [s.strip() for s in str(internal).split(",") if s.strip()]
+                    if ids:
+                        pairs.append(("Internal IDs", ", ".join(ids)))
+                self.logger.info(ascii_kv(f"TNS info ({source})", pairs, width=80))
             except Exception:
                 self.logger.info("TNS info (%s): %s", source, str(target_name))
 
-        # Early return for user-provided coordinates
-        if target_name is None:
-            if (
-                self.input_yaml["target_ra"] is not None
-                and self.input_yaml["target_dec"] is not None
-            ):
-                return {
-                    "ra": self.input_yaml["target_ra"],
-                    "dec": self.input_yaml["target_dec"],
-                }
-            response = (
-                input(
-                    "\nNo target_name and no RA/Dec provided in the configuration.\n"
-                    "Continue without target information? [y/N]: "
-                )
-                .strip()
-                .lower()
-            )
-            if response not in ("y", "yes"):
-                raise Exception(
-                    "No target information provided and user declined to continue."
-                )
-            return {}
-
-        # Check for cached TNS data
+        # Cached TNS data wins over a fresh query.
         if transient_path.is_file():
             tns_response = AutophotYaml(str(transient_path), target_name).load()
             self.logger.info(
@@ -543,15 +894,23 @@ class Prepare:
             _log_tns_summary(tns_response, source="cache")
             return tns_response
 
-        # Fetch new TNS data
         tns_bot_id = self.input_yaml["wcs"].get("TNS_BOT_ID")
         if tns_bot_id is None or (
             isinstance(tns_bot_id, str) and tns_bot_id.strip() == ""
         ):
             self.logger.warning(
-                "No TNS Bot ID configured for target '%s'. Falling back to manual coordinates.",
+                "No TNS Bot ID configured for target '%s'. Trying SIMBAD fallback.",
                 target_name,
             )
+            simbad_response = get_coords_simbad(target_name)
+            if simbad_response is not None:
+                AutophotYaml.create(str(transient_path), simbad_response)
+                self.logger.info(
+                    "Resolved target '%s' via SIMBAD (no TNS credentials).",
+                    target_name,
+                )
+                _log_tns_summary(simbad_response, source="simbad")
+                return simbad_response
             if (
                 self.input_yaml["target_ra"] is not None
                 and self.input_yaml["target_dec"] is not None
@@ -560,7 +919,7 @@ class Prepare:
                     "ra": self.input_yaml["target_ra"],
                     "dec": self.input_yaml["target_dec"],
                 }
-            raise Exception("No TNS Bot ID and no manual RA/DEC coordinates provided.")
+            raise Exception("No TNS Bot ID, SIMBAD failed, and no manual RA/DEC coordinates provided.")
 
         try:
             self.logger.info("Querying TNS for target '%s'.", target_name)
@@ -570,6 +929,61 @@ class Prepare:
                 TNS_BOT_NAME=self.input_yaml["wcs"]["TNS_BOT_NAME"],
                 TNS_BOT_API=self.input_yaml["wcs"]["TNS_BOT_API"],
             )
+            
+            # TNS found nothing: try SIMBAD, then manual coordinates.
+            if tns_response is None:
+                self.logger.info(
+                    "TNS lookup returned no result for '%s'. Trying SIMBAD fallback.",
+                    target_name,
+                )
+                simbad_response = get_coords_simbad(target_name)
+                if simbad_response is not None:
+                    AutophotYaml.create(str(transient_path), simbad_response)
+                    self.logger.info(
+                        "Resolved target '%s' via SIMBAD (TNS returned no result).",
+                        target_name,
+                    )
+                    _log_tns_summary(simbad_response, source="simbad")
+                    return simbad_response
+
+                if (
+                    self.input_yaml.get("target_ra") is not None
+                    and self.input_yaml.get("target_dec") is not None
+                ):
+                    self.logger.warning(
+                        "TNS and SIMBAD both failed for '%s', but manual RA/Dec provided. Using manual coordinates.",
+                        target_name,
+                    )
+                    return {
+                        "ra": float(self.input_yaml["target_ra"]),
+                        "dec": float(self.input_yaml["target_dec"]),
+                    }
+                else:
+                    self.logger.error(
+                        "TNS and SIMBAD both failed for target '%s' and no RA/Dec coordinates provided.",
+                        target_name,
+                    )
+                    print(
+                        f"\n{'='*60}\n"
+                        f"ERROR: Target '{target_name}' not found on TNS or SIMBAD.\n\n"
+                        f"You provided a target_name but:\n"
+                        f"  1. TNS lookup failed (no API credentials or object not found), AND\n"
+                        f"  2. SIMBAD lookup also failed, AND\n"
+                        f"  3. No manual RA/Dec coordinates were provided.\n\n"
+                        f"To fix this, either:\n"
+                        f"  a) Provide TNS API credentials in your input YAML:\n"
+                        f"       wcs:\n"
+                        f"         TNS_BOT_ID: <your_bot_id>\n"
+                        f"         TNS_BOT_NAME: <your_bot_name>\n"
+                        f"         TNS_BOT_API: <your_api_key>\n\n"
+                        f"  b) Provide RA/Dec coordinates manually:\n"
+                        f"       autophot_input['target_ra'] = <RA in degrees>\n"
+                        f"       autophot_input['target_dec'] = <Dec in degrees>\n\n"
+                        f"  c) Remove target_name to run without a specific target\n"
+                        f"{'='*60}\n"
+                    )
+                    sys.exit("Stopped: TNS and SIMBAD both failed and no RA/Dec provided for target_name.")
+            
             AutophotYaml.create(str(transient_path), tns_response)
             obj_name = tns_response.get("name_prefix", "") + tns_response["objname"]
             self.logger.info("Retrieved TNS information for %s.", obj_name)
@@ -590,8 +1004,34 @@ class Prepare:
                 line,
                 exc,
             )
+            # TNS API call failed - try SIMBAD before giving up.
+            self.logger.info(
+                "TNS API error for '%s'. Trying SIMBAD fallback.",
+                target_name,
+            )
+            simbad_response = get_coords_simbad(target_name)
+            if simbad_response is not None:
+                AutophotYaml.create(str(transient_path), simbad_response)
+                self.logger.info(
+                    "Resolved target '%s' via SIMBAD (TNS API error).",
+                    target_name,
+                )
+                _log_tns_summary(simbad_response, source="simbad")
+                return simbad_response
+            if (
+                self.input_yaml.get("target_ra") is not None
+                and self.input_yaml.get("target_dec") is not None
+            ):
+                self.logger.warning(
+                    "TNS and SIMBAD both failed for '%s', but manual RA/Dec provided. Using manual coordinates.",
+                    target_name,
+                )
+                return {
+                    "ra": float(self.input_yaml["target_ra"]),
+                    "dec": float(self.input_yaml["target_dec"]),
+                }
             sys.exit(
-                "Cannot reach TNS server - check internet connection and API credentials."
+                "Cannot reach TNS or SIMBAD - check internet connection and API credentials."
             )
 
     def _update_telescope_yml(
@@ -653,9 +1093,8 @@ class Prepare:
                 log_warning_from_exception(
                     self.logger, "Could not write telescope.yml", e
                 )
-        #
-        # Pixel scale updates use a separate helper so they can be added without
-        # touching user-defined values if already present.
+        # pixel_scale is handled separately by _maybe_update_pixel_scale_yml so
+        # existing user-defined values are never overwritten here.
 
     def _maybe_update_pixel_scale_yml(
         self,
@@ -675,14 +1114,20 @@ class Prepare:
 
         Existing user-provided ``pixel_scale`` values are left unchanged.
         """
-        # Derive candidate pixel scale from WCS (arcsec/pixel)
         try:
             with np.errstate(all="ignore"):
                 wcs_obj = get_wcs(header)
-                xy_scales = WCS.utils.proj_plane_pixel_scales(wcs_obj)
-                if xy_scales is None or len(xy_scales) == 0:
+                if wcs_obj is None:
                     return
-                pixel_scale_candidate = float(xy_scales[0]) * 3600.0
+                # photutils 3.1 per-pixel sky areas: sqrt(median |det J|)
+                # is the area-preserving scale across the field, so a
+                # distorted WCS no longer reports the x-axis-only value.
+                _shape = None
+                if "NAXIS1" in header and "NAXIS2" in header:
+                    _shape = (int(header["NAXIS2"]), int(header["NAXIS1"]))
+                pixel_scale_candidate = pixel_area_scale_arcsec(
+                    wcs_obj, shape=_shape
+                )
         except Exception as exc:
             # WCS is missing or invalid; nothing to do.
             self.logger.debug(
@@ -694,7 +1139,7 @@ class Prepare:
             return
 
         if not (np.isfinite(pixel_scale_candidate) and 0 < pixel_scale_candidate <= 5):
-            # Discard clearly unreasonable scales.
+            # >5 arcsec/px or non-finite is not a plausible scale.
             return
 
         path = os.path.join(wdir, "telescope.yml")
@@ -710,7 +1155,6 @@ class Prepare:
             )
             return
 
-        # Ensure nested structure exists
         if telescope not in data:
             data[telescope] = {}
         if block_key not in data[telescope]:
@@ -725,7 +1169,7 @@ class Prepare:
         except (TypeError, ValueError):
             existing_val = None
 
-        # If a valid pixel_scale is already present, do not override it.
+        # Never override an existing user-provided pixel_scale.
         if existing_val is not None and np.isfinite(existing_val) and existing_val > 0:
             return
 
@@ -758,9 +1202,9 @@ class Prepare:
         """
         Validates the list of image files based on their filter information.
 
-        The logic is robust to missing or incomplete ``telescope.yml`` entries:
-        if a telescope/instrument combination is not found, the code falls back
-        to using common header names (e.g. ``FILTER``) and the raw filter value.
+        Falls back to common header names (e.g. ``FILTER``) and the raw
+        filter value when a telescope/instrument is missing from
+        ``telescope.yml``.
 
         Args
         ----
@@ -805,34 +1249,30 @@ class Prepare:
                 )
                 selected_filters = []
 
-        # Cache of header filter -> catalog band mappings seen in this run,
-        # keyed by (telescope, instrument, raw_header_value). This prevents us
-        # from repeatedly updating telescope.yml with the same mapping (e.g.
-        # many exposures with FILTER='rp' all mapping to 'r').
+        # Header filter -> catalog band mappings written this run, keyed by
+        # (telescope, instrument, raw header value). Prevents re-writing the
+        # same mapping to telescope.yml (e.g. many exposures with FILTER='rp'
+        # all mapping to 'r').
         seen_filter_mappings: Dict[Tuple[str, str, str], str] = {}
+        # Unmatched filter -> affected files; reported once per filter below.
+        filter_unmatched: Dict[str, List[str]] = defaultdict(list)
 
         tele_key = "TELESCOP"
         inst_key = "INSTRUME"
         avoid_keys = ["clear", "open"]
 
-        # Load telescope configuration (telescope.yml + built-in). Images must have TELESCOP and INSTRUME.
+        # Images must carry TELESCOP and INSTRUME to be mapped.
         tele_autophot_input = load_telescope_config(self.input_yaml["wdir"])
 
-        self.logger.info(
-            border_msg(
-                "Filter check",
-                body="-",
-                corner="+",
-            )
-        )
+        self.logger.info(border_msg("Filter check"))
         self.logger.info(
             "Checking %d image(s). Catalog bands: %s\n",
             len(flist),
             ", ".join(sorted(available_filters)),
         )
 
-        # Fail fast: the pipeline requires an explicit catalog choice to map
-        # instrument filter names onto supported catalog bands.
+        # Fail fast: without an explicit catalog choice, instrument filter
+        # names cannot be mapped onto catalog bands.
         use_catalog = (self.input_yaml.get("catalog") or {}).get("use_catalog", None)
         if (
             use_catalog is None
@@ -847,8 +1287,7 @@ class Prepare:
             self.logger.warning(msg)
             raise ValueError(msg)
 
-        # If no files were passed in, return immediately to avoid zero-division
-        # in the progress-bar helper and keep template-only runs robust.
+        # Empty file list would trip zero-division in the progress-bar helper.
         if not flist:
             return out_flist, filter_available
 
@@ -860,7 +1299,7 @@ class Prepare:
                 prepare_templates
                 and "PSF_model" in name
             ):
-                # Skip pre-computed PSF model products when validating templates
+                # PSF model products are pipeline output, not template input.
                 continue
 
             headinfo = get_header(name)
@@ -875,15 +1314,14 @@ class Prepare:
                 )
                 if mapping is None and not is_template:
                     self.logger.warning(
-                        "Instrument '%s' for telescope '%s' not found in telescope.yml; "
-                        "falling back to raw FILTER header for %s.",
+                        "Instrument '%s' for telescope '%s' not found in telescope.yml; falling back to raw FILTER header for %s.",
                         inst,
                         tele,
                         name,
                     )
                 else:
-                    # Optionally update telescope.yml with pixel_scale derived from WCS
-                    # when a valid telescope/instrument mapping exists.
+                    # Mapping exists: optionally store the WCS-derived
+                    # pixel_scale in telescope.yml.
                     if tele and inst and block_key is not None:
                         self._maybe_update_pixel_scale_yml(
                             self.input_yaml["wdir"],
@@ -893,8 +1331,8 @@ class Prepare:
                             headinfo,
                         )
             else:
-                # For template files with missing TELESCOP/INSTRUME, quietly fall back
-                # to raw FILTER header without noisy warnings.
+                # Templates may lack TELESCOP/INSTRUME; fall back to the raw
+                # FILTER header without warning noise.
                 if not is_template:
                     self.logger.warning(
                         "Telescope '%s' not found in telescope.yml; falling back to raw FILTER header for %s.",
@@ -906,7 +1344,7 @@ class Prepare:
             filter_name = "no_filter"
 
             if mapping is not None:
-                # Use telescope.yml mapping (or header value if not yet in mapping)
+                # Resolve via the telescope.yml filter_key_* entries.
                 filter_keys = [k for k in mapping if k.startswith("filter_key_")]
                 header_key = None
                 for filter_header_key in filter_keys:
@@ -920,27 +1358,26 @@ class Prepare:
                     break
 
                 if header_key is None:
-                    # Could not find a suitable filter header; fall back
                     self.logger.warning(
-                        "No valid filter header found for '%s' with telescope '%s' / instrument '%s'; "
-                        "falling back to raw FILTER header.",
+                        "No valid filter header found for '%s' with telescope '%s' / instrument '%s'; falling back to raw FILTER header.",
                         name,
                         tele,
                         inst,
                     )
                 else:
                     fits_filter = headinfo.get(header_key, "no_filter")
-                    # Case-insensitive lookup for filter mapping
+                    # telescope.yml keys are matched case-insensitively;
+                    # unmatched values keep the raw header string.
                     fits_filter_str = str(fits_filter)
-                    filter_name = fits_filter_str  # Default to raw value
+                    filter_name = fits_filter_str
                     for key, value in mapping.items():
                         if key.startswith("filter_key_"):
-                            continue  # Skip metadata keys
+                            continue  # metadata keys, not filter values
                         if str(key).lower() == fits_filter_str.lower():
                             filter_name = str(value)
                             break
             else:
-                # Fallback: try common header names directly
+                # No telescope.yml entry: try common header names directly.
                 candidate_keys = ["FILTER", "FILTER1", "FILTER2"]
                 for key in candidate_keys:
                     if key in headinfo and str(headinfo[key]).lower() not in avoid_keys:
@@ -948,11 +1385,10 @@ class Prepare:
                         filter_name = str(fits_filter)
                         break
 
-            # If still no filter (e.g. template with no FILTER/TELESCOP), infer from path
-            # e.g. .../gp_template/... -> g, .../K_template/... -> K, .../zp_template/... -> z, .../B_template/... -> B
+            # Templates may lack FILTER/TELESCOP entirely; infer the band from
+            # the directory name (e.g. gp_template -> g, K_template -> K).
             if filter_name == "no_filter" and "templates" in os.path.normpath(name):
                 norm = os.path.normpath(name)
-                # Standard template patterns
                 standard_patterns = (
                     "u_template", "g_template", "r_template", "i_template", "z_template",
                     "gp_template", "rp_template", "ip_template", "up_template", "zp_template",
@@ -961,7 +1397,6 @@ class Prepare:
                     "Y_template", "w_template", "y_template",
                 )
                 
-                # Check standard patterns first
                 for folder_band in standard_patterns:
                     if folder_band in norm:
                         band = folder_band.split("_")[0].replace("p", "")
@@ -969,10 +1404,9 @@ class Prepare:
                             filter_name = band
                             fits_filter = band
                         break
-                
-                # If no standard pattern matched, try dynamic patterns
+
+                # No standard match: try "<catalog band>_template" patterns.
                 if filter_name == "no_filter" and available_filters:
-                    # Create dynamic template patterns from available filters
                     for avail_filter in available_filters:
                         if f"{avail_filter}_template" in norm:
                             filter_name = avail_filter
@@ -983,9 +1417,8 @@ class Prepare:
                             )
                             break
 
-            # Apply catalog and user filter constraints
-            # Dynamic filter validation: accept any filter that can be normalized
-            # using the available_filters list, enabling completely custom filter names
+            # A filter passes if it normalizes against the catalog bands;
+            # custom (nonstandard) filter names are allowed.
             normalized_filter = None
             if filter_name != "no_filter":
                 normalized_filter = normalize_photometric_filter_name(
@@ -994,31 +1427,20 @@ class Prepare:
                 )
             
             if (
-                normalized_filter is None 
+                normalized_filter is None
                 and filter_name != "no_filter"
                 and not prepare_templates
             ):
-                # Filter could not be normalized with available filters
-                self.logger.info(
-                    "Filter %s could not be matched to catalog filters (available: %s) for %s",
-                    filter_name,
-                    ", ".join(sorted(available_filters)),
-                    os.path.basename(name),
-                )
-                self.logger.info(
-                    "Solutions: 1) Add filter to custom catalog, 2) Use Gaia custom catalog with transmission curves, 3) Check telescope.yml mapping"
-                )
-                
+                filter_unmatched[filter_name].append(os.path.basename(name))
                 files_removed += 1
                 filters_removed += 1
                 filter_unavailable.append(filter_name)
                 continue
             
-            # Update filter_name to the normalized version
             if normalized_filter is not None:
                 filter_name = normalized_filter
-                # Only log normalization for significant changes, not for common cases
-                if (filter_name != str(fits_filter) and 
+                # Log only real remappings, not cosmetic ones (e.g. r.00000 -> r).
+                if (filter_name != str(fits_filter) and
                     not (str(fits_filter).endswith('.00000') and filter_name == str(fits_filter).split('.')[0])):
                     self.logger.debug(
                         "Auto-normalized filter %s -> %s for %s",
@@ -1031,7 +1453,8 @@ class Prepare:
                 self.input_yaml["select_filter"]
                 and not prepare_templates
             ):
-                # When using select_filter, require the raw header value to be in do_filter
+                # select_filter compares against the raw header value, not the
+                # normalized band.
                 if str(fits_filter) not in self.input_yaml["do_filter"]:
                     files_removed += 1
                     filters_removed += 1
@@ -1046,6 +1469,7 @@ class Prepare:
 
             filter_available.append(filter_name)
             out_flist.append(name)
+            self.file_filter_map[os.path.abspath(name)] = filter_name
 
             # If this telescope/instrument had a header filter value not in telescope.yml,
             # add it once per run and remember the mapping so repeated occurrences of the
@@ -1068,6 +1492,21 @@ class Prepare:
                 )
                 seen_filter_mappings[key] = filter_name
 
+        for filt, names in sorted(filter_unmatched.items()):
+            shown = names[:8]
+            more = f", +{len(names) - 8} more" if len(names) > 8 else ""
+            self.logger.info(
+                "Filter %s could not be matched to catalog filters (available: %s) for %d file(s): %s%s",
+                filt,
+                ", ".join(sorted(available_filters)),
+                len(names),
+                ", ".join(shown),
+                more,
+            )
+        if filter_unmatched:
+            self.logger.info(
+                "Solutions: 1) Add filter to custom catalog, 2) Use Gaia custom catalog with transmission curves, 3) Check telescope.yml mapping"
+            )
         if len(filter_unavailable) > 0:
             self.logger.info(
                 "  %d file(s) removed: filter not in catalog (%s).",
@@ -1098,10 +1537,9 @@ class Prepare:
         Returns:
             List[str]: List of valid template file paths.
         """
-        self.logger.info(border_msg("Searching for template files"))
+        self.logger.info(border_msg("Find template files"))
         template_list = []
 
-        # Normalize the FITS directory path
         if self.input_yaml["fits_dir"].endswith("/"):
             self.input_yaml["fits_dir"] = self.input_yaml["fits_dir"][:-1]
 
@@ -1109,10 +1547,9 @@ class Prepare:
         self.logger.info("Looking for templates in directory: %s", template_dir)
         template_status = {}
 
-        # Load default filters if none provided
         if not required_filters:
-            # For dynamic filter system, use available filters from catalog
-            # This ensures templates work with transmission curves
+            # Prefer catalog bands so custom filters with transmission
+            # curves get templates too; fall back to filters.yml defaults.
             try:
                 available_filters = self.check_catalog()
                 if available_filters:
@@ -1122,7 +1559,6 @@ class Prepare:
                         ", ".join(sorted(required_filters))
                     )
                 else:
-                    # Fallback to default filters
                     base_filepath = os.path.dirname(os.path.abspath(__file__))
                     base_database = os.path.join(base_filepath, "databases")
                     filters_yml = "filters.yml"
@@ -1132,7 +1568,6 @@ class Prepare:
                         .keys()
                     )
             except Exception:
-                # Fallback to default filters if catalog check fails
                 base_filepath = os.path.dirname(os.path.abspath(__file__))
                 base_database = os.path.join(base_filepath, "databases")
                 filters_yml = "filters.yml"
@@ -1143,12 +1578,11 @@ class Prepare:
                 )
 
         raw_filters = [str(f).strip() for f in required_filters if str(f).strip()]
-        # For template lookup, use available_filters if available to support dynamic filters
+        # Sanitize against catalog bands so custom filters are kept.
         try:
             template_available_filters = self.check_catalog()
             required_filters, dropped_required = sanitize_photometric_filters(raw_filters, available_filters=template_available_filters)
         except Exception:
-            # Fallback to default behavior if catalog check fails
             required_filters, dropped_required = sanitize_photometric_filters(raw_filters)
         if dropped_required:
             self.logger.info(
@@ -1158,8 +1592,7 @@ class Prepare:
 
         if not os.path.isdir(template_dir):
             self.logger.warning(
-                "No template folder found at expected location; skipping templates. "
-                "Expected position: %s",
+                "No template folder found at expected location; skipping templates. Expected position: %s",
                 template_dir,
             )
             return []
@@ -1235,7 +1668,6 @@ class Prepare:
                 template_status[canonical_filter]["status"] = "found"
                 template_status[canonical_filter]["fpath"] = template_files[0]
 
-        # Log template status
         for key, info in template_status.items():
             status = info.get("status")
             if status == "found":
@@ -1256,7 +1688,6 @@ class Prepare:
                     info.get("fpath"),
                 )
 
-        # Prompt user if issues detected
         if incorrect_setup:
             quit_answer = (
                 input(

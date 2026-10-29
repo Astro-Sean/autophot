@@ -9,15 +9,18 @@ Created on Fri Oct  7 12:47:32 2022
 # IMPORTS
 # =============================================================================
 # Standard library imports
+import contextlib
 import os
 import sys
 import logging
 import pathlib
 import warnings
+import hashlib
 import shutil
 import requests
 import random
 import string
+import time
 from functools import reduce
 from math import ceil
 from typing import Optional
@@ -26,6 +29,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from matplotlib.ticker import ScalarFormatter
 from scipy.optimize import minimize
 from scipy.ndimage import gaussian_laplace
@@ -43,9 +47,6 @@ from astropy.wcs import WCS
 
 from astroquery.vizier import Vizier
 
-# Photutils imports
-from photutils.centroids import centroid_sources, centroid_com, centroid_2dg
-
 # Scikit-learn imports
 from sklearn.linear_model import RANSACRegressor
 from sklearn.base import BaseEstimator, RegressorMixin
@@ -57,7 +58,8 @@ import traceback
 # Local imports
 from functions import (
     AutophotYaml,
-    border_msg,
+    STATUS,
+    log_step,
     pix_dist,
     mag,
     snr,
@@ -65,18 +67,864 @@ from functions import (
     normalize_photometric_filter_name,
     parse_supported_filter_group_key,
     log_warning_from_exception,
+    canonical_target_name,
+    SUPPORTED_PHOTOMETRIC_FILTERS,
 )
 from aperture import Aperture
+from filter_transformations import (
+    apply_filter_transformations,
+    transformable_bands,
+    transformations_enabled,
+)
 
-# Initialize logger
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# =============================================================================
-# #
-# =============================================================================
-# =============================================================================
+@contextlib.contextmanager
+def _quiet_catalog_log():
+    """
+    Silence download()/clean() chatter during the optimizer scan.
+
+    Those helpers log a status banner, cache hits, and per-column warnings
+    on every call - fine for single-image runs, unreadable when the
+    optimizer fans them out over every catalog. Errors still propagate to
+    the caller, which reports each failure as one line.
+    """
+    _prev = logger.level
+    logger.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        logger.setLevel(_prev)
+
+
+# Remote backends eligible for `use_catalog: "auto"` optimization. "refcat"
+# and "custom" join the list only when their prerequisites (MAST CasJobs
+# credentials / a catalog file) are configured.
+AUTO_OPTIMIZE_CATALOGS = (
+    "gaia",
+    "pan_starrs",
+    "sdss",
+    "apass",
+    "2mass",
+    "skymapper",
+    "legacy",
+    "tic",
+)
+
+# Eligible backends removed from the default "auto" scan, with the reason
+# shown in the run printout.  Gaia stays in the scan: the XP source-count
+# pre-check made its participation cheap - one COUNT(*) query decides
+# whether the ADQL + GaiaXPy build can possibly supply enough calibrators
+# (see ``_gaia_xp_cone_source_count``).
+AUTO_OPTIMIZE_EXCLUDED = {"tic": "Excluded as the TIC catalog is untested by developer"}
+
+
+# Fixed marker/color per catalog so the optimizer coverage plot keeps a
+# consistent legend across bands and runs.
+CATALOG_PLOT_STYLE = {
+    "gaia": {"marker": "*", "color": "tab:purple"},
+    "pan_starrs": {"marker": "o", "color": "tab:blue"},
+    "sdss": {"marker": "s", "color": "tab:orange"},
+    "apass": {"marker": "^", "color": "tab:green"},
+    "2mass": {"marker": "D", "color": "tab:red"},
+    "skymapper": {"marker": "v", "color": "tab:cyan"},
+    "legacy": {"marker": "P", "color": "tab:pink"},
+    "tic": {"marker": "X", "color": "tab:olive"},
+    "refcat": {"marker": "h", "color": "tab:brown"},
+    "custom": {"marker": "d", "color": "tab:gray"},
+}
+
+
+def _catalog_plot_style(name):
+    """Marker/color for a catalog; unnamed backends cycle deterministically."""
+    style = CATALOG_PLOT_STYLE.get(name)
+    if style is not None:
+        return style
+    markers = ["o", "s", "^", "D", "v", "P", "X", "h", "d"]
+    i = abs(hash(str(name))) % len(markers)
+    return {"marker": markers[i], "color": f"C{i % 10}"}
+
+
+# Photometric system of each catalog's reported magnitudes, keyed on the
+# cleaned column names built from databases/catalog.yml. A plain string
+# means one system covers every band; a dict resolves per band because
+# the catalog mixes systems (APASS: Johnson BV are Vega, Sloan gri are
+# AB; Gaia synthetic columns: SDSS_Std are AB, JKC_Std are Vega).
+# "combined" merges several sources band-dependent per row, and "custom"
+# is user-supplied - its system cannot be inferred.
+CATALOG_MAGSYS = {
+    "gaia": {
+        "u": "abmag",
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "B": "vegamag",
+        "V": "vegamag",
+        "R": "vegamag",
+        "I": "vegamag",
+    },
+    "gaia_custom": "abmag",
+    "pan_starrs": {
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "Y": "abmag",
+        "w": "abmag",
+        "default": "abmag",
+        # BVRI synthesized by filter transformations are Vega-system.
+        "B": "vegamag",
+        "V": "vegamag",
+        "R": "vegamag",
+        "I": "vegamag",
+    },
+    "sdss": {
+        "u": "abmag",
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "default": "abmag",
+        "U": "vegamag",
+        "B": "vegamag",
+        "V": "vegamag",
+        "R": "vegamag",
+        "I": "vegamag",
+    },
+    "legacy": {
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "default": "abmag",
+        "B": "vegamag",
+        "V": "vegamag",
+        "R": "vegamag",
+        "I": "vegamag",
+    },
+    "skymapper": "abmag",
+    "refcat": {
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "J": "vegamag",
+        "H": "vegamag",
+        "K": "vegamag",
+    },
+    "apass": {
+        "B": "vegamag",
+        "V": "vegamag",
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+    },
+    "2mass": "vegamag",
+    "tic": {
+        "u": "abmag",
+        "g": "abmag",
+        "r": "abmag",
+        "i": "abmag",
+        "z": "abmag",
+        "B": "vegamag",
+        "V": "vegamag",
+        "J": "vegamag",
+        "H": "vegamag",
+        "K": "vegamag",
+        "G": "vegamag",
+        "T": "vegamag",
+    },
+    "custom": "unknown",
+    "combined": "mixed",
+}
+
+def catalog_magsys(catalog_name, band=None):
+    """
+    Photometric system of a catalog's reported magnitudes.
+
+    Returns "abmag", "vegamag", "mixed" (per-row system varies for
+    combined catalogs), or "unknown" (custom/unrecognized backends).
+    *band* is normalized through the pipeline's filter map before
+    lookup; pass it whenever a mixed catalog is in play so the value
+    reflects the band actually calibrated.
+    """
+    name = Catalog._normalize_catalog_name(catalog_name)
+    entry = CATALOG_MAGSYS.get(str(name or "").strip().lower())
+    if entry is None:
+        return "unknown"
+    if isinstance(entry, str):
+        return entry
+
+    if band:
+        key = normalize_photometric_filter_name(band) or str(band).strip()
+        key = str(key).strip()
+        if key in entry:
+            return entry[key]
+    default = entry.get("default")
+    if default is not None:
+        return default
+    systems = set(entry.values())
+    return systems.pop() if len(systems) == 1 else "mixed"
+
+
+def _unwrap_ra_near(ra_deg, center_ra):
+    """Wrap RA values to within +/-180 deg of the field centre for plotting."""
+    return (np.asarray(ra_deg, dtype=float) - center_ra + 180.0) % 360.0 - 180.0 + center_ra
+
+
+def _plot_footprint_outline(ax, fps, center_ra, color, dashed=False):
+    """
+    Draw the union outline of image footprints on ``ax``.
+
+    Small stacks (<=8 frames) keep their individual squares. Larger stacks
+    are rasterized onto a grid and traced as a single mosaic outline, so
+    hundreds of overlapping edges collapse into one boundary; disjoint
+    pointings simply produce separate contours.
+    """
+    from matplotlib.path import Path
+
+    polys = [
+        np.c_[
+            _unwrap_ra_near(fp["ra"], center_ra),
+            np.asarray(fp["dec"], dtype=float),
+        ]
+        for fp in fps
+        if fp.get("ra") is not None and fp.get("dec") is not None
+    ]
+    if not polys:
+        return
+
+    ls = "--" if dashed else "-"
+    if len(polys) <= 8:
+        for p in polys:
+            ax.plot(
+                np.r_[p[:, 0], p[0, 0]],
+                np.r_[p[:, 1], p[0, 1]],
+                color=color,
+                lw=0.8,
+                alpha=0.8,
+                ls=ls,
+                zorder=2,
+            )
+        return
+
+    x0 = min(p[:, 0].min() for p in polys)
+    x1 = max(p[:, 0].max() for p in polys)
+    y0 = min(p[:, 1].min() for p in polys)
+    y1 = max(p[:, 1].max() for p in polys)
+    pad_x = 0.03 * (x1 - x0) + 1e-6
+    pad_y = 0.03 * (y1 - y0) + 1e-6
+
+    nx = 600
+    xs = np.linspace(x0 - pad_x, x1 + pad_x, nx)
+    dx = xs[1] - xs[0]
+    ny = max(64, int(round((y1 - y0 + 2 * pad_y) / dx)))
+    ys = np.linspace(y0 - pad_y, y0 - pad_y + ny * dx, ny + 1)
+    mask = np.zeros((ys.size, xs.size), dtype=bool)
+
+    for p in polys:
+        sx = (xs >= p[:, 0].min()) & (xs <= p[:, 0].max())
+        sy = (ys >= p[:, 1].min()) & (ys <= p[:, 1].max())
+        if not (sx.any() and sy.any()):
+            continue
+        gx, gy = np.meshgrid(xs[sx], ys[sy], indexing="xy")
+        inside = Path(p).contains_points(np.c_[gx.ravel(), gy.ravel()])
+        mask[np.ix_(sy, sx)] |= inside.reshape(sy.sum(), sx.sum())
+
+    if not mask.any():
+        return
+    ax.contourf(
+        xs, ys, mask.astype(float), levels=[0.5, 1.5],
+        colors=[color], alpha=0.10, zorder=2,
+    )
+    ax.contour(
+        xs, ys, mask.astype(float), levels=[0.5],
+        colors=[color], linewidths=1.2, linestyles=ls, zorder=2,
+    )
+
+
+def _draw_region_outline(
+    ax, region, color, center_ra, ls=":", lw=0.9, alpha=0.75, use_box=None
+):
+    """
+    Outline of a catalog query region on an RA/Dec axes.
+
+    ``use_box`` selects the rectangular region (``box_deg`` bounds);
+    otherwise the circumscribed cone is drawn, rendered as a
+    cos(dec)-corrected circle so it matches the true angular extent under
+    the axes' equal-aspect degree grid.  RA coordinates are unwrapped
+    near ``center_ra`` so fields near 0/360 stay contiguous.
+    """
+    if not isinstance(region, dict):
+        return
+    try:
+        ra_c = float(region["ra"])
+        dec_c = float(region["dec"])
+    except (KeyError, TypeError, ValueError):
+        return
+    box = region.get("box_deg") or region.get("box")
+    if use_box is None:
+        use_box = bool(region.get("used_box", box is not None))
+    if use_box and box is not None:
+        try:
+            ra_min, ra_max, dec_min, dec_max = [float(v) for v in box]
+        except (TypeError, ValueError):
+            box = None
+    if use_box and box is not None:
+        xs = _unwrap_ra_near(
+            np.array([ra_min, ra_max, ra_max, ra_min]), center_ra
+        )
+        ys = np.array([dec_min, dec_min, dec_max, dec_max])
+        ax.plot(
+            np.r_[xs, xs[0]],
+            np.r_[ys, ys[0]],
+            color=color,
+            ls=ls,
+            lw=lw,
+            alpha=alpha,
+            zorder=3,
+        )
+        return
+    try:
+        r_deg = float(region.get("radius_arcmin") or 0.0) / 60.0
+    except (TypeError, ValueError):
+        return
+    if r_deg <= 0:
+        return
+    th = np.linspace(0.0, 2.0 * np.pi, 121)
+    cosd = max(np.cos(np.radians(dec_c)), 1e-6)
+    xs = _unwrap_ra_near(ra_c + r_deg * np.cos(th) / cosd, center_ra)
+    ys = dec_c + r_deg * np.sin(th)
+    ax.plot(xs, ys, color=color, ls=ls, lw=lw, alpha=alpha, zorder=3)
+
+
+def _usable_mag_mask(
+    cleaned, band, bright_lim, faint_lim, mag_err_max=None
+):
+    """Sources with a well-measured in-window magnitude in ``band``.
+
+    A row qualifies when ``cleaned[band]`` is finite and inside the
+    ``[bright_lim, faint_lim]`` window and - when the catalog carries a
+    ``<band>_err`` column - that error is finite and at most
+    ``mag_err_max`` (None or non-finite accepts any finite error).
+    Returns None when the band column is absent.
+    """
+    if cleaned is None or len(cleaned) == 0 or band not in cleaned.columns:
+        return None
+    m = pd.to_numeric(cleaned[band], errors="coerce")
+    mask = np.isfinite(m) & (m >= bright_lim) & (m <= faint_lim)
+    err_col = f"{band}_err"
+    if err_col in cleaned.columns:
+        e = pd.to_numeric(cleaned[err_col], errors="coerce")
+        mask = mask & np.isfinite(e)
+        if mag_err_max is not None and np.isfinite(mag_err_max):
+            mask = mask & (e <= float(mag_err_max))
+    return mask
+
+
+def _footprints_from_image_infos(image_infos):
+    """Sky-polygon footprints for the optimizer coverage map.
+
+    Returns a list of ``{band, ra, dec, name}`` dicts; images without a
+    WCS or shape contribute nothing (their sources were field-scored).
+    """
+    footprints = []
+    for img in image_infos or []:
+        w_i, s_i = img.get("wcs"), img.get("shape")
+        if w_i is None or s_i is None:
+            continue
+        ny, nx = s_i
+        try:
+            fp_ra, fp_dec = w_i.all_pix2world(
+                [0.0, nx - 1.0, nx - 1.0, 0.0],
+                [0.0, 0.0, ny - 1.0, ny - 1.0],
+                0,
+            )
+            footprints.append(
+                {
+                    "band": img.get("band"),
+                    "ra": np.asarray(fp_ra, dtype=float).ravel(),
+                    "dec": np.asarray(fp_dec, dtype=float).ravel(),
+                    "name": (
+                        os.path.basename(str(img["path"]))
+                        if img.get("path")
+                        else "field"
+                    ),
+                }
+            )
+        except Exception:
+            continue
+    return footprints
+
+
+def _draw_score_panel(
+    ax, sub, band, winner, min_sources, coverage_min, band_color
+):
+    """One optimizer scoreboard panel: worst-image usable count per
+    catalog (bars), per-image mean (tick), the required minimum (dashed
+    line), and per-catalog field coverage under each name (red below the
+    threshold).  ``sub`` is the report rows for ``band``."""
+    stats = (
+        sub.groupby("catalog")
+        .agg(
+            n_min=("n_usable", "min"),
+            n_mean=("n_usable", "mean"),
+            cov=("coverage", "first"),
+        )
+        .sort_values(["n_min", "n_mean"], ascending=False)
+    )
+    if stats.empty:
+        ax.set_visible(False)
+        return
+
+    xs = np.arange(len(stats))
+    ax.bar(
+        xs,
+        stats["n_min"].values,
+        color=[
+            band_color if c == winner else "0.75" for c in stats.index
+        ],
+        edgecolor="black",
+        linewidth=0.6,
+        zorder=3,
+    )
+    for x, m in zip(xs, stats["n_mean"].values):
+        ax.plot(
+            [x - 0.3, x + 0.3], [m, m], color="black", lw=1.4, zorder=4
+        )
+    for x, n in zip(xs, stats["n_min"].values):
+        ax.text(
+            x, n, f"{int(n)}",
+            ha="center", va="bottom", fontsize=7, zorder=5,
+        )
+    ax.axhline(min_sources, color="tab:red", lw=1.0, ls="--", zorder=2)
+    ax.text(
+        0.99,
+        min_sources,
+        f"required >= {min_sources:g}",
+        transform=ax.get_yaxis_transform(),
+        ha="right",
+        va="bottom",
+        fontsize=7,
+        color="tab:red",
+    )
+
+    labels = []
+    for c, row in stats.iterrows():
+        cov = row["cov"]
+        labels.append(
+            f"{c}\n{cov:.0%} cov" if np.isfinite(cov) else f"{c}\ncov n/a"
+        )
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels, fontsize=7)
+    for tick, (_, row) in zip(ax.get_xticklabels(), stats.iterrows()):
+        if np.isfinite(row["cov"]) and row["cov"] < coverage_min:
+            tick.set_color("tab:red")
+
+    title = f"{band}-band"
+    if winner:
+        title += f" -> {winner}"
+    ax.set_title(title, fontsize=10)
+    from matplotlib.ticker import MaxNLocator
+
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.grid(axis="y", lw=0.3, color="0.85", zorder=0)
+    ax.set_axisbelow(True)
+
+
+def plot_optimized_catalog_coverage(
+    plot_data,
+    target_coords=None,
+    wdir=None,
+    target_name="target",
+    outpath=None,
+    report=None,
+    min_sources=5,
+    coverage_min=0.8,
+    skipped=None,
+):
+    """
+    Render the find_optimized_catalog coverage map: one subplot per band
+    (at most three columns), image footprints as band-coloured squares,
+    every source each catalog returned as a faint underlay, and usable
+    catalog sources with a unique marker+color per catalog.  When
+    ``report`` is given, a scoreboard row is appended below the map
+    panels (worst-image usable counts vs the required minimum,
+    per-catalog field coverage).
+
+    Parameters
+    ----------
+    plot_data : dict
+        ``result["plot_data"]`` from ``find_optimized_catalog`` - needs
+        ``footprints`` (list of {band, ra, dec, name}), ``sources``
+        ({(catalog, band): DataFrame with RA/DEC}), ``winners``,
+        ``band_set``, and ``evaluated``.  Optional: ``catalog_sources``
+        ({catalog: DataFrame with RA/DEC}) - every source each catalog
+        returned, drawn faintly under the usable subset;
+        ``band_regions``/``regions``/``catalog_bands`` - the required
+        per-band boxes and per-catalog query outlines.
+    target_coords : SkyCoord, optional
+        Field centre; drawn as a cross when given.
+    wdir : str, optional
+        Output directory root (report lands in ``<wdir>/catalog_queries``).
+    target_name : str
+        Used in the output filename.
+    outpath : str, optional
+        Explicit output path; overrides wdir/target_name.
+    report : pd.DataFrame, optional
+        Optimizer report (catalog/band/image/n_usable/coverage); enables
+        the scoreboard row.
+    min_sources : float
+        Preferred minimum usable sources on the worst image (scoreboard).
+    coverage_min : float
+        Field-coverage fraction below which a catalog name turns red.
+    skipped : dict, optional
+        Catalog -> reason it was not evaluated; listed as a footnote.
+
+    Returns
+    -------
+    str or None
+        Path of the written PNG, or None if nothing was drawn.
+    """
+    band_set = list(plot_data.get("band_set") or [])
+    if not band_set:
+        return None
+
+    from lightcurve import BAND_COLORS
+    from matplotlib.colors import is_color_like
+    from matplotlib.ticker import MaxNLocator
+
+    _band_color_cache = {}
+
+    def _band_color(band):
+        """Filter colour: the project palette first (case-insensitive),
+        then a deterministic fallback so unlisted filters still get a
+        unique, stable colour within the figure."""
+        for k in (str(band), str(band).lower(), str(band).upper()):
+            c = BAND_COLORS.get(k)
+            if c and is_color_like(c):
+                return c
+        if band not in _band_color_cache:
+            pool = plt.get_cmap("tab20").colors
+            used = {
+                _band_color_cache[b]
+                for b in band_set
+                if b in _band_color_cache
+            }
+            seed = int(
+                hashlib.md5(str(band).encode()).hexdigest()[:8], 16
+            )
+            for k in range(len(pool)):
+                cand = pool[(seed + k) % len(pool)]
+                if cand not in used:
+                    _band_color_cache[band] = cand
+                    break
+            else:
+                _band_color_cache[band] = pool[seed % len(pool)]
+        return _band_color_cache[band]
+
+    center_ra = None
+    if target_coords is not None:
+        center_ra = float(target_coords.ra.degree)
+        center_dec = float(target_coords.dec.degree)
+    else:
+        # Anchor RA unwrapping at the mean footprint centre when no target
+        # is given (fields near RA=0/360 otherwise smear across the axes).
+        all_ra = [
+            np.asarray(fp["ra"], dtype=float)
+            for fp in plot_data.get("footprints", [])
+            if fp.get("ra") is not None
+        ]
+        center_ra = (
+            float(np.mean(np.concatenate(all_ra))) if all_ra else 180.0
+        )
+        center_dec = None
+
+    n_bands = len(band_set)
+    ncols = min(3, n_bands)
+    nrows = int(ceil(n_bands / ncols))
+    have_score = report is not None and len(report) > 0
+    if have_score:
+        report = report.copy()
+        if "coverage" not in report.columns:
+            report["coverage"] = np.nan
+    score_rows = int(ceil(n_bands / ncols)) if have_score else 0
+    fig, axes = plt.subplots(
+        nrows + score_rows,
+        ncols,
+        figsize=(5.2 * ncols, 4.6 * nrows + 3.4 * score_rows),
+        squeeze=False,
+        constrained_layout=True,
+        height_ratios=[4.6] * nrows + [3.4] * score_rows,
+    )
+
+    footprints = plot_data.get("footprints", [])
+    sources = plot_data.get("sources", {})
+    winners = plot_data.get("winners", {})
+
+    for idx, band in enumerate(band_set):
+        ax = axes[idx // ncols][idx % ncols]
+        band_color = _band_color(band)
+
+        # Footprints: only resolved-band images are drawn, in the band
+        # colour - unresolved-band (band=None) frames were scored under
+        # every band and are skipped here. Large stacks collapse to a
+        # single union outline so the mosaic boundary stays readable.
+        band_fps = [fp for fp in footprints if fp["band"] == band]
+        _plot_footprint_outline(ax, band_fps, center_ra, band_color)
+
+        # Required coverage for this band's images: the padded bounding
+        # box the catalog query must span (dashed, band colour).
+        _draw_region_outline(
+            ax,
+            (plot_data.get("band_regions") or {}).get(band),
+            color=band_color,
+            center_ra=center_ra,
+            ls="--",
+            lw=1.2,
+            alpha=0.9,
+            use_box=True,
+        )
+
+        # The region each evaluated catalog was actually queried over -
+        # the rectangular box for box-capable backends, the circumscribed
+        # cone otherwise (dotted, catalog colour).
+        _cat_bands = plot_data.get("catalog_bands") or {}
+        for _cname, _creg in (plot_data.get("regions") or {}).items():
+            _serves = _cat_bands.get(_cname)
+            if _serves is not None and band not in _serves:
+                continue
+            _draw_region_outline(
+                ax,
+                _creg,
+                color=_catalog_plot_style(_cname)["color"],
+                center_ra=center_ra,
+                ls=":",
+                lw=0.9,
+                alpha=0.7,
+                use_box=_cname in _BOX_QUERY_CATALOGS,
+            )
+
+        # All sources each catalog returned, drawn faintly under the
+        # usable subset so raw catalog coverage is visible against the
+        # required region - e.g. a survey boundary shows as an empty
+        # half-panel even before the usable-source cuts bite.
+        _cat_src = plot_data.get("catalog_sources") or {}
+        _raw_shown = {}
+        for _cname in sorted(_cat_src):
+            _serves_c = _cat_bands.get(_cname)
+            if _serves_c is not None and band not in _serves_c:
+                continue
+            _df = _cat_src[_cname]
+            if _df is None or len(_df) == 0:
+                continue
+            ax.scatter(
+                _unwrap_ra_near(
+                    pd.to_numeric(_df["RA"], errors="coerce").to_numpy(),
+                    center_ra,
+                ),
+                pd.to_numeric(_df["DEC"], errors="coerce").to_numpy(),
+                s=3,
+                marker=".",
+                c=_catalog_plot_style(_cname)["color"],
+                alpha=0.15,
+                linewidths=0,
+                zorder=1.5,
+            )
+            _raw_shown[_cname] = len(_df)
+
+        # Usable sources per catalog (well-measured in-window mag on a
+        # detector).  Open markers: catalogs share most of their
+        # calibrator pool, so filled symbols would hide coincident
+        # points under whichever catalog was drawn last.
+        legend_handles = []
+        for (cat_name, cat_band), df in sorted(sources.items()):
+            if cat_band != band or df is None or len(df) == 0:
+                continue
+            style = _catalog_plot_style(cat_name)
+            sc = ax.scatter(
+                _unwrap_ra_near(df["RA"].values, center_ra),
+                df["DEC"].values,
+                s=18,
+                marker=style["marker"],
+                facecolors="none",
+                edgecolors=style["color"],
+                linewidths=0.7,
+                alpha=0.85,
+                label=f"{cat_name} ({len(df)})",
+                zorder=4,
+            )
+            legend_handles.append(sc)
+
+        # Catalogs that returned detections but no usable sources on this
+        # band still get a legend entry so the faint underlay points are
+        # attributable.
+        _usable_cats = {
+            cn
+            for (cn, cb), df in sources.items()
+            if cb == band and df is not None and len(df) > 0
+        }
+        for _cname in sorted(_raw_shown):
+            if _cname in _usable_cats:
+                continue
+            legend_handles.append(
+                Line2D(
+                    [],
+                    [],
+                    marker=".",
+                    ls="",
+                    markersize=7,
+                    color=_catalog_plot_style(_cname)["color"],
+                    alpha=0.6,
+                    label=f"{_cname} raw ({_raw_shown[_cname]})",
+                )
+            )
+
+        if center_dec is not None:
+            # White underlay keeps the cross legible over dense footprints.
+            ax.plot(
+                center_ra,
+                center_dec,
+                marker="+",
+                ms=16,
+                mew=3.0,
+                color="white",
+                zorder=5,
+            )
+            ax.plot(
+                center_ra,
+                center_dec,
+                marker="+",
+                ms=14,
+                mew=1.8,
+                color="black",
+                zorder=6,
+            )
+
+        # Band label floats just above the top of the coverage mosaic,
+        # centred on the field; falls back to the panel top when there are
+        # no footprints to anchor to.
+        title = f"{band}-band dataset"
+
+        def _fp_pts(fps):
+            return [
+                np.c_[
+                    _unwrap_ra_near(fp["ra"], center_ra),
+                    np.asarray(fp["dec"], dtype=float),
+                ]
+                for fp in fps
+                if fp.get("ra") is not None and fp.get("dec") is not None
+            ]
+
+        _label_pts = _fp_pts(band_fps)
+        _txt_kw = dict(
+            fontsize=10,
+            ha="center",
+            zorder=7,
+            bbox=dict(
+                facecolor="white", edgecolor="none", alpha=0.75, pad=1.5
+            ),
+        )
+        if _label_pts:
+            _y_top = max(p[:, 1].max() for p in _label_pts)
+            _y_bot = min(p[:, 1].min() for p in _label_pts)
+            _x_lab = 0.5 * (
+                min(p[:, 0].min() for p in _label_pts)
+                + max(p[:, 0].max() for p in _label_pts)
+            )
+            _y_lab = _y_top + 0.04 * (_y_top - _y_bot + 1e-9)
+            # Invisible point pulls the datalim up so the label is not
+            # clipped by the axes top.
+            ax.plot([_x_lab], [_y_lab + 0.04 * (_y_top - _y_bot)], alpha=0)
+            ax.text(_x_lab, _y_lab, title, va="bottom", **_txt_kw)
+        else:
+            ax.text(
+                0.5, 1.0, title, transform=ax.transAxes, va="bottom", **_txt_kw
+            )
+        if legend_handles:
+            # Single-column legend inside the axes, top right.
+            ax.legend(
+                handles=legend_handles,
+                fontsize=7,
+                loc="upper right",
+                ncol=1,
+                framealpha=0.9,
+            )
+        ax.set_xlabel("RA [deg]")
+        ax.set_ylabel("Dec [deg]")
+        # Few ticks: the field is a fraction of a degree wide, so the
+        # default locator crowds the axis with long decimals.
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=7, prune="both"))
+        ax.grid(lw=0.3, color="0.85", zorder=0)
+        ax.invert_xaxis()  # sky convention: RA increases to the left
+        ax.set_aspect("equal", adjustable="datalim")
+
+    # Hide unused panels.
+    for j in range(n_bands, nrows * ncols):
+        axes[j // ncols][j % ncols].set_visible(False)
+
+    # Scoreboard row(s): same grid layout as the map panels so band
+    # columns line up.
+    if have_score:
+        winners = winners or {}
+        for idx, band in enumerate(band_set):
+            ax = axes[nrows + idx // ncols][idx % ncols]
+            sub = report[report["band"].astype(str) == band]
+            _draw_score_panel(
+                ax,
+                sub,
+                band,
+                winners.get(band),
+                min_sources,
+                coverage_min,
+                _band_color(band),
+            )
+            if idx % ncols == 0:
+                ax.set_ylabel("usable sources (worst image)")
+        for j in range(n_bands, score_rows * ncols):
+            axes[nrows + j // ncols][j % ncols].set_visible(False)
+
+        note = (
+            f"bar = worst-image usable count, tick = per-image mean; "
+            f"coverage under each name (red = below {coverage_min:.0%})"
+        )
+        if skipped:
+            note += " | skipped: " + "; ".join(
+                f"{k} ({str(v).splitlines()[0]})" for k, v in skipped.items()
+            )
+        # Negative y lands below the x tick labels; bbox_inches="tight"
+        # keeps it in the saved figure.
+        fig.text(0.5, -0.015, note, ha="center", fontsize=7, color="0.4")
+
+    if plot_data.get("band_regions") or plot_data.get("regions"):
+        fig.text(
+            0.5,
+            -0.015 if not have_score else -0.04,
+            "dashed = region each band's images require; "
+            "dotted = region each catalog was queried over "
+            "(box where supported, else circumscribed cone)",
+            ha="center",
+            fontsize=7,
+            color="0.4",
+        )
+
+    if outpath is None:
+        rep_dir = os.path.join(wdir or ".", "catalog_queries")
+        outpath = os.path.join(
+            rep_dir, f"{target_name}_optimized_catalog_coverage.png"
+        )
+    pathlib.Path(os.path.dirname(os.path.abspath(outpath))).mkdir(
+        parents=True, exist_ok=True
+    )
+    try:
+        fig.savefig(outpath, dpi=150, bbox_inches="tight")
+    finally:
+        plt.close(fig)
+    logger.info("Optimized catalog coverage plot: %s", outpath)
+    return outpath
 
 
 def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
@@ -97,7 +945,7 @@ def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
     filtered_catalog : pd.DataFrame
         DataFrame with matched sources removed.
     """
-    if len(variable_catalog) == 0:
+    if variable_catalog is None or len(variable_catalog) == 0:
         return given_catalog
 
     x_given = given_catalog["x_pix"].values
@@ -105,31 +953,954 @@ def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
     x_var = variable_catalog["x_pix"].values
     y_var = variable_catalog["y_pix"].values
 
-    keep_mask = np.ones(len(given_catalog), dtype=bool)
-    removed_indices = []
+    # KDTree for O(N log M) matching; replaces the O(N*M) per-source
+    # distance loop.
+    from scipy.spatial import cKDTree as _cKDTree
+    var_tree = _cKDTree(np.column_stack([x_var, y_var]))
+    given_xy = np.column_stack([x_given, y_given])
+    dist_nearest, idx_nearest = var_tree.query(given_xy, k=1, workers=1)
+    keep_mask = dist_nearest > match_radius_pix
 
-    for i, (xg, yg) in enumerate(zip(x_given, y_given)):
-        dx = x_var - xg
-        dy = y_var - yg
-        dist = np.sqrt(dx**2 + dy**2)
-        within_radius = dist <= match_radius_pix
-
-        if np.any(within_radius):
-            matched_var_idx = np.where(within_radius)[0][
-                0
-            ]  # First matched variable source index
-            keep_mask[i] = False
-            removed_indices.append(i)
-            otype = variable_catalog.iloc[matched_var_idx]["OTYPE_opt"]
-            logger.debug(
-                f"Removing source at index {i} (x={xg:.2f}, y={yg:.2f}) due to match with variable source [{otype}]"
-            )
+    removed_indices = np.where(~keep_mask)[0].tolist()
+    # OTYPE_opt is not guaranteed on every catalog - the drop must still
+    # happen when the column is absent.
+    has_otype = "OTYPE_opt" in variable_catalog.columns
+    for i in removed_indices:
+        otype = (
+            variable_catalog.iloc[idx_nearest[i]]["OTYPE_opt"]
+            if has_otype
+            else "unknown"
+        )
+        logger.debug(
+            f"Removing source at index {i} (x={x_given[i]:.2f}, y={y_given[i]:.2f}) due to match with variable source [{otype}]"
+        )
 
     filtered_catalog = given_catalog[keep_mask].reset_index(drop=True)
-    logger.info(f"Number of sources removed due to matching: {len(removed_indices)}")
-    logger.info(f"Number of sources remaining after filtering: {len(filtered_catalog)}")
+    logger.info(
+        "Variable-source match: removed %d, %d sources remain",
+        len(removed_indices), len(filtered_catalog),
+    )
 
     return filtered_catalog
+
+
+# =============================================================================
+# Deduplication helper
+# =============================================================================
+
+def _skycoord_dedup_keep_one(catalog_df, sep_threshold_arcsec=0.1):
+    """
+    Remove duplicate sky positions from *catalog_df*, keeping exactly one
+    member of each close pair rather than dropping both.
+
+    Algorithm
+    ---------
+    For every source i, find its nearest *other* source (nthneighbor=2) and
+    its index j.  If sep(i,j) < threshold AND j < i then source i is the
+    later-arriving duplicate and is marked for removal.  This guarantees the
+    lower-index entry of any close pair survives.
+
+    Parameters
+    ----------
+    catalog_df : pd.DataFrame  - must contain "RA" and "DEC" columns (degrees)
+    sep_threshold_arcsec : float - angular separation below which two sources
+                                   are considered duplicates (default 0.1 arcsec)
+
+    Returns
+    -------
+    pd.DataFrame  - deduplicated catalog with reset integer index
+    """
+    import numpy as np
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+
+    if catalog_df is None or len(catalog_df) < 2:
+        return catalog_df
+    if not {"RA", "DEC"}.issubset(catalog_df.columns):
+        return catalog_df
+
+    coords = SkyCoord(
+        ra=catalog_df["RA"].values * u.degree,
+        dec=catalog_df["DEC"].values * u.degree,
+    )
+    idx_match, sep2, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
+    thr = sep_threshold_arcsec * u.arcsec
+    # Vectorized: drop source i if its nearest neighbour j is closer than the
+    # threshold AND has a lower index (meaning j is the "first" copy to keep).
+    drop = (sep2 <= thr) & (idx_match < np.arange(len(catalog_df)))
+    return catalog_df[~drop].reset_index(drop=True)
+
+
+def _drop_fainter_blended_neighbors(
+    catalog_df, mag_col, radius_arcsec=6.0, dmag=3.0
+):
+    """
+    Drop catalog entries that sit within ``radius_arcsec`` of another entry
+    at least ``dmag`` magnitudes brighter in ``mag_col``.
+
+    Some catalogs (notably Pan-STARRS) contain spurious faint entries within
+    a few arcsec of a bright star; the measured flux at that position is the
+    bright star's, so the faint entry lands on a false zeropoint locus and
+    can hijack the linearity fit.  Even when the faint entry is a real
+    companion, its photometry is dominated by the neighbour, so dropping it
+    costs nothing for calibration.
+
+    Parameters
+    ----------
+    catalog_df : pd.DataFrame  - must contain "RA", "DEC" (degrees) and mag_col
+    mag_col : str              - magnitude column used for the brightness test
+    radius_arcsec : float      - neighbour search radius
+    dmag : float               - minimum magnitude difference that marks the
+                                 fainter member as contaminated
+
+    Returns
+    -------
+    pd.DataFrame - catalog with the fainter member of each such pair removed
+    """
+    import numpy as np
+
+    if catalog_df is None or len(catalog_df) < 2:
+        return catalog_df
+    if (
+        not {"RA", "DEC"}.issubset(catalog_df.columns)
+        or mag_col not in catalog_df.columns
+    ):
+        return catalog_df
+
+    ra = pd.to_numeric(catalog_df["RA"], errors="coerce").to_numpy(dtype=float)
+    dec = pd.to_numeric(catalog_df["DEC"], errors="coerce").to_numpy(dtype=float)
+    mags = pd.to_numeric(catalog_df[mag_col], errors="coerce").to_numpy(
+        dtype=float
+    )
+    cosd = np.cos(np.deg2rad(np.nan_to_num(dec, nan=0.0)))
+    radius_deg = radius_arcsec / 3600.0
+
+    n = len(catalog_df)
+    drop = np.zeros(n, dtype=bool)
+    # Chunked N^2: catalogs are ~1e2-1e3 rows, but bound memory anyway.
+    block = 1024
+    col_idx = np.arange(n)
+    for s in range(0, n, block):
+        e = min(s + block, n)
+        # Wrap the RA difference to [-180, 180) so pairs straddling RA=0 not
+        # rejected as ~360 deg apart.
+        dra = ((ra[s:e, None] - ra[None, :] + 180.0) % 360.0 - 180.0) * cosd[None, :]
+        ddec = dec[s:e, None] - dec[None, :]
+        sep_deg = np.hypot(dra, ddec)
+        # dm[i, j] < 0 means neighbour j is brighter than source i.
+        dm = mags[None, :] - mags[s:e, None]
+        is_self = (np.arange(s, e)[:, None] == col_idx[None, :])
+        contaminated = (
+            (sep_deg <= radius_deg)
+            & (dm <= -dmag)
+            & np.isfinite(dm)
+            & ~is_self
+        )
+        drop[s:e] = np.any(contaminated, axis=1)
+    return catalog_df[~drop].reset_index(drop=True)
+
+
+# =============================================================================
+# Spatial coverage helpers
+# =============================================================================
+
+# (catalog, rounded field, rounded radius) keys already warned about for
+# partial sky coverage.  Module-level because main.py builds a fresh
+# Catalog per image - an instance set would repeat the same warning for
+# every frame in the stack.
+_COVERAGE_WARNED_KEYS = set()
+
+# Column-name spellings used by the remote backends (checked in order).
+_RA_COL_CANDIDATES = ("ra", "raicrs", "raj2000", "ramean", "radeg")
+_DEC_COL_CANDIDATES = ("dec", "de", "deicrs", "dej2000", "decmean", "decdeg")
+
+
+def _catalog_radec(df):
+    """
+    Return (ra_deg, dec_deg) float arrays for a raw catalog table, or
+    (None, None) when no RA/DEC pair is found.
+
+    Works on pre-clean() frames, where coordinate columns carry each
+    service's native names (RA_ICRS/DE_ICRS, raMean/decMean, ra/dec, ...).
+    """
+    if df is None or len(df) == 0:
+        return None, None
+    norm = {
+        str(c).lower().replace("_", "").replace(" ", ""): c
+        for c in df.columns
+    }
+    ra_col = next(
+        (norm[k] for k in _RA_COL_CANDIDATES if k in norm), None
+    )
+    dec_col = next(
+        (norm[k] for k in _DEC_COL_CANDIDATES if k in norm), None
+    )
+    if ra_col is None or dec_col is None:
+        return None, None
+    ra = pd.to_numeric(df[ra_col], errors="coerce").to_numpy(dtype=float)
+    dec = pd.to_numeric(df[dec_col], errors="coerce").to_numpy(dtype=float)
+    return ra, dec
+
+
+def _sky_uniform_subsample(df, nmax, center_ra=None):
+    """
+    Cap a catalog at ``nmax`` rows while preserving sky coverage.
+
+    Row caps that keep "the N nearest to the field centre" hollow out the
+    edges of the FOV (distance-ordered TOP-N queries do this silently).
+    This instead bins the footprint into a grid and keeps a per-cell
+    quota, then tops up from the leftovers.
+    """
+    if df is None or nmax is None or len(df) <= nmax:
+        return df
+    ra, dec = _catalog_radec(df)
+    if ra is None:
+        return df.head(int(nmax))
+
+    if center_ra is None:
+        center_ra = float(np.nanmean(ra))
+    dec0 = float(np.nanmean(dec))
+    x = (_unwrap_ra_near(ra, center_ra) - center_ra) * np.cos(
+        np.radians(dec0)
+    )
+    y = dec - dec0
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not finite.any():
+        return df.head(int(nmax))
+
+    nmax = int(nmax)
+    n_bins = max(2, int(np.sqrt(nmax)))
+    per_cell = max(1, nmax // (n_bins**2))
+    x_edges = np.linspace(x[finite].min(), x[finite].max(), n_bins + 1)
+    y_edges = np.linspace(y[finite].min(), y[finite].max(), n_bins + 1)
+
+    xi = np.clip(np.digitize(x, x_edges) - 1, 0, n_bins - 1)
+    yi = np.clip(np.digitize(y, y_edges) - 1, 0, n_bins - 1)
+    # Non-finite coordinates get a sentinel cell so they can only be
+    # picked up by the top-up below, not displace real coverage.
+    cell_id = np.where(finite, yi * n_bins + xi, n_bins**2)
+
+    # Keep up to per_cell rows per occupied cell, in the catalog's own row
+    # order (distance-sorted inputs keep their nearest-to-centre members).
+    order = np.argsort(cell_id, kind="stable")
+    cell_sorted = cell_id[order]
+    starts = np.searchsorted(cell_sorted, np.arange(n_bins**2 + 1))
+    picked = []
+    for cid in range(n_bins**2):
+        cell_rows = order[starts[cid] : starts[cid + 1]]
+        if cell_rows.size:
+            picked.extend(cell_rows[:per_cell].tolist())
+
+    if len(picked) < nmax:
+        rest = np.setdiff1d(np.arange(len(df)), np.asarray(picked))
+        picked.extend(rest[: nmax - len(picked)].tolist())
+    return df.iloc[np.asarray(picked[:nmax])]
+
+
+def _legacy_ivar_to_mag_err(mag, flux_ivar):
+    """Per-source Legacy Survey magnitude error from the Tractor inverse variance.
+
+    ``mag`` is the Tractor model magnitude (AB, nanomaggies) and
+    ``flux_ivar`` the inverse variance of the model flux.  With
+    ``sigma_f = 1/sqrt(flux_ivar)``, ``f = 10**((22.5 - mag)/2.5)`` and
+    ``sigma_m = (2.5/ln 10) * sigma_f / f``.  Returns NaN wherever the flux
+    or variance is unusable (missing sky coverage in the combined DR10 table
+    is encoded as -9999).
+    """
+    _mag = np.asarray(mag, float)
+    _ivar = np.asarray(flux_ivar, float)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        _flux = np.power(10.0, (22.5 - _mag) / 2.5)
+        _flux_err = np.where(
+            _ivar > 0, 1.0 / np.sqrt(np.clip(_ivar, 1e-300, None)), np.nan
+        )
+        return np.where(
+            np.isfinite(_flux) & (_flux > 0) & np.isfinite(_flux_err),
+            (2.5 / np.log(10.0)) * _flux_err / _flux,
+            np.nan,
+        )
+
+
+def _field_coverage_fraction(
+    ra_deg, dec_deg, center_ra, center_dec, radius_deg, box_wh=None
+):
+    """
+    Fraction of the query region populated by at least one source.
+
+    The region is divided into a grid whose cell count scales with the
+    number of in-region sources, so the metric is meaningful for sparse
+    (2MASS) and dense (Pan-STARRS) catalogs alike.  A survey boundary
+    crossing the field (e.g. SDSS covering only half a cone) reads as a
+    fraction well below 1.
+
+    ``box_wh`` = (width_deg, height_deg) restricts the region to the
+    box centred on (center_ra, center_dec) - the shape actually queried
+    by box-capable backends, where ``width_deg`` is the angular width
+    along RA (already cos(dec)-projected, matching VizieR ``-c.b``);
+    otherwise the circular disk of ``radius_deg`` is used.
+
+    Returns NaN when the catalog or the query region is empty.
+    """
+    ra = np.asarray(ra_deg, dtype=float)
+    dec = np.asarray(dec_deg, dtype=float)
+    ok = np.isfinite(ra) & np.isfinite(dec)
+    if not ok.any():
+        return np.nan
+    x = (_unwrap_ra_near(ra[ok], center_ra) - center_ra) * np.cos(
+        np.radians(center_dec)
+    )
+    y = dec[ok] - center_dec
+
+    if box_wh is not None:
+        # x is already a projected (angular) offset, matching the
+        # angular-width convention the box query itself uses.
+        hw_x = 0.5 * float(box_wh[0])
+        hw_y = 0.5 * float(box_wh[1])
+        if hw_x <= 0 or hw_y <= 0:
+            return np.nan
+        inside = (np.abs(x) <= hw_x) & (np.abs(y) <= hw_y)
+    else:
+        if radius_deg is None or radius_deg <= 0:
+            return np.nan
+        hw_x = hw_y = float(radius_deg)
+        inside = (x**2 + y**2) <= radius_deg**2
+    n_in = int(inside.sum())
+    if n_in == 0:
+        return 0.0
+
+    n_side = int(np.clip(round(np.sqrt(n_in / 3.0)), 4, 12))
+    x_edges = np.linspace(-hw_x, hw_x, n_side + 1)
+    y_edges = np.linspace(-hw_y, hw_y, n_side + 1)
+    x_ctr = 0.5 * (x_edges[:-1] + x_edges[1:])
+    y_ctr = 0.5 * (y_edges[:-1] + y_edges[1:])
+    if box_wh is not None:
+        in_region = np.ones((n_side, n_side), dtype=bool)
+    else:
+        in_region = (
+            x_ctr[:, None] ** 2 + y_ctr[None, :] ** 2
+        ) <= radius_deg**2
+    if not in_region.any():
+        return np.nan
+
+    xi = np.clip(np.digitize(x[inside], x_edges) - 1, 0, n_side - 1)
+    yi = np.clip(np.digitize(y[inside], y_edges) - 1, 0, n_side - 1)
+    occupied = np.zeros((n_side, n_side), dtype=bool)
+    occupied[yi, xi] = True
+    return float((occupied & in_region).sum() / in_region.sum())
+
+
+def _in_required_region(ra_deg, dec_deg, region):
+    """Mask of sources inside a region's required box (or its cone).
+
+    The box is tested in projected coordinates - x along RA after the
+    cos(dec) foreshortening, y along Dec - matching the angular-width
+    convention ``_field_coverage_fraction`` and the VizieR ``-c.b``
+    box query use.  Falls back to the circumscribed cone when the
+    region carries no box (pan-sky or corner-less fallback regions).
+    """
+    ra = np.asarray(ra_deg, dtype=float).ravel()
+    dec = np.asarray(dec_deg, dtype=float).ravel()
+    mask = np.zeros(ra.shape, dtype=bool)
+    reg = region or {}
+    try:
+        c_ra = float(reg["ra"])
+        c_dec = float(reg["dec"])
+    except (TypeError, ValueError, KeyError):
+        return mask
+    ok = np.isfinite(ra) & np.isfinite(dec)
+    x = (_unwrap_ra_near(ra[ok], c_ra) - c_ra) * np.cos(
+        np.radians(c_dec)
+    )
+    y = dec[ok] - c_dec
+    try:
+        hw_x = 0.5 * float(reg["width_deg"])
+        hw_y = 0.5 * float(reg["height_deg"])
+    except (TypeError, ValueError, KeyError):
+        hw_x = hw_y = 0.0
+    if hw_x > 0 and hw_y > 0:
+        inside = (np.abs(x) <= hw_x) & (np.abs(y) <= hw_y)
+    else:
+        try:
+            radius_deg = float(reg.get("radius_arcmin") or 0.0) / 60.0
+        except (TypeError, ValueError):
+            return mask
+        if radius_deg <= 0:
+            return mask
+        inside = (x**2 + y**2) <= radius_deg**2
+    mask[ok] = inside
+    return mask
+
+
+def _coverage_optimal_center(ra_deg, dec_deg, region):
+    """Cone centre that keeps a partial-coverage query on covered sky.
+
+    A survey boundary through the required field leaves the
+    footprint-centred query half-empty; distance-ordered (refcat,
+    legacy, gaia) or radius-clamped cones then spend their row budget
+    on sky the catalog never observed.  Returns ``(ra, dec)`` - the
+    centroid of the sources inside the required box, clipped to that
+    box so the re-query still sits on the field - or None when the
+    shift is too small to be worth a second query.
+    """
+    reg = region or {}
+    try:
+        c_ra = float(reg["ra"])
+        c_dec = float(reg["dec"])
+        radius_deg = float(reg.get("radius_arcmin") or 0.0) / 60.0
+    except (TypeError, ValueError, KeyError):
+        return None
+    ra = np.asarray(ra_deg, dtype=float).ravel()
+    dec = np.asarray(dec_deg, dtype=float).ravel()
+    inside = _in_required_region(ra, dec, reg)
+    if inside.sum() < 10:
+        return None
+    x = (_unwrap_ra_near(ra[inside], c_ra) - c_ra) * np.cos(
+        np.radians(c_dec)
+    )
+    y = dec[inside] - c_dec
+    new_x = float(np.mean(x))
+    new_y = float(np.mean(y))
+    # Stay on the required field: coverage confined to a corner pulls
+    # the centre to the box edge, never beyond it.
+    try:
+        hw_x = 0.5 * float(reg["width_deg"])
+        hw_y = 0.5 * float(reg["height_deg"])
+    except (TypeError, ValueError, KeyError):
+        hw_x = hw_y = 0.0
+    if hw_x > 0 and hw_y > 0:
+        new_x = float(np.clip(new_x, -hw_x, hw_x))
+        new_y = float(np.clip(new_y, -hw_y, hw_y))
+    elif radius_deg > 0:
+        d = float(np.hypot(new_x, new_y))
+        if d > radius_deg:
+            new_x *= radius_deg / d
+            new_y *= radius_deg / d
+    if radius_deg <= 0 or np.hypot(new_x, new_y) < 0.05 * radius_deg:
+        return None
+    dec_new = c_dec + new_y
+    ra_new = c_ra + new_x / max(np.cos(np.radians(c_dec)), 1e-6)
+    return (
+        float(ra_new % 360.0),
+        float(np.clip(dec_new, -89.999, 89.999)),
+    )
+
+
+def _refcat_nsources_cap(cat_cfg, radius_arcmin):
+    """RefCat2's effective per-query row cap for a region.
+
+    Mirrors the resolution ``download`` applies: an explicit
+    ``catalog.refcat_nsources`` override, else ~3 rows/arcmin^2 of cone
+    area clipped to [500, 10000].
+    """
+    try:
+        cap = int((cat_cfg or {}).get("refcat_nsources") or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap > 0:
+        return cap
+    return int(
+        np.clip(3.0 * np.pi * float(radius_arcmin) ** 2, 500, 10000)
+    )
+
+
+def _query_rows_capped(name, n_rows, cat_cfg, region):
+    """True when a distance-ordered cone backend likely hit its cap.
+
+    A truncated fetch keeps only the sky nearest the query centre, so
+    recentring changes which part of the field the returned rows
+    cover.  Uncapped backends return the same sky from any centre.
+    """
+    if name == "refcat":
+        cap = _refcat_nsources_cap(
+            cat_cfg, float((region or {}).get("radius_arcmin") or 10.0)
+        )
+        return n_rows >= 0.95 * cap
+    if name == "legacy":
+        # query_legacy_survey trims to a fixed 1000 rows.
+        return n_rows >= 950
+    if name == "gaia":
+        try:
+            cap = int((cat_cfg or {}).get("gaia_xp_max_sources") or 500)
+        except (TypeError, ValueError):
+            cap = 500
+        return n_rows >= 0.95 * cap
+    return False
+
+
+_PIXSCALE_KEYS = (
+    "PIXSCALE",
+    "PIXSCAL1",
+    "SCALE",
+    "SECPIX",
+    "SECPIX1",
+)
+
+
+def _pixscale_arcsec(header):
+    """
+    Pixel scale (arcsec/pix) from common header cards, or None.
+
+    Explicit scale keywords are tried first; the CD matrix and CDELT are
+    worth a look even when astropy rejects the full WCS - some products
+    carry a mixed SIP/TPV card set whose WCS fails to build while the raw
+    linear cards are still valid.
+    """
+    if header is None:
+        return None
+    try:
+        for key in _PIXSCALE_KEYS:
+            val = header.get(key)
+            if val is None:
+                continue
+            try:
+                scale = abs(float(val))
+            except (TypeError, ValueError):
+                continue
+            if 0.0 < scale <= 30.0:
+                return scale
+        if all(k in header for k in ("CD1_1", "CD1_2", "CD2_1", "CD2_2")):
+            det = abs(
+                float(header["CD1_1"]) * float(header["CD2_2"])
+                - float(header["CD1_2"]) * float(header["CD2_1"])
+            )
+            scale = det**0.5 * 3600.0
+            if 0.0 < scale <= 30.0:
+                return scale
+        for key in ("CDELT1", "CDELT2"):
+            if key in header:
+                scale = abs(float(header[key])) * 3600.0
+                if 0.0 < scale <= 30.0:
+                    return scale
+    except Exception:
+        pass
+    return None
+
+
+def _footprint_radius_arcmin(image_infos, target_coords, margin=1.1):
+    """
+    Cone radius (arcmin) centred on ``target_coords`` that covers the
+    corners of every image footprint.  Returns None when no image carries
+    a usable WCS/shape, so callers can keep their default radius.
+
+    An image without a usable WCS falls back to its detector
+    half-diagonal at the ``pixscale`` entry (arcsec/pix) - that assumes a
+    near-centred target, which is the best available estimate when no
+    WCS exists; the coverage diagnostic flags fields where it falls
+    short.
+    """
+    max_sep = 0.0
+    for img in image_infos or []:
+        shape_i = img.get("shape")
+        if shape_i is None:
+            continue
+        try:
+            ny, nx = shape_i
+            sep_i = None
+            wcs_i = img.get("wcs")
+            if wcs_i is not None:
+                try:
+                    cra, cde = wcs_i.all_pix2world(
+                        [0.0, nx - 1.0, nx - 1.0, 0.0],
+                        [0.0, 0.0, ny - 1.0, ny - 1.0],
+                        0,
+                    )
+                    corners = SkyCoord(
+                        np.asarray(cra, dtype=float).ravel() * u.deg,
+                        np.asarray(cde, dtype=float).ravel() * u.deg,
+                    )
+                    sep = target_coords.separation(corners).arcmin
+                    if np.isfinite(sep).any():
+                        sep_i = float(np.nanmax(sep))
+                except Exception:
+                    sep_i = None
+            if sep_i is None:
+                ps = img.get("pixscale")
+                try:
+                    ps = float(ps) if ps is not None else np.nan
+                except (TypeError, ValueError):
+                    ps = np.nan
+                if np.isfinite(ps) and ps > 0.0:
+                    sep_i = 0.5 * np.hypot(nx, ny) * ps / 60.0
+            if sep_i is not None and np.isfinite(sep_i):
+                max_sep = max(max_sep, sep_i)
+        except Exception:
+            continue
+    if max_sep <= 0:
+        return None
+    return max_sep * margin
+
+
+def _catalog_cone_radius_arcmin(
+    image_infos,
+    target_coords,
+    default_arcmin=10.0,
+    min_arcmin=2.0,
+    max_arcmin=60.0,
+):
+    """
+    Cone-search radius sized by the image footprint extent.
+
+    The footprint radius both covers and *limits* the query: a narrow
+    field gets a narrower cone instead of always paying for the default
+    radius.  Falls back to ``default_arcmin`` when no image carries a
+    usable WCS or pixel scale (e.g. a dataset with no WCS solution).
+    """
+    footprint = _footprint_radius_arcmin(image_infos, target_coords)
+    if footprint is None or not np.isfinite(footprint) or footprint <= 0:
+        return float(default_arcmin)
+    return float(min(max(footprint, min_arcmin), max_arcmin))
+
+
+# Backends whose query API accepts a rectangular region; the rest get the
+# box's circumscribed cone. VizieR query_region takes width/height.
+_BOX_QUERY_CATALOGS = {"apass", "2mass", "sdss"}
+
+
+def _footprint_corners_radec(image_infos, target_coords=None):
+    """
+    Collect image-footprint corner positions as flat RA/Dec arrays.
+
+    Images with a usable WCS contribute their true sky corners; images
+    with only ``shape`` + ``pixscale`` contribute a square box centred on
+    ``target_coords`` (the same near-centred assumption
+    ``_footprint_radius_arcmin`` makes).  Images with neither contribute
+    nothing.
+    """
+    ras, decs = [], []
+    t_ra = t_dec = None
+    if target_coords is not None:
+        try:
+            t_ra = float(target_coords.ra.degree)
+            t_dec = float(target_coords.dec.degree)
+        except Exception:
+            t_ra = t_dec = None
+    for img in image_infos or []:
+        shape_i = img.get("shape")
+        if shape_i is None:
+            continue
+        try:
+            ny, nx = int(shape_i[0]), int(shape_i[1])
+        except Exception:
+            continue
+        if nx <= 0 or ny <= 0:
+            continue
+        wcs_i = img.get("wcs")
+        done = False
+        if wcs_i is not None:
+            try:
+                cra, cde = wcs_i.all_pix2world(
+                    [0.0, nx - 1.0, nx - 1.0, 0.0],
+                    [0.0, 0.0, ny - 1.0, ny - 1.0],
+                    0,
+                )
+                cra = np.asarray(cra, dtype=float).ravel()
+                cde = np.asarray(cde, dtype=float).ravel()
+                if np.isfinite(cra).all() and np.isfinite(cde).all():
+                    ras.append(cra)
+                    decs.append(cde)
+                    done = True
+            except Exception:
+                pass
+        if done or t_ra is None:
+            continue
+        try:
+            ps = float(img.get("pixscale"))
+        except (TypeError, ValueError):
+            continue
+        if not (np.isfinite(ps) and 0.0 < ps <= 30.0):
+            continue
+        hw_y = 0.5 * ny * ps / 3600.0
+        cosd = max(np.cos(np.radians(t_dec)), 1e-6)
+        hw_x = 0.5 * nx * ps / 3600.0 / cosd
+        ras.append(t_ra + np.array([-hw_x, hw_x, hw_x, -hw_x]))
+        decs.append(t_dec + np.array([-hw_y, -hw_y, hw_y, hw_y]))
+    if not ras:
+        return np.array([]), np.array([])
+    return np.concatenate(ras), np.concatenate(decs)
+
+
+def _region_from_corners(
+    ra_deg,
+    dec_deg,
+    target_coords=None,
+    margin=1.1,
+    min_arcmin=2.0,
+    max_arcmin=60.0,
+    default_arcmin=10.0,
+):
+    """
+    Catalog query region covering a footprint corner set.
+
+    The region is anchored on the bounding-box centre of the footprint
+    corners - not the target - so dithered/off-centre pointings no longer
+    inflate the cone (a target at the field edge used to double the
+    radius).  ``box_deg`` is the padded RA/Dec bounding box for backends
+    that accept rectangular queries; ``radius_arcmin`` is the box's
+    circumscribed cone for cone-only backends.  Both are bounded: the
+    cone is clamped to [min_arcmin, max_arcmin] and the box rescaled so
+    it stays inscribed in the clamped cone.
+
+    Falls back to a target-centred default cone (no box) when the corner
+    set is empty.
+
+    Returns a plain-python dict (yaml/json safe):
+    ``ra``, ``dec``, ``radius_arcmin``, ``offset_arcmin``,
+    ``box_deg`` = [ra_min, ra_max, dec_min, dec_max] (ra_min > ra_max
+    means the box wraps across RA=0/360), ``width_deg``, ``height_deg``,
+    ``n_corners``.
+
+    ``width_deg`` is the *angular* width along the RA direction (what
+    VizieR's ``-c.b`` box consumes), so the RA coordinate span is
+    ``width_deg / cos(dec)``; ``box_deg`` carries the coordinate bounds
+    for plotting.
+    """
+    t_ra = t_dec = None
+    if target_coords is not None:
+        try:
+            t_ra = float(target_coords.ra.degree)
+            t_dec = float(target_coords.dec.degree)
+        except Exception:
+            t_ra = t_dec = None
+
+    ra = np.asarray(ra_deg, dtype=float).ravel()
+    dec = np.asarray(dec_deg, dtype=float).ravel()
+    ok = np.isfinite(ra) & np.isfinite(dec)
+    ra, dec = ra[ok], dec[ok]
+    if ra.size == 0:
+        return {
+            "ra": float(t_ra if t_ra is not None else 0.0),
+            "dec": float(t_dec if t_dec is not None else 0.0),
+            "radius_arcmin": float(default_arcmin),
+            "offset_arcmin": 0.0,
+            "box_deg": None,
+            "width_deg": None,
+            "height_deg": None,
+            "n_corners": 0,
+            "clamped": False,
+        }
+
+    anchor = t_ra if t_ra is not None else float(np.mean(ra % 360.0))
+    ra_u = _unwrap_ra_near(ra, anchor)
+    hw_ra = 0.5 * float(ra_u.max() - ra_u.min()) * margin
+    hw_dec = 0.5 * float(dec.max() - dec.min()) * margin
+    c_ra_u = 0.5 * float(ra_u.max() + ra_u.min())
+    c_dec = 0.5 * float(dec.max() + dec.min())
+
+    # Dec bounds cannot cross a pole; re-centre on the clamped range.
+    dec_lo = max(c_dec - hw_dec, -89.999)
+    dec_hi = min(c_dec + hw_dec, 89.999)
+    c_dec = 0.5 * (dec_lo + dec_hi)
+    hw_dec = 0.5 * (dec_hi - dec_lo)
+
+    # Circumscribed cone: true angular distance centre -> box corner
+    # (SkyCoord handles the cos(dec) RA foreshortening and wrap).
+    c_ra = c_ra_u % 360.0
+    corner_sc = SkyCoord(
+        ra=np.array(
+            [c_ra_u - hw_ra, c_ra_u + hw_ra, c_ra_u + hw_ra, c_ra_u - hw_ra]
+        )
+        * u.deg,
+        dec=np.array([dec_lo, dec_lo, dec_hi, dec_hi]) * u.deg,
+        frame="icrs",
+    )
+    centre_sc = SkyCoord(ra=c_ra * u.deg, dec=c_dec * u.deg, frame="icrs")
+    sep_raw = float(centre_sc.separation(corner_sc).arcmin.max())
+    radius = float(min(max(sep_raw, min_arcmin), max_arcmin))
+
+    # Rescale the box so it stays inscribed in the (clamped) cone.  A
+    # degenerate corner set (sep_raw ~ 0) gets the minimum-size box.
+    if sep_raw > 0:
+        hw_ra *= radius / sep_raw
+        hw_dec *= radius / sep_raw
+    else:
+        hw_dec = radius / (60.0 * np.sqrt(2.0))
+        hw_ra = hw_dec / max(np.cos(np.radians(c_dec)), 1e-6)
+
+    dec_lo = max(c_dec - hw_dec, -89.999)
+    dec_hi = min(c_dec + hw_dec, 89.999)
+    # A box spanning (nearly) all of RA is not a useful box query - the
+    # pole/pan-sky case is better served by the plain cone.
+    if 2.0 * hw_ra >= 350.0:
+        box_deg = None
+        width_deg = height_deg = None
+    else:
+        ra_min = (c_ra_u - hw_ra) % 360.0
+        ra_max = (c_ra_u + hw_ra) % 360.0
+        box_deg = [
+            float(ra_min),
+            float(ra_max),
+            float(dec_lo),
+            float(dec_hi),
+        ]
+        # VizieR box widths are angular (RA size is divided by cos(dec)
+        # server-side), so report the on-sky width, not the RA coordinate
+        # span stored in box_deg.
+        width_deg = float(
+            2.0 * hw_ra * max(np.cos(np.radians(c_dec)), 1e-6)
+        )
+        height_deg = float(2.0 * hw_dec)
+
+    off = 0.0
+    if t_ra is not None:
+        off = float(
+            centre_sc.separation(
+                SkyCoord(ra=t_ra * u.deg, dec=t_dec * u.deg, frame="icrs")
+            ).arcmin
+        )
+    return {
+        "ra": float(c_ra),
+        "dec": float(c_dec),
+        "radius_arcmin": float(radius),
+        "offset_arcmin": float(off),
+        "box_deg": box_deg,
+        "width_deg": width_deg,
+        "height_deg": height_deg,
+        "n_corners": int(ra.size),
+        # True when max_arcmin shrank the region below the required
+        # extent - the cone then covers only part of the footprint.
+        "clamped": bool(sep_raw > max_arcmin),
+    }
+
+
+def _footprint_region(
+    image_infos,
+    bands,
+    target_coords,
+    margin=1.1,
+    min_arcmin=2.0,
+    max_arcmin=60.0,
+    default_arcmin=10.0,
+):
+    """
+    Query region covering the footprints of ``image_infos`` restricted
+    to ``bands`` (falsy = all images).  Images with no resolved band are
+    scored under every band, so they join every band's region.
+    """
+    if bands:
+        sel = {str(b) for b in bands}
+        infos = [
+            i
+            for i in (image_infos or [])
+            if i.get("band") is None or str(i.get("band")) in sel
+        ]
+    else:
+        infos = list(image_infos or [])
+    ra, dec = _footprint_corners_radec(infos, target_coords)
+    reg = _region_from_corners(
+        ra,
+        dec,
+        target_coords,
+        margin=margin,
+        min_arcmin=min_arcmin,
+        max_arcmin=max_arcmin,
+        default_arcmin=default_arcmin,
+    )
+    reg["n_images"] = len(infos)
+    return reg
+
+
+def _fmt_region(region):
+    """
+    Compact one-line description of a query region for log messages:
+    cone radius and centre, box size when present, and the centre's
+    offset from the target when it is not negligible.
+    """
+    if not isinstance(region, dict):
+        return ""
+    parts = [f"r={float(region.get('radius_arcmin', 0.0)):.1f}'"]
+    if region.get("width_deg") and region.get("height_deg"):
+        parts.append(
+            f"box {60.0 * float(region['width_deg']):.1f}'x"
+            f"{60.0 * float(region['height_deg']):.1f}'"
+        )
+    parts.append(
+        f"@ ({float(region.get('ra', 0.0)):.4f}, "
+        f"{float(region.get('dec', 0.0)):.4f})"
+    )
+    off = float(region.get("offset_arcmin") or 0.0)
+    if off > 1.0:
+        parts.append(f"({off:.1f}' off target)")
+    return " ".join(parts)
+
+
+# VizieR resolves ``catalog="sdss"`` to several SDSS releases at once and
+# returns one table per release.  The footprints differ between releases,
+# so the first table is not necessarily the best-covered one.
+_SDSS_RELEASE_RANK = {
+    "v/154": 4,  # DR16 - final release, largest footprint
+    "v/147": 3,  # DR12
+    "v/139": 2,  # DR9
+    "ii/294": 1,  # DR7
+}
+
+
+def _select_sdss_vizier_table(
+    catalog_search, center_ra=None, center_dec=None, radius_deg=None
+):
+    """
+    Pick the best SDSS release from a VizieR TableList.
+
+    Every SDSS release on VizieR answers the same cone query; each applies
+    its own star cuts (``cl``/``class`` == 6, ``mode`` == 1, ``clean`` == 1
+    where present).  Releases are scored on how much of the query disk
+    their surviving primary stars cover - footprints differ between
+    releases - with ties going to the newer release, then to the larger
+    source count.
+    """
+    best_key = None
+    best_df = pd.DataFrame()
+    best_name = "?"
+    for table in catalog_search:
+        name = str(getattr(table, "meta", {}).get("name", "?"))
+        try:
+            df = table.to_pandas()
+        except Exception:
+            continue
+        n0 = len(df)
+        if "mode" in df.columns:
+            df = df[pd.to_numeric(df["mode"], errors="coerce") == 1]
+        if "cl" in df.columns:
+            df = df[pd.to_numeric(df["cl"], errors="coerce") == 6]
+        elif "class" in df.columns:
+            df = df[pd.to_numeric(df["class"], errors="coerce") == 6]
+        if "clean" in df.columns:
+            df = df[pd.to_numeric(df["clean"], errors="coerce") == 1]
+        rank = _SDSS_RELEASE_RANK.get(
+            "/".join(name.split("/")[:2]).lower(), 0
+        )
+        # Coverage decides at ~10% granularity; count alone would favour
+        # older releases that lack the ``clean`` cut.
+        decile = 0
+        if (
+            center_ra is not None
+            and center_dec is not None
+            and radius_deg
+            and len(df) > 0
+        ):
+            ra_arr, dec_arr = _catalog_radec(df)
+            if ra_arr is not None:
+                cov = _field_coverage_fraction(
+                    ra_arr, dec_arr, center_ra, center_dec, radius_deg
+                )
+                if np.isfinite(cov):
+                    decile = int(np.clip(cov * 10, 0, 10))
+        logger.debug(
+            "SDSS %s: %d usable primary stars (of %d rows), coverage decile %d",
+            name,
+            len(df),
+            n0,
+            decile,
+        )
+        key = (decile, rank, len(df))
+        if best_key is None or key > best_key:
+            best_key = key
+            best_df = df
+            best_name = name
+    if len(best_df) > 0:
+        logger.info(
+            "SDSS: using %s (%d usable primary stars)", best_name, len(best_df)
+        )
+    return best_df
 
 
 # =============================================================================
@@ -138,6 +1909,13 @@ def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
 # =============================================================================
 # =============================================================================
 class Catalog:
+    """Catalog query and cross-matching for photometric calibration.
+
+    Wraps online catalog services (Pan-STARRS, SDSS, Skymapper, Gaia, 2MASS,
+    WISE) and provides local catalog operations: source cross-matching,
+    saturation/linearity filtering, and zeropoint fitting preparation.
+    """
+
     def __init__(self, input_yaml):
         """
         Initialize the catalog class with the input YAML configuration.
@@ -167,6 +1945,12 @@ class Catalog:
                 "No catalog selected. Set `default_input.catalog.use_catalog` in your YAML "
                 "(e.g. 'gaia', 'panstarrs'/'pan_starrs', 'sdss', 'apass', '2mass', 'legacy', 'refcat', 'custom', or 'gaia_custom')."
             )
+        if str(catalogName).strip().lower() == "auto":
+            raise ValueError(
+                "catalog.use_catalog='auto' is resolved by the driver "
+                "(autophot.py) into a per-filter mapping before per-image "
+                "processing; it cannot be used when calling main() directly."
+            )
         return str(catalogName).strip()
 
     def _resolve_catalog_for_filter(self, catalog_choice):
@@ -184,7 +1968,7 @@ class Catalog:
             band_for_group = (
                 use_filter_norm if use_filter_norm is not None else use_filter
             )
-            # Warn when the current filter matches multiple mapping keys.
+            # Warn on ambiguous mappings (multiple keys match this filter).
             membership_matches = []
             if use_filter:
                 for key, value in catalog_choice.items():
@@ -199,8 +1983,7 @@ class Catalog:
                         membership_matches.append(str(key))
                 if len(membership_matches) > 1:
                     logger.warning(
-                        "catalog.use_catalog mapping is ambiguous for filter '%s': matched keys=%s. "
-                        "Using precedence: exact key > first membership key > default.",
+                        "catalog.use_catalog mapping is ambiguous for filter '%s': matched keys=%s. Using precedence: exact key > first membership key > default.",
                         use_filter,
                         membership_matches,
                     )
@@ -268,21 +2051,21 @@ class Catalog:
     @staticmethod
     def _normalize_catalog_name(catalog_name: str) -> str:
         """
-        Normalize catalog name aliases to canonical form.
+        Normalize catalog name aliases to canonical form (lowercase).
         
-        Accepts 'panstarrs' (no underscore) and converts to 'pan_starrs'.
-        This ensures backward compatibility with both naming conventions.
+        Accepts case-insensitive input (e.g., 'GAIA', 'Gaia', 'gaia') and
+        converts to lowercase. Also handles 'panstarrs' (no underscore) and
+        converts to 'pan_starrs' for backward compatibility.
         """
         if not catalog_name:
             return catalog_name
         name = str(catalog_name).strip().lower()
-        # Map common aliases to canonical names
         aliases = {
             "panstarrs": "pan_starrs",
             "pan-starrs": "pan_starrs",
             "ps1": "pan_starrs",
         }
-        return aliases.get(name, catalog_name)
+        return aliases.get(name, name)
 
     def _require_nonempty_catalog(
         self, selectedCatalog, catalogName: str, target_coords, radius_arcmin: float
@@ -324,26 +2107,28 @@ class Catalog:
         import logging
 
         from autophot_gaia_curves.gaia_archive import (
-            gaia_xp_source_query,
             gaia_xp_sql_top_n,
             generate_source_ids_batched,
-            launch_gaia_adql_to_pandas,
+            query_gaia_xp_cone_growing,
             sort_gaia_table_nearest_to_target,
         )
 
         logger = logging.getLogger(__name__)
         cat_cfg = self.input_yaml.get("catalog", {}) or {}
-        query_pause_b = float(cat_cfg.get("gaia_archive_query_pause_before_sec", 1.0))
-        query_pause_a = float(cat_cfg.get("gaia_archive_query_pause_after_sec", 1.0))
+        query_pause_b = float(cat_cfg.get("gaia_archive_query_pause_before_sec", 0.25))
+        query_pause_a = float(cat_cfg.get("gaia_archive_query_pause_after_sec", 0.25))
         xp_batch_size = int(cat_cfg.get("gaia_xp_batch_size", 200))
-        xp_batch_pause = float(cat_cfg.get("gaia_xp_batch_pause_sec", 1.0))
+        xp_batch_pause = float(cat_cfg.get("gaia_xp_batch_pause_sec", 0.5))
         archive_retries = int(cat_cfg.get("gaia_archive_max_retries", 3))
         retry_base_delay = float(cat_cfg.get("gaia_archive_retry_base_delay_sec", 2.0))
         xp_order = str(cat_cfg.get("gaia_xp_order_by", "brightness")).strip().lower()
         xp_show_progress = bool(cat_cfg.get("gaia_xp_show_progress", False))
         prefetch_factor = int(cat_cfg.get("gaia_nearest_prefetch_factor", 50))
-        prefetch_min = int(cat_cfg.get("gaia_nearest_prefetch_min", 500))
+        prefetch_min = int(cat_cfg.get("gaia_nearest_prefetch_min", 200))
         prefetch_max = int(cat_cfg.get("gaia_nearest_prefetch_max", 10000))
+        xp_min_sources = int(cat_cfg.get("gaia_xp_min_sources", 25))
+        xp_max_radius_deg = float(cat_cfg.get("gaia_xp_max_radius_deg", 1.0))
+        xp_grow_factor = float(cat_cfg.get("gaia_xp_grow_factor", 1.5))
 
         sql_top, sort_by_distance = gaia_xp_sql_top_n(
             max_sources,
@@ -353,25 +2138,22 @@ class Catalog:
             prefetch_max=prefetch_max,
         )
 
-        # ADQL radius is in degrees; caller passes degrees (e.g. radius_deg).
-        query = gaia_xp_source_query(
-            ra,
-            dec,
-            radius,
-            sql_top,
-            include_bp_rp=True,
-        )
-
         try:
             logger.info(
-                "Querying Gaia DR3 (synthetic photometry, SQL TOP %d -> target %d "
-                "sources; paced archive: pause %.2fs before/after ADQL)...",
+                "Querying Gaia DR3 (synthetic photometry, SQL TOP %d -> target %d sources; paced archive: pause %.2fs before/after ADQL)...",
                 sql_top,
                 max_sources,
                 max(query_pause_b, query_pause_a),
             )
-            results = launch_gaia_adql_to_pandas(
-                query,
+            results, used_radius_deg = query_gaia_xp_cone_growing(
+                ra,
+                dec,
+                radius,
+                sql_top,
+                include_bp_rp=True,
+                min_sources=xp_min_sources,
+                max_radius_deg=xp_max_radius_deg,
+                grow_factor=xp_grow_factor,
                 pause_before_sec=query_pause_b,
                 pause_after_sec=query_pause_a,
                 max_retries=archive_retries,
@@ -379,12 +2161,15 @@ class Catalog:
                 logger=logger,
                 op_name="Gaia ADQL (XP sources for synthetic photometry)",
             )
-            logger.info("Gaia DR3 query returned %d sources.", len(results))
+            logger.info(
+                "Gaia DR3 query returned %d sources within %.4f deg.",
+                len(results),
+                used_radius_deg,
+            )
 
             if sort_by_distance and not results.empty:
                 logger.info(
-                    "Sorting %d rows by on-sky distance to target (Gaia ADQL "
-                    "does not support ORDER BY distance); keeping nearest %d.",
+                    "Sorting %d rows by on-sky distance to target (Gaia ADQL does not support ORDER BY distance); keeping nearest %d.",
                     len(results),
                     max_sources,
                 )
@@ -398,10 +2183,9 @@ class Catalog:
 
             source_ids = results["source_id"].astype(str).tolist()
             # Resolve requested GaiaXPy photometric systems.
-            #
-            # If `photometric_systems` is None: keep prior behaviour (both).
-            # If it is an empty list/[]/None: skip GaiaXPy synthetic photometry and
-            # fall back to base DR3 photometry only (much faster).
+            # photometric_systems=None keeps prior behaviour (both systems);
+            # an empty list skips GaiaXPy and returns base DR3 photometry
+            # only (much faster).
             if photometric_systems is None:
                 phot_systems = [
                     PhotometricSystem.SDSS_Std,
@@ -414,23 +2198,32 @@ class Catalog:
                 cfg_list = list(cfg) if cfg else []
 
                 if not cfg_list:
-                    logger.info(
-                        "Gaia XP synthetic photometry disabled (empty photometric systems)."
+                    logger.warning(
+                        "gaia_xp_photometric_systems is empty; returning\n"
+                        "    base Gaia DR3 photometry only. The catalog\n"
+                        "    will have no SdssStd/JkcStd columns, so no\n"
+                        "    standard-band magnitudes can be mapped\n"
+                        "    downstream."
                     )
                     return results
 
                 phot_systems = []
                 for sys_name in cfg_list:
                     if isinstance(sys_name, str):
-                        sys_name = sys_name.strip()
-                        phot_systems.append(getattr(PhotometricSystem, sys_name))
+                        name = sys_name.strip()
+                        try:
+                            phot_systems.append(getattr(PhotometricSystem, name))
+                        except AttributeError:
+                            raise ValueError(
+                                f"Unknown GaiaXPy photometric system '{name}'. "
+                                f"Valid options: {[p.name for p in PhotometricSystem]}"
+                            )
                     else:
-                        # Allow passing enum values directly.
+                        # Enum values are accepted directly.
                         phot_systems.append(sys_name)
 
             logger.info(
-                "Downloading Gaia XP spectra and synthetic photometry with GaiaXPy "
-                "(batched: size=%d, inter-batch pause=%.2fs)...",
+                "Downloading Gaia XP spectra and synthetic photometry with GaiaXPy (batched: size=%d, inter-batch pause=%.2fs)...",
                 xp_batch_size if xp_batch_size > 0 else len(source_ids),
                 xp_batch_pause,
             )
@@ -471,36 +2264,23 @@ class Catalog:
                 )
                 merged = results
 
-            # Compute magnitude errors from flux and flux_error where available:
-            # sigma_m = 2.5 / ln(10) * (sigma_F / F).
+            # Magnitude errors from flux: sigma_m = 2.5/ln(10) * (sigma_F/F).
             factor = 2.5 / np.log(10)
 
-            # Avoid division by zero or missing columns; skip bands that are not
-            # present in the merged table (e.g. when XP failed and only base DR3
-            # photometry is available).
-            for band in ["u", "g", "r", "i", "z"]:
-                f_col = f"SdssStd_flux_{band}"
-                e_col = f"SdssStd_flux_error_{band}"
-                m_err_col = f"SdssStd_mag_error_{band}"
-                if f_col not in merged.columns or e_col not in merged.columns:
-                    continue
-                valid = merged[f_col] > 0
-                merged[m_err_col] = np.nan
-                merged.loc[valid, m_err_col] = (
-                    factor * merged.loc[valid, e_col] / merged.loc[valid, f_col]
-                )
-
-            for band in ["U", "B", "V", "R", "I"]:
-                f_col = f"JkcStd_flux_{band}"
-                e_col = f"JkcStd_flux_error_{band}"
-                m_err_col = f"JkcStd_mag_error_{band}"
-                if f_col not in merged.columns or e_col not in merged.columns:
-                    continue
-                valid = merged[f_col] > 0
-                merged[m_err_col] = np.nan
-                merged.loc[valid, m_err_col] = (
-                    factor * merged.loc[valid, e_col] / merged.loc[valid, f_col]
-                )
+            # Skip bands absent from the merged table (e.g. when XP failed and
+            # only base DR3 photometry is available); also guards F<=0.
+            for prefix, bands in (("SdssStd", "ugriz"), ("JkcStd", "UBVRI")):
+                for band in bands:
+                    f_col = f"{prefix}_flux_{band}"
+                    e_col = f"{prefix}_flux_error_{band}"
+                    m_err_col = f"{prefix}_mag_error_{band}"
+                    if f_col not in merged.columns or e_col not in merged.columns:
+                        continue
+                    valid = merged[f_col] > 0
+                    merged[m_err_col] = np.nan
+                    merged.loc[valid, m_err_col] = (
+                        factor * merged.loc[valid, e_col] / merged.loc[valid, f_col]
+                    )
 
             logger.info(
                 "Successfully merged Gaia DR3 catalog and XP photometry for %d sources.",
@@ -520,7 +2300,7 @@ class Catalog:
     # =============================================================================
     # =============================================================================
 
-    def query_legacy_survey(self, ra, dec, radius=0.1):
+    def query_legacy_survey(self, ra, dec, radius=0.1, nsources=1000):
         """
         Query the Legacy Survey using the NOIRLab Data Lab TAP service via astroquery's TAP+.
 
@@ -532,19 +2312,26 @@ class Catalog:
             Declination in degrees.
         radius : float, optional
             Search radius in degrees
+        nsources : int, optional
+            Maximum number of sources to return (default 1000).  The TAP
+            query over-fetches so the cap is applied as a spatially
+            uniform subsample - a distance-ordered TOP-N alone would keep
+            only the inner cone in crowded fields.
 
         Returns:
         --------
         str
             Path to the downloaded file, or None if an error occurred.
         """
-        # TAP service URL for NOIRLab Data Lab
         tap_service_url = "https://datalab.noirlab.edu/tap"
-        # radius_deg = radius / 60
 
-        # SQL query to search the Legacy Survey catalog using ADQL
+        fetch_n = min(max(int(nsources) * 10, int(nsources)), 50000)
+
+        # `type` is selected so point sources (PSF) can be separated from
+        # extended objects (REX, EXP, DEV, SER = galaxies/resolved sources).
         query = f"""
-            SELECT TOP 1000 ra, dec, mag_g, mag_r, mag_i, mag_z,
+            SELECT TOP {fetch_n} ra, dec, type, mag_g, mag_r, mag_i, mag_z,
+                flux_ivar_g, flux_ivar_r, flux_ivar_i, flux_ivar_z,
                 sqrt(power(ra - {ra}, 2) + power(dec - {dec}, 2)) AS angular_distance
             FROM ls_dr10.tractor
             WHERE 't'= Q3C_RADIAL_QUERY(ra, dec, {ra}, {dec}, {radius})
@@ -552,30 +2339,70 @@ class Catalog:
         """
 
         try:
-            logging.info(
+            logger.info(
                 f"Fetching Legacy Survey Dr10 catalog over {radius:.1f} field-of-view centered at ra = {ra:.1f} dec = {dec:.1f}"
             )
-            logging.info(query)
+            logger.debug(query)
 
             from astroquery.utils.tap import TapPlus
 
-            # Initialize the TAP service using TapPlus from astroquery
             tap = TapPlus(url=tap_service_url)
-
-            # Perform the query using TAP+ (synchronous execution)
             result = tap.launch_job(query)
-
-            # Convert the result to an Astropy Table
             table = result.get_results().to_pandas()
+
+            # Point sources only; non-PSF types are extended/galaxies.
+            if "type" in table.columns:
+                n_before = len(table)
+                table = table[table["type"].astype(str).str.upper() == "PSF"].copy()
+                n_gal = n_before - len(table)
+                if n_gal > 0:
+                    logger.info(
+                        "Legacy Survey: removed %d extended sources (type != PSF); %d point sources remain.",
+                        n_gal, len(table),
+                    )
+            table = table.drop(columns=["type"], errors="ignore")
+
+            if len(table) > nsources:
+                logger.info(
+                    "Legacy Survey: %d rows exceed the %d-source cap; "
+                    "subsampling spatially to keep coverage uniform.",
+                    len(table),
+                    nsources,
+                )
+                table = _sky_uniform_subsample(
+                    table, int(nsources), center_ra=ra
+                )
+
             filters = ["g", "r", "i", "z"]
 
+            # Per-source magnitude errors from the Tractor inverse variances.
+            # A fixed placeholder (previously 0.01 mag for every source) is
+            # magnitude-independent and corrupts the inverse-variance
+            # zeropoint fit and the target's error budget.  Recover the real
+            # uncertainty:
+            #     sigma_f = 1 / sqrt(flux_ivar)
+            #     sigma_m = (2.5/ln 10) * sigma_f / f   with  mag = 22.5 - 2.5 log10 f
             for f in filters:
-                table[f"mag_{f}_e"] = [0.01] * len(table)
+                mag_col = f"mag_{f}"
+                ivar_col = f"flux_ivar_{f}"
+                if mag_col not in table.columns or ivar_col not in table.columns:
+                    logger.warning(
+                        "Legacy Survey: missing %s/%s columns; %s magnitude "
+                        "errors set to NaN.",
+                        mag_col,
+                        ivar_col,
+                        f,
+                    )
+                    table[f"mag_{f}_e"] = np.nan
+                    continue
+                _mag = pd.to_numeric(table[mag_col], errors="coerce").to_numpy(float)
+                _ivar = pd.to_numeric(table[ivar_col], errors="coerce").to_numpy(float)
+                table[f"mag_{f}_e"] = _legacy_ivar_to_mag_err(_mag, _ivar)
 
             return table
 
         except Exception as e:
-            logger.info(f"Error during query: {e}")
+            logger.warning("Error during query: %s", e)
             return None
 
     # =============================================================================
@@ -584,7 +2411,8 @@ class Catalog:
     # =============================================================================
     # =============================================================================
 
-    def fetch_refcat2_field(self, ra, dec, credentials, nsources=1000, sr=0.5):
+    def fetch_refcat2_field(self, ra, dec, credentials, nsources=1000, sr=0.5,
+                             max_retries=3, retry_delay=5.0):
         """
         Fetch ATLAS-RefCat2 catalog from MAST.
 
@@ -598,92 +2426,118 @@ class Catalog:
             Dictionary containing MAST credentials.
         nsources : int, optional
             Maximum number of sources to fetch (default is 1000).
+            The SQL over-fetches so the cap is applied as a spatially
+            uniform subsample - TOP-N ordered by distance alone would
+            keep only the inner cone in crowded fields.
         sr : float, optional
             Search radius in degrees (default is 0.5).
+        max_retries : int, optional
+            Maximum number of retry attempts for transient MAST errors (default 3).
+        retry_delay : float, optional
+            Initial delay between retries in seconds; doubles each retry (default 5.0).
 
         Returns:
         --------
         pd.DataFrame
-            DataFrame containing the catalog data.
+            DataFrame containing the catalog data, or None if all retries fail.
         """
-        try:
-            # Generate a unique name for the catalog
-            name = f"autophot_{''.join(random.choices(string.ascii_uppercase, k=5))}"
-            logger.info(
-                f"Fetching ATLAS-RefCat2 catalog from MAST over {sr:.3f} deg field-of-view centered at ra = {ra:.1f} dec = {dec:.1f}"
-            )
+        from mastcasjobs import MastCasJobs
 
-            # Define the columns to be retrieved from the database
-            table = [
-                "RA",
-                "Dec",
-                "g",
-                "dg",
-                "r",
-                "dr",
-                "i",
-                "di",
-                "z",
-                "dz",
-                "J",
-                "dJ",
-                "H",
-                "dH",
-                "K",
-                "dK",
-            ]
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Random suffix gives each attempt a unique MAST table name.
+                name = f"autophot_{''.join(random.choices(string.ascii_uppercase, k=5))}"
+                logger.info(
+                    f"Fetching ATLAS-RefCat2 catalog from MAST over {sr:.3f} deg field-of-view centered at ra = {ra:.1f} dec = {dec:.1f}"
+                    + (f" (attempt {attempt}/{max_retries})" if attempt > 1 else "")
+                )
 
-            # Create the SQL query to fetch data from the database
-            q = """
-            SELECT TOP {max} {columns}
-            INTO MyDB.{name}
-            FROM fGetNearbyObjEq({ra}, {dec}, {sr}) as n
-            INNER JOIN refcat2 AS r ON (n.objid = r.objid)
-            WHERE r.dr < 0.1
-            ORDER BY n.distance
-            """.format(
-                max=nsources,
-                columns="r." + ",r.".join(table),
-                name=name,
-                ra=ra,
-                dec=dec,
-                sr=sr,
-            )
+                table = [
+                    "RA", "Dec", "g", "dg", "r", "dr",
+                    "i", "di", "z", "dz", "J", "dJ", "H", "dH", "K", "dK",
+                ]
 
-            logger.debug(f"SQL Query: {q}")
-            from mastcasjobs import MastCasJobs
+                # Over-fetch: the SQL cap alone truncates nearest-first,
+                # leaving the field edge empty; the spatial subsample
+                # below restores uniform coverage at nsources rows.
+                fetch_n = min(max(int(nsources) * 10, int(nsources)), 20000)
+                q = """
+                SELECT TOP {max} {columns}
+                INTO MyDB.{name}
+                FROM fGetNearbyObjEq({ra}, {dec}, {sr}) as n
+                INNER JOIN refcat2 AS r ON (n.objid = r.objid)
+                WHERE r.dr < 0.1
+                ORDER BY n.distance
+                """.format(
+                    max=fetch_n,
+                    columns="r." + ",r.".join(table),
+                    name=name,
+                    ra=ra,
+                    dec=dec,
+                    sr=sr,
+                )
 
-            # Create a job to execute the SQL query
-            job = MastCasJobs(context="HLSP_ATLAS_REFCAT2", **credentials)
-            job.drop_table_if_exists(name)
-            jobid = job.submit(q, task_name=f"refcat catalog search {ra:.5f} {dec:.5f}")
+                logger.debug("SQL Query: %s", q)
 
-            # Monitor the status of the job
-            status = job.monitor(jobid)
+                job = MastCasJobs(context="HLSP_ATLAS_REFCAT2", **credentials)
 
-            # Check if the job status indicates an error
-            if status[0] in (3, 4):
-                raise Exception(f"Job failed with status {status[0]}: {status[1]}")
+                # drop_table_if_exists can fail with transient MAST SQL errors;
+                # since we use random table names, the table almost never exists.
+                # Make this non-fatal so the actual query can still proceed.
+                try:
+                    job.drop_table_if_exists(name)
+                except Exception as drop_err:
+                    logger.debug(
+                        f"drop_table_if_exists failed (non-fatal, table likely new): {drop_err}"
+                    )
 
-            # Retrieve the result table and drop the temporary table
-            tab = job.get_table(name, format="CSV")
-            job.drop_table_if_exists(name)
+                jobid = job.submit(q, task_name=f"refcat catalog search {ra:.5f} {dec:.5f}")
 
-            # Convert the result table to a pandas DataFrame
-            tab = tab.to_pandas()
+                status = job.monitor(jobid)
 
-            # Remove any row where any value is zero
-            tab = tab[~(tab == 0).any(axis=1)]
-            tab.reset_index(drop=True, inplace=True)
+                # CasJobs status 3/4 means the job failed.
+                if status[0] in (3, 4):
+                    raise Exception(f"Job failed with status {status[0]}: {status[1]}")
 
-        except Exception as e:
-            logger.error("\n> Catalog retrieval failed! \n")
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            logger.error("%s %s %d %s", exc_type, fname, exc_tb.tb_lineno, e)
-            return None
+                tab = job.get_table(name, format="CSV")
+                try:
+                    job.drop_table_if_exists(name)
+                except Exception as drop_err:
+                    logger.debug("Post-query drop_table failed (non-fatal): %s", drop_err)
 
-        return tab
+                tab = tab.to_pandas()
+
+                # Drop rows containing a 0 (missing photometry sentinel).
+                tab = tab[~(tab == 0).any(axis=1)]
+                tab.reset_index(drop=True, inplace=True)
+
+                if len(tab) > nsources:
+                    logger.info(
+                        "RefCat2: %d rows exceed the %d-source cap; "
+                        "subsampling spatially to keep coverage uniform.",
+                        len(tab),
+                        nsources,
+                    )
+                    tab = _sky_uniform_subsample(
+                        tab, int(nsources), center_ra=ra
+                    ).reset_index(drop=True)
+
+                return tab
+
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"RefCat2 fetch attempt {attempt}/{max_retries} failed: {e}"
+                )
+                if attempt < max_retries:
+                    delay = retry_delay * (2 ** (attempt - 1))
+                    logger.info("Retrying in %.0fs...", delay)
+                    time.sleep(delay)
+
+        logger.error("\n> Catalog retrieval failed after %d attempts! \n", max_retries)
+        logger.error("Last error: %s: %s", type(last_error).__name__, last_error)
+        return None
 
     # =============================================================================
     # =============================================================================
@@ -700,6 +2554,8 @@ class Catalog:
         catalog_custom_fpath=None,
         include_IR_sequence_data=True,
         max_sources=None,
+        region=None,
+        _stale_retry=False,
     ):
         """
         Download and process catalog data for a given target.
@@ -711,7 +2567,7 @@ class Catalog:
         catalogName : str
             Name of the catalog to fetch ('refcat', 'gaia', 'apass', '2mass', 'sdss', 'skymapper', 'panstarrs'/'pan_starrs', 'custom').
         radius : float, optional
-            Search radius around the target in degrees (default is 15).
+            Search radius around the target in **arcminutes** (default is 10).
         target_name : str, optional
             Optional name for the target.
         catalog_custom_fpath : str, optional
@@ -721,22 +2577,70 @@ class Catalog:
         max_sources : int, optional
             Maximum number of sources to return (default None for no limit).
             If set, catalogs will be limited to this many sources after download.
+        region : dict, optional
+            Query region from ``_footprint_region``/``_region_from_corners``
+            (keys ``ra``, ``dec``, ``radius_arcmin``, ``box_deg``,
+            ``width_deg``, ``height_deg``).  When given, the query is
+            centred on the region centre - the footprint bounding-box
+            midpoint, which need not be the target - and box-capable
+            backends (``_BOX_QUERY_CATALOGS``) issue the rectangular query
+            while the rest get the box's circumscribed cone.  ``radius``
+            remains the fallback when ``region`` carries none.
 
         Returns:
         --------
         DataFrame
             DataFrame containing the catalog data, or None if an error occurs.
         """
-        logger.info(border_msg("Collecting Sequence sources in field"))
+        logger.log(STATUS, log_step("Catalog: sequence sources in field"))
 
         try:
             catalogName = self._require_catalog_selected(catalogName)
 
-            # If target or its RA/DEC is set, set target name
             target_ra = target_coords.ra.degree
             target_dec = target_coords.dec.degree
 
-            # Set default target name if not provided
+            # Effective query region: a passed-in ``region`` centres the
+            # query on the footprint bounds rather than the target, so
+            # offset pointings no longer inflate the cone.  Cone-only
+            # backends use the box's circumscribed radius; box-capable
+            # ones issue the rectangular query directly.
+            q_ra, q_dec = float(target_ra), float(target_dec)
+            q_radius_arcmin = float(radius)
+            box_wh = None
+            if isinstance(region, dict):
+                try:
+                    if region.get("ra") is not None:
+                        q_ra = float(region["ra"]) % 360.0
+                    if region.get("dec") is not None:
+                        q_dec = float(region["dec"])
+                    _qr = region.get("radius_arcmin")
+                    if _qr is not None:
+                        _qr = float(_qr)
+                        if np.isfinite(_qr) and _qr > 0:
+                            q_radius_arcmin = _qr
+                    _bw = region.get("width_deg")
+                    _bh = region.get("height_deg")
+                    if _bw is not None and _bh is not None:
+                        _bw, _bh = float(_bw), float(_bh)
+                        if np.isfinite(_bw) and np.isfinite(_bh) and _bw > 0 and _bh > 0:
+                            box_wh = (_bw, _bh)
+                except (TypeError, ValueError):
+                    q_ra, q_dec = float(target_ra), float(target_dec)
+                    q_radius_arcmin = float(radius)
+                    box_wh = None
+            query_coords = SkyCoord(
+                ra=q_ra * u.deg, dec=q_dec * u.deg, frame="icrs"
+            )
+            # A region offset from the target still needs its far edge
+            # inside clean()'s target-anchored max_distance cut.
+            off_arcmin = float(
+                query_coords.separation(target_coords).arcmin
+            )
+            # Rectangular queries are only sent to backends that support
+            # them; other backends use the circumscribed cone.
+            use_box = box_wh is not None and catalogName in _BOX_QUERY_CATALOGS
+
             if target_name is None:
                 if target_ra is not None and target_dec is not None:
                     target_name = f"target_ra_{target_ra:.6f}_dec_{target_dec:.6f}"
@@ -744,20 +2648,20 @@ class Catalog:
                     target_name = "target"
             else:
                 if "Unknown" not in target_name:
-                    target_name = self.input_yaml.get("target_name", "Transient")
+                    # Re-anchor on the configured name so every caller
+                    # shares one cache key; "Unknown" labels (additional
+                    # targets) keep their own namespace.
+                    target_name = canonical_target_name(self.input_yaml)
 
-            # Set default custom catalog path if not provided
             if not catalog_custom_fpath:
                 catalog_custom_fpath = self.input_yaml["catalog"].get(
                     "catalog_custom_fpath", None
                 )
 
-            # Working directory
             wdir = self.input_yaml.get("wdir")
             if not wdir:
                 raise ValueError("Working directory (wdir) is not set in input YAML.")
 
-            # Create directories for storing catalog data
             dirname = os.path.join(wdir, "catalog_queries")
             pathlib.Path(dirname).mkdir(parents=True, exist_ok=True)
             catalog_dir = os.path.join(dirname, catalogName)
@@ -767,15 +2671,83 @@ class Catalog:
             )
             pathlib.Path(target_dir).mkdir(parents=True, exist_ok=True)
 
-            # Generate file name for the catalog
-            fname = f"{target_name}_r_{radius:.1f}arcmins_{catalogName}_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}".replace(
-                "", ""
+            # radius is arcmin; catalog queries take degrees.
+            radius_deg = q_radius_arcmin / 60
+
+            # RefCat2's row cap must track the queried area: a flat 500
+            # rows was sized for a 10 arcmin cone and leaves the
+            # footprint-anchored optimizer regions (13-30+ arcmin) too
+            # thin to score or display coverage honestly.  ~3 rows per
+            # arcmin^2 keeps roughly a third of the typical
+            # high-latitude density; catalog.refcat_nsources pins an
+            # exact cap when set.  The cap rides in the cache key so a
+            # truncated older file can never satisfy a larger request.
+            _refcat_ns = None
+            if catalogName == "refcat":
+                _refcat_ns = _refcat_nsources_cap(
+                    self.input_yaml.get("catalog", {}) or {},
+                    q_radius_arcmin,
+                )
+
+            # The cache key carries the *queried* centre/extent so runs
+            # with different resolved regions never collide.
+            box_tag = (
+                f"_box{box_wh[0]:.2f}x{box_wh[1]:.2f}deg" if use_box else ""
+            )
+            _ns_tag = f"_n{_refcat_ns}" if _refcat_ns else ""
+            fname = (
+                f"{target_name}_r_{q_radius_arcmin:.1f}arcmins{box_tag}_"
+                f"{catalogName}{_ns_tag}_target_ra_{q_ra:.6f}_dec_{q_dec:.6f}"
             )
 
-            # Convert from arcmins to degrees
-            radius_deg = radius / 60
+            # clean() drops sources farther than catalog.max_distance from
+            # the target - a wider query cone must not be re-trimmed to the
+            # default 10 arcmin or the edge coverage would be lost again.
+            # The reach is centre-to-target offset + radius: region centres
+            # sit on the footprint bounds, not necessarily on the target.
+            try:
+                _cat_cfg = self.input_yaml.setdefault("catalog", {})
+                _cur_md = float(_cat_cfg.get("max_distance", 10.0))
+                _reach = q_radius_arcmin + off_arcmin
+                if _reach > _cur_md:
+                    _cat_cfg["max_distance"] = _reach
+                    logger.debug(
+                        "Raised catalog.max_distance to %.1f arcmin to match "
+                        "the query reach (r=%.1f + offset %.1f).",
+                        _reach,
+                        q_radius_arcmin,
+                        off_arcmin,
+                    )
+            except Exception:
+                pass
 
-            # Handle different catalog sources
+            # A cone cache at the same centre is a superset of any box
+            # query - reuse it before paying for a narrower download.
+            _cache_paths = [os.path.join(target_dir, f"{fname}.csv")]
+            if (
+                catalogName == "refcat"
+                and _refcat_ns
+                and _refcat_ns <= 500
+            ):
+                # Legacy files carry no cap tag and top out at the old
+                # flat 500 - only equivalent when the resolved cap
+                # matches; a wider region must fetch the denser table.
+                _legacy = fname.replace(f"_n{_refcat_ns}_", "_")
+                _cache_paths.append(
+                    os.path.join(target_dir, f"{_legacy}.csv")
+                )
+            if use_box:
+                _fname_cone = (
+                    f"{target_name}_r_{q_radius_arcmin:.1f}arcmins_"
+                    f"{catalogName}_target_ra_{q_ra:.6f}_dec_{q_dec:.6f}"
+                )
+                _cache_paths.append(
+                    os.path.join(target_dir, f"{_fname_cone}.csv")
+                )
+            _cache_hit = next(
+                (p for p in _cache_paths if os.path.isfile(p)), None
+            )
+
             if catalogName == "custom":
                 if not catalog_custom_fpath:
                     logger.critical(
@@ -784,15 +2756,58 @@ class Catalog:
                     return None
                 selectedCatalog = pd.read_csv(catalog_custom_fpath)
 
-            elif os.path.isfile(os.path.join(target_dir, f"{fname}.csv")):
-                logger.info(
-                    f'Existing {catalogName.upper()} catalog found for {target_name}\n{os.path.join(target_dir, f"{fname}.csv")}'
-                )
+            elif _cache_hit is not None:
+                logger.info("Existing %s catalog found for %s", catalogName.upper(), target_name)
                 selectedCatalog = (
-                    Table.read(os.path.join(target_dir, f"{fname}.csv"), format="csv")
+                    Table.read(_cache_hit, format="csv")
                     .to_pandas()
                     .fillna(np.nan)
                 )
+                # Caches written before the detection-quality cuts lack the
+                # flag columns they need; treat them as stale and re-download.
+                _quality_cols = {
+                    "pan_starrs": {"ng", "nr", "ni", "nz", "ny"},
+                    "2mass": {"Qflg"},
+                    "skymapper": {"ngood"},
+                }
+                _need = _quality_cols.get(catalogName, set())
+                if _need and not _need.issubset(selectedCatalog.columns):
+                    if not _stale_retry:
+                        logger.info(
+                            "Cached %s catalog lacks quality columns %s; re-downloading",
+                            catalogName.upper(),
+                            sorted(_need),
+                        )
+                        os.remove(_cache_hit)
+                        return self.download(
+                            target_coords=target_coords,
+                            catalogName=catalogName,
+                            radius=radius,
+                            target_name=target_name,
+                            catalog_custom_fpath=catalog_custom_fpath,
+                            include_IR_sequence_data=include_IR_sequence_data,
+                            max_sources=max_sources,
+                            region=region,
+                            _stale_retry=True,
+                        )
+                    # Re-downloaded once already and the columns are still
+                    # missing: the upstream service does not provide them.
+                    # Return the catalog we have rather than recursing forever.
+                    logger.warning(
+                        "Re-downloaded %s catalog still lacks quality columns "
+                        "%s; keeping the cached catalog.",
+                        catalogName.upper(),
+                        sorted(_need),
+                    )
+                # Dedup cached catalog: earlier runs may have written duplicates.
+                if not selectedCatalog.empty and {"RA", "DEC"}.issubset(selectedCatalog.columns):
+                    n_before = len(selectedCatalog)
+                    selectedCatalog = _skycoord_dedup_keep_one(selectedCatalog, sep_threshold_arcsec=0.1)
+                    n_dups = n_before - len(selectedCatalog)
+                    if n_dups > 0:
+                        logger.warning(
+                            f"Removed {n_dups} duplicates from cached {catalogName.upper()} catalog"
+                        )
 
             else:
                 selectedCatalog = []
@@ -802,68 +2817,81 @@ class Catalog:
                     logger.info(
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
-                    coord = SkyCoord(
-                        ra=target_coords.ra.degree,
-                        dec=target_coords.dec.degree,
-                        unit="deg",
-                    )
                     result = Catalogs.query_region(
-                        coord, radius=5 * u.arcmin, catalog="TIC"
+                        query_coords,
+                        radius=q_radius_arcmin * u.arcmin,
+                        catalog="TIC",
                     )
                     if len(result) == 0:
                         selectedCatalog = pd.DataFrame()
                         self._require_nonempty_catalog(
-                            selectedCatalog, catalogName, target_coords, radius
+                            selectedCatalog, catalogName, query_coords, q_radius_arcmin
                         )
+                    else:
+                        # objType is kept so point sources can be separated
+                        # from galaxies below.
+                        selected_cols = [
+                            "ID",
+                            "ra",
+                            "dec",
+                            "objType",
+                            "rmag",
+                            "e_rmag",
+                            "gmag",
+                            "e_gmag",
+                            "imag",
+                            "e_imag",
+                            "zmag",
+                            "e_zmag",
+                            "umag",
+                            "e_umag",
+                            "Bmag",
+                            "e_Bmag",
+                            "Vmag",
+                            "e_Vmag",
+                            "Jmag",
+                            "e_Jmag",
+                            "Hmag",
+                            "e_Hmag",
+                            "Kmag",
+                            "e_Kmag",
+                            "GAIAmag",
+                            "e_GAIAmag",
+                            "Tmag",
+                            "e_Tmag",
+                        ]
 
-                    # Columns to extract (RA/DEC, r-band + error, others optional)
-                    selected_cols = [
-                        "ID",
-                        "ra",
-                        "dec",
-                        "rmag",
-                        "e_rmag",
-                        "gmag",
-                        "e_gmag",
-                        "imag",
-                        "e_imag",
-                        "zmag",
-                        "e_zmag",
-                        "umag",
-                        "e_umag",
-                        "Bmag",
-                        "e_Bmag",
-                        "Vmag",
-                        "e_Vmag",
-                        "Jmag",
-                        "e_Jmag",
-                        "Hmag",
-                        "e_Hmag",
-                        "Kmag",
-                        "e_Kmag",
-                        "GAIAmag",
-                        "e_GAIAmag",
-                        "Tmag",
-                        "e_Tmag",
-                    ]
+                        # Keep only columns the result table actually has.
+                        available_cols = [
+                            col for col in selected_cols if col in result.colnames
+                        ]
 
-                    # Ensure all selected columns exist in the result table
-                    available_cols = [
-                        col for col in selected_cols if col in result.colnames
-                    ]
+                        selectedCatalog = result[available_cols].to_pandas()
 
-                    # Build final catalog table
-                    selectedCatalog = result[available_cols].to_pandas()
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                        # Point sources only: TIC objType bitmask STAR = 0x300000;
+                        # galaxies and extended objects are excluded.
+                        if "objType" in selectedCatalog.columns:
+                            n_before = len(selectedCatalog)
+                            _obj_type = pd.to_numeric(selectedCatalog["objType"], errors="coerce")
+                            _is_star = _obj_type == 0x300000
+                            if _is_star.sum() > 0:
+                                selectedCatalog = selectedCatalog[_is_star].copy()
+                                n_gal = n_before - len(selectedCatalog)
+                                if n_gal > 0:
+                                    logger.info(
+                                        "TIC: removed %d non-stellar sources (objType != STAR); %d stars remain.",
+                                        n_gal, len(selectedCatalog),
+                                    )
+                            selectedCatalog = selectedCatalog.drop(columns=["objType"], errors="ignore")
+
+                        # Write to target_dir (not cwd) to avoid misplaced files.
+                        csv_path = os.path.join(target_dir, f"{fname}.csv")
+                        selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "gaia":
-                    # For Gaia DR3+XP, use a smaller radius than the full catalog
-                    # search radius to reduce load on the archive. Hard-limit to
-                    # at most 10 arcmin (10/60 deg), and optionally smaller if
+                    # Gaia DR3+XP uses a smaller radius than the full catalog
+                    # search radius to reduce archive load. Hard limit of
+                    # 10 arcmin (10/60 deg), optionally smaller if
                     # catalog.gaia_xp_radius_deg is set.
                     max_gaia_deg = 10.0 / 60.0  # 10 arcmin
                     cfg_radius = float(
@@ -874,7 +2902,7 @@ class Catalog:
                     xp_radius_deg = min(radius_deg, cfg_radius, max_gaia_deg)
                     gaia_xp_max_sources = int(
                         self.input_yaml.get("catalog", {}).get(
-                            "gaia_xp_max_sources", 5000
+                            "gaia_xp_max_sources", 500
                         )
                     )
                     gaia_xp_photometric_systems = (
@@ -883,20 +2911,20 @@ class Catalog:
                         )
                     )
                     result = self.gaia_synthetic_photometry(
-                        ra=target_coords.ra.degree,
-                        dec=target_coords.dec.degree,
+                        ra=q_ra,
+                        dec=q_dec,
                         radius=xp_radius_deg,
                         max_sources=gaia_xp_max_sources,
                         photometric_systems=gaia_xp_photometric_systems,
                     )
 
-                    # Build final catalog table
                     selectedCatalog = result
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
+                    self._require_nonempty_catalog(
+                        selectedCatalog, catalogName, query_coords, q_radius_arcmin
                     )
+                    # Write to target_dir (not cwd) to avoid misplaced files.
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "refcat":
 
@@ -904,11 +2932,12 @@ class Catalog:
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
                     logger.warning(
-                        "REFCAT requires MAST CasJobs credentials. Set `default_input.catalog.MASTcasjobs_wsid` "
-                        "and `default_input.catalog.MASTcasjobs_pwd` (or provide them via environment/local overrides)."
+                        "REFCAT requires MAST CasJobs credentials. Set\n"
+                        "    `default_input.catalog.MASTcasjobs_wsid` and\n"
+                        "    `default_input.catalog.MASTcasjobs_pwd` (or\n"
+                        "    provide them via environment/local overrides)."
                     )
-                    # Normalise types: many auth backends are strict about
-                    # receiving strings, so cast to str (and strip) here.
+                    # Some auth backends reject non-str; cast and strip here.
                     userid = self.input_yaml["catalog"].get("MASTcasjobs_wsid")
                     password = self.input_yaml["catalog"].get("MASTcasjobs_pwd")
                     if userid is not None:
@@ -934,20 +2963,18 @@ class Catalog:
                         )
 
                     selectedCatalog = self.fetch_refcat2_field(
-                        ra=target_coords.ra.degree,
-                        dec=target_coords.dec.degree,
+                        ra=q_ra,
+                        dec=q_dec,
                         credentials=credentials,
-                        nsources=500,
+                        nsources=_refcat_ns or 500,
                         sr=radius_deg,
                     )
                     self._require_nonempty_catalog(
-                        selectedCatalog, catalogName, target_coords, radius
+                        selectedCatalog, catalogName, query_coords, q_radius_arcmin
                     )
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                    # Write to target_dir (not cwd) to avoid misplaced files.
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "legacy":
 
@@ -955,50 +2982,127 @@ class Catalog:
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
                     selectedCatalog = self.query_legacy_survey(
-                        ra=target_coords.ra.degree,
-                        dec=target_coords.dec.degree,
+                        ra=q_ra,
+                        dec=q_dec,
                         radius=radius_deg,
                     )
                     self._require_nonempty_catalog(
-                        selectedCatalog, catalogName, target_coords, radius
+                        selectedCatalog, catalogName, query_coords, q_radius_arcmin
                     )
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                    # Write to target_dir (not cwd) to avoid misplaced files.
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName in ["apass", "2mass", "sdss"]:
                     Vizier.ROW_LIMIT = -1
                     logger.info(
                         f"Downloading Sequence Stars from {catalogName.upper()}"
                     )
-                    catalog_search = Vizier.query_region(
-                        target_coords,
-                        radius=Angle(radius_deg, "deg"),
-                        catalog=catalogName,
-                    )
+                    if use_box:
+                        # Rectangular query matched to the footprint
+                        # bounds: no cone-corner waste (~36% of the
+                        # circumscribed disk for square fields).
+                        catalog_search = Vizier.query_region(
+                            query_coords,
+                            width=Angle(box_wh[0], "deg"),
+                            height=Angle(box_wh[1], "deg"),
+                            catalog=catalogName,
+                            frame="icrs",
+                        )
+                    else:
+                        catalog_search = Vizier.query_region(
+                            query_coords,
+                            radius=Angle(radius_deg, "deg"),
+                            catalog=catalogName,
+                        )
                     if len(catalog_search) < 1:
                         selectedCatalog = pd.DataFrame()
+                    elif catalogName == "sdss":
+                        # The 'sdss' alias resolves to several VizieR
+                        # releases (DR7/9/12/16) returned as separate
+                        # tables with different footprints - keep the one
+                        # with the best-covered field rather than table [0].
+                        selectedCatalog = _select_sdss_vizier_table(
+                            catalog_search,
+                            center_ra=q_ra,
+                            center_dec=q_dec,
+                            radius_deg=radius_deg,
+                        )
                     else:
+                        if len(catalog_search) > 1:
+                            logger.debug(
+                                "%s query matched %d VizieR catalogs; using %s",
+                                catalogName.upper(),
+                                len(catalog_search),
+                                catalog_search[0].meta.get("name"),
+                            )
                         selectedCatalog = catalog_search[0].to_pandas()
-                        if catalogName == "sdss":
-                            selectedCatalog = selectedCatalog[
-                                selectedCatalog["mode"] == 1
+                    if catalogName == "apass":
+                            # APASS `cls` column: 'A' = stellar, 'G' = galaxy.
+                            # Stars only for zeropoint calibration.
+                            if "cls" in selectedCatalog.columns:
+                                n_before = len(selectedCatalog)
+                                selectedCatalog = selectedCatalog[
+                                    selectedCatalog["cls"].astype(str).str.upper() == "A"
+                                ]
+                                n_gal = n_before - len(selectedCatalog)
+                                if n_gal > 0:
+                                    logger.info(
+                                        "APASS: removed %d non-stellar sources (cls != 'A'); %d stars remain.",
+                                        n_gal, len(selectedCatalog),
+                                    )
+                    if catalogName == "2mass":
+                        # Photometric quality flag Qflg holds one letter per
+                        # band (J,H,Ks): A/B/C are reliable detections; D/E/F/
+                        # U/X/- are poor fits, upper limits, or non-detections
+                        # that should never calibrate.
+                        if "Qflg" in selectedCatalog.columns:
+                            _qflg = selectedCatalog["Qflg"].astype(str)
+                            for _bi, (_mcol, _ecol) in enumerate(
+                                [
+                                    ("Jmag", "e_Jmag"),
+                                    ("Hmag", "e_Hmag"),
+                                    ("Kmag", "e_Kmag"),
+                                ]
+                            ):
+                                _bad = ~_qflg.str[_bi].isin(["A", "B", "C"])
+                                for _c in (_mcol, _ecol):
+                                    if _c in selectedCatalog.columns:
+                                        selectedCatalog.loc[_bad, _c] = np.nan
+                            _jk = [
+                                c
+                                for c in ("Jmag", "Hmag", "Kmag")
+                                if c in selectedCatalog.columns
                             ]
-                            selectedCatalog = selectedCatalog[
-                                selectedCatalog["cl"] == 6
-                            ]
-                        selectedCatalog.to_csv(
-                            f"{fname}.csv", index=False, na_rep=np.nan
-                        )
-                        shutil.move(
-                            os.path.join(os.getcwd(), f"{fname}.csv"),
-                            os.path.join(target_dir, f"{fname}.csv"),
-                        )
+                            if _jk:
+                                _has = pd.concat(
+                                    [
+                                        pd.to_numeric(
+                                            selectedCatalog[c],
+                                            errors="coerce",
+                                        )
+                                        for c in _jk
+                                    ],
+                                    axis=1,
+                                ).notna().any(axis=1)
+                                _n_dead = int((~_has).sum())
+                                if _n_dead:
+                                    selectedCatalog = selectedCatalog[
+                                        _has
+                                    ].copy()
+                                    logger.info(
+                                        "2MASS: dropped %d sources with no "
+                                        "quality magnitude (Qflg not A-C) "
+                                        "in any band.",
+                                        _n_dead,
+                                    )
+                    # Validate before writing (covers empty query and post-filter empty).
                     self._require_nonempty_catalog(
-                        selectedCatalog, catalogName, target_coords, radius
+                        selectedCatalog, catalogName, query_coords, q_radius_arcmin
                     )
+                    # Write to target_dir (not cwd) to avoid misplaced files.
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "skymapper":
                     logger.info(
@@ -1006,86 +3110,169 @@ class Catalog:
                     )
                     server = "http://skymapper.anu.edu.au/sm-cone/public/query?"
                     params = {
-                        "RA": target_coords.ra.degree,
-                        "DEC": target_coords.dec.degree,
+                        "RA": q_ra,
+                        "DEC": q_dec,
                         "SR": radius_deg,
                         "RESPONSEFORMAT": "VOTABLE",
                     }
-                    with open("temp.vot", "wb") as f:
+                    # Write temp file to target_dir (not cwd) to avoid misplaced files.
+                    temp_vot_path = os.path.join(target_dir, "temp.vot")
+                    try:
                         logger.info("Downloading Sequence Stars from SkyMapper")
-                        response = requests.get(server, params=params)
-                        f.write(response.content)
-                    selectedCatalog = (
-                        parse_single_table("temp.vot")
-                        .to_table(use_names_over_ids=True)
-                        .to_pandas()
-                    )
-                    selectedCatalog = selectedCatalog[
-                        selectedCatalog["class_star"] > 0.8
-                    ]
-                    selectedCatalog = selectedCatalog[selectedCatalog["flags"] <= 1]
-                    os.remove("temp.vot")
+                        response = requests.get(server, params=params, timeout=60)
+                        response.raise_for_status()
+                        with open(temp_vot_path, "wb") as f:
+                            f.write(response.content)
+                        selectedCatalog = (
+                            parse_single_table(temp_vot_path)
+                            .to_table(use_names_over_ids=True)
+                            .to_pandas()
+                        )
+                    finally:
+                        if os.path.exists(temp_vot_path):
+                            os.remove(temp_vot_path)
+                    # Guard column existence before filtering.
+                    if "class_star" in selectedCatalog.columns:
+                        selectedCatalog = selectedCatalog[
+                            selectedCatalog["class_star"] > 0.8
+                        ]
+                    if "flags" in selectedCatalog.columns:
+                        selectedCatalog = selectedCatalog[selectedCatalog["flags"] <= 1]
+                    # ngood counts clean measurements; a source measured well
+                    # only once is as likely an artifact as real.
+                    if "ngood" in selectedCatalog.columns:
+                        selectedCatalog = selectedCatalog[
+                            pd.to_numeric(
+                                selectedCatalog["ngood"], errors="coerce"
+                            )
+                            >= 2
+                        ]
                     self._require_nonempty_catalog(
-                        selectedCatalog, catalogName, target_coords, radius
+                        selectedCatalog, catalogName, query_coords, q_radius_arcmin
                     )
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                    # Write to target_dir (not cwd) to avoid misplaced files.
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "pan_starrs":
                     logger.info(
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
-                    # Use direct API request to handle string "None" values properly
-                    try:
-                        import requests
-                        
-                        ra = float(target_coords.ra.degree)
-                        dec = float(target_coords.dec.degree)
-                        radius_deg = 0.1
-                        
-                        # Direct MAST API call for Pan-STARRS
-                        url = "https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/ps1/search"
-                        params = {
-                            "ra": ra,
-                            "dec": dec,
-                            "radius": radius_deg,
-                            "pagesize": 10000,
-                            "format": "json"
-                        }
-                        
-                        response = requests.get(url, params=params, timeout=60)
-                        response.raise_for_status()
-                        data = response.json()
-                        
-                        if not data:
-                            selectedCatalog = pd.DataFrame()
-                        else:
-                            # Convert to DataFrame, handling None strings
-                            selectedCatalog = pd.DataFrame(data)
-                            # Replace all forms of None/null with np.nan
-                            for col in selectedCatalog.columns:
-                                if selectedCatalog[col].dtype == object:
-                                    selectedCatalog[col] = selectedCatalog[col].replace(
-                                        ['None', 'none', 'NONE', 'null', 'NULL', 'nan', 'NaN'], np.nan
-                                    )
-                            # Convert numeric columns
-                            for col in selectedCatalog.columns:
-                                if col not in ['objName', 'objAltName1', 'objAltName2', 'objAltName3']:
-                                    try:
-                                        selectedCatalog[col] = pd.to_numeric(selectedCatalog[col], errors='coerce')
-                                    except Exception:
-                                        pass
-                            
-                        logger.info(f"Retrieved {len(selectedCatalog)} Pan-STARRS sources")
-                        
-                    except Exception as api_exc:
-                        logger.warning(f"Direct Pan-STARRS API failed ({api_exc}), using empty catalog")
-                        selectedCatalog = pd.DataFrame()
-                    
-                    # Replace all common null representations
+                    # Direct API request: the MAST catalog endpoint returns
+                    # {"info": [column metadata], "data": [row arrays]}; the
+                    # release segment must be dr1/dr2 ('ps1' is rejected), and
+                    # 'mean' is the MeanObjectView (gMeanPSFMag et al.).
+                    #
+                    # MAST read timeouts are common on wide cones, so retry
+                    # with backoff. An exhausted query raises a distinct
+                    # "query failed" error - folding it into an empty
+                    # DataFrame would make a transient failure look like a
+                    # genuine 0-source (no coverage) result downstream.
+                    _ps_attempts = max(
+                        1,
+                        int(
+                            self.input_yaml.get("catalog", {}).get(
+                                "pan_starrs_max_retries", 3
+                            )
+                            or 3
+                        ),
+                    )
+                    _ps_delay = float(
+                        self.input_yaml.get("catalog", {}).get(
+                            "pan_starrs_retry_base_delay_sec", 5.0
+                        )
+                        or 5.0
+                    )
+                    selectedCatalog = None
+                    _ps_exc = None
+                    for _ps_try in range(1, _ps_attempts + 1):
+                        try:
+                            ra = q_ra
+                            dec = q_dec
+
+                            url = "https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/mean"
+                            params = {
+                                "ra": ra,
+                                "dec": dec,
+                                "radius": radius_deg,
+                                "pagesize": 50000,
+                                "format": "json"
+                            }
+
+                            # Paginate: a single page silently truncates the cone
+                            # at pagesize rows, biasing coverage toward whatever
+                            # order the endpoint happens to return.
+                            rows = []
+                            col_names = None
+                            first_row = None
+                            page = 1
+                            while True:
+                                params["page"] = page
+                                response = requests.get(url, params=params, timeout=120)
+                                response.raise_for_status()
+                                data = response.json()
+                                page_rows = (
+                                    data.get("data")
+                                    if isinstance(data, dict)
+                                    else None
+                                )
+                                if col_names is None:
+                                    col_names = [
+                                        c["name"] for c in data.get("info", [])
+                                    ]
+                                if not page_rows:
+                                    break
+                                # If the endpoint ignores 'page', every request
+                                # returns page 1 - detect repeats and stop rather
+                                # than accumulating duplicates.
+                                if page > 1 and page_rows[0] == first_row:
+                                    break
+                                if first_row is None:
+                                    first_row = page_rows[0]
+                                rows.extend(page_rows)
+                                if (
+                                    len(page_rows) < params["pagesize"]
+                                    or len(rows) >= 200000
+                                ):
+                                    break
+                                page += 1
+
+                            if not rows:
+                                selectedCatalog = pd.DataFrame()
+                            else:
+                                selectedCatalog = pd.DataFrame(rows, columns=col_names)
+                                # Normalize null-like strings to NaN.
+                                selectedCatalog = selectedCatalog.replace(
+                                    ['None', 'none', 'NONE', 'null', 'NULL', 'nan', 'NaN'], np.nan
+                                )
+                                # Coerce numeric columns; name columns stay strings.
+                                for col in selectedCatalog.columns:
+                                    if col not in ['objName', 'objAltName1', 'objAltName2', 'objAltName3']:
+                                        try:
+                                            selectedCatalog[col] = pd.to_numeric(selectedCatalog[col], errors='coerce')
+                                        except Exception:
+                                            pass
+
+                            logger.info("Retrieved %s Pan-STARRS sources", len(selectedCatalog))
+                            break
+
+                        except Exception as api_exc:
+                            _ps_exc = api_exc
+                            logger.warning(
+                                "Direct Pan-STARRS API attempt %d/%d failed (%s)",
+                                _ps_try,
+                                _ps_attempts,
+                                api_exc,
+                            )
+                            if _ps_try < _ps_attempts:
+                                time.sleep(_ps_delay * (2 ** (_ps_try - 1)))
+                    if selectedCatalog is None:
+                        raise RuntimeError(
+                            f"PAN_STARRS catalog query failed after "
+                            f"{_ps_attempts} attempt(s): {_ps_exc}"
+                        )
+
+                    # Catch remaining null sentinels (numeric -999 included).
                     selectedCatalog = selectedCatalog.replace([-999, -999.0, "None", "none", "NONE", "null", "NULL"], np.nan)
                     columns = [
                         "raMean",
@@ -1102,28 +3289,142 @@ class Catalog:
                         "zMeanPSFMagErr",
                         "yMeanPSFMag",
                         "yMeanPSFMagErr",
+                        # Kron magnitudes for star-galaxy separation:
+                        # stars have PSF ~ Kron; galaxies have Kron > PSF.
+                        "rMeanKronMag",
+                        "rMeanKronMagErr",
+                        # Detection counts for reliability cuts: the mean
+                        # endpoint returns single-epoch detections too, whose
+                        # "mean" magnitude is one noisy/artifact-prone
+                        # measurement.
+                        "nStackDetections",
+                        "nDetections",
+                        "ng",
+                        "nr",
+                        "ni",
+                        "nz",
+                        "ny",
                     ]
-                    selectedCatalog = selectedCatalog[columns]
-                    coords = SkyCoord(
-                        ra=selectedCatalog["raMean"].values * u.deg,
-                        dec=selectedCatalog["decMean"].values * u.deg,
-                    )
-                    distances = target_coords.separation(coords)
-                    selectedCatalog["distance"] = distances.arcsecond
+                    # Keep only columns present in the API response.
+                    missing_cols = [c for c in columns if c not in selectedCatalog.columns]
+                    if missing_cols:
+                        logger.warning(
+                            "Pan-STARRS response missing expected columns: %s - they will be absent from the catalog",
+                            missing_cols,
+                        )
+                    available_columns = [c for c in columns if c in selectedCatalog.columns]
+                    selectedCatalog = selectedCatalog[available_columns]
+
+                    # Star-galaxy separation: compare PSF and Kron magnitudes.
+                    # Stars: |PSF - Kron| < 0.1 mag (point sources).
+                    # Galaxies: Kron > PSF by > 0.1 mag (extended flux).
+                    if {"rMeanPSFMag", "rMeanKronMag"}.issubset(selectedCatalog.columns):
+                        _psf = pd.to_numeric(selectedCatalog["rMeanPSFMag"], errors="coerce")
+                        _kron = pd.to_numeric(selectedCatalog["rMeanKronMag"], errors="coerce")
+                        _both_finite = np.isfinite(_psf) & np.isfinite(_kron)
+                        _is_star = _both_finite & (np.abs(_psf - _kron) < 0.1)
+                        # Conservative keep: star-like, or Kron mag missing.
+                        _keep = _is_star | ~np.isfinite(_kron)
+                        n_before = len(selectedCatalog)
+                        selectedCatalog = selectedCatalog[_keep].copy()
+                        n_gal = n_before - len(selectedCatalog)
+                        if n_gal > 0:
+                            logger.info(
+                                "Pan-STARRS: removed %d extended sources (|PSF-Kron| >= 0.1 mag); %d point sources remain.",
+                                n_gal, len(selectedCatalog),
+                            )
+                        # Kron columns were only needed for the star cut.
+                        selectedCatalog = selectedCatalog.drop(
+                            columns=[c for c in ["rMeanKronMag", "rMeanKronMagErr"] if c in selectedCatalog.columns],
+                            errors="ignore",
+                        )
+
+                    # Per-band reliability: a mean magnitude built from a
+                    # single-epoch detection is as likely a cosmic ray or
+                    # artifact as a source (the bulk of MeanObjectView rows
+                    # have nDetections=1). Mask mags with <2 detections in
+                    # that band; masked values fail every finite-mag check
+                    # downstream (coverage scoring and ZP fitting alike).
+                    _n_det_col = {"g": "ng", "r": "nr", "i": "ni",
+                                  "z": "nz", "y": "ny"}
+                    _n_masked = 0
+                    for _b, _ncol in _n_det_col.items():
+                        _mcol = f"{_b}MeanPSFMag"
+                        _ecol = f"{_b}MeanPSFMagErr"
+                        if (
+                            _ncol in selectedCatalog.columns
+                            and _mcol in selectedCatalog.columns
+                        ):
+                            _ndet = pd.to_numeric(
+                                selectedCatalog[_ncol], errors="coerce"
+                            )
+                            _bad = np.isfinite(
+                                pd.to_numeric(
+                                    selectedCatalog[_mcol], errors="coerce"
+                                )
+                            ) & ~(_ndet >= 2)
+                            if _bad.any():
+                                _n_masked += int(_bad.sum())
+                                _cols = [_mcol] + (
+                                    [_ecol]
+                                    if _ecol in selectedCatalog.columns
+                                    else []
+                                )
+                                selectedCatalog.loc[_bad, _cols] = np.nan
+                    if _n_masked:
+                        logger.info(
+                            "Pan-STARRS: masked %d magnitudes built from "
+                            "single-epoch detections (n<2 in that band).",
+                            _n_masked,
+                        )
+                    _mag_cols = [
+                        c
+                        for c in selectedCatalog.columns
+                        if c.endswith("MeanPSFMag")
+                    ]
+                    if _mag_cols:
+                        _has_mag = pd.concat(
+                            [
+                                pd.to_numeric(selectedCatalog[c],
+                                              errors="coerce")
+                                for c in _mag_cols
+                            ],
+                            axis=1,
+                        ).notna().any(axis=1)
+                        _n_dead = int((~_has_mag).sum())
+                        if _n_dead:
+                            selectedCatalog = selectedCatalog[
+                                _has_mag
+                            ].copy()
+                            logger.info(
+                                "Pan-STARRS: dropped %d sources with no "
+                                "reliable magnitude in any band.",
+                                _n_dead,
+                            )
+
+                    if {"raMean", "decMean"}.issubset(selectedCatalog.columns):
+                        coords = SkyCoord(
+                            ra=selectedCatalog["raMean"].values * u.deg,
+                            dec=selectedCatalog["decMean"].values * u.deg,
+                        )
+                        # clean()'s max_distance cut is anchored on the
+                        # target, so this column measures from the target
+                        # even when the query region is centred elsewhere.
+                        distances = target_coords.separation(coords)
+                        selectedCatalog["distance"] = distances.arcsecond
                     self._require_nonempty_catalog(
-                        selectedCatalog, catalogName, target_coords, radius
+                        selectedCatalog, catalogName, query_coords, q_radius_arcmin
                     )
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                    # Write to target_dir (not cwd) to avoid misplaced files.
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 else:
                     logger.critical("Catalog %s is not recognized.", catalogName)
                     sys.exit()
 
-                logger.info(
+                logger.log(
+                    STATUS,
                     "%s catalog contains %d sources",
                     catalogName.upper(),
                     len(selectedCatalog),
@@ -1133,33 +3434,69 @@ class Catalog:
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            logger.info("%s %s %d %s", exc_type, fname, exc_tb.tb_lineno, e)
+            logger.warning("%s %s %d %s", exc_type, fname, exc_tb.tb_lineno, e)
             # Propagate catalog failures as hard stops: downstream calibration
             # should not proceed without a valid catalog.
             raise
 
-        # Limit catalog size if max_sources is specified
         if max_sources is not None and selectedCatalog is not None and len(selectedCatalog) > max_sources:
             logger.info(
-                f"Limiting catalog from {len(selectedCatalog)} to {max_sources} sources"
+                "Limiting catalog from %s to %s sources",
+                len(selectedCatalog), max_sources,
             )
-            # Sort by distance to target if RA and DEC columns are available
-            if "RA" in selectedCatalog.columns and "DEC" in selectedCatalog.columns:
-                from astropy.coordinates import SkyCoord
-                from astropy import units as u
-                
-                catalog_coords = SkyCoord(
-                    ra=selectedCatalog["RA"].values * u.degree,
-                    dec=selectedCatalog["DEC"].values * u.degree
+            # Spatially uniform subsample: keeping the N nearest to the
+            # target would concentrate calibrators at the field centre and
+            # leave the edges empty.
+            selectedCatalog = _sky_uniform_subsample(
+                selectedCatalog, max_sources, center_ra=q_ra
+            )
+            logger.info("Catalog limited to %s sources", len(selectedCatalog))
+
+        # Coverage diagnostic: a catalog can answer a cone query yet cover
+        # only part of the region (survey boundary, or a distance-ordered
+        # row cap that slipped through).  Measured against the region
+        # actually queried - the box for box-capable backends, the
+        # circumscribed cone otherwise - and warned once per field so
+        # one-sided coverage does not silently reach the zeropoint fit.
+        try:
+            _cov_ra, _cov_dec = _catalog_radec(selectedCatalog)
+            if _cov_ra is not None:
+                _cov = _field_coverage_fraction(
+                    _cov_ra,
+                    _cov_dec,
+                    q_ra,
+                    q_dec,
+                    radius_deg,
+                    box_wh=box_wh if use_box else None,
                 )
-                distances = catalog_coords.separation(target_coords)
-                selectedCatalog = selectedCatalog.assign(distance=distances.arcsecond)
-                selectedCatalog = selectedCatalog.nsmallest(max_sources, "distance")
-                selectedCatalog = selectedCatalog.drop(columns=["distance"])
-            else:
-                # If RA/DEC not available, just take the first max_sources rows
-                selectedCatalog = selectedCatalog.head(max_sources)
-            logger.info(f"Catalog limited to {len(selectedCatalog)} sources")
+                _cov_key = (
+                    catalogName,
+                    round(float(q_ra), 3),
+                    round(float(q_dec), 3),
+                    round(float(radius_deg), 3),
+                    use_box,
+                )
+                if np.isfinite(_cov) and _cov_key not in _COVERAGE_WARNED_KEYS:
+                    _COVERAGE_WARNED_KEYS.add(_cov_key)
+                    if _cov < 0.8:
+                        logger.warning(
+                            "%s catalog covers only %.0f%% of the %.1f arcmin query "
+                            "field - the survey footprint likely does not cover the "
+                            "full image, so calibrators will be unevenly distributed. "
+                            "Consider catalog.use_catalog='auto' or a "
+                            "wider-coverage catalog.",
+                            catalogName.upper(),
+                            100.0 * _cov,
+                            float(q_radius_arcmin),
+                        )
+                    else:
+                        logger.info(
+                            "%s catalog covers %.0f%% of the query field",
+                            catalogName.upper(),
+                            100.0 * _cov,
+                        )
+        except Exception as _cov_exc:
+            logger.debug("Field-coverage check skipped: %s", _cov_exc)
 
         return selectedCatalog
 
@@ -1223,10 +3560,10 @@ class Catalog:
         logger = logging.getLogger(__name__)
 
         if full_clean:
-            logger.info(f"Cleaning {len(selectedCatalog)} sources")
+            logger.info("Cleaning %s sources", len(selectedCatalog))
 
         try:
-            # Early exit if catalog is None or empty (e.g. Gaia service failure)
+            # Catalog can be empty after a service failure (e.g. Gaia).
             if selectedCatalog is None or len(selectedCatalog) == 0:
                 logger.warning("Selected catalog is empty; skipping catalog cleaning.")
                 return None
@@ -1236,10 +3573,12 @@ class Catalog:
             catalog_autophot_input_yml = "catalog.yml"
             catalogName = catalogName or self.input_yaml["catalog"]["use_catalog"]
 
-            # Load catalog keyword mappings
+            # catalog.yml uses 'panstarrs' while the normalized internal
+            # catalog name is 'pan_starrs' - translate for the YAML lookup.
+            _yml_name = {"pan_starrs": "panstarrs"}.get(catalogName, catalogName)
             catalog_keywords = AutophotYaml(
                 os.path.join(filepath, "databases", catalog_autophot_input_yml),
-                catalogName,
+                _yml_name,
             ).load()
 
             max_distance = self.input_yaml["catalog"].get(
@@ -1249,9 +3588,10 @@ class Catalog:
             # --- Filter sources by distance ---
             if "distance" in selectedCatalog:
                 too_far = selectedCatalog["distance"] > max_distance * 60  # arcseconds
-                if too_far.any():
+                n_far = too_far.sum()
+                if n_far > 0:
                     logger.info(
-                        f"Removing {too_far.sum()} sources that are greater than {max_distance:.1f} arcmins from the target"
+                        f"Removing {n_far} sources that are greater than {max_distance:.1f} arcmins from the target"
                     )
                     selectedCatalog = selectedCatalog[~too_far]
 
@@ -1273,31 +3613,98 @@ class Catalog:
             # --- Convert RA/DEC to pixel coordinates if WCS is provided ---
             if image_wcs:
                 try:
-                    # Filter out coordinates that are too far from the image center
-                    ra_values = selectedCatalog[catalog_keywords["RA"]].values
-                    dec_values = selectedCatalog[catalog_keywords["DEC"]].values
+                    ra_values = np.asarray(
+                        selectedCatalog[catalog_keywords["RA"]].values, dtype=float
+                    )
+                    dec_values = np.asarray(
+                        selectedCatalog[catalog_keywords["DEC"]].values, dtype=float
+                    )
 
-                    # Get the image center
-                    center_ra, center_dec = image_wcs.wcs.crval
+                    # Angular pre-filter must match how the catalog was queried
+                    # (usually within max_distance arcmin of the target). A
+                    # CRVAL + fixed 1 deg cap wrongly drops on-chip sources on
+                    # wide stacks/coadds where CRVAL sits far from the field
+                    # center (common after astrometry.net SIP updates).
+                    cfg_cat = self.input_yaml.get("catalog", {}) or {}
+                    max_dist_arcmin = float(cfg_cat.get("max_distance", 10.0))
+                    t_ra = self.input_yaml.get("target_ra")
+                    t_dec = self.input_yaml.get("target_dec")
+                    if (
+                        t_ra is not None
+                        and t_dec is not None
+                        and np.isfinite(t_ra)
+                        and np.isfinite(t_dec)
+                    ):
+                        cen_ra = float(t_ra)
+                        cen_dec = float(t_dec)
+                        # Query radius plus a generous margin, in arcsec.
+                        max_distance_threshold = (max_dist_arcmin + 5.0) * 60.0
+                    else:
+                        shape = getattr(image_wcs, "array_shape", None)
+                        if shape is not None and len(shape) == 2:
+                            ny, nx = int(shape[0]), int(shape[1])
+                            cx = 0.5 * float(max(nx - 1, 0))
+                            cy = 0.5 * float(max(ny - 1, 0))
+                            cen_ra, cen_dec = image_wcs.all_pix2world(
+                                np.asarray([cx]),
+                                np.asarray([cy]),
+                                0,
+                            )
+                            cen_ra = float(np.asarray(cen_ra).ravel()[0])
+                            cen_dec = float(np.asarray(cen_dec).ravel()[0])
+                            corners_x = np.array(
+                                [0.0, float(nx - 1), 0.0, float(nx - 1)], dtype=float
+                            )
+                            corners_y = np.array(
+                                [0.0, 0.0, float(ny - 1), float(ny - 1)], dtype=float
+                            )
+                            cra, cde = image_wcs.all_pix2world(corners_x, corners_y, 0)
+                            sc_cen = SkyCoord(
+                                cen_ra * u.deg, cen_dec * u.deg, frame="icrs"
+                            )
+                            sc_corner = SkyCoord(
+                                np.asarray(cra).ravel() * u.deg,
+                                np.asarray(cde).ravel() * u.deg,
+                                frame="icrs",
+                            )
+                            max_sep = float(
+                                np.max(sc_cen.separation(sc_corner).to(u.arcsec).value)
+                            )
+                            max_distance_threshold = max(3600.0, max_sep * 1.25)
+                        else:
+                            cen_ra, cen_dec = image_wcs.wcs.crval
+                            max_distance_threshold = 4 * 3600.0
 
-                    # Calculate angular distance from the center
-                    dra = (ra_values - center_ra) * np.cos(np.radians(center_dec))
-                    ddec = dec_values - center_dec
-                    distance = np.sqrt(dra**2 + ddec**2) * 3600  # arcseconds
-
-                    # Define a reasonable threshold (e.g., 1 degree = 3600 arcseconds)
-                    max_distance_threshold = 3600  # arcseconds
-
-                    # Filter out sources too far from the center
+                    # Wrap the RA offset across 0/360 deg - a field centred
+                    # on RA ~0.1 with catalog entries at 359.9 otherwise
+                    # measures dra ~ 360 deg and drops every valid source.
+                    dra = (
+                        _unwrap_ra_near(ra_values, cen_ra) - cen_ra
+                    ) * np.cos(np.radians(cen_dec))
+                    ddec = dec_values - cen_dec
+                    distance = np.sqrt(dra**2 + ddec**2) * 3600.0  # arcseconds
                     valid_indices = distance < max_distance_threshold
+                    if not np.any(valid_indices):
+                        logger.warning(
+                            "Catalog WCS pre-filter removed all sources (sky vs ref); relaxing filter and keeping full list for pixel conversion."
+                        )
+                        valid_indices = np.ones(len(ra_values), dtype=bool)
+
                     ra_values = ra_values[valid_indices]
                     dec_values = dec_values[valid_indices]
 
-                    # Convert valid coordinates to pixel coordinates
-                    x_pix, y_pix = image_wcs.wcs_world2pix(ra_values, dec_values, index)
+                    # world_to_pixel applies full distortion (SIP etc.);
+                    # wcs_world2pix can disagree with all_pix2world /
+                    # solve-field SIP headers used elsewhere.
+                    coords = SkyCoord(
+                        ra=ra_values * u.deg, dec=dec_values * u.deg, frame="icrs"
+                    )
+                    x_pix, y_pix = image_wcs.world_to_pixel(coords)
+                    x_pix = np.asarray(x_pix, dtype=float).ravel()
+                    y_pix = np.asarray(y_pix, dtype=float).ravel()
 
-                    # Update outputCatalog with valid sources only
                     outputCatalog = outputCatalog.iloc[valid_indices].copy()
+                    selectedCatalog = selectedCatalog.iloc[valid_indices].copy()
                     outputCatalog["x_pix"] = x_pix
                     outputCatalog["y_pix"] = y_pix
 
@@ -1312,21 +3719,58 @@ class Catalog:
 
             # Populate photometric band columns for the current filter.
             image_filter = self.input_yaml["imageFilter"]
+            logger.debug("Populating filter columns for %s; input catalog columns: %s", image_filter, list(selectedCatalog.columns))
+
+            # Custom catalogs: auto-detect filter columns as <band>/<band>_err
+            # pairs so arbitrary filter names work without catalog.yml entries.
+            if catalogName == "custom":
+                import re
+                filter_cols = []
+                for col in selectedCatalog.columns:
+                    if str(col).endswith('_err'):
+                        continue
+                    err_col = f"{col}_err"
+                    if err_col in selectedCatalog.columns:
+                        filter_cols.append(col)
+                        logger.debug("Auto-detected filter column pair: %s / %s", col, err_col)
+
+                for col in filter_cols:
+                    err_col = f"{col}_err"
+                    outputCatalog[col] = selectedCatalog[col].values
+                    outputCatalog[err_col] = selectedCatalog[err_col].values
+                    logger.debug("Auto-copied custom filter %s from catalog", col)
+
+            # The current image filter must always be populated.
             for col in [image_filter, f"{image_filter}_err"]:
-                # First try catalog.yml mapping
+                if col in outputCatalog.columns:
+                    logger.debug("Column %s already present in output catalog", col)
+                    continue
+                # catalog.yml mapping first, then exact-name fallback.
                 if col in catalog_keywords and catalog_keywords[col] in selectedCatalog:
                     outputCatalog[col] = selectedCatalog[catalog_keywords[col]].values
-                # Fallback: copy directly if column exists (for custom catalogs)
+                    logger.debug("Mapped %s from catalog_keywords", col)
                 elif col in selectedCatalog.columns:
                     outputCatalog[col] = selectedCatalog[col].values
-                # Case-insensitive fallback for custom catalogs only (not standard UBVRI/ugriz/JHK)
-                # to avoid conflating different photometric systems (e.g., r vs R)
-                elif col not in catalog_keywords:
-                    col_lower = col.lower()
-                    for cat_col in selectedCatalog.columns:
-                        if str(cat_col).lower() == col_lower:
-                            outputCatalog[col] = selectedCatalog[cat_col].values
-                            break
+                    logger.debug("Copied %s directly from catalog", col)
+                else:
+                    _missing_band = col[:-4] if col.endswith("_err") else col
+                    _can_synth = (
+                        not col.endswith("_err")
+                        and transformations_enabled(self.input_yaml)
+                        and _missing_band
+                        in transformable_bands(
+                            catalogName
+                            if not isinstance(catalogName, dict)
+                            else self._resolve_catalog_for_filter(catalogName)
+                        )
+                    )
+                    if _can_synth:
+                        logger.info(
+                            "Column %s not in catalog; it will be synthesized by filter transformations",
+                            col,
+                        )
+                    else:
+                        logger.warning("Could not find column %s in catalog; available columns: %s", col, list(selectedCatalog.columns))
 
             # --- Retrieve all available filters ---
             baseDatabase = os.path.join(
@@ -1339,7 +3783,7 @@ class Catalog:
 
             for filter_x in availableFilters["default_dmag"].keys():
                 for col in [filter_x, f"{filter_x}_err"]:
-                    # First try catalog.yml mapping
+                    # catalog.yml mapping first, then exact-name fallback.
                     if (
                         filter_x in catalog_keywords
                         and catalog_keywords.get(col) in selectedCatalog
@@ -1347,16 +3791,36 @@ class Catalog:
                         outputCatalog[col] = selectedCatalog[
                             catalog_keywords[col]
                         ].values
-                    # Fallback: copy directly if column exists (for custom catalogs)
                     elif col in selectedCatalog.columns:
                         outputCatalog[col] = selectedCatalog[col].values
-                    # Case-insensitive fallback for custom catalogs only (not standard UBVRI/ugriz/JHK)
-                    elif filter_x not in catalog_keywords:
-                        col_lower = col.lower()
-                        for cat_col in selectedCatalog.columns:
-                            if str(cat_col).lower() == col_lower:
-                                outputCatalog[col] = selectedCatalog[cat_col].values
-                                break
+                    # NOTE: no case-insensitive fallback - it would conflate
+                    # different photometric systems (e.g. SDSS r vs Cousins R).
+
+            # --- Published band transformations ---------------------------
+            # Optionally synthesize bands the survey does not carry (e.g.
+            # Johnson-Cousins BVRI for SDSS/PS1/LEGACY) so the image filter
+            # and its color-term bands can still be populated.
+            if transformations_enabled(self.input_yaml):
+                try:
+                    _ft_name = catalogName
+                    if isinstance(_ft_name, dict):
+                        _ft_name = self._resolve_catalog_for_filter(_ft_name)
+                    _ft_report = apply_filter_transformations(
+                        outputCatalog, _ft_name
+                    )
+                    for _fb, (_fl, _fn) in sorted(_ft_report.items()):
+                        logger.info(
+                            "Synthesized %s-band magnitudes for %d sources (%s)",
+                            _fb,
+                            _fn,
+                            _fl,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "allow_filter_transformations is set but the "
+                        "transformation failed: %s",
+                        exc,
+                    )
 
             # --- Early return if only updating names ---
             if update_names_only:
@@ -1378,15 +3842,16 @@ class Catalog:
                     if usefilter_i in outputCatalog.columns:
                         cutoff_i = magCutoff[i] if i < len(magCutoff) else magCutoff[0]
                         tooFaint |= outputCatalog[usefilter_i].values > cutoff_i
-                if tooFaint.any():
+                n_faint = tooFaint.sum()
+                if n_faint > 0:
                     logger.info(
-                        f"Removing {tooFaint.sum()} sources that are fainter than the cutoff"
+                        f"Removing {n_faint} sources that are fainter than the cutoff"
                     )
                     outputCatalog = outputCatalog.loc[~tooFaint]
 
             # --- Full cleaning procedures ---
             if full_clean:
-                # Remove sources with missing filter information
+                # Drop sources missing the image-filter magnitude.
                 image_filter = self.input_yaml["imageFilter"]
                 if image_filter in outputCatalog.columns:
                     hasFilterinfo = np.isfinite(outputCatalog[image_filter].values)
@@ -1395,14 +3860,67 @@ class Catalog:
                             f"Excluding {(~hasFilterinfo).sum()} sources with no {image_filter} band information"
                         )
                         outputCatalog = outputCatalog[hasFilterinfo]
+                else:
+                    logger.warning(
+                        f"Filter column '{image_filter}' not found in output catalog; "
+                        f"available columns: {list(outputCatalog.columns)}"
+                    )
 
-            logger.info(f"{len(outputCatalog)} sources in output catalog")
+                # Drop entries sharing a position with a much brighter
+                # catalog source.  Pan-STARRS in particular carries spurious
+                # faint rows within a few arcsec of bright stars; whether the
+                # faint entry is an artifact or a real companion, its measured
+                # flux is dominated by the neighbour, so it cannot calibrate.
+                cat_cfg = self.input_yaml.get("catalog", {}) or {}
+                try:
+                    blend_radius = float(
+                        cat_cfg.get("blend_neighbor_radius_arcsec", 6.0)
+                    )
+                    blend_dmag = float(
+                        cat_cfg.get("blend_neighbor_dmag", 3.0)
+                    )
+                except (TypeError, ValueError):
+                    blend_radius, blend_dmag = 6.0, 3.0
+                if (
+                    blend_radius > 0
+                    and blend_dmag > 0
+                    and image_filter in outputCatalog.columns
+                    and not outputCatalog.empty
+                ):
+                    n_blend = len(outputCatalog)
+                    outputCatalog = _drop_fainter_blended_neighbors(
+                        outputCatalog,
+                        mag_col=image_filter,
+                        radius_arcsec=blend_radius,
+                        dmag=blend_dmag,
+                    )
+                    n_blend -= len(outputCatalog)
+                    if n_blend > 0:
+                        logger.info(
+                            "Removed %d sources within %.1f arcsec of a "
+                            ">%.1f-mag-brighter catalog neighbour "
+                            "(blend/artifact rejection)",
+                            n_blend,
+                            blend_radius,
+                            blend_dmag,
+                        )
+
+            # Final deduplication before returning.
+            if not outputCatalog.empty and {"RA", "DEC"}.issubset(outputCatalog.columns):
+                n_before = len(outputCatalog)
+                outputCatalog = _skycoord_dedup_keep_one(outputCatalog, sep_threshold_arcsec=0.1)
+                n_dups = n_before - len(outputCatalog)
+                if n_dups > 0:
+                    logger.info("Removed %s duplicates during catalog cleaning", n_dups)
+
+            logger.info("%s sources in output catalog", len(outputCatalog))
+            logger.debug("Output catalog columns: %s", list(outputCatalog.columns))
             return outputCatalog
 
         except Exception as e:
             import traceback
 
-            logger.error(f"Error in catalog cleaning: {e}")
+            logger.error("Error in catalog cleaning: %s", e)
             logger.error(traceback.format_exc())
             return None
 
@@ -1415,15 +3933,18 @@ class Catalog:
     def recenter(self, selectedCatalog, image, boxsize=None, error=None):
         """
         Recenter sources in an image, selecting centroiding method from FWHM.
-        Undersampled (FWHM < 3 px): 2D Gaussian fit for subpixel accuracy.
-        Well-sampled (FWHM >= 3 px): center-of-mass. Robust against fully masked cutouts.
-        Error-weighted centroiding has been removed; this routine always uses
-        unweighted centroiding for stability across diverse background/error maps.
+        Undersampled (FWHM <= undersampled_fwhm_threshold, default 2.5 px): 2D Gaussian fit for subpixel accuracy.
+        Well-sampled (FWHM > threshold): center-of-mass. Tolerates fully masked cutouts.
+        When an error map is supplied (e.g. background_rms), centroid positions use
+        noise-weighted centroiding and x_pix_err/y_pix_err are propagated from the
+        per-pixel error array using the photutils 3.1 SourceCatalog centroid_err
+        formula (with its single-pixel variance floor); without an error map the
+        centroid errors are NaN, matching photutils semantics.
         """
         try:
             num_sources = len(selectedCatalog)
             logger.info(
-                border_msg(
+                log_step(
                     f"Recentering {num_sources} source{'s' if num_sources > 1 else ''}"
                 )
             )
@@ -1445,7 +3966,8 @@ class Catalog:
                 self.input_yaml.get("undersampled_mode", fwhm <= undersampled_thr)
             )
 
-            # Box size: default ~3xFWHM, odd, at least 3; for undersampled use at least 7 for 2DG
+            # Box size ~3xFWHM (odd, >=3); undersampled needs >=7 for the
+            # 2D Gaussian fit to constrain the core.
             if boxsize is None:
                 boxsize = max(3, int(np.ceil(fwhm) * 3))
             boxsize = int(boxsize)
@@ -1453,10 +3975,20 @@ class Catalog:
                 boxsize = 7
             boxsize = boxsize if boxsize % 2 != 0 else boxsize + 1
             boxsize = max(boxsize, 3)
-            border = boxsize
-            logger.info(f"Boxsize: {boxsize} px (undersampled={undersampled})")
+            # Border must clear the aperture annulus (aperture + gap + width);
+            # annulus parameters match aperture.py conventions.
+            phot_cfg = self.input_yaml.get("photometry", {}) or {}
+            _ap_radius = phot_cfg.get("aperture_radius")
+            ap_radius = float(_ap_radius if _ap_radius is not None else fwhm * 1.7)
+            _gap = phot_cfg.get("annulus_gap_fwhm")
+            gap_fwhm = float(_gap if _gap is not None else 0.75)
+            _width = phot_cfg.get("annulus_width_fwhm")
+            width_fwhm = float(_width if _width is not None else 2.0)
+            annulus_outer = ap_radius + (gap_fwhm + width_fwhm) * fwhm
+            border = max(boxsize, int(np.ceil(annulus_outer)))
+            logger.debug("Boxsize: %s px, Border: %s px (annulus outer=%.1f, undersampled=%s)", boxsize, border, annulus_outer, undersampled)
 
-            # Filter sources near image borders
+            # Drop sources whose cutout would cross the image border.
             height, width = image.shape
             mask_x = (selectedCatalog["x_pix"] > border) & (
                 selectedCatalog["x_pix"] < width - border
@@ -1467,15 +3999,14 @@ class Catalog:
             mask = mask_x & mask_y
 
             if num_sources > 1:
-                logger.info(f"Recentering {sum(mask)} sources within border")
+                logger.debug("Recentering %s sources within border", sum(mask))
                 selectedCatalog = selectedCatalog.loc[mask].copy()
 
-            # Extract initial coordinates
             old_x = selectedCatalog["x_pix"].values
             old_y = selectedCatalog["y_pix"].values
             nan_mask = ~np.isfinite(image)
 
-            # Pre-check cutouts to avoid fully masked regions
+            # Skip sources whose cutout is fully masked.
             valid_sources = self._check_valid_cutouts(
                 image, old_x, old_y, boxsize, nan_mask
             )
@@ -1483,39 +4014,55 @@ class Catalog:
                 logger.warning("No sources have valid cutouts - skipping recentering")
                 return selectedCatalog.loc[valid_sources]
 
-            logger.info(f"{valid_sources.sum()} sources have valid cutouts")
+            logger.debug("%s sources have valid cutouts", valid_sources.sum())
 
             old_x_valid = old_x[valid_sources]
             old_y_valid = old_y[valid_sources]
 
-            # Undersampled (FWHM < 3): 2D Gaussian; well-sampled: COM
-            if undersampled:
-                logger.info("Using 2D Gaussian centroiding (FWHM < 3 px, undersampled)")
-                centroid_func = centroid_2dg
-            else:
-                logger.info("Using center-of-mass centroiding (FWHM >= 3 px)")
-                centroid_func = centroid_com
-            try:
-                x_valid, y_valid = centroid_sources(
-                    image,
-                    old_x_valid,
-                    old_y_valid,
-                    box_size=boxsize,
-                    centroid_func=centroid_func,
-                    mask=nan_mask,
-                )
-                x_valid = np.asarray(x_valid)
-                y_valid = np.asarray(y_valid)
-            except Exception as e:
-                log_warning_from_exception(
-                    logger, "Centroiding failed even on valid sources", e
-                )
-                x_valid = old_x_valid.copy()
-                y_valid = old_y_valid.copy()
-            x_err_valid = np.full(len(x_valid), np.nan)
-            y_err_valid = np.full(len(y_valid), np.nan)
+            # Always use the error-aware centroid path so x_pix_err/y_pix_err
+            # are reported (from the noise-propagated error map when one is
+            # supplied, or from the flux-moment proxy when it is not).  This
+            # also routes centroid_2dg through centroid_2dg_with_error, which
+            # wraps the astropy-modelling Gaussian fit so its cov_x overflow
+            # / divide-by-zero warnings are contained and a clean NaN is
+            # returned on a degenerate fit instead of poisoning the source.
+            from psf import (
+                _centroid_sources_with_error_impl,
+                centroid_2dg_with_error,
+                centroid_com_with_error,
+            )
 
-            # Create full arrays with NaNs for invalid sources
+            # A mis-shaped error map would silently broadcast wrong; drop it
+            # so centroid errors are NaN rather than garbage.
+            if error is not None and np.shape(error) != image.shape:
+                logger.warning(
+                    "recenter: error map shape %s != image shape %s; "
+                    "centroid errors skipped",
+                    np.shape(error),
+                    image.shape,
+                )
+                error = None
+
+            (
+                x_valid,
+                y_valid,
+                x_err_valid,
+                y_err_valid,
+            ) = _centroid_sources_with_error_impl(
+                image,
+                old_x_valid,
+                old_y_valid,
+                box_size=boxsize,
+                centroid_func=(
+                    centroid_2dg_with_error
+                    if undersampled
+                    else centroid_com_with_error
+                ),
+                mask=nan_mask,
+                error=error,
+            )
+
+            # NaN-fill invalid sources so indices stay aligned.
             x = np.full(len(old_x), np.nan)
             y = np.full(len(old_y), np.nan)
             x[valid_sources] = x_valid
@@ -1526,7 +4073,37 @@ class Catalog:
             x_err[valid_sources] = x_err_valid
             y_err[valid_sources] = y_err_valid
 
-            # Update coordinates
+            # Gaussian fits fail on faint or crowded cutouts; retry those
+            # with COM rather than dropping the source.
+            if undersampled:
+                failed_idx = np.where(valid_sources)[0][
+                    ~np.isfinite(x_valid) | ~np.isfinite(y_valid)
+                ]
+                if failed_idx.size:
+                    (
+                        x_fb,
+                        y_fb,
+                        xerr_fb,
+                        yerr_fb,
+                    ) = _centroid_sources_with_error_impl(
+                        image,
+                        old_x[failed_idx],
+                        old_y[failed_idx],
+                        box_size=boxsize,
+                        centroid_func=centroid_com_with_error,
+                        mask=nan_mask,
+                        error=error,
+                    )
+                    x[failed_idx] = x_fb
+                    y[failed_idx] = y_fb
+                    x_err[failed_idx] = xerr_fb
+                    y_err[failed_idx] = yerr_fb
+                    logger.debug(
+                        "%d sources fell back to COM centroiding after "
+                        "2dg fit failure",
+                        failed_idx.size,
+                    )
+
             selectedCatalog.loc[:, "x_pix"] = x
             selectedCatalog.loc[:, "y_pix"] = y
             if "x_pix_err" not in selectedCatalog.columns:
@@ -1536,7 +4113,7 @@ class Catalog:
             selectedCatalog.loc[:, "x_pix_err"] = x_err
             selectedCatalog.loc[:, "y_pix_err"] = y_err
 
-            # Filter sources that moved outside the border
+            # Drop sources recentered outside the border.
             mask_x = (selectedCatalog["x_pix"] >= border) & (
                 selectedCatalog["x_pix"] < width - border
             )
@@ -1546,30 +4123,48 @@ class Catalog:
             mask = mask_x & mask_y
 
             if sum(~mask) > 0:
-                logger.info(f"Failed to recenter {sum(~mask)} sources - ignoring")
+                n_nan = int(
+                    (
+                        ~np.isfinite(selectedCatalog["x_pix"])
+                        | ~np.isfinite(selectedCatalog["y_pix"])
+                    ).sum()
+                )
+                logger.warning(
+                    "Failed to recenter %s sources "
+                    "(%d centroid fit failures, %d outside border) - ignoring",
+                    sum(~mask),
+                    n_nan,
+                    int(sum(~mask)) - n_nan,
+                )
                 selectedCatalog = selectedCatalog.loc[mask].copy()
 
-            # Compute median offset
             valid = (
                 np.isfinite(x)
                 & np.isfinite(y)
                 & np.isfinite(old_x)
                 & np.isfinite(old_y)
             )
+            average_offset = np.nan
             if valid.any():
                 average_offset = np.nanmedian(
                     pix_dist(x[valid], old_x[valid], y[valid], old_y[valid])
                 )
-                logger.info(f"Median pixel correction: {average_offset:.1f} px")
             else:
                 logger.warning("No valid sources to compute median offset.")
 
-            # Remove NaNs
             selectedCatalog = selectedCatalog.loc[
                 selectedCatalog[["x_pix", "y_pix"]].notna().all(axis=1)
             ]
+            offset_txt = (
+                f", median offset {average_offset:.1f} px"
+                if np.isfinite(average_offset)
+                else ""
+            )
             logger.info(
-                f"Recentered {len(selectedCatalog)} source{'s' if len(selectedCatalog) > 1 else ''}"
+                "Recentered %d sources (%s centroiding%s)",
+                len(selectedCatalog),
+                "2dg" if undersampled else "com",
+                offset_txt,
             )
 
         except Exception as e:
@@ -1613,18 +4208,15 @@ class Catalog:
         valid_mask = np.ones(len(x_coords), dtype=bool)
 
         for i, (x, y) in enumerate(zip(x_coords, y_coords)):
-            # Define cutout bounds
             x_min = int(x - half_box)
             x_max = int(x + half_box + 1)
             y_min = int(y - half_box)
             y_max = int(y + half_box + 1)
 
-            # Check bounds
             if x_min < 0 or x_max > width or y_min < 0 or y_max > height:
                 valid_mask[i] = False
                 continue
 
-            # Check if cutout has enough unmasked pixels
             cutout_mask = mask[y_min:y_max, x_min:x_max]
             n_pix = cutout_mask.size
             n_unmasked = int(np.sum(~cutout_mask))
@@ -1664,16 +4256,17 @@ class Catalog:
         if catalog.empty:
             return catalog
 
-        # Vectorized angular separation using small-angle approximation
-        # (valid for separations << 1 degree, which tolerance in arcsec guarantees)
-        dec_rad = np.radians(dec)
-        ra_vals = catalog["RA"].values
-        dec_vals = catalog["DEC"].values
-
-        delta_ra = (ra_vals - ra) * np.cos(dec_rad)   # arcsec-equivalent in degrees
-        delta_dec = dec_vals - dec
-        separation_deg = np.sqrt(delta_ra**2 + delta_dec**2)
-        separation_arcsec = separation_deg * 3600.0
+        # Exact great-circle separation.  Using the target's declination for the
+        # cos(dec) projection (the previous small-angle approximation) biases the
+        # RA offset for every source whose own declination differs from the
+        # target's - a systematic error across a wide field.  SkyCoord handles
+        # the per-source cos(dec) and the RA wrap correctly.
+        target = SkyCoord(ra=ra * u.degree, dec=dec * u.degree)
+        sources = SkyCoord(
+            ra=catalog["RA"].values * u.degree,
+            dec=catalog["DEC"].values * u.degree,
+        )
+        separation_arcsec = target.separation(sources).arcsec
 
         match_mask = separation_arcsec <= tolerance
         return catalog[match_mask]
@@ -1686,8 +4279,9 @@ class Catalog:
         target_coords,
         target_name=None,
         catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
-        radius=2,
+        radius=10,
         max_separation=3,
+        regions=None,
         **kwargs,
     ):
         """
@@ -1702,20 +4296,14 @@ class Catalog:
         catalog_list : list, optional
             List of catalogs to combine (default is ['refcat', 'sdss', 'pan_starrs', 'apass', '2mass']).
         radius : float, optional
-            Search radius in arcminutes (default is 2).
+            Search radius in arcminutes (default is 10).
         max_separation : float, optional
             Maximum separation in arcseconds for matching sources (default is 3).
-        # Backward compatibility: support legacy misspelled keyword.
-        if "max_seperation" in kwargs:
-            legacy_value = kwargs.pop("max_seperation")
-            if legacy_value is not None:
-                max_separation = legacy_value
-        if kwargs:
-            logger.warning(
-                "Ignoring unexpected keyword(s) in build_complete_catalog: %s",
-                ", ".join(sorted(kwargs.keys())),
-            )
-
+        regions : dict, optional
+            Per-catalog query regions (``catalog_query_regions`` format);
+            each member catalog downloads over its own region so the
+            combined build reuses the same CSV cache keys as the
+            per-catalog downloads.
 
         Returns:
         --------
@@ -1723,16 +4311,17 @@ class Catalog:
             Combined catalog DataFrame.
         """
         catalog_list_str = ",".join([i.upper() for i in catalog_list])
-        logger.info(
-            border_msg(f"Building Custom catalog using from {catalog_list_str}")
-        )
+        logger.info(log_step(f"Custom catalog: {catalog_list_str}"))
 
-        # Set default target name if not provided
         if not target_name:
-            target_name = self.input_yaml.get("target_name", "Transient")
+            target_name = canonical_target_name(self.input_yaml)
 
-        # Generate file name for the catalog
-        fname = f"{target_name}_r_{radius}arcmins_CUSTOM.csv".replace("", "")
+        # Target RA/DEC in the filename makes the cache field-specific;
+        # otherwise catalogs from different targets with the same name get
+        # reused (N in the ZP legend then exceeds the real source count).
+        target_ra = target_coords.ra.degree
+        target_dec = target_coords.dec.degree
+        fname = f"{target_name}_r_{radius}arcmins_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}_CUSTOM.csv"
         wdir = self.input_yaml.get("wdir")
         if not wdir:
             raise ValueError("Working directory (wdir) is not set in input YAML.")
@@ -1740,7 +4329,6 @@ class Catalog:
         dirname = os.path.join(wdir, "catalog_queries")
         dirname = os.path.join(dirname, "custom")
 
-        # Create directories for storing catalog data
         dirname = os.path.join(wdir, "catalog_queries")
         pathlib.Path(dirname).mkdir(parents=True, exist_ok=True)
         catalog_dir = os.path.join(dirname, "custom_builds")
@@ -1764,25 +4352,50 @@ class Catalog:
             "K",
         ]
 
-        # Create a new list by appending '_err' to each element
         updated_filter_list = []
         for filter in filter_list:
             updated_filter_list.append(filter)
             updated_filter_list.append(f"{filter}_err")
 
-        # Matching tolerance in arcseconds (used by `find_source`)
+        # Matching tolerance in arcseconds (used by `find_source`).
         tolerance_arcsec = max_separation
 
         cols = ["RA", "DEC"] + updated_filter_list
+
+        # A cached combined catalog is reused (after deduplication).
+        if os.path.isfile(fpath):
+            logger.info("Loading existing custom catalog from %s", fpath)
+            existing_catalog = pd.read_csv(fpath)
+            if not existing_catalog.empty and {"RA", "DEC"}.issubset(existing_catalog.columns):
+                # Keep one member of every close pair.
+                n_before = len(existing_catalog)
+                existing_catalog = _skycoord_dedup_keep_one(existing_catalog, sep_threshold_arcsec=0.1)
+                n_dups = n_before - len(existing_catalog)
+                if n_dups > 0:
+                    logger.warning(
+                        f"Removed {n_dups} duplicates from existing cached catalog - resaving clean version"
+                    )
+                    existing_catalog.to_csv(fpath, index=False, float_format="%.6f")
+            elif not existing_catalog.empty:
+                logger.warning(
+                    "Existing cached catalog at %s is missing RA/DEC columns - skipping deduplication",
+                    fpath,
+                )
+            return existing_catalog
+        
         output_catalog = pd.DataFrame(columns=cols)
 
         for catalogName in catalog_list:
-            logger.info(f"Getting {catalogName} catalog")
+            logger.info("Getting %s catalog", catalogName)
+            _reg_i = (regions or {}).get(
+                catalogName
+            ) or (regions or {}).get("default")
             catalog_i = self.download(
                 target_coords=target_coords,
                 catalogName=catalogName,
                 radius=radius,
                 target_name=target_name,
+                region=_reg_i,
             )
             if catalog_i is None:
                 continue
@@ -1791,42 +4404,1250 @@ class Catalog:
                 catalog_i, catalogName=catalogName, update_names_only=True
             )
 
-            # Collect new rows to avoid repeated concat in loop
+            # Cross-match via a single match_to_catalog_sky call (O(N log N)),
+            # then split into new / update groups. The empty-catalog branch
+            # (first iteration) just takes every row.
             new_rows = []
-            
-            # Loop over each entry in the current catalog
-            for index, entry in catalog_i.iterrows():
-                ra = entry["RA"]
-                dec = entry["DEC"]
-
-                # Check if the source exists in the output catalog
-                existing_source = self.find_source(
-                    ra, dec, output_catalog, tolerance=tolerance_arcsec
+            if output_catalog.empty:
+                # to_dict('records') avoids one Series per row (iterrows is
+                # much slower on large catalogs).
+                catalog_cols = [c for c in cols if c in catalog_i.columns]
+                missing_cols = [c for c in cols if c not in catalog_i.columns]
+                sub = catalog_i[catalog_cols].copy()
+                for c in missing_cols:
+                    sub[c] = np.nan
+                new_rows = sub[cols].to_dict("records")
+            else:
+                coords_existing = SkyCoord(
+                    ra=output_catalog["RA"].values * u.degree,
+                    dec=output_catalog["DEC"].values * u.degree,
                 )
+                coords_new = SkyCoord(
+                    ra=catalog_i["RA"].values * u.degree,
+                    dec=catalog_i["DEC"].values * u.degree,
+                )
+                idx_match, sep2d, _ = coords_new.match_to_catalog_sky(coords_existing)
+                tol_deg = tolerance_arcsec / 3600.0
+                within = sep2d.deg < tol_deg
+                # Mutual nearest-neighbour match: a new source counts as already
+                # present only when the existing source it points at points back
+                # to it.  A one-way match suppresses genuine new sources whenever
+                # two new detections share the same nearest existing source (more
+                # likely in sparse fields), and can accept a source whose true
+                # counterpart is a different, closer entry.
+                _idx_rev, _, _ = coords_existing.match_to_catalog_sky(coords_new)
+                _back = _idx_rev[idx_match] == np.arange(len(coords_new))
+                matched = within & _back
 
-                if existing_source.empty:
-                    # Source does not exist, add to new rows list
-                    new_row = {col: entry.get(col, np.nan) for col in cols}
-                    new_rows.append(new_row)
-                else:
-                    # Source exists, update the row with missing filter data
-                    index = existing_source.index[0]
+                # New (unmatched) sources via boolean mask - no iterrows().
+                new_mask = ~matched
+                if new_mask.any():
+                    catalog_cols = [c for c in cols if c in catalog_i.columns]
+                    missing_cols = [c for c in cols if c not in catalog_i.columns]
+                    sub = catalog_i.loc[new_mask, catalog_cols].copy()
+                    for c in missing_cols:
+                        sub[c] = np.nan
+                    new_rows = sub[cols].to_dict("records")
+
+                # Fill in missing filter values for matched sources.
+                if matched.any():
+                    matched_new_idx = np.where(matched)[0]
+                    out_indices = output_catalog.index[idx_match[matched_new_idx]]
                     for filter_name in updated_filter_list:
-                        if filter_name in entry and pd.isna(
-                            output_catalog.at[index, filter_name]
-                        ):
-                            output_catalog.at[index, filter_name] = entry[filter_name]
-            
-            # Concatenate all new rows at once for performance
+                        if filter_name not in catalog_i.columns:
+                            continue
+                        new_vals = catalog_i[filter_name].to_numpy()
+                        existing_vals = output_catalog.loc[out_indices, filter_name].to_numpy()
+                        fill_mask = pd.isna(existing_vals) & pd.notna(new_vals[matched_new_idx])
+                        if fill_mask.any():
+                            output_catalog.loc[
+                                out_indices[fill_mask], filter_name
+                            ] = new_vals[matched_new_idx[fill_mask]]
+
             if new_rows:
                 new_rows_df = pd.DataFrame(new_rows)
                 output_catalog = pd.concat(
                     [output_catalog, new_rows_df], ignore_index=True
                 )
+                logger.info(
+                    "Added %d sources from %s, catalog now has %d sources",
+                    len(new_rows_df), catalogName, len(output_catalog),
+                )
 
-        # Final output catalog is ready
+        # Final deduplication: keep exactly one member of every close pair.
+        if not output_catalog.empty:
+            n_before_dedup = len(output_catalog)
+            output_catalog = _skycoord_dedup_keep_one(output_catalog, sep_threshold_arcsec=0.1)
+            n_removed = n_before_dedup - len(output_catalog)
+            logger.info(
+                f"Final catalog: {len(output_catalog)} sources (removed {n_removed} duplicates)"
+            )
+            if n_removed > 0:
+                logger.warning(
+                    f"Removed {n_removed} duplicate sources from final combined catalog"
+                )
+        
         output_catalog.to_csv(fpath, index=False, float_format="%.6f")
+        logger.debug("Saved clean catalog to %s", fpath)
         return output_catalog
+
+    # =============================================================================
+    # =============================================================================
+    # #
+    # =============================================================================
+    # =============================================================================
+
+    def _optimizer_mag_err_max(self):
+        """Catalog magnitude-error ceiling for "usable" calibrators.
+
+        ``catalog.optimizer_mag_err_max`` (default 0.2 mag); a non-finite
+        or non-positive value lifts the cap - the error column must still
+        be finite where the catalog carries one.
+        """
+        try:
+            val = float(
+                (self.input_yaml.get("catalog", {}) or {}).get(
+                    "optimizer_mag_err_max", 0.2
+                )
+            )
+        except (TypeError, ValueError):
+            val = 0.2
+        return val if val > 0 else None
+
+    def _gaia_xp_cone_source_count(self, region):
+        """
+        COUNT(*) of Gaia DR3 XP-spectra sources the query ``region`` could
+        contribute, or None when the count query fails.
+
+        On-detector calibrators must lie inside the region cone and inside
+        whatever cone the XP download grows to, so the reachable set is
+        bounded by ``min(region radius, gaia_xp_max_radius_deg)``.  The
+        count gates the expensive ADQL + batched GaiaXPy build during the
+        optimizer scan; ``None`` (query failure) must not gate anything -
+        the real download then decides.
+        """
+        cat_cfg = self.input_yaml.get("catalog", {}) or {}
+        try:
+            from autophot_gaia_curves.gaia_archive import gaia_cone_count
+
+            region_deg = float(region.get("radius_arcmin", 0.0)) / 60.0
+            grown_cap = float(cat_cfg.get("gaia_xp_max_radius_deg", 1.0))
+            radius_deg = min(region_deg, grown_cap)
+            if not np.isfinite(radius_deg) or radius_deg <= 0:
+                return None
+            return gaia_cone_count(
+                float(region["ra"]),
+                float(region["dec"]),
+                radius_deg,
+                xp_only=True,
+                max_retries=int(cat_cfg.get("gaia_archive_max_retries", 3)),
+                retry_base_delay_sec=float(
+                    cat_cfg.get("gaia_archive_retry_base_delay_sec", 2.0)
+                ),
+                logger=logger,
+            )
+        except Exception:
+            return None
+
+    def _catalog_supported_bands(self, catalog_names, cat_cfg=None):
+        """Bands each candidate backend can serve, from catalog.yml.
+
+        Returns ``(supported_bands, skipped)`` where ``skipped`` maps a
+        catalog name to the reason it cannot participate (currently only
+        an unreadable custom catalog).
+        """
+        cat_cfg = cat_cfg if cat_cfg is not None else (
+            self.input_yaml.get("catalog", {}) or {}
+        )
+        filepath = os.path.dirname(os.path.abspath(__file__))
+        catalog_db = AutophotYaml(
+            os.path.join(filepath, "databases", "catalog.yml")
+        ).load()
+
+        supported_bands = {}
+        skipped = {}
+        for name in catalog_names:
+            # catalog.yml uses 'panstarrs' for the normalized 'pan_starrs'.
+            yml_name = {"pan_starrs": "panstarrs"}.get(name, name)
+            section = catalog_db.get(yml_name) or {}
+            bands_i = {
+                k
+                for k in section
+                if normalize_photometric_filter_name(k) is not None
+            }
+            if name == "custom":
+                # custom.yml band names are nominal; the CSV decides.
+                try:
+                    csv_cols = set(
+                        pd.read_csv(
+                            cat_cfg["catalog_custom_fpath"], nrows=0
+                        ).columns
+                    )
+                except Exception as exc:
+                    skipped[name] = f"custom catalog unreadable: {exc}"
+                    continue
+                bands_i = {b for b in bands_i if b in csv_cols}
+                # clean() also auto-detects <band>/<band>_err column pairs.
+                bands_i |= {
+                    c
+                    for c in csv_cols
+                    if f"{c}_err" in csv_cols
+                    and normalize_photometric_filter_name(c) is not None
+                }
+            # With transformations enabled a catalog also serves the bands
+            # it can synthesize (e.g. BVRI for sdss/panstarrs/legacy).
+            if cat_cfg.get("allow_filter_transformations", False):
+                bands_i |= set(transformable_bands(name))
+            supported_bands[name] = bands_i
+        return supported_bands, skipped
+
+    def _optimizer_plot_sources(
+        self,
+        catalog_names,
+        band_set,
+        image_infos,
+        target_coords,
+        radius,
+        border=11,
+        regions=None,
+        return_all=False,
+        return_report=False,
+        min_sources=5,
+    ):
+        """Rebuild ``plot_data["sources"]`` for the coverage map without a
+        full rescan.
+
+        Used on cached-selection auto runs: every download here hits the
+        local catalog CSV cache, so the (catalog, band) -> usable-source
+        RA/DEC union is recomputed with the same masks the optimizer
+        applies, but entirely offline.  Returns a dict keyed by
+        ``(catalog_name, band)`` holding concatenated RA/DEC frames.
+
+        ``regions`` optionally maps catalog name -> the query region the
+        scan used, so cache keys resolve identically to the original run.
+        With ``return_all=True`` the return value becomes
+        ``(sources, catalog_sources)`` where ``catalog_sources`` maps
+        catalog name -> every source it returned (post-clean), matching
+        ``plot_data["catalog_sources"]`` from the optimizer.
+        ``return_report=True`` appends a third return value: a report
+        DataFrame with the same columns the optimizer report carries
+        (catalog/band/image/n_usable/coverage/r_query_arcmin/mode), so a
+        cached run can still draw the scoreboard row when the original
+        coverage CSV did not survive.
+        ``min_sources`` mirrors the optimizer's preferred minimum: when a
+        catalog has no CSV cache and would hit the archive, Gaia is
+        skipped unless a COUNT(*) shows at least that many XP-spectra
+        sources in the reachable cone - the same gate the scan applies.
+        """
+        zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
+        bright_lim = float(zp_cfg.get("bright_mag_limit", 11.0))
+        faint_lim = float(zp_cfg.get("faint_mag_limit", 22.0))
+        mag_err_max = self._optimizer_mag_err_max()
+        supported_bands, _ = self._catalog_supported_bands(
+            list(catalog_names)
+        )
+        band_set = sorted({str(b) for b in band_set if b})
+
+        per_key = {}
+        all_sources = {}
+        report_rows = []
+        for name in catalog_names:
+            name = self._normalize_catalog_name(str(name))
+            if not (set(band_set) & supported_bands.get(name, set())):
+                continue
+            reg = (regions or {}).get(name)
+            if name == "gaia":
+                # A cached Gaia CSV is free to reuse; without one this
+                # download would run the full XP build the optimizer scan
+                # gates behind a source count - apply the same gate so a
+                # rebuild never pays for a catalog the scan skipped.
+                _gaia_dir = os.path.join(
+                    self.input_yaml.get("wdir", "."),
+                    "catalog_queries",
+                    "gaia",
+                    canonical_target_name(self.input_yaml).lower(),
+                )
+                _has_cache = any(
+                    pathlib.Path(_gaia_dir).glob("*_gaia_target_ra_*.csv")
+                )
+                if not _has_cache:
+                    _reg = (
+                        reg
+                        if isinstance(reg, dict)
+                        else {
+                            "ra": float(target_coords.ra.deg),
+                            "dec": float(target_coords.dec.deg),
+                            "radius_arcmin": float(radius),
+                        }
+                    )
+                    _n_xp = self._gaia_xp_cone_source_count(_reg)
+                    if _n_xp is not None and _n_xp < min_sources:
+                        continue
+            try:
+                with _quiet_catalog_log():
+                    raw = self.download(
+                        target_coords=target_coords,
+                        catalogName=name,
+                        radius=(
+                            reg.get("radius_arcmin", radius)
+                            if isinstance(reg, dict)
+                            else radius
+                        ),
+                        region=reg,
+                    )
+            except Exception:
+                continue
+            try:
+                with _quiet_catalog_log():
+                    cleaned = self.clean(
+                        raw, catalogName=name, update_names_only=True
+                    )
+                    if (
+                        cleaned is not None
+                        and len(cleaned) > 0
+                        and {"RA", "DEC"}.issubset(cleaned.columns)
+                    ):
+                        cleaned = _skycoord_dedup_keep_one(
+                            cleaned, sep_threshold_arcsec=0.1
+                        )
+            except Exception:
+                cleaned = None
+
+            coords = None
+            if (
+                cleaned is not None
+                and len(cleaned) > 0
+                and {"RA", "DEC"}.issubset(cleaned.columns)
+            ):
+                coords = SkyCoord(
+                    ra=pd.to_numeric(cleaned["RA"], errors="coerce").to_numpy()
+                    * u.deg,
+                    dec=pd.to_numeric(cleaned["DEC"], errors="coerce").to_numpy()
+                    * u.deg,
+                    frame="icrs",
+                )
+                all_sources[name] = cleaned[["RA", "DEC"]].copy()
+
+            # Field coverage over the queried region - same metric the
+            # optimizer uses so the rebuilt report can flag a partial
+            # survey footprint (e.g. a survey boundary crossing the box).
+            cov_frac = np.nan
+            if coords is not None and isinstance(reg, dict):
+                _box = (
+                    (float(reg["width_deg"]), float(reg["height_deg"]))
+                    if name in _BOX_QUERY_CATALOGS and reg.get("width_deg")
+                    else None
+                )
+                try:
+                    cov_frac = _field_coverage_fraction(
+                        coords.ra.deg,
+                        coords.dec.deg,
+                        float(reg["ra"]),
+                        float(reg["dec"]),
+                        float(reg.get("radius_arcmin", radius)) / 60.0,
+                        box_wh=_box,
+                    )
+                except Exception:
+                    cov_frac = np.nan
+
+            for img in image_infos or []:
+                img_bands = (
+                    [img["band"]] if img.get("band") else band_set
+                )
+                img_bands = [
+                    b
+                    for b in img_bands
+                    if b in supported_bands.get(name, set())
+                ]
+                if not img_bands:
+                    continue
+
+                onchip_mask = None
+                wcs_i = img.get("wcs")
+                shape_i = img.get("shape")
+                if (
+                    coords is not None
+                    and wcs_i is not None
+                    and shape_i is not None
+                ):
+                    try:
+                        x, y = wcs_i.world_to_pixel(coords)
+                        x = np.asarray(x, dtype=float).ravel()
+                        y = np.asarray(y, dtype=float).ravel()
+                        ny, nx = shape_i
+                        onchip_mask = (
+                            np.isfinite(x)
+                            & np.isfinite(y)
+                            & (x >= border)
+                            & (x < nx - border)
+                            & (y >= border)
+                            & (y < ny - border)
+                        )
+                    except Exception:
+                        pass
+
+                for band in img_bands:
+                    mag_mask = _usable_mag_mask(
+                        cleaned, band, bright_lim, faint_lim, mag_err_max
+                    )
+                    if mag_mask is None:
+                        usable = None
+                    elif onchip_mask is not None:
+                        usable = mag_mask.to_numpy() & onchip_mask
+                    else:
+                        usable = mag_mask.to_numpy()
+                    if usable is not None and usable.any():
+                        per_key.setdefault((name, band), []).append(
+                            cleaned.loc[usable, ["RA", "DEC"]]
+                        )
+                    if return_report:
+                        report_rows.append(
+                            {
+                                "catalog": name,
+                                "band": band,
+                                "image": (
+                                    os.path.basename(str(img["path"]))
+                                    if img.get("path")
+                                    else "field"
+                                ),
+                                "n_usable": (
+                                    int(usable.sum())
+                                    if usable is not None
+                                    else 0
+                                ),
+                                "coverage": cov_frac,
+                                "r_query_arcmin": float(
+                                    (reg if isinstance(reg, dict) else {}).get(
+                                        "radius_arcmin", radius
+                                    )
+                                ),
+                                "mode": (
+                                    "onchip"
+                                    if wcs_i is not None and shape_i is not None
+                                    else "field"
+                                ),
+                            }
+                        )
+
+        out = {
+            key: pd.concat(frames, ignore_index=True).drop_duplicates(
+                subset=["RA", "DEC"]
+            )
+            for key, frames in per_key.items()
+        }
+        if return_report:
+            report = pd.DataFrame(
+                report_rows,
+                columns=[
+                    "catalog",
+                    "band",
+                    "image",
+                    "n_usable",
+                    "coverage",
+                    "r_query_arcmin",
+                    "mode",
+                ],
+            )
+            return out, all_sources, report
+        if return_all:
+            return out, all_sources
+        return out
+
+    def _recenter_on_coverage(
+        self,
+        name,
+        reg,
+        coords,
+        target_coords,
+        target_name,
+    ):
+        """Re-query a partially-covered cone catalog on covered sky.
+
+        The nominal region is centred on the footprint bounds, which
+        may sit on a survey boundary: distance-ordered (refcat, legacy)
+        and radius-clamped queries then spend their row budget on sky
+        the catalog never observed.  Re-issues the download centred on
+        the covered portion and returns ``(raw, cleaned, coords, reg,
+        coverage)`` only when the required box gains coverage or kept
+        rows; None keeps the original query.
+        """
+        new_centre = _coverage_optimal_center(
+            coords.ra.deg, coords.dec.deg, reg
+        )
+        if new_centre is None:
+            return None
+        reg2 = dict(reg)
+        reg2["ra"], reg2["dec"] = new_centre
+        reg2["recentered"] = True
+        try:
+            reg2["offset_arcmin"] = float(
+                SkyCoord(
+                    ra=reg2["ra"] * u.deg,
+                    dec=reg2["dec"] * u.deg,
+                    frame="icrs",
+                ).separation(target_coords).arcmin
+            )
+        except Exception:
+            pass
+        try:
+            with _quiet_catalog_log():
+                raw2 = self.download(
+                    target_coords=target_coords,
+                    catalogName=name,
+                    radius=reg2["radius_arcmin"],
+                    target_name=target_name,
+                    region=reg2,
+                )
+                cleaned2 = self.clean(
+                    raw2, catalogName=name, update_names_only=True
+                )
+        except Exception as exc:
+            logger.debug(
+                "  %-12s coverage recentre query failed - %s", name, exc
+            )
+            return None
+        if (
+            cleaned2 is None
+            or len(cleaned2) == 0
+            or not {"RA", "DEC"}.issubset(cleaned2.columns)
+        ):
+            return None
+        cleaned2 = _skycoord_dedup_keep_one(
+            cleaned2, sep_threshold_arcsec=0.1
+        )
+        coords2 = SkyCoord(
+            ra=pd.to_numeric(cleaned2["RA"], errors="coerce").to_numpy()
+            * u.deg,
+            dec=pd.to_numeric(cleaned2["DEC"], errors="coerce").to_numpy()
+            * u.deg,
+            frame="icrs",
+        )
+        # Both candidates are judged against the SAME required box so
+        # the adoption test never rewards a shifted region for merely
+        # covering different sky.
+        _box_wh = (
+            (float(reg["width_deg"]), float(reg["height_deg"]))
+            if reg.get("width_deg") and reg.get("height_deg")
+            else None
+        )
+        _r_deg = float(reg["radius_arcmin"]) / 60.0
+        cov_old = _field_coverage_fraction(
+            coords.ra.deg,
+            coords.dec.deg,
+            float(reg["ra"]),
+            float(reg["dec"]),
+            _r_deg,
+            box_wh=_box_wh,
+        )
+        cov_new = _field_coverage_fraction(
+            coords2.ra.deg,
+            coords2.dec.deg,
+            float(reg["ra"]),
+            float(reg["dec"]),
+            _r_deg,
+            box_wh=_box_wh,
+        )
+        if not np.isfinite(cov_new):
+            return None
+        _cov_old = cov_old if np.isfinite(cov_old) else 0.0
+        n_old = int(
+            _in_required_region(coords.ra.deg, coords.dec.deg, reg).sum()
+        )
+        n_new = int(
+            _in_required_region(coords2.ra.deg, coords2.dec.deg, reg).sum()
+        )
+        if not (
+            cov_new > _cov_old + 0.01
+            or (cov_new >= _cov_old - 1e-9 and n_new > 1.15 * n_old)
+        ):
+            return None
+        # The scoreboard column keeps its "coverage of the queried
+        # region" meaning - here the recentred cone.
+        cov2 = _field_coverage_fraction(
+            coords2.ra.deg,
+            coords2.dec.deg,
+            float(reg2["ra"]),
+            float(reg2["dec"]),
+            _r_deg,
+        )
+        logger.info(
+            "  %-12s recentred on covered sky: (%.4f, %.4f) -> "
+            "(%.4f, %.4f); required-box coverage %.0f%% -> %.0f%%",
+            name,
+            float(reg["ra"]),
+            float(reg["dec"]),
+            float(reg2["ra"]),
+            float(reg2["dec"]),
+            100.0 * _cov_old,
+            100.0 * cov_new,
+        )
+        return raw2, cleaned2, coords2, reg2, cov2
+
+    def find_optimized_catalog(
+        self,
+        target_coords,
+        images=None,
+        bands=None,
+        catalog_names=None,
+        radius=10,
+        border=11,
+        min_sources=5,
+        target_name=None,
+        write_report=True,
+        write_plot=True,
+        outdir=None,
+    ):
+        """
+        Evaluate every feasible catalog against the science images and pick
+        the best backend per band.
+
+        Each catalog is downloaded once (the ``catalog_queries`` CSV cache
+        makes repeat evaluations cheap) and cleaned against each image
+        footprint. A source counts as usable when it lands on the detector,
+        carries a finite magnitude in the image band, and sits inside the
+        zeropoint magnitude window (``zeropoint.bright_mag_limit`` to
+        ``zeropoint.faint_mag_limit``). The winner per band maximises the
+        worst-case per-image count, so the least-covered image still gets
+        the most calibrators available.
+
+        Parameters
+        ----------
+        target_coords : SkyCoord
+            Reference point for the catalog queries.  Query regions are
+            centred on each band's image-footprint bounding box, so the
+            query centre can sit away from the target for offset
+            pointings; ``target_coords`` anchors fallback regions and
+            the plot.
+        images : list of dict, optional
+            Per-image descriptors with keys ``path`` (str), ``band``
+            (resolved image band or None), ``wcs`` (astropy WCS or None),
+            and ``shape`` ((ny, nx) or None). Entries with no band are
+            scored under every requested band; entries with no WCS fall
+            back to field-level counts (no on-detector cut).
+        bands : list of str, optional
+            Bands that need a winner; defaults to the distinct bands found
+            in ``images``.
+        catalog_names : list of str, optional
+            Backends to try; defaults to all feasible catalogs (every entry
+            of AUTO_OPTIMIZE_CATALOGS minus AUTO_OPTIMIZE_EXCLUDED, plus
+            "refcat"/"custom" when their credentials/file are configured).
+            Passing an explicit list restricts the scan to the named
+            backends and bypasses AUTO_OPTIMIZE_EXCLUDED.
+            "gaia" is gated differently: a cheap COUNT(*) of XP-spectra
+            sources in the reachable cone runs first, and the ADQL +
+            GaiaXPy synthetic-photometry build is skipped entirely when
+            the count falls below ``min_sources``.
+        radius : float
+            Fallback query radius in arcmin (default 10) used when no
+            image carries footprint geometry (no WCS/shape/pixel scale).
+            Otherwise each band gets its own region centred on the
+            footprint bounding box - bounded by ``catalog.region_*`` -
+            and each catalog is queried over the union of the bands it
+            can serve.
+        border : int
+            Pixel margin for the on-detector count (default 11).
+        min_sources : int
+            Preferred minimum usable sources on the worst-covered image
+            (default 5); below this a warning is logged but the best
+            available catalog is still chosen.
+        target_name : str, optional
+            Cache/report naming; defaults to ``target_name`` in the input
+            YAML.
+        write_report : bool
+            Write a per-image coverage CSV under
+            ``<wdir>/catalog_queries/`` (default True).
+        write_plot : bool
+            Render a coverage map - one subplot per band, image footprints
+            as band-coloured squares, usable catalog sources with a unique
+            marker/color per catalog, plus a scoreboard row (worst-image
+            usable count vs the required minimum, per-catalog field
+            coverage) - under ``<wdir>/catalog_queries/`` (default True).
+        outdir : str, optional
+            If given, the coverage CSV and PNG are written directly into
+            this directory (e.g. the run's ``*_REDUCED`` output folder)
+            instead of ``<wdir>/catalog_queries/``.
+
+        Returns
+        -------
+        dict
+            ``use_catalog`` - per-band mapping compatible with
+            ``catalog.use_catalog`` (one key per band plus ``default``);
+            ``winners`` - band -> catalog name; ``report`` - per-image
+            coverage DataFrame; ``evaluated`` - catalogs that downloaded;
+            ``skipped`` - catalog -> reason it was not evaluated;
+            ``plot_data``/``plot_path`` - coverage-map inputs and the
+            written PNG path (None if not drawn).
+        """
+        logger.log(STATUS, log_step("Catalog: optimize catalog per band"))
+
+        cat_cfg = self.input_yaml.get("catalog", {}) or {}
+        zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
+        bright_lim = float(zp_cfg.get("bright_mag_limit", 11.0))
+        faint_lim = float(zp_cfg.get("faint_mag_limit", 22.0))
+        mag_err_max = self._optimizer_mag_err_max()
+        target_name = target_name or canonical_target_name(self.input_yaml)
+
+        # --- Candidate set ----------------------------------------------------
+        excluded = {}
+        if catalog_names is None:
+            catalog_names = list(AUTO_OPTIMIZE_CATALOGS)
+            if cat_cfg.get("MASTcasjobs_wsid") and cat_cfg.get(
+                "MASTcasjobs_pwd"
+            ):
+                catalog_names.append("refcat")
+            if cat_cfg.get("catalog_custom_fpath"):
+                catalog_names.append("custom")
+            excluded = {
+                n: AUTO_OPTIMIZE_EXCLUDED[n]
+                for n in catalog_names
+                if n in AUTO_OPTIMIZE_EXCLUDED
+            }
+            catalog_names = [
+                c for c in catalog_names if c not in AUTO_OPTIMIZE_EXCLUDED
+            ]
+        catalog_names = list(
+            dict.fromkeys(
+                self._normalize_catalog_name(str(c)) for c in catalog_names
+            )
+        )
+
+        # --- Bands each backend can serve -------------------------------------
+        supported_bands, _band_skips = self._catalog_supported_bands(
+            catalog_names, cat_cfg
+        )
+        skipped = dict(excluded)
+        skipped.update(_band_skips)
+
+        # --- Normalise image descriptors --------------------------------------
+        image_infos = []
+        for img in images or []:
+            if isinstance(img, dict):
+                image_infos.append(
+                    {
+                        "path": img.get("path"),
+                        "band": img.get("band"),
+                        "wcs": img.get("wcs"),
+                        "shape": img.get("shape"),
+                    }
+                )
+            else:
+                image_infos.append(
+                    {"path": img, "band": None, "wcs": None, "shape": None}
+                )
+        if not image_infos:
+            # Field-level fallback: one synthetic entry scored under every band.
+            image_infos = [
+                {"path": None, "band": None, "wcs": None, "shape": None}
+            ]
+
+        band_set = sorted({str(b) for b in (bands or []) if b})
+        if not band_set:
+            band_set = sorted(
+                {i["band"] for i in image_infos if i.get("band")}
+            )
+        if not band_set:
+            raise ValueError(
+                "find_optimized_catalog: no bands to optimize - pass "
+                "`bands` or images with resolved filters."
+            )
+
+        # --- Query regions ---------------------------------------------------
+        # Each band's images get their own coverage region: bands observed
+        # at different pointings or with different instruments must not be
+        # forced into one global cone.  A catalog is then queried over the
+        # union of the bands it can serve, centred on the footprint
+        # bounding box (not the target - a target near the field edge would
+        # otherwise double the cone), bounded by the catalog.region_*
+        # config, and box-shaped where the backend accepts rectangular
+        # queries.  Sources outside the queried region can never be scored,
+        # so an undersized region reads as "no coverage" at the edges.
+        _rb_margin = float(cat_cfg.get("region_margin", 1.1))
+        _rb_min = float(cat_cfg.get("region_min_arcmin", 2.0))
+        _rb_max = float(cat_cfg.get("region_max_arcmin", 60.0))
+        band_regions = {
+            b: _footprint_region(
+                image_infos,
+                [b],
+                target_coords,
+                margin=_rb_margin,
+                min_arcmin=_rb_min,
+                max_arcmin=_rb_max,
+                default_arcmin=radius,
+            )
+            for b in band_set
+        }
+        for b in band_set:
+            logger.info(
+                "  %s-band coverage region: %s", b, _fmt_region(band_regions[b])
+            )
+
+        # Download each candidate once. Failures are recorded, not fatal: a
+        # catalog that does not cover the field (or is unreachable) simply
+        # cannot win a band. download()/clean() run under _quiet_catalog_log
+        # so their per-call banners/cache lines/column warnings don't flood
+        # the console - each candidate reports one summary line here instead.
+        logger.log(
+            STATUS,
+            log_step(
+                f"Optimized catalog scan: {len(catalog_names)} candidate "
+                f"catalogs x {len(image_infos)} images"
+            ),
+        )
+        for name, reason in excluded.items():
+            logger.info("  %-12s skipped - %s", name, reason)
+        raw_catalogs = {}
+        evaluated = []
+        # catalog -> query region actually used / bands it can serve.
+        cat_regions = {}
+        cat_bands = {}
+        for name in catalog_names:
+            served = sorted(set(band_set) & supported_bands.get(name, set()))
+            if not served:
+                skipped[name] = "none of the required bands are covered"
+                logger.info("  %-12s skipped - no required bands", name)
+                continue
+            reg = _footprint_region(
+                image_infos,
+                served,
+                target_coords,
+                margin=_rb_margin,
+                min_arcmin=_rb_min,
+                max_arcmin=_rb_max,
+                default_arcmin=radius,
+            )
+            cat_regions[name] = reg
+            cat_bands[name] = served
+            if name == "gaia":
+                # The XP synthetic-photometry build is the heaviest step
+                # of the scan (ADQL cone + batched GaiaXPy).  One COUNT(*)
+                # over the reachable cone is enough to know Gaia cannot
+                # supply the preferred minimum - skip the build in that
+                # case instead of paying for spectra nobody can use.
+                _n_xp = self._gaia_xp_cone_source_count(reg)
+                if _n_xp is not None and _n_xp < min_sources:
+                    skipped[name] = (
+                        f"{_n_xp} Gaia XP-spectra sources in the query "
+                        f"cone (preferred minimum {min_sources})"
+                    )
+                    logger.info("  %-12s skipped - %s", name, skipped[name])
+                    continue
+                if _n_xp is not None:
+                    logger.info(
+                        "  %-12s %d XP-spectra sources in query cone",
+                        name,
+                        _n_xp,
+                    )
+            try:
+                with _quiet_catalog_log():
+                    raw_catalogs[name] = self.download(
+                        target_coords=target_coords,
+                        catalogName=name,
+                        radius=reg["radius_arcmin"],
+                        target_name=target_name,
+                        region=reg,
+                    )
+                evaluated.append(name)
+                logger.info(
+                    "  %-12s %d sources (%s)",
+                    name,
+                    len(raw_catalogs[name]),
+                    _fmt_region(reg),
+                )
+            except Exception as exc:
+                skipped[name] = str(exc)
+                reason = str(exc).splitlines()[0] if str(exc) else repr(exc)
+                if len(reason) > 120:
+                    reason = reason[:117] + "..."
+                logger.warning("  %-12s failed - %s", name, reason)
+
+        # --- Score every catalog x image --------------------------------------
+        # The band-column mapping is identical for every image, so clean()
+        # runs ONCE per catalog (update_names_only=True populates all band
+        # columns); only the world->pixel transform varies per image, done
+        # here directly. This also keeps the scan quiet: clean() logs per
+        # call, so per-image cleaning would print thousands of lines. The
+        # band-missing drop clean() skips is replicated per band by the
+        # finite-magnitude requirement in _usable_mag_mask; the skipped dedup
+        # is applied explicitly below.
+        # clean() reads input_yaml["imageFilter"]; it is restored after the scan.
+        rows = []
+        # catalog -> fraction of the query disk populated by its sources.
+        coverage_map = {}
+        # (catalog, band) -> list of usable-source RA/DEC frames, for the
+        # coverage plot. Unioned across the band's images at the end.
+        plot_sources = {}
+        # catalog -> every source the query returned (post-clean), drawn
+        # faintly on the map so the catalog's raw coverage is visible
+        # next to the usable subset.
+        catalog_sources = {}
+        prev_filter = self.input_yaml.get("imageFilter")
+        try:
+            for name in evaluated:
+                self.input_yaml["imageFilter"] = band_set[0]
+                try:
+                    with _quiet_catalog_log():
+                        cleaned = self.clean(
+                            raw_catalogs[name],
+                            catalogName=name,
+                            update_names_only=True,
+                        )
+                        if (
+                            cleaned is not None
+                            and len(cleaned) > 0
+                            and {"RA", "DEC"}.issubset(cleaned.columns)
+                        ):
+                            cleaned = _skycoord_dedup_keep_one(
+                                cleaned, sep_threshold_arcsec=0.1
+                            )
+                except Exception as exc:
+                    reason = str(exc).splitlines()[0] if str(exc) else repr(exc)
+                    logger.warning("  %-12s clean failed - %s", name, reason)
+                    cleaned = None
+
+                coords = None
+                if (
+                    cleaned is not None
+                    and len(cleaned) > 0
+                    and {"RA", "DEC"}.issubset(cleaned.columns)
+                ):
+                    coords = SkyCoord(
+                        ra=pd.to_numeric(cleaned["RA"], errors="coerce").to_numpy()
+                        * u.deg,
+                        dec=pd.to_numeric(cleaned["DEC"], errors="coerce").to_numpy()
+                        * u.deg,
+                        frame="icrs",
+                    )
+                    catalog_sources[name] = cleaned[["RA", "DEC"]].copy()
+
+                # Coverage is measured against the region actually
+                # queried - the box for box-capable backends, the
+                # circumscribed cone otherwise - centred on the footprint
+                # bounds rather than the target.
+                reg = cat_regions.get(name) or {}
+                cov_frac = np.nan
+                if coords is not None and reg:
+                    _box = (
+                        (float(reg["width_deg"]), float(reg["height_deg"]))
+                        if name in _BOX_QUERY_CATALOGS
+                        and reg.get("width_deg")
+                        else None
+                    )
+                    cov_frac = _field_coverage_fraction(
+                        coords.ra.deg,
+                        coords.dec.deg,
+                        float(reg["ra"]),
+                        float(reg["dec"]),
+                        float(reg["radius_arcmin"]) / 60.0,
+                        box_wh=_box,
+                    )
+                coverage_map[name] = cov_frac
+                if np.isfinite(cov_frac) and cov_frac < 0.8:
+                    logger.warning(
+                        "  %-12s covers only %.0f%% of the query field "
+                        "(partial survey footprint)",
+                        name,
+                        100.0 * cov_frac,
+                    )
+
+                # Coverage-recentre: a boundary through the field leaves
+                # a footprint-centred cone half-empty, and distance-
+                # ordered or radius-clamped queries spend their row
+                # budget on sky the catalog never observed.  Re-query
+                # once centred on the covered portion; the region is
+                # adopted only when the required box gains coverage or
+                # kept rows.  Box backends cover their region exactly -
+                # a shifted query cannot add sources the survey lacks.
+                try:
+                    _rc_min = float(
+                        cat_cfg.get("coverage_recenter_min", 0.8) or 0.0
+                    )
+                except (TypeError, ValueError):
+                    _rc_min = 0.8
+                if (
+                    _rc_min > 0
+                    and name not in _BOX_QUERY_CATALOGS
+                    and coords is not None
+                    and np.isfinite(cov_frac)
+                    and cov_frac < _rc_min
+                    and (
+                        reg.get("clamped")
+                        or _query_rows_capped(
+                            name,
+                            len(raw_catalogs[name])
+                            if raw_catalogs.get(name) is not None
+                            else 0,
+                            cat_cfg,
+                            reg,
+                        )
+                    )
+                ):
+                    _rc = self._recenter_on_coverage(
+                        name,
+                        reg,
+                        coords,
+                        target_coords,
+                        target_name,
+                    )
+                    if _rc is not None:
+                        raw2, cleaned, coords, reg, cov_frac = _rc
+                        raw_catalogs[name] = raw2
+                        cat_regions[name] = reg
+                        coverage_map[name] = cov_frac
+                        catalog_sources[name] = cleaned[
+                            ["RA", "DEC"]
+                        ].copy()
+
+                for img in image_infos:
+                    img_bands = (
+                        [img["band"]] if img.get("band") else band_set
+                    )
+                    img_bands = [
+                        b for b in img_bands if b in supported_bands.get(name, set())
+                    ]
+                    if not img_bands:
+                        continue
+
+                    onchip_mask = None
+                    wcs_i = img.get("wcs")
+                    shape_i = img.get("shape")
+                    if (
+                        coords is not None
+                        and wcs_i is not None
+                        and shape_i is not None
+                    ):
+                        try:
+                            x, y = wcs_i.world_to_pixel(coords)
+                            x = np.asarray(x, dtype=float).ravel()
+                            y = np.asarray(y, dtype=float).ravel()
+                            ny, nx = shape_i
+                            onchip_mask = (
+                                np.isfinite(x)
+                                & np.isfinite(y)
+                                & (x >= border)
+                                & (x < nx - border)
+                                & (y >= border)
+                                & (y < ny - border)
+                            )
+                        except Exception as exc:
+                            logger.debug(
+                                "Optimized catalog scan: %s WCS transform "
+                                "failed on %s (%s)",
+                                name.upper(),
+                                img.get("path"),
+                                exc,
+                            )
+
+                    for band in img_bands:
+                        mag_mask = _usable_mag_mask(
+                            cleaned, band, bright_lim, faint_lim, mag_err_max
+                        )
+                        if mag_mask is None:
+                            usable = None
+                        elif onchip_mask is not None:
+                            usable = mag_mask.to_numpy() & onchip_mask
+                        else:
+                            usable = mag_mask.to_numpy()
+                        n = int(usable.sum()) if usable is not None else 0
+                        if usable is not None and usable.any():
+                            plot_sources.setdefault((name, band), []).append(
+                                cleaned.loc[usable, ["RA", "DEC"]]
+                            )
+                        rows.append(
+                            {
+                                "catalog": name,
+                                "band": band,
+                                "image": (
+                                    os.path.basename(str(img["path"]))
+                                    if img.get("path")
+                                    else "field"
+                                ),
+                                "n_usable": n,
+                                "coverage": coverage_map.get(name, np.nan),
+                                "r_query_arcmin": float(
+                                    reg.get("radius_arcmin", np.nan)
+                                ),
+                                "mode": (
+                                    "onchip"
+                                    if wcs_i is not None and shape_i is not None
+                                    else "field"
+                                ),
+                            }
+                        )
+        finally:
+            if prev_filter is None:
+                self.input_yaml.pop("imageFilter", None)
+            else:
+                self.input_yaml["imageFilter"] = prev_filter
+
+        report = pd.DataFrame(
+            rows,
+            columns=[
+                "catalog",
+                "band",
+                "image",
+                "n_usable",
+                "coverage",
+                "r_query_arcmin",
+                "mode",
+            ],
+        )
+
+        # Usable-source summary: the numbers the winners are picked from -
+        # on-detector sources with a finite magnitude inside the zeropoint
+        # window, reported as the worst-covered image's count (the maximin
+        # criterion), sorted descending per band.
+        for band in band_set:
+            sub = report[report["band"] == band]
+            if sub.empty:
+                continue
+            worst = (
+                sub.groupby("catalog")["n_usable"]
+                .min()
+                .sort_values(ascending=False)
+            )
+            logger.info(
+                "  %s-band usable (worst image, %g <= mag <= %g): %s",
+                band,
+                bright_lim,
+                faint_lim,
+                ", ".join(f"{c}={int(n)}" for c, n in worst.items()),
+            )
+
+        # --- Winners: maximise the worst-case per-image count -----------------
+        winners = {}
+        for band in band_set:
+            sub = report[report["band"] == band]
+            if sub.empty:
+                continue
+            scores = (
+                sub.groupby("catalog")["n_usable"]
+                .agg(["min", "mean"])
+                .sort_values(["min", "mean"], ascending=False)
+            )
+            if scores.empty:
+                continue
+            best = str(scores.index[0])
+            best_min = int(scores.iloc[0]["min"])
+            winners[band] = best
+            logger.info(
+                "Optimized catalog: %s-band -> %s "
+                "(worst-case %d usable sources per image, mean %.1f)",
+                band,
+                best.upper(),
+                best_min,
+                float(scores.iloc[0]["mean"]),
+            )
+            best_cov = coverage_map.get(best, np.nan)
+            if np.isfinite(best_cov) and best_cov < 0.8:
+                logger.warning(
+                    "Optimized catalog: winning %s-band catalog %s covers "
+                    "only %.0f%% of the field - part of the detector will "
+                    "have no calibrators.",
+                    band,
+                    best.upper(),
+                    100.0 * best_cov,
+                )
+            if best_min < min_sources:
+                logger.warning(
+                    "Optimized catalog: best %s-band catalog %s provides only "
+                    "%d usable source(s) on the worst-covered image "
+                    "(preferred minimum %d).",
+                    band,
+                    best.upper(),
+                    best_min,
+                    min_sources,
+                )
+
+        use_catalog_map = {band: cat for band, cat in sorted(winners.items())}
+        if winners:
+            # A "default" key covers any runtime band not in the winners map.
+            default_cat = (
+                pd.Series(list(winners.values()))
+                .value_counts()
+                .index[0]
+            )
+            use_catalog_map["default"] = str(default_cat)
+
+        if write_report:
+            try:
+                rep_dir = outdir or os.path.join(
+                    self.input_yaml.get("wdir", "."), "catalog_queries"
+                )
+                pathlib.Path(rep_dir).mkdir(parents=True, exist_ok=True)
+                rep_path = os.path.join(
+                    rep_dir,
+                    f"{target_name}_optimized_catalog_coverage.csv",
+                )
+                report.to_csv(rep_path, index=False)
+                logger.info("Optimized catalog coverage report: %s", rep_path)
+            except Exception as exc:
+                logger.warning(
+                    "Could not write optimized-catalog report: %s", exc
+                )
+
+        # --- Plot data ---------------------------------------------------------
+        # Image footprints (WCS corners -> sky polygon) and per-(catalog,
+        # band) usable-source positions, unioned across the band's images.
+        footprints = _footprints_from_image_infos(image_infos)
+
+        sources_union = {}
+        for key, frames in plot_sources.items():
+            merged = pd.concat(frames, ignore_index=True)
+            sources_union[key] = merged.drop_duplicates(subset=["RA", "DEC"])
+
+        plot_data = {
+            "footprints": footprints,
+            "sources": sources_union,
+            "winners": winners,
+            "band_set": band_set,
+            "evaluated": evaluated,
+            "skipped": skipped,
+            # Region outlines: per-band required coverage and the
+            # per-catalog query regions actually issued.
+            "band_regions": band_regions,
+            "regions": cat_regions,
+            "catalog_bands": cat_bands,
+            # Every source each catalog returned (post-clean); drawn
+            # faintly under the usable subset on the coverage map.
+            "catalog_sources": catalog_sources,
+        }
+
+        plot_path = None
+        if write_plot:
+            try:
+                plot_path = plot_optimized_catalog_coverage(
+                    plot_data,
+                    target_coords=target_coords,
+                    wdir=self.input_yaml.get("wdir", "."),
+                    target_name=target_name,
+                    outpath=(
+                        os.path.join(
+                            outdir,
+                            f"{target_name}_optimized_catalog_coverage.png",
+                        )
+                        if outdir
+                        else None
+                    ),
+                    report=report,
+                    min_sources=min_sources,
+                    skipped=skipped,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Optimized catalog coverage plot failed: %s", exc
+                )
+
+        return {
+            "use_catalog": use_catalog_map,
+            "winners": winners,
+            "report": report,
+            "evaluated": evaluated,
+            "skipped": skipped,
+            "regions": cat_regions,
+            "band_regions": band_regions,
+            "plot_data": plot_data,
+            "plot_path": plot_path,
+        }
 
     # =============================================================================
     # =============================================================================
@@ -1837,7 +5658,7 @@ class Catalog:
     def check_saturation_range(self, catalog, threshold=5):
         """
         Checks the saturation range of a given catalog by plotting catalog magnitude vs. instrumental magnitude
-        and robustly fitting a straight line with slope constrained to ~1 using RANSAC.
+        and fitting a straight line with slope fixed to ~1 using RANSAC.
         Determines the linearity range within the 0.5 to 95 flux range of the inliers.
 
         Parameters:
@@ -1853,7 +5674,6 @@ class Catalog:
             (pd.DataFrame, dict, list) Updated clean catalog containing only inliers,
             fit parameters including errors, and saturation range [min_flux, max_flux].
         """
-        # Initialize fit parameters dictionary
         fit_params = {
             "slope": None,
             "intercept": None,
@@ -1863,7 +5683,6 @@ class Catalog:
         saturation_range = [0, np.inf]
 
         try:
-            # Extract file paths
             fpath = self.input_yaml.get("fpath", "")
             if not fpath:
                 raise ValueError("File path is missing from input_yaml.")
@@ -1871,16 +5690,19 @@ class Catalog:
             base_name = os.path.splitext(os.path.basename(fpath))[0]
             write_dir = os.path.dirname(fpath)
             logger.info(
-                border_msg(f"Checking saturation level using {len(catalog)} sources")
+                log_step(f"Linearity: saturation check ({len(catalog)} sources)")
             )
 
-            # Extract filter
             use_filter = self.input_yaml.get("imageFilter")
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
 
-            # Check for required columns
-            required_columns = ["flux_AP", use_filter, f"{use_filter}_err"]
+            required_columns = [
+                "flux_AP",
+                "flux_AP_err",
+                use_filter,
+                f"{use_filter}_err",
+            ]
             missing_columns = [
                 col for col in required_columns if col not in catalog.columns
             ]
@@ -1889,139 +5711,264 @@ class Catalog:
                     f"Missing required columns in catalog: {missing_columns}"
                 )
 
-            # Sigma-clip sky background
-            if "sky" in catalog.columns:
-                noise_mask = sigma_clip(
-                    np.abs(catalog["sky"].values), sigma=5, maxiters=10
-                )
-                if np.any(noise_mask.mask):
-                    logger.info(
-                        f"Masking {np.sum(noise_mask.mask)} sources with irregular backgrounds"
-                    )
-                    catalog = catalog[~noise_mask.mask]
-
-            # Threshold filtering
+            # NOTE: sky sigma-clipping and threshold filtering are already done
+            # by Zeropoint.clean() before this method is called.  Repeating them
+            # here with different parameters (threshold=5 vs 3.0) causes additional
+            # source loss.  'threshold' is the peak-pixel S/N, which undersells
+            # the aperture S/N by ~1/sqrt(A_psf) on oversampled images (a 22-px
+            # FWHM star needs aperture S/N ~12+ to pass a peak cut of 5).  Gate
+            # on the better of the two metrics so good calibrators survive, and
+            # keep the strongest sources when the pool would drop below the
+            # keep-floor -- the ZP fit flags a degenerate inlier set itself.
             if "threshold" in catalog.columns:
-                threshold_cut = catalog["threshold"] < threshold
-                logger.info(
-                    f"Removing {np.sum(threshold_cut)} sources with threshold < {threshold}"
+                _peak_snr = pd.to_numeric(
+                    catalog["threshold"], errors="coerce"
+                ).to_numpy(dtype=float)
+                _snr_col = next(
+                    (
+                        c
+                        for c in ("SNR", "snr_ap", "snr")
+                        if c in catalog.columns
+                    ),
+                    None,
                 )
-                catalog = catalog[~threshold_cut]
+                if _snr_col is not None:
+                    _aper_snr = pd.to_numeric(
+                        catalog[_snr_col], errors="coerce"
+                    ).to_numpy(dtype=float)
+                    _det_metric = np.fmax(_peak_snr, _aper_snr)
+                else:
+                    _det_metric = _peak_snr
+                threshold_cut = ~np.isfinite(_det_metric) | (
+                    _det_metric < threshold
+                )
+                n_thresh = int(np.sum(threshold_cut))
+                if n_thresh > 0:
+                    _min_keep = int(
+                        (self.input_yaml.get("zeropoint") or {}).get(
+                            "saturation_check_min_keep", 3
+                        )
+                    )
+                    if len(catalog) - n_thresh < _min_keep:
+                        _rank = np.where(
+                            np.isfinite(_det_metric), -_det_metric, np.inf
+                        )
+                        _keep_idx = np.argsort(_rank, kind="stable")[
+                            : _min_keep
+                        ]
+                        _keep_mask = np.zeros(len(catalog), dtype=bool)
+                        _keep_mask[_keep_idx] = True
+                        n_dropped = int((~_keep_mask).sum())
+                        logger.info(
+                            f"Keeping {_min_keep} highest-S/N sources "
+                            f"instead of applying threshold < {threshold} "
+                            f"cut ({n_dropped} dropped); calibrator pool is "
+                            "too small to vet further."
+                        )
+                        catalog = catalog[_keep_mask]
+                    else:
+                        logger.info(
+                            f"Removing {n_thresh} sources with detection "
+                            f"S/N < {threshold} (peak and aperture)"
+                        )
+                        catalog = catalog[~threshold_cut]
 
-            # Calculate instrumental magnitude
-            flux = catalog["flux_AP"].values
-            flux_err = catalog["flux_AP_err"].values
-            inst_mag = -2.5 * np.log10(flux)
-            inst_mag_err = 2.5 / np.log(10) * (flux_err / flux)
-            catalog_mag = catalog[use_filter].values
-            catalog_mag_err = catalog[f"{use_filter}_err"].values
+            # Catalog columns can arrive with object dtype (mixed strings/NaN
+            # from upstream merges); coerce so np.isfinite and friends work.
+            flux = pd.to_numeric(catalog["flux_AP"], errors="coerce").to_numpy(
+                dtype=float
+            )
+            flux_err = pd.to_numeric(
+                catalog["flux_AP_err"], errors="coerce"
+            ).to_numpy(dtype=float)
+            # NaN for non-positive fluxes (same convention as functions.mag)
+            flux_safe = flux.copy()
+            flux_safe[flux_safe <= 0] = np.nan
+            inst_mag = -2.5 * np.log10(flux_safe)
+            inst_mag_err = 2.5 / np.log(10) * (flux_err / flux_safe)
+            catalog_mag = pd.to_numeric(
+                catalog[use_filter], errors="coerce"
+            ).to_numpy(dtype=float)
+            catalog_mag_err = pd.to_numeric(
+                catalog[f"{use_filter}_err"], errors="coerce"
+            ).to_numpy(dtype=float)
 
-            # Filter out high-error points
-            error_mask = np.sqrt(catalog_mag_err**2 + inst_mag_err**2) < 0.32
+            # 0.5 mag combined-error cut matches the _prepare_catalog threshold.
+            finite_mask = (
+                np.isfinite(inst_mag)
+                & np.isfinite(inst_mag_err)
+                & np.isfinite(catalog_mag)
+                & np.isfinite(catalog_mag_err)
+            )
+            error_mask = finite_mask & (
+                np.sqrt(catalog_mag_err**2 + inst_mag_err**2) < 0.5
+            )
             clean_catalog = catalog[error_mask].copy()
 
             if len(clean_catalog) < 2:
                 logger.warning("Too few points left after error cut.")
                 return clean_catalog, fit_params, saturation_range
 
+            # The high-S/N subset is used ONLY to fit the RANSAC model; the
+            # model is then applied to the FULL catalog so faint but valid
+            # sources can still be inliers.
             flux = clean_catalog["flux_AP"].values
             flux_err = clean_catalog["flux_AP_err"].values
-            inst_mag_linear = -2.5 * np.log10(flux)
-            inst_mag_err_linear = 2.5 / np.log(10) * (flux_err / flux)
+            flux_err_safe = np.maximum(flux_err, 1e-10)  # guard flux_err=0
+            snr_values = np.abs(flux) / flux_err_safe
+
+            # Step down the S/N floor until RANSAC has enough sources.
+            min_snr_thresholds = [100, 75, 50, 30, 20, 10]
+            selected_indices = None
+            for min_snr in min_snr_thresholds:
+                high_snr_mask = snr_values >= min_snr
+                n_high_snr = np.sum(high_snr_mask)
+                if n_high_snr >= 10:  # RANSAC needs at least ~10 sources
+                    selected_indices = high_snr_mask
+                    logger.debug(
+                        f"Selected {n_high_snr} high S/N sources (SNR >= {min_snr}) for linearity fit"
+                    )
+                    break
+
+            # Instrumental magnitudes for the FULL clean catalog.
+            flux_safe = flux.astype(float).copy()
+            flux_safe[flux_safe <= 0] = np.nan
+            inst_mag_linear = -2.5 * np.log10(flux_safe)
+            inst_mag_err_linear = 2.5 / np.log(10) * (flux_err / flux_safe)
             catalog_mag_linear = clean_catalog[use_filter].values
             catalog_mag_err_linear = clean_catalog[f"{use_filter}_err"].values
 
-            class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
-                def __init__(
-                    self, slope_constraint=1.0, slope_tolerance=1e-3, sample_weight=None
-                ):
-                    self.slope_constraint = slope_constraint
-                    self.slope_tolerance = slope_tolerance
-                    self.sample_weight = sample_weight  # weights = 1/sigma^2
+            # Local import: reuse zeropoint's regressor, avoid duplication.
+            from zeropoint import PenalisedSlopeRegressor
+            ConstrainedSlopeRegressor = PenalisedSlopeRegressor
 
-                def fit(self, X, y):
-                    X, y = check_X_y(X, y)
-                    weights = None
-                    if self.sample_weight is not None:
-                        weights = np.array(self.sample_weight)
-                        if weights.shape[0] != len(y):
-                            raise ValueError(
-                                "sample_weight must match number of samples"
-                            )
+            # Fit on the high-S/N subset if available, then apply the model
+            # to the FULL catalog to identify all inliers.
+            X_full = inst_mag_linear.reshape(-1, 1)
+            y_full = catalog_mag_linear
 
-                    def loss(params):
-                        slope, intercept = params
-                        pred = slope * X.flatten() + intercept
-                        resid = y - pred
-                        if weights is not None:
-                            mse = np.average(resid**2, weights=weights)
-                        else:
-                            mse = np.mean(resid**2)
-                        slope_penalty = 100 * max(
-                            0, abs(slope - self.slope_constraint) - self.slope_tolerance
-                        )
-                        return mse + slope_penalty
+            if selected_indices is not None and np.sum(selected_indices) >= 10:
+                X_fit = X_full[selected_indices]
+                y_fit = y_full[selected_indices]
+            else:
+                X_fit = X_full
+                y_fit = y_full
 
-                    init_params = [1.0, np.mean(y) - np.mean(X)]
-                    result = minimize(loss, init_params, method="L-BFGS-B")
-                    self.slope_, self.intercept_ = result.x
-                    return self
-
-                def predict(self, X):
-                    check_is_fitted(self, "slope_")
-                    X = check_array(X)
-                    return self.slope_ * X.flatten() + self.intercept_
-
-            # Fit with RANSAC
-            if len(inst_mag_linear) > 1:
+            if len(X_fit) > 1:
                 base_estimator = ConstrainedSlopeRegressor(
-                    slope_constraint=1.0, slope_tolerance=0  # Keep slope strictly fixed to 1
+                    slope_constraint=1.0, slope_tolerance=0  # slope fixed to 1
                 )
-                # Adaptive residual threshold based on data scatter
-                initial_mad = np.median(np.abs(catalog_mag_linear - np.median(catalog_mag_linear)))
-                ransac_residual_threshold = max(3.0 * initial_mad, 0.1)  # More lenient threshold for better fit
+                # Residual threshold adapts to the scatter in this field.
+                # The MAD must be taken on the slope-1 residuals (y - x, the
+                # per-source ZP deltas), NOT on the catalog magnitudes y
+                # themselves: a field spanning several magnitudes otherwise
+                # yields a threshold of a few mag and RANSAC accepts every
+                # locus, including the bogus one.
+                _delta_fit = y_fit - X_fit.flatten()
+                initial_mad = np.median(
+                    np.abs(_delta_fit - np.median(_delta_fit))
+                )
+                ransac_residual_threshold = max(
+                    3.0 * 1.4826 * initial_mad, 0.15
+                )
                 ransac = RANSACRegressor(
                     estimator=base_estimator,
                     residual_threshold=ransac_residual_threshold,
-                    max_trials=2000,  # More trials for better convergence
-                    min_samples=0.25,  # Require slightly more samples for stability
+                    max_trials=500,
+                    min_samples=0.25,
+                    # Fixed seed: the inlier set feeds the ZP calibration
+                    # chain, so the same image must give the same calibrators
+                    # (and the same zeropoint) on every run.
+                    random_state=42,
                 )
-                X = inst_mag_linear.reshape(-1, 1)
-                y = catalog_mag_linear
-                ransac.fit(X, y)
+                ransac.fit(X_fit, y_fit)
                 slope = ransac.estimator_.slope_
                 intercept = ransac.estimator_.intercept_
-                inlier_mask = ransac.inlier_mask_
 
-                # Post-RANSAC sigma clipping to remove remaining outliers
+                # Inliers are computed on the FULL catalog, not the fit subset.
+                residuals_full = y_full - (slope * X_full.flatten() + intercept)
+                inlier_mask = np.abs(residuals_full) < ransac_residual_threshold
+
+                # Majority-locus guard: the high-S/N fit subset can be
+                # dominated by catalog artifacts (spurious faint entries
+                # coincident with bright stars inherit the bright flux and
+                # its S/N, so they top the S/N ladder on noisy images).
+                # The median per-source offset over the FULL clean catalog
+                # tracks the majority locus instead; if it collects more
+                # inliers than the RANSAC model, re-anchor on it.
+                zp_median = np.nanmedian(y_full - X_full.flatten())
+                resid_median = (y_full - X_full.flatten()) - zp_median
+                mad_median = 1.4826 * np.nanmedian(
+                    np.abs(resid_median - np.nanmedian(resid_median))
+                )
+                median_band = max(3.0 * mad_median, 0.3)
+                median_inlier_mask = np.abs(resid_median) < median_band
+                if np.sum(median_inlier_mask) > np.sum(inlier_mask):
+                    logger.warning(
+                        "Linearity fit anchored on a minority locus "
+                        "(%d/%d inliers); the median offset ZP=%.3f supports "
+                        "%d/%d - re-anchoring on the majority locus. Check "
+                        "the catalog for blended/spurious entries.",
+                        int(np.sum(inlier_mask)),
+                        len(X_full),
+                        zp_median,
+                        int(np.sum(median_inlier_mask)),
+                        len(X_full),
+                    )
+                    intercept = zp_median
+                    slope = 1.0
+                    residuals_full = resid_median
+                    inlier_mask = median_inlier_mask
+                    ransac_residual_threshold = median_band
+
+                # Post-RANSAC sigma clip on the full-catalog inliers;
+                # sigma=3.0 (not 2.5) is more stable for small samples.
+                n_sigma_outliers = 0
                 if np.sum(inlier_mask) > 5:
-                    inlier_X = X[inlier_mask]
-                    inlier_y = y[inlier_mask]
-                    residuals = inlier_y - (slope * inlier_X.flatten() + intercept)
-                    # Apply sigma clipping on residuals
-                    clipped = sigma_clip(residuals, sigma=2.5, maxiters=5)
-                    # Keep only points within sigma-clipped range
-                    residual_mask = ~clipped.mask
-                    inlier_mask[inlier_mask] = residual_mask
-                    n_sigma_outliers = np.sum(~residual_mask)
-                    if n_sigma_outliers > 0:
-                        logger.info(f"Post-RANSAC sigma clipping removed {n_sigma_outliers} additional outliers")
+                    inlier_residuals = residuals_full[inlier_mask]
+                    clip_sigma = 3.0 if np.sum(inlier_mask) < 30 else 2.5
+                    clipped = sigma_clip(inlier_residuals, sigma=clip_sigma, maxiters=5)
+                    residual_mask = np.asarray(~clipped.mask, dtype=bool).flatten()
+                    if residual_mask.shape[0] == np.sum(inlier_mask):
+                        inlier_mask[inlier_mask] = residual_mask
+                    else:
+                        logger.warning("Shape mismatch in residual masking: %s vs %s, skipping sigma clip update", residual_mask.shape[0], np.sum(inlier_mask))
+                    n_sigma_outliers = int(np.sum(~residual_mask))
 
-                # Calculate intercept error
-                inlier_X = X[inlier_mask]
-                inlier_y = y[inlier_mask]
-                residuals = inlier_y - (slope * inlier_X.flatten() + intercept)
-                residual_std = np.std(residuals)
-                n_points = len(inlier_X)
-                x_mean = np.mean(inlier_X)
-                x_var = np.var(inlier_X)
+                # Recompute the intercept on the final inlier set.
+                if np.sum(inlier_mask) > 1 and np.isfinite(slope):
+                    try:
+                        intercept = float(
+                            np.nanmedian(
+                                y_full[inlier_mask] - slope * X_full[inlier_mask].flatten()
+                            )
+                        )
+                    except Exception:
+                        pass
 
-                # Standard error of the intercept
-                intercept_error = residual_std * np.sqrt(
-                    1 / n_points + x_mean**2 / ((n_points - 1) * x_var)
+                logger.debug(
+                    f"RANSAC: {np.sum(inlier_mask)}/{len(X_full)} inliers "
+                    f"(fit on {len(X_fit)}, applied to {len(X_full)}), "
+                    f"ZP={intercept:.3f}"
                 )
 
-                # Update fit parameters
+                # Intercept error: standard error of the intercept.
+                inlier_X = X_full[inlier_mask]
+                inlier_y = y_full[inlier_mask]
+                residuals = inlier_y - (slope * inlier_X.flatten() + intercept)
+                residual_std = np.std(residuals, ddof=1)  # sample std (ddof=1)
+                n_points = len(inlier_X)
+                x_mean = np.mean(inlier_X)
+                x_var = np.var(inlier_X, ddof=1)  # sample variance (ddof=1)
+
+                if x_var <= 0 or not np.isfinite(x_var):
+                    logger.warning("Zero or invalid variance in instrumental magnitudes")
+                    intercept_error = np.nan
+                else:
+                    intercept_error = residual_std * np.sqrt(
+                        1 / n_points + x_mean**2 / ((n_points - 1) * x_var)
+                    )
+
                 fit_params.update(
                     {
                         "slope": slope,
@@ -2030,21 +5977,28 @@ class Catalog:
                         "n_inliers": n_points,
                     }
                 )
-                logger.info(
-                    f"Constrained fit results:  Zeropoint = {intercept:.3f} +/- {intercept_error:.3f}"
-                )
 
-                # Calculate linearity range (0.5 to 95 flux range of inliers)
+                # Linearity range = 0.5th to 95th flux percentile of inliers.
                 inlier_flux = flux[inlier_mask]
+                linear_range_str = ""
                 if len(inlier_flux) > 0:
                     min_flux = np.percentile(inlier_flux, 0.5)
                     max_flux = np.percentile(inlier_flux, 95)
                     saturation_range = [min_flux, max_flux]
-                    logger.info(
-                        f"Linearity range (0.5-95% flux percentiles): {min_flux:.1f} - {max_flux:.1f}"
-                    )
+                    linear_range_str = f" | flux range {min_flux:.0f}-{max_flux:.0f}"
                 else:
                     logger.warning("No inliers found for linearity range calculation")
+
+                _zp_err_str = (
+                    f" +/- {intercept_error:.3f}"
+                    if np.isfinite(intercept_error)
+                    else ""
+                )
+                logger.info(
+                    f"Linearity fit: {n_points}/{len(X_full)} inliers "
+                    f"(RANSAC on {len(X_fit)} high-S/N, -{n_sigma_outliers} clip) | "
+                    f"ZP={intercept:.3f}{_zp_err_str}{linear_range_str}"
+                )
 
                 fit_line = lambda x: slope * x + intercept
             else:
@@ -2053,77 +6007,115 @@ class Catalog:
                 inlier_mask = np.ones_like(catalog_mag_linear, dtype=bool)
 
             # Plotting
-            _style = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
+            from plotting_utils import (
+                apply_autophot_mplstyle, get_ransac_color, get_marker_size,
+                get_alpha, get_line_width, ransac_grid, ransac_savefig,
+                set_mag_axes_inverted_xy, format_log_colorbar_ticks,
+                get_plot_ext,
             )
-            if os.path.exists(_style):
-                plt.style.use(_style)
+
+            apply_autophot_mplstyle()
             plt.ioff()
-            fig, ax1 = plt.subplots(figsize=set_size(340, 1))
-            plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
-            # Import centralized plotting utilities for consistent formatting
-            from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
+            fig, ax1 = plt.subplots(figsize=set_size(540, 1))
 
             if fit_line:
                 predicted = fit_line(inst_mag_linear)
                 residuals = catalog_mag_linear - predicted
-                # Use RANSAC inlier mask for plotting consistency
+                # Plot with the same RANSAC inlier mask used for the fit.
                 ransac_inliers = inlier_mask if 'inlier_mask' in locals() else np.ones(len(inst_mag_linear), dtype=bool)
                 ransac_outliers = ~ransac_inliers
+
+                # S/N-driven marker colours; the norm range covers inliers
+                # only -- outliers always get the flat outlier colour.
+                _snr_in = snr_values[ransac_inliers] if 'snr_values' in locals() else np.array([])
+                finite_snr = _snr_in[np.isfinite(_snr_in) & (_snr_in > 0)]
+                snr_norm = None
+                if finite_snr.size >= 3 and np.nanmax(finite_snr) > np.nanmin(finite_snr):
+                    from matplotlib.colors import LogNorm
+                    vmin = max(1.0, float(np.nanmin(finite_snr)))
+                    vmax = float(np.nanpercentile(finite_snr, 98))
+                    if vmax <= vmin:
+                        vmax = vmin * 10.0
+                    snr_norm = LogNorm(vmin=vmin, vmax=vmax)
+                ms_area = get_marker_size('medium') ** 2
+
                 ax1.errorbar(
                     inst_mag_linear[ransac_outliers],
                     catalog_mag_linear[ransac_outliers],
                     yerr=catalog_mag_err_linear[ransac_outliers],
                     xerr=inst_mag_err_linear[ransac_outliers],
-                    fmt="x",
-                    color=get_color('outliers'),
+                    fmt="none",
                     ecolor="lightgrey",
-                    markersize=get_marker_size('medium'),
                     alpha=get_alpha('medium'),
-                    lw=get_line_width('thin'),
-                    capsize=0,
-                    elinewidth=0.4,
+                    capsize=get_marker_size('medium') / 4,
+                    elinewidth=0.5,
                     linestyle="None",
+                    zorder=2,
+                )
+                ax1.plot(
+                    inst_mag_linear[ransac_outliers],
+                    catalog_mag_linear[ransac_outliers],
+                    "x", markersize=get_marker_size('medium'),
+                    color=get_ransac_color('outliers'),
+                    alpha=get_alpha('medium'), linestyle="None",
                     label=f"Outliers [{np.sum(ransac_outliers)}]",
+                    zorder=3,
                 )
                 ax1.errorbar(
                     inst_mag_linear[ransac_inliers],
                     catalog_mag_linear[ransac_inliers],
                     yerr=catalog_mag_err_linear[ransac_inliers],
                     xerr=inst_mag_err_linear[ransac_inliers],
-                    fmt="o",
-                    markersize=get_marker_size('medium'),
-                    mfc="none",
-                    mec=get_color('inliers'),
+                    fmt="none",
                     ecolor="lightgrey",
                     alpha=get_alpha('dark'),
-                    capsize=0,
-                    elinewidth=0.4,
+                    capsize=get_marker_size('medium') / 4,
+                    elinewidth=0.5,
                     linestyle="None",
-                    label=f"Inliers [{np.sum(ransac_inliers)}]",
+                    zorder=4,
                 )
+                if snr_norm is not None:
+                    sc_in = ax1.scatter(
+                        inst_mag_linear[ransac_inliers],
+                        catalog_mag_linear[ransac_inliers],
+                        c=snr_values[ransac_inliers], cmap="viridis", norm=snr_norm,
+                        marker="o", s=ms_area, alpha=get_alpha('dark'),
+                        label=f"Inliers [{np.sum(ransac_inliers)}]",
+                        zorder=5,
+                    )
+                    cb = fig.colorbar(sc_in, ax=ax1, label="S/N", pad=0.02)
+                    format_log_colorbar_ticks(cb, snr_norm.vmin, snr_norm.vmax)
+                else:
+                    ax1.plot(
+                        inst_mag_linear[ransac_inliers],
+                        catalog_mag_linear[ransac_inliers],
+                        "o", markersize=get_marker_size('medium'),
+                        color=get_ransac_color('zeropoint_ap'),
+                        alpha=get_alpha('dark'), linestyle="None",
+                        label=f"Inliers [{np.sum(ransac_inliers)}]",
+                    )
                 x_range = np.linspace(inst_mag_linear[ransac_inliers].min(), inst_mag_linear[ransac_inliers].max(), 100)
                 y_fit = fit_line(x_range)
-                ax1.plot(
-                    x_range,
-                    y_fit,
-                    color=get_color('fit'),
-                    linestyle="--",
-                    lw=get_line_width('thick'),
-                    zorder=10,
-                    label=f"Fit: y = {slope:.3f}x + {intercept:.2f} +/- {intercept_error:.2f}",
-                )
-                # Add shaded error region
                 ax1.fill_between(
                     x_range,
                     y_fit - intercept_error,
                     y_fit + intercept_error,
-                    color=get_color('error_region'),
-                    alpha=get_alpha('light'),
-                    label=f"Fit error (+/- {intercept_error:.2f})",
+                    color=get_ransac_color('error_band'),
+                    alpha=get_alpha('very_light'),
+                )
+                ax1.plot(
+                    x_range,
+                    y_fit,
+                    color=get_ransac_color('fit'),
+                    linestyle="--",
+                    lw=get_line_width('medium'),
+                    zorder=10,
+                    label=(
+                        rf"$m_\mathrm{{cal}} = m_\mathrm{{inst}} + {intercept:.2f} \pm {intercept_error:.2f}$"
+                    ),
                 )
 
-                # Add vertical lines showing linearity range in instrumental magnitude
+                # Mark the linearity range in instrumental magnitude.
                 if len(inlier_flux) > 0:
                     min_inst_mag = -2.5 * np.log10(
                         max_flux
@@ -2131,180 +6123,255 @@ class Catalog:
                     max_inst_mag = -2.5 * np.log10(min_flux)
                     ax1.axvline(
                         x=min_inst_mag,
-                        color="#00AA00",
+                        color=get_ransac_color('error_band'),
                         linestyle=":",
+                        lw=get_line_width('thin'),
                         alpha=0.7,
-                        label=f"Linearity range: {min_flux:.1f}-{max_flux:.1f} flux",
                     )
                     ax1.axvline(
                         x=max_inst_mag,
-                        color="#00AA00",
+                        color=get_ransac_color('error_band'),
                         linestyle=":",
+                        lw=get_line_width('thin'),
                         alpha=0.7,
                     )
 
-            ax1.set_xlabel("Instrumental Magnitude [mag]")
-            ax1.set_ylabel(f"Catalog {use_filter} Band [mag]")
-            ax1.invert_yaxis()
-            ax1.invert_xaxis()
-            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2)
-            ax1.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
-            save_path = os.path.join(
-                write_dir, f"Saturation_{base_name}.png"
+            ax1.set_xlabel(r"Instrumental Magnitude $m_\mathrm{inst}$ [mag]")
+            ax1.set_ylabel(rf"Catalog Magnitude $m_\mathrm{{cal,{use_filter}}}$ [mag]")
+            set_mag_axes_inverted_xy(ax1)
+            ax1.legend(
+                loc="upper left", ncol=1, fontsize=8, frameon=False,
             )
-            fig.savefig(save_path, bbox_inches="tight", dpi=150, facecolor="white")
+            ransac_grid(ax1)
+            save_path = os.path.join(write_dir, f"Saturation_{base_name}{get_plot_ext(self.input_yaml)}")
+            ransac_savefig(fig, save_path)
             plt.close(fig)
 
-            # Robust selection: find continuous linear region with tight scatter requirement
+            # Locate the continuous linear region via residual scatter.
             if fit_line:
-                # Get inlier sources from RANSAC
+                # Guard against length mismatches before indexing masks.
+                n_clean = len(clean_catalog)
+                n_flux = len(flux)
+                n_mag = len(catalog_mag_linear)
+                n_inst = len(inst_mag_linear)
+                n_inlier_mask = len(inlier_mask)
+                if not (n_clean == n_flux == n_mag == n_inst == n_inlier_mask):
+                    logger.error(
+                        f"Array length mismatch: clean_catalog={n_clean},\n"
+                        f"    flux={n_flux}, catalog_mag_linear={n_mag},\n"
+                        f"    inst_mag_linear={n_inst},\n"
+                        f"    inlier_mask={n_inlier_mask}.\n"
+                        f"    Skipping robust selection."
+                    )
+                    clean_catalog = clean_catalog[inlier_mask] if n_clean == n_inlier_mask else clean_catalog
+                    return clean_catalog, fit_params, saturation_range
+                
                 inlier_catalog = clean_catalog[inlier_mask].copy()
                 inlier_flux = flux[inlier_mask]
                 inlier_inst_mag = inst_mag_linear[inlier_mask]
-                
+
+                # Keep all RANSAC inliers for zeropoint fitting. The aggressive
+                # flux-range selection below removes too many valid faint sources
+                # (photon noise is mistaken for non-linearity on modern CCDs).
+                # NOTE: Don't reassign clean_catalog yet - we need the full arrays
+                # for mask computation. We'll reassign after selection is complete.
+
                 if len(inlier_catalog) > 5:
-                    # Calculate residuals for all inliers
-                    predicted_mag = fit_line(inlier_inst_mag.reshape(-1, 1))
-                    residuals = catalog_mag_linear[inlier_mask] - predicted_mag
-                    
-                    # Sort by flux (bright to faint - smaller mag = brighter)
-                    sort_idx = np.argsort(inlier_flux)[::-1]  # Bright first
+                    # predict() can return shape (N,1) depending on the sklearn
+                    # version; flatten so the subtraction stays (N,)-(N,) and
+                    # cannot broadcast to (N,N), which would silently corrupt
+                    # central_start/central_end and cause an IndexError when
+                    # indexing sorted_flux (size N).
+                    predicted_mag = np.asarray(
+                        fit_line(inlier_inst_mag.reshape(-1, 1))
+                    ).flatten()
+                    residuals = (
+                        np.asarray(catalog_mag_linear[inlier_mask]).flatten() - predicted_mag
+                    )
+
+                    # Sort by flux, bright first (smaller mag = brighter).
+                    sort_idx = np.argsort(inlier_flux)[::-1]
                     sorted_flux = inlier_flux[sort_idx]
-                    sorted_residuals = np.asarray(residuals[sort_idx]).flatten()  # Ensure 1D
+                    sorted_residuals = residuals[sort_idx]  # already 1D
                     sorted_mag = inlier_inst_mag[sort_idx]
-                    
-                    # TIGHT residual threshold: use 2-sigma instead of 3-sigma for stricter selection
-                    # Calculate from central 50% of sources (most linear region)
+
+                    # Residual threshold comes from the central 50% of
+                    # sources, the most linear region.
                     central_start = len(sorted_residuals) // 4
                     central_end = 3 * len(sorted_residuals) // 4
                     central_residuals = sorted_residuals[central_start:central_end]
-                    
+
                     if len(central_residuals) > 3:
                         median_resid = np.median(central_residuals)
                         mad_residual = np.median(np.abs(central_residuals - median_resid))
-                        # Relaxed threshold: 3.0 * MAD or 0.1 mag to fit majority of points better
+                        # Residual floor: 3*MAD, minimum 0.1 mag.
                         residual_threshold = float(np.maximum(3.0 * mad_residual, 0.1))
                     else:
                         residual_threshold = 0.15
-                    
-                    # Find bright end: cut where residuals exceed threshold (saturation/non-linear)
+
+                    # Bright end: cut where residuals exceed the threshold
+                    # (saturation / non-linearity).
                     bright_cut_idx = 0
                     for i in range(len(sorted_residuals)):
-                        resid_val = float(sorted_residuals[i])  # Ensure scalar
+                        resid_val = float(sorted_residuals[i])  # ensure scalar
                         if np.abs(resid_val) > residual_threshold:
-                            bright_cut_idx = i + 1  # Cut this and brighter
+                            bright_cut_idx = i + 1  # cut this and brighter
                         else:
                             break
-                    
-                    # Find faint end: detect where scatter systematically increases
-                    # Use smaller window for tighter control, and require multiple consecutive windows
-                    window_size = max(3, len(sorted_residuals) // 15)  # Smaller window
+
+                    # Faint end: cut where the local scatter systematically
+                    # exceeds the central scatter. Require 2 consecutive
+                    # high-scatter windows so a single noisy window does not
+                    # trigger the cut.
+                    window_size = max(3, len(sorted_residuals) // 15)
                     faint_cut_idx = len(sorted_residuals)
-                    
-                    # Track consecutive high-scatter windows
+
                     high_scatter_count = 0
-                    required_consecutive = 2  # Require 2 consecutive windows with high scatter
-                    
+                    required_consecutive = 2
+
                     for i in range(window_size, len(sorted_residuals) - window_size):
                         window_residuals = sorted_residuals[i-window_size:i+window_size]
                         window_mad = np.median(np.abs(window_residuals - np.median(window_residuals)))
 
-                        # If local scatter exceeds 2.0x central scatter, mark as high scatter (relaxed from 1.5x)
+                        # High scatter = local MAD > 2x central MAD
+                        # (relaxed from 1.5x).
                         if window_mad > 2.0 * mad_residual:
                             high_scatter_count += 1
                             if high_scatter_count >= required_consecutive:
-                                faint_cut_idx = i - window_size  # Cut before this region
+                                faint_cut_idx = i - window_size  # cut before this region
                                 break
                         else:
-                            high_scatter_count = 0  # Reset if scatter drops
-                    
-                    # Additional faint cut: ensure we're not using sources with large individual residuals
-                    # Scan from faint end and find where residuals become acceptable
+                            high_scatter_count = 0  # reset if scatter drops
+
+                    # Second faint cut: drop sources with large individual
+                    # residuals, scanning in from the faint end.
                     for i in range(len(sorted_residuals) - 1, faint_cut_idx - 1, -1):
                         if np.abs(sorted_residuals[i]) > 1.5 * residual_threshold:
-                            faint_cut_idx = i  # Cut this and fainter
+                            faint_cut_idx = i  # cut this and fainter
                         else:
                             break
-                    
-                    # Apply flux range cuts (bright_cut_idx to faint_cut_idx)
+
+                    # Apply flux range cuts (bright_cut_idx to faint_cut_idx).
                     if bright_cut_idx > 0 or faint_cut_idx < len(sorted_flux):
-                        min_linear_flux = sorted_flux[min(faint_cut_idx, len(sorted_flux)-1)]
+                        # faint_cut_idx is the first *cut* (fainter) source, so
+                        # the faintest retained source is one index brighter.
+                        _faint_keep = max(min(faint_cut_idx, len(sorted_flux)) - 1, 0)
+                        min_linear_flux = sorted_flux[_faint_keep]
                         max_linear_flux = sorted_flux[bright_cut_idx] if bright_cut_idx < len(sorted_flux) else sorted_flux[0]
-                        
-                        # Ensure we have a valid range
+
                         if min_linear_flux < max_linear_flux:
-                            # Create mask for continuous linear region
                             linear_flux_mask = (flux >= min_linear_flux) & (flux <= max_linear_flux)
-                            
-                            # Apply tight residual threshold to remove individual outliers
-                            # Use inlier arrays only to avoid mismatch with clean_catalog
+
+                            # Residual filter on the inlier arrays only;
+                            # mixing with clean_catalog would mismatch lengths.
                             inlier_catalog_mag_linear = catalog_mag_linear[inlier_mask]
                             inlier_inst_mag_linear = inst_mag_linear[inlier_mask]
-                            all_residuals = inlier_catalog_mag_linear - fit_line(inlier_inst_mag_linear.reshape(-1, 1))
+                            preds = np.asarray(fit_line(inlier_inst_mag_linear.reshape(-1, 1))).flatten()
+                            all_residuals = np.asarray(inlier_catalog_mag_linear).flatten() - preds
                             inlier_residual_mask = np.abs(all_residuals) < residual_threshold
                             
-                            # Expand inlier residual mask back to full array size
-                            linear_residual_mask = np.zeros(len(flux), dtype=bool)
-                            linear_residual_mask[inlier_mask] = inlier_residual_mask
+                            # Expand the inlier residual mask back to full
+                            # size; lengths must match to avoid indexing errors.
+                            n_inliers = np.sum(inlier_mask)
+                            if len(inlier_residual_mask) != n_inliers:
+                                logger.warning(
+                                    f"Array length mismatch:\n"
+                                    f"    inlier_residual_mask={len(inlier_residual_mask)},\n"
+                                    f"    inlier_mask.sum()={n_inliers}.\n"
+                                    f"    Skipping residual masking."
+                                )
+                                linear_residual_mask = inlier_mask.copy()
+                            else:
+                                linear_residual_mask = np.zeros(len(flux), dtype=bool)
+                                linear_residual_mask[inlier_mask] = inlier_residual_mask
                             
-                            # Combined mask: must be in flux range AND have good residual
+                            # Keep sources in the flux range AND with a good residual.
                             final_linear_mask = linear_flux_mask & linear_residual_mask
-                            
+
                             n_bright_cut = np.sum(flux > max_linear_flux)
                             n_faint_cut = np.sum(flux < min_linear_flux)
                             n_outlier_cut = np.sum(linear_flux_mask & ~linear_residual_mask)
                             n_selected = np.sum(final_linear_mask)
                             
                             logger.info(
-                                f"Robust linear selection: flux range {min_linear_flux:.1f} - {max_linear_flux:.1f}, "
-                                f"residual thresh {residual_threshold:.3f} mag, "
-                                f"cut {n_bright_cut} bright + {n_faint_cut} faint + {n_outlier_cut} outlier, "
-                                f"kept {n_selected} sources"
+                                f"Robust linear selection:\n"
+                                f"    flux range {min_linear_flux:.1f} - "
+                                f"{max_linear_flux:.1f}, residual thresh "
+                                f"{residual_threshold:.3f} mag\n"
+                                f"    cut {n_bright_cut} bright + {n_faint_cut} "
+                                f"faint + {n_outlier_cut} outlier, would keep "
+                                f"{n_selected} sources\n"
+                                f"    (keeping all {len(inlier_catalog)} inliers "
+                                f"for ZP fit)"
                             )
                             
                             if n_selected > 0:
-                                clean_catalog = clean_catalog[final_linear_mask]
-                                # Update saturation range from final selection
+                                # Saturation range is informational only; all
+                                # inliers are kept for zeropoint fitting to
+                                # avoid over-aggressive faint-end cuts.
+                                inlier_flux = inlier_catalog["flux_AP"].values
+                                inlier_linear_mask = (inlier_flux >= min_linear_flux) & (inlier_flux <= max_linear_flux)
+                                # linear_residual_mask already matches inlier_catalog size.
+                                inlier_linear_mask = inlier_linear_mask & linear_residual_mask[inlier_mask]
                                 saturation_range = [
-                                    np.percentile(clean_catalog["flux_AP"].values, 0.5),
-                                    np.percentile(clean_catalog["flux_AP"].values, 99.5)
+                                    np.percentile(inlier_catalog["flux_AP"].values[inlier_linear_mask], 0.5),
+                                    np.percentile(inlier_catalog["flux_AP"].values[inlier_linear_mask], 99.5)
                                 ]
                             else:
-                                # No sources passed tight criteria, fall back to central region only
-                                central_flux_mask = (flux >= sorted_flux[central_end]) & (flux <= sorted_flux[central_start])
+                                # Nothing passed; fall back to the central
+                                # region (inlier_catalog avoids length mismatch).
+                                inlier_flux = inlier_catalog["flux_AP"].values
+                                inlier_sorted_flux = np.sort(inlier_flux)[::-1]
+                                central_start = max(0, len(inlier_sorted_flux) // 3)
+                                central_end = min(len(inlier_sorted_flux), 2 * len(inlier_sorted_flux) // 3)
+                                central_flux_mask = (inlier_flux >= inlier_sorted_flux[central_end]) & (inlier_flux <= inlier_sorted_flux[central_start])
                                 if np.sum(central_flux_mask) > 0:
-                                    clean_catalog = clean_catalog[central_flux_mask]
-                                    logger.warning(f"No sources passed tight criteria, using central {len(clean_catalog)} sources")
+                                    logger.warning("No sources passed tight criteria, using central %s sources", np.sum(central_flux_mask))
                                 else:
-                                    clean_catalog = inlier_catalog
-                                    logger.warning(f"No sources passed tight criteria, using all {len(clean_catalog)} inliers")
+                                    logger.warning("No sources passed tight criteria, using all %s inliers", len(inlier_catalog))
                         else:
-                            # Invalid range, use central region
-                            central_flux_mask = (flux >= sorted_flux[central_end]) & (flux <= sorted_flux[central_start])
+                            # Invalid range; use the central region
+                            # (inlier_catalog avoids length mismatch).
+                            inlier_flux = inlier_catalog["flux_AP"].values
+                            inlier_sorted_flux = np.sort(inlier_flux)[::-1]
+                            central_start = max(0, len(inlier_sorted_flux) // 3)
+                            central_end = min(len(inlier_sorted_flux), 2 * len(inlier_sorted_flux) // 3)
+                            central_flux_mask = (inlier_flux >= inlier_sorted_flux[central_end]) & (inlier_flux <= inlier_sorted_flux[central_start])
                             if np.sum(central_flux_mask) > 0:
-                                clean_catalog = clean_catalog[central_flux_mask]
+                                pass
                     else:
-                        # No cuts needed but still apply tight residual filter
+                        # No cuts needed; still report the tight residual filter.
                         tight_residual_mask = np.abs(residuals) < residual_threshold
                         n_tight_outliers = (~tight_residual_mask).sum()
                         if n_tight_outliers > 0:
-                            logger.info(f"Applying tight residual filter: removed {n_tight_outliers} sources")
-                        clean_catalog = inlier_catalog[tight_residual_mask]
+                            logger.info("Tight residual filter would remove %s sources (keeping all inliers)", n_tight_outliers)
                 else:
-                    # Too few sources for robust selection
-                    clean_catalog = inlier_catalog
-                    logger.warning(f"Only {len(inlier_catalog)} inliers, skipping robust selection")
+                    # Too few inliers for the linear-range selection.
+                    logger.warning("Only %s inliers, skipping robust selection", len(inlier_catalog))
 
-            logger.info(f"Returning {len(clean_catalog)} linear sources")
+                # Reassign clean_catalog only after all mask computations.
+                clean_catalog = inlier_catalog
+
+            logger.info("Returning %s sources for zeropoint fitting", len(clean_catalog))
             return clean_catalog, fit_params, saturation_range
 
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
             logger.error(
-                f"Error in build_psf: {exc_type} in {fname} at line {exc_tb.tb_lineno}: {str(e)}"
+                f"Error in check_saturation_range: {exc_type} in {fname} at line {exc_tb.tb_lineno}: {str(e)}"
             )
-            return catalog, fit_params, saturation_range
+            # Fail closed, not open: the caller feeds the returned catalog
+            # straight into the ZP fit, so returning the raw input would
+            # silently calibrate on saturated/non-linear sources.  The
+            # 0.5-mag combined-error cut is the one vetting step that does
+            # not depend on the failed fit - apply it if we got that far.
+            _fallback = (
+                clean_catalog
+                if "clean_catalog" in locals() and clean_catalog is not None
+                else catalog
+            )
+            return _fallback, fit_params, saturation_range
 
     # =============================================================================
     # =============================================================================
@@ -2344,52 +6411,46 @@ class Catalog:
         """
         n_src = len(df)
 
-        # If dataframe is already small enough, return quickly without extra logging or work.
+        # Small enough: return early without extra logging or work.
         if n_src <= nmax:
             logger.info("Downsampling skipped: %d sources (<= %d target).", n_src, nmax)
             return df.copy()
 
-        # Only emit the full banner when we are actually going to downsample.
+        # Banner only when downsampling actually runs.
         logger.info(
-            border_msg(
-                f"Starting downsampling: {n_src} sources -> target {nmax} sources"
-            )
+            log_step(f"Downsampling: {n_src} sources -> {nmax} max")
         )
 
-        # Check if required columns exist
         if x_col not in df.columns or y_col not in df.columns:
             error_msg = f"DataFrame must contain '{x_col}' and '{y_col}' columns"
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        # Calculate number of bins (square grid)
+        # Square spatial grid.
         n_bins = int(np.sqrt(nmax))
         sources_per_bin = max(1, nmax // (n_bins**2))
         logger.info(
             f"Using {n_bins}x{n_bins} grid with ~{sources_per_bin} sources per bin"
         )
 
-        # Create spatial bins
         x_bins = np.linspace(df[x_col].min(), df[x_col].max(), n_bins + 1)
         y_bins = np.linspace(df[y_col].min(), df[y_col].max(), n_bins + 1)
-        logger.debug(f"X bins range: {x_bins[0]:.2f} to {x_bins[-1]:.2f}")
-        logger.debug(f"Y bins range: {y_bins[0]:.2f} to {y_bins[-1]:.2f}")
+        logger.debug("X bins range: %.2f to %.2f", x_bins[0], x_bins[-1])
+        logger.debug("Y bins range: %.2f to %.2f", y_bins[0], y_bins[-1])
 
         selected_indices = []
         bin_stats = []  # Track bin statistics for logging
 
-        # Iterate through each spatial bin
         logger.info("Processing spatial bins...")
         for i in range(n_bins):
             for j in range(n_bins):
-                # Find sources in current bin
                 in_xbin = (df[x_col] >= x_bins[i]) & (df[x_col] < x_bins[i + 1])
                 in_ybin = (df[y_col] >= y_bins[j]) & (df[y_col] < y_bins[j + 1])
                 bin_indices = np.where(in_xbin & in_ybin)[0]
                 bin_stats.append(len(bin_indices))
 
                 if len(bin_indices) > 0:
-                    # Sort by SNR (highest first) if SNR column exists
+                    # Highest SNR first so bins keep their best sources.
                     if snr_col and snr_col in df.columns:
                         bin_indices = bin_indices[
                             np.argsort(df[snr_col].iloc[bin_indices])[::-1]
@@ -2398,19 +6459,17 @@ class Catalog:
                             f"Bin ({i},{j}): {len(bin_indices)} sources, sorted by {snr_col}"
                         )
                     else:
-                        logger.debug(f"Bin ({i},{j}): {len(bin_indices)} sources")
+                        logger.debug("Bin (%s,%s): %s sources", i, j, len(bin_indices))
 
-                    # Take top sources from this bin
                     selected_indices.extend(bin_indices[:sources_per_bin])
 
-        # Log bin statistics
         logger.info(
             f"Bin statistics: min={min(bin_stats)}, max={max(bin_stats)}, "
             f"avg={np.mean(bin_stats):.1f} sources per bin"
         )
-        logger.info(f"Selected {len(selected_indices)} sources from spatial bins")
+        logger.info("Selected %s sources from spatial bins", len(selected_indices))
 
-        # If we didn't get enough sources, fill with highest SNR remaining sources
+        # Under-filled bins: top up with the highest-SNR remaining sources.
         if len(selected_indices) < nmax:
             logger.warning(
                 f"Only {len(selected_indices)} sources selected from bins, "
@@ -2420,7 +6479,6 @@ class Catalog:
             remaining_indices = list(all_indices - set(selected_indices))
 
             if snr_col and snr_col in df.columns:
-                # Sort remaining sources by SNR (highest first)
                 remaining_indices = sorted(
                     remaining_indices,
                     key=lambda idx: df[snr_col].iloc[idx],
@@ -2428,21 +6486,18 @@ class Catalog:
                 )
                 logger.debug("Sorted remaining sources by SNR")
 
-            # Add top remaining sources
             additional_count = nmax - len(selected_indices)
             selected_indices.extend(remaining_indices[:additional_count])
             logger.info(
                 f"Added {additional_count} additional sources from remaining pool"
             )
 
-        # Final validation
         final_count = len(selected_indices)
         if final_count > nmax:
-            logger.warning(f"Selected {final_count} sources (exceeds target {nmax})")
+            logger.warning("Selected %s sources (exceeds target %s)", final_count, nmax)
         else:
-            logger.info(f"Final selection: {final_count} sources")
+            logger.info("Final selection: %s sources", final_count)
 
-        # Return the downsampled dataframe
         logger.info("Downsampling complete")
         return df.iloc[selected_indices].copy()
 
@@ -2510,30 +6565,29 @@ class Catalog:
             return tbin / np.maximum(nr, 1)
 
         def calculate_fwhm(data):
-            """Estimate FWHM from radial profile"""
+            """Estimate FWHM from the radial profile."""
             profile = radial_profile(data)
             half_max = np.max(profile) * 0.5
             above = np.where(profile >= half_max)[0]
             return 2 * (above[-1] - above[0]) if len(above) > 1 else np.nan
 
         def calculate_roundness(data):
-            """Calculate roundness (1 - b/a) from moments"""
+            """Calculate roundness (1 - b/a) from image moments."""
             y, x = np.indices(data.shape)
             xc, yc = data.shape[1] / 2, data.shape[0] / 2
             x = x - xc
             y = y - yc
 
-            # Calculate second moments
+            # Second moments -> eigenvalues give major/minor axes.
             mxx = np.sum(x**2 * data) / np.sum(data)
             myy = np.sum(y**2 * data) / np.sum(data)
             mxy = np.sum(x * y * data) / np.sum(data)
 
-            # Calculate eigenvalues (major/minor axes)
             term1 = (mxx + myy) / 2
             term2 = np.sqrt(((mxx - myy) / 2) ** 2 + mxy**2)
             a = term1 + term2
             b = term1 - term2
-            return 1 - np.sqrt(b / a)  # 0=perfect circle
+            return 1 - np.sqrt(b / max(a, 1e-10))  # 0=perfect circle
 
         def norm(array):
             """
@@ -2559,7 +6613,7 @@ class Catalog:
             return (array - min_val) / (max_val - min_val)
 
         def calculate_sharpness(data):
-            """Measure central concentration using Laplacian"""
+            """Measure central concentration via the Laplacian."""
             lap = gaussian_laplace(data, sigma=1)
             center = data.shape[0] // 2, data.shape[1] // 2
             radius = min(center) // 2
@@ -2574,7 +6628,7 @@ class Catalog:
         radial_profiles = []
         valid_indices = []
 
-        logger.info(border_msg(f"Checking radial profile of {len(catalog)} sources"))
+        logger.info(log_step(f"Radial profile: {len(catalog)} sources"))
 
         for i, (x, y) in enumerate(zip(catalog["x_pix"], catalog["y_pix"])):
             position = (float(x), float(y))
@@ -2587,7 +6641,6 @@ class Catalog:
                 if np.isfinite(total_flux) and total_flux > 0:
                     normalized_cutout = norm(cutout_data / total_flux)
 
-                    # Calculate all metrics
                     fwhm = calculate_fwhm(normalized_cutout)
                     roundness = calculate_roundness(normalized_cutout)
                     sharpness = calculate_sharpness(normalized_cutout)
@@ -2599,43 +6652,43 @@ class Catalog:
                     radial_profiles.append(norm(radial_profile(normalized_cutout)))
                     valid_indices.append(i)
                 else:
-                    logger.info(f"Star {i} rejected: zero or negative flux.")
+                    logger.debug("Star %s rejected: zero or negative flux.", i)
 
             except Exception as e:
                 logger.warning(
                     f"Star {i} at position {position} skipped due to error: {e}"
                 )
-                for key in metrics:
-                    metrics[key].append(np.nan)
+                # Do NOT append NaN to metrics here: metrics arrays must stay
+                # aligned with valid_indices (and hence with profile_mask /
+                # combined_mask), or metrics[key][combined_mask] below would
+                # misassign per-source diagnostics or raise on a length
+                # mismatch whenever a source raises mid-loop.
 
-        # Convert metrics to arrays
         for key in metrics:
             metrics[key] = np.array(metrics[key])
 
-        # Create selection masks for each criterion
         fwhm_mask = np.isfinite(metrics["fwhm"])  # & (metrics['fwhm'] < fwhm_threshold)
 
-        # Apply sigma clipping to roundness and sharpness
+        # Sigma-clip roundness and sharpness to reject outliers.
         roundness_sigma_clip = sigma_clip(
             metrics["roundness"],
             sigma=threshold,
             masked=True,
             cenfunc=np.nanmedian,
-            stdfunc=np.nanstd,
+            stdfunc=mad_std,
         )
         sharpness_sigma_clip = sigma_clip(
             metrics["sharpness"],
             sigma=threshold,
             masked=True,
             cenfunc=np.nanmedian,
-            stdfunc=np.nanstd,
+            stdfunc=mad_std,
         )
 
-        # Mask for roundness and sharpness after sigma clipping
         roundness_mask = np.isfinite(metrics["roundness"]) & ~roundness_sigma_clip.mask
         sharpness_mask = np.isfinite(metrics["sharpness"]) & ~sharpness_sigma_clip.mask
 
-        # Combine with radial profile outlier rejection
+        # Reject radial-profile outliers.
         if len(radial_profiles) > 0:
             radial_profiles = np.array(radial_profiles)
             clipped = sigma_clip(
@@ -2649,16 +6702,15 @@ class Catalog:
         else:
             profile_mask = np.zeros(len(valid_indices), dtype=bool)
 
-        # Final combined mask (profile_mask only; roundness/sharpness still logged above)
+        # Only profile_mask gates rejection; roundness/sharpness are
+        # diagnostic-only (still logged above).
         combined_mask = profile_mask
 
-        # Ensure that at least a few sources remain
+        # Never let the masking empty the catalog.
         if np.sum(combined_mask) < 5:
             logger.warning("All sources have been rejected by the masking process.")
-            # Keep all sources or apply a fallback strategy
             combined_mask = np.ones_like(combined_mask, dtype=bool)
 
-        # Identify inliers and outliers
         inliers = [
             valid_indices[i] for i, is_good in enumerate(combined_mask) if is_good
         ]
@@ -2666,7 +6718,6 @@ class Catalog:
             valid_indices[i] for i, is_good in enumerate(combined_mask) if not is_good
         ]
 
-        # Log the results
         logger.info(
             f"Point sources: {len(inliers)} | Extended/rejected sources: {len(outliers)}"
         )
@@ -2677,16 +6728,15 @@ class Catalog:
             f"Profile: {sum(~profile_mask)}"
         )
 
-        # Check the cleaned catalog
         if len(inliers) > 0:
             cleaned_catalog = catalog.iloc[inliers].copy()
         else:
             logger.warning(
                 "No sources remained after cleaning. Using original catalog."
             )
-            cleaned_catalog = catalog.copy()  # Fallback to original catalog
+            cleaned_catalog = catalog.copy()  # fall back to the full catalog
 
-        # Add metrics to catalog for diagnostics
+        # Keep per-source metrics in the catalog for diagnostics.
         for key in metrics:
             cleaned_catalog[f"star_{key}"] = metrics[key][combined_mask]
 
@@ -2697,23 +6747,35 @@ class Catalog:
             side_length = int(np.ceil(np.sqrt(num_stars)))
             ncols = side_length
             nrows = ceil(num_stars / ncols)
-            _style = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-            )
-            if os.path.exists(_style):
-                plt.style.use(_style)
+            from plotting_utils import apply_autophot_mplstyle, get_plot_ext
+            apply_autophot_mplstyle()
             plt.ioff()
             fpath = self.input_yaml["fpath"]
             base = os.path.basename(fpath)
             write_dir = os.path.dirname(fpath)
-            fig = plt.figure(figsize=set_size(540, 1))
+            # Size each grid cell to the cutout aspect so the equal-aspect
+            # panels fill their cells; a fixed figsize shrinks them and
+            # leaves gaps no wspace can remove. The 3 trailing columns are
+            # a 0.1 spacer plus the radial-profile panel.
+            cut_h, cut_w = np.asarray(stars[0]).shape
+            ax_h = 1.2
+            cell_w = ax_h * (cut_w / max(cut_h, 1))
+            left, right, bottom, top = 0.05, 0.985, 0.07, 0.88
+            hspace = wspace = 0.01
+            fig_w = (ncols + 2.1) * cell_w * (1 + wspace) / (right - left)
+            fig_h = nrows * ax_h * (1 + hspace) / (top - bottom)
+            fig = plt.figure(figsize=(fig_w, fig_h))
             grid = fig.add_gridspec(
                 nrows=nrows,
                 ncols=ncols + 3,
                 width_ratios=[1] * ncols + [0.1, 1, 1],
                 height_ratios=[1] * nrows,
-                hspace=0.01,
-                wspace=0.01,
+                hspace=hspace,
+                wspace=wspace,
+                left=left,
+                right=right,
+                bottom=bottom,
+                top=top,
             )
             for i in range(num_stars):
                 row, col = divmod(i, ncols)
@@ -2721,13 +6783,17 @@ class Catalog:
                 interval = ZScaleInterval()
                 vmin, vmax = interval.get_limits(np.asarray(stars[i]))
                 norm = ImageNormalize(vmin=vmin, vmax=vmax)
+                cmap = plt.get_cmap("viridis").copy()
+                cmap = cmap.with_extremes(bad="none")
                 ax.imshow(
                     stars[i],
                     origin="lower",
-                    cmap="viridis",
+                    cmap=cmap,
                     norm=norm,
                     interpolation="none",
                 )
+                from plotting_utils import overlay_mask_hatch
+                overlay_mask_hatch(ax, ~np.isfinite(np.asarray(stars[i])))
                 ax.text(
                     0.98,
                     0.98,
@@ -2751,24 +6817,25 @@ class Catalog:
             ax_right.step(
                 radii,
                 median_profile,
-                color="#FF0000",
+                color="#D94F4F",
                 linewidth=0.5,
                 label="Median\nRadial\nProfile",
             )
             ax_right.set_xlabel("Radius [pixels]")
             ax_right.set_ylabel("Normalized Flux")
-            ax_right.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
+            ax_right.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                            frameon=False, fontsize=8)
             ax_right.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
             ax_right.ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
             pos = ax_right.get_position()
             ax_right.set_position([pos.x0 + 0.05, pos.y0, pos.width, pos.height])
             output_path = os.path.join(
-                write_dir, f"Zeropoint_Sources_{base}.png"
+                write_dir, f"Zeropoint_Sources_{base}{get_plot_ext(self.input_yaml)}"
             )
             fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor="white")
-            plt.close()
+            plt.close(fig)
 
-        logger.info(f"Returning {len(cleaned_catalog)} well-behaved sources")
+        logger.info("Returning %s well-behaved sources", len(cleaned_catalog))
         return cleaned_catalog
 
     # =============================================================================
@@ -2793,38 +6860,32 @@ class Catalog:
         pd.DataFrame
             Updated DataFrame with measured flux, instrumental magnitude, and SNR for each source.
         """
-        # Initialize logger
         logger = logging.getLogger(__name__)
 
-        # Log the start of the measurement process
         logger.info(
-            border_msg(
-                f"Measuring {len(selectedCatalog)} Sources in the Field using Aperture Photometry"
+            log_step(
+                f"Aperture photometry: {len(selectedCatalog)} field sources"
             )
         )
 
-        # Initialize the aperture photometry object with the provided input YAML and image
         initialAperture = Aperture(
             input_yaml=self.input_yaml,
             image=image,
         )
 
-        # Measure the sources using aperture photometry
         selectedCatalog = initialAperture.measure(sources=selectedCatalog)
 
-        # Rename the flux column to reflect the aperture measurement
-        selectedCatalog.rename(columns={"flux": "flux_AP"}, inplace=True)
-
-        # Calculate the instrumental magnitude based on the measured flux (mag() does not mutate flux_AP)
+        # mag() does not mutate flux_AP.
         instMag = mag(selectedCatalog["flux_AP"])
         inst_col = "inst_" + self.input_yaml["imageFilter"] + "_AP"
-        selectedCatalog[inst_col] = np.round(instMag, 3)
+        # Keep full float64 precision - this column feeds the zeropoint
+        # fit, and 1-mmag rounding is unnecessary quantization on sparse
+        # calibrator fields.
+        selectedCatalog[inst_col] = instMag
 
-        # Calculate the SNR for each source
         sourceSNR = snr(selectedCatalog["maxPixel"], selectedCatalog["noiseSky"])
-        selectedCatalog["SNR"] = np.round(sourceSNR, 1)
+        selectedCatalog["snr"] = np.round(sourceSNR, 1)
 
-        # Log the number of sources with valid instrumental magnitude (finite flux > 0)
         logger.info(
             "Instrumental magnitude of %d sources measured"
             % sum(~np.isnan(selectedCatalog[inst_col]))
