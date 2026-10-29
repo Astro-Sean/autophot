@@ -80,6 +80,9 @@ test:
     - templates
     - lightcurve
     - additional_targets
+    - check
+    - inspect_telescope
+    - filter_transformations
     - color_correction
     - utils
     - databases

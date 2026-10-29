@@ -90,11 +90,8 @@ tests/
 test_*.py
 
 # Local helper/debug scripts (not production)
-additional_targets.py
-check.py
 check_telescope_entries.py
 debug_*.py
-inspect_telescope.py
 run_autophot_VIPER.py
 
 # Build artifacts

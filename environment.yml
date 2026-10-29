@@ -25,6 +25,12 @@ dependencies:
   - corner==2.2.3
   - ccdproc==2.5.1
   - astroalign==2.6.2
+  # SFFT support deps (conda-forge); sfft itself is pip-only below.
+  - fastremap>=1.20
+  - llvmlite>=0.36
+  - numba>=0.53
+  - pyfftw>=0.12
+  - sep>=1.0
   # sip_tpv==1.1 does `import pkg_resources`, which setuptools removed in 81.
   - setuptools<81
   - astromatic-source-extractor
