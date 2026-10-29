@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Created on Wed Sep 28 09:58:29 2022
+"""Shared utility functions for the AutoPHOT pipeline.
 
-@author: seanbrennan
+This module provides:
+
+* Logging formatters (``PlainFormatter``, ``ColoredLevelFormatter``) and
+  helpers (``log_step``, ``border_msg``, ``configure_console_logging``).
+* FITS I/O helpers (``get_header``, ``get_image``, ``get_image_and_header``,
+  ``save_to_fits``).
+* Photometric utilities (``beta_aperture``, ``beta_psf``, ``snr``,
+  ``snr_err``, ``mag``).
+* WCS header helpers (``remove_wcs_from_header``, ``copy_wcs_from_header``,
+  ``update_header_from_wcs``).
+* Filter-name normalisation (``normalize_photometric_filter_name``,
+  ``sanitize_photometric_filters``).
+* YAML configuration loader (``AutophotYaml``).
+* Miscellaneous helpers (``set_size``, ``pix_dist``, ``gauss_1d``,
+  ``moffat_2d``, ``quadrature_add``).
 """
 
-# Import all required modules at the top
 import numpy as np
 
 import os
+import re
+import shutil
 import sys
 import warnings
+from pathlib import Path
 import pandas as pd
 import yaml
 import logging
@@ -19,12 +34,14 @@ import matplotlib.pyplot as plt
 import traceback
 import textwrap
 import inspect
+import unicodedata
 
 import copy
+from contextlib import contextmanager
 from astropy.io import fits
 from astropy.time import Time
 from astropy.convolution import Gaussian2DKernel, convolve, interpolate_replace_nans
-from astropy.stats import sigma_clipped_stats, mad_std
+from astropy.stats import sigma_clipped_stats, biweight_scale
 from astropy.cosmology import FlatLambdaCDM
 from astropy.wcs import WCS
 from astropy.nddata import Cutout2D
@@ -37,36 +54,265 @@ from scipy.special import erf, erfinv
 from skimage.measure import moments
 
 from photutils.background import Background2D, MedianBackground
+from photutils.centroids import centroid_2dg, centroid_com, centroid_sources
 from photutils.segmentation import detect_sources, SourceCatalog, make_2dgaussian_kernel
-from photutils.aperture import RectangularAperture
+
+logger = logging.getLogger(__name__)
+
+# Sentinel floor for SATURATE placeholders: real detectors saturate below
+# ~1e6 ADU, while "no limit" markers are written as 1e10-1e30 by this
+# pipeline and some upstream tools.  Readers use this to recognise a stored
+# sentinel instead of treating it as a physical ceiling.
+SATURATE_SENTINEL_MIN = 1e8
+
+# --- FITS I/O cache ---------------------------------------------------------
+# mtime+size keyed cache so repeated get_header / get_image_and_header calls
+# on the same (unmodified) file avoid re-opening and re-parsing the FITS file.
+# Entries are invalidated when the file changes on disk (mtime/size mismatch)
+# or explicitly via invalidate_fits_cache().
+import threading as _threading
+
+_FITS_CACHE_LOCK = _threading.Lock()
+_FITS_HEADER_CACHE = {}   # key -> header
+_FITS_IMAGE_CACHE = {}    # key -> (image, header)
+_FITS_CACHE_MAX = 64      # max entries per cache
+
+# photutils 3.1 exposes n_threads on its compiled paths (aperture sums,
+# annulus stats, source catalogs, deblend groups, Background2D tiles).
+# Those kernels release the GIL, so threads parallelise on stock
+# CPython - but the pipeline stays serial unless configured, matching
+# the sextractor_nthreads/aperture_n_jobs convention.
+_PHOTUTILS_THREADS_CAP = 16
+
+
+def photutils_n_threads(cfg=None, default=1):
+    """Resolve ``photometry.photutils_n_threads`` to a usable thread count.
+
+    ``cfg`` may be the full ``input_yaml`` dict or its ``photometry``
+    section; both shapes occur at call sites.  The result is capped by
+    the CPUs actually available to this process (``sched_getaffinity``
+    reflects cgroup/Slurm limits) and by ``_PHOTUTILS_THREADS_CAP``.
+    """
+    if not isinstance(cfg, dict):
+        cfg = {}
+    phot_cfg = cfg.get("photometry", cfg)
+    if not isinstance(phot_cfg, dict):
+        phot_cfg = {}
+    try:
+        requested = int(phot_cfg.get("photutils_n_threads", default) or default)
+    except (TypeError, ValueError):
+        requested = int(default)
+    if requested < 1:
+        return 1
+    try:
+        n_cpu = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n_cpu = os.cpu_count() or 1
+    return max(1, min(requested, n_cpu, _PHOTUTILS_THREADS_CAP))
+
+
+def _python_free_threaded():
+    """True on CPython free-threaded builds where the GIL is disabled."""
+    is_gil = getattr(sys, "_is_gil_enabled", None)
+    return callable(is_gil) and not is_gil()
+
+
+def psf_photometry_threads(cfg=None, default=1):
+    """``n_threads`` for PSFPhotometry-style entry points.
+
+    photutils only gains from threads in the fit loop on free-threaded
+    CPython; on regular builds it emits a warning and runs serially, so
+    the request is dropped there rather than producing noise.
+    """
+    if not _python_free_threaded():
+        return 1
+    return photutils_n_threads(cfg, default=default)
+
+
+def _fits_cache_key(fpath):
+    """Return a cache key tuple (path, mtime, size) or None if stat fails."""
+    try:
+        st = os.stat(fpath)
+        return (os.path.abspath(fpath), st.st_mtime, st.st_size)
+    except OSError:
+        return None
+
+
+def invalidate_fits_cache(fpath=None):
+    """Invalidate cached FITS data for *fpath* (or the entire cache if None).
+
+    Call this after an external tool (SWarp, SFFT, SCAMP, ...) modifies a
+    FITS file on disk so the next read picks up the new content.
+    """
+    with _FITS_CACHE_LOCK:
+        if fpath is None:
+            _FITS_HEADER_CACHE.clear()
+            _FITS_IMAGE_CACHE.clear()
+            return
+        abspath = os.path.abspath(fpath)
+        # Drop all keys for this path (any mtime/size variant)
+        for cache in (_FITS_HEADER_CACHE, _FITS_IMAGE_CACHE):
+            stale = [k for k in cache if k[0] == abspath]
+            for k in stale:
+                del cache[k]
+
+
+def _cache_evict(cache):
+    """Evict oldest entries if cache exceeds the max size (FIFO)."""
+    while len(cache) > _FITS_CACHE_MAX:
+        cache.pop(next(iter(cache)))
+
+
+class PlainFormatter(logging.Formatter):
+    """
+    Plain text formatter for log files - strips ANSI escape codes.
+    
+    Ensures log files contain clean, readable text without terminal
+    formatting codes (bold, color, etc.) that are added by border_msg
+    and other formatting functions.  Multi-line messages (e.g. border
+    banners) are indented so continuation lines align with the first
+    line's prefix.
+    """
+    ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+    def __init__(self, *args, max_width: int = 150, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._max_width = int(max_width)
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        msg = self.ANSI_ESCAPE.sub('', msg)
+        msg = normalize_log_message(msg, width=self._max_width)
+        # Indent continuation lines so border banners and other multi-line
+        # output align under the first line's timestamp/level prefix.
+        if '\n' in msg:
+            lines = msg.split('\n')
+            dummy = copy.copy(record)
+            dummy.msg, dummy.args = '', ()
+            prefix = super().format(dummy)
+            prefix_len = len(prefix)
+            lines = [lines[0]] + [' ' * prefix_len + ln for ln in lines[1:]]
+            msg = '\n'.join(lines)
+        return msg
 
 
 class ColoredLevelFormatter(logging.Formatter):
     """
-    Logging formatter with ANSI color highlights based on log level.
+    Logging formatter with consistent, minimal color coding for terminal output.
 
-    Uses colors only when stdout is a TTY; otherwise it behaves like a normal
-    logging.Formatter (no ANSI escape sequences).
+    Principle: Only warnings and errors get color. Routine output (INFO, DEBUG)
+    remains plain black for clean, professional appearance.
+
+    Layout:
+        - No timestamp column: wall-clock time is logged once as a "Started:"
+          line at the top of each run and again at the end with the elapsed
+          seconds, so per-line timestamps only add noise.
+        - A bordered banner opens a section; a blank line precedes each banner
+          and each ``[Step]`` sub-section marker. Routine messages print flush
+          left so lines stay short.
+        - Non-INFO messages carry a ``[LEVEL]`` tag; wrapped continuation
+          lines align under the message text.
+        - Lines are soft-wrapped so no emitted line exceeds ``max_width``
+          (default 90), including the ``[LEVEL]`` tag where present.
+
+    Color scheme:
+        - INFO/DEBUG:     Plain black (no color)
+        - WARNING:        Yellow (attention needed, not critical)
+        - ERROR:          Red (action required)
+        - CRITICAL:       Bold red (urgent failure)
     """
 
     RESET = "\033[0m"
     BOLD = "\033[1m"
-    BLUE = "\033[34m"
     RED = "\033[31m"
+    YELLOW = "\033[33m"
 
-    def __init__(self, *args, use_color: bool = True, **kwargs):
+    def __init__(self, *args, use_color: bool = True, compact: bool = True,
+                 max_width: int = 90, **kwargs):
         super().__init__(*args, **kwargs)
         self._use_color = use_color
+        self._compact = compact
+        self._max_width = int(max_width)
+        self._msg_count = 0
+        self._in_section = False   # a banner has opened a pipeline section
+        self._last_kind = None     # "banner" | "step" | "msg"
+
+    @staticmethod
+    def _kind(msg: str) -> str:
+        first = msg.lstrip().split("\n")[0] if msg else ""
+        if first[:1] in ("-", "+", "="):
+            return "banner"
+        if (
+            first.startswith("[")
+            and first.rstrip().endswith("]")
+            and "\n" not in msg.strip()
+        ):
+            return "step"
+        return "msg"
+
+    @staticmethod
+    def _align_continuation(msg: str, col: int) -> str:
+        """Indent continuation lines of a multi-line message to column *col*."""
+        if "\n" not in msg:
+            return msg
+        head, *tail = msg.split("\n")
+        pad = " " * col
+        return "\n".join([head] + [(pad + ln) if ln.strip() else ln for ln in tail])
+
+    def _format_info(self, record: logging.LogRecord, msg_clean: str) -> str:
+        self._msg_count += 1
+        first_ever = self._msg_count == 1
+        kind = self._kind(msg_clean)
+
+        if kind == "banner":
+            self._in_section = True
+            lead = "" if first_ever else "\n"
+        elif kind == "step" and self._last_kind != "banner":
+            # Sub-step markers get a blank line unless a banner just opened.
+            lead = "" if first_ever else "\n"
+        else:
+            lead = ""
+        base = f"{lead}{msg_clean}"
+
+        self._last_kind = kind
+        return base
+
+    def _format_leveled(self, record: logging.LogRecord, msg_clean: str) -> str:
+        label = f"[{record.levelname}]"
+        msg_clean = self._align_continuation(msg_clean, len(label) + 1)
+        base = f"{label} {msg_clean}"
+        self._msg_count += 1
+        # Warnings and errors get a leading blank line so they stand out from
+        # the surrounding routine output; DEBUG lines stay dense.
+        if self._msg_count > 1 and record.levelno >= logging.WARNING:
+            base = f"\n{base}"
+        self._last_kind = "msg"
+        return base
 
     def format(self, record: logging.LogRecord) -> str:
         msg_raw = record.getMessage()
-        msg_clean = normalize_log_message(msg_raw)
+        # Reserve room for the "[LEVEL] " tag _format_leveled prepends so
+        # tagged lines stay within max_width as well.
+        tag_len = 0
+        if not self._compact or record.levelno >= logging.WARNING:
+            tag_len = len(record.levelname) + 3
+        msg_clean = normalize_log_message(
+            msg_raw, width=max(40, self._max_width - tag_len)
+        )
         old_msg, old_args = record.msg, record.args
         if msg_clean != msg_raw:
             record.msg = msg_clean
             record.args = ()
-        base = super().format(record)
+
+        # STATUS lines (stage banners, key measurements) render like INFO:
+        # no level tag, banner/step spacing rules apply.
+        if self._compact and record.levelno < logging.WARNING:
+            base = self._format_info(record, msg_clean)
+        else:
+            base = self._format_leveled(record, msg_clean)
+
         record.msg, record.args = old_msg, old_args
+
         if not self._use_color:
             return base
 
@@ -77,31 +323,157 @@ class ColoredLevelFormatter(logging.Formatter):
         if not use_color:
             return base
 
+        # Only warnings and errors get color - everything else is plain
         if record.levelno >= logging.CRITICAL:
             return f"{self.BOLD}{self.RED}{base}{self.RESET}"
         if record.levelno >= logging.ERROR:
-            return f"{self.BOLD}{self.RED}{base}{self.RESET}"
+            return f"{self.RED}{base}{self.RESET}"
         if record.levelno >= logging.WARNING:
-            # Keep warnings high-contrast without extra color coding.
-            return f"{self.BOLD}{base}{self.RESET}"
-        if record.levelno >= logging.DEBUG:
-            # Debug output: blue for quick visual scanning.
-            return f"{self.BLUE}{base}{self.RESET}"
+            return f"{self.YELLOW}{base}{self.RESET}"
 
-        # INFO/default: plain text (terminal default color, typically black/white).
         return base
+
+
+# Common non-ASCII symbols mapped to plain-ASCII equivalents so log output
+# stays readable in any terminal and grep-friendly in log files.
+_ASCII_TRANSLATE = {
+    ord("\u00b1"): "+/-",   # plus-minus
+    ord("\u00d7"): "x",     # multiplication sign
+    ord("\u00b0"): "deg",   # degree sign
+    ord("\u00b5"): "u",     # micro sign
+    ord("\u03bc"): "u",     # greek mu
+    ord("\u03c3"): "sigma",
+    ord("\u0394"): "Delta",
+    ord("\u03b4"): "delta",
+    ord("\u03b1"): "alpha",
+    ord("\u03b2"): "beta",
+    ord("\u03b3"): "gamma",
+    ord("\u03bb"): "lambda",
+    ord("\u03bd"): "nu",
+    ord("\u03b8"): "theta",
+    ord("\u03c6"): "phi",
+    ord("\u03c7"): "chi",
+    ord("\u03c0"): "pi",
+    ord("\u03a3"): "Sigma",
+    ord("\u2192"): "->",    # rightwards arrow
+    ord("\u2190"): "<-",    # leftwards arrow
+    ord("\u2194"): "<->",   # left right arrow
+    ord("\u2212"): "-",     # minus sign
+    ord("\u2265"): ">=",
+    ord("\u2264"): "<=",
+    ord("\u2260"): "!=",
+    ord("\u2248"): "~=",
+    ord("\u221e"): "inf",
+    ord("\u221a"): "sqrt",
+    ord("\u2013"): "-",     # en dash
+    ord("\u2014"): "-",     # em dash
+    ord("\u2026"): "...",   # ellipsis
+    ord("\u2018"): "'",
+    ord("\u2019"): "'",
+    ord("\u201c"): '"',
+    ord("\u201d"): '"',
+    ord("\u2022"): "-",     # bullet
+    ord("\u00b7"): ".",     # middle dot
+}
+
+
+def _to_ascii(text: str) -> str:
+    """Replace known symbols with ASCII and drop anything else non-ASCII."""
+    text = text.translate(_ASCII_TRANSLATE)
+    # NFKD folds accented letters (e.g. e-acute -> e) before the strip.
+    text = unicodedata.normalize("NFKD", text)
+    return text.encode("ascii", "ignore").decode("ascii")
+
+
+def _is_metric_dense(line: str) -> bool:
+    """Heuristic for stat-dump lines (key=value lists, pipe-separated
+    segments) that read badly when wrapped at arbitrary word gaps."""
+    return line.count("=") >= 3 or line.count("|") >= 2
+
+
+_METRIC_KEY = re.compile(r"^[(\[]?[A-Za-z_][\w.\[\]()]{0,40}=")
+
+
+def _metric_atoms(s: str):
+    """Split a metric-dense line into atoms, each starting at a logical
+    boundary: a '|' separator, a 'key=' token, or the token after a
+    comma.  Parenthesised groups (e.g. '(dx=1, dy=2)') stay together.
+    Original whitespace is preserved inside atoms."""
+    toks = re.split(r"(?<=\s)(?=\S)", s)
+    atoms, cur, depth = [], [], 0
+    for tok in toks:
+        t = tok.strip()
+        opens = t.count("(") + t.count("[") - t.count(")") - t.count("]")
+        boundary = depth <= 0 and (t == "|" or bool(_METRIC_KEY.match(t)))
+        if boundary and cur:
+            atoms.append("".join(cur))
+            cur = []
+        cur.append(tok)
+        depth += opens
+        if depth <= 0 and t.endswith(",") and cur:
+            atoms.append("".join(cur))
+            cur = []
+    if cur:
+        atoms.append("".join(cur))
+    return atoms
+
+
+def _wrap_metric_line(ln: str, width: int, indent: str) -> list[str]:
+    """Wrap a stat-dump line at metric boundaries, packing whole atoms
+    per line and aligning continuations under the first value after a
+    'Label:' prefix.  Returns None when the line has too few atoms to
+    benefit (caller falls back to plain textwrap)."""
+    atoms = _metric_atoms(ln.strip())
+    if len(atoms) < 2:
+        return None
+    m = re.match(r"^([^\s][^:]{0,50}?:)(\s+)", ln.strip())
+    cont_col = len(indent) + len(m.group(0)) if m else 0
+    if not (0 < cont_col <= width // 2):
+        cont_col = len(indent) + 2
+    cont = " " * cont_col
+
+    # cur is either pure indentation or ends with a separator space, so
+    # atoms can always be appended directly.
+    out, cur = [], indent
+    for a in atoms:
+        piece = a.strip()
+        if not piece:
+            continue
+        if len(cur + piece) <= width:
+            cur += piece + " "
+            continue
+        out.append(cur.rstrip())
+        if len(piece) > width - cont_col:
+            # Single atom wider than the budget: hard-wrap it.
+            out.extend(
+                textwrap.wrap(
+                    piece,
+                    width=width,
+                    initial_indent=cont,
+                    subsequent_indent=cont,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+            )
+            cur = cont
+        else:
+            cur = cont + piece + " "
+    if cur.strip():
+        out.append(cur.rstrip())
+    return out
 
 
 def normalize_log_message(message: str, width: int = 150) -> str:
     """
     Normalize log message formatting for readability and consistency.
 
+    - Transliterates non-ASCII symbols to plain ASCII.
     - Converts tabs to spaces.
     - Trims trailing whitespace.
     - Collapses repeated blank lines.
     - Soft-wraps long lines to a fixed width with indentation preserved.
     """
-    text = str(message).replace("\t", "    ")
+    text = _to_ascii(str(message)).replace("\t", "    ")
     lines = [ln.rstrip() for ln in text.splitlines()]
     if text.endswith("\n"):
         # Preserve intentional trailing spacer lines from banner-style messages.
@@ -128,12 +500,17 @@ def normalize_log_message(message: str, width: int = 150) -> str:
             continue
         indent_len = len(ln) - len(ln.lstrip(" "))
         indent = " " * indent_len
+        if _is_metric_dense(ln):
+            dense = _wrap_metric_line(ln, width, indent)
+            if dense is not None:
+                wrapped.extend(dense)
+                continue
         wrapped_ln = textwrap.fill(
             ln.strip(),
             width=width,
             initial_indent=indent,
             subsequent_indent=indent + "  ",
-            break_long_words=False,
+            break_long_words=True,
             break_on_hyphens=False,
         )
         wrapped.extend(wrapped_ln.splitlines())
@@ -143,21 +520,128 @@ def normalize_log_message(message: str, width: int = 150) -> str:
     return "\n".join(wrapped)
 
 
-class LogMessageNormalizeFilter(logging.Filter):
-    """Filter that normalizes message text before emission."""
+# Lines that external binaries print on every run but carry no actionable
+# information for this pipeline (single-threaded execution is enforced by
+# the subprocess environment anyway).
+_SUBPROCESS_LOG_NOISE = (
+    "compiled using a version of the ATLAS library without support for multithreading",
+)
 
-    def __init__(self, width: int = 150):
+
+def strip_subprocess_noise(text: str) -> str:
+    """Remove known-benign noise lines from captured subprocess output."""
+    kept = [
+        ln for ln in str(text).splitlines()
+        if ln.strip() and not any(noise in ln for noise in _SUBPROCESS_LOG_NOISE)
+    ]
+    return "\n".join(kept)
+
+
+def clean_subprocess_log(path) -> None:
+    """Drop known-benign noise lines from a captured subprocess log file."""
+    try:
+        with open(path, "r", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    kept = [
+        ln for ln in lines
+        if not any(noise in ln for noise in _SUBPROCESS_LOG_NOISE)
+    ]
+    if len(kept) != len(lines):
+        with open(path, "w") as f:
+            f.write("\n".join(kept) + "\n")
+
+
+class LogMessageNormalizeFilter(logging.Filter):
+    """Filter that normalizes message text before emission.
+
+    ``width`` is the rendered line budget.  When the handler's formatter
+    prepends a per-record prefix, ``prefix_fmt`` reserves space for it so
+    the emitted line still fits ``width``:
+
+    - ``"{levelname} - "`` for plain ``%(levelname)s - %(message)s``
+      handlers (prefix on every level -> ``prefix_min_level=0``).
+    - ``"[{levelname}] "`` for the compact ColoredLevelFormatter
+      convention (tag only at WARNING+).
+
+    ``extra_reserve`` covers additional fixed-width columns such as
+    ``%(asctime)s`` timestamps.
+    """
+
+    def __init__(
+        self,
+        width: int = 150,
+        prefix_fmt: str | None = None,
+        prefix_min_level: int = logging.WARNING,
+        extra_reserve: int = 0,
+    ):
         super().__init__()
         self.width = int(width)
+        self.prefix_fmt = prefix_fmt
+        self.prefix_min_level = int(prefix_min_level)
+        self.extra_reserve = int(extra_reserve)
+
+    def _line_budget(self, record: logging.LogRecord) -> int:
+        budget = self.width - self.extra_reserve
+        if self.prefix_fmt and record.levelno >= self.prefix_min_level:
+            budget -= len(self.prefix_fmt.format(levelname=record.levelname))
+        return max(40, budget)
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            normalized = normalize_log_message(record.getMessage(), width=self.width)
+            normalized = normalize_log_message(
+                record.getMessage(), width=self._line_budget(record)
+            )
             record.msg = normalized
             record.args = ()
         except Exception:
             pass
         return True
+
+
+def cap_console_lines(
+    handlers,
+    width: int = 90,
+    prefix_fmt: str | None = "{levelname} - ",
+    extra_reserve: int = 0,
+) -> None:
+    """Attach a 90-column normalize filter to plain-format console handlers.
+
+    For handlers using ``logging.Formatter`` directly (basicConfig fallback
+    setups), where neither ColoredLevelFormatter nor PlainFormatter performs
+    the wrapping.  ``prefix_fmt`` should mirror the handler's level prefix
+    and ``extra_reserve`` any fixed columns such as ``%(asctime)s``.
+    """
+    for h in handlers:
+        h.addFilter(
+            LogMessageNormalizeFilter(
+                width=width,
+                prefix_fmt=prefix_fmt,
+                prefix_min_level=0,
+                extra_reserve=extra_reserve,
+            )
+        )
+
+
+def silence_noisy_loggers(level: int = logging.WARNING) -> None:
+    """
+    Clamp third-party loggers whose DEBUG output floods the log file.
+
+    With the root logger at DEBUG (so the per-image log file keeps the
+    complete diagnostic record), library internals propagate to the
+    handlers.  matplotlib alone emits ~50k findfont/locator lines per
+    image; none of it is diagnostically useful.
+    """
+    for name in (
+        "matplotlib",
+        "PIL",
+        "urllib3",
+        "requests",
+        "filelock",
+        "charset_normalizer",
+    ):
+        logging.getLogger(name).setLevel(level)
 
 
 def configure_console_logging(
@@ -173,15 +657,159 @@ def configure_console_logging(
 
     handler = logging.StreamHandler()
     handler.setLevel(level)
-    handler.addFilter(LogMessageNormalizeFilter(width=150))
     if formatter is None:
-        formatter = ColoredLevelFormatter(
-            fmt="%(asctime)s - %(levelname)s - %(message)s",
-            datefmt="%H:%M:%S",
-            use_color=use_color,
+        # ColoredLevelFormatter wraps lines itself (max_width=90).
+        formatter = ColoredLevelFormatter(use_color=use_color)
+    elif not isinstance(formatter, ColoredLevelFormatter):
+        # Stock/plain formatters do not wrap; reserve the "LEVEL - " prefix.
+        handler.addFilter(
+            LogMessageNormalizeFilter(
+                width=90, prefix_fmt="{levelname} - ", prefix_min_level=0
+            )
         )
     handler.setFormatter(formatter)
     return handler
+
+
+# Verbosity names accepted by ``global_verbose_level`` (YAML) and the
+# ``--verbose-level`` CLI option.  Numeric values pass straight through.
+#
+# Tiers: quiet(0) -> WARNING+, normal(1) -> STATUS+, verbose(2) -> INFO+,
+# debug(3) -> DEBUG.  The per-image log FILE always records DEBUG+
+# regardless of the console tier, so nothing is ever lost from the log.
+VERBOSE_LEVELS = {
+    "quiet": 0,
+    "warning": 0,
+    "error": 0,
+    "normal": 1,
+    "verbose": 2,
+    "info": 2,
+    "debug": 3,
+}
+
+# Custom level between INFO and WARNING: user-facing progress and key
+# scientific results.  Shows on the console in "normal" mode while the
+# bulk of INFO diagnostics stays in the log file / verbose console.
+STATUS = 25
+logging.addLevelName(STATUS, "STATUS")
+
+
+def log_status(msg: str, *args, ui: bool = False, **kwargs) -> None:
+    """Log a user-facing progress/result message at STATUS level.
+
+    ``ui=True`` marks the record so the console UI filter passes it even
+    at quiet level (reserved for the final result card).
+    """
+    extra = kwargs.pop("extra", None) or {}
+    if ui:
+        extra = {**extra, "ui": True}
+    logging.getLogger(__name__).log(STATUS, msg, *args, extra=extra, **kwargs)
+
+
+class ConsoleLevelFilter(logging.Filter):
+    """
+    Pass records at or above the console level, plus any record carrying
+    ``ui=True`` (final results always reach the console, even in quiet).
+    """
+
+    def __init__(self, min_level: int):
+        super().__init__()
+        self.min_level = min_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= self.min_level or bool(
+            getattr(record, "ui", False)
+        )
+
+
+def resolve_verbose_level(value) -> int:
+    """
+    Normalize a verbosity setting to the 0/1/2 integer convention.
+
+    Accepts ints (clamped to 0-3) or names: ``quiet``/``warning``/``error``
+    -> 0, ``normal`` -> 1, ``verbose``/``info`` -> 2, ``debug`` -> 3.
+    Unrecognised values fall back to 1 (normal).
+    """
+    if isinstance(value, str):
+        named = VERBOSE_LEVELS.get(value.strip().lower())
+        if named is not None:
+            return named
+        try:
+            value = int(value)
+        except ValueError:
+            return 1
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return 0 if v <= 0 else (3 if v >= 3 else v)
+
+
+def verbose_to_log_level(value) -> int:
+    """
+    Map a verbosity value (0/1/2/3 or name) to a ``logging`` level.
+
+    Kept for backward compatibility -- prefer verbose_to_console_level for
+    the console handler; the log file should always use DEBUG.
+    """
+    return verbose_to_console_level(value)
+
+
+def verbose_to_console_level(value) -> int:
+    """Map a verbosity tier to the console handler threshold."""
+    return {
+        0: logging.WARNING,
+        1: STATUS,
+        2: logging.INFO,
+        3: logging.DEBUG,
+    }[resolve_verbose_level(value)]
+
+
+def set_verbose_level(value) -> int:
+    """
+    Apply a verbosity setting to the root logger and console handlers.
+
+    Only stream (console) handlers are re-levelled -- FileHandlers stay at
+    DEBUG so the log file always keeps the complete diagnostic record.
+    Returns the normalized 0-3 verbosity tier.
+    """
+    level = verbose_to_console_level(value)
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    for handler in root.handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.setLevel(logging.DEBUG)
+            continue
+        # Console handlers stay at DEBUG; ConsoleLevelFilter owns the
+        # effective threshold so ui-tagged records always pass.
+        handler.setLevel(logging.DEBUG)
+        for flt in handler.filters:
+            if isinstance(flt, ConsoleLevelFilter):
+                flt.min_level = level
+    return resolve_verbose_level(value)
+
+
+@contextmanager
+def quiet_root_logger(level: int = logging.WARNING):
+    """
+    Temporarily raise the root logger's level.
+
+    Third-party helpers that emit per-step chatter straight through the
+    root logger (e.g. spalipy's "Processing source entry 0") can be wrapped
+    in this context so only warnings and errors reach the console.  The
+    level is left untouched on DEBUG runs (so verbose output is preserved)
+    and when it is already at or above *level*.
+    """
+    root = logging.getLogger()
+    prev = root.level
+    if prev <= logging.DEBUG or prev >= level:
+        yield
+        return
+    root.setLevel(level)
+    try:
+        yield
+    finally:
+        root.setLevel(prev)
 
 
 SUPPORTED_FILTER_GROUPS = {
@@ -217,6 +845,9 @@ def get_supported_photometric_filters() -> tuple:
 
 
 # Composite YAML keys (optical + near-IR) that are not one single family letter-set.
+# Kept for backward compat: the same strings also parse via the generic
+# per-character path below, but the lowercased lookup additionally accepts
+# case variants such as "GRIZJHK" or "grizjhk".
 _COMPOSITE_FILTER_GROUP_KEYS = {
     "grizjhk": tuple("grizJHK"),  # g,r,i,z,J,H,K (matches common refcat / Pan-STARRS+2MASS style maps)
     "ugrizjhk": tuple("ugrizJHK"),  # u,g,r,i,z,J,H,K
@@ -224,18 +855,52 @@ _COMPOSITE_FILTER_GROUP_KEYS = {
     "ugrizjhkYw": tuple("ugrizJHKYw"),  # u,g,r,i,z,J,H,K,Y,w (extended filter set)
 }
 
+# Band letters are unique across families (u vs U are different bands), so a
+# mixed key like "uRI" parses unambiguously one char at a time.
+_ALL_BAND_CHARS = frozenset(SUPPORTED_PHOTOMETRIC_FILTERS)
+
+_GROUP_KEY_SEPARATORS = re.compile(r"[,;|+\-/\s]+")
+
+
+def _parse_band_token(token):
+    """Parse one separator-free token into bands, or None if any char is unknown.
+
+    Case is significant: 'r' is ugriz r and 'R' is UBVRI R, so band
+    letters are always used exactly as written. The only case fallback
+    fires when NO character is a valid band ("jhk" -> JHK, "bv" -> BV);
+    uppercasing can then only turn non-band letters into bands, never
+    swap one band for another. A token mixing real band letters with
+    unknown ones fails ("bvri", "uXQ") rather than guessing at case.
+    """
+    if not token:
+        return None
+    if all(ch in _ALL_BAND_CHARS for ch in token):
+        return tuple(dict.fromkeys(token))
+    if not any(ch in _ALL_BAND_CHARS for ch in token):
+        upper = token.upper()
+        if all(ch in _ALL_BAND_CHARS for ch in upper):
+            return tuple(dict.fromkeys(upper))
+    return None
+
 
 def parse_supported_filter_group_key(group_key):
     """
     Parse a mapping-group key into explicit supported bands.
 
     Accepted examples:
-      - Full groups: "UBVRI", "ugriz", "JHK"
-      - Valid subsets/singletons of one family: "griz", "u", "BV", "HK"
-      - Composite keys: "grizJHK", "ugrizJHK" (optical + JHK for catalog.use_catalog maps)
+      - Full groups: "UBVRI", "ugriz", "JHK", "extended"
+      - Any mix of band letters, families may mix: "griz", "u", "BV",
+        "uRI", "rJ", "gBVw"
+      - Separators as token boundaries: "u, RI", "u|JHK"
+      - Lowercase words with no valid band letters get an uppercase
+        rescue: "jhk" -> JHK, "bv" -> BV. Case is otherwise exact:
+        "bvri" fails because r and i are real band letters - the rescue
+        never swaps one band for another (no r->R or u->U guessing).
+      - Composite keys: "grizJHK", "ugrizJHK" (optical + JHK for
+        catalog.use_catalog maps), incl. case variants via the composite
+        table ("GRIZJHK", "grizjhk")
     Rejected:
-      - Mixed-family tokens: "uBV", "rJ"
-      - Unsupported tokens/bands.
+      - Keys containing unknown band letters: "xyz", "uXQ"
     """
     if group_key is None:
         return None
@@ -243,7 +908,7 @@ def parse_supported_filter_group_key(group_key):
     if key == "":
         return None
 
-    # Fast path for canonical full-group keys.
+    # Canonical full-group keys take the fast path.
     if key in SUPPORTED_FILTER_GROUPS:
         return tuple(SUPPORTED_FILTER_GROUPS[key])
 
@@ -251,18 +916,45 @@ def parse_supported_filter_group_key(group_key):
     if comp is not None:
         return comp
 
-    # Support subsets of exactly one canonical family.
-    for family_bands in SUPPORTED_FILTER_GROUPS.values():
-        fam_set = set(family_bands)
-        if all(ch in fam_set for ch in key):
-            ordered = []
-            seen = set()
-            for ch in key:
-                if ch not in seen:
-                    ordered.append(ch)
-                    seen.add(ch)
-            return tuple(ordered)
-    return None
+    bands = []
+    for token in _GROUP_KEY_SEPARATORS.split(key):
+        if not token:
+            continue
+        parsed = _parse_band_token(token)
+        if parsed is None:
+            # Reject the whole key: a partially valid key silently mapping
+            # fewer bands than the user wrote is worse than no match.
+            return None
+        for b in parsed:
+            if b not in bands:
+                bands.append(b)
+    return tuple(bands) if bands else None
+
+
+def invalid_use_catalog_keys(use_catalog):
+    """
+    Return ``use_catalog`` mapping keys that can never match a filter band.
+
+    A key is usable if it normalizes to a single supported band (the
+    exact-match path) or parses to a supported band group. Keys containing
+    unknown band letters (e.g. "uXQ") satisfy neither, so images for
+    those bands silently fall back to the "default" entry.
+    """
+    bad = []
+    if not isinstance(use_catalog, dict):
+        return bad
+    for key, value in use_catalog.items():
+        if value is None:
+            continue
+        key_s = str(key).strip()
+        if key_s.lower() in {"default", "*", "all"}:
+            continue
+        if (
+            normalize_photometric_filter_name(key_s) is None
+            and parse_supported_filter_group_key(key_s) is None
+        ):
+            bad.append(key_s)
+    return bad
 
 
 def normalize_photometric_filter_name(filter_name, available_filters=None):
@@ -302,21 +994,17 @@ def normalize_photometric_filter_name(filter_name, available_filters=None):
     # If available_filters is provided, accept any filter present there
     if available_filters is not None:
         available_set = set(str(f).strip() for f in available_filters)
-        # Exact match first
         if token in available_set:
             return token
-        # Case-insensitive match
+        # Case-insensitive match returns the catalog's own casing.
         if token.lower() in {f.lower() for f in available_set}:
-            # Return the exact case from available_filters
             for f in available_set:
                 if f.lower() == token.lower():
                     return f
     
-    # Standard photometric filters
     if token in SUPPORTED_PHOTOMETRIC_FILTERS:
         return token
 
-    # Common aliases for standard filters
     token_l = token.lower()
     aliases = {
         "up": "u",
@@ -330,7 +1018,7 @@ def normalize_photometric_filter_name(filter_name, available_filters=None):
         "j": "J",
         "h": "H",
         "k": "K",
-        # Additional common variations
+        # Non-photometric header values map to None.
         "clear": None,
         "open": None,
         "luminance": None,
@@ -341,15 +1029,15 @@ def normalize_photometric_filter_name(filter_name, available_filters=None):
     if result is not None:
         return result
     
-    # If available_filters is provided, try to find close matches
+    # available_filters also enables fuzzy matching, then a final exact
+    # check - the exact check is what lets custom catalogs use arbitrary
+    # filter names.
     if available_filters is not None:
         import difflib
         close_matches = difflib.get_close_matches(token, list(available_set), n=1, cutoff=0.8)
         if close_matches:
             return close_matches[0]
-        
-        # For custom catalogs, accept the original token if it's in the available filters
-        # This is the key change that allows arbitrary filter names
+
         if token in available_set:
             return token
     
@@ -395,6 +1083,63 @@ def odd(n: int) -> int:
     """Return n if odd, else n+1."""
     n = int(n)
     return n + (n % 2 == 0)
+
+
+def normalize_target_name(name):
+    """Strip transient-name prefixes (SN, AT, TDE) so catalog cache keys are stable.
+
+    Both autophot.py (pre-fetch) and main.py (per-image) must use the same
+    normalized name, otherwise the cached CSV is saved under one directory
+    (e.g. ``sn2026yos/``) but looked up under another (``2026yos/``),
+    causing redundant Gaia archive downloads.
+    """
+    if name and isinstance(name, str):
+        return name.replace("TDE", "").replace("SN", "").replace("AT", "")
+    return name
+
+
+def canonical_target_name(input_yaml):
+    """Resolve the target-name label used for catalog cache paths.
+
+    Applies the same fallback everywhere (driver pre-fetch, per-image
+    main.py, catalog downloads): the configured name with transient
+    prefixes stripped, ``"Transient"`` when only coordinates exist, or
+    ``"Center of Field"`` when neither is set.  Blank names count as
+    unset, matching the check_tns conflict guard.
+    """
+    name = input_yaml.get("target_name")
+    if name is not None and str(name).strip() != "":
+        return normalize_target_name(str(name).strip())
+    if (
+        input_yaml.get("target_ra") is not None
+        and input_yaml.get("target_dec") is not None
+    ):
+        return "Transient"
+    return "Center of Field"
+
+
+def display_target_name(input_yaml):
+    """Return the most complete target name for user-facing output.
+
+    Prefers the TNS-resolved ``name_prefix`` + ``objname`` pair (e.g.
+    ``SN 2024pba``) over the configured ``target_name``, which may be a
+    bare IAU name like ``2024pba``.  A user-supplied prefix is also
+    normalised to ``SN 2024pba`` style (prefix, space, name).  Falls back
+    to :func:`canonical_target_name` when no name is available.
+    """
+    objname = str(input_yaml.get("objname") or "").strip()
+    prefix = str(input_yaml.get("name_prefix") or "").strip()
+    if objname:
+        return f"{prefix} {objname}" if prefix else objname
+
+    name = input_yaml.get("target_name")
+    if name is not None and str(name).strip() != "":
+        name = str(name).strip()
+        m = re.match(r"^(SN|AT|TDE)\s*(\S.*)$", name, flags=re.IGNORECASE)
+        if m:
+            return f"{m.group(1).upper()} {m.group(2).strip()}"
+        return name
+    return canonical_target_name(input_yaml)
 
 
 def format_exception_origin(exc: BaseException) -> str:
@@ -502,13 +1247,123 @@ def pad_ones(mask, padding):
     if padding <= 0:
         return mask
 
-    # Compute the distance transform from the zero regions
+    # Distance is measured from the zero regions, so masked pixels within
+    # `padding` px of an existing 1 get set.
     distance = distance_transform_edt(1 - mask)
 
-    # Expand the mask where the distance is within the padding radius
     expanded_mask = (distance <= padding).astype(np.uint8)
 
     return expanded_mask
+
+
+def drop_mask_components_at_positions(
+    mask,
+    positions,
+    max_area_px=150,
+    max_extent_px=None,
+    reference_image=None,
+):
+    """
+    Drop small connected components of *mask* that cover a listed position.
+
+    A compact defect blob sitting exactly on a known source (e.g. a
+    transient misread as a cosmic ray) is a suspect flag, not a real data
+    hole.  Components larger than ``max_area_px`` (chip gaps, trails,
+    columns, bleed) are kept - those are genuine defects wherever they
+    fall.  ``max_extent_px`` adds a compactness check: every pixel of the
+    component must lie within that distance of the position, so an
+    elongated defect (dead column, trail) that merely crosses the
+    position is never dropped even when its area is small.  When
+    ``reference_image`` is given, a component is dropped only if the
+    image pixel at the position is finite: a flag covering real data is
+    suspect, while a flag covering genuinely missing data is harmless to
+    keep (the pixel is invalid either way).
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        2-D boolean/int mask (True/1 = masked).
+    positions : iterable of (x, y)
+        Pixel positions to protect.  Non-finite and out-of-frame
+        positions are skipped.
+    max_area_px : int
+        Maximum component area in pixels eligible for removal.
+    max_extent_px : float or None
+        Optional maximum allowed distance (pixels) between the position
+        and any pixel of its component.  None disables the extent check.
+    reference_image : np.ndarray or None
+        Optional image on the same grid; the component is dropped only
+        when ``reference_image`` is finite at the position.
+
+    Returns
+    -------
+    (mask, dropped) : (np.ndarray, list of (x, y))
+        The mask with eligible components removed (a copy when anything
+        changed) and the list of positions whose components were dropped.
+    """
+    from scipy.ndimage import label as _ndi_label
+
+    mask = np.asarray(mask)
+    if mask.ndim != 2 or not np.any(mask):
+        return mask, []
+
+    if max_extent_px is not None:
+        try:
+            max_extent_px = float(max_extent_px)
+        except (TypeError, ValueError):
+            max_extent_px = None
+        if max_extent_px is not None and (
+            not np.isfinite(max_extent_px) or max_extent_px <= 0
+        ):
+            max_extent_px = None
+
+    valid = []
+    for pos in positions or []:
+        try:
+            px, py = float(pos[0]), float(pos[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if not (np.isfinite(px) and np.isfinite(py)):
+            continue
+        ix, iy = int(round(px)), int(round(py))
+        if 0 <= ix < mask.shape[1] and 0 <= iy < mask.shape[0]:
+            valid.append((px, py, ix, iy))
+    if not valid:
+        return mask, []
+
+    lab, n_lab = _ndi_label(np.asarray(mask, dtype=bool))
+    if n_lab == 0:
+        return mask, []
+    areas = np.bincount(lab.ravel(), minlength=n_lab + 1)
+
+    to_drop = np.zeros(n_lab + 1, dtype=bool)
+    dropped = []
+    for px, py, ix, iy in valid:
+        comp = lab[iy, ix]
+        if comp == 0:
+            continue
+        if areas[comp] > max_area_px:
+            continue
+        if max_extent_px is not None:
+            ys, xs = np.nonzero(lab == comp)
+            furthest = np.sqrt(
+                np.max((xs - px) ** 2 + (ys - py) ** 2)
+            )
+            if furthest > max_extent_px:
+                continue
+        if reference_image is not None and not np.isfinite(
+            np.asarray(reference_image)[iy, ix]
+        ):
+            continue
+        if not to_drop[comp]:
+            to_drop[comp] = True
+            dropped.append((px, py))
+
+    if not dropped:
+        return mask, []
+    out = mask.copy()
+    out[to_drop[lab]] = False
+    return out, dropped
 
 
 def set_size(width, aspect=1, fraction=1):
@@ -533,18 +1388,15 @@ def set_size(width, aspect=1, fraction=1):
 
     """
 
-    # Width of figure
     fig_width_pt = width * fraction
 
-    # Convert from pt to inches
+    # pt -> inches (1 pt = 1/72.27 in)
     inches_per_pt = 1 / 72.27
 
-    # Golden ratio to set aesthetic figure height
+    # Golden ratio for aesthetic figure height.
     golden_ratio = (5**0.5 + 1) / 2
 
-    # Figure width in inches
     fig_width_in = fig_width_pt * inches_per_pt
-    # Figure height in inches
     fig_height_in = fig_width_in / golden_ratio
 
     fig_dim = (fig_width_in, fig_height_in * aspect)
@@ -553,64 +1405,81 @@ def set_size(width, aspect=1, fraction=1):
 
 
 def convert_to_mjd_astropy(date_string):
-
+    """Parse a date string (ISOT or FITS format) and return MJD."""
     try:
-        # Try parsing with 'T' separator
+        # ISOT has a 'T' separator.
         t = Time(date_string, format="isot", scale="utc")
     except ValueError:
-        # If parsing fails, try without 'T' separator
+        # FITS format has no 'T'.
         t = Time(date_string, format="fits", scale="utc")
 
-    # Access the Modified Julian Date (MJD)
     mjd = t.mjd
 
     return mjd
 
 
-def get_image_stats(image, sigma=3, maxiters=None):
+def biweight_stdfunc(data, axis=None):
+    """biweight_scale wrapped for use as a sigma_clip/sigma_clipped_stats
+    ``stdfunc`` (masked-array aware, NaN tolerant)."""
+    if np.ma.isMaskedArray(data):
+        data = np.asarray(data.filled(np.nan))
+    return biweight_scale(np.asarray(data, dtype=float), axis=axis, ignore_nan=True)
 
-    # Perform sigma clipping and calculate mean, median, and MAD in one step
+
+def biweight_sky_sigma(data, mask=None):
+    """Sky-noise sigma via the biweight scale (c=9.0), matching photutils'
+    ``BiweightScaleBackgroundRMS`` used for the pipeline RMS map.
+
+    Preferred over ``mad_std`` for pixel noise: on heavily quantized images
+    (stacks stored on a coarse ADU lattice after lossy compression, e.g.
+    PS1 pswarp products) the median absolute deviation snaps to integer
+    multiples of the quantization step, turning the noise map into a
+    staircase with ~10% box-to-box artifacts.  The biweight scale averages
+    squared deviations, stays continuous on quantized data, and tolerates
+    unmasked source flux comparably well.
+    """
+    arr = np.asanyarray(data, dtype=float)
+    if np.ma.isMaskedArray(arr):
+        arr = np.asarray(arr.filled(np.nan))
+    if mask is not None:
+        arr = np.where(np.asarray(mask, dtype=bool), np.nan, arr)
+    try:
+        sig = float(biweight_scale(arr, ignore_nan=True))
+    except Exception:
+        sig = float("nan")
+    if not np.isfinite(sig) or sig <= 0:
+        finite = arr[np.isfinite(arr)]
+        sig = float(np.nanstd(finite)) if finite.size > 1 else float("nan")
+    return sig
+
+
+def get_image_stats(image, sigma=3, maxiters=None):
+    """Return sigma-clipped mean, median, and std for *image*."""
     mean_value, median_value, std_value = sigma_clipped_stats(
         image,
         sigma=sigma,
         maxiters=maxiters,
         # background=sigma,
-        cenfunc=np.nanmedian,  # Use nanmedian for the center function
-        stdfunc=mad_std,  # Use mad_std for the standard deviation function
+        cenfunc=np.nanmedian,
+        stdfunc=biweight_stdfunc,
     )
 
     return mean_value, median_value, std_value
 
 
 def calculate_bins(x, percentiles=[25, 75]):
-
+    """Compute a Freedman-Diaconis-style bin width for *x*."""
     try:
 
         if not np.any(np.isfinite(x)):
-            return "auto"  # Return default bins if no finite data
-        # Your normal bin calculation here
-        """
-        Calculate the number of bins for a histogram using the Freedman-Diaconis rule.
-    
-        Parameters:
-        x (array-like): Input data array or list of data values.
-    
-        Returns:
-        int: Number of bins to use for the histogram.
-        
-        The Freedman-Diaconis rule is used to determine an optimal number of bins
-        by considering the interquartile range (IQR) and the number of data points.
-        """
-        # Compute the 25th and 75th percentiles of the data
+            return "auto"  # default bins when there is no finite data
         q25, q75 = np.nanpercentile(x, percentiles)
 
-        # Calculate the interquartile range (IQR)
         iqr = q75 - q25
 
-        # Calculate the bin width using the Freedman-Diaconis rule
+        # Freedman-Diaconis bin width.
         bin_width = 2 * iqr * len(x) ** (-1 / 3)
 
-        # Determine the number of bins
         data_range = np.nanmax(x) - np.nanmin(x)
         bins = round(data_range / bin_width)
 
@@ -621,16 +1490,14 @@ def calculate_bins(x, percentiles=[25, 75]):
 
 
 def save_to_fits(data, output_filename):
+    """Write *data* to a FITS file as float32 (preserves NaNs)."""
     try:
-        # Use float32 to preserve NaNs (chip gaps) - integer dtypes cannot represent NaN
+        # float32 preserves NaNs (chip gaps); integer dtypes cannot.
         data_to_write = data.astype(np.float32) if data.dtype.kind != 'f' else data
-        # Create a PrimaryHDU object with the data
         hdu = fits.PrimaryHDU(data_to_write)
 
-        # Create an HDU list and append the PrimaryHDU
         hdulist = fits.HDUList([hdu])
 
-        # Write the HDU list to a FITS file
         hdulist.writeto(
             output_filename, overwrite=True, output_verify="silentfix+ignore"
         )
@@ -657,7 +1524,7 @@ def save_to_fits(data, output_filename):
 
 
 def get_distance_modulus(redshift, H0=70, omega=0.3):
-
+    """Return the distance modulus for *redshift* using a flat LambdaCDM cosmology."""
     cosmo = FlatLambdaCDM(H0=H0, Om0=omega)
     d = cosmo.luminosity_distance(redshift).value * 1e6
     dm = 5 * np.log10(d / 10)
@@ -666,16 +1533,20 @@ def get_distance_modulus(redshift, H0=70, omega=0.3):
 
 
 class SuppressStdout:
+    """Context manager that temporarily redirects stdout to /dev/null."""
 
     def __enter__(self):
         import sys, os
 
         self._original_stdout = sys.stdout
+        self._opened_devnull = True
         sys.stdout = open(os.devnull, "w")
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-
-        sys.stdout.close()
+        # Only close stdout if we opened it (i.e., os.devnull)
+        # Don't close permanently if it was already open
+        if self._opened_devnull:
+            sys.stdout.close()
         sys.stdout = self._original_stdout
 
 
@@ -692,11 +1563,14 @@ def beta_aperture(n, flux_aperture, npix, sigma, noise=0):
     n : float
         Detection threshold in sigma (e.g., 3 for 3*sigma).
     flux_aperture : float or np.ndarray
-        Total flux measured in the aperture.
+        Background-subtracted aperture flux in **per-second** units (e-/s),
+        matching ``Aperture.measure``'s ``flux_AP``.
     npix : int or float
-        Number of pixels in the aperture.
+        Geometric aperture area in pixels (same ``area`` as ``Aperture`` uses
+        for background subtraction), *not* the integer pixel count of a mask.
     sigma : float
-        Background standard deviation per pixel.
+        Per-pixel background RMS in **per-second** units (e-/s per pixel),
+        matching ``noiseSky`` from ``Aperture.measure``.
     noise : float, optional
         Mean background offset if not background-subtracted (default 0).
 
@@ -706,18 +1580,20 @@ def beta_aperture(n, flux_aperture, npix, sigma, noise=0):
         Detection confidence in [0, 1]. Higher values indicate a more
         confident detection above the threshold.
     """
-    # Ensure non-negative flux after background subtraction
-    source_flux = np.maximum(flux_aperture - noise * npix, 0.0)
+    # abs() keeps detection confidence symmetric: a -5 sigma dip on a
+    # difference image is as significant as a +5 sigma peak (consistent
+    # with the beta_psf fix, BUG-5).  The sign is checked separately in
+    # the detection logic (main.py is_detection), so this only affects
+    # the confidence value, not the detection decision.
+    source_flux = np.abs(flux_aperture - noise * npix)
 
-    # Total noise in the aperture
     sigma_aperture = sigma * np.sqrt(npix)
-    # Avoid division by zero
+    # Guard against division by zero.
     sigma_aperture = np.maximum(sigma_aperture, np.finfo(float).tiny)
 
     # z-score: how far the measured flux is above the n-sigma threshold
     z = ((n * sigma_aperture) - source_flux) / (np.sqrt(2) * sigma_aperture)
 
-    # Detection confidence; clip to [0, 1] for a proper probability
     beta = np.clip(0.5 * (1 - erf(z)), 0.0, 1.0)
     return beta
 
@@ -746,55 +1622,247 @@ def beta_psf(n, flux_psf, flux_psf_err):
         Detection confidence in [0, 1]. Higher values indicate a more
         confident detection above the threshold.
     """
-    flux_psf = np.maximum(np.asarray(flux_psf, dtype=float), 0.0)
+    # |flux| keeps detection confidence symmetric (a -5 sigma dip is as
+    # significant as a +5 sigma peak); needed for inverted fits where
+    # flux_PSF is negative.
+    flux_abs = np.abs(np.asarray(flux_psf, dtype=float))
     err = np.maximum(np.asarray(flux_psf_err, dtype=float), np.finfo(float).tiny)
-    # Threshold flux = n * (1-sigma error); z-score for "flux above threshold"
-    z = (n * err - flux_psf) / (np.sqrt(2) * err)
+    # Threshold flux = n * (1-sigma error); z-score for "flux above threshold".
+    # z may overflow to +/-inf for extreme flux/error values; erf saturates
+    # there, so the result is still correct and the fp warning is noise.
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        z = (n * err - flux_abs) / (np.sqrt(2) * err)
     beta = np.clip(0.5 * (1 - erf(z)), 0.0, 1.0)
     return beta
 
 
-def border_msg(msg: str, body: str = "-", corner: str = "+") -> str:
+def log_step(msg: str) -> str:
     """
-    Generate a simple, readable banner string for logging.
+    One-line subheader for pipeline steps: ``---- X ----``.
+
+    Subordinate to ``border_msg`` section banners (``==== X ====``);
+    prefer for routine stages inside a major section.
+    """
+    return border_msg(msg, body="-")
+
+
+def _rule_line(title: str, char: str, width: int = 70) -> str:
+    """Centered title embedded in a full-width rule, e.g. ``=== X ===``."""
+    t = str(title).strip()
+    inner = width
+    if len(t) > inner - 2:
+        t = t[: inner - 5] + "..."
+    side = (inner - len(t) - 2) // 2
+    return f"{char * side} {t} {char * (inner - side - len(t) - 2)}"
+
+
+def border_msg(msg: str, body: str = "=", corner: str = "+",
+               metadata: str | None = None, width: int = 70, use_ansi: bool | None = None) -> str:
+    """
+    Section banner for major log sections: ``=== Title ===``.
+
+    Parameters
+    ----------
+    msg : str
+        Main section title (centered in a full-width '=' rule)
+    body : str
+        Rule character (default '=')
+    corner : str
+        Unused; kept for backward compatibility with older call sites.
+    metadata : str | None
+        Optional second line, rendered as ``--- metadata ---``
+    width : int
+        Total banner width in characters
+    use_ansi : bool | None
+        Unused; kept for backward compatibility.
 
     Example:
-        >>> logging.info(border_msg("Filter check"))
-        # blank line above, then:
-        # ----------------
-        #  Filter check
-        # ----------------
+        logging.info(border_msg("Template Preparation", metadata="align=SWarp catalog=Gaia"))
     """
     text = str(msg).strip()
     if not text:
         return ""
+    rule = str(body or "=")[0]
+    lines = [_rule_line(text, rule, width)]
+    if metadata:
+        lines.append(_rule_line(str(metadata).strip(), "-", width))
+    # Leading newline separates the banner from dense output above it.
+    return "\n" + "\n".join(lines)
 
-    line = text
-    border = body * len(line)
 
-    # Bold the title line on interactive terminals.
-    # (ANSI sequences are ignored by non-TTY log capture.)
-    try:
-        use_bold = sys.stdout.isatty()
-    except Exception:
-        use_bold = False
-    if use_bold:
-        bold_prefix = "\033[1m"
-        reset_suffix = "\033[0m"
-        line = f"{bold_prefix}{line}{reset_suffix}"
+def ascii_kv(title: str, pairs, width: int = 70, framed: bool = False) -> str:
+    """
+    Key/value block with dotted leaders.
 
-    # Avoid leading newlines: most loggers prefix the first line with
-    # "<timestamp> - INFO - " and then print message. If the message starts
-    # with "\n", the "INFO -" portion appears blank, which looks messy.
-    # Instead, put separators at the end so the banner still reads cleanly.
-    return f"\n\n\n{border}\n{line}\n{border}\n\n"
+    pairs : iterable of (label, value) tuples; values are pre-formatted
+    strings.  With ``framed=False`` the block is a lightweight sub-section:
+
+        * Title
+          ------------------  ----------------
+          label ........... value
+
+    With ``framed=True`` it is wrapped in '=' rules for major blocks:
+
+        ============================ Title ============================
+          label ........... value
+        ================================================================
+    """
+    rows = [(str(k), str(v)) for k, v in pairs]
+    if not rows:
+        return ""
+    label_w = max(len(k) for k, _ in rows)
+    label_w = max(label_w, 8)
+    val_x = label_w + 8  # '  ' + label + ' ... ' gap
+    val_w = width - val_x - 2
+    lines = []
+    if framed:
+        lines.append(_rule_line(str(title), "=", width))
+    else:
+        lines.append(f"* {str(title).strip()}")
+        lines.append("  " + "-" * label_w + "  " + "-" * max(8, min(val_w, 24)))
+    for k, v in rows:
+        dots = "." * max(3, val_x - 2 - len(k) - 4)
+        line = f"  {k} {dots} {v}"
+        lines.append(line[:width] if len(line) > width else line)
+    if framed:
+        lines.append("=" * width)
+    return "\n" + "\n".join(lines)
+
+
+def ascii_table(title: str, headers, rows, width: int = 70) -> str:
+    """
+    Column table framed in '-' rules:
+
+        --------------------------- Title ----------------------------
+           Method     ZP      err      N
+           ------  -------  ------  ----
+           AP      24.547   0.003   159
+        -----------------------------------------------------------------
+    """
+    headers = [str(h) for h in headers]
+    rows = [[str(c) for c in r] for r in rows]
+    if not headers or not rows:
+        return ""
+    ncols = len(headers)
+    col_w = [len(h) for h in headers]
+    for r in rows:
+        for i in range(min(ncols, len(r))):
+            col_w[i] = max(col_w[i], len(r[i]))
+    body_w = 4 + sum(col_w) + 2 * ncols  # leading indent + columns + gaps
+    rule_w = min(max(width, body_w), max(width, 40))
+    lines = []
+    if title:
+        lines.append(_rule_line(str(title), "-", rule_w))
+    else:
+        lines.append("-" * rule_w)
+    lines.append(
+        "   " + "  ".join(h.ljust(col_w[i]) for i, h in enumerate(headers)).rstrip()
+    )
+    lines.append("   " + "  ".join("-" * col_w[i] for i in range(ncols)))
+    for r in rows:
+        cells = [r[i] if i < len(r) else "" for i in range(ncols)]
+        lines.append(
+            "   " + "  ".join(c.ljust(col_w[i]) for i, c in enumerate(cells)).rstrip()
+        )
+    lines.append("-" * rule_w)
+    return "\n" + "\n".join(lines)
+
+
+def ascii_card(title: str, lines, width: int = 70) -> str:
+    """
+    Framed free-text block for errors, warnings, and explanatory cards:
+
+        ============================ Title ============================
+          some explanatory line
+          another line
+        ================================================================
+    """
+    body = [str(l) for l in lines]
+    if not any(l.strip() for l in body):
+        return ""
+    out = [_rule_line(str(title), "=", width)]
+    out.extend(f"  {l[: width - 4]}" if l.strip() else "" for l in body)
+    out.append("=" * width)
+    return "\n" + "\n".join(out)
+
+
+def metrics_table(metrics: dict[str, tuple], title: str | None = None, width: int = 70) -> str:
+    """
+    Format a compact two-column metrics table.
+
+    Parameters
+    ----------
+    metrics : dict[str, tuple]
+        Dictionary of label -> (value, unit_or_note)
+        Example: {"Seeing FWHM": (3.5, "px"), "Zeropoint": (25.34, "mag")}
+    title : str | None
+        Optional title line printed above the table
+    width : int
+        Total width of the formatted block
+
+    Returns
+    -------
+    str
+        Formatted multi-line string ready for logging.info()
+    """
+    if not metrics:
+        return ""
+    pairs = [
+        (label, f"{value} {unit}".strip())
+        for label, (value, unit) in metrics.items()
+    ]
+    return ascii_kv(title or "Metrics", pairs, width=width, framed=True)
+
+
+def compact_status(filename: str, results: dict) -> str:
+    """
+    One-line status summary for completed image processing.
+
+    Parameters
+    ----------
+    filename : str
+        Base filename (will be truncated if too long)
+    results : dict
+        Must contain keys: 'mag', 'mag_err', 'snr', 'detected' (bool),
+        optionally 'zp', 'n_cal', 'template'
+
+    Example output:
+        OK SN2024pba_ZTF_r.fits  r=18.34+/-0.03  S/N=12.5  OK Detection
+    """
+    base = os.path.basename(filename)
+    if len(base) > 30:
+        base = "..." + base[-27:]
+
+    mag = results.get('mag', float('nan'))
+    mag_err = results.get('mag_err', float('nan'))
+    snr = results.get('snr', float('nan'))
+    detected = results.get('detected', False)
+    zp = results.get('zp')
+    n_cal = results.get('n_cal')
+
+    parts = [f"{'OK' if detected else 'o'} {base:>30}"]
+
+    if np.isfinite(mag) and np.isfinite(mag_err):
+        parts.append(f"m={mag:.2f}+/-{mag_err:.2f}")
+
+    if np.isfinite(snr):
+        parts.append(f"S/N={snr:.1f}")
+
+    if zp is not None and np.isfinite(zp):
+        parts.append(f"zp={zp:.2f}")
+
+    if n_cal is not None:
+        parts.append(f"cal={n_cal}")
+
+    parts.append("OK Detection" if detected else "o Limit")
+
+    return "  ".join(parts)
 
 
 # Telescope/instrument config: images must have FITS header keywords TELESCOP and INSTRUME.
 # telescope.yml in the working dir lists all telescopes; each entry follows the structure below.
 # Top level: TELESCOP value (e.g. "1m0-01", "ESO-NTT", "Palomar 48-inch"). Under each:
 #   INSTRUME: instrument name -> instrument config dict.
-#   location (optional): {name, lon, lat, alt} for the site.
 #
 # Instrument config entry structure (build telescope.yml entries from this):
 INSTRUMENT_ENTRY_STRUCTURE = {
@@ -821,6 +1889,9 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "ZTF_g": "g",
                 "ZTF_r": "r",
                 "ZTF_i": "i",
+                "ZTFg": "g",
+                "ZTFr": "r",
+                "ZTFi": "i",
                 "ztf_g": "g",
                 "ztf_r": "r",
                 "ztf_i": "i",
@@ -839,6 +1910,9 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "ZTF_g": "g",
                 "ZTF_r": "r",
                 "ZTF_i": "i",
+                "ZTFg": "g",
+                "ZTFr": "r",
+                "ZTFi": "i",
                 "ztf_g": "g",
                 "ztf_r": "r",
                 "ztf_i": "i",
@@ -852,7 +1926,6 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "pixel_scale": 0.4,
             },
         },
-        "location": {"name": None, "lon": None, "lat": None, "alt": None},
     },
     "SDSS": {
         "INSTRUME": {
@@ -871,7 +1944,6 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "pixel_scale": 0.4,
             },
         },
-        "location": {"name": None, "lon": None, "lat": None, "alt": None},
     },
     "2MASS": {
         "INSTRUME": {
@@ -890,7 +1962,6 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "pixel_scale": 1.0,
             },
         },
-        "location": {"name": None, "lon": None, "lat": None, "alt": None},
     },
     "ESO-VST": {
         "INSTRUME": {
@@ -913,7 +1984,6 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "pixel_scale": 0.21,
             },
         },
-        "location": {"name": None, "lon": None, "lat": None, "alt": None},
     },
     "ESO-VISTA": {
         "INSTRUME": {
@@ -931,7 +2001,6 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "pixel_scale": 0.34,
             },
         },
-        "location": {"name": None, "lon": None, "lat": None, "alt": None},
     },
 }
 
@@ -1009,7 +2078,7 @@ def load_telescope_config(wdir):
 
     out = _deep_merge_into(out, _safe_load_yaml(user_path))
     if loaded_sources:
-        logger.info("telescope.yml loaded from: %s", " (merged) ".join(loaded_sources))
+        logger.debug("telescope.yml loaded from: %s", " (merged) ".join(loaded_sources))
     else:
         logger.info(
             "telescope.yml: using built-in defaults only (no file found at %r)",
@@ -1042,7 +2111,9 @@ def compute_target_crowding(
       - nearest_neighbor_sep_pix (or None)
       - segmentation (2D int array, cutout coordinates; 0=background)
       - neighbor_mask (2D bool array, cutout coordinates; True=neighbor pixels)
-      - neighbors (list of dicts with x_pix,y_pix,sep_pix in full-image pixels)
+      - neighbors (list of dicts with x_pix,y_pix,sep_pix in full-image pixels,
+        plus cen_err_pix = propagated 1-sigma centroid error and seg_flags =
+        photutils 3.1 segmentation quality flags)
     """
     import numpy as np
 
@@ -1068,7 +2139,7 @@ def compute_target_crowding(
     if not np.any(np.isfinite(cut)):
         return {"ok": False, "reason": "cutout all non-finite"}
 
-    # Background / noise estimate for thresholding (robust to outliers)
+    # MAD-based background / noise estimate (resistant to outliers).
     finite = cut[np.isfinite(cut)]
     med = np.median(finite)
     mad = np.median(np.abs(finite - med))
@@ -1089,8 +2160,10 @@ def compute_target_crowding(
     except Exception as exc:
         return {"ok": False, "reason": f"photutils.segmentation unavailable: {exc}"}
 
-    threshold = detect_threshold(cut, nsigma=nsigma, background=med, error=sigma)
-    segm = detect_sources(cut, threshold, npixels=npixels)
+    threshold = detect_threshold(
+        cut, n_sigma=nsigma, background=med, error=sigma
+    )
+    segm = detect_sources(cut, threshold, n_pixels=npixels)
     if segm is None:
         return {
             "ok": True,
@@ -1109,11 +2182,25 @@ def compute_target_crowding(
             segm = deblend_sources(
                 cut,
                 segm,
-                npixels=npixels,
-                nlevels=int(deblend_nlevels),
+                n_pixels=npixels,
+                n_levels=int(deblend_nlevels),
                 contrast=float(deblend_contrast),
-                progress_bar=False,
+                n_threads=photutils_n_threads(),
             )
+            # 3.1 records per-label deblend provenance on the returned
+            # SegmentationImage; surface how many parents needed a
+            # fallback so crowded-field logs can tell apart a real blend
+            # from a spacing/too-many-markers bail.
+            _fb = getattr(segm, "info", None) or {}
+            n_npmin = len(_fb.get("non_positive_min_labels") or [])
+            n_markers = len(_fb.get("too_many_markers_labels") or [])
+            if n_npmin or n_markers:
+                logger.debug(
+                    "crowding deblend fallbacks: %d non-positive-min, "
+                    "%d too-many-markers",
+                    n_npmin,
+                    n_markers,
+                )
         except Exception:
             # If deblending fails, keep the original segmentation.
             pass
@@ -1121,14 +2208,37 @@ def compute_target_crowding(
     seg_data = np.asarray(segm.data, dtype=int)
     n_sources_total = int(np.nanmax(seg_data))
 
-    # Catalog for centroids
     try:
-        cat = SourceCatalog(cut, segm)
-        xcen = np.asarray(cat.xcentroid)
-        ycen = np.asarray(cat.ycentroid)
+        # The error array feeds photutils 3.1's propagated centroid
+        # uncertainties (x/y_centroid_err), reported per neighbour below.
+        cat = SourceCatalog(
+            cut,
+            segm,
+            error=np.full(cut.shape, sigma),
+            n_threads=photutils_n_threads(),
+        )
+        xcen = np.asarray(cat.x_centroid if hasattr(cat, 'x_centroid') else cat.xcentroid)
+        ycen = np.asarray(cat.y_centroid if hasattr(cat, 'y_centroid') else cat.ycentroid)
+        labels = np.atleast_1d(cat.label)
+        try:
+            cen_err = np.hypot(
+                np.asarray(cat.x_centroid_err, float),
+                np.asarray(cat.y_centroid_err, float),
+            )
+        except Exception:
+            cen_err = np.full(xcen.shape, np.nan)
+        try:
+            # photutils 3.1 per-source provenance/quality flags
+            # (deblended, edge_touch, non_finite_data, ...).
+            seg_flags = np.asarray(cat.flags, dtype=int)
+        except Exception:
+            seg_flags = np.zeros(xcen.shape, dtype=int)
     except Exception:
         xcen = np.array([])
         ycen = np.array([])
+        labels = np.array([])
+        cen_err = np.array([])
+        seg_flags = np.array([], dtype=int)
 
     # Convert centroids to full-image pixels
     neighbors = []
@@ -1146,9 +2256,9 @@ def compute_target_crowding(
         for idx in order[: max_neighbors + 1]:
             if not np.isfinite(sep[idx]):
                 continue
-            label = int(
-                idx + 1
-            )  # SourceCatalog order corresponds to labels for simple cases
+            # SourceCatalog rows are label-ordered but read the label
+            # explicitly rather than assuming idx+1.
+            label = int(labels[idx]) if idx < len(labels) else int(idx + 1)
             # Prefer excluding by target_label if possible; otherwise exclude by sep ~ 0.
             if target_label > 0 and label == target_label:
                 continue
@@ -1159,6 +2269,12 @@ def compute_target_crowding(
                     "x_pix": float(x0 + xcen[idx]),
                     "y_pix": float(y0 + ycen[idx]),
                     "sep_pix": float(sep[idx]),
+                    "cen_err_pix": (
+                        float(cen_err[idx]) if idx < len(cen_err) else np.nan
+                    ),
+                    "seg_flags": (
+                        int(seg_flags[idx]) if idx < len(seg_flags) else 0
+                    ),
                 }
             )
         # Keep only within neighbor radius for metrics/list
@@ -1206,16 +2322,17 @@ def compute_target_crowding(
 
 
 class AutophotYaml:
+    """Load and update YAML configuration files for AutoPHOT."""
 
     def __init__(self, filepath=None, dict_name=None, wdir=None):
-
+        """Store path, optional sub-key, and working directory for later load/update."""
         self.filepath = filepath
         self.dict_name = dict_name
         self.wdir = wdir
 
     def load(self):
-
-        if self.wdir != None:
+        """Load YAML from *filepath* and return the full dict or a named sub-key."""
+        if self.wdir is not None:
             file_path = os.path.join(self.wdir, self.filepath)
         else:
             file_path = self.filepath
@@ -1223,7 +2340,7 @@ class AutophotYaml:
         with open(file_path, "r") as stream:
             var = yaml.safe_load(stream)
 
-        if self.dict_name != None:
+        if self.dict_name is not None:
             data = var[self.dict_name]
         else:
             data = var
@@ -1231,7 +2348,7 @@ class AutophotYaml:
         return data
 
     def update(self, tele, inst_key, inst, key, new_val):
-
+        """Update a nested key in the YAML file under ``tele[inst_key][inst]``."""
         doc = {key: new_val}
 
         with open(self.filepath, "r") as yamlfile:
@@ -1264,24 +2381,309 @@ class AutophotYaml:
             yaml.dump(data_new, outfile, default_flow_style=False)
 
 
+# --- Input-config validation -----------------------------------------------
+#
+# The pipeline is driven by a plain YAML mapping; an unrecognised key was
+# historically ignored, so a typo silently ran with the default value (and
+# several dispatch options silently map a bad value to a fallback).  The
+# helpers below compare a user-supplied config against the shipped schema and
+# report entries the pipeline can never read.
+
+# Sections AutomatedPhotometry.load() creates when the shipped file lacks
+# them.  They carry no schema keys but appear in generated input.yaml files,
+# so they must be part of the accepted schema (their children still check
+# against the empty mapping, i.e. any key under them is unknown).
+_CONFIG_LOADED_SECTIONS = (
+    "preprocessing",
+    "photometry",
+    "templates",
+    "wcs",
+    "catalog",
+    "cosmic_rays",
+    "fitting",
+    "source_detection",
+    "limiting_magnitude",
+    "alignment",
+    "template_subtraction",
+    "background",
+    "zeropoint",
+    "error",
+    "psf",
+    "target_photometry",
+)
+
+# Top-level keys that carry runtime-injected data, not user options.
+# ``name_prefix``/``objname`` come from the TNS resolution (autophot.py) and
+# are read back by plot.py/limits.py for display names; ``variable_sources``
+# is the SIMBAD enrichment payload.  All three land in the generated
+# input.yaml, so they must round-trip validation.
+_CONFIG_DATA_KEYS = frozenset({"variable_sources", "name_prefix", "objname"})
+
+# Removed keys that older configs may still carry; warn rather than
+# reject - they are ignored, not honoured.
+_CONFIG_REMOVED_KEYS = frozenset({"template_subtraction.zogy_update"})
+
+# Renamed keys still honoured at point of use; warn rather than reject.
+_CONFIG_DEPRECATED_KEYS = {
+    "photometry.psf_contam_asymmetry_frac": "photometry.psf_contam_asymmetry_sigma",
+    "photometry.psf_contam_radial_reversal_frac": (
+        "photometry.psf_contam_radial_reversal_sigma"
+    ),
+    "template_subtraction.sfft_sky_subtract": "template_subtraction.sky_subtract",
+    "template_subtraction.zogy_sky_subtract": "template_subtraction.sky_subtract",
+    "template_subtraction.sfft_forceconv": "template_subtraction.forceconv",
+    "template_subtraction.zogy_forceconv": "template_subtraction.forceconv",
+    "template_subtraction.alignment_max_p95_px": (
+        "template_subtraction.alignment_max_p90_px"
+    ),
+}
+
+# Options whose values come from a fixed dispatch set.  Comparisons are
+# case-insensitive.  A bad value otherwise degrades silently (forceconv maps
+# to REF) or to a mid-run warning (finder, alignment_method).
+_CONFIG_ENUM_VALUES = {
+    "template_subtraction.method": {"sfft", "hotpants", "zogy", "auto"},
+    "template_subtraction.forceconv": {"auto", "ref", "sci"},
+    "template_subtraction.zogy_nan_fill": {"median", "zero"},
+    "template_subtraction.alignment_method": {
+        "spalipy",
+        "swarp",
+        "reproject",
+        "astroalign",
+        "tweakwcs",
+        "chi2_shift",
+    },
+    "alignment.reproject_method": {"exact", "adaptive", "interp"},
+    "wcs.solver": {"astrometry", "astrometry.net", "scamp"},
+    "background.fwhm_unit": {"pixels", "arcsec"},
+    "source_detection.finder": {
+        "dao",
+        "daofind",
+        "daostarfinder",
+        "iraf",
+        "starfind",
+        "irafstarfinder",
+    },
+    "zeropoint.fit_method": {"mcmc", "odr", "ransac"},
+    "limiting_magnitude.recovery_method": {
+        "auto",
+        "psf",
+        "ap",
+        "emcee",
+        "mcmc",
+    },
+    "limiting_magnitude.completeness_solver": {
+        "bisect",
+        "logistic_mle",
+        "logistic_emcee",
+    },
+    "catalog.use_catalog": {
+        "gaia",
+        "gaia_custom",
+        "auto",
+        "pan_starrs",
+        "panstarrs",
+        "sdss",
+        "legacy",
+        "apass",
+        "2mass",
+        "refcat",
+        "tic",
+        "skymapper",
+        "custom",
+    },
+}
+
+_CONFIG_SCHEMA_CACHE = None
+
+
+def load_default_input_schema() -> dict:
+    """Return the accepted config-key schema: databases/default_input.yml plus
+    the empty sections AutomatedPhotometry.load() creates, so a generated
+    input.yaml round-trips validation cleanly.  Cached; do not mutate."""
+    global _CONFIG_SCHEMA_CACHE
+    if _CONFIG_SCHEMA_CACHE is not None:
+        return _CONFIG_SCHEMA_CACHE
+    path = Path(__file__).resolve().parent / "databases" / "default_input.yml"
+    with open(path, "r") as f:
+        schema = yaml.safe_load(f) or {}
+    schema = schema.get("default_input", schema)
+    for _k in _CONFIG_LOADED_SECTIONS:
+        schema.setdefault(_k, {})
+    _CONFIG_SCHEMA_CACHE = schema
+    return schema
+
+
+def config_schema_key_paths(schema=None) -> list:
+    """Flatten the schema to a list of dotted key paths (for suggestions)."""
+    schema = load_default_input_schema() if schema is None else schema
+    out = []
+
+    def _walk(node, prefix):
+        for key, val in node.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            out.append(path)
+            if isinstance(val, dict):
+                _walk(val, path)
+
+    _walk(schema, "")
+    return out
+
+
+def find_unknown_config_keys(config, schema=None):
+    """Return ``(unknown, deprecated, removed)`` sorted lists of dotted key
+    paths in *config*.
+
+    ``unknown``: keys absent from the schema (typos, stale names, a scalar
+    where a section mapping is expected).  ``deprecated``: renamed keys still
+    honoured at point of use.  ``removed``: keys dropped from the schema that
+    older configs may still carry - ignored, but not a fatal unknown.
+    ``_``-prefixed keys are runtime slots injected by the pipeline and are
+    skipped at any level.
+    """
+    schema = load_default_input_schema() if schema is None else schema
+    unknown, deprecated, removed = [], [], []
+
+    def _walk(cfg, sch, prefix):
+        for key, val in cfg.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if str(key).startswith("_"):
+                continue
+            if not prefix and key in _CONFIG_DATA_KEYS:
+                continue
+            if not isinstance(sch, dict) or key not in sch:
+                if path in _CONFIG_DEPRECATED_KEYS:
+                    deprecated.append(path)
+                elif path in _CONFIG_REMOVED_KEYS:
+                    removed.append(path)
+                else:
+                    unknown.append(path)
+                continue
+            sch_val = sch[key]
+            if isinstance(val, dict) and isinstance(sch_val, dict):
+                _walk(val, sch_val, path)
+            elif (
+                val is not None
+                and isinstance(sch_val, dict)
+                and sch_val
+                and not isinstance(val, dict)
+            ):
+                # A scalar where a section mapping is expected; null is
+                # 'unset' and stays legal.
+                unknown.append(f"{path} (expects a mapping of options)")
+
+    if isinstance(config, dict):
+        _walk(config, schema, "")
+    else:
+        unknown.append("<root> (input is not a YAML mapping)")
+    return sorted(unknown), sorted(deprecated), sorted(removed)
+
+
+def find_invalid_config_values(config):
+    """Return ``[(path, value, allowed)]`` for enum-valued options carrying an
+    unrecognised value.  None/absent values skip (pipeline defaults apply); a
+    mapping value (``catalog.use_catalog`` band mapping) validates its values."""
+    bad = []
+    for path, allowed in _CONFIG_ENUM_VALUES.items():
+        node = config
+        for part in path.split("."):
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            node = node[part]
+        if node is None:
+            continue
+        if isinstance(node, dict):
+            vals = list(node.values())
+        elif isinstance(node, (list, tuple)):
+            vals = list(node)
+        else:
+            vals = [node]
+        for v in vals:
+            if v is None:
+                continue
+            if str(v).strip().lower() not in allowed:
+                bad.append((path, v, sorted(allowed)))
+    return bad
+
+
+def check_input_config(config, schema=None) -> dict:
+    """Validate a user-supplied config mapping against the shipped schema.
+
+    Returns a report dict::
+
+        {"unknown":     [dotted paths the pipeline cannot read],
+         "deprecated":  [(path, current key name)],
+         "removed":     [dotted paths dropped from the schema],
+         "bad_values":  [(path, value, allowed set)]}
+    """
+    schema = load_default_input_schema() if schema is None else schema
+    unknown, deprecated, removed = find_unknown_config_keys(config, schema)
+    return {
+        "unknown": unknown,
+        "deprecated": [(p, _CONFIG_DEPRECATED_KEYS[p]) for p in deprecated],
+        "removed": removed,
+        "bad_values": find_invalid_config_values(config),
+    }
+
+
+def strict_config_enabled() -> bool:
+    """AUTOPHOT_STRICT_CONFIG env toggle (default on): strict = hard-fail on
+    unaccepted parameters; off = warn only."""
+    raw = str(os.environ.get("AUTOPHOT_STRICT_CONFIG", "1"))
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def format_config_errors(report: dict, source: str = "configuration") -> str:
+    """Render a ``check_input_config`` report; empty report -> empty string.
+    Unknown keys get a close-match suggestion from the schema."""
+    from difflib import get_close_matches
+
+    lines = []
+    for path, value, allowed in report.get("bad_values", []):
+        lines.append(
+            f"  - {path}: invalid value {value!r} "
+            f"(accepted: {', '.join(allowed)})"
+        )
+    schema_paths = None
+    for path in report.get("unknown", []):
+        if schema_paths is None:
+            schema_paths = config_schema_key_paths()
+        close = get_close_matches(path.split(" ", 1)[0], schema_paths, n=1, cutoff=0.6)
+        hint = f"  (did you mean {close[0]!r}?)" if close else ""
+        lines.append(f"  - {path}: not an accepted option{hint}")
+    if not lines:
+        return ""
+    return (
+        f"Unaccepted parameter(s) found in {source}:\n"
+        + "\n".join(lines)
+        + "\nRemove or fix them, or set AUTOPHOT_STRICT_CONFIG=0 to downgrade "
+        "this to a warning."
+    )
+
+
 def get_header(fpath):
+    """Read a FITS header, tolerating missing extensions.
+
+    Looks for the ``TELESCOP`` keyword across HDUs and returns the first
+    matching header, merging with the primary header if needed.
+
+    Results are cached by (path, mtime, size); call ``invalidate_fits_cache``
+    after external tools modify the file.
+    """
+    key = _fits_cache_key(fpath)
+    if key is not None:
+        with _FITS_CACHE_LOCK:
+            cached = _FITS_HEADER_CACHE.get(key)
+            if cached is not None:
+                return cached.copy()
+
     from astropy.io.fits import getheader
     from astropy.io import fits
-
-    """
-    Robust function to get header from a FITS image for use in AutoPHOT. This function aims to find the correct
-    telescope header information based on the "Telescop" header key. FITS images may contain multiple headers, 
-    so the function combines them if necessary.
-
-    :param fpath: Path to the FITS file.
-    :type fpath: str
-    :return: Combined header information.
-    :rtype: Header object
-    """
     try:
-        # Attempt to open FITS file with 'ignore_missing_end' to handle incomplete files
+        # 'ignore_missing_end' tolerates truncated files.
         with fits.open(fpath, ignore_missing_end=True) as hdul:
-            hdul.verify("silentfix+ignore")  # Try to fix any issues with the file
+            hdul.verify("silentfix+ignore")
 
             # FITS keywords are typically uppercase; check case-insensitively for TELESCOP
             def has_telescop(header):
@@ -1290,7 +2692,7 @@ def get_header(fpath):
             if has_telescop(hdul[0].header):
                 headinfo = hdul[0].header.copy()
             else:
-                # If not in primary, use first HDU that has TELESCOP (e.g. extension with image)
+                # TELESCOP may live in an extension HDU (e.g. the image ext).
                 for i in range(1, len(hdul)):
                     if has_telescop(hdul[i].header):
                         headinfo = hdul[i].header.copy()
@@ -1298,14 +2700,13 @@ def get_header(fpath):
                 else:
                     headinfo = hdul[0].header.copy()
     except KeyError as e:
-        # Handle missing or incorrect header keys (e.g., 'Telescop')
+        # Missing or mis-cased header keys (e.g., 'Telescop').
         raise Exception(f"KeyError: The required header keyword was not found: {e}")
 
     except Exception as e:
-        # General exception handling, including file issues or unexpected errors
         raise Exception(f"An error occurred while reading the FITS file: {e}")
 
-    # If the header is a list (indicating multiple HDUs), combine them
+    # A list header means multiple HDUs; combine them.
     if isinstance(headinfo, list):
         combined_header = headinfo[0].header
 
@@ -1313,6 +2714,11 @@ def get_header(fpath):
             combined_header.update(ext.header)
 
         headinfo = combined_header
+
+    if key is not None:
+        with _FITS_CACHE_LOCK:
+            _FITS_HEADER_CACHE[key] = headinfo
+            _cache_evict(_FITS_HEADER_CACHE)
 
     return headinfo
 
@@ -1322,16 +2728,27 @@ def get_image_and_header(fpath):
     Load FITS image and header with a single file open. Same semantics as
     get_image(fpath) and get_header(fpath), but avoids opening the file twice.
 
+    Results are cached by (path, mtime, size); call ``invalidate_fits_cache``
+    after external tools modify the file.
+
     :param fpath: Path to the FITS file.
     :return: (image, header) where image is a 2D numpy array copy and header is a copy.
     """
+    key = _fits_cache_key(fpath)
+    if key is not None:
+        with _FITS_CACHE_LOCK:
+            cached = _FITS_IMAGE_CACHE.get(key)
+            if cached is not None:
+                img, hdr = cached
+                return img.copy(), hdr.copy()
+
     import os
     from astropy.io import fits
 
     try:
         with fits.open(fpath, ignore_missing_end=True) as hdul:
             hdul.verify("silentfix+ignore")
-            # Enhanced HDU selection for better FITS file support
+            # Pick the best image HDU across FITS layout conventions.
             image = None
             best_hdu_idx = None
             
@@ -1344,7 +2761,7 @@ def get_image_and_header(fpath):
                     if image.dtype.kind != 'f':
                         image = image.astype(np.float32)
                     best_hdu_idx = hdul.index_of("sci")
-                    print(f"Using 'sci' extension (HDU {best_hdu_idx}) with shape {image.shape}")
+                    logger.info("Using 'sci' extension (HDU %s) with shape %s", best_hdu_idx, image.shape)
             except (KeyError, TypeError):
                 pass
             
@@ -1376,7 +2793,7 @@ def get_image_and_header(fpath):
                     if image.dtype.kind != 'f':
                         image = image.astype(np.float32)
                     best_hdu_idx = best_idx
-                    print(f"Selected HDU {best_idx} (score={best_score:.1f}) with shape {image.shape}")
+                    logger.debug("Selected HDU %s (score=%.1f) with shape %s", best_idx, best_score, image.shape)
             
             # Strategy 3: Last resort - try primary HDU
             if image is None and len(hdul) > 0:
@@ -1385,46 +2802,44 @@ def get_image_and_header(fpath):
                     try:
                         test_image = np.asarray(primary_data)
                         if hasattr(test_image, 'shape'):
-                            print(f"Using primary HDU as fallback with shape {getattr(test_image, 'shape', 'no shape')}")
+                            logger.debug("Using primary HDU as fallback with shape %s", getattr(test_image, 'shape', 'no shape'))
                             image = test_image.copy()
                             # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
                             if image.dtype.kind != 'f':
                                 image = image.astype(np.float32)
                             best_hdu_idx = 0
                     except Exception as e:
-                        print(f"Error with primary HDU: {e}")
+                        logger.debug("Error with primary HDU: %s", e)
             
-            # Final validation and error handling
             if image is None:
-                # Print detailed HDU information for debugging
-                print("HDU structure analysis:")
+                # Dump HDU structure to help debug exotic FITS layouts.
+                logger.debug("HDU structure analysis:")
                 for i, hdu in enumerate(hdul):
                     data_info = f"shape={getattr(hdu.data, 'shape', 'None')}" if hdu.data is not None else "None"
-                    print(f"  HDU {i}: {hdu.__class__.__name__}, name='{hdu.name}', data={data_info}")
+                    logger.debug("  HDU %s: %s, name='%s', data=%s", i, hdu.__class__.__name__, hdu.name, data_info)
                 raise Exception(f"No valid 2D+ image data found in FITS file: {os.path.basename(fpath)}")
             
-            # Handle multi-dimensional data by taking first 2D slice
+            # Cube data (e.g. data+error planes) collapses to its first 2D slice.
             if hasattr(image, 'shape') and len(image.shape) > 2:
                 base = os.path.basename(fpath)
-                print(f"Warning: {base} has {len(image.shape)}D data, taking first 2D slice")
+                logger.warning("%s has %sD data, taking first 2D slice", base, len(image.shape))
                 original_shape = image.shape
                 while len(image.shape) > 2:
                     image = image[0]
                 image = image.copy()
-                print(f"  Reshaped from {original_shape} to {image.shape}")
+                logger.info("  Reshaped from %s to %s", original_shape, image.shape)
             elif not hasattr(image, 'shape') or len(image.shape) < 2:
                 base = os.path.basename(fpath)
                 raise Exception(f"Warning: {base} is not a 2D array (found {getattr(image, 'shape', 'no shape')} data).")
 
-            # Header: use the header from the same HDU that contains the image data
-            # to ensure WCS keywords are preserved. Merge with TELESCOP header if different.
+            # Use the header from the same HDU as the image data so WCS
+            # keywords stay paired with the pixels they describe; merge
+            # TELESCOP metadata in from another HDU if needed.
             def has_telescop(header):
                 return any(k.upper() == "TELESCOP" for k in header.keys())
-            
-            # Start with header from the HDU containing the image data
+
             headinfo = hdul[best_hdu_idx].header.copy()
-            
-            # If the image HDU doesn't have TELESCOP, try to find it in other HDUs
+
             if not has_telescop(headinfo):
                 for i in range(len(hdul)):
                     if has_telescop(hdul[i].header):
@@ -1432,13 +2847,49 @@ def get_image_and_header(fpath):
                         telescop_header = hdul[i].header
                         for key in telescop_header.keys():
                             if key not in headinfo and (
-                                key.upper() in ['TELESCOP', 'INSTRUME', 'FILTER', 
+                                key.upper() in ['TELESCOP', 'INSTRUME', 'FILTER',
                                                'EXPTIME', 'MJD-OBS', 'DATE-OBS',
                                                'GAIN', 'RDNOISE', 'SATURATE']
                             ):
                                 headinfo[key] = telescop_header[key]
                         break
-            
+
+            # Warn when integer-stored data arrives without its FITS scaling:
+            # the signature of a scaled/compressed HDU rewritten with
+            # do_not_scale_image_data=True (raw stored codes left in the
+            # pixels, BLANK kept but BZERO/BSCALE lost).  The ~-BZERO sky
+            # pedestal is absorbed by background subtraction, but SATURATE and
+            # GAIN then describe physical units the data no longer uses.
+            try:
+                _bitpix = headinfo.get("BITPIX", -32)
+                if (
+                    isinstance(_bitpix, (int, np.integer))
+                    and _bitpix > 0
+                    and "BLANK" in headinfo
+                    and "BZERO" not in headinfo
+                    and "BSCALE" not in headinfo
+                ):
+                    _fin = np.isfinite(image)
+                    if _fin.any():
+                        _med = float(np.median(image[_fin]))
+                        if _med < -1.0e3:
+                            logger.warning(
+                                "%s: integer FITS data (BITPIX=%d) with BLANK\n"
+                                "    but no BZERO/BSCALE and median %.3g ADU -\n"
+                                "    the file looks like raw stored integers\n"
+                                "    whose scaling was stripped. Sky level,\n"
+                                "    SATURATE and flux scales may be in stored\n"
+                                "    units; re-export the file with scaling\n"
+                                "    applied.",
+                                os.path.basename(fpath), _bitpix, _med,
+                            )
+            except Exception:
+                pass
+
+            if key is not None:
+                with _FITS_CACHE_LOCK:
+                    _FITS_IMAGE_CACHE[key] = (image, headinfo)
+                    _cache_evict(_FITS_IMAGE_CACHE)
             return image, headinfo
     except KeyError as e:
         raise Exception(f"KeyError: The required header keyword was not found: {e}")
@@ -1447,39 +2898,66 @@ def get_image_and_header(fpath):
 
 
 def get_image(fpath):
+    """Load a 2-D image array from a FITS file.
 
+    Tries the ``sci`` extension first, then falls back to the primary HDU.
+    Raises if the data is not 2-D.
+    """
     import os
     from astropy.io import fits
-
-    """
-    Given a FITS file, this function attempts to retrieve the 2D image data using the "sci" extension. 
-    If the image is not 2D or if the file is a FITS cube, an error will be raised.
-
-    :param fpath: Path to the FITS file.
-    :type fpath: str
-    :return: 2D image data array.
-    :rtype: numpy.ndarray
-    :raises Exception: If the image is not 2D or an error occurs during reading.
-    """
     try:
-        # Try to get 2D image from 'sci' extension
         image = fits.getdata(fpath, extname="sci")
 
     except Exception:
-        # If 'sci' extension fails, try getting image from the primary HDU
         image = fits.getdata(fpath)
 
-    # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
-    # Integer dtypes cannot represent NaN values, so we convert to float32
+    # float32 preserves NaNs (chip gaps); integer dtypes cannot.
     if image.dtype.kind != 'f':
         image = image.astype(np.float32)
 
-    # Check if the image data is a 2D array
     if len(image.shape) != 2:
         base = os.path.basename(fpath)
         raise Exception(f"Warning: {base} is not a 2D array.")
 
     return image
+
+
+def read_output_csv(file_path, **kwargs):
+    """Read a per-image ``Output_*.csv`` in either on-disk layout.
+
+    Current outputs are saved transposed (``field,value`` rows following the
+    preferred output order); files from older runs hold a single wide row.
+    Always return the wide one-row frame so concatenation and analysis code
+    is layout-agnostic.
+    """
+    df = pd.read_csv(file_path, **kwargs)
+    if (
+        df.shape[1] == 2
+        and df.columns[0] == "field"
+        and df.columns[1] == "value"
+    ):
+        df = (
+            df.set_index("field")["value"]
+            .to_frame()
+            .T.reset_index(drop=True)
+            .rename_axis(columns=None)
+        )
+    return df
+
+
+def write_output_csv(df, file_path, float_format="%.6f"):
+    """Write a single-row output frame transposed (``field,value`` rows).
+
+    The output schema runs ~60 columns wide; a vertical table stays readable
+    and diffs cleanly between epochs.  Row order follows the preferred
+    ordering applied to the frame's columns before transposing.
+    """
+    df.T.to_csv(
+        file_path,
+        header=["value"],
+        index_label="field",
+        float_format=float_format,
+    )
 
 
 def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
@@ -1496,27 +2974,25 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
         Name of the CSV files to look for in subdirectories (default: 'output.csv')
     """
 
-    # Initialize an empty list to hold DataFrames
     concatenated_data = []
 
     from fnmatch import fnmatch
 
-    # Traverse the folder using os.walk
     for root, dirs, files in os.walk(folder_path):
         for file in files:
-            # Support wildcard patterns, e.g. loc_file="OUTPUT_*.csv"
+            # Support wildcard patterns, e.g. loc_file="Output_*.csv"
             if ("*" in loc_file) and fnmatch(file, loc_file):
                 file_path = os.path.join(root, file)
 
-                # Read CSV with empty cells treated as NaN
-                df = pd.read_csv(
+                # dtype=str preserves blank cells so they can be mapped
+                # to NaN below rather than parsed as 0 or ''.
+                df = read_output_csv(
                     file_path,
                     keep_default_na=True,
                     na_values=["", " ", "NA", "N/A", "NaN", "null"],
-                    dtype=str,  # Read all columns as string to preserve blanks before NaN replacement
+                    dtype=str,
                 )
 
-                # Replace all empty strings or whitespace-only strings with np.nan
                 df = df.map(
                     lambda x: np.nan if isinstance(x, str) and x.strip() == "" else x
                 )
@@ -1525,15 +3001,13 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
             elif file == loc_file:
                 file_path = os.path.join(root, file)
 
-                # Read CSV with empty cells treated as NaN
-                df = pd.read_csv(
+                df = read_output_csv(
                     file_path,
                     keep_default_na=True,
                     na_values=["", " ", "NA", "N/A", "NaN", "null"],
-                    dtype=str,  # Read all columns as string to preserve blanks before NaN replacement
+                    dtype=str,
                 )
 
-                # Replace all empty strings or whitespace-only strings with np.nan
                 df = df.map(
                     lambda x: np.nan if isinstance(x, str) and x.strip() == "" else x
                 )
@@ -1546,13 +3020,18 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
         )
         return None
 
-    # Concatenate all DataFrames
     concatenated_data = pd.concat(concatenated_data, ignore_index=True)
 
-    # Write the concatenated data to the output file
+    # If concatenation produced duplicate column names (common when mixing legacy
+    # wide-format outputs across versions), keep the first occurrence.
+    if concatenated_data.columns.duplicated().any():
+        concatenated_data = concatenated_data.loc[
+            :, ~concatenated_data.columns.duplicated()
+        ].copy()
+
     concatenated_data.to_csv(
         output_filename, index=False, na_rep="NaN"
-    )  # Explicit NaN representation
+    )  # write NaN explicitly
 
     logging.getLogger(__name__).info(
         "Concatenated %d rows of tabular data into '%s'.",
@@ -1626,17 +3105,27 @@ def gauss_1d(x, A, x0, sigma):
 
 
 def snr(maxPixel, noiseBkg):
+    """Return the simple signal-to-noise ratio ``maxPixel / noiseBkg``.
 
+    Guards against a zero or non-finite noise term (which would produce Inf
+    or NaN) by returning NaN instead of raising a divide-by-zero warning.
+    """
+    maxPixel = np.asarray(maxPixel, dtype=float)
+    noiseBkg = np.asarray(noiseBkg, dtype=float)
     with warnings.catch_warnings():
-
-        snr_value = maxPixel / noiseBkg
-
+        warnings.simplefilter("ignore", RuntimeWarning)
+        snr_value = np.divide(
+            maxPixel,
+            noiseBkg,
+            out=np.full(np.broadcast(maxPixel, noiseBkg).shape, np.nan),
+            where=np.isfinite(noiseBkg) & (noiseBkg > 0),
+        )
     return snr_value
 
 
 def snr_err(snr_value):
     """
-     Error associated with signal to noise ratio (S/N). Equation  taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_. Whe can associate the error on the instrumental magnitude of a source as:
+     Error associated with signal to noise ratio (S/N). Equation taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.png>`_. The error on the instrumental magnitude of a source is:
 
 
     .. math ::
@@ -1656,18 +3145,155 @@ def snr_err(snr_value):
 
     """
 
-    from numpy import log10, errstate
-
-    with errstate(divide="ignore", invalid="ignore"):
-        snr_err_value = 2.5 * log10(1 + (1 / snr_value))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # Standard linear approximation: dm = (2.5/ln(10)) / SNR = 1.0857/SNR.
+        # This is the upper bound of the exact 2.5*log10(1 + 1/SNR) formula and
+        # is the convention used by aperture.py and zeropoint._compute_delta_mag.
+        snr_err_value = (2.5 / np.log(10.0)) / snr_value
 
     return snr_err_value
 
 
 def quadrature_add(values):
-    from numpy import sqrt
+    """Return the quadrature sum of *values* (sqrt of sum of squares).
 
-    return sqrt(sum([i**2 for i in values]))
+    NaN terms are **skipped**, not propagated.  This prevents a single
+    missing error term (e.g. NaN zeropoint_error) from silently zeroing
+    out the entire calibrated magnitude error budget.  If *all* terms
+    are NaN, returns NaN.
+    """
+    finite = [v for v in values if np.isfinite(v)]
+    if not finite:
+        return np.nan
+    return float(np.sqrt(sum(v ** 2 for v in finite)))
+
+
+# ---------------------------------------------------------------------------
+# Sampling regime classification (Howell 1989 sampling parameter)
+# ---------------------------------------------------------------------------
+# FWHM in pixels determines how well the PSF is sampled:
+#   < 2 px : undersampled  - PSF core spans < 2 pixels, flux concentrated
+#            in 1-2 pixels.  Need supersampled PSF, broader detection cuts,
+#            larger fixed apertures.
+#   2-3 px : critically sampled - PSF core barely resolved.  Moffat PSF
+#            with free beta, moderate apertures.
+#   3-5 px : well-sampled - standard PSF fitting, curve-of-growth apertures.
+#   > 5 px : oversampled - SNR inefficient, warn user, larger apertures.
+#
+# These thresholds are configurable via input_yaml["photometry"]:
+#   undersampled_fwhm_threshold (default 2.5) - already used by psf.py
+#   critical_fwhm_threshold (default 3.0)
+#   oversampled_fwhm_threshold (default 5.0)
+
+SAMPLING_REGIME_UNDERSAMPLED = "undersampled"
+SAMPLING_REGIME_CRITICAL = "critical"
+SAMPLING_REGIME_WELL_SAMPLED = "well_sampled"
+SAMPLING_REGIME_OVERSAMPLED = "oversampled"
+
+
+def classify_sampling_regime(
+    fwhm_px: float,
+    input_yaml: dict = None,
+) -> str:
+    """Classify the PSF sampling regime from FWHM in pixels.
+
+    Parameters
+    ----------
+    fwhm_px : float
+        FWHM in pixels.
+    input_yaml : dict, optional
+        Configuration dict with optional thresholds under
+        ``photometry``: ``undersampled_fwhm_threshold`` (default 2.5),
+        ``critical_fwhm_threshold`` (default 3.0),
+        ``oversampled_fwhm_threshold`` (default 5.0).
+
+    Returns
+    -------
+    str
+        One of ``SAMPLING_REGIME_UNDERSAMPLED``,
+        ``SAMPLING_REGIME_CRITICAL``, ``SAMPLING_REGIME_WELL_SAMPLED``,
+        ``SAMPLING_REGIME_OVERSAMPLED``.
+    """
+    if not np.isfinite(fwhm_px) or fwhm_px <= 0:
+        return SAMPLING_REGIME_WELL_SAMPLED  # safe default
+
+    phot_cfg = (input_yaml or {}).get("photometry", {}) or {}
+    under_thr = float(phot_cfg.get("undersampled_fwhm_threshold", 2.5))
+    crit_thr = float(phot_cfg.get("critical_fwhm_threshold", 3.0))
+    over_thr = float(phot_cfg.get("oversampled_fwhm_threshold", 5.0))
+
+    if fwhm_px <= under_thr:
+        return SAMPLING_REGIME_UNDERSAMPLED
+    elif fwhm_px <= crit_thr:
+        return SAMPLING_REGIME_CRITICAL
+    elif fwhm_px <= over_thr:
+        return SAMPLING_REGIME_WELL_SAMPLED
+    else:
+        return SAMPLING_REGIME_OVERSAMPLED
+
+
+def adaptive_aperture_radius(
+    fwhm_px: float,
+    input_yaml: dict = None,
+) -> float:
+    """Compute FWHM-regime-aware aperture radius in pixels.
+
+    Undersampled data needs larger fixed apertures (flux concentrated
+    in 1-2 pixels, aperture corrections are large and unstable for
+    small radii).  Well-sampled data uses the standard ~1.5*FWHM.
+
+    Parameters
+    ----------
+    fwhm_px : float
+        FWHM in pixels.
+    input_yaml : dict, optional
+        Configuration dict (for threshold lookup).
+
+    Returns
+    -------
+    float
+        Aperture radius in pixels.
+    """
+    if not np.isfinite(fwhm_px) or fwhm_px <= 0:
+        fwhm_px = 3.0  # safe default
+
+    regime = classify_sampling_regime(fwhm_px, input_yaml)
+    if regime == SAMPLING_REGIME_UNDERSAMPLED:
+        # Minimum 4 px; 2.5*FWHM captures most flux for undersampled PSFs
+        return max(4.0, 2.5 * fwhm_px)
+    elif regime == SAMPLING_REGIME_CRITICAL:
+        return 2.0 * fwhm_px
+    elif regime == SAMPLING_REGIME_OVERSAMPLED:
+        # Larger apertures proportional to FWHM
+        return 1.8 * fwhm_px
+    else:
+        # Well-sampled: standard
+        return 1.5 * fwhm_px
+
+
+def adaptive_annulus_radii(
+    fwhm_px: float,
+    input_yaml: dict = None,
+) -> tuple:
+    """Compute FWHM-regime-aware sky annulus (inner, outer) radii in pixels.
+
+    Returns
+    -------
+    tuple(float, float)
+        (inner_radius, outer_radius) in pixels.
+    """
+    if not np.isfinite(fwhm_px) or fwhm_px <= 0:
+        fwhm_px = 3.0
+
+    regime = classify_sampling_regime(fwhm_px, input_yaml)
+    if regime == SAMPLING_REGIME_UNDERSAMPLED:
+        return 6.0, 9.0  # fixed, wide annulus
+    elif regime == SAMPLING_REGIME_CRITICAL:
+        return 3.0 * fwhm_px, 4.0 * fwhm_px
+    elif regime == SAMPLING_REGIME_OVERSAMPLED:
+        return 2.5 * fwhm_px, 4.0 * fwhm_px
+    else:
+        return 2.5 * fwhm_px, 4.0 * fwhm_px
 
 
 def moffat_2d(image, x0, y0, sky, A, image_params):
@@ -1726,13 +3352,13 @@ def mag(flux):
 
     Does not mutate the input. Non-positive flux values yield NaN in the output.
 
-    :param flux: Flux in counts per second measured from source
+    :param flux: Brightness in *per-second* units, matching ``Aperture.flux_AP`` and
+        ``psf`` ``flux_PSF`` (e-/s when photometry uses ``image * gain`` in
+        :mod:`aperture`).
     :type flux: float or array
     :return: Instrumental magnitude; NaN where flux <= 0
     :rtype: float or array
     """
-    import pandas as pd
-
     if isinstance(flux, (int, float)):
         if flux <= 0:
             return np.nan
@@ -1757,6 +3383,11 @@ def rebin(arr, new_shape):
     :rtype: array
 
     """
+    # Add divisibility check to prevent ValueError
+    if arr.shape[0] % new_shape[0] != 0 or arr.shape[1] % new_shape[1] != 0:
+        raise ValueError(
+            f"Array dimensions {arr.shape} are not evenly divisible by new_shape {new_shape}"
+        )
     shape = (
         new_shape[0],
         arr.shape[0] // new_shape[0],
@@ -1839,7 +3470,7 @@ def remove_wcs_from_header(header):
     ]
     # For SIP / polynomial distortion: key starts with this stem and contains '_'
     # (e.g. A_ORDER, A_0_0, B_1_2, AP_0_0, BP_2_1, D_*, DP_*)
-    wcs_stem_underscore = ["A_", "B_", "AP_", "BP_", "D_", "DP_", "PV"]
+    wcs_stem_underscore = ["A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_"]
 
     keys = list(header.keys())
     for key in keys:
@@ -1847,6 +3478,13 @@ def remove_wcs_from_header(header):
             continue
         remove = False
         for prefix in wcs_prefixes:
+            if prefix == "PC":
+                # PC matrix keys are PC001001 / PC1_1 / PC01_01; the bare
+                # "PC" prefix would also swallow the unrelated PCOUNT keyword.
+                if key.startswith("PC") and len(key) > 2 and key[2].isdigit():
+                    remove = True
+                    break
+                continue
             if key.startswith(prefix):
                 remove = True
                 break
@@ -1865,10 +3503,172 @@ def remove_wcs_from_header(header):
     return header
 
 
+def copy_wcs_from_header(src_header, dst_header):
+    """
+    Copy all WCS keywords from src_header into dst_header.
+
+    This is the inverse of remove_wcs_from_header.  It preserves the
+    exact WCS representation (CD matrix, SIP, PV, etc.) from the source
+    header, unlike WCS.to_header() which may drop the CD matrix and
+    write CDELT=1.0.
+
+    Parameters
+    ----------
+    src_header : fits.Header
+        Source FITS header containing the WCS to copy.
+    dst_header : fits.Header
+        Destination FITS header (modified in place).
+
+    Returns
+    -------
+    fits.Header
+        The modified dst_header.
+    """
+    wcs_prefixes = [
+        "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT", "CROTA",
+        "PV", "LONPOLE", "LATPOLE", "EQUINOX", "WCSNAME", "CUNIT",
+        "WCSAXES", "PROJP", "LTV", "LTM", "RADECSYS", "RADESYS",
+        "RADYSYS", "LONGPOLE", "TNX", "SIP_",
+    ]
+    wcs_stem_underscore = ["A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_"]
+
+    for key in src_header.keys():
+        if key in ("NAXIS", "NAXIS1", "NAXIS2", "COMMENT", "HISTORY"):
+            continue
+        is_wcs = False
+        for prefix in wcs_prefixes:
+            if key.startswith(prefix):
+                is_wcs = True
+                break
+        if not is_wcs:
+            stem = key.split("_")[0] + "_" if "_" in key else ""
+            if stem in wcs_stem_underscore and key.startswith(stem.rstrip("_")):
+                is_wcs = True
+        if is_wcs:
+            dst_header[key] = src_header[key]
+
+    return dst_header
+
+
+def update_header_from_wcs(header, wcs_obj):
+    """
+    Update a FITS header with WCS from a WCS object (e.g. Cutout2D.wcs).
+
+    This is the correct way to update a header from a WCS object, unlike
+    ``header.update(wcs.to_header(relax=True))`` which can:
+    - Drop the CD matrix and write CDELT=1.0
+    - Leave stale WCS keywords from the old header
+
+    Steps:
+    1. Remove all old WCS keywords from the header.
+    2. Convert WCS to header with relax=True (preserves SIP/PV keywords).
+    3. Restore CD matrix if astropy dropped it.
+    4. Update the header in place.
+
+    Parameters
+    ----------
+    header : fits.Header
+        Destination FITS header (modified in place).
+    wcs_obj : astropy.wcs.WCS
+        WCS object to extract keywords from.
+
+    Returns
+    -------
+    fits.Header
+        The modified header.
+    """
+    header = remove_wcs_from_header(header)
+    wcs_hdr = wcs_obj.to_header(relax=True)
+    header.update(wcs_hdr)
+    # Preserve CD matrix from the WCS if to_header dropped it
+    if not any(k.startswith('CD') for k in wcs_hdr):
+        cd = getattr(wcs_obj.wcs, 'cd', None)
+        if cd is not None and wcs_obj.wcs.has_cd():
+            header['CD1_1'] = cd[0, 0]
+            header['CD1_2'] = cd[0, 1]
+            header['CD2_1'] = cd[1, 0]
+            header['CD2_2'] = cd[1, 1]
+            for k in ['CDELT1', 'CDELT2']:
+                header.pop(k, None)
+    return header
+
+
+def nan_crop(data, header, cx, cy, ny, nx):
+    """
+    Crop an image to (ny, nx) centred on (cx, cy), padding with NaN if the
+    region extends beyond the array.  Only CRPIX1/CRPIX2 are updated in the
+    header - all other WCS keywords (CD, SIP, PV, CTYPE, etc.) are left
+    untouched, avoiding the distortion-dropping problems that Cutout2D's
+    WCS round-trip can introduce.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        2-D image array.
+    header : fits.Header
+        FITS header (modified in place).
+    cx, cy : float
+        Desired centre in 0-based pixel coordinates.
+    ny, nx : int
+        Desired output shape (rows, cols).
+
+    Returns
+    -------
+    cropped : np.ndarray  shape (ny, nx)
+    header : fits.Header   (same object, CRPIX updated)
+    """
+    src_ny, src_nx = data.shape
+
+    # Output array, filled with NaN.  Integer input cannot represent NaN, so
+    # promote to float (keeping float32 sources as float32).
+    _out_dtype = (
+        data.dtype if np.issubdtype(data.dtype, np.floating) else np.float32
+    )
+    out = np.full((ny, nx), np.nan, dtype=_out_dtype)
+
+    # Source slice that maps into the output.
+    # Use (nx-1)/2 (0-based pixel centre) not nx/2 (geometric centre between
+    # pixels for even nx).  floor(x + 0.5) gives deterministic half-up
+    # rounding; np.round uses round-half-to-even, which can choose different
+    # integer slice origins for half-integer offsets depending on parity and
+    # introduce ~0.5px shifts between science/template cutouts.
+    src_y0 = int(np.floor(cy - (ny - 1) / 2.0 + 0.5))
+    src_y1 = src_y0 + ny
+    src_x0 = int(np.floor(cx - (nx - 1) / 2.0 + 0.5))
+    src_x1 = src_x0 + nx
+
+    # Clamp to source bounds
+    sy0 = max(0, src_y0)
+    sy1 = min(src_ny, src_y1)
+    sx0 = max(0, src_x0)
+    sx1 = min(src_nx, src_x1)
+
+    # Corresponding destination indices
+    dy0 = sy0 - src_y0
+    dy1 = dy0 + (sy1 - sy0)
+    dx0 = sx0 - src_x0
+    dx1 = dx0 + (sx1 - sx0)
+
+    if sy1 > sy0 and sx1 > sx0:
+        out[dy0:dy1, dx0:dx1] = data[sy0:sy1, sx0:sx1]
+
+    # Update only CRPIX - the pixel that was at (cx, cy) in the source
+    # should be at (nx/2, ny/2) in the output (0-based -> FITS 1-based).
+    crpix1 = header.get("CRPIX1", None)
+    crpix2 = header.get("CRPIX2", None)
+    if crpix1 is not None:
+        header["CRPIX1"] = float(crpix1) - src_x0
+    if crpix2 is not None:
+        header["CRPIX2"] = float(crpix2) - src_y0
+
+    header["NAXIS1"] = nx
+    header["NAXIS2"] = ny
+
+    return out, header
+
+
 def convert_ra_dec_to_hms_dms(ra_deg, dec_deg):
-    # Create a SkyCoord object using RA and DEC in degrees
-    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="fk5", equinox="J2000")
-    # Convert to the required format
+    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
     ra_str = coord.ra.to_string(unit=u.hour, sep=":", precision=1)
     dec_str = coord.dec.to_string(sep=":", precision=1, alwayssign=True)
     return f"{ra_str}, {dec_str}"
@@ -2061,31 +3861,25 @@ def trim_zeros_slices(arr):
 
 def distance_to_uniform_row_col(image, x, y):
 
-    # Ensure the input is a numpy array for easier manipulation
     image = np.array(image)
     rows, cols = image.shape
 
-    # Find rows with all same values
+    # Uniform (constant-value) rows/columns mark padded edges.
     uniform_rows = [i for i in range(rows) if np.all(image[i] == image[i, 0])]
-
-    # Find columns with all same values
     uniform_cols = [j for j in range(cols) if np.all(image[:, j] == image[0, j])]
 
-    # Calculate the Manhattan distance to the nearest uniform row
     if uniform_rows:
         row_distances = [abs(x - row) for row in uniform_rows]
         min_row_distance = min(row_distances)
     else:
-        min_row_distance = float("inf")  # If no uniform rows are found
+        min_row_distance = float("inf")  # no uniform rows found
 
-    # Calculate the Manhattan distance to the nearest uniform column
     if uniform_cols:
         col_distances = [abs(y - col) for col in uniform_cols]
         min_col_distance = min(col_distances)
     else:
-        min_col_distance = float("inf")  # If no uniform columns are found
+        min_col_distance = float("inf")  # no uniform columns found
 
-    # Return the minimum distance to a uniform row or column
     return min(min_row_distance, min_col_distance)
 
 
@@ -2183,19 +3977,16 @@ def write_position_2_ascii(dataframe, output_file):
     - None
     """
 
-    # Extract x_pix and y_pix columns
     if "x_pix" not in dataframe.columns or "y_pix" not in dataframe.columns:
         raise ValueError("DataFrame must have 'x_pix' and 'y_pix' columns.")
 
     x_pix_column = dataframe["x_pix"].values
     y_pix_column = dataframe["y_pix"].values
 
-    # Combine columns into a new DataFrame
     output_dataframe = pd.DataFrame({"x_pix": x_pix_column, "y_pix": y_pix_column})
 
-    # Write DataFrame to ASCII file with "X Y" header
     with open(output_file, "w") as file:
-        file.write("x y\n")  # Header line
+        file.write("x y\n")
         output_dataframe.to_csv(
             file, sep=" ", header=None, index=False, float_format="%.3f"
         )
@@ -2258,22 +4049,19 @@ def print_progress_bar(
 
 def get_normalized_histogram(data, bins="auto"):
 
-    # Create the histogram
     data = data[~np.isnan(data)]
     if bins == "auto":
         bins = calculate_bins(data)
     hist, bin_edges = np.histogram(data, bins=bins, density=True)
 
-    # Calculate the normalization factor
     normalization_factor = np.nanmax(hist)
 
-    # Normalize the histogram
     normalized_hist = hist / normalization_factor
 
     return normalized_hist, bin_edges
 
 
-def dict_to_string_with_hashtag(dictionary, float_format="%.3f"):
+def dict_to_string_with_hashtag(dictionary, float_format="%.6f"):
     result = ""
     for key, value in dictionary.items():
 
@@ -2339,3 +4127,361 @@ def safe_fits_write(fpath: str, image: np.ndarray, header: fits.Header, overwrit
     except (UnicodeEncodeError, ValueError) as e:
         # If sanitization failed, try with even more lenient verification
         fits.writeto(fpath, image_to_write, sanitized_header, overwrite=overwrite, output_verify="fix")
+
+    # Invalidate any cached entry for this path so subsequent reads see the new file
+    invalidate_fits_cache(fpath)
+
+
+def refresh_sibling_weight_map(
+    image_fpath: str,
+    weight_fpath: str = None,
+    weight_data: np.ndarray = None,
+    logger=None,
+) -> None:
+    """Keep ``<image>.weight<ext>`` siblings consistent after in-place resampling.
+
+    Alignment backends can overwrite a staged template or science FITS in place
+    (SWarp ``copyfile``, reproject/AstroAlign writing ``<base>.fits`` over the
+    input), which leaves a ``<stem>.weight.fits`` companion describing the
+    *previous* pixel grid.  SExtractor aborts with "measured frame and weight
+    map have different sizes" when handed such a mismatched MAP_WEIGHT.
+
+    For every existing sibling weight whose shape no longer matches the image:
+
+    1. write ``weight_data`` when given (must be on the new grid), else
+    2. copy ``weight_fpath`` when it exists and matches the new shape
+       (e.g. a resampled weight product from SWarp), else
+    3. write a binary weight map: 1 where the image is finite, else 0
+       (the convention used for the SWarp input weights).
+
+    Weights already matching the image shape, and images with no weight
+    sibling at all, are left untouched - no new convention is created.
+    All failures are non-fatal.
+    """
+    _log = logger if logger is not None else logging.getLogger(__name__)
+    try:
+        p = Path(str(image_fpath))
+        candidates = [
+            p.with_name(p.name + ".weight" + p.suffix),
+            p.with_suffix(".weight.fits"),
+        ]
+        existing = [c for c in dict.fromkeys(candidates) if c.is_file()]
+        if not existing:
+            return
+
+        img_hdr = fits.getheader(str(p))
+        img_shape = (int(img_hdr["NAXIS2"]), int(img_hdr["NAXIS1"]))
+
+        def _shape_of(fits_path):
+            h = fits.getheader(str(fits_path))
+            return (int(h.get("NAXIS2", -1)), int(h.get("NAXIS1", -1)))
+
+        for sibling in existing:
+            try:
+                if _shape_of(sibling) == img_shape:
+                    continue  # already consistent with the new grid
+            except Exception:
+                continue
+
+            replaced = None
+            if weight_data is not None:
+                try:
+                    wd = np.asarray(weight_data, dtype=np.float32)
+                    if wd.shape == img_shape:
+                        safe_fits_write(str(sibling), wd, img_hdr)
+                        replaced = "provided weight array"
+                except Exception:
+                    pass
+            if replaced is None and weight_fpath:
+                try:
+                    wp = Path(str(weight_fpath))
+                    if wp.is_file() and wp.resolve() != sibling.resolve() and _shape_of(wp) == img_shape:
+                        shutil.copyfile(str(wp), str(sibling))
+                        invalidate_fits_cache(str(sibling))
+                        replaced = "resampled weight %s" % wp.name
+                except Exception:
+                    pass
+            if replaced is None:
+                try:
+                    img = np.asarray(fits.getdata(str(p)), dtype=float)
+                    w = np.zeros(img_shape, dtype=np.float32)
+                    w[np.isfinite(img)] = 1.0
+                    safe_fits_write(str(sibling), w, img_hdr)
+                    replaced = "binary finite-pixel mask"
+                except Exception:
+                    continue
+            _log.warning(
+                "Weight map %s was on the pre-resampling grid; replaced with %s "
+                "to match %s (%dx%d).",
+                sibling.name, replaced, p.name, img_shape[1], img_shape[0],
+            )
+    except Exception:
+        return
+
+
+def _sfft_match_bad_mask(
+    science_image,
+    template_image,
+    hardware_defects_mask=None,
+):
+    """Return pixels to keep SFFT kernel priors away from.
+
+    The caller's broader ``defects_mask`` includes the catalog source mask;
+    using it here would reject every candidate around its own aperture
+    footprint, which starved the kernel fit in sparse fields.  This helper is
+    deliberately limited to invalid pixels and coordinate-aligned hardware
+    defects.
+    """
+    bad = ~np.isfinite(np.asarray(science_image))
+    template_image = np.asarray(template_image)
+    if template_image.shape == bad.shape:
+        bad |= ~np.isfinite(template_image)
+
+    if hardware_defects_mask is not None:
+        hardware_mask = np.asarray(hardware_defects_mask, dtype=bool)
+        if hardware_mask.shape == bad.shape:
+            bad |= hardware_mask
+    return bad
+
+
+def _sfft_post_anomaly_retry_viable(
+    n_surviving_vetted,
+    has_vetted_list,
+    n_pipeline_priors,
+    min_for_retry,
+):
+    """Decide whether the SFFT post-anomaly feedback retry can produce a
+    constrained kernel.
+
+    Post-anomaly positions are first-pass SubSources, so banning them
+    removes constraints directly from the retry's SubSource catalog;
+    ``n_surviving_vetted`` (SFFT-vetted sources not near an anomaly)
+    predicts the retry's matched count.  When that count and the pipeline
+    priors both sit at or below the kernel minimum, the retry cannot reach
+    a constrained solution - its prior pass dies at run_sfft's
+    matched-source gate and the prior-free alternative was already
+    evaluated in the first pass.  A larger prior pool can still feed SFFT
+    new SubSources, so it is not vetoed.
+    """
+    if not has_vetted_list:
+        return True
+    if n_surviving_vetted >= min_for_retry:
+        return True
+    return n_pipeline_priors > min_for_retry
+
+
+def _sfft_actual_convd(header):
+    """Return the image SFFT actually convolved, or an empty string."""
+    if header is None:
+        return ""
+    convd = str(header.get("CONVD", "")).strip().upper()
+    if convd in ("SCI", "REF"):
+        return convd
+
+    forcecon = str(header.get("FORCECON", "")).strip().upper()
+    if forcecon in ("SCI", "REF"):
+        return forcecon
+    if forcecon != "AUTO":
+        return ""
+
+    try:
+        fwhm_sci = float(header.get("FWHM_SCI", 0.0))
+        fwhm_ref = float(header.get("FWHM_REF", 0.0))
+    except (TypeError, ValueError):
+        return ""
+    if not (
+        np.isfinite(fwhm_sci)
+        and np.isfinite(fwhm_ref)
+        and fwhm_sci > 0
+        and fwhm_ref > 0
+    ):
+        return ""
+    return "SCI" if fwhm_sci <= fwhm_ref else "REF"
+
+
+def _sfft_photometric_flux_correction(
+    header,
+    convd=None,
+    min_disc_pct=3.0,
+    max_disc_pct=50.0,
+):
+    """Return the whole-image SFFT flux correction, or ``None``.
+
+    This correction is valid only when SFFT convolved the science image: both
+    the transient and the residual scale then share the convolution flux
+    scale.  For ``CONVD=REF`` the transient remains in native science units,
+    so multiplying the whole difference would bias the target amplitude.
+    """
+    actual_convd = convd if convd is not None else _sfft_actual_convd(header)
+    if str(actual_convd).strip().upper() != "SCI":
+        return None
+    try:
+        fscal_conv = float(header.get("FSCAL_CONV", header.get("FSCAL", 0.0)))
+        fscal_phot = float(header.get("FSCAL_PHOT", 0.0))
+        fscal_disc = float(header.get("FSCAL_DISC", np.nan))
+    except (TypeError, ValueError):
+        return None
+    if not (
+        np.isfinite(fscal_conv)
+        and np.isfinite(fscal_phot)
+        and fscal_conv > 0
+        and fscal_phot > 0
+    ):
+        return None
+    if not np.isfinite(fscal_disc):
+        fscal_disc = (
+            abs(fscal_conv - fscal_phot)
+            / max(abs(fscal_conv), abs(fscal_phot), 1e-10)
+            * 100.0
+        )
+    if min_disc_pct < fscal_disc <= max_disc_pct:
+        return fscal_phot / fscal_conv
+    return None
+
+
+def _sfft_difference_gain(
+    header,
+    science_gain,
+    convd=None,
+    flux_corrected=False,
+    flux_scale=None,
+):
+    """Return the gain that converts difference ADU to science electrons.
+
+    ``CONVD=SCI`` scales a science transient by the solved convolution scale,
+    so the effective gain must be ``GAIN_SCI / scale``.  ``CONVD=REF`` leaves
+    the transient on the native science scale and keeps the science gain.
+    ``flux_scale`` allows the caller to supply the kernel sum at the target,
+    which can differ from the header mean for a spatially varying solution.
+    """
+    try:
+        science_gain = float(science_gain)
+    except (TypeError, ValueError):
+        return np.nan
+    if not np.isfinite(science_gain) or science_gain <= 0:
+        return np.nan
+
+    actual_convd = convd if convd is not None else _sfft_actual_convd(header)
+    if str(actual_convd).strip().upper() != "SCI":
+        return science_gain
+
+    if flux_scale is not None:
+        try:
+            fscal = float(flux_scale)
+        except (TypeError, ValueError):
+            fscal = 0.0
+    else:
+        scale_key = "FSCAL_PHOT" if flux_corrected else "FSCAL_CONV"
+        try:
+            fscal = float(header.get(scale_key, 0.0))
+        except (TypeError, ValueError):
+            fscal = 0.0
+        if not (np.isfinite(fscal) and fscal > 0) and not flux_corrected:
+            try:
+                fscal = float(header.get("FSCAL", 0.0))
+            except (TypeError, ValueError):
+                fscal = 0.0
+    if np.isfinite(fscal) and fscal > 0:
+        return science_gain / fscal
+    if flux_scale is not None:
+        return np.nan
+
+    if not flux_corrected:
+        try:
+            diff_gain = float(header.get("GAIN", 0.0))
+        except (TypeError, ValueError):
+            diff_gain = 0.0
+        if np.isfinite(diff_gain) and diff_gain > 0:
+            return diff_gain
+    return science_gain
+
+
+def _keep_floor_cut(current_mask, bad_mask, metric, min_keep):
+    """Apply a boolean cut bounded by a keep-floor on the surviving pool.
+
+    Removes every ``bad_mask`` row still alive in ``current_mask`` when enough
+    rows would remain; otherwise removes only the worst-ranked flagged rows
+    (highest ``metric``, NaN treated as worst) so at least ``min_keep`` rows
+    survive.  Because the floor is evaluated against the accumulated mask,
+    successive cuts cannot combine to starve the pool.
+
+    Returns ``(new_mask, n_removed, n_flagged)``.
+    """
+    current_mask = np.asarray(current_mask, dtype=bool)
+    cand = np.asarray(bad_mask, dtype=bool) & current_mask
+    n_flagged = int(cand.sum())
+    if n_flagged == 0:
+        return current_mask, 0, 0
+    if int((current_mask & ~cand).sum()) >= min_keep:
+        return current_mask & ~cand, n_flagged, n_flagged
+    room = int(current_mask.sum()) - min_keep
+    if room <= 0:
+        return current_mask, 0, n_flagged
+    idx = np.flatnonzero(cand)
+    vals = np.nan_to_num(np.asarray(metric, dtype=float)[idx], nan=np.inf)
+    order = idx[np.argsort(-vals, kind="stable")]
+    drop = order[: min(room, len(order))]
+    new_mask = current_mask.copy()
+    new_mask[drop] = False
+    return new_mask, int(len(drop)), n_flagged
+
+
+def _bounded_centroid(img, x, y, box, wander_max):
+    """Centroid at (x, y), accepted only within wander_max px of the seed.
+
+    A centroid landing far from its seed is a centroiding failure (the fit
+    latched onto a neighbour, a mask edge, or noise), not a real position.
+    Bounding the accepted drift makes a wandering centroid equivalent to a
+    failed fit, so the caller keeps the source at its seed position instead
+    of trusting a corrupted one.  Returns (nan, nan) when neither centroid
+    function produces a bounded result.
+    """
+    for func in (centroid_2dg, centroid_com):
+        try:
+            x_c, y_c = centroid_sources(
+                img,
+                [x],
+                [y],
+                box_size=box,
+                centroid_func=func,
+                mask=~np.isfinite(img),
+            )
+            x_f, y_f = float(x_c[0]), float(y_c[0])
+            if (
+                np.isfinite(x_f)
+                and np.isfinite(y_f)
+                and abs(x_f - x) <= wander_max
+                and abs(y_f - y) <= wander_max
+            ):
+                return x_f, y_f
+        except Exception:
+            pass
+    return np.nan, np.nan
+
+
+def fwhm_outlier_clip(values, sigma=3.0, rel_floor=0.10):
+    """MAD sigma-clip on per-source FWHM values.
+
+    Returns ``(outlier_mask, median, sigma_eff)`` where ``outlier_mask``
+    is True for entries whose FWHM lies outside ``median +/- sigma *
+    sigma_eff``.  ``sigma_eff`` is the MAD-scaled scatter floored at
+    ``rel_floor`` x median: without the floor a defect-dominated pool
+    (MAD collapsing onto the majority locus) flags the genuine stellar
+    side as outliers, and even on clean pools the band should never be
+    tighter than the irreducible per-source FWHM measurement scatter.
+    Non-finite and non-positive entries are kept (not marked): callers
+    decide how to vet unmeasurable sizes.
+    """
+    vals = np.asarray(values, dtype=float)
+    finite = np.isfinite(vals) & (vals > 0)
+    if (
+        int(finite.sum()) == 0
+        or not np.isfinite(sigma)
+        or sigma <= 0
+    ):
+        return np.zeros(len(vals), dtype=bool), np.nan, np.nan
+    med = float(np.median(vals[finite]))
+    mad = float(np.median(np.abs(vals[finite] - med))) * 1.4826
+    sig_eff = max(mad, rel_floor * med)
+    outlier = finite & (np.abs(vals - med) > sigma * sig_eff)
+    return outlier, med, sig_eff

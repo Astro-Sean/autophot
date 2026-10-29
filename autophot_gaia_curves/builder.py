@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass
@@ -12,9 +13,9 @@ import requests
 
 from autophot_gaia_curves.gaia_archive import (
     calibrate_source_ids_batched,
-    gaia_xp_source_query,
     gaia_xp_sql_top_n,
-    launch_gaia_adql_to_pandas,
+    query_gaia_xp_cone_growing,
+    retry_with_backoff,
     sort_gaia_table_nearest_to_target,
 )
 
@@ -394,6 +395,82 @@ class GaiaCurveCatalogBuilder:
         )
         return m
 
+    @staticmethod
+    def _meta_path(out_path: Path) -> Path:
+        """Provenance sidecar recording the query footprint of a built catalog."""
+        return out_path.with_suffix(out_path.suffix + ".meta.json")
+
+    def _catalog_cache_usable(
+        self,
+        cached_df: pd.DataFrame,
+        meta_path: Path,
+        ra_deg: float,
+        dec_deg: float,
+        radius_deg: float,
+        *,
+        min_sources: int,
+        max_radius_deg: float,
+    ) -> bool:
+        """
+        Decide whether an existing catalog CSV can be reused.
+
+        Without a provenance sidecar (catalogs written before this existed)
+        only the row count is known, so the file is trusted only when it
+        already meets ``min_sources``. With provenance, reuse requires the
+        same target position and a query cone at least as wide as requested;
+        sparse catalogs are reused only when the earlier build already grew
+        the cone to its cap.
+        """
+        needed = max(1, int(min_sources))
+        if not meta_path.exists():
+            return len(cached_df) >= needed
+        try:
+            meta = json.loads(meta_path.read_text())
+            used_radius = float(meta["used_radius_deg"])
+            if (
+                abs(float(meta["ra_deg"]) - float(ra_deg)) > 1e-5
+                or abs(float(meta["dec_deg"]) - float(dec_deg)) > 1e-5
+            ):
+                return False
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        if used_radius < float(radius_deg) - 1e-6:
+            return False
+        if len(cached_df) >= needed:
+            return True
+        return (
+            bool(meta.get("growth_exhausted"))
+            and float(meta.get("max_radius_deg", 0.0))
+            >= float(max_radius_deg) - 1e-6
+        )
+
+    def _write_outputs(
+        self,
+        out_path: Path,
+        out_df: pd.DataFrame,
+        ra_deg: float,
+        dec_deg: float,
+        radius_deg: float,
+        used_radius_deg: float,
+        max_radius_deg: float,
+    ) -> None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_df.to_csv(out_path, index=False)
+        cap = max(float(max_radius_deg), float(radius_deg))
+        meta = {
+            "ra_deg": float(ra_deg),
+            "dec_deg": float(dec_deg),
+            "requested_radius_deg": float(radius_deg),
+            "used_radius_deg": float(used_radius_deg),
+            "max_radius_deg": float(cap),
+            "n_rows": int(len(out_df)),
+            "growth_exhausted": bool(used_radius_deg >= cap - 1e-9),
+        }
+        try:
+            self._meta_path(out_path).write_text(json.dumps(meta, indent=2))
+        except OSError:
+            pass
+
     def build(
         self,
         ra_deg: float,
@@ -405,18 +482,45 @@ class GaiaCurveCatalogBuilder:
         svo_filters: Optional[Dict[str, str]] = None,
         curve_cache_dir: str | Path = "svo_curves",
         timeout_sec: int = 60,
-        gaia_query_pause_before_sec: float = 1.0,
-        gaia_query_pause_after_sec: float = 1.0,
+        gaia_query_pause_before_sec: float = 0.25,
+        gaia_query_pause_after_sec: float = 0.25,
         gaia_xp_batch_size: int = 200,
-        gaia_xp_batch_pause_sec: float = 1.0,
+        gaia_xp_batch_pause_sec: float = 0.5,
         gaia_archive_max_retries: int = 3,
         gaia_archive_retry_base_delay_sec: float = 2.0,
         gaia_xp_order_by: str = "distance",
-        gaia_xp_show_progress: bool = True,
+        gaia_xp_show_progress: bool = False,
         gaia_nearest_prefetch_factor: int = 50,
-        gaia_nearest_prefetch_min: int = 500,
+        gaia_nearest_prefetch_min: int = 200,
         gaia_nearest_prefetch_max: int = 10000,
+        gaia_xp_min_sources: int = 25,
+        gaia_xp_max_radius_deg: float = 1.0,
+        gaia_xp_grow_factor: float = 1.5,
     ) -> pd.DataFrame:
+        out_path = Path(out_csv)
+        if out_path.exists():
+            cached_df = pd.read_csv(out_path)
+            if self._catalog_cache_usable(
+                cached_df,
+                self._meta_path(out_path),
+                ra_deg,
+                dec_deg,
+                radius_deg,
+                min_sources=gaia_xp_min_sources,
+                max_radius_deg=gaia_xp_max_radius_deg,
+            ):
+                self.logger.info(
+                    "Existing Gaia custom catalog found at %s; using cached file instead of re-downloading.",
+                    out_path,
+                )
+                return cached_df
+            self.logger.info(
+                "Cached catalog at %s has %d row(s) and does not cover the current "
+                "query settings; rebuilding with an expanded cone.",
+                out_path,
+                len(cached_df),
+            )
+
         band_to_curve_path: Dict[str, Path] = {
             b: Path(p).expanduser().resolve() for b, p in curves.items()
         }
@@ -428,7 +532,15 @@ class GaiaCurveCatalogBuilder:
                 self.logger.info(
                     "Downloading SVO filter %s for band %s ...", svo_id, band
                 )
-                self.download_svo_curve(svo_id, out, timeout_sec=timeout_sec)
+                retry_with_backoff(
+                    lambda: self.download_svo_curve(
+                        svo_id, out, timeout_sec=timeout_sec
+                    ),
+                    max_retries=gaia_archive_max_retries,
+                    base_delay_sec=gaia_archive_retry_base_delay_sec,
+                    logger=self.logger,
+                    op_name=f"SVO filter download {svo_id}",
+                )
                 band_to_curve_path[band] = out
 
         if not band_to_curve_path:
@@ -455,15 +567,15 @@ class GaiaCurveCatalogBuilder:
             prefetch_min=gaia_nearest_prefetch_min,
             prefetch_max=gaia_nearest_prefetch_max,
         )
-        adql = gaia_xp_source_query(
+        gaia, used_radius_deg = query_gaia_xp_cone_growing(
             ra_deg,
             dec_deg,
             radius_deg,
             sql_top,
             include_bp_rp=False,
-        )
-        gaia = launch_gaia_adql_to_pandas(
-            adql,
+            min_sources=gaia_xp_min_sources,
+            max_radius_deg=gaia_xp_max_radius_deg,
+            grow_factor=gaia_xp_grow_factor,
             pause_before_sec=gaia_query_pause_before_sec,
             pause_after_sec=gaia_query_pause_after_sec,
             max_retries=gaia_archive_max_retries,
@@ -473,8 +585,7 @@ class GaiaCurveCatalogBuilder:
         )
         if sort_by_distance and not gaia.empty:
             self.logger.info(
-                "Gaia TAP does not support ORDER BY sky distance; "
-                "fetched TOP %d rows, sorting in Python to nearest %d ...",
+                "Gaia TAP does not support ORDER BY sky distance; fetched TOP %d rows, sorting in Python to nearest %d ...",
                 sql_top,
                 max_sources,
             )
@@ -487,15 +598,21 @@ class GaiaCurveCatalogBuilder:
         if gaia.empty:
             self.logger.warning("No Gaia sources found.")
             out_df = pd.DataFrame(columns=["name", "ra", "dec"])
-            Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
-            out_df.to_csv(out_csv, index=False)
+            self._write_outputs(
+                out_path,
+                out_df,
+                ra_deg,
+                dec_deg,
+                radius_deg,
+                used_radius_deg,
+                gaia_xp_max_radius_deg,
+            )
             return out_df
 
         source_ids = [s for s in gaia["_sid_key"].tolist() if s]
         if len(source_ids) != len(gaia):
             self.logger.warning(
-                "After formatting, %d / %d Gaia rows have empty source_id (skipped "
-                "for GaiaXPy).",
+                "After formatting, %d / %d Gaia rows have empty source_id (skipped for GaiaXPy).",
                 len(gaia) - len(source_ids),
                 len(gaia),
             )
@@ -506,8 +623,7 @@ class GaiaCurveCatalogBuilder:
         )
         n_batches = max(1, (len(source_ids) + eff_bs - 1) // eff_bs) if source_ids else 0
         self.logger.info(
-            "Calibrating Gaia XP spectra for %d sources (%d batch(es), "
-            "batch_size=%s, inter_batch_pause=%.2fs) ...",
+            "Calibrating Gaia XP spectra for %d sources (%d batch(es), batch_size=%s, inter_batch_pause=%.2fs) ...",
             len(source_ids),
             n_batches,
             gaia_xp_batch_size if gaia_xp_batch_size > 0 else "all",
@@ -528,9 +644,10 @@ class GaiaCurveCatalogBuilder:
             )
         elif not spectra_df.empty:
             self.logger.warning(
-                "GaiaXPy did not return a separate wavelength sampling array; "
-                "expecting wavelength columns inside each row. If the catalog is "
-                "empty, update autophot_gaia_curves or inspect calibrate() output."
+                "GaiaXPy did not return a separate wavelength sampling\n"
+                "    array; expecting wavelength columns inside each row.\n"
+                "    If the catalog is empty, update autophot_gaia_curves\n"
+                "    or inspect calibrate() output."
             )
 
         if "source_id" not in spectra_df.columns:
@@ -550,14 +667,20 @@ class GaiaCurveCatalogBuilder:
                 )
             except ImportError:
                 pass
+        # Index the ADQL rows once so the per-source join is O(1) instead of
+        # a full-frame scan for every calibrated spectrum.
+        gaia_by_sid = gaia.drop_duplicates("_sid_key", keep="first").set_index(
+            "_sid_key", drop=False
+        )
         join_miss_logged = 0
         extract_fail_logged = 0
         for _, row in row_iter:
             sid = _format_gaia_source_id(row["source_id"])
             if not sid:
                 continue
-            match = gaia.loc[gaia["_sid_key"] == sid]
-            if match.empty:
+            try:
+                base = gaia_by_sid.loc[sid]
+            except KeyError:
                 if join_miss_logged < 3:
                     self.logger.warning(
                         "No ADQL row for GaiaXPy source_id=%s (join mismatch).",
@@ -565,7 +688,6 @@ class GaiaCurveCatalogBuilder:
                     )
                     join_miss_logged += 1
                 continue
-            base = match.iloc[0]
             try:
                 wavelength_nm, flux_w_m2_nm, flux_err_w_m2_nm = (
                     self.extract_spectrum_columns(
@@ -608,10 +730,11 @@ class GaiaCurveCatalogBuilder:
             out_df = pd.DataFrame(columns=cols)
             if not spectra_df.empty:
                 self.logger.warning(
-                    "Gaia curve-map catalog has 0 usable rows after band "
-                    "integration (%d calibrated sources skipped). "
-                    "spectra_df columns=%s; xp_sampling_nm=%s. "
-                    "Check XP flux column names, wavelength grid, and filter overlap.",
+                    "Gaia curve-map catalog has 0 usable rows after band\n"
+                    "    integration (%d calibrated sources skipped).\n"
+                    "    spectra_df columns=%s; xp_sampling_nm=%s.\n"
+                    "    Check XP flux column names, wavelength grid, and\n"
+                    "    filter overlap.",
                     len(spectra_df),
                     list(spectra_df.columns),
                     "None"
@@ -640,17 +763,36 @@ class GaiaCurveCatalogBuilder:
                     bad_bands.append(f"{b} (0/{n} finite)")
             if len(bad_bands) == len(list(loaded_curves.keys())):
                 self.logger.warning(
-                    "Gaia curve-map catalog build produced %d row(s) but no finite "
-                    "synthetic magnitudes for any requested band(s): %s. "
-                    "Likely causes: (1) curve wavelength units misinterpreted (A vs nm), "
-                    "(2) no overlap with Gaia XP spectra (~330-1050 nm), "
-                    "(3) GaiaXPy output format changed (flux column names).",
+                    "Gaia curve-map catalog build produced %d row(s) but no\n"
+                    "    finite synthetic magnitudes for any requested\n"
+                    "    band(s): %s.\n"
+                    "    Likely causes: (1) curve wavelength units\n"
+                    "    misinterpreted (A vs nm), (2) no overlap with Gaia\n"
+                    "    XP spectra (~330-1050 nm), (3) GaiaXPy output\n"
+                    "    format changed (flux column names).",
                     n,
                     ", ".join(bad_bands),
                 )
-        out_path = Path(out_csv)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_df.to_csv(out_path, index=False)
+        if not out_df.empty and len(out_df) < max(1, int(gaia_xp_min_sources)):
+            self.logger.warning(
+                "Gaia curve-map catalog holds only %d source(s) after XP\n"
+                "    calibration within a %.4f-deg cone (target >= %d).\n"
+                "    Zeropoints on so few stars are fragile; for survey-covered\n"
+                "    bands prefer 'refcat'/'pan_starrs', or raise\n"
+                "    catalog.gaia_xp_max_radius_deg.",
+                len(out_df),
+                used_radius_deg,
+                int(gaia_xp_min_sources),
+            )
+        self._write_outputs(
+            out_path,
+            out_df,
+            ra_deg,
+            dec_deg,
+            radius_deg,
+            used_radius_deg,
+            gaia_xp_max_radius_deg,
+        )
         self.logger.debug("Curve-map catalog written: %d rows -> %s", len(out_df), out_path)
         return out_df
 
@@ -665,23 +807,32 @@ def build_custom_catalog(
     svo_filters: Optional[Dict[str, str]] = None,
     curve_cache_dir: str | Path = "svo_curves",
     timeout_sec: int = 60,
-    gaia_query_pause_before_sec: float = 1.0,
-    gaia_query_pause_after_sec: float = 1.0,
+    gaia_query_pause_before_sec: float = 0.25,
+    gaia_query_pause_after_sec: float = 0.25,
     gaia_xp_batch_size: int = 200,
-    gaia_xp_batch_pause_sec: float = 1.0,
+    gaia_xp_batch_pause_sec: float = 0.5,
     gaia_archive_max_retries: int = 3,
     gaia_archive_retry_base_delay_sec: float = 2.0,
     gaia_xp_order_by: str = "distance",
-    gaia_xp_show_progress: bool = True,
+    gaia_xp_show_progress: bool = False,
     gaia_nearest_prefetch_factor: int = 50,
-    gaia_nearest_prefetch_min: int = 500,
+    gaia_nearest_prefetch_min: int = 200,
     gaia_nearest_prefetch_max: int = 10000,
+    gaia_xp_min_sources: int = 25,
+    gaia_xp_max_radius_deg: float = 1.0,
+    gaia_xp_grow_factor: float = 1.5,
     log_level: int = logging.INFO,
 ) -> pd.DataFrame:
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
+    try:
+        from functions import cap_console_lines
+    except ImportError:
+        pass
+    else:
+        cap_console_lines(logging.getLogger().handlers, extra_reserve=26)
     builder = GaiaCurveCatalogBuilder()
     return builder.build(
         ra_deg=ra_deg,
@@ -704,5 +855,8 @@ def build_custom_catalog(
         gaia_nearest_prefetch_factor=gaia_nearest_prefetch_factor,
         gaia_nearest_prefetch_min=gaia_nearest_prefetch_min,
         gaia_nearest_prefetch_max=gaia_nearest_prefetch_max,
+        gaia_xp_min_sources=gaia_xp_min_sources,
+        gaia_xp_max_radius_deg=gaia_xp_max_radius_deg,
+        gaia_xp_grow_factor=gaia_xp_grow_factor,
     )
 

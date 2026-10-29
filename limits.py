@@ -3,9 +3,9 @@
 """
 Limiting-magnitude estimation utilities.
 
-This module supports both background-based limiting estimates and injection/
-recovery experiments by simulating PSF sources into science cutouts and
-measuring the detection threshold required for robust photometry.
+Supports background-based limiting estimates and injection/recovery
+experiments that inject PSF sources into science cutouts and measure the
+detection threshold.
 """
 
 # ---------------------------------------------------------------------------
@@ -16,7 +16,7 @@ import os
 import sys
 import time
 import copy
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from functools import lru_cache
 
@@ -27,37 +27,221 @@ import pandas as pd
 
 
 @contextmanager
-def _pool_or_serial(n_jobs: int):
-    """Yield a ProcessPoolExecutor when n_jobs > 1, else None (serial; avoids fork on HPC)."""
+def _pool_or_serial(n_jobs: int, initializer=None, initargs=()):
+    """Yield a ProcessPoolExecutor when n_jobs > 1, else None (serial; avoids fork on HPC).
+
+    ``initializer``/``initargs`` let each worker receive large shared state
+    (image cutout, ePSF model, config, RMS map) once at startup instead of
+    pickling it into every task.
+    """
     if n_jobs <= 1:
         yield None
         return
-    with ProcessPoolExecutor(max_workers=n_jobs) as pool:
+    with ProcessPoolExecutor(
+        max_workers=n_jobs, initializer=initializer, initargs=initargs
+    ) as pool:
         yield pool
+
+
+# Shared per-worker state for injection trials (see _pool_or_serial initargs).
+_INJ_CTX: dict = {}
+
+
+def _injection_init_shared(
+    cutout, oversampling, epsf_model, input_yaml, background_rms,
+    snr_limit, beta_n, recovery_method,
+):
+    """ProcessPoolExecutor initializer: stash trial-invariant state per worker."""
+    _INJ_CTX.update(
+        cutout=cutout,
+        oversampling=oversampling,
+        epsf_model=epsf_model,
+        input_yaml=input_yaml,
+        background_rms=background_rms,
+        snr_limit=snr_limit,
+        beta_n=beta_n,
+        recovery_method=recovery_method,
+    )
+
+
+def _injection_worker_shared(pos_and_flux):
+    """Pool entry point: (x, y, F_amp[, expected_flux, seed]) per task."""
+    x_inj, y_inj, F_amp = pos_and_flux[:3]
+    extra = tuple(pos_and_flux[3:])
+    return _injection_worker(
+        (
+            x_inj,
+            y_inj,
+            F_amp,
+            _INJ_CTX["cutout"],
+            _INJ_CTX["oversampling"],
+            _INJ_CTX["epsf_model"],
+            _INJ_CTX["input_yaml"],
+            _INJ_CTX["background_rms"],
+            _INJ_CTX["snr_limit"],
+            _INJ_CTX["beta_n"],
+            _INJ_CTX["recovery_method"],
+        )
+        + extra
+    )
+
+
+def _wls_psf_flux(data, psf1, var, min_pix: int = 10):
+    """
+    Weighted least-squares fit of ``data ~= flux * psf1 + bkg``.
+
+    Returns (flux, flux_err); (nan, nan) on failure or too few valid pixels.
+    """
+    ok = np.isfinite(data) & np.isfinite(psf1) & np.isfinite(var) & (var > 0)
+    n_ok = int(np.count_nonzero(ok))
+    if n_ok < min_pix:
+        return np.nan, np.nan
+    w = 1.0 / var[ok]
+    a = np.vstack([psf1[ok].ravel(), np.ones(n_ok)])  # (2, N)
+    aw = a * w
+    m = aw @ a.T  # 2x2
+    b = aw @ data[ok].ravel()  # 2,
+    # Pseudo-inverse for numerical stability with ill-conditioned matrices
+    try:
+        cov = np.linalg.pinv(m)
+    except Exception:
+        return np.nan, np.nan
+    if not np.all(np.isfinite(cov)):
+        return np.nan, np.nan
+    theta = cov @ b  # (flux, bkg)
+    return float(theta[0]), float(np.sqrt(max(cov[0, 0], 0.0)))
+
+
+def _logistic_completeness_mle(mags, detected, m_guess=None):
+    """
+    Fit a logistic completeness curve ``P(det|m) = 1/(1+exp((m - m50)/s))``
+    to per-trial Bernoulli outcomes by maximum likelihood.
+
+    Parameters
+    ----------
+    mags     : (N,) injected instrumental magnitudes (per-trial, not per-bin)
+    detected : (N,) bool/0-1 detection outcomes
+    m_guess  : optional seed for m50 (defaults to median of `mags`)
+
+    Returns
+    -------
+    (m50, s) : float, float -- NaN on failure or degenerate input
+    """
+    x = np.asarray(mags, dtype=float)
+    y = np.asarray(detected, dtype=float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x = x[ok]
+    y = y[ok]
+    n_det = float(np.sum(y))
+    if x.size < 10 or n_det == 0.0 or n_det == float(x.size):
+        return np.nan, np.nan
+    if m_guess is None or not np.isfinite(m_guess):
+        m_guess = float(np.median(x))
+
+    def nll(theta):
+        m50, log_s = theta
+        s = np.exp(log_s)
+        if not (np.isfinite(s) and s > 0):
+            return np.inf
+        z = np.clip((x - m50) / s, -60.0, 60.0)
+        p = np.clip(1.0 / (1.0 + np.exp(z)), 1e-9, 1.0 - 1e-9)
+        return float(-np.sum(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
+
+    try:
+        from scipy.optimize import minimize
+
+        # Bounds keep noisy/sparse data from pushing m50 outside the sampled
+        # range or collapsing/inflating the transition width -- a converged
+        # but unconstrained fit can land magnitudes away from the data.
+        x_lo, x_hi = float(np.min(x)), float(np.max(x))
+        bounds = [
+            (x_lo - 1.0, x_hi + 1.0),
+            (np.log(0.01), np.log(5.0)),
+        ]
+        best = None
+        for s0 in (0.1, 0.3, 1.0):
+            r = minimize(
+                nll, np.array([float(m_guess), np.log(s0)]),
+                method="L-BFGS-B",
+                bounds=bounds,
+            )
+            if r.success and np.all(np.isfinite(r.x)) and (
+                best is None or r.fun < best.fun
+            ):
+                best = r
+        if best is None:
+            return np.nan, np.nan
+        m50, s = float(best.x[0]), float(np.exp(best.x[1]))
+        # Reject fits whose crossing lies outside the sampled magnitudes or
+        # whose width is implausibly flat/steep for this data.
+        if not (x_lo <= m50 <= x_hi):
+            return np.nan, np.nan
+        return m50, s
+    except Exception:
+        return np.nan, np.nan
+
+
+def _logistic_m_at_target(m50: float, s: float, p_target: float) -> float:
+    """Magnitude at which logistic completeness equals *p_target*."""
+    p = float(np.clip(p_target, 1e-6, 1.0 - 1e-6))
+    return float(m50) + float(s) * float(np.log((1.0 - p) / p))
 
 
 @lru_cache(maxsize=512)
 def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> float:
-    """Cached version of flux_for_mag for performance optimization."""
-    flux_target = 10.0 ** (-0.4 * m)
-    counts_target = flux_target * exposure_time
-    return counts_target / counts_ref
+    """
+    ePSF ``flux`` parameter for instrumental magnitude *m* (cached).
+
+    ``counts_ref`` **must be in e-**: the unit-flux PSF render integrated on
+    the recovery method's flux scale (total integral for PSF/EMCEE recovery,
+    aperture sum for AP recovery), after multiplying ADU by gain.  The ePSF
+    model is built from ADU images, so its raw integrals are in ADU; the
+    caller is responsible for multiplying by gain before passing here.
+
+    ``m`` uses the same e-/s convention as ``mag(flux)`` for that method.
+    The returned value is the dimensionless PSF flux scale factor such that
+    the injected PSF carries exactly ``10^(-0.4*m) * exposure_time`` e- on the
+    reference scale (total model flux, or aperture flux, respectively).
+    """
+    flux_e_per_s = 10.0 ** (-0.4 * m)
+    ref_e_in_frame = flux_e_per_s * float(exposure_time)
+    if counts_ref <= 0 or not np.isfinite(counts_ref):
+        return np.nan
+    return ref_e_in_frame / float(counts_ref)
 
 
-def _compute_p_det(df: pd.DataFrame, beta_n: float) -> pd.Series:
-    """Compute detection probability (beta) for each site."""
-    def _beta_row(row):
-        if (np.isfinite(row["flux_AP"]) and row["flux_AP"] > 0
-                and np.isfinite(row["noiseSky"]) and row["noiseSky"] > 0
-                and np.isfinite(row["area"]) and row["area"] > 0):
-            return beta_aperture(
-                n=beta_n,
-                flux_aperture=row["flux_AP"],
-                sigma=row["noiseSky"],
-                npix=row["area"],
-            )
+def _combine_limit_errors(err_boot, err_other):
+    """Quadrature-combine the site-bootstrap and solver limiting-mag errors.
+
+    Either term may be non-finite (e.g. a logistic/emcee fallback leaves the
+    bisection error NaN).  A valid term must never be discarded by an invalid
+    one, so each is treated independently; NaN is returned only when both are
+    unusable.
+    """
+    _b = float(err_boot) if np.isfinite(err_boot) else np.nan
+    _o = float(err_other) if np.isfinite(err_other) else np.nan
+    if np.isfinite(_b) and np.isfinite(_o):
+        return float(np.sqrt(_b**2 + _o**2))
+    if np.isfinite(_b):
+        return _b
+    return _o
+
+
+def _ap_diff_resid(input_yaml: dict) -> float:
+    """Residual aperture correction for rescaled diff apertures (mag).
+
+    main.py stores ``aperture_correction_diff_resid`` when the AP radius is
+    rescaled to the diff PSF (ZOGY geometric-mean / ForceConv=SCI); AP
+    recovery measures through that rescaled aperture, so inst->apparent
+    conversions on the diff carry the signed residual.  0.0 when absent.
+    (EMCEE recovery is on the PSF total-flux scale and needs no residual;
+    EMCEE display annotations that read the aperture flux_AP column do.)
+    """
+    try:
+        v = float((input_yaml or {}).get("aperture_correction_diff_resid", 0.0) or 0.0)
+    except (TypeError, ValueError):
         return 0.0
-    return df.apply(_beta_row, axis=1)
+    return v if np.isfinite(v) else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -66,29 +250,225 @@ def _compute_p_det(df: pd.DataFrame, beta_n: float) -> pd.Series:
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-from scipy.optimize import curve_fit
-from astropy.stats import sigma_clipped_stats, mad_std
 from astropy.nddata import Cutout2D
-from astropy.visualization import ZScaleInterval, ImageNormalize
+from astropy.visualization import ZScaleInterval
 from photutils.detection import DAOStarFinder
-from photutils.aperture import CircularAperture, CircularAnnulus
-
-from functions import log_warning_from_exception
+from photutils.aperture import (
+    AperturePhotometry,
+    CircularAperture,
+    CircularAnnulus,
+)
 
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
 from functions import (
     set_size,
-    gauss_1d,  # used directly - NOT redefined inside methods
-    flux_upper_limit,
     mag,
     points_in_circum,
     beta_aperture,
-    border_msg,
+    ascii_kv,
+    STATUS,
+    biweight_sky_sigma,
 )
-from aperture import Aperture
-from plotting_utils import get_marker_size
+from aperture import (
+    Aperture,
+    resolve_exposure_time_seconds,
+    resolve_gain_e_per_adu,
+)
+from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
+
+
+def _effective_exposure_seconds(input_yaml: dict) -> float:
+    """Exposure time [s]; same rules as ``Aperture.measure`` (required, no default)."""
+    return resolve_exposure_time_seconds(None, input_yaml)
+
+
+def _downsample_psf_flux_conserving(psf_os: np.ndarray, oversampling: int) -> np.ndarray:
+    """
+    Flux-conserving binning of an oversampled PSF onto detector pixels.
+
+    Same convention as ``Limits._downsample_psf`` (block sum over oversample
+    cells).  Used so ePSF oversampling matches photutils / pipeline PSF models.
+    """
+    osamp = int(oversampling)
+    if osamp <= 1:
+        return np.asarray(psf_os, dtype=float)
+    H_os, W_os = psf_os.shape
+    H = H_os // osamp
+    W = W_os // osamp
+    return (
+        psf_os[: H * osamp, : W * osamp]
+        .reshape(H, osamp, W, osamp)
+        .sum(axis=(1, 3))
+    )
+
+
+def _render_epsf_on_cutout(
+    epsf_model,
+    height: int,
+    width: int,
+    x_0: float,
+    y_0: float,
+    flux: float,
+    oversampling: int,
+) -> np.ndarray:
+    """
+    Render the ePSF onto a full ``(height, width)`` detector grid.
+
+    When ``oversampling > 1``, evaluate on a subpixel grid and bin down with
+    flux-conserving downsampling.  Injection trials **must** use the same path
+    as ``counts_ref`` calibration; otherwise ``flux_for_mag`` is wrong and
+    limiting magnitudes can be biased (often spuriously deep).
+    """
+    osamp = max(1, int(oversampling))
+    H, W = int(height), int(width)
+    if osamp <= 1:
+        gridy, gridx = np.indices((H, W))
+        return np.asarray(
+            epsf_model.evaluate(
+                x=gridx,
+                y=gridy,
+                flux=float(flux),
+                x_0=float(x_0),
+                y_0=float(y_0),
+            ),
+            dtype=float,
+        )
+    # Subpixel-cell centres inside each detector pixel: pixel i covers
+    # [i - 0.5, i + 0.5), so its osamp sub-cells sit at
+    # i + (k + 0.5)/osamp - 0.5.  np.linspace(0, W-1, W*osamp) is WRONG
+    # here - it spaces samples (W-1)/(W*osamp-1) apart instead of
+    # 1/osamp, stretching the render and shifting the pixel phase.
+    gx_os = (np.arange(W * osamp, dtype=float) + 0.5) / osamp - 0.5
+    gy_os = (np.arange(H * osamp, dtype=float) + 0.5) / osamp - 0.5
+    gridx_os, gridy_os = np.meshgrid(gx_os, gy_os)
+    psf_os = np.asarray(
+        epsf_model.evaluate(
+            x=gridx_os,
+            y=gridy_os,
+            flux=float(flux),
+            x_0=float(x_0),
+            y_0=float(y_0),
+        ),
+        dtype=float,
+    )
+    # evaluate() interpolates the stored data, which by the photutils ePSF
+    # convention sums to prod(oversampling) for flux=1 -- block-summing
+    # therefore yields osamp**2 * flux.  Divide it back out so the render
+    # carries true detector counts: counts_ref and injections then agree
+    # with the osamp<=1 evaluate() path AND with the model flux parameter.
+    return _downsample_psf_flux_conserving(psf_os, osamp) / float(osamp**2)
+
+
+def _analytic_psf_for_injection(fwhm: float, oversampling: int | None = None):
+    """Build an analytic Moffat ``ImagePSF`` for injection/recovery trials.
+
+    Used when no empirical ePSF model is available (ePSF build failure or too
+    few PSF stars): the injection still needs a PSF-shaped stamp even when the
+    recovery method is aperture-only.  Mirrors the ePSF init-kernel
+    construction in ``psf.py`` (same Moffat beta and grid conventions,
+    including the square pixel-response convolution) so the model is a
+    drop-in replacement wherever an ePSF is expected.
+
+    Parameters
+    ----------
+    fwhm        : image FWHM in native pixels
+    oversampling: ePSF oversampling factor; ``None`` picks 4 for
+                  undersampled data (FWHM < 2.5 px), 2 for marginally
+                  sampled (FWHM < 4 px), else 1.
+    """
+    from astropy.convolution import Moffat2DKernel
+    from photutils.psf import ImagePSF
+    from psf import MoffatPRF
+
+    fwhm = float(fwhm)
+    if not np.isfinite(fwhm) or fwhm <= 0:
+        return None
+    if oversampling is None:
+        osamp = 4 if fwhm < 2.5 else (2 if fwhm < 4.0 else 1)
+    else:
+        osamp = max(1, int(oversampling))
+    beta = 4.765
+    gamma = (osamp * fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0))
+    size_native = int(np.ceil(10.0 * fwhm)) | 1  # odd, >= ~10*FWHM footprint
+    size_native = max(size_native, 15)
+    if MoffatPRF is not None:
+        # Same pixel-integrated path as psf._analytic_moffat_psf: the
+        # PRF evaluates the analytic integral over each detector-pixel
+        # square, replacing the sampled-kernel boxcar below.
+        n = osamp * size_native
+        ctr = (n - 1) / 2.0
+        yy, xx = np.indices((n, n))
+        model = MoffatPRF(
+            flux=1.0,
+            x_0=ctr / osamp,
+            y_0=ctr / osamp,
+            alpha=max(float(gamma) / osamp, 1e-6),
+            beta=beta,
+        )
+        kernel_data = model(xx / osamp, yy / osamp)
+        total = float(np.nansum(kernel_data))
+        if np.isfinite(total) and total > 0:
+            kernel_data = kernel_data / total
+        kernel_data = kernel_data * float(osamp) ** 2
+        return ImagePSF(
+            data=kernel_data, x_0=ctr, y_0=ctr, oversampling=osamp
+        )
+    kernel = Moffat2DKernel(
+        gamma=max(float(gamma), 1e-6),
+        alpha=beta,
+        x_size=osamp * size_native,
+        y_size=osamp * size_native,
+    )
+    # Convolve the continuous Moffat with the square pixel response so the
+    # stamp is an effective PSF -- matching both detector data and the ePSF
+    # grid convention (injected sources rendered from a continuous model
+    # would be systematically narrower than real sources).
+    from psf import pixel_integrate_oversampled
+
+    kernel_data = pixel_integrate_oversampled(kernel.array, osamp)
+    # photutils ePSF convention: data sums to prod(oversampling) so that
+    # ``evaluate(flux=F)`` renders a source of total flux F.  A unit-sum
+    # array would inject stars osamp^2 too faint.
+    kernel_data = kernel_data * float(osamp) ** 2
+    ctr = (osamp * size_native - 1) / 2.0
+    return ImagePSF(
+        data=kernel_data, x_0=ctr, y_0=ctr, oversampling=osamp
+    )
+
+
+# Sigma multiplier passed to ``beta_aperture`` for injection trials and related
+# completeness (same n as Connolly-style aperture significance). Keep in sync
+# with any code that recomputes aperture beta to match injection (e.g. main.py).
+BETA_APERTURE_SIGMA_N = 3.0
+
+
+def _compute_p_det(df: pd.DataFrame, beta_n: float) -> pd.Series:
+    """
+    Compute detection probability (beta) for each site.
+
+    Expects ``flux_AP`` and ``noiseSky`` in matching *per-second* units
+    (e-/s and e-/s per pixel) as from ``Aperture.measure()``.
+    """
+    flux_ap = np.asarray(df["flux_AP"].values, dtype=float)
+    noise = np.asarray(df["noiseSky"].values, dtype=float)
+    area = np.asarray(df["area"].values, dtype=float)
+    valid = (
+        np.isfinite(flux_ap) & (flux_ap > 0)
+        & np.isfinite(noise) & (noise > 0)
+        & np.isfinite(area) & (area > 0)
+    )
+    result = np.zeros(len(df), dtype=float)
+    if valid.any():
+        result[valid] = beta_aperture(
+            n=beta_n,
+            flux_aperture=flux_ap[valid],
+            sigma=noise[valid],
+            npix=area[valid],
+        )
+    return pd.Series(result, index=df.index)
+
 
 # ===========================================================================
 # Module-level worker functions
@@ -121,6 +501,71 @@ def _fake_aperture_worker(args):
     return np.nansum(cutout_e[includ_zip[idx, 0], includ_zip[idx, 1]], axis=1)
 
 
+def _recovered_detection_flags(flux, err, F_amp, snr_thresh, lim_cfg):
+    """
+    Recompute the ``_injection_worker`` detection gate for scaled errors.
+
+    The worker's gate is ``S/N >= snr_thresh`` plus positivity/error-validity
+    (and the optional flux-ratio) cuts.  Given the per-trial recovered fluxes
+    and errors, this rebuilds the flag under ``err * scale`` without rerunning
+    photometry -- e.g. err scaled by the empirical calibration factor so the
+    injection gate matches the calibrated S/N used by the real detection flag.
+    """
+    flux = np.asarray(flux, dtype=float)
+    err = np.asarray(err, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        snr = np.where(
+            np.isfinite(flux) & np.isfinite(err) & (err > 0),
+            flux / err,
+            np.nan,
+        )
+    ok = np.isfinite(flux) & np.isfinite(err) & (err > 0)
+    if bool(lim_cfg.get("recovery_require_positive_flux", True)):
+        ok = ok & (flux > 0)
+    ratio = lim_cfg.get("recovery_max_flux_ratio", 0.0)
+    try:
+        ratio = float(ratio)
+    except (TypeError, ValueError):
+        ratio = 0.0
+    if ratio > 0 and np.isfinite(F_amp) and float(F_amp) > 0:
+        ok = ok & (np.abs(flux) <= ratio * abs(float(F_amp)))
+    if bool(lim_cfg.get("recovery_use_absolute_snr", False)):
+        snr_gate = np.abs(snr) >= float(snr_thresh)
+    else:
+        snr_gate = np.isfinite(snr) & (snr >= float(snr_thresh))
+    return np.asarray(ok & snr_gate, dtype=bool)
+
+
+def _recovery_systematic_flux_err(input_yaml: dict, flux: float) -> float:
+    """Systematic flux error the real detection SNR carries.
+
+    The injected-trial S/N gate must answer the same question the
+    detection decision asks of a real source.  main.py folds the SFFT
+    kernel-model fraction, the flux-scale discrepancy, and the LPI
+    background-infill floor into the measured flux errors; without the
+    same terms the recovered S/N is optimistic and the reported
+    limiting magnitude is deeper than a real source could reach.
+    """
+    if not np.isfinite(flux):
+        return np.nan
+    frac = 0.0
+    for key in ("psf_kernel_model_err_frac", "flux_scale_discrep_frac"):
+        try:
+            frac = np.hypot(
+                frac, max(float(input_yaml.get(key, 0.0) or 0.0), 0.0)
+            )
+        except (TypeError, ValueError):
+            continue
+    sys_err = abs(float(flux)) * frac
+    try:
+        lpi_err = float(input_yaml.get("_lpi_extra_flux_err_for_limits", np.nan))
+    except (TypeError, ValueError):
+        lpi_err = np.nan
+    if np.isfinite(lpi_err) and lpi_err > 0:
+        sys_err = np.hypot(sys_err, lpi_err)
+    return float(sys_err)
+
+
 def _injection_worker(args):
     """
     Inject a scaled PSF at a jittered position and attempt recovery.
@@ -128,35 +573,103 @@ def _injection_worker(args):
     Parameters
     ----------
     args : tuple
-        (x_inj, y_inj, F_amp, gridx, gridy, cutout,
+        (x_inj, y_inj, F_amp, cutout, oversampling,
          epsf_model, input_yaml, background_rms,
-         snr_limit, beta_n, DETECTION_BETA_THRESH, recovery_method)
+         snr_limit, beta_n, recovery_method)
+        Optionally followed by (expected_recovered_flux, seed):
+        ``expected_recovered_flux`` is the recovered quantity the flux-ratio
+        gate compares against (the model amplitude for PSF/EMCEE, the
+        aperture rate in e-/s for AP); ``seed`` drives the per-task source
+        Poisson draw and keeps trials reproducible.
 
     Returns
     -------
-    (detection_flag, beta_p) : (bool, float)
+    (detection_flag, beta_p, recovered_flux, recovered_flux_err, error)
+        ``error`` is None for normal outcomes (including legitimate site
+        rejections) and a short ``"Type: message"`` string when an unexpected
+        exception aborted the trial -- so systematic failures are visible to
+        the caller instead of masquerading as non-detections.
     """
     (
         x_inj,
         y_inj,
         F_amp,
-        gridx,
-        gridy,
         cutout,
+        oversampling,
         epsf_model,
         input_yaml,
         background_rms,
         snr_limit,
         beta_n,
-        DETECTION_BETA_THRESH,
         recovery_method,
-    ) = args
+    ) = args[:11]
+    # Trailing optional fields: expected recovered flux (unit-consistent
+    # gate reference) and a per-task RNG seed for the source Poisson draw.
+    expected_flux = float(args[11]) if len(args) > 11 else float(F_amp)
+    seed = args[12] if len(args) > 12 else None
 
     try:
-        psf_img = epsf_model.evaluate(
-            x=gridx, y=gridy, flux=F_amp, x_0=x_inj, y_0=y_inj
+        ny, nx = cutout.shape
+        psf_img = _render_epsf_on_cutout(
+            epsf_model, ny, nx, x_inj, y_inj, F_amp, oversampling
         )
+        # Preserve no-data regions (NaNs) end-to-end.
+        # - Never inject flux into invalid pixels.
+        # - Never replace NaNs with finite fill values (keeps diagnostics honest
+        #   and avoids bias near chip gaps / bands).
+        invalid = ~np.isfinite(cutout)
+        if np.any(invalid):
+            # Check if the PSF footprint has significant overlap with invalid
+            # pixels.  We measure the invalid fraction within the PSF's
+            # significant support (where |psf_img| > 1% of peak), not over the
+            # entire cutout -- a cutout can have few invalid pixels overall but
+            # all concentrated under the PSF.
+            psf_abs = np.abs(psf_img)
+            psf_peak = float(np.nanmax(psf_abs)) if np.any(np.isfinite(psf_abs)) else 0.0
+            if psf_peak > 0:
+                psf_support = psf_abs > (0.01 * psf_peak)
+                psf_support &= np.isfinite(psf_abs)
+                n_support = int(np.count_nonzero(psf_support))
+                if n_support > 0:
+                    n_invalid_in_psf = int(np.count_nonzero(psf_support & invalid))
+                    invalid_fraction = n_invalid_in_psf / n_support
+                else:
+                    invalid_fraction = 1.0
+            else:
+                invalid_fraction = float(np.sum(invalid)) / float(invalid.size)
+            # Reject site if >10% of the PSF's significant support falls on
+            # invalid pixels -- recovery would be biased by missing flux.
+            if invalid_fraction > 0.1:
+                return False, 0.0, np.nan, np.nan, None
+            psf_img = np.asarray(psf_img, dtype=float)
+            psf_img[invalid] = 0.0
+
+        # Realize the injected source's own shot noise: without it the
+        # completeness transition is artificially sharp because only the
+        # sky noise fluctuates.  The increment keeps the expected value
+        # (poisson(lam) - lam has zero mean), so the deterministic amp
+        # calibration is preserved while bright-source trials scatter
+        # correctly.  Seeded per task for reproducibility.
+        lim_cfg_inj = input_yaml.get("limiting_magnitude") or {}
+        if bool(lim_cfg_inj.get("inject_source_poisson_noise", True)):
+            try:
+                gain_inj = float(resolve_gain_e_per_adu(None, input_yaml))
+            except (TypeError, ValueError):
+                gain_inj = np.nan
+            if np.isfinite(gain_inj) and gain_inj > 0:
+                rng_inj = np.random.default_rng(seed)
+                psf_e = np.clip(psf_img * gain_inj, 0.0, None)
+                psf_img = psf_img + (rng_inj.poisson(psf_e) - psf_e) / gain_inj
+
         new_img = cutout + psf_img
+        if np.any(invalid):
+            new_img = np.asarray(new_img, dtype=float)
+            new_img[invalid] = np.nan
+
+        # All-NaN image: nothing to measure.
+        n_finite = int(np.count_nonzero(np.isfinite(new_img)))
+        if n_finite == 0:
+            return False, 0.0, np.nan, np.nan, None
 
         # Compute beta using the canonical aperture-based formalism (n=3) so
         # beta thresholds remain comparable across runs/methods.
@@ -166,16 +679,14 @@ def _injection_worker(args):
             sources=trial_df, plot=False, background_rms=background_rms, verbose=0
         )
 
-        # noiseSky from Aperture.measure() is per-pixel RMS (not total noise)
-        # beta_aperture uses sigma * sqrt(npix) internally to compute total noise
-        # Validate noiseSky first before computing beta_p
+        # noiseSky is per-pixel RMS; beta_aperture multiplies by sqrt(npix)
+        # internally. Beta is diagnostic only -- the detection gate is S/N.
         noise_sky = float(mres["noiseSky"].iloc[0])
         flux_ap = float(mres["flux_AP"].iloc[0])
         area_px = float(mres["area"].iloc[0])
 
         if not (np.isfinite(noise_sky) and noise_sky > 0):
-            logger.warning("Invalid noiseSky=%.4e; returning non-detection.", noise_sky)
-            return False, 0.0, np.nan
+            return False, 0.0, np.nan, np.nan, None
 
         beta_p = beta_aperture(
             n=beta_n,
@@ -183,12 +694,13 @@ def _injection_worker(args):
             sigma=noise_sky,
             npix=area_px,
         )
-        det_beta = beta_p >= DETECTION_BETA_THRESH
 
-        # Detection SNR gate: either aperture SNR (legacy) or PSF-fit SNR.
+        # Recovery decision is S/N-only. Beta is still returned for optional
+        # diagnostics/plots and backwards compatibility with existing outputs.
         method = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
         snr_val = np.nan
-        flux_hat = np.nan  # Initialize before PSF block
+        flux_hat = np.nan
+        flux_err = np.nan
         if method == "PSF":
             try:
                 # Fast PSF-flux estimate using weighted least squares on a local stamp.
@@ -206,48 +718,105 @@ def _injection_worker(args):
                 y2 = min(ny, int(np.floor(y0i)) + half + 2)
 
                 data = np.asarray(new_img[y1:y2, x1:x2], dtype=float)
-                # gx/gy and x_inj/y_inj are all in cutout-local pixel coordinates.
-                gx, gy = np.meshgrid(np.arange(x1, x2), np.arange(y1, y2))
-                psf1 = np.asarray(
-                    epsf_model.evaluate(x=gx, y=gy, flux=1.0, x_0=x0i, y_0=y0i),
-                    dtype=float,
-                )
-                # Fit both PSF flux and a constant background level in the stamp:
-                # data ~= flux * psf1 + bkg. This correctly handles any local mean
-                # shift (including the uniform "bias") without forcing background=0
-                # or relying on an annulus estimate.
+                # Same PSF rendering as injection (handles oversampling consistently).
+                psf_stamp = np.asarray(psf_img[y1:y2, x1:x2], dtype=float)
+                if np.isfinite(F_amp) and abs(float(F_amp)) > 1e-30:
+                    psf1 = psf_stamp / float(F_amp)
+                else:
+                    psf1 = _render_epsf_on_cutout(
+                        epsf_model,
+                        y2 - y1,
+                        x2 - x1,
+                        float(x0i - x1),
+                        float(y0i - y1),
+                        1.0,
+                        oversampling,
+                    )
+                # Fit PSF flux plus a constant background: data ~= flux*psf1 + bkg.
+                # Absorbs any local mean shift (including a uniform bias) without
+                # forcing background=0 or trusting an annulus estimate.
+                # Variance model (same image units as `data`):
+                #   var ~= background_rms^2 + source_poisson + readnoise^2
+                # Understating var would make the recovered S/N optimistic.
                 if background_rms is not None:
                     rms = np.asarray(background_rms[y1:y2, x1:x2], dtype=float)
-                    var = np.maximum(rms * rms, 1e-30)
+                    var = np.maximum(rms * rms, 0.0)
                 else:
-                    # Fallback variance: robust scatter of the stamp.
-                    sig = float(np.nanstd(data))
-                    var = np.full_like(data, max(sig * sig, 1e-30), dtype=float)
+                    sig = biweight_sky_sigma(data)
+                    if not np.isfinite(sig) or sig <= 0:
+                        sig = float(np.nanstd(data))
+                    var = np.full_like(data, max(sig * sig, 0.0), dtype=float)
 
-                ok = np.isfinite(data) & np.isfinite(psf1) & np.isfinite(var) & (var > 0)
-                if int(np.count_nonzero(ok)) >= 10:
-                    w = 1.0 / var[ok]
-                    a = np.vstack([psf1[ok].ravel(), np.ones(int(np.count_nonzero(ok)))])  # (2, N)
-                    # Weighted normal equations: (A W A^T)^{-1} A W y
-                    aw = a * w  # broadcast weights across rows
-                    m = aw @ a.T  # 2x2
-                    b = aw @ data[ok].ravel()  # 2,
-                    try:
-                        cov = np.linalg.inv(m)
-                    except Exception:
-                        cov = None
-                    if cov is not None and np.all(np.isfinite(cov)):
-                        theta = cov @ b  # (flux, bkg)
-                        flux_hat = float(theta[0])
-                        flux_err = float(np.sqrt(max(cov[0, 0], 0.0)))
-                        if np.isfinite(flux_err) and flux_err > 0:
-                            snr_val = flux_hat / flux_err
+                # Optional Poisson + read-noise contributions (conservative defaults).
+                lim_cfg = input_yaml.get("limiting_magnitude") or {}
+                include_poisson = bool(lim_cfg.get("psf_snr_include_poisson", True))
+                include_readnoise = bool(lim_cfg.get("psf_snr_include_readnoise", True))
+
+                gain_e_per_adu = float(resolve_gain_e_per_adu(None, input_yaml))
+                gain_e_per_adu = gain_e_per_adu if np.isfinite(gain_e_per_adu) and gain_e_per_adu > 0 else np.nan
+
+                if include_poisson and np.isfinite(gain_e_per_adu) and gain_e_per_adu > 0:
+                    # Source model (ADU) for the stamp using the injected-normalised PSF.
+                    # Use injected flux as a first-order approximation in the weights.
+                    model_adu = np.maximum(float(F_amp) * np.asarray(psf1, dtype=float), 0.0)
+                    var = var + (model_adu / gain_e_per_adu)
+
+                # Read noise is already included in background_rms (from
+                # the Background2D biweight-scale RMS) and in the fallback
+                # nanstd.  Do NOT add it again -- that double-counts it
+                # (same fix as BUG 131 in psf.py and aperture.py).
+                _ = bool(lim_cfg.get("psf_snr_include_readnoise", True))  # kept for config compat
+
+                var = np.maximum(var, 1e-30)
+
+                flux_hat, flux_err = _wls_psf_flux(data, psf1, var)
+                if np.isfinite(flux_err) and flux_err > 0:
+                    # Use signed S/N: a negative flux_hat (source on sky hole)
+                    # must NOT pass the detection threshold >= snr_limit > 0.
+                    snr_val = float(flux_hat) / flux_err
+
+                # Optional free-centroid recovery: re-fit the flux on a small
+                # grid of centroid offsets and keep the best (max signed) S/N.
+                # This approximates a blind *detection* limit rather than forced
+                # photometry at the exact injected position -- the found-peak S/N
+                # is what a real detection pipeline would measure.  Disabled by
+                # default (forced-photometry semantics, faster, and matches the
+                # known-position upper-limit definition).
+                if bool(lim_cfg.get("recovery_fit_centroid", False)):
+                    search_r = float(lim_cfg.get("recovery_centroid_search_px", 1.0))
+                    search_step = float(lim_cfg.get("recovery_centroid_search_step", 0.5))
+                    search_r = max(0.0, min(search_r, 5.0))
+                    search_step = max(0.25, min(search_step, search_r if search_r > 0 else 1.0))
+                    if search_r > 0:
+                        offs = np.arange(-search_r, search_r + 0.5 * search_step,
+                                         search_step)
+                        best_snr = snr_val if np.isfinite(snr_val) else -np.inf
+                        for dx in offs:
+                            for dy in offs:
+                                try:
+                                    psf1_d = _render_epsf_on_cutout(
+                                        epsf_model, y2 - y1, x2 - x1,
+                                        float(x0i + dx - x1),
+                                        float(y0i + dy - y1),
+                                        1.0, oversampling,
+                                    )
+                                    fh, fe = _wls_psf_flux(data, psf1_d, var)
+                                    if np.isfinite(fe) and fe > 0 and np.isfinite(fh):
+                                        s_d = fh / fe
+                                        if s_d > best_snr:
+                                            best_snr = s_d
+                                            flux_hat, flux_err = fh, fe
+                                except Exception:
+                                    continue
+                        if np.isfinite(best_snr):
+                            snr_val = best_snr
             except Exception:
                 snr_val = np.nan
+                flux_err = np.nan
         elif method == "EMCEE":
-            # Robust (but slow) PSF photometry recovery using the same MCMCFitter
-            # used by the main PSF pipeline. For performance and stability, this
-            # is best run serial (n_jobs=1) at the get_injected_limit level.
+            # Slow PSF photometry recovery via the same MCMCFitter as the main
+            # PSF pipeline. Run serial (n_jobs=1) at the get_injected_limit
+            # level: trials are expensive and models may not pickle cleanly.
             try:
                 from psf import MCMCFitter
 
@@ -265,27 +834,25 @@ def _injection_worker(args):
                 y2 = min(ny, int(np.floor(y0i)) + half + 2)
 
                 stamp = np.asarray(new_img[y1:y2, x1:x2], dtype=float)
+                # Stamp-local coordinates; model is shifted to match below.
                 gx, gy = np.meshgrid(np.arange(stamp.shape[1]), np.arange(stamp.shape[0]))
-                # gx/gy are stamp-local coordinates (correct)
 
-                # For EMCEE recovery we do not force background=0. The MCMC fitter
-                # uses an uncertainty model; background offsets are handled via the
-                # local background treatment already applied in Aperture-based beta
-                # and via the PSF flux posterior.
+                # Do not force background=0: background offsets are already
+                # handled by the Aperture-based local background treatment and
+                # absorbed into the PSF flux posterior.
 
-                # Local RMS if available.
                 rms_stamp = None
                 if background_rms is not None:
                     rms_stamp = np.asarray(background_rms[y1:y2, x1:x2], dtype=float)
                     rms_stamp = np.abs(rms_stamp)
 
                 model = epsf_model.copy()
-                # Place the source at injected coordinates in stamp-local coordinates.
+                # Stamp-local injection position.
                 model.x_0.value = float(x0i - x1)  # stamp-local
                 model.y_0.value = float(y0i - y1)  # stamp-local
                 model.flux.value = float(F_amp)
 
-                # Delta (px) bound for centroid; keep it tight since injection pos is known.
+                # Centroid bound; tight because the injection position is known.
                 raw_delta = phot_cfg.get("emcee_delta", None)
                 delta_px = float(raw_delta) if raw_delta is not None else 1.0
 
@@ -300,7 +867,7 @@ def _injection_worker(args):
                     batch_steps=int(phot_cfg.get("emcee_batch_steps", 100)),
                     jitter_scale=float(phot_cfg.get("emcee_jitter_scale", 0.01)),
                     use_nddata_uncertainty=True,
-                    gain=float(input_yaml.get("gain", 1.0)),
+                    gain=float(resolve_gain_e_per_adu(None, input_yaml)),
                     readnoise=float(input_yaml.get("read_noise", 0.0)),
                     background_rms=rms_stamp,
                 )
@@ -319,37 +886,114 @@ def _injection_worker(args):
                     flux_hat = float(fitted.parameters[i_flux])
                     flux_err = float(getattr(fitted, "stds", np.full_like(fitted.parameters, np.nan))[i_flux])
                     if np.isfinite(flux_hat) and np.isfinite(flux_err) and flux_err > 0:
-                        snr_val = flux_hat / flux_err
+                        snr_val = float(flux_hat) / flux_err  # signed, consistent with PSF path
                 except Exception:
                     snr_val = np.nan
+                    flux_err = np.nan
             except Exception:
                 snr_val = np.nan
+                flux_err = np.nan
 
-        if not np.isfinite(snr_val):
-            # Fall back to aperture-measured SNR.
-            try:
-                snr_val = float(mres["SNR"].iloc[0])
-            except Exception:
-                return False, beta_p, np.nan
-
-        # For PSF method, use PSF-fit SNR for detection (not beta aperture)
-        # For AP method, use beta aperture detection
-        # Return recovered flux for plotting injected vs recovered magnitude
-        recovered_flux = float(mres["flux_AP"].iloc[0]) if method == "AP" else flux_hat
-        if method == "PSF":
-            effective_snr_limit = float(snr_limit) if snr_limit is not None else 3.0
-            det_snr = np.isfinite(snr_val) and (snr_val >= effective_snr_limit)
-            return det_snr, beta_p, recovered_flux
+        # For PSF / EMCEE methods we require method-consistent S/N.
+        # Do not silently fall back to AP S/N here, which can make limits too deep.
+        if method in ("PSF", "EMCEE"):
+            recovered_flux = flux_hat if np.isfinite(flux_hat) else np.nan
+            recovered_flux_err = flux_err if np.isfinite(flux_err) else np.nan
+            if not np.isfinite(snr_val):
+                # WLS/MCMC fit failed (e.g. too few valid stamp pixels, or a
+                # site near a chip gap where the PSF stamp is bigger than the
+                # aperture disk used for site filtering). Conservative
+                # non-detection; ideally such sites are rejected upstream.
+                return False, beta_p, recovered_flux, recovered_flux_err, None
         else:
-            # AP method: use beta detection, optionally with SNR gate if snr_limit is set
-            if snr_limit is not None:
-                det_snr = np.isfinite(snr_val) and (snr_val >= float(snr_limit))
-                return (det_beta and det_snr), beta_p, recovered_flux
-            else:
-                return det_beta, beta_p, recovered_flux
+            # AP recovery: aperture S/N is the method-consistent detection statistic.
+            if not np.isfinite(snr_val):
+                try:
+                    snr_val = float(mres["SNR"].iloc[0])
+                except Exception:
+                    return False, beta_p, np.nan, np.nan, None
+            recovered_flux = float(mres["flux_AP"].iloc[0])
+            try:
+                recovered_flux_err = float(mres["flux_AP_err"].iloc[0])
+            except Exception:
+                recovered_flux_err = np.nan
 
-    except Exception:
-        return False, 0.0, np.nan
+        effective_snr_limit = float(snr_limit) if snr_limit is not None else 3.0
+
+        # --- Detection criterion for positive-source injection-recovery ---
+        #
+        # Only positive sources are injected (F_amp > 0), so a detection
+        # requires a positive recovered flux with S/N >= threshold. A
+        # negative flux with high |S/N| is an opposite-sign noise
+        # fluctuation, not a detection. Keep the positive-flux requirement
+        # enabled for science and difference images alike.
+        #
+        # recovery_use_absolute_snr controls only the S/N sign convention
+        # (signed vs |SNR|); it is independent of the flux-sign requirement.
+        lim_cfg_det = input_yaml.get("limiting_magnitude") or {}
+
+        # Mirror the systematic error budget the real target carries
+        # (kernel-model fraction, flux-scale discrepancy, LPI floor).  Without
+        # it injected trials clear the S/N gate more easily than a real source
+        # of the same brightness and the limit reads deeper than the pipeline
+        # can actually detect.
+        _sys_err = _recovery_systematic_flux_err(input_yaml, recovered_flux)
+        if (
+            np.isfinite(_sys_err)
+            and _sys_err > 0
+            and np.isfinite(recovered_flux_err)
+            and recovered_flux_err > 0
+        ):
+            recovered_flux_err = float(np.hypot(recovered_flux_err, _sys_err))
+            if np.isfinite(recovered_flux):
+                snr_val = float(recovered_flux) / recovered_flux_err
+
+        use_absolute_snr = bool(lim_cfg_det.get("recovery_use_absolute_snr", False))
+        require_positive_flux = bool(
+            lim_cfg_det.get("recovery_require_positive_flux", True)
+        )
+
+        # 1. S/N gate: signed SNR >= threshold (default) or |SNR| >= threshold
+        if use_absolute_snr:
+            det_snr = np.isfinite(snr_val) and (np.abs(snr_val) >= effective_snr_limit)
+        else:
+            det_snr = np.isfinite(snr_val) and (snr_val >= effective_snr_limit)
+
+        # 2. Flux gate: recovered flux must be finite and, by default,
+        #    positive (a negative fit found a dip, not the injected source).
+        #    Disable only for negative-injection experiments
+        #    (recovery_require_positive_flux=false).
+        det_flux = np.isfinite(recovered_flux)
+        if require_positive_flux and det_flux:
+            det_flux = recovered_flux > 0
+
+        # 3. Flux-error gate: the error must be finite and positive.
+        #    Without a valid error, the SNR is meaningless.
+        det_flux_err = (
+            np.isfinite(recovered_flux_err) and recovered_flux_err > 0
+        )
+
+        # 4. Optional flux-consistency gate: reject when the recovered flux
+        #    far exceeds the injected flux (cosmic ray or unmasked source in
+        #    the aperture). Off by default (ratio=0); enabling it biases the
+        #    measured limit near threshold.
+        max_flux_ratio = float(lim_cfg_det.get("recovery_max_flux_ratio", 0.0))
+        det_flux_consistent = True
+        if (
+            max_flux_ratio > 0
+            and np.isfinite(recovered_flux)
+            and np.isfinite(expected_flux)
+            and expected_flux > 0
+        ):
+            det_flux_consistent = abs(recovered_flux) <= max_flux_ratio * abs(expected_flux)
+
+        detected = det_snr and det_flux and det_flux_err and det_flux_consistent
+        return detected, beta_p, recovered_flux, recovered_flux_err, None
+
+    except Exception as exc:
+        # Surface the error instead of failing silently -- a systematic failure
+        # (e.g. a photutils API change) otherwise reads as 0% completeness.
+        return False, 0.0, np.nan, np.nan, f"{type(exc).__name__}: {exc}"
 
 
 # ===========================================================================
@@ -379,6 +1023,10 @@ class Limits:
         self.input_yaml = input_yaml
         self.catalog = catalog
 
+        # Most recent injection/recovery uncertainty calibration
+        # ({"result": UncertaintyCalibrationResult, "method": str} or None).
+        self.last_uncal = None
+
         # Optional RNG seed for reproducible limiting-magnitude experiments.
         seed = self.input_yaml.get("rng_seed", None)
         self._rng = (
@@ -391,7 +1039,7 @@ class Limits:
 
     def get_cutout(
         self, image: np.ndarray, position=None, *, scale_override: float | None = None
-    ) -> np.ndarray | None:
+    ) -> tuple:
         """
         Extract a square cutout centred on the target (or supplied) position.
 
@@ -407,7 +1055,11 @@ class Limits:
 
         Returns
         -------
-        ndarray or None
+        tuple of (ndarray or None, float, float)
+            ``(cutout, cx, cy)`` where ``cx, cy`` is the requested position
+            in cutout-local pixel coordinates (``Cutout2D.position_cutout``,
+            handles partial cutouts).  On failure the array is None and the
+            coordinates are NaN.
         """
         logger = logging.getLogger(__name__)
         try:
@@ -424,13 +1076,17 @@ class Limits:
                 )
                 return None
 
-            fwhm = self.input_yaml["fwhm"]
+            fwhm = float(self.input_yaml.get("fwhm", 3.0))
             scale = (
                 float(scale_override)
                 if scale_override is not None
-                else float(self.input_yaml["scale"])
+                else float(self.input_yaml.get("scale", 0.0))
             )
-            location_fwhm_mult = self.input_yaml["limiting_magnitude"]["inject_source_location"]
+            location_fwhm_mult = float(
+                (self.input_yaml.get("limiting_magnitude") or {}).get(
+                    "inject_source_location", 3.0
+                )
+            )
 
             half = int(np.ceil(location_fwhm_mult * fwhm + scale))
             # If `image` is already a cutout (e.g. the shared target cutout),
@@ -446,18 +1102,23 @@ class Limits:
             # This matters when callers pass an already-extracted local cutout into
             # limiting-magnitude routines (target_cutout); in that case full-frame
             # scale parameters can request a larger region than the provided array.
-            cutout = Cutout2D(
+            cutout_obj = Cutout2D(
                 image,
                 position=(tx, ty),
                 size=(2 * half, 2 * half),
                 mode="partial",
                 fill_value=np.nan,
             )
-            return cutout.data
+            data = cutout_obj.data.copy()
+            # True position of (tx, ty) in cutout-local pixel coordinates.
+            # position_cutout is (x, y) = (col, row) in cutout frame.
+            true_cx = float(cutout_obj.position_cutout[0])
+            true_cy = float(cutout_obj.position_cutout[1])
+            return data, true_cx, true_cy
 
         except Exception as exc:
-            logger.debug(f"getCutout failed: {exc}")
-            return None
+            logger.debug("getCutout failed: %s", exc)
+            return None, np.nan, np.nan
 
     # -----------------------------------------------------------------------
     # PSF helpers
@@ -468,27 +1129,10 @@ class Limits:
         """
         Flux-conserving downsampling of an oversampled PSF.
 
-        Reshapes into (H, os, W, os) blocks and takes the sum over the
-        oversampling axes to preserve total flux.
-
-        Parameters
-        ----------
-        psf_os      : 2-D ndarray  (H*os, W*os)
-        oversampling: int
-
-        Returns
-        -------
-        psf_unit : 2-D ndarray  (H, W),  sum(psf_unit) == sum(psf_os)
+        Delegates to module-level ``_downsample_psf_flux_conserving`` (single
+        implementation used by injection rendering and diagnostics).
         """
-        H_os, W_os = psf_os.shape
-        H = H_os // oversampling
-        W = W_os // oversampling
-        # Trim to exact multiple then reshape and sum to preserve flux.
-        return (
-            psf_os[: H * oversampling, : W * oversampling]
-            .reshape(H, oversampling, W, oversampling)
-            .sum(axis=(1, 3))
-        )
+        return _downsample_psf_flux_conserving(psf_os, oversampling)
 
     # -----------------------------------------------------------------------
     # PSF injection / recovery limiting magnitude
@@ -508,6 +1152,8 @@ class Limits:
         zeropoint: float = None,
         n_jobs: int = None,
         image_zeropoint: dict = None,
+        _return_details: bool = False,
+        avoid_positions=None,
     ) -> float:
         """
         Bracket-and-bisect search for the limiting magnitude by injecting
@@ -523,13 +1169,15 @@ class Limits:
         position        : (x, y) target pixel coords used to centre the cutout
         epsf_model      : photutils ePSF model
         initialGuess    : starting instrumental magnitude for the bracket
-        detection_limit : optional S/N detection threshold. If set, a trial is a detection only when (S/N >= detection_limit) AND (beta >= detection_cutoff). If null, beta-only detections are used.
-        detection_cutoff: beta threshold for an injected source to count as detected (default 0.5; beta is computed with n=3 so beta=0.5 ~ S/N~3)
+        detection_limit : optional S/N detection threshold. If null, defaults to S/N >= 3.0.
+        detection_cutoff: legacy beta threshold (unused; retained for backwards compatibility)
         plot            : save diagnostic completeness PDF
         background_rms  : full-frame RMS map (optional)
         subtraction_ready: unused placeholder
         zeropoint       : adds an apparent-magnitude axis to the plot
         n_jobs          : worker processes; None defaults to 1 (serial)
+        avoid_positions : additional full-frame ``(x, y)`` transient positions
+                          that injected sources must not overlap
 
         Returns
         -------
@@ -537,48 +1185,72 @@ class Limits:
         """
         logger = logging.getLogger(__name__)
         start_time = time.time()
+        self.last_uncal = None
 
         try:
-            # Always write diagnostic completeness plots for limiting-magnitude runs.
-            # This keeps behavior consistent and avoids "missing plot" surprises.
-            plot = True
-
             lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
+            # Beta-limit support is retained for backwards compatibility, but limiting
+            # magnitude detection is now S/N-only (see _injection_worker).
             if detection_cutoff is None:
-                detection_cutoff = float(
-                    lim_cfg.get("beta_limit", 0.5)
-                )
-            # Convert beta threshold to an equivalent k-sigma flux threshold for the
-            # beta formalism (using n=3). This is only a rough guide.
-            k_sigma = None
+                detection_cutoff = float(lim_cfg.get("beta_limit", 0.5))
+            # Validate the S/N detection gate: it must be a finite, positive
+            # number -- a NaN or non-positive threshold would trivially "detect"
+            # (or never detect) every trial and corrupt the limit.
             try:
-                k_sigma = float(flux_upper_limit(n=3.0, sigma=1.0, beta_p=float(detection_cutoff)))
-            except Exception:
-                k_sigma = None
-            logger.info(
-                "Injected limiting magnitude: beta_limit=%.3f (~%s sigma; n=3 beta formalism), "
-                "snr_gate=%s (limiting_magnitude.detection_limit), beta_n=3",
-                float(detection_cutoff),
-                ("%.2f" % float(k_sigma)) if k_sigma is not None else "unknown",
-                "off" if detection_limit is None else str(detection_limit),
-            )
+                effective_snr_limit = (
+                    float(detection_limit) if detection_limit is not None else 3.0
+                )
+            except (TypeError, ValueError):
+                effective_snr_limit = np.nan
+            if not (np.isfinite(effective_snr_limit) and effective_snr_limit > 0):
+                logger.warning(
+                    "Invalid detection_limit=%r; using S/N >= 3.0", detection_limit
+                )
+                effective_snr_limit = 3.0
+
             # =================================================================
             # Validation
             # =================================================================
+            # background_rms is indexed with full-frame coordinates by
+            # _extract_cutouts; a shape mismatch would silently slice a
+            # misaligned noise map and corrupt the trial S/N gate.
+            if background_rms is not None:
+                if np.shape(background_rms) != np.shape(full_image):
+                    raise ValueError(
+                        "background_rms must match full_image shape; got "
+                        f"{np.shape(background_rms)} vs {np.shape(full_image)}"
+                    )
             if epsf_model is None:
-                logger.info("No PSF model - skipping limiting magnitude")
-                return np.nan
+                # Injection needs a PSF-shaped stamp even for aperture-only
+                # recovery; substitute an analytic Moffat at the measured
+                # image FWHM when no empirical ePSF was built.
+                _fwhm_inj = float(self.input_yaml.get("fwhm", 3.0))
+                epsf_model = _analytic_psf_for_injection(_fwhm_inj)
+                if epsf_model is None:
+                    logger.info("No PSF model - skipping limiting magnitude")
+                    if _return_details:
+                        return {"inject_lmag": np.nan, "inject_lmag_err": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": 0.5, "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
+                    return np.nan
+                logger.info(
+                    "No ePSF model; using analytic Moffat PSF (FWHM=%.2f px) "
+                    "for injection/recovery.",
+                    _fwhm_inj,
+                )
 
-            if initialGuess is None or not np.isfinite(float(initialGuess)):
+            # Track whether the caller supplied a usable initial guess; -5.0 is
+            # only a fallback value, not a "use auto-guess" sentinel (a user can
+            # legitimately pass -5.0 explicitly).
+            try:
+                user_supplied_guess = (
+                    initialGuess is not None and np.isfinite(float(initialGuess))
+                )
+            except (TypeError, ValueError):
+                user_supplied_guess = False
+            if not user_supplied_guess:
                 initialGuess = -5.0
 
             # =================================================================
-            # Extract cutouts (science + RMS).
-            #
-            # If `precutout=True`, the caller has already provided the cutout
-            # to operate on (e.g. the shared local target cutout). In that case
-            # we must NOT call get_cutout() again, since it uses full-frame scale
-            # parameters and can shrink/pad the provided array.
+            # Extract cutouts (science + RMS)
             # =================================================================
             lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
             growth_factor = float(lim_cfg.get("scale_growth_factor", 1.5))
@@ -587,30 +1259,67 @@ class Limits:
             base_scale = float(self.input_yaml.get("scale", 0))
             scale_used = base_scale
 
-            # Capture original values in immutable local variables before defining closure
+            # Minimum half-size: injection radius + aperture_radius + annulus_width + 5px margin.
+            # annulus_width is typically 1.5 * aperture_radius from Aperture defaults.
+            phot_cfg_pre = self.input_yaml.get("photometry", {})
+            fwhm_pre = float(self.input_yaml.get("fwhm", 3.0))
+            ap_r_pre = float(phot_cfg_pre.get("aperture_radius", fwhm_pre))
+            r_base_pre = float((self.input_yaml.get("limiting_magnitude") or {}).get(
+                "inject_source_location", 3.0)) * fwhm_pre
+            annulus_w_pre = float(phot_cfg_pre.get("annulus_width", 1.5 * ap_r_pre))
+            min_half_needed = r_base_pre + ap_r_pre + annulus_w_pre + 5.0
+            location_fwhm_mult_pre = float((self.input_yaml.get("limiting_magnitude") or {}).get(
+                "inject_source_location", 3.0))
+            current_half = float(np.ceil(location_fwhm_mult_pre * fwhm_pre + base_scale))
+            if current_half < min_half_needed:
+                scale_used = max(base_scale, min_half_needed - location_fwhm_mult_pre * fwhm_pre)
+
+            # Snapshot full-frame inputs for the cutout closure below.
             _orig_frame = np.asarray(full_image, dtype=float)  # full science frame
             _orig_position = [float(position[0]), float(position[1])]  # full-frame coords (target position)
             _orig_background_rms = background_rms  # full-frame RMS map
 
+            _avoid_positions_full = []
+            if avoid_positions is not None:
+                try:
+                    _avoid_iter = np.asarray(avoid_positions, dtype=float).reshape(-1, 2)
+                except (TypeError, ValueError):
+                    _avoid_iter = []
+                    logger.warning(
+                        "Ignoring invalid limit avoid_positions=%r", avoid_positions
+                    )
+                for _ax, _ay in _avoid_iter:
+                    if not (np.isfinite(_ax) and np.isfinite(_ay)):
+                        continue
+                    # The primary already has its own exclusion; adding a
+                    # duplicate centre would only duplicate plot markers.
+                    if np.hypot(
+                        float(_ax) - _orig_position[0],
+                        float(_ay) - _orig_position[1],
+                    ) <= 0.5:
+                        continue
+                    _avoid_positions_full.append((float(_ax), float(_ay)))
+
             def _extract_cutouts(scale_px: float):
-                img = self.get_cutout(
+                result = self.get_cutout(
                     image=_orig_frame, position=_orig_position, scale_override=scale_px
                 )
-                if img is None:
-                    return None, None
+                if result is None:
+                    return None, None, np.nan, np.nan
+                img, cx, cy = result
                 rms = None
                 if _orig_background_rms is not None:
-                    rms = self.get_cutout(
+                    rms_result = self.get_cutout(
                         image=_orig_background_rms,
                         position=_orig_position,
                         scale_override=scale_px,
                     )
-                    if rms is not None:
-                        rms = np.abs(np.asarray(rms, dtype=float))
-                return img, rms
+                    if rms_result is not None:
+                        rms = np.abs(np.asarray(rms_result[0], dtype=float))
+                return img, rms, cx, cy
 
-            # Always create cutout internally from full image
-            cutout_img, cutout_rms = _extract_cutouts(scale_used)
+            # Cutouts are always extracted internally from the full frame.
+            cutout_img, cutout_rms, cutout_cx, cutout_cy = _extract_cutouts(scale_used)
             if cutout_img is None and growth_factor > 1:
                 # Try a slightly larger cutout if the initial one fails.
                 for _ in range(2):
@@ -618,49 +1327,88 @@ class Limits:
                         float(growth_max),
                         max(scale_used + 1.0, scale_used * growth_factor),
                     )
-                    cutout_img, cutout_rms = _extract_cutouts(scale_used)
+                    cutout_img, cutout_rms, cutout_cx, cutout_cy = _extract_cutouts(scale_used)
                     if cutout_img is not None:
                         break
 
-            if cutout_img is None:
-                logger.warning("getCutout returned None; aborting")
+            if cutout_img is None or not np.isfinite(cutout_cx) or not np.isfinite(cutout_cy):
+                logger.warning("getCutout returned None or invalid centre; aborting")
+                if _return_details:
+                    return {"inject_lmag": np.nan, "inject_lmag_err": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": 0.5, "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                 return np.nan
 
             cutout = cutout_img
             background_rms = cutout_rms
 
-            # Target is always at the centre of the cutout by construction.
+            # Target is at the true centre returned by get_cutout (accounts for partial cutouts)
             H, W = cutout.shape
-            cutout_cx = (W - 1) / 2.0
-            cutout_cy = (H - 1) / 2.0
 
-            # Calculate optimum aperture radius if not already set
+            def _avoid_positions_cutout() -> list:
+                """Map full-frame transient exclusions onto this cutout."""
+                ox = _orig_position[0] - float(cutout_cx)
+                oy = _orig_position[1] - float(cutout_cy)
+                return [
+                    (float(px - ox), float(py - oy))
+                    for px, py in _avoid_positions_full
+                ]
+
+            # A configured aperture_radius equal to the FWHM is the fallback
+            # sentinel; the optimum-radius measurement runs further below.
             fwhm = float(self.input_yaml.get("fwhm", 3.0))
             phot_cfg = self.input_yaml.get("photometry", {})
             configured_radius = float(phot_cfg.get("aperture_radius", fwhm))
 
             # Use local copy of config to avoid mutating shared state
-            import copy
             local_input_yaml = copy.deepcopy(self.input_yaml)
-
+            # Canonical exposure and gain for every Aperture call and for flux_for_mag
+            # (must match ``Aperture.measure`` resolution on this frame).
+            _exp_canon = _effective_exposure_seconds(local_input_yaml)
+            _gain_canon = resolve_gain_e_per_adu(None, local_input_yaml)
+            local_input_yaml["exposure_time"] = _exp_canon
+            local_input_yaml["gain"] = _gain_canon
+            
+            # On difference images the local annulus median can legitimately be
+            # negative; flooring it to 0 biases flux positive and makes every
+            # site look like a source (|S/N| > 3 everywhere). Keep the
+            # empirical noise: do not floor negative local backgrounds here.
+            lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
+            phot_cfg_local = local_input_yaml.get("photometry") or {}
+            floor_local_bkg = bool(
+                lim_cfg.get("enforce_nonnegative_local_background_for_injection", False)
+            )
+            phot_cfg_local["enforce_nonnegative_local_background"] = bool(floor_local_bkg)
+            local_input_yaml["photometry"] = phot_cfg_local
+            
             def _exclude_target_overlap(df: pd.DataFrame,
                                          target_cx: float,
                                          target_cy: float,
                                          exclusion_r: float) -> pd.DataFrame:
+                return _exclude_positions_overlap(
+                    df, [(target_cx, target_cy)], exclusion_r
+                )
+
+            def _exclude_positions_overlap(
+                df: pd.DataFrame,
+                positions,
+                exclusion_r: float,
+            ) -> pd.DataFrame:
                 """
-                Remove any injection sites whose aperture could overlap with the
-                transient aperture at (target_cx, target_cy).
+                Remove sites whose aperture could overlap any transient
+                aperture in ``positions``.
 
                 exclusion_r = aperture_radius (transient) + aperture_radius (injected)
                               + fwhm (PSF wing buffer)
-                Sites within exclusion_r pixels of the target are removed.
                 """
-                if len(df) == 0:
+                if len(df) == 0 or positions is None:
                     return df
-                dx = df["x_pix"].to_numpy() - target_cx
-                dy = df["y_pix"].to_numpy() - target_cy
+                pos = np.asarray(positions, dtype=float).reshape(-1, 2)
+                pos = pos[np.isfinite(pos).all(axis=1)]
+                if pos.size == 0:
+                    return df
+                dx = df["x_pix"].to_numpy(float)[:, None] - pos[None, :, 0]
+                dy = df["y_pix"].to_numpy(float)[:, None] - pos[None, :, 1]
                 dist = np.sqrt(dx**2 + dy**2)
-                return df[dist >= exclusion_r].copy()
+                return df[np.min(dist, axis=1) >= exclusion_r].copy()
 
             def _filter_edge_clearance(df: pd.DataFrame,
                                       cutout_w: float,
@@ -677,17 +1425,484 @@ class Limits:
                 )
                 return df[mask].copy()
 
-            # If aperture_radius equals fwhm (default fallback), try to calculate optimum
+            def _filter_aperture_validity(
+                df: pd.DataFrame,
+                image: np.ndarray,
+                *,
+                aperture_radius_pix: float,
+            ) -> pd.DataFrame:
+                """
+                Keep sites whose *aperture footprint* has no invalid pixels.
+
+                Policy:
+                - Reject if the aperture circle intersects NaN/Inf pixels.
+                - Optionally reject exact zeros (common SWarp no-coverage fill).
+                """
+                if df is None or len(df) == 0:
+                    return df
+                if image is None or np.ndim(image) != 2:
+                    return df
+                Hn, Wn = int(image.shape[0]), int(image.shape[1])
+                r = float(max(1.0, aperture_radius_pix))
+                r_int = int(np.ceil(r))
+                imgf = np.asarray(image, dtype=float)
+                avoid_zero_pixels = bool(lim_cfg.get("inject_avoid_zero_pixels", True))
+
+                keep = np.zeros(len(df), dtype=bool)
+                xs = np.asarray(df["x_pix"], dtype=float)
+                ys = np.asarray(df["y_pix"], dtype=float)
+                for i, (x, y) in enumerate(zip(xs, ys)):
+                    if not (np.isfinite(x) and np.isfinite(y)):
+                        continue
+                    xi = int(np.round(x))
+                    yi = int(np.round(y))
+                    if xi < 0 or yi < 0 or xi >= Wn or yi >= Hn:
+                        continue
+                    x0 = max(0, xi - r_int)
+                    x1 = min(Wn, xi + r_int + 1)
+                    y0 = max(0, yi - r_int)
+                    y1 = min(Hn, yi + r_int + 1)
+                    stamp = imgf[y0:y1, x0:x1]
+                    if stamp.size == 0:
+                        continue
+                    yy, xx = np.indices(stamp.shape)
+                    cx0 = float(x) - float(x0)
+                    cy0 = float(y) - float(y0)
+                    in_ap = (xx - cx0) ** 2 + (yy - cy0) ** 2 <= r**2
+                    vals = stamp[in_ap]
+                    if vals.size == 0:
+                        continue
+                    ok = np.isfinite(vals)
+                    if avoid_zero_pixels:
+                        ok &= (vals != 0.0)
+                    if bool(np.all(ok)):
+                        keep[i] = True
+                return df[keep].copy()
+
+            def _filter_annulus_finite_support(
+                df: pd.DataFrame,
+                image: np.ndarray,
+                *,
+                annulus_in_pix: float,
+                annulus_out_pix: float,
+            ) -> pd.DataFrame:
+                """
+                Allow NaNs in the annulus, but require enough finite pixels to
+                estimate local background/noise.
+                """
+                if df is None or len(df) == 0:
+                    return df
+                if image is None or np.ndim(image) != 2:
+                    return df
+                imgf = np.asarray(image, dtype=float)
+                avoid_zero_pixels = bool(lim_cfg.get("inject_avoid_zero_pixels", True))
+
+                # Minimum fraction of annulus pixels that must be finite/nonzero
+                # (default 0.5, matching historical behaviour and aperture.py).
+                min_frac = float(lim_cfg.get("inject_min_finite_annulus_frac", 0.5))
+                min_frac = float(max(0.0, min(1.0, min_frac)))
+                min_pix = int(lim_cfg.get("inject_min_finite_annulus_pix", 10))
+                min_pix = int(max(0, min_pix))
+
+                keep = np.zeros(len(df), dtype=bool)
+                for i, (x, y) in enumerate(zip(df["x_pix"].to_numpy(float), df["y_pix"].to_numpy(float))):
+                    if not (np.isfinite(x) and np.isfinite(y)):
+                        continue
+                    ann = CircularAnnulus(
+                        (float(x), float(y)),
+                        r_in=float(annulus_in_pix),
+                        r_out=float(annulus_out_pix),
+                    )
+                    try:
+                        vals = ann.to_mask(method="center").get_values(imgf)
+                    except Exception:
+                        continue
+                    if vals is None:
+                        continue
+                    vals = np.asarray(vals, dtype=float)
+                    total = int(vals.size)
+                    if total <= 0:
+                        continue
+                    # Annulus may contain NaNs; require a minimum usable count.
+                    ok = np.isfinite(vals)
+                    if avoid_zero_pixels:
+                        ok &= (vals != 0.0)
+                    n_ok = int(np.count_nonzero(ok))
+                    if n_ok >= min_pix and (n_ok / float(total)) >= min_frac:
+                        keep[i] = True
+                return df[keep].copy()
+
+            def _filter_pixel_statistics(
+                df: pd.DataFrame,
+                image: np.ndarray,
+                *,
+                aperture_radius_pix: float,
+                rms_map: np.ndarray | None = None,
+                max_variance_ratio: float = 3.0,
+                max_abs_mean_sigma: float = 2.5,
+            ) -> pd.DataFrame:
+                """
+                Reject sites whose pixel statistics indicate contamination from
+                bright-star template subtraction residuals. A residual halo has
+                elevated pixel-to-pixel scatter (variance test) or a shifted
+                local mean (mean-bias test) even when its median is near zero.
+
+                1. Variance test: reject if var_ap / var_ref > max_variance_ratio,
+                   where var_ref comes from the RMS map when available, else the
+                   annulus MAD, else a cutout-wide MAD fallback.
+
+                2. Mean-bias test: reject if
+                   |mean_ap - mean_annulus| / sigma_ref > max_abs_mean_sigma.
+
+                Both tests must pass for a site to be kept. Config keys
+                (0 disables the test):
+                  inject_max_variance_ratio   (default 3.0)
+                  inject_max_abs_mean_sigma   (default 2.5)
+                """
+                if df is None or len(df) == 0:
+                    return df
+                if image is None or np.ndim(image) != 2:
+                    return df
+
+                _var_ratio_thr = float(
+                    lim_cfg.get("inject_max_variance_ratio", max_variance_ratio)
+                )
+                _mean_sigma_thr = float(
+                    lim_cfg.get("inject_max_abs_mean_sigma", max_abs_mean_sigma)
+                )
+                _use_var_test = _var_ratio_thr > 0.0
+                _use_mean_test = _mean_sigma_thr > 0.0
+
+                if not (_use_var_test or _use_mean_test):
+                    return df
+
+                # Minimum fraction of annulus pixels that must be finite to
+                # produce a reliable background/noise estimate.
+                _annulus_valid_fraction = 0.5
+
+                Hn, Wn = int(image.shape[0]), int(image.shape[1])
+                imgf = np.asarray(image, dtype=float)
+                r = float(max(1.0, aperture_radius_pix))
+                r_int = int(np.ceil(r))
+                # Annulus for local background reference: 1.5*r_in to 3.0*r_out
+                ann_in = r * 1.5
+                ann_out = r * 3.0
+
+                # Global background variance fallback: sigma-clipped MAD of finite pixels
+                _global_finite = imgf[np.isfinite(imgf)]
+                if _global_finite.size >= 20:
+                    _global_mad = float(np.nanmedian(np.abs(_global_finite - np.nanmedian(_global_finite))))
+                    _global_sigma = max(_global_mad * 1.4826, 1e-30)
+                    _global_var = _global_sigma ** 2
+                else:
+                    _global_var = 1.0
+
+                keep = np.zeros(len(df), dtype=bool)
+                n_drop_var = 0
+                n_drop_mean = 0
+                xs = np.asarray(df["x_pix"], dtype=float)
+                ys = np.asarray(df["y_pix"], dtype=float)
+
+                for i, (x, y) in enumerate(zip(xs, ys)):
+                    if not (np.isfinite(x) and np.isfinite(y)):
+                        continue
+                    xi = int(np.round(x))
+                    yi = int(np.round(y))
+                    if xi < 0 or yi < 0 or xi >= Wn or yi >= Hn:
+                        continue
+
+                    # --- Aperture pixels ---
+                    x0 = max(0, xi - r_int)
+                    x1 = min(Wn, xi + r_int + 1)
+                    y0 = max(0, yi - r_int)
+                    y1 = min(Hn, yi + r_int + 1)
+                    stamp = imgf[y0:y1, x0:x1]
+                    if stamp.size == 0:
+                        continue
+                    yy, xx = np.indices(stamp.shape)
+                    cx0 = float(x) - float(x0)
+                    cy0 = float(y) - float(y0)
+                    in_ap = (xx - cx0) ** 2 + (yy - cy0) ** 2 <= r ** 2
+                    ap_vals = stamp[in_ap]
+                    ap_vals = ap_vals[np.isfinite(ap_vals)]
+                    if ap_vals.size < 4:
+                        # Too few pixels to test - treat as valid (the NaN
+                        # filter already ran upstream).
+                        keep[i] = True
+                        continue
+                    mean_ap = float(np.mean(ap_vals))
+                    var_ap = float(np.var(ap_vals))
+
+                    # --- Reference variance ---
+                    # Prefer the RMS map; most accurate on difference images.
+                    if rms_map is not None:
+                        rms_stamp = np.asarray(rms_map, dtype=float)[y0:y1, x0:x1]
+                        rms_ap_vals = rms_stamp[in_ap]
+                        rms_ap_vals = rms_ap_vals[np.isfinite(rms_ap_vals) & (rms_ap_vals > 0)]
+                        if rms_ap_vals.size >= 2:
+                            var_ref = float(np.median(rms_ap_vals) ** 2)
+                        else:
+                            var_ref = _global_var
+                        sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
+                        # Annulus mean still needed for mean-bias test
+                        try:
+                            ann = CircularAnnulus(
+                                (float(x), float(y)), r_in=ann_in, r_out=ann_out
+                            )
+                            ann_vals = ann.to_mask(method="center").get_values(imgf)
+                            if ann_vals is not None:
+                                ann_vals_raw = np.asarray(ann_vals, dtype=float)
+                                total_annulus = ann_vals_raw.size
+                                ann_vals = ann_vals_raw[np.isfinite(ann_vals_raw)]
+                            # Require at least _annulus_valid_fraction of annulus pixels to be finite.
+                            if ann_vals is not None and ann_vals.size >= 4 and ann_vals.size >= (total_annulus * _annulus_valid_fraction):
+                                mean_annulus = float(np.median(ann_vals))
+                            else:
+                                mean_annulus = 0.0
+                        except Exception:
+                            mean_annulus = 0.0
+                    else:
+                        # Annulus-based reference
+                        try:
+                            ann = CircularAnnulus(
+                                (float(x), float(y)), r_in=ann_in, r_out=ann_out
+                            )
+                            ann_vals = ann.to_mask(method="center").get_values(imgf)
+                            if ann_vals is not None:
+                                ann_vals_raw = np.asarray(ann_vals, dtype=float)
+                                total_annulus = ann_vals_raw.size
+                                ann_vals = ann_vals_raw[np.isfinite(ann_vals_raw)]
+                            # Require at least _annulus_valid_fraction of annulus pixels to be finite.
+                            if ann_vals is not None and ann_vals.size >= 4 and ann_vals.size >= (total_annulus * _annulus_valid_fraction):
+                                mean_annulus = float(np.median(ann_vals))
+                                mad = float(np.median(np.abs(ann_vals - mean_annulus)))
+                                sigma_ref = max(mad * 1.4826, 1e-30)
+                                var_ref = sigma_ref ** 2
+                            else:
+                                mean_annulus = 0.0
+                                var_ref = _global_var
+                                sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
+                        except Exception:
+                            mean_annulus = 0.0
+                            var_ref = _global_var
+                            sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
+
+                    # The model RMS map can understate the true diff
+                    # noise by orders of magnitude on a degraded
+                    # subtraction (e.g. VSCALE left at 1.0); measured
+                    # against it, EVERY quiet site looks contaminated
+                    # and the filter kills the whole field.  Floor the
+                    # reference by the measured cutout scatter so the
+                    # test only fires on sites worse than the actual
+                    # field noise.
+                    var_ref = max(var_ref, _global_var)
+                    sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
+
+                    # --- Variance test ---
+                    if _use_var_test and var_ref > 1e-60:
+                        ratio = var_ap / var_ref
+                        if ratio > _var_ratio_thr:
+                            n_drop_var += 1
+                            logger.debug(
+                                "Site (%.1f,%.1f) rejected: var_ap/var_ref=%.2f > %.2f (elevated pixel scatter - likely star-subtraction residual).",
+                                x, y, ratio, _var_ratio_thr,
+                            )
+                            continue
+
+                    # --- Mean-bias test ---
+                    if _use_mean_test and sigma_ref > 1e-60:
+                        bias = abs(mean_ap - mean_annulus) / sigma_ref
+                        if bias > _mean_sigma_thr:
+                            n_drop_mean += 1
+                            logger.debug(
+                                "Site (%.1f,%.1f) rejected: |mean_ap - mean_annulus|/sigma=%.2f > %.2f (significant local mean bias - likely star-subtraction pedestal).",
+                                x, y, bias, _mean_sigma_thr,
+                            )
+                            continue
+
+                    keep[i] = True
+
+                if n_drop_var or n_drop_mean:
+                    logger.info(
+                        "Pixel-statistics filter: dropped %d sites (variance) + %d sites (mean bias) of %d candidates.",
+                        n_drop_var, n_drop_mean, len(df),
+                    )
+                return df[keep].copy()
+
+            def _robust_site_snr(df: pd.DataFrame) -> pd.DataFrame:
+                """
+                Ensure candidate-site rows have a finite `SNR` for filtering.
+
+                ``Aperture.measure()`` can yield NaN SNR even for quiet sites.
+                For site selection only, fall back to
+
+                    SNR ~= |flux_AP| / (noiseSky * sqrt(area))
+
+                and drop rows whose inputs are non-finite.
+                """
+                if df is None or len(df) == 0:
+                    return df
+                if "SNR" not in df.columns:
+                    df["SNR"] = np.nan
+                flux_ap = np.asarray(df.get("flux_AP", np.nan), dtype=float)
+                noise = np.asarray(df.get("noiseSky", np.nan), dtype=float)
+                area = np.asarray(df.get("area", np.nan), dtype=float)
+                snr = np.asarray(df.get("SNR", np.nan), dtype=float)
+                valid = (
+                    np.isfinite(flux_ap)
+                    & np.isfinite(noise)
+                    & (noise > 0)
+                    & np.isfinite(area)
+                    & (area > 0)
+                )
+                snr_fb = np.full_like(flux_ap, np.nan, dtype=float)
+                snr_fb[valid] = np.abs(flux_ap[valid]) / (noise[valid] * np.sqrt(area[valid]))
+                use_fb = (~np.isfinite(snr)) & np.isfinite(snr_fb)
+                if np.any(use_fb):
+                    df.loc[use_fb, "SNR"] = snr_fb[use_fb]
+                n_before = int(len(df))
+                df = df[valid].copy()
+                n_drop = int(n_before - len(df))
+                return df
+
+            def _calculate_annulus_statistics(
+                x: float,
+                y: float,
+                image: np.ndarray,
+                annulus_in_pix: float,
+                annulus_out_pix: float,
+            ) -> tuple[float, float]:
+                """
+                Calculate annulus statistics (mean, std) for a given position.
+                
+                Parameters
+                ----------
+                x, y : float
+                    Center position in pixels
+                image : np.ndarray
+                    Image array
+                annulus_in_pix, annulus_out_pix : float
+                    Inner and outer radius of annulus in pixels
+                    
+                Returns
+                -------
+                mean, std : tuple[float, float]
+                    Mean and standard deviation of annulus pixels (NaN if invalid)
+                """
+                try:
+                    ann = CircularAnnulus((x, y), r_in=annulus_in_pix, r_out=annulus_out_pix)
+                    ann_vals = ann.to_mask(method="center").get_values(image)
+                    if ann_vals is not None:
+                        ann_vals = np.asarray(ann_vals, dtype=float)
+                        ann_vals = ann_vals[np.isfinite(ann_vals)]
+                        if ann_vals.size >= 4:
+                            mean = float(np.median(ann_vals))
+                            # MAD scaled to a normal-equivalent sigma.
+                            mad = np.median(np.abs(ann_vals - mean))
+                            std = float(1.4826 * mad)
+                            return mean, std
+                except Exception:
+                    pass
+                return np.nan, np.nan
+
+            def _stratified_annular_candidates(
+                n_sites: int,
+                cx: float,
+                cy: float,
+                r_min: float,
+                r_max: float,
+                rng: np.random.Generator,
+                jitter_pix: float = 0.5,
+            ) -> pd.DataFrame:
+                """
+                Generate approximately *n_sites* candidate positions uniformly
+                distributed in area within the annulus [r_min, r_max] using a
+                Fibonacci-spiral (sunflower) pattern.
+
+                A small random sub-pixel jitter is added so repeated runs with
+                different seeds explore slightly different positions while
+                retaining the uniform large-scale coverage.
+
+                Returns a DataFrame with ``x_pix`` and ``y_pix`` columns.
+                """
+                n_sites = max(1, int(n_sites))
+                r_min = float(r_min)
+                r_max = float(r_max)
+                if r_max <= r_min:
+                    r_max = r_min + 1.0
+                # Golden-angle spiral for area-uniform coverage of the annulus.
+                golden = np.pi * (3.0 - np.sqrt(5.0))
+                indices = np.arange(n_sites, dtype=float)
+                # Map indices to a radius that is uniform in area between r_min and r_max.
+                # Fraction of area inside radius r: (r^2 - r_min^2) / (r_max^2 - r_min^2)
+                frac = (indices + 0.5) / n_sites
+                rr = np.sqrt(frac * (r_max ** 2 - r_min ** 2) + r_min ** 2)
+                theta = indices * golden
+                # Optional sub-pixel jitter for stochastic exploration.
+                # The angular jitter is normalised by the *unjittered*
+                # radius so the radial and angular perturbations stay
+                # independent (a larger radial kick should not also
+                # change the angular scale).
+                if jitter_pix > 0:
+                    th_j = rng.uniform(
+                        -jitter_pix, jitter_pix, n_sites
+                    ) / np.maximum(rr, 1.0)
+                    rr = rr + rng.uniform(-jitter_pix, jitter_pix, n_sites)
+                    theta = theta + th_j
+                x_pix = cx + rr * np.cos(theta)
+                y_pix = cy + rr * np.sin(theta)
+                return pd.DataFrame({"x_pix": x_pix, "y_pix": y_pix})
+
+            def _farthest_point_select(
+                coords: np.ndarray,
+                n_select: int,
+                *,
+                start_idx: int | None = None,
+            ) -> np.ndarray:
+                """
+                Greedy farthest-point sampling for spatial uniformity.
+
+                Given an ``(N, 2)`` array of candidate coordinates, select
+                ``n_select`` indices that are maximally spread apart.
+
+                The first point is either *start_idx* (if given) or the point
+                closest to the centroid of all candidates.
+
+                Runs in O(N * n_select) which is cheap for N~500, n_select~100.
+                """
+                N = coords.shape[0]
+                n_select = min(n_select, N)
+                if n_select <= 0:
+                    return np.array([], dtype=int)
+                if n_select == N:
+                    return np.arange(N)
+                # Distance from each candidate to all others (squared).
+                # We maintain the minimum distance to any already-selected point.
+                if start_idx is None:
+                    centroid = coords.mean(axis=0)
+                    start_idx = int(np.argmin(np.sum((coords - centroid) ** 2, axis=1)))
+                selected = [start_idx]
+                min_dist_sq = np.sum((coords - coords[start_idx]) ** 2, axis=1)
+                for _ in range(1, n_select):
+                    nxt = int(np.argmax(min_dist_sq))
+                    selected.append(nxt)
+                    new_dist_sq = np.sum((coords - coords[nxt]) ** 2, axis=1)
+                    min_dist_sq = np.minimum(min_dist_sq, new_dist_sq)
+                return np.array(selected, dtype=int)
+
+            # aperture_radius == fwhm means the config value is the fallback;
+            # try to measure an optimum radius from detected cutout sources.
             if configured_radius == fwhm:
                 try:
-                    # Detect sources in the cutout to use for optimum radius calculation
                     from photutils.detection import DAOStarFinder
-                    daofind = DAOStarFinder(fwhm=fwhm, threshold=5.0 * np.nanstd(cutout))
+                    daofind = DAOStarFinder(fwhm=fwhm, threshold=5.0 * biweight_sky_sigma(cutout))
                     sources = daofind(cutout)
                     if sources is not None and len(sources) >= 5:
+                        _xcol = "x_centroid" if "x_centroid" in sources.colnames else "xcentroid"
+                        _ycol = "y_centroid" if "y_centroid" in sources.colnames else "ycentroid"
                         sources_df = pd.DataFrame({
-                            "x_pix": sources["xcentroid"],
-                            "y_pix": sources["ycentroid"]
+                            "x_pix": sources[_xcol],
+                            "y_pix": sources[_ycol]
                         })
                         ap = Aperture(input_yaml=local_input_yaml, image=cutout)
                         _, optimum_radius_fwhm, _ = ap.measure_optimum_radius(
@@ -697,27 +1912,46 @@ class Limits:
                             n_jobs=1,
                         )
                         optimum_radius_pixels = optimum_radius_fwhm * fwhm
-                        # Update local config with calculated optimum radius
                         local_input_yaml["photometry"]["aperture_radius"] = optimum_radius_pixels
-                        logger.info(f"Calculated optimum aperture radius: {optimum_radius_pixels:.2f} pixels ({optimum_radius_fwhm:.2f} FWHM)")
                     else:
-                        logger.info(f"Insufficient sources for optimum radius, using configured: {configured_radius:.2f}")
+                        pass  # Insufficient sources for optimum radius, using configured
                 except Exception as e:
-                    logger.warning(f"Failed to calculate optimum aperture radius: {e}, using configured")
+                    logger.warning("Failed to calculate optimum aperture radius: %s, using configured", e)
             
-            # Get final aperture radius from local_input_yaml
             phot_cfg_local = local_input_yaml.get("photometry", {})
             aperture_radius_local = float(phot_cfg_local.get("aperture_radius", fwhm))
-            
+
+            # Annulus outer radius (match Aperture.measure defaults) for NaN
+            # clearance filtering.  Aperture.measure reads `crowded_field`
+            # (the `crowded` key belongs to WCS solving, not photometry) --
+            # read the same key so the site-validity annulus matches the
+            # recovery annulus in crowded fields.
+            try:
+                crowded_local = bool(
+                    phot_cfg_local.get(
+                        "crowded_field",
+                        phot_cfg_local.get("crowded", False),
+                    )
+                )
+            except Exception:
+                crowded_local = False
+            gap_fwhm = float(
+                phot_cfg_local.get("annulus_gap_fwhm", 0.5 if crowded_local else 0.75)
+            )
+            width_fwhm = float(
+                phot_cfg_local.get("annulus_width_fwhm", 1.5 if crowded_local else 2.0)
+            )
+            annulus_in_local = float(
+                np.ceil(aperture_radius_local + gap_fwhm * float(fwhm))
+            )
+            annulus_out_local = float(
+                np.ceil(annulus_in_local + width_fwhm * float(fwhm))
+            )
             # Exclusion zone: two aperture diameters + one FWHM buffer
             # Ensures zero overlap between transient aperture and injection aperture,
             # plus a PSF-wing buffer so transient flux cannot bias the injected recovery.
             target_exclusion_r = 2.0 * aperture_radius_local + fwhm
-            logger.info(
-                "Target exclusion zone: r=%.1f px (2*ap_r=%.1f + fwhm=%.1f)",
-                target_exclusion_r, 2.0 * aperture_radius_local, fwhm
-            )
-
+            
             # Define injection radii early (needed for initial guess)
             fwhm_px = float(self.input_yaml.get("fwhm", 3.0))
             r_min = float(lim_cfg.get("inject_min_radius_fwhm", 2.0)) * fwhm_px
@@ -726,71 +1960,115 @@ class Limits:
             
             # Enforce r_min >= target_exclusion_r so sites are never generated inside exclusion zone
             r_min = max(r_min, target_exclusion_r)
-            logger.info(
-                "Injection radii: r_min=%.1f px (excl_zone=%.1f), r_base=%.1f, r_max=%.1f",
-                r_min, target_exclusion_r, r_base, r_max,
-            )
-            
-            # Calculate minimum cutout size needed for all photometry operations
-            # Need space for: target exclusion zone + edge clearance + injection radius
+            # Ensure valid sampling range; if exclusion zone consumes the whole
+            # injection annulus, expand r_max to leave at least one FWHM of room.
+            if r_min >= r_max:
+                r_max = r_min + max(fwhm_px, 2.0)
+                        
+            # The cutout must fit: target exclusion zone + injection radius +
+            # edge clearance.  A nearby companion can sit outside the initial
+            # stamp but still overlap a valid injection aperture near the edge;
+            # grow the stamp until every transient exclusion is represented.
             edge_margin = max(3.0 * fwhm_px, 2.0 * aperture_radius_local)
             min_half_size = target_exclusion_r + r_max + edge_margin
+            for _ax, _ay in _avoid_positions_cutout():
+                _companion_dist = np.hypot(
+                    _ax - float(cutout_cx), _ay - float(cutout_cy)
+                )
+                if np.isfinite(_companion_dist):
+                    min_half_size = max(
+                        min_half_size,
+                        float(_companion_dist) + target_exclusion_r + edge_margin,
+                    )
             min_cutout_size = 2 * min_half_size
             
-            # Current scale-based cutout size
+            # Cutout size implied by the current scale.
             location_fwhm_mult = float(lim_cfg.get("inject_source_location", 3.0))
             current_half_size = int(np.ceil(location_fwhm_mult * fwhm_px + base_scale))
             current_cutout_size = 2 * current_half_size
 
-            # Update scale if current cutout is too small
+            # Grow the cutout if it cannot fit the required footprint.
             if current_cutout_size < min_cutout_size:
-                # Calculate the scale needed to achieve minimum cutout size
                 needed_half_size = min_half_size
                 needed_scale = needed_half_size - location_fwhm_mult * fwhm_px
-                # Ensure scale is at least the base scale and is reasonable
                 new_scale = max(base_scale, needed_scale, 10.0)  # minimum 10px scale
-                
-                logger.info(
-                    "Cutout size update: current=%dx%d (half=%.1f), needed=%dx%d (half=%.1f), "
-                    "scale: %.1f -> %.1f",
-                    current_cutout_size, current_cutout_size, current_half_size,
-                    min_cutout_size, min_cutout_size, min_half_size,
-                    base_scale, new_scale
-                )
-                
-                # Update the scale used for cutout extraction
-                scale_used = new_scale
-            else:
-                logger.info(
-                    "Cutout size sufficient: %dx%d (half=%.1f) >= needed %dx%d (half=%.1f)",
-                    current_cutout_size, current_cutout_size, current_half_size,
-                    min_cutout_size, min_cutout_size, min_half_size
-                )
 
-            # Data-driven initial guess from instrumental magnitudes measured
-            # on an annulus around the target location.
-            try:
-                use_annulus_guess = bool(np.isclose(float(initialGuess), -5.0))
-            except Exception:
-                use_annulus_guess = True
+                # Re-extract with the larger scale: the initial extraction used
+                # a simpler formula that ignores target_exclusion_r and r_max,
+                # which can leave every candidate failing edge clearance.
+                _old_H, _old_W = int(H), int(W)
+                if new_scale > scale_used:
+                    scale_used = new_scale
+                    _new_cutout, _new_rms, _new_cx, _new_cy = _extract_cutouts(scale_used)
+                    if _new_cutout is not None and np.isfinite(_new_cx) and np.isfinite(_new_cy):
+                        cutout = _new_cutout
+                        cutout_rms = _new_rms
+                        background_rms = _new_rms
+                        cutout_cx = _new_cx
+                        cutout_cy = _new_cy
+                        H, W = cutout.shape
+                        logger.info(
+                            ascii_kv(
+                                "Re-extracted injection cutout",
+                                [
+                                    ("scale", f"{float(base_scale):.1f} -> {float(scale_used):.1f}"),
+                                    ("size", f"{_old_W}x{_old_H} -> {int(W)}x{int(H)}"),
+                                    ("target", f"{float(_orig_position[0]):.1f}, {float(_orig_position[1]):.1f}"),
+                                    ("cutout_cx", f"{float(cutout_cx):.1f}, {float(cutout_cy):.1f}"),
+                                    ("needed_half", f"{float(min_half_size):.1f}"),
+                                    ("edge_margin", f"{float(edge_margin):.1f}"),
+                                    ("r_max", f"{float(r_max):.1f}"),
+                                    ("excl", f"{float(target_exclusion_r):.1f}"),
+                                ],
+                            )
+                        )
+                    else:
+                        logger.warning(
+                            "Re-extraction of larger injection cutout failed (scale=%.1f); "
+                            "using original cutout (%dx%d). Injection sites may be limited.",
+                            float(scale_used), int(W), int(H),
+                        )
+                else:
+                    scale_used = new_scale
+            
+            # Data-driven initial guess, used only when the caller did not
+            # supply a usable one.
+            use_annulus_guess = not user_supplied_guess
             if use_annulus_guess:
                 try:
-                    # Prefer an S/N-based guess tied to the local background scatter:
-                    # flux_guess ~= k * sigma_sky * sqrt(Npix).
-                    # This is more stable than using a percentile of random annulus mags,
-                    # especially when the background mean is shifted (bias) but scatter is unchanged.
-                    # Start at 10 sigma to ensure we're in the detectable regime before searching fainter.
+                    # S/N-based guess tied to local background scatter:
+                    # flux_guess ~= k * sigma_sky * sqrt(Npix). More stable than
+                    # a percentile of random annulus mags when the background
+                    # mean is biased but the scatter is unchanged. Start well
+                    # above threshold so the search begins in the detectable
+                    # regime.
                     try:
-                        guess_k = float(lim_cfg.get("initial_guess_sigma_mult", 10.0))
+                        guess_k = float(lim_cfg.get("initial_guess_sigma_mult", 5.0))
                     except Exception:
-                        guess_k = 10.0
+                        guess_k = 5.0
                     probe_n = int((lim_cfg.get("initial_guess_n_samples", 24)))
                     probe_n = max(8, min(probe_n, 72))
-                    # Use r_base for probe radius
                     probe_r = r_base
-                    pts = points_in_circum(probe_r, center=[W/2.0, H/2.0], n=probe_n)
+                    pts = points_in_circum(probe_r, center=[cutout_cx, cutout_cy], n=probe_n)
                     probe_df = pd.DataFrame(
                         {"x_pix": [p[0] for p in pts], "y_pix": [p[1] for p in pts]}
+                    )
+                    probe_df = _exclude_positions_overlap(
+                        probe_df,
+                        [
+                            (float(cutout_cx), float(cutout_cy)),
+                            *_avoid_positions_cutout(),
+                        ],
+                        target_exclusion_r,
+                    )
+                    probe_df = _filter_aperture_validity(
+                        probe_df, cutout, aperture_radius_pix=float(aperture_radius_local)
+                    )
+                    probe_df = _filter_annulus_finite_support(
+                        probe_df,
+                        cutout,
+                        annulus_in_pix=float(annulus_in_local),
+                        annulus_out_pix=float(annulus_out_local),
                     )
                     probe_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
                     probe_meas = probe_ap.measure(
@@ -808,9 +2086,8 @@ class Limits:
                         flux_guess = float(guess_k) * sigma_med * float(np.sqrt(area_med))
                         if np.isfinite(flux_guess) and flux_guess > 0:
                             initialGuess = float(mag(flux_guess))
-                            logger.info(
-                                "Injected limiting magnitude: initial guess from %.1f*sigma*sqrt(Npix) = %.2f "
-                                "(sigma=%.3g, Npix=%.1f, N=%d)",
+                            logger.debug(
+                                "Injected limiting magnitude: initial guess from %.1f*sigma*sqrt(Npix) = %.2f (sigma=%.3g, Npix=%.1f, N=%d)",
                                 float(guess_k),
                                 float(initialGuess),
                                 float(sigma_med),
@@ -818,7 +2095,7 @@ class Limits:
                                 int(np.count_nonzero(ok)),
                             )
                     else:
-                        logger.info(
+                        logger.debug(
                             "Injected limiting magnitude: sigma-based initial guess unavailable (N=%d); using %.2f",
                             int(np.count_nonzero(ok)),
                             float(initialGuess),
@@ -829,10 +2106,8 @@ class Limits:
                         exc,
                     )
             
-            # Note: Initial guess flux will be logged after flux_for_mag is defined
-
-            # Pixel grids for PSF evaluation will be constructed after final cutout shape is known
-            # (moved here to avoid shape mismatch if grow loop changes cutout size)
+            # PSF evaluation grids are built later, once the final cutout shape
+            # is known (the grow loop above can change it).
 
             # =================================================================
             # Oversampling - compute grids ONCE
@@ -850,364 +2125,420 @@ class Limits:
             # =================================================================
             # PSF calibration: flux=1 -> what instrumental magnitude?
             # =================================================================
-            # Use cutout center for PSF evaluation (grid is cutout-sized)
-            # Target is always at the centre of the cutout by construction.
+            # Resolve the recovery method here: the flux<->magnitude calibration
+            # below depends on which photometric convention the reported limit
+            # shares (total PSF flux vs aperture flux).
+            recovery_method = str(lim_cfg.get("recovery_method", "PSF")).strip().upper()
+            # "AUTO" is resolved in main.py to AP vs PSF from do_aperture_ONLY; if unset, prefer PSF.
+            if recovery_method in {"AUTO", "DEFAULT", "MATCH_TRANSIENT", "MATCH_TARGET"}:
+                logger.warning(
+                    "limiting_magnitude.recovery_method=%s was not pre-resolved; using PSF. Set recovery_method explicitly or run from main (auto).",
+                    recovery_method,
+                )
+                recovery_method = "PSF"
+            elif recovery_method in {"MCMC", "EMCEE"}:
+                recovery_method = "EMCEE"
+            elif recovery_method in {"PSF", "AP"}:
+                pass
+            else:
+                logger.warning(
+                    "Unknown recovery_method %r; using PSF.",
+                    recovery_method,
+                )
+                recovery_method = "PSF"
+
+            # cutout_cx/cutout_cy are the true target position in cutout
+            # coordinates (Cutout2D.position_cutout handles partial cutouts).
             cx, cy = cutout_cx, cutout_cy
-            # Create oversampled grid for PSF evaluation (will downsample later)
-            if oversampling > 1:
-                gx_os = np.linspace(0, W - 1, W * oversampling)
-                gy_os = np.linspace(0, H - 1, H * oversampling)
-                gridx_os, gridy_os = np.meshgrid(gx_os, gy_os)
+            # Must match ``_injection_worker`` rendering (especially oversampling > 1).
+            psf_unit = _render_epsf_on_cutout(
+                epsf_model, H, W, float(cx), float(cy), 1.0, oversampling
+            )
+
+            if recovery_method in ("PSF", "EMCEE"):
+                # Total-flux convention: inst_mag_psf and the PSF zeropoint are
+                # on the *total* PSF flux scale (model.flux integrates over the
+                # whole profile), so the unit-flux reference is the full
+                # integral of the rendered PSF.  Using the aperture integral
+                # here instead injects every source ~1/encircled-fraction too
+                # bright, making the reported limit spuriously deep.
+                counts_ref_adu = float(np.nansum(psf_unit))
+                if not (np.isfinite(counts_ref_adu) and counts_ref_adu > 0):
+                    logger.warning(
+                        "Total unit-PSF integral not finite; falling back to "
+                        "aperture integral for flux_for_mag calibration."
+                    )
+                    _psf_ap_obj = CircularAperture(
+                        (float(cx), float(cy)), r=float(aperture_radius_local)
+                    )
+                    _psf_phot = AperturePhotometry(
+                        psf_unit, _psf_ap_obj, method="exact"
+                    )
+                    counts_ref_adu = float(np.atleast_1d(_psf_phot.flux)[0])
             else:
-                # Pixel-resolution grid for injection (will be reused after final cutout)
-                gridx, gridy = np.meshgrid(np.arange(W), np.arange(H))
-                gridx_os, gridy_os = gridx, gridy
-            psf_os = epsf_model.evaluate(
-                x=gridx_os, y=gridy_os, flux=1.0, x_0=cx, y_0=cy
-            )
-
-            psf_unit = (
-                self._downsample_psf(psf_os, oversampling)
-                if oversampling > 1
-                else psf_os
-            )
-
-            # Normalize PSF to sum to 1.0 only if necessary (flux=1.0 means total counts = 1.0)
-            psf_sum = np.sum(psf_unit)
-            if psf_sum > 0:
-                # Only normalize if the sum deviates significantly from 1.0
-                # (accounts for potential PSF model calibration differences)
-                if abs(psf_sum - 1.0) > 0.01:  # 1% tolerance
-                    psf_unit = psf_unit / psf_sum
-                    logger.debug(f"Normalized PSF: original sum={psf_sum:.4e}, new sum={np.sum(psf_unit):.4e}")
-                else:
-                    logger.debug(f"PSF already normalized (sum={psf_sum:.4e}, within 1% of 1.0)")
+                # Aperture convention: inst_mag_ap/zp_ap are on the
+                # aperture-flux scale AFTER annulus background subtraction.
+                # The annulus contains real PSF-wing flux, so the recovery
+                # response per unit injected amplitude is the NET signal
+                # (aperture sum minus annulus-estimated background).  Using
+                # the gross aperture integral overstates the response, so
+                # injected sources would recover fainter than the requested
+                # magnitude -- a spuriously shallow limit.  Calibrate with
+                # the same Aperture.measure operator used at recovery, on a
+                # constant background that cancels in the subtraction and
+                # avoids the exact-zero site rejection.
+                counts_ref_adu = np.nan
+                try:
+                    _ap_img = np.asarray(psf_unit, dtype=float) + 100.0
+                    _ap_meas = Aperture(
+                        input_yaml=local_input_yaml, image=_ap_img
+                    ).measure(
+                        sources=pd.DataFrame(
+                            {"x_pix": [float(cx)], "y_pix": [float(cy)]}
+                        ),
+                        plot=False,
+                        background_rms=None,
+                        verbose=0,
+                    )
+                    # counts_AP is integrated e- over the exposure; convert
+                    # back to ADU so the *gain below restores e-.
+                    _counts_e = float(_ap_meas["counts_AP"].iloc[0])
+                    counts_ref_adu = _counts_e / float(_gain_canon)
+                except Exception as _cal_exc:
+                    logger.warning(
+                        "AP calibration via Aperture.measure failed (%s); "
+                        "falling back to gross aperture integral.",
+                        _cal_exc,
+                    )
+                if not (np.isfinite(counts_ref_adu) and counts_ref_adu > 0):
+                    _psf_ap_obj = CircularAperture(
+                        (float(cx), float(cy)), r=float(aperture_radius_local)
+                    )
+                    _psf_phot = AperturePhotometry(
+                        psf_unit, _psf_ap_obj, method="exact"
+                    )
+                    counts_ref_adu = float(np.atleast_1d(_psf_phot.flux)[0])
+            # Convert to e-: Aperture.measure works on image*gain. Without this,
+            # _flux_for_mag_cached divides e- by ADU, so F_amp is gainx too
+            # large, every injected source is gainx too bright, and the limit is
+            # ~2.5*log10(gain) mag spuriously deep.
+            counts_ref = counts_ref_adu * float(_gain_canon)  # now in e-
+            # F_ref = counts_ref (e-) / exposure_time -> e-/s, same units as flux_AP
+            exposure_time = float(local_input_yaml["exposure_time"])
+            if exposure_time <= 0 or not np.isfinite(exposure_time):
+                logger.warning("Invalid exposure_time (%s) in limits calculation", exposure_time)
+                F_ref = np.nan
             else:
-                logger.warning(f"PSF sum is zero or negative ({psf_sum:.4e}); normalization skipped")
+                F_ref = counts_ref / exposure_time
 
-            # Use cutout-sized blank canvas for PSF calibration (no background contamination)
-            calib_H, calib_W = H, W
-            calib_cx, calib_cy = cx, cy  # Cutout center
-            blank = np.zeros((calib_H, calib_W), dtype=float)
-            # Place PSF at the center of the blank canvas
-            psf_h, psf_w = psf_unit.shape
-            y_start = int(calib_cy - psf_h // 2)
-            y_end = y_start + psf_h
-            x_start = int(calib_cx - psf_w // 2)
-            x_end = x_start + psf_w
-
-            # Ensure PSF fits within blank canvas
-            if y_start < 0 or y_end > calib_H or x_start < 0 or x_end > calib_W:
-                # Fallback: clamp coordinates to canvas bounds
-                logger.warning("PSF placement bounds exceeded; clamping to canvas.")
-                y_start = int(np.clip(y_start, 0, calib_H - psf_h))
-                y_end = y_start + psf_h
-                x_start = int(np.clip(x_start, 0, calib_W - psf_w))
-                x_end = x_start + psf_w
-            blank[y_start:y_end, x_start:x_end] = psf_unit
-
-            psf_ap = Aperture(input_yaml=local_input_yaml, image=blank)
-            psf_meas = psf_ap.measure(
-                pd.DataFrame({"x_pix": [cutout_cx], "y_pix": [cutout_cy]}),  # Use same centre as PSF evaluation
-                plot=False,
-                verbose=0,
-            )
-            F_ref = float(psf_meas["flux_AP"].iloc[0])  # ADU/s from aperture.measure()
-            counts_ref = float(psf_meas["counts_AP"].iloc[0])  # aperture counts (same units as image data)
-            
-            # Guard: check if calibration failed
+            # Bad calibration would corrupt every injected flux; abort early.
             if not (np.isfinite(counts_ref) and counts_ref > 0
                     and np.isfinite(F_ref) and F_ref > 0):
                 logger.error(
-                    f"PSF calibration failed: counts_ref={counts_ref:.4e}, F_ref={F_ref:.4e} "
-                    f"(both must be finite and positive). "
-                    f"PSF sum={np.sum(psf_unit):.4e}, PSF placement=({x_start}:{x_end}, {y_start}:{y_end})"
+                    f"PSF calibration failed: counts_ref_adu=\n"
+                    f"    {counts_ref_adu:.4e}, counts_ref(e-)={counts_ref:.4e},\n"
+                    f"    F_ref={F_ref:.4e} (both must be finite and positive).\n"
+                    f"    PSF sum={np.sum(psf_unit):.4e}, shape={psf_unit.shape},\n"
+                    f"    oversampling={oversampling}, gain={_gain_canon:.4g} e/ADU"
                 )
+                if _return_details:
+                    return {"inject_lmag": np.nan, "inject_lmag_err": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": locals().get('completeness_target', 0.5), "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                 return np.nan
-            
-            # DIAGNOSTIC: Check if PSF flux parameter represents total integrated flux
-            # psf_unit is normalized to sum=1.0, so total flux should be 1.0
-            psf_total_sum = np.sum(psf_unit)
-
-            exposure_time = float(self.input_yaml.get("exposure_time", 1.0))
-            if exposure_time <= 0:
-                logger.warning("exposure_time <= 0; defaulting to 1.0s")
-                exposure_time = 1.0
-
-            # For verification: what magnitude does flux=1.0 correspond to?
-            # Since psf_unit is normalized to sum=1.0, flux=1.0 injects exactly 1 total count
-            # Magnitude of 1 count per second: m = -2.5 * log10(1.0 / exposure_time)
-            m_ref_check = -2.5 * np.log10(1.0 / exposure_time)  # magnitude of 1 count per second
-            # Also compute standard instrumental magnitude for logging
-            m_ref = mag(F_ref)
 
             # Memoised so repeated calls at the same magnitude are free.
-            # Uses cached module-level function for performance
             def flux_for_mag(m: float) -> float:
                 """Return ePSF flux parameter to inject for instrumental magnitude m."""
                 return _flux_for_mag_cached(m, counts_ref, exposure_time)
 
-            # DIAGNOSTIC: verify calibration round-trip
-            # Use counts_ref/exposure_time to get ADU/s, consistent with pipeline convention m = -2.5 * log10(ADU/s)
-            m_roundtrip = -2.5 * np.log10(counts_ref / exposure_time)  # instrumental mag from counts_ref
-            F_roundtrip = flux_for_mag(m_roundtrip)
-
-            # Log what flux is being injected at the initial guess
-            F_at_guess = flux_for_mag(initialGuess)
+            # Sanity round-trip: flux_for_mag(mag(F_ref)) should equal 1.0.
+            mag_at_unit_flux = float(mag(float(F_ref)))
+            f_roundtrip = float(flux_for_mag(mag_at_unit_flux))
+            if np.isfinite(f_roundtrip) and abs(f_roundtrip - 1.0) > 1e-6:
+                logger.warning(
+                    "PSF flux calibration round-trip differs from 1.0 (got %.8f). "
+                    "Check oversampling and that flux_for_mag uses the same aperture radius as recovery.",
+                    f_roundtrip,
+                )
 
             # =================================================================
             # Choose quiet injection sites
             # =================================================================
-            DETECTION_BETA_THRESH = detection_cutoff
-            snr_limit = float(detection_limit) if detection_limit is not None else None
-            recovery_method = str(lim_cfg.get("recovery_method", "PSF")).strip().upper()
-            # Accept common synonyms and any letter case.
-            if recovery_method in {"MCMC", "EMCEE"}:
-                recovery_method = "EMCEE"
-            elif recovery_method in {"PSF", "AP"}:
-                recovery_method = recovery_method
-            else:
-                recovery_method = "PSF"
+            # effective_snr_limit was validated above (finite, > 0); pass it to
+            # the workers so they never see an unvalidated threshold.
+            # recovery_method was already resolved before the PSF calibration.
+            snr_limit = effective_snr_limit
             completeness_target = float(lim_cfg.get("completeness_target", 0.5))
-            completeness_target = max(0.0, min(1.0, completeness_target))
             if not np.isfinite(completeness_target):
                 completeness_target = 0.5
+            # The bracket requires c_faint < target, impossible at 0; at 1.0
+            # it needs exactly 100% recovery, unreachable with finite trials.
+            if not (0.0 < completeness_target < 1.0):
+                logger.warning(
+                    "completeness_target=%s outside (0, 1); clipping.",
+                    completeness_target,
+                )
+                completeness_target = float(
+                    np.clip(completeness_target, 0.01, 0.99)
+                )
 
-            # Option to disable quiet site selection for more representative limiting magnitude
-            use_quiet_sites = bool(lim_cfg.get("inject_use_quiet_sites", True))
+            # Option to disable quiet site selection for more representative
+            # limiting magnitude.  Default matches default_input.yml (False =
+            # representative sites); quiet sites bias the limit spuriously faint.
+            use_quiet_sites = bool(lim_cfg.get("inject_use_quiet_sites", False))
 
-            logger.info(
-                "Injected limiting magnitude: recovery_method=%s, completeness_target=%.2f, use_quiet_sites=%s",
-                str(recovery_method),
-                float(completeness_target),
-                str(use_quiet_sites),
-            )
             completeness_solver = str(lim_cfg.get("completeness_solver", "bisect")).strip().lower()
-            if completeness_solver not in {"bisect", "logistic_emcee"}:
+            if completeness_solver not in {"bisect", "logistic_mle", "logistic_emcee"}:
+                logger.warning(
+                    "Unknown completeness_solver=%r; using 'bisect'.",
+                    completeness_solver,
+                )
                 completeness_solver = "bisect"
 
             # emcee recovery should run serial (each trial is expensive and models
             # are not guaranteed to pickle cleanly across platforms).
             if recovery_method == "EMCEE":
                 n_jobs = 1
-            # Beta is computed using the canonical n=3 aperture formalism so that
-            # beta thresholds are comparable across runs (beta=0.5 ~ S/N~3).
-            beta_n = 3.0
+            # Beta is still computed with the canonical n=3 aperture formalism for
+            # diagnostics/plots, but it is not used for detection gating.
+            beta_n = float(BETA_APERTURE_SIGMA_N)
             # Monte Carlo settings for injection/recovery.
             # Too few sites/jitters makes the completeness curve look jagged.
             sourceNum = int(lim_cfg.get("injection_n_sites", 30))
             sourceNum = max(8, min(sourceNum, 200))
             redo_default = int(lim_cfg.get("injection_jitter_repetitions", 5))
             redo_default = max(1, min(redo_default, 20))
-            distance_factor = 1.0
             injection_df = pd.DataFrame()
 
-            # Injection strategy (radii already defined above for initial guess)
-            inj_strategy = str(lim_cfg.get("injection_strategy", "ring_quiet")).strip().lower()
-            if inj_strategy not in {"ring_quiet", "annulus_random"}:
-                inj_strategy = "ring_quiet"
+            # -----------------------------------------------------------------
+            # Generate candidate injection sites, then select ~100 final sites
+            # spread uniformly around the target.
+            #
+            #   * Representative (default): stratified annular candidates +
+            #     farthest-point selection; no bias toward quiet patches.
+            #   * Quiet: rank candidates by quietness/similarity, then
+            #     farthest-point select from the top-ranked pool.
+            # -----------------------------------------------------------------
+            n_final = int(lim_cfg.get("inject_final_n_sites",
+                                      lim_cfg.get("inject_quiet_n_sites", 100)))
+            # Floor of 6: the completeness fit needs a handful of distinct
+            # sites to stay honest on spatially varying backgrounds; fewer
+            # than that measures a single spot rather than a field limit.
+            n_final = max(6, min(n_final, 500))
 
-            for attempt in range(3):
-                inj_dist = float(np.clip(r_base * distance_factor, r_min, r_max))
-                if inj_strategy == "annulus_random":
-                    # Sample positions uniformly in area within the local annulus.
-                    # (r ~ sqrt(u)) and theta ~ U[0, 2pi].
-                    # Add safety margin for sub-pixel jitter
-                    r_min_with_jitter = r_min + 1.0  # 1px safety margin for jitter
-                    theta = self._rng.random(sourceNum) * (2.0 * np.pi)
-                    rr = np.sqrt(self._rng.random(sourceNum)) * (r_max - r_min_with_jitter) + r_min_with_jitter
-                    xran = cutout_cx + rr * np.cos(theta)
-                    yran = cutout_cy + rr * np.sin(theta)
-                    df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
-                else:
-                    pts = points_in_circum(inj_dist, center=[cutout_cx, cutout_cy], n=sourceNum)
-                    xran = [p[0] for p in pts]
-                    yran = [p[1] for p in pts]
-                    df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
+            # Candidate pool: a modest multiple of the final count, enough to
+            # survive filtering without paying per-candidate cost on thousands.
+            n_candidates = int(lim_cfg.get("inject_candidate_n_sites", 0))
+            if n_candidates <= 0:
+                n_candidates = max(3 * n_final, 40)
+            n_candidates = max(30, min(n_candidates, 5000))
 
+            # Legacy key kept for backward compatibility but no longer drives
+            # heavy jitter/KMeans workloads.
+            redo_default = int(lim_cfg.get("injection_jitter_repetitions", 3))
+            redo_default = max(1, min(redo_default, 20))
+
+            r_min_with_jitter = float(r_min) + 1.0
+            r_min_with_jitter = min(r_min_with_jitter, float(r_max))
+
+            # Fibonacci-spiral candidates give area-uniform coverage; a small
+            # jitter keeps different seeds from landing on identical points.
+            cand_df = _stratified_annular_candidates(
+                n_candidates,
+                cutout_cx, cutout_cy,
+                r_min_with_jitter, r_max,
+                self._rng,
+                jitter_pix=0.5,
+            )
+
+            # Geometric constraints first (cheapest).
+            n0 = int(len(cand_df))
+            _transient_positions_cut = [
+                (float(cutout_cx), float(cutout_cy)),
+                *_avoid_positions_cutout(),
+            ]
+            cand_df = _exclude_positions_overlap(
+                cand_df, _transient_positions_cut, target_exclusion_r
+            )
+            n1 = int(len(cand_df))
+            cand_df = _filter_edge_clearance(cand_df, W, H, edge_margin)
+            n2 = int(len(cand_df))
+
+            # Aperture disk must be fully finite; the annulus may contain NaNs
+            # but needs enough finite pixels for a background/noise estimate.
+            cand_df = _filter_aperture_validity(
+                cand_df, cutout, aperture_radius_pix=float(aperture_radius_local)
+            )
+            n3 = int(len(cand_df))
+            cand_df = _filter_annulus_finite_support(
+                cand_df,
+                cutout,
+                annulus_in_pix=float(annulus_in_local),
+                annulus_out_pix=float(annulus_out_local),
+            )
+            n4 = int(len(cand_df))
+
+            # Drop sites contaminated by bright-star subtraction residuals
+            # (elevated local variance or biased mean).
+            cand_df = _filter_pixel_statistics(
+                cand_df,
+                cutout,
+                aperture_radius_pix=float(aperture_radius_local),
+                rms_map=cutout_rms,
+            )
+            n5 = int(len(cand_df))
+
+            logger.info(
+                ascii_kv(
+                    "Injection candidate attrition",
+                    [
+                        ("generated", f"{n0}"),
+                        ("excl_target", f"{n1}"),
+                        ("edge", f"{n2}"),
+                        ("aperture_validity", f"{n3}"),
+                        ("annulus_support", f"{n4}"),
+                        ("pixel_stats", f"{n5}"),
+                        ("cutout", f"{int(W)}x{int(H)}"),
+                        ("center", f"{float(cutout_cx):.1f}, {float(cutout_cy):.1f}"),
+                        ("r_min", f"{float(r_min_with_jitter):.1f}"),
+                        ("r_max", f"{float(r_max):.1f}"),
+                        ("edge_margin", f"{float(edge_margin):.1f}"),
+                        ("ap_r", f"{float(aperture_radius_local):.1f}"),
+                        ("annulus_in", f"{float(annulus_in_local):.1f}"),
+                        ("annulus_out", f"{float(annulus_out_local):.1f}"),
+                    ],
+                )
+            )
+
+            if len(cand_df) == 0:
+                logger.warning(
+                    "No valid candidate sites after NaN/edge/exclusion filtering; cannot run injected limiting magnitude."
+                )
+                if _return_details:
+                    return {"inject_lmag": np.nan, "inject_lmag_err": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": locals().get('completeness_target', 0.5), "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
+                return np.nan
+
+            if use_quiet_sites:
+                # ----------------------------------------------------------
+                # Quiet-site mode: rank candidates by quietness + annulus
+                # similarity, then select final sites with farthest-point
+                # sampling for spatial uniformity (replaces heavy
+                # jitter + KMeans pipeline).
+                # ----------------------------------------------------------
+                target_mean, target_std = _calculate_annulus_statistics(
+                    cutout_cx, cutout_cy, cutout,
+                    float(annulus_in_local), float(annulus_out_local)
+                )
+                logger.debug(
+                    "Target annulus statistics: mean=%.3f, std=%.3f",
+                    target_mean, target_std
+                )
+
+                # Site S/N feeds the quietness ranking below.
                 ini_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
-                df = ini_ap.measure(
-                    sources=df,
+                cand_df = ini_ap.measure(
+                    sources=cand_df,
                     plot=False,
                     background_rms=cutout_rms,
                     verbose=0,
                 )
-                p_det = _compute_p_det(df, beta_n)
-                # Diagnostic logging for quiet point selection
-                logger.info(
-                    "Quiet point selection: n_sites=%d, p_det_range=[%.4f, %.4f], thresh=%.4f, "
-                    "flux_AP_range=[%.4e, %.4e], noiseSky_range=[%.4e, %.4e]",
-                    len(p_det),
-                    float(np.nanmin(p_det)) if len(p_det) > 0 else np.nan,
-                    float(np.nanmax(p_det)) if len(p_det) > 0 else np.nan,
-                    float(DETECTION_BETA_THRESH),
-                    float(np.nanmin(df["flux_AP"])) if "flux_AP" in df.columns and len(df) > 0 else np.nan,
-                    float(np.nanmax(df["flux_AP"])) if "flux_AP" in df.columns and len(df) > 0 else np.nan,
-                    float(np.nanmin(df["noiseSky"])) if "noiseSky" in df.columns and len(df) > 0 else np.nan,
-                    float(np.nanmax(df["noiseSky"])) if "noiseSky" in df.columns and len(df) > 0 else np.nan,
-                )
-                # "Quiet" sites: choose positions with detection probability below
-                # the same cutoff used later to define what counts as a detection.
-                # If disabled, use all sites for more representative limiting magnitude.
-                if use_quiet_sites:
-                    injection_df = df[p_det < DETECTION_BETA_THRESH].copy()
-                else:
-                    injection_df = df.copy()
+                cand_df = _robust_site_snr(cand_df)
 
-                # Always apply exclusion zone regardless of use_quiet_sites
-                # Target is always at cutout center [W/2, H/2]
-                _target_cx = W / 2.0
-                _target_cy = H / 2.0
-                injection_df = _exclude_target_overlap(
-                    injection_df, _target_cx, _target_cy, target_exclusion_r
-                )
-
-                # Add edge clearance to prevent injection sites from being too close to cutout boundaries
-                injection_df = _filter_edge_clearance(
-                    injection_df, W, H, edge_margin
-                )
-
-                if len(injection_df) > 0:
-                    break
-                # Expand outward within the allowed annulus before giving up.
-                distance_factor = min(2.0, distance_factor * 1.5)
-                logger.info(
-                    "No quiet positions; retrying at larger radius (r=%.1f px)",
-                    float(np.clip(r_base * distance_factor, r_min, r_max)),
-                )
-
-            # If still no quiet sites, grow the cutout scale and retry the quiet-site
-            # search. This helps when the local cutout is dominated by host structure.
-            if (
-                len(injection_df) == 0
-                and use_quiet_sites
-                and growth_factor > 1
-                and scale_used < float(growth_max)
-            ):
-                for _grow in range(3):
-                    prev_scale = float(scale_used)
-                    scale_used = min(
-                        float(growth_max),
-                        max(scale_used + 1.0, scale_used * growth_factor),
+                # Per-candidate annulus stats feed the similarity ranking.
+                ann_means = []
+                ann_stds = []
+                for _, row in cand_df.iterrows():
+                    mean, std = _calculate_annulus_statistics(
+                        row["x_pix"], row["y_pix"], cutout,
+                        float(annulus_in_local), float(annulus_out_local)
                     )
-                    if float(scale_used) <= prev_scale + 1e-6:
-                        break
-                    logger.info(
-                        "No quiet positions; growing cutout scale from %.1f to %.1f px and retrying",
-                        prev_scale,
-                        float(scale_used),
-                    )
-                    cutout_img, cutout_rms = _extract_cutouts(scale_used)
-                    if cutout_img is None:
-                        continue
-                    cutout = cutout_img
-                    background_rms = cutout_rms
-                    # Recalculate cutout centre after re-extraction
-                    H, W = cutout.shape
-                    cutout_cx = (W - 1) / 2.0
-                    cutout_cy = (H - 1) / 2.0
-
-                    distance_factor = 1.0
-                    injection_df = pd.DataFrame()
-                    for attempt in range(3):
-                        inj_dist = float(np.clip(r_base * distance_factor, r_min, r_max))
-                        if inj_strategy == "annulus_random":
-                            theta = self._rng.random(sourceNum) * (2.0 * np.pi)
-                            r_min_with_jitter = r_min + 1.0  # 1px safety margin for jitter
-                            rr = (
-                                np.sqrt(self._rng.random(sourceNum)) * (r_max - r_min_with_jitter)
-                                + r_min_with_jitter
-                            )
-                            xran = cutout_cx + rr * np.cos(theta)
-                            yran = cutout_cy + rr * np.sin(theta)
-                            df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
-                        else:
-                            pts = points_in_circum(inj_dist, center=[cutout_cx, cutout_cy], n=sourceNum)
-                            xran = [p[0] for p in pts]
-                            yran = [p[1] for p in pts]
-                            df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
-
-                        ini_ap = Aperture(input_yaml=local_input_yaml, image=cutout_img)
-                        df = ini_ap.measure(
-                            sources=df,
-                            plot=False,
-                            background_rms=cutout_rms,
-                            verbose=0,
-                        )
-                        p_det = _compute_p_det(df, beta_n)
-                        if use_quiet_sites:
-                            injection_df = df[p_det < DETECTION_BETA_THRESH].copy()
-                        else:
-                            injection_df = df.copy()
-                        
-                        # Always apply exclusion zone
-                        _target_cx_grow = (W - 1) / 2.0
-                        _target_cy_grow = (H - 1) / 2.0
-                        injection_df = _exclude_target_overlap(
-                            injection_df,
-                            _target_cx_grow,
-                            _target_cy_grow,
-                            target_exclusion_r,
-                        )
-                        
-                        # Apply edge clearance for grown cutout
-                        injection_df = _filter_edge_clearance(
-                            injection_df, W, H, edge_margin
-                        )
-                        
-                        if len(injection_df) > 0:
-                            break
-                        distance_factor = min(2.0, distance_factor * 1.5)
-                    if len(injection_df) > 0:
-                        break
-
-            if len(injection_df) == 0:
-                # Final fallback: still inject off-target (never at the transient position).
-                logger.info(
-                    "No quiet positions found in annulus; using off-target injection sites anyway (r=%.1f px).",
-                    float(np.clip(r_base, r_min, r_max)),
-                )
-                inj_dist = float(np.clip(r_base, r_min, r_max))
-                if inj_strategy == "annulus_random":
-                    theta = self._rng.random(sourceNum) * (2.0 * np.pi)
-                    rr = np.sqrt(self._rng.random(sourceNum)) * (r_max - r_min) + r_min
-                    xran = cutout_cx + rr * np.cos(theta)
-                    yran = cutout_cy + rr * np.sin(theta)
-                    injection_df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
-                else:
-                    pts = points_in_circum(inj_dist, center=[cutout_cx, cutout_cy], n=sourceNum)
-                    injection_df = pd.DataFrame(
-                        {"x_pix": [p[0] for p in pts], "y_pix": [p[1] for p in pts]}
-                    )
-
-                # Apply exclusion zone to fallback sites too
-                injection_df = _exclude_target_overlap(
-                    injection_df, cutout_cx, cutout_cy, target_exclusion_r
+                    ann_means.append(mean)
+                    ann_stds.append(std)
+                cand_df = cand_df.assign(
+                    _annulus_mean=ann_means,
+                    _annulus_std=ann_stds
                 )
 
-                # Use current cutout dimensions for edge clearance
-                H_fb, W_fb = cutout.shape  # always current
-                # Apply edge clearance to fallback sites
-                injection_df = _filter_edge_clearance(
-                    injection_df, W_fb, H_fb, edge_margin
-                )
-                
-                if len(injection_df) == 0:
+                snr_col = np.asarray(cand_df.get("SNR", np.nan), dtype=float)
+                mean_col = np.asarray(cand_df.get("_annulus_mean", np.nan), dtype=float)
+                std_col = np.asarray(cand_df.get("_annulus_std", np.nan), dtype=float)
+
+                mean_diff = np.abs(mean_col - target_mean) if np.isfinite(target_mean) else np.zeros_like(mean_col)
+                std_diff = np.abs(std_col - target_std) if np.isfinite(target_std) else np.zeros_like(std_col)
+                mean_sim = mean_diff / (np.abs(target_mean) + 1e-6) if np.isfinite(target_mean) and target_mean != 0 else mean_diff
+                std_sim = std_diff / (np.abs(target_std) + 1e-6) if np.isfinite(target_std) and target_std != 0 else std_diff
+
+                similarity_weight = 0.3
+                snr_weight = 0.7
+                combined_score = snr_weight * np.abs(snr_col) + similarity_weight * (mean_sim + std_sim)
+
+                cand_df = cand_df.assign(_combined_score=combined_score)
+                cand_df = cand_df[np.isfinite(cand_df["_combined_score"])].copy()
+
+                if len(cand_df) == 0:
                     logger.warning(
-                        "All fallback sites within exclusion zone or edge clearance (r=%.1f px, margin=%.1f px); "
-                        "increase inject_source_location or inject_min_radius_fwhm",
-                        target_exclusion_r, edge_margin,
+                        "All candidate sites have non-finite scores; cannot find injection sites."
                     )
+                    if _return_details:
+                        return {"inject_lmag": np.nan, "inject_lmag_err": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": locals().get('completeness_target', 0.5), "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                     return np.nan
 
-            if len(injection_df) > sourceNum:
-                injection_df = injection_df.sample(sourceNum).reset_index(drop=True)
+                # Sort by combined score (lower = quieter + more similar).
+                cand_df = cand_df.sort_values("_combined_score", ascending=True).reset_index(drop=True)
 
-            # Compute grids after final cutout shape is known (compute once, reuse everywhere)
+                # Build a ranked pool of ~3x final count, then farthest-point
+                # select from it so chosen sites are both quiet and spatially
+                # spread out.
+                pool_size = min(3 * n_final, len(cand_df))
+                pool_df = cand_df.head(pool_size).copy()
+                pool_coords = np.column_stack([pool_df["x_pix"].values, pool_df["y_pix"].values])
+                chosen_idx = _farthest_point_select(pool_coords, n_final)
+                injection_df = pool_df.iloc[chosen_idx][["x_pix", "y_pix"]].reset_index(drop=True)
+
+                selected_mean_snr = float(np.mean(np.abs(pool_df.iloc[chosen_idx]["SNR"])))
+                logger.info(
+                    "Quiet site selection: %d valid candidates -> ranked pool of %d -> "
+                    "%d final sites via farthest-point sampling (mean |S/N|=%.3f).",
+                    int(len(cand_df)), int(pool_size), int(len(injection_df)),
+                    selected_mean_snr,
+                )
+
+            else:
+                # ----------------------------------------------------------
+                # Representative-site mode (default):
+                # Select final sites from the valid candidate pool using
+                # farthest-point sampling for maximal spatial uniformity.
+                # No bias toward quiet patches -- the limit reflects the
+                # actual local background distribution.
+                # ----------------------------------------------------------
+                cand_coords = np.column_stack([cand_df["x_pix"].values, cand_df["y_pix"].values])
+                chosen_idx = _farthest_point_select(cand_coords, n_final)
+                injection_df = cand_df.iloc[chosen_idx][["x_pix", "y_pix"]].reset_index(drop=True)
+                logger.info(
+                    "Representative site selection: %d valid candidates -> %d final sites "
+                    "via farthest-point sampling (target=%d).",
+                    int(len(cand_df)), int(len(injection_df)), int(n_final),
+                )
+                
+            sourceNum = int(len(injection_df))
+
+            if sourceNum < 10:
+                # Repeated jittered trials share a site, so the effective
+                # sample is sourceNum, not sourceNum x reps: a few-site
+                # limit carries site-selection bias its binomial error
+                # does not capture.
+                logger.warning(
+                    "Limiting-magnitude injection uses only %d independent "
+                    "site(s); the reported limit is a few-site estimate "
+                    "whose error does not include site-selection bias.",
+                    sourceNum,
+                )
+
             H_final, W_final = cutout.shape
-            gridy, gridx = np.indices((H_final, W_final))
-            
-            # Recompute r_max and r_base after final cutout shape is known
+
+            # Largest target-centred injection radius that keeps a
+            # 1-FWHM clearance inside the final cutout bounds; used only
+            # for the diagnostic warning below (out-of-bounds sites are
+            # dropped by the bounds filter, not re-generated).
             margin_r = float(np.ceil(fwhm_px))
             max_safe_r = min(
                 cutout_cx - margin_r,
@@ -1215,15 +2546,12 @@ class Limits:
                 cutout_cy - margin_r,
                 H_final - 1 - cutout_cy - margin_r,
             )
-            r_max_eff = min(r_max, max(r_min, float(max_safe_r)))
-            r_base_eff = float(np.clip(r_base, r_min, r_max_eff))
 
-            # injection_df is already built in cutout coordinates
             x_pix_arr = injection_df["x_pix"].to_numpy()
             y_pix_arr = injection_df["y_pix"].to_numpy()
             n_sites = len(injection_df)
 
-            # Filter out-of-bounds sites instead of clipping to edge
+            # Drop out-of-bounds sites rather than clipping them to the edge.
             margin = float(np.ceil(fwhm))
             valid_mask = (
                 (x_pix_arr >= margin) & (x_pix_arr <= W_final - 1 - margin) &
@@ -1232,6 +2560,8 @@ class Limits:
             if valid_mask.sum() < 3:
                 logger.warning(
                     f"Too few injection sites within cutout bounds ({int(valid_mask.sum())}/{len(x_pix_arr)}); "
+                    f"max safe injection radius is {float(max_safe_r):.1f} px "
+                    f"(configured r_max={float(r_max):.1f} px) - "
                     "consider increasing cutout size or reducing inject_max_radius_fwhm"
                 )
             x_pix_arr = x_pix_arr[valid_mask]
@@ -1239,138 +2569,291 @@ class Limits:
             n_sites = len(x_pix_arr)
             if n_sites == 0:
                 logger.warning("No valid injection sites after bounds filtering; aborting.")
+                if _return_details:
+                    return {"inject_lmag": np.nan, "inject_lmag_err": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": locals().get('completeness_target', 0.5), "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                 return np.nan
 
+            # injection_df positions are already jittered from site selection;
+            # these are the final trial positions.
+            _x_inj_all = x_pix_arr
+            _y_inj_all = y_pix_arr
+
+            # Base seed for deterministic per-task draws (Poisson source
+            # noise, jitter repetitions).  Drawn from self._rng so the
+            # rng_seed config keeps runs reproducible.
+            _seed_base = int(self._rng.integers(0, 2**31 - 1))
+            
             # Default serial; cap workers to avoid HPC fork/resource limits.
             n_jobs = n_jobs if n_jobs is not None else 1
             n_jobs = max(1, min(n_jobs, 8))
 
             # =================================================================
             # Trial runner - captures the shared pool from the outer scope.
-            #
-            # KEY OPTIMISATION: the ProcessPoolExecutor is created once below
-            # and referenced here.  The original code called Pool() inside
-            # this closure on every single magnitude evaluation.
+            # The pool is created once for the whole search; the original code
+            # created a Pool() per magnitude evaluation.
             # =================================================================
 
             def run_trials_at_mag(m: float, redo: int = None, pool=None, *, return_flags: bool = False):
                 """
-                Inject at *m* at all sites with *redo* sub-pixel jitter
-                repetitions and return (mean_detection_rate, beta_array, recovered_flux_array[, det_flags]).
+                Inject at *m* at all pre-jittered sites and return summary statistics.
+
+                Jittering is done during quiet-site selection, so the positions in
+                _x_inj_all/_y_inj_all are already the final trial positions.
+
+                Per-trial detection flags are retained in ``_flag_cache``
+                (n_sites x n_reps bools per magnitude -- negligible) so the
+                post-search logistic fit and site-bootstrap uncertainty need
+                no extra photometry trials.
                 """
-                redo = int(redo_default if redo is None else redo)
-                redo = max(1, min(redo, 50))
-                # Per-magnitude deterministic seeding for reproducibility
-                seed = int(abs(hash(round(m, 4)))) % (2**31)
-                local_rng = np.random.default_rng(seed)
-                dx = local_rng.random((n_sites, redo)) - 0.5
-                dy = local_rng.random((n_sites, redo)) - 0.5
+                # Repetitions: rep 0 injects at the site position; later reps
+                # take a deterministic sub-pixel offset and an independent
+                # Poisson seed, so each rep is a fresh realization rather
+                # than an identical copy.  All draws are seeded from
+                # _seed_base, preserving rng_seed reproducibility.
+                n_reps = (
+                    max(1, int(redo)) if redo is not None else int(redo_default)
+                )
+
+                # Full precision key: bisection evaluates nearby magnitudes.
+                # Keys stay magnitude-only because downstream code parses
+                # them as floats; a cached entry is only reused when its
+                # flag count matches the requested rep count.
+                cache_key = f"{m:.12f}"
+                if cache_key in _trial_cache:
+                    _cached_flags = _flag_cache.get(cache_key)
+                    _n_expect = len(_x_inj_all) * n_reps
+                    if (
+                        _cached_flags is not None
+                        and len(_cached_flags) == _n_expect
+                    ):
+                        if not return_flags:
+                            return _trial_cache[cache_key]
+                        return (*_trial_cache[cache_key], _cached_flags)
+
                 F = flux_for_mag(m)
+                x_inj_all = _x_inj_all
+                y_inj_all = _y_inj_all
 
-                # Vectorized jitter: build arrays directly instead of nested list comprehension
-                k_idx, j_idx = np.divmod(np.arange(n_sites * redo), redo)
-                x_inj_all = x_pix_arr[k_idx] + dx[k_idx, j_idx]
-                y_inj_all = y_pix_arr[k_idx] + dy[k_idx, j_idx]
+                # Recovered-quantity reference for the flux-ratio gate, on the
+                # same scale as what the method reports: the ePSF amplitude
+                # for PSF/EMCEE, the aperture rate (e-/s) for AP.
+                if str(recovery_method).strip().upper() == "AP":
+                    expected_flux = float(10.0 ** (-0.4 * float(m)))
+                else:
+                    expected_flux = float(F)
 
-                tasks = [
-                    (
-                        x_inj_all[n],
-                        y_inj_all[n],
-                        F,
-                        gridx,
-                        gridy,
-                        cutout,
-                        epsf_model,
-                        local_input_yaml,
-                        background_rms,
-                        snr_limit,
-                        beta_n,
-                        DETECTION_BETA_THRESH,
-                        recovery_method,
-                    )
-                    for n in range(len(x_inj_all))
-                ]
+                jitter_pix = float(
+                    lim_cfg.get("injection_jitter_pix", 0.5)
+                )
+                _m_key = int(round(float(m) * 1e6)) & 0x3FFFFFFF
+                task_specs = []
+                for n in range(len(x_inj_all)):
+                    for r in range(n_reps):
+                        task_idx = n * n_reps + r
+                        seed = int(
+                            np.random.SeedSequence(
+                                [_seed_base, _m_key, task_idx]
+                            ).generate_state(1, dtype=np.uint64)[0]
+                        )
+                        x_t = float(x_inj_all[n])
+                        y_t = float(y_inj_all[n])
+                        if r > 0 and jitter_pix > 0:
+                            jr = np.random.default_rng(
+                                np.random.SeedSequence(
+                                    [_seed_base, _m_key, task_idx, 991]
+                                )
+                            )
+                            _ang = jr.uniform(0.0, 2.0 * np.pi)
+                            _rad = jitter_pix * float(np.sqrt(jr.uniform()))
+                            x_t += _rad * np.cos(_ang)
+                            y_t += _rad * np.sin(_ang)
+                        task_specs.append((x_t, y_t, F, expected_flux, seed))
 
                 if pool is not None:
-                    results = list(pool.map(_injection_worker, tasks))
+                    # Shared state was broadcast once via the pool initializer;
+                    # only the per-task tuple is pickled.
+                    results = list(pool.map(_injection_worker_shared, task_specs))
                 else:
+                    tasks = [
+                        (
+                            tx,
+                            ty,
+                            F,
+                            cutout,
+                            oversampling,
+                            epsf_model,
+                            local_input_yaml,
+                            background_rms,
+                            snr_limit,
+                            beta_n,
+                            recovery_method,
+                            expected,
+                            seed,
+                        )
+                        for (tx, ty, _Fa, expected, seed) in task_specs
+                    ]
                     results = [_injection_worker(t) for t in tasks]
 
                 det_flags = np.array([r[0] for r in results], dtype=bool)
                 betas = np.array([r[1] for r in results], dtype=float)
                 recovered_fluxes = np.array([r[2] for r in results], dtype=float)
+                recovered_flux_errs = np.array([r[3] for r in results], dtype=float)
 
-                # DIAGNOSTIC: log detection rate at this magnitude
-                F = flux_for_mag(m)
+                # Calibrated-gate mode: rebuild the detection flag under
+                # errors inflated by the empirical calibration factor so the
+                # injection gate matches the (scaled) S/N used for the real
+                # detection flag.  The raw per-trial flux/err are kept so the
+                # gate can be re-evaluated once the factor is measured.
+                if _gate_err_scale["k"] != 1.0:
+                    det_flags = _recovered_detection_flags(
+                        recovered_fluxes,
+                        recovered_flux_errs * _gate_err_scale["k"],
+                        expected_flux,
+                        snr_limit,
+                        lim_cfg,
+                    )
+
+                # Collect (true, measured, err) per trial for the empirical
+                # uncertainty calibration.  All finite trials count, detected
+                # or not: the z-score is scale-free, and restricting to
+                # detections would bias the coverage statistics.
+                # For PSF/EMCEE the recovered flux is the model flux parameter
+                # (total-flux scale), directly comparable to F_amp; for AP the
+                # recovered flux is the aperture rate in e-/s, whose true value
+                # is 10^(-0.4m) by construction of flux_for_mag/counts_ref.
+                if _uncal_collect:
+                    if _uncal_method in ("PSF", "EMCEE", "MCMC"):
+                        _f_true = float(F)
+                    else:
+                        _f_true = float(10.0 ** (-0.4 * float(m)))
+                    for _rf, _rfe in zip(recovered_fluxes, recovered_flux_errs):
+                        if np.isfinite(_rf) and np.isfinite(_rfe) and _rfe > 0:
+                            _uncal_rows.append((_f_true, float(_rf), float(_rfe)))
+                # Surface worker exceptions: a systematic failure would otherwise
+                # masquerade as 0% completeness with no diagnostic output.
+                trial_errors = [r[4] for r in results if len(r) > 4 and r[4]]
+                if trial_errors:
+                    unique_errors = sorted(set(trial_errors))
+                    logger.warning(
+                        "inject m=%+.3f: %d/%d trials raised exceptions "
+                        "(first: %s%s)",
+                        m, len(trial_errors), len(results), unique_errors[0],
+                        f" (+{len(unique_errors) - 1} more)" if len(unique_errors) > 1 else "",
+                    )
+
+                _rate = float(det_flags.mean()) if len(det_flags) else 0.0
+                _n_det = int(det_flags.sum())
+                _n_tot = len(det_flags)
                 logger.debug(
-                    "run_trials_at_mag(m=%.3f): F=%.4e, det_rate=%.3f (%d/%d)",
-                    m, F, float(det_flags.mean()), int(det_flags.sum()), len(det_flags)
+                    "inject m=%+7.3f | %5.1f%%  (%d/%d detected)",
+                    m, 100.0 * _rate, _n_det, _n_tot,
                 )
 
+                det_rate = float(det_flags.mean()) if len(det_flags) else 0.0
+                beta_med = float(np.nanmedian(betas)) if betas.size else np.nan
+                flux_med = float(np.nanmedian(recovered_fluxes)) if recovered_fluxes.size else np.nan
+                flux_err_med = float(np.nanmedian(recovered_flux_errs)) if recovered_flux_errs.size else np.nan
+
+                _trial_cache[cache_key] = (det_rate, beta_med, flux_med, flux_err_med)
+                _flag_cache[cache_key] = det_flags
+                _fe_cache[cache_key] = (
+                    float(expected_flux),
+                    recovered_fluxes,
+                    recovered_flux_errs,
+                )
                 if return_flags:
-                    return float(det_flags.mean()), betas, recovered_fluxes, det_flags
-                return float(det_flags.mean()), betas, recovered_fluxes
+                    return det_rate, beta_med, flux_med, flux_err_med, det_flags
+                return det_rate, beta_med, flux_med, flux_err_med
 
             # =================================================================
             # Single ProcessPoolExecutor for the ENTIRE search (or serial if n_jobs==1)
             # =================================================================
             inject_lmag = np.nan
+            inject_lmag_err = np.nan
+            inject_lmag_raw = np.nan  # pre-calibration crossing when the S/N gate is scaled
+            _snr_gate_factor = 1.0    # empirical error-scale applied to the detection gate
             bracket_steps: list[tuple] = []
             bisect_steps: list[tuple] = []
+            _trial_cache: dict[str, tuple] = {}
+            _flag_cache: dict[str, np.ndarray] = {}
+            # Per-magnitude raw trial results so the detection gate can be
+            # re-evaluated under the calibrated error scale without rerunning
+            # photometry: cache_key -> (expected_flux, recovered_fluxes,
+            # recovered_errs), where expected_flux is on the recovery
+            # method's own scale (model amplitude for PSF/EMCEE, e-/s for AP).
+            _fe_cache: dict[str, tuple] = {}
+            # Error-scale factor applied to the detection gate.  Set to the
+            # empirical uncertainty-calibration factor once the search has
+            # collected enough trials to measure it.
+            _gate_err_scale = {"k": 1.0}
 
-            with _pool_or_serial(n_jobs) as pool:
+            # Per-trial (true_flux, measured_flux, measured_err) samples for the
+            # empirical uncertainty calibration.  The true value lives on the
+            # same scale as the recovered quantity: the model flux parameter
+            # for PSF/EMCEE, the aperture rate (e-/s) for AP.
+            _uncal_rows: list[tuple] = []
+            _uncal_method = (
+                str(recovery_method).strip().upper()
+                if recovery_method is not None
+                else "AP"
+            )
+            _uncal_collect = bool(
+                lim_cfg.get("uncal_from_injections", True)
+            )
+
+            with _pool_or_serial(
+                n_jobs,
+                initializer=_injection_init_shared,
+                initargs=(
+                    cutout, oversampling, epsf_model, local_input_yaml,
+                    background_rms, snr_limit, beta_n, recovery_method,
+                ),
+            ) as pool:
 
                 # ---- Bracket phase ------------------------------------------
                 step = 0.5
                 max_steps = 30
-                # Check if injection recovery plot is enabled
                 plot_injection_recovery = (self.input_yaml.get("limiting_magnitude") or {}).get("plot_injection_recovery", False)
 
                 if plot_injection_recovery:
-                    # Start at artificially bright magnitude for visualization in the plot
-                    m_bright = -10.0  # Very bright starting point
-                    c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
+                    # Start artificially bright so the plot spans the full curve.
+                    m_bright = -10.0
+                    c_bright, _, f_bright, _ = run_trials_at_mag(m_bright, pool=pool)
                     going_faint = c_bright >= completeness_target
                     m_faint, c_faint = m_bright, c_bright
-                    bracket_steps.append((m_bright, c_bright, np.median(f_bright)))
+                    f_faint = f_bright
+                    bracket_steps.append((m_bright, c_bright, f_bright, np.nan))
                 else:
-                    # Skip the -10.0 trial; start from data-driven initial guess instead
+                    # Skip the -10.0 trial; start from the initial guess.
                     m_bright = float(initialGuess) if np.isfinite(initialGuess) else -5.0
-                    c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
+                    c_bright, _, f_bright, _ = run_trials_at_mag(m_bright, pool=pool)
                     going_faint = c_bright >= completeness_target
                     m_faint, c_faint = m_bright, c_bright
-                    bracket_steps.append((m_bright, c_bright, np.median(f_bright)))
-
-                # Determine target faint magnitude: 1 mag below limiting magnitude (if known)
-                # Otherwise, just use the standard bracketing logic
-                target_faint = inject_lmag - 1.0 if np.isfinite(inject_lmag) else None
+                    f_faint = f_bright
+                    bracket_steps.append((m_bright, c_bright, f_bright, np.nan))
 
                 for _ in range(max_steps):
                     m_test = m_faint + step if going_faint else m_bright - step
-                    c_test, _, f_test = run_trials_at_mag(m_test, pool=pool)
-                    bracket_steps.append((m_test, c_test, np.median(f_test)))
+                    c_test, _, f_test, _ = run_trials_at_mag(m_test, pool=pool)
+                    bracket_steps.append((m_test, c_test, f_test, np.nan))
 
                     if going_faint:
+                        # Track the last detected point so bisection starts from
+                        # the final detected endpoint, not the initial guess.
+                        prev_m, prev_c, prev_f = m_faint, c_faint, f_faint
                         m_faint, c_faint = m_test, c_test
-                        # Continue stepping fainter until we reach target_faint or find undetected endpoint
+                        f_faint = f_test
                         if c_faint < completeness_target:
-                            if target_faint is None or m_faint <= target_faint:
-                                break
-                    else:
-                        # When stepping brighter (looking for detected end)
-                        # Keep m_faint fixed (this is the undetected endpoint)
-                        if c_test >= completeness_target:
-                            # Found detected end
-                            m_bright, c_bright = m_test, c_test
+                            # The detected endpoint is the previous step.
+                            m_bright, c_bright, f_bright = prev_m, prev_c, prev_f
                             break
-                        else:
-                            # Still not detected even at this brighter magnitude
-                            # This indicates a fundamental detection problem - log warning and break
-                            logger.warning(
-                                f"Bracket phase stepping bright: source not detected even at brighter mag {m_test:.3f} "
-                                f"(completeness={c_test:.3f} < target={completeness_target:.3f}). "
-                                "This may indicate a detection issue."
-                            )
+                    else:
+                        # Stepping brighter: advance the bright frontier on
+                        # every trial, otherwise m_test (anchored on m_bright)
+                        # retries the same magnitude each iteration.  m_faint
+                        # stays the undetected (fainter) end.
+                        m_bright, c_bright, f_bright = m_test, c_test, f_test
+                        if c_test >= completeness_target:
                             break
 
                 bracketed = (c_bright >= completeness_target) and (
@@ -1387,26 +2870,29 @@ class Limits:
                         float(initialGuess) + 2.0,
                     ):
                         m_bright = float(guess)
-                        c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
+                        c_bright, _, f_bright, _ = run_trials_at_mag(m_bright, pool=pool)
                         going_faint = c_bright >= completeness_target
                         m_faint, c_faint = m_bright, c_bright
-                        bracket_steps.append((m_bright, c_bright, np.median(f_bright)))
+                        f_faint = f_bright
+                        bracket_steps.append((m_bright, c_bright, f_bright, np.nan))
                         for _ in range(35):
                             m_test = m_faint + step if going_faint else m_bright - step
-                            c_test, _, f_test = run_trials_at_mag(m_test, pool=pool)
-                            bracket_steps.append((m_test, c_test, np.median(f_test)))
+                            c_test, _, f_test, _ = run_trials_at_mag(m_test, pool=pool)
+                            bracket_steps.append((m_test, c_test, f_test, np.nan))
                             if going_faint:
+                                prev_m, prev_c, prev_f = m_faint, c_faint, f_faint
                                 m_faint, c_faint = m_test, c_test
+                                f_faint = f_test
                                 if c_faint < completeness_target:
+                                    m_bright, c_bright, f_bright = prev_m, prev_c, prev_f
                                     break
                             else:
-                                # When stepping brighter, update based on detection
+                                # Stepping brighter: advance the bright
+                                # frontier every trial (see above); m_faint
+                                # stays the undetected end.
+                                m_bright, c_bright, f_bright = m_test, c_test, f_test
                                 if c_test >= completeness_target:
-                                    m_bright, c_bright = m_test, c_test
                                     break
-                                else:
-                                    # Still not detected; this becomes new bright boundary (keep faint fixed)
-                                    m_bright, c_bright = m_test, c_test
                         bracketed = (c_bright >= completeness_target) and (
                             c_faint < completeness_target
                         )
@@ -1418,25 +2904,42 @@ class Limits:
                             break
 
                 if not bracketed:
-                    # Return NaN when bracketing fails - no default fallback limit
+                    # No fallback limit: a failed bracket returns NaN.
                     inject_lmag = np.nan
+                    all_bracket_mags = [t[0] for t in bracket_steps if np.isfinite(t[0])]
+                    m_lo_tried = float(min(all_bracket_mags)) if all_bracket_mags else np.nan
+                    m_hi_tried = float(max(all_bracket_mags)) if all_bracket_mags else np.nan
                     logger.warning(
-                        f"Could not bracket cutoff; returning NaN"
+                        "Could not bracket %.0f%% completeness threshold "
+                        "(searched m=[%.2f, %.2f], brightest det_rate=%.1f%%, "
+                        "faintest det_rate=%.1f%%); returning NaN.",
+                        100.0 * completeness_target,
+                        m_lo_tried, m_hi_tried,
+                        100.0 * float(c_bright),
+                        100.0 * float(c_faint),
                     )
 
                 else:
                     # ---- Bisect phase ----------------------------------------
                     lo_m, lo_c = m_bright, c_bright
                     hi_m, hi_c = m_faint, c_faint
-                    # Get recovered fluxes for initial bracket endpoints
-                    _, _, lo_f = run_trials_at_mag(lo_m, pool=pool)
-                    _, _, hi_f = run_trials_at_mag(hi_m, pool=pool)
-                    bisect_steps = [(lo_m, lo_c, np.median(lo_f)), (hi_m, hi_c, np.median(hi_f))]
+                    # Seed bisect_steps with the bracket endpoints so the
+                    # plotted trajectory visibly straddles the target.
+                    # (f_bright/f_faint are medians from run_trials_at_mag).
+                    try:
+                        lo_f = float(f_bright) if "f_bright" in locals() else np.nan
+                    except Exception:
+                        lo_f = np.nan
+                    try:
+                        hi_f = float(f_faint) if "f_faint" in locals() else np.nan
+                    except Exception:
+                        hi_f = np.nan
+                    bisect_steps = [(lo_m, lo_c, lo_f, np.nan), (hi_m, hi_c, hi_f, np.nan)]
 
                     for _ in range(30):
                         mid_m = 0.5 * (lo_m + hi_m)
-                        mid_c, _, mid_f = run_trials_at_mag(mid_m, pool=pool)
-                        bisect_steps.append((mid_m, mid_c, np.median(mid_f)))
+                        mid_c, _, mid_f, mid_f_err = run_trials_at_mag(mid_m, pool=pool)
+                        bisect_steps.append((mid_m, mid_c, mid_f, mid_f_err))
 
                         if mid_c >= completeness_target:
                             lo_m, lo_c = mid_m, mid_c
@@ -1446,12 +2949,308 @@ class Limits:
                         if abs(hi_m - lo_m) < 0.02:
                             break
 
+                    # Make sure the final endpoints are in the plotted
+                    # bisection trajectory.
+                    try:
+                        xs = np.asarray([t[0] for t in bisect_steps], dtype=float)
+                        has_lo = bool(np.any(np.isfinite(xs) & np.isclose(xs, lo_m, atol=1e-12, rtol=0.0)))
+                        has_hi = bool(np.any(np.isfinite(xs) & np.isclose(xs, hi_m, atol=1e-12, rtol=0.0)))
+                        if not has_lo:
+                            bisect_steps.append((lo_m, lo_c, np.nan, np.nan))
+                        if not has_hi:
+                            bisect_steps.append((hi_m, hi_c, np.nan, np.nan))
+                    except Exception:
+                        pass
+
+                    # Interpolate to m at completeness_target between the final
+                    # bracket endpoints; more faithful than the last midpoint
+                    # when the recovery fraction is quantized by few trials.
                     inject_lmag = 0.5 * (lo_m + hi_m)
+                    inject_lmag_err = np.nan
+                    try:
+                        denom = float(hi_c - lo_c)
+                        if np.isfinite(denom) and abs(denom) > 0:
+                            w = float((completeness_target - lo_c) / denom)
+                            if np.isfinite(w):
+                                w = float(np.clip(w, 0.0, 1.0))
+                                inject_lmag = float(lo_m + w * (hi_m - lo_m))
+                                # Propagate binomial errors on lo_c/hi_c
+                                # through the interpolation weight w:
+                                #   sigma_w^2 = ((1-w)*sigma_lo_c/denom)^2
+                                #             + (w*sigma_hi_c/denom)^2
+                                #   sigma_c = sqrt(c*(1-c)/n_sites)
+                                if n_sites > 0:
+                                    sigma_lo_c = np.sqrt(max(lo_c * (1 - lo_c) / n_sites, 0))
+                                    sigma_hi_c = np.sqrt(max(hi_c * (1 - hi_c) / n_sites, 0))
+                                    sigma_w = np.sqrt(((1.0 - w) * sigma_lo_c / denom)**2 + (w * sigma_hi_c / denom)**2)
+                                    # Endpoint mag errors are taken as
+                                    # negligible vs binomial sampling error.
+                                    inject_lmag_err = abs(hi_m - lo_m) * sigma_w
+                    except Exception:
+                        pass
+                    logger.info(
+                        "    Bisection converged: m50=%.4f +/- %.4f (bracket width=%.4f mag)",
+                        float(inject_lmag), float(inject_lmag_err) if np.isfinite(inject_lmag_err) else np.nan, abs(hi_m - lo_m),
+                    )
+
+                    # ---- Calibrated detection gate ---------------------------
+                    # The empirical uncertainty calibration inflates the
+                    # reported flux errors by factor k; the real detection
+                    # flag is then decided on calibrated S/N = flux/(err*k).
+                    # Evaluating the injection gate at the raw S/N instead
+                    # would report a limit ~2.5*log10(k) mag deeper than the
+                    # pipeline's own detection threshold.  Rebuild every
+                    # cached flag under err*k (no extra photometry) and
+                    # re-solve the crossing so the limit matches the
+                    # calibrated gate.
+                    _snr_gate_factor = 1.0
+                    try:
+                        if (
+                            np.isfinite(inject_lmag)
+                            and _uncal_collect
+                            and bool(lim_cfg.get("recovery_calibrate_snr", True))
+                            and bool(lim_cfg.get("uncal_apply", True))
+                            and len(_uncal_rows) > 0
+                        ):
+                            from utils.uncertainty_calibration import (
+                                calibrate_uncertainties,
+                            )
+
+                            _cal_arr = np.asarray(_uncal_rows, dtype=float)
+                            _cal_res = calibrate_uncertainties(
+                                _cal_arr[:, 0], _cal_arr[:, 1], _cal_arr[:, 2],
+                                min_sources=int(
+                                    lim_cfg.get("uncal_min_sources", 30)
+                                ),
+                            )
+                            _kc = float(
+                                getattr(_cal_res, "calibration_factor", np.nan)
+                            )
+                            _clip = lim_cfg.get("uncal_factor_clip", [0.5, 2.0])
+                            _c_lo, _c_hi = float(_clip[0]), float(_clip[1])
+                            _cal_ok = (
+                                int(getattr(_cal_res, "n_sources", 0) or 0)
+                                >= int(lim_cfg.get("uncal_min_sources", 30))
+                                and np.isfinite(_kc)
+                                and _c_lo <= _kc <= _c_hi
+                            )
+                            if _cal_ok and not np.isclose(_kc, 1.0):
+                                _snr_gate_factor = _kc
+                    except Exception:
+                        _snr_gate_factor = 1.0
+
+                    if _snr_gate_factor != 1.0:
+                        inject_lmag_raw = float(inject_lmag)
+                        inject_lmag_err_raw = inject_lmag_err
+                        # Snapshot raw state so a failed re-solve can restore it.
+                        _flag_cache_raw = {k: v.copy() for k, v in _flag_cache.items()}
+                        _trial_cache_raw = dict(_trial_cache)
+                        _bisect_len_raw = len(bisect_steps)
+                        _gate_err_scale["k"] = _snr_gate_factor
+                        for _key, (_F, _fl, _fe) in list(_fe_cache.items()):
+                            _nf = _recovered_detection_flags(
+                                _fl,
+                                _fe * _snr_gate_factor,
+                                _F,
+                                snr_limit,
+                                lim_cfg,
+                            )
+                            _flag_cache[_key] = _nf
+                            _r0 = _trial_cache.get(_key)
+                            if _r0 is not None:
+                                _trial_cache[_key] = (
+                                    float(_nf.mean()), _r0[1], _r0[2], _r0[3],
+                                )
+
+                        _c_corr = {
+                            float(kk): float(np.asarray(v, dtype=bool).mean())
+                            for kk, v in _flag_cache.items()
+                        }
+                        _ms = sorted(_c_corr)
+                        _pairs = [
+                            (a, b)
+                            for a, b in zip(_ms, _ms[1:])
+                            if _c_corr[a] >= completeness_target > _c_corr[b]
+                        ]
+                        solved_corrected = False
+                        if _pairs:
+                            lo_m2, hi_m2 = min(
+                                _pairs,
+                                key=lambda ab: abs(
+                                    0.5 * (ab[0] + ab[1]) - inject_lmag_raw
+                                ),
+                            )
+                            for _it in range(10):
+                                if abs(hi_m2 - lo_m2) < 0.02:
+                                    break
+                                mid2 = 0.5 * (lo_m2 + hi_m2)
+                                c2, _, f2, fe2 = run_trials_at_mag(
+                                    mid2, pool=pool
+                                )
+                                bisect_steps.append((mid2, c2, f2, fe2))
+                                if c2 >= completeness_target:
+                                    lo_m2 = mid2
+                                else:
+                                    hi_m2 = mid2
+                            lo_c2 = float(
+                                _flag_cache[f"{lo_m2:.12f}"].mean()
+                            )
+                            hi_c2 = float(
+                                _flag_cache[f"{hi_m2:.12f}"].mean()
+                            )
+                            inject_lmag = 0.5 * (lo_m2 + hi_m2)
+                            inject_lmag_err = np.nan
+                            try:
+                                denom2 = float(hi_c2 - lo_c2)
+                                if np.isfinite(denom2) and abs(denom2) > 0:
+                                    w2 = float(
+                                        np.clip(
+                                            (completeness_target - lo_c2)
+                                            / denom2,
+                                            0.0,
+                                            1.0,
+                                        )
+                                    )
+                                    inject_lmag = float(
+                                        lo_m2 + w2 * (hi_m2 - lo_m2)
+                                    )
+                                    n2 = len(_flag_cache[f"{lo_m2:.12f}"])
+                                    if n2 > 0:
+                                        s_lo = np.sqrt(
+                                            max(lo_c2 * (1 - lo_c2) / n2, 0)
+                                        )
+                                        s_hi = np.sqrt(
+                                            max(hi_c2 * (1 - hi_c2) / n2, 0)
+                                        )
+                                        s_w = np.sqrt(
+                                            ((1.0 - w2) * s_lo / denom2) ** 2
+                                            + (w2 * s_hi / denom2) ** 2
+                                        )
+                                        inject_lmag_err = abs(
+                                            hi_m2 - lo_m2
+                                        ) * s_w
+                            except Exception:
+                                pass
+                            solved_corrected = np.isfinite(inject_lmag)
+                        if not solved_corrected:
+                            # Logistic fit over the corrected flags handles
+                            # non-monotone curves where no adjacent straddle
+                            # exists.
+                            try:
+                                x_c = np.concatenate([
+                                    np.full(len(f), float(m), dtype=float)
+                                    for m, f in _flag_cache.items()
+                                ])
+                                y_c = np.concatenate([
+                                    np.asarray(f, dtype=float)
+                                    for f in _flag_cache.values()
+                                ])
+                                m50_c, s_c = _logistic_completeness_mle(
+                                    x_c, y_c, m_guess=float(inject_lmag_raw)
+                                )
+                                if np.isfinite(m50_c) and np.isfinite(s_c) and s_c > 0:
+                                    inject_lmag = _logistic_m_at_target(
+                                        m50_c, s_c, completeness_target
+                                    )
+                                    inject_lmag_err = np.nan
+                                    solved_corrected = True
+                            except Exception:
+                                pass
+                        if not solved_corrected:
+                            # Could not localize the calibrated crossing:
+                            # revert to the raw gate so the reported limit and
+                            # the cached flags stay consistent.  clear()+update
+                            # also drops entries added by the failed re-solve;
+                            # a plain update() would leave corrected-gate flags
+                            # mixed into the raw-gate curve.
+                            _gate_err_scale["k"] = 1.0
+                            _flag_cache.clear()
+                            _flag_cache.update(_flag_cache_raw)
+                            _trial_cache.clear()
+                            _trial_cache.update(_trial_cache_raw)
+                            del bisect_steps[_bisect_len_raw:]
+                            inject_lmag = inject_lmag_raw
+                            inject_lmag_err = inject_lmag_err_raw
+                            inject_lmag_raw = np.nan
+                            _snr_gate_factor = 1.0
+                            logger.warning(
+                                "Calibrated S/N gate (factor=%.3f) did not "
+                                "bracket the completeness target; reporting "
+                                "the uncalibrated limit %.3f.",
+                                float(_kc),
+                                float(inject_lmag),
+                            )
+                        else:
+                            logger.info(
+                                "    Calibrated S/N gate: error scale=%.3f "
+                                "(effective S/N >= %.2f) -> m50 %.4f -> %.4f",
+                                float(_snr_gate_factor),
+                                float(snr_limit) * _snr_gate_factor,
+                                inject_lmag_raw,
+                                float(inject_lmag),
+                            )
+                            # Step lists carry the completeness column for the
+                            # plot; refresh it from the corrected flags so the
+                            # drawn curve matches the adopted limit.
+                            def _corr_step_c(m, c_old):
+                                _f = _flag_cache.get(f"{float(m):.12f}")
+                                if _f is None:
+                                    return c_old
+                                return float(np.asarray(_f, dtype=bool).mean())
+                            bracket_steps = [
+                                (m, _corr_step_c(m, c), f, fe)
+                                for (m, c, f, fe) in bracket_steps
+                            ]
+                            bisect_steps = [
+                                (m, _corr_step_c(m, c), f, fe)
+                                for (m, c, f, fe) in bisect_steps
+                            ]
+
+                    # Optional: fit a smooth logistic completeness curve over
+                    # all evaluated magnitudes (cached per-site flags, no extra
+                    # photometry). Uses every trial, not just the final two
+                    # bracket endpoints, so non-monotone wiggles in the
+                    # empirical curve do not move the answer.
+                    flag_by_mag = {
+                        float(k): np.asarray(v, dtype=bool)
+                        for k, v in _flag_cache.items()
+                    }
+                    if completeness_solver == "logistic_mle" and len(flag_by_mag) >= 2:
+                        try:
+                            x_all = np.concatenate([
+                                np.full(len(f), m, dtype=float)
+                                for m, f in flag_by_mag.items()
+                            ])
+                            y_all = np.concatenate([
+                                f.astype(float) for f in flag_by_mag.values()
+                            ])
+                            m50_mle, s_mle = _logistic_completeness_mle(
+                                x_all, y_all, m_guess=float(inject_lmag)
+                            )
+                            if np.isfinite(m50_mle) and np.isfinite(s_mle) and s_mle > 0:
+                                inject_lmag = _logistic_m_at_target(
+                                    m50_mle, s_mle, completeness_target
+                                )
+                                logger.info(
+                                    "Injected limiting magnitude (logistic_mle): "
+                                    "m50=%.4f s=%.4f -> m@%.0f%%=%.4f (instrumental mag)",
+                                    m50_mle, s_mle, 100.0 * completeness_target,
+                                    float(inject_lmag),
+                                )
+                            else:
+                                logger.warning(
+                                    "logistic_mle fit did not converge; keeping bisection result."
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "Injected limiting magnitude: logistic_mle solver failed (%s); using bisection result.",
+                                str(exc),
+                            )
 
                     # Optional: fit a smooth completeness curve with emcee and solve for m50.
                     if completeness_solver == "logistic_emcee":
                         try:
-                            inject_lmag, m50_err = self._solve_m50_logistic_emcee(
+                            inject_lmag_emcee, m50_err_emcee = self._solve_m50_logistic_emcee(
                                 run_trials_at_mag=run_trials_at_mag,
                                 pool=pool,
                                 m_guess=float(inject_lmag),
@@ -1459,11 +3258,17 @@ class Limits:
                                 completeness_target=float(completeness_target),
                                 lim_cfg=lim_cfg,
                             )
-                            if np.isfinite(m50_err):
+                            # Combine binomial sampling error with MCMC posterior error
+                            if np.isfinite(m50_err_emcee) and np.isfinite(inject_lmag_err):
+                                inject_lmag_err = np.sqrt(m50_err_emcee**2 + inject_lmag_err**2)
+                            elif np.isfinite(m50_err_emcee):
+                                inject_lmag_err = m50_err_emcee
+                            inject_lmag = inject_lmag_emcee
+                            if np.isfinite(m50_err_emcee):
                                 logger.info(
                                     "Injected limiting magnitude (logistic_emcee): m50=%.3f +/- %.3f (instrumental mag)",
                                     float(inject_lmag),
-                                    float(m50_err),
+                                    float(inject_lmag_err),
                                 )
                         except Exception as exc:
                             logger.warning(
@@ -1471,37 +3276,81 @@ class Limits:
                                 str(exc),
                             )
 
+                    # Site-bootstrap uncertainty: resample the per-site flags at
+                    # every evaluated magnitude and refit the logistic curve.
+                    # Captures the dominant Monte-Carlo error -- which sites
+                    # were drawn -- that the interpolation error alone misses.
+                    # Runs on cached flags; no extra photometry.
+                    if np.isfinite(inject_lmag) and len(flag_by_mag) >= 2:
+                        err_boot = self._bootstrap_m50_uncertainty(
+                            flag_by_mag,
+                            float(completeness_target),
+                            group=int(redo_default),
+                        )
+                        if np.isfinite(err_boot) and err_boot > 0:
+                            # Bootstrap (site resampling) captures site-to-site
+                            # variability; the emcee/bisection error captures
+                            # parameter and interpolation uncertainty given the
+                            # observed data.  These are independent sources, so
+                            # combine in quadrature rather than replacing one
+                            # with the other (which could underestimate the total
+                            # limiting-magnitude error).  A non-finite bisection
+                            # error (e.g. a logistic fallback) must not turn the
+                            # whole combination into NaN - fall back to the
+                            # bootstrap term alone.
+                            inject_lmag_err = _combine_limit_errors(
+                                err_boot, inject_lmag_err
+                            )
+                            logger.info(
+                                "    m50 site-bootstrap error: +/- %.4f mag "
+                                "(combined with emcee/bisection error)",
+                                float(err_boot),
+                            )
+
                 # ---- Extended injection trials for plotting ----
-                # Rely on bracket and bisect steps to determine magnitude range
+                # Bracket/bisect steps already span the magnitude range.
                 extended_steps = []
 
                 # ---- Plot completeness curve (still inside pool context) -----
+                # Plotting must never discard a successfully computed limit:
+                # any failure here is logged and the limit is still returned.
                 if plot:
-                    self._plot_completeness(
-                        None,  # No sample_mags
-                        None,  # No completeness_groups
-                        None,  # No medians
-                        bracket_steps,
-                        bisect_steps,
-                        inject_lmag,
-                        completeness_target,
-                        DETECTION_BETA_THRESH,
-                        zeropoint,
-                        recovery_method,
-                        epsf_model=epsf_model,
-                        cutout=cutout,
-                        position=position,
-                        background_rms=background_rms,
-                        flux_for_mag=flux_for_mag,
-                        image_zeropoint=image_zeropoint,
-                        injection_df=injection_df,
-                        F_ref=F_ref,
-                        counts_ref=counts_ref,
-                        exposure_time=exposure_time,
-                        extended_steps=extended_steps,
-                        orig_position=_orig_position,
-                        target_name=self.input_yaml.get("target_name", None),
-                    )
+                    try:
+                        self._plot_completeness(
+                            None,  # No sample_mags
+                            None,  # No completeness_groups
+                            None,  # No medians
+                            bracket_steps,
+                            bisect_steps,
+                            inject_lmag,
+                            completeness_target,
+                            detection_cutoff,
+                            zeropoint,
+                            recovery_method,
+                            epsf_model=epsf_model,
+                            cutout=cutout,
+                            position=position,
+                            background_rms=background_rms,
+                            flux_for_mag=flux_for_mag,
+                            image_zeropoint=image_zeropoint,
+                            injection_df=injection_df,
+                            F_ref=F_ref,
+                            counts_ref=counts_ref,
+                            exposure_time=exposure_time,
+                            extended_steps=extended_steps,
+                            orig_position=_orig_position,
+                            target_name=self.input_yaml.get("target_name", None),
+                            cutout_cx=cutout_cx,
+                            cutout_cy=cutout_cy,
+                            snr_limit=effective_snr_limit,
+                            snr_gate_factor=_snr_gate_factor,
+                            avoid_positions=_avoid_positions_cutout(),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Completeness plot failed (%s); limiting magnitude result unaffected.",
+                            exc,
+                        )
 
                     # Detection-limit demo plot removed by request.
 
@@ -1520,6 +3369,7 @@ class Limits:
                             position=position,
                             m_inj=float(inject_lmag),
                             flux_for_mag=flux_for_mag,
+                            avoid_positions=_avoid_positions_cutout(),
                         )
                     except Exception:
                         pass
@@ -1529,19 +3379,143 @@ class Limits:
             # =================================================================
             elapsed = time.time() - start_time
             if np.isfinite(inject_lmag):
-                app_str = ""
-                if zeropoint is not None and np.isfinite(zeropoint):
-                    app_mag = float(inject_lmag) + float(zeropoint)
-                    app_str = f" ({app_mag:.3f} apparent)"
-                logger.info(
-                    f"Limiting magnitude: instrumental={inject_lmag:.3f}{app_str}, zeropoint={zeropoint:.3f}"
+                # Log the zeropoint matching the recovery method.
+                log_zeropoint = zeropoint
+                if image_zeropoint is not None:
+                    recovery_method_upper = str(recovery_method).strip().upper() if recovery_method else "AP"
+                    if recovery_method_upper in ("PSF", "EMCEE"):
+                        log_zeropoint = image_zeropoint.get("PSF", {}).get("zeropoint", zeropoint)
+                    else:
+                        log_zeropoint = image_zeropoint.get("AP", {}).get("zeropoint", zeropoint)
+
+                zp_log = (
+                    f"{float(log_zeropoint):.3f}"
+                    if log_zeropoint is not None and np.isfinite(float(log_zeropoint) if log_zeropoint is not None else np.nan)
+                    else "n/a"
                 )
-                logger.info(f"Limiting mag ~ {inject_lmag:.3f}{app_str}  [{elapsed:.1f}s]")
+                app_str = ""
+                if log_zeropoint is not None:
+                    try:
+                        if np.isfinite(float(log_zeropoint)):
+                            app_mag = float(inject_lmag) + float(log_zeropoint)
+                            # AP recovery measures through the rescaled
+                            # diff aperture - carry the residual correction.
+                            _rm = str(recovery_method).strip().upper()
+                            if _rm == "AP":
+                                app_mag += _ap_diff_resid(self.input_yaml)
+                            app_str = f"  apparent={app_mag:.3f}"
+                    except (TypeError, ValueError):
+                        pass
+
+                n_trials_total = len(_trial_cache)
+                err_str = (
+                    f"+/-{float(inject_lmag_err):.3f}"
+                    if np.isfinite(inject_lmag_err)
+                    else "+/-n/a"
+                )
+                cal_str = ""
+                if _snr_gate_factor != 1.0:
+                    cal_str = (
+                        f"  S/N gate calibrated x{_snr_gate_factor:.3f}"
+                        f" (raw m50={float(inject_lmag_raw):.3f})"
+                    )
+                logger.log(
+                    STATUS,
+                    "Limiting magnitude: inst=%.3f %s%s  ZP=%s  "
+                    "method=%s  completeness=%.0f%%  trials=%d%s  [%.1fs]",
+                    float(inject_lmag), err_str, app_str, zp_log,
+                    str(recovery_method), 100.0 * completeness_target,
+                    n_trials_total, cal_str, elapsed,
+                )
             else:
-                logger.info(f"Limiting magnitude search failed [{elapsed:.1f}s]")
+                logger.info(
+                    "Limiting magnitude search failed  [%.1fs]", elapsed
+                )
+
+            # ----------------------------------------------------------
+            # Empirical uncertainty calibration from the injection trials.
+            # z = (F_meas - F_true) / sigma_F should have std ~ 1; the
+            # MAD-based std is the calibration factor main.py applies to
+            # the reported measurement errors.
+            # ----------------------------------------------------------
+            self.last_uncal = None
+            if _uncal_collect and len(_uncal_rows) > 0:
+                try:
+                    from utils.uncertainty_calibration import (
+                        calibrate_uncertainties,
+                    )
+
+                    _uncal_arr = np.asarray(_uncal_rows, dtype=float)
+                    _uncal_res = calibrate_uncertainties(
+                        _uncal_arr[:, 0],
+                        _uncal_arr[:, 1],
+                        _uncal_arr[:, 2],
+                        min_sources=int(
+                            lim_cfg.get("uncal_min_sources", 30)
+                        ),
+                    )
+                    self.last_uncal = {
+                        "result": _uncal_res,
+                        "method": _uncal_method,
+                    }
+                    logger.info(
+                        "Uncertainty calibration (%s, %d trials): "
+                        "z-std=%.3f factor=%.3f bias=%.2f%% "
+                        "(coverage 1sig=%.0f%% 2sig=%.0f%%)",
+                        _uncal_method,
+                        _uncal_res.n_sources,
+                        _uncal_res.z_mad_std,
+                        _uncal_res.calibration_factor,
+                        100.0 * _uncal_res.bias_frac,
+                        100.0 * _uncal_res.fraction_within_1sigma,
+                        100.0 * _uncal_res.fraction_within_2sigma,
+                    )
+                except Exception as _uncal_exc:
+                    logger.debug(
+                        "Uncertainty calibration skipped: %s", _uncal_exc
+                    )
 
             # The limiting magnitude is already exposure-time-normalized via flux_for_mag
-            return float(inject_lmag)
+            result_mag = float(inject_lmag)
+            if _return_details:
+                return {
+                    "inject_lmag": result_mag,
+                    "inject_lmag_err": float(inject_lmag_err) if np.isfinite(inject_lmag_err) else np.nan,
+                    "bracket_steps": bracket_steps,
+                    "bisect_steps": bisect_steps,
+                    "completeness_target": completeness_target,
+                    "detection_cutoff": detection_cutoff,
+                    "zeropoint": zeropoint,
+                    "recovery_method": recovery_method,
+                    "snr_limit": effective_snr_limit,
+                    "snr_gate_factor": float(_snr_gate_factor),
+                    "inject_lmag_raw": (
+                        float(inject_lmag_raw)
+                        if np.isfinite(inject_lmag_raw)
+                        else np.nan
+                    ),
+                    "image_zeropoint": image_zeropoint,
+                    # Objects needed for injection cutout inset panels
+                    "epsf_model": epsf_model,
+                    "cutout": cutout,
+                    "position": position,
+                    "background_rms": background_rms,
+                    "flux_for_mag": flux_for_mag,
+                    "injection_df": injection_df,
+                    "F_ref": F_ref,
+                    "counts_ref": counts_ref,
+                    "exposure_time": exposure_time,
+                    "cutout_cx": cutout_cx,
+                    "cutout_cy": cutout_cy,
+                    "avoid_positions": _avoid_positions_cutout(),
+                    # Empirical uncertainty calibration (or None when skipped).
+                    "uncal": (
+                        self.last_uncal["result"].to_dict()
+                        if self.last_uncal is not None
+                        else None
+                    ),
+                }
+            return result_mag
 
         except Exception as exc:
             exc_type, _, exc_tb = sys.exc_info()
@@ -1550,6 +3524,19 @@ class Limits:
                 f"getInjectedLimit failed: {exc} "
                 f"[{exc_type.__name__}, {fname}:{exc_tb.tb_lineno}]"
             )
+            if _return_details:
+                return {
+                    "inject_lmag": np.nan,
+                    "inject_lmag_err": np.nan,
+                    "bracket_steps": [],
+                    "bisect_steps": [],
+                    "completeness_target": locals().get('completeness_target', 0.5),
+                    "detection_cutoff": detection_cutoff,
+                    "zeropoint": zeropoint,
+                    "recovery_method": None,
+                    "snr_limit": None,
+                    "image_zeropoint": image_zeropoint,
+                }
             return np.nan
 
     def _save_emcee_recovery_diagnostic(
@@ -1561,6 +3548,7 @@ class Limits:
         position,
         m_inj: float,
         flux_for_mag,
+        avoid_positions=None,
     ) -> None:
         """
         Save a simple emcee diagnostic plot (trace + marginal histograms)
@@ -1571,23 +3559,70 @@ class Limits:
         lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
         phot_cfg = self.input_yaml.get("photometry") or {}
 
-        # Inject off-target (representative; avoid injecting on the transient).
+        # Inject off-target: no transient position is ever a trial site.
         H, W = cutout.shape
-        # Target is always at the centre of the cutout by construction.
+        # Target is at the cutout centre by construction.
         x0c = (W - 1) / 2.0
         y0c = (H - 1) / 2.0
         fwhm_px = float(self.input_yaml.get("fwhm", 3.0))
         r_min = float(lim_cfg.get("inject_min_radius_fwhm", 2.0)) * fwhm_px
         r_base = float(lim_cfg.get("inject_source_location", 3.0)) * fwhm_px
         r_inj = float(max(r_min, r_base))
-        pts = points_in_circum(r_inj, center=(x0c, y0c), n=8)
-        x0, y0 = float(pts[0][0]), float(pts[0][1])
-        gridx, gridy = np.meshgrid(np.arange(W), np.arange(H))
-        F = float(flux_for_mag(float(m_inj)))
-        img = np.asarray(cutout, dtype=float) + np.asarray(
-            epsf_model.evaluate(x=gridx, y=gridy, flux=F, x_0=x0, y_0=y0),
-            dtype=float,
+        pts = np.asarray(
+            points_in_circum(r_inj, center=(x0c, y0c), n=16), dtype=float
         )
+        try:
+            _avoid = np.asarray(avoid_positions, dtype=float).reshape(-1, 2)
+            _avoid = _avoid[np.isfinite(_avoid).all(axis=1)]
+        except (TypeError, ValueError):
+            _avoid = np.empty((0, 2), dtype=float)
+        _ap_r = float(phot_cfg.get("aperture_radius", fwhm_px))
+        _min_sep = 2.0 * _ap_r + fwhm_px
+        _in_bounds = (
+            (pts[:, 0] >= _ap_r)
+            & (pts[:, 0] <= W - 1 - _ap_r)
+            & (pts[:, 1] >= _ap_r)
+            & (pts[:, 1] <= H - 1 - _ap_r)
+        )
+        _d_primary = np.hypot(pts[:, 0] - x0c, pts[:, 1] - y0c)
+        _d_min = _d_primary.copy()
+        if _avoid.size:
+            _d_min = np.minimum(
+                _d_min,
+                np.min(
+                    np.hypot(
+                        pts[:, 0, None] - _avoid[None, :, 0],
+                        pts[:, 1, None] - _avoid[None, :, 1],
+                    ),
+                    axis=1,
+                ),
+            )
+        _allowed = _in_bounds & (_d_min >= _min_sep)
+        if np.any(_allowed):
+            _pick = int(np.argmax(np.where(_allowed, _d_min, -np.inf)))
+        elif np.any(_in_bounds):
+            _pick = int(np.argmax(np.where(_in_bounds, _d_min, -np.inf)))
+        else:
+            _pick = int(np.argmax(_d_min))
+        x0, y0 = float(pts[_pick, 0]), float(pts[_pick, 1])
+        F = float(flux_for_mag(float(m_inj)))
+        raw_os = getattr(epsf_model, "oversampling", 1)
+        if isinstance(raw_os, (list, tuple, np.ndarray)):
+            os_inj = int(raw_os[0])
+        elif np.isscalar(raw_os) and raw_os > 1:
+            os_inj = int(raw_os)
+        else:
+            os_inj = 1
+        psf_add = _render_epsf_on_cutout(epsf_model, H, W, x0, y0, F, os_inj)
+        # Preserve no-data regions: do not inject into NaNs and keep them NaN.
+        invalid = ~np.isfinite(cutout)
+        psf_add = np.asarray(psf_add, dtype=float)
+        if np.any(invalid):
+            psf_add[invalid] = 0.0
+        img = np.asarray(cutout, dtype=float) + psf_add
+        if np.any(invalid):
+            img = np.asarray(img, dtype=float)
+            img[invalid] = np.nan
 
         # Small stamp for speed.
         half = int(np.ceil(max(6.0, 3.0 * fwhm_px)))
@@ -1626,7 +3661,7 @@ class Limits:
             batch_steps=int(phot_cfg.get("emcee_batch_steps", 100)),
             jitter_scale=float(phot_cfg.get("emcee_jitter_scale", 0.01)),
             use_nddata_uncertainty=True,
-            gain=float(self.input_yaml.get("gain", 1.0)),
+            gain=float(resolve_gain_e_per_adu(None, self.input_yaml)),
             readnoise=float(self.input_yaml.get("read_noise", 0.0)),
             background_rms=rms_stamp,
         )
@@ -1639,6 +3674,7 @@ class Limits:
         # Assume parameters are (flux, x_0, y_0) in that order for the ePSF model.
         labels = ["flux", "x_0", "y_0"][: chain.shape[1]]
 
+        apply_autophot_mplstyle()
         fig, axes = plt.subplots(2, len(labels), figsize=(3.2 * len(labels), 4.6), constrained_layout=True)
         if len(labels) == 1:
             axes = np.array([[axes[0]], [axes[1]]])
@@ -1648,22 +3684,28 @@ class Limits:
             ax_h = axes[1, j]
             ax_t.plot(chain[:, j], lw=0.5, color="0.2")
             ax_t.set_title(lab)
-            ax_t.set_xlabel("sample")
-            ax_t.set_ylabel("value")
+            ax_t.set_xlabel("MCMC Sample Index")
+            ax_t.set_ylabel("Parameter Value")
 
             v = chain[:, j]
             v = v[np.isfinite(v)]
             if v.size > 0:
-                ax_h.hist(v, bins=40, histtype="step", color="0.2")
+                try:
+                    be = np.histogram_bin_edges(v, bins="fd")
+                except Exception:
+                    be = 40
+                ax_h.hist(v, bins=be, histtype="step", color="0.2")
             ax_h.set_xlabel(lab)
-            ax_h.set_ylabel("N")
+            ax_h.set_ylabel("Count")
 
         fpath = self.input_yaml.get("fpath", "frame")
         base = os.path.splitext(os.path.basename(str(fpath)))[0]
         outdir = os.path.dirname(str(fpath)) if os.path.dirname(str(fpath)) else "."
-        save_png = os.path.join(outdir, f"EMCEE_InjectionDiag_{base}.png")
+        save_png = os.path.join(
+            outdir, f"Injection_EMCEE_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+        )
         fig.suptitle(f"EMCEE recovery diagnostic (m_inj={float(m_inj):.3f})", fontsize=10)
-        fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor="white")
+        fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
 
     def _solve_m50_logistic_emcee(
@@ -1694,7 +3736,7 @@ class Limits:
         outcomes_m = []
         outcomes_y = []
         for m in mags:
-            _, _, _, flags = run_trials_at_mag(float(m), redo=int(redo), pool=pool, return_flags=True)
+            _, _, _, _, flags = run_trials_at_mag(float(m), redo=int(redo), pool=pool, return_flags=True)
             outcomes_m.extend([float(m)] * int(len(flags)))
             outcomes_y.extend([1.0 if bool(v) else 0.0 for v in np.asarray(flags).ravel().tolist()])
 
@@ -1705,6 +3747,29 @@ class Limits:
         y = y[ok]
         if x.size < 30:
             raise RuntimeError(f"Too few trials for logistic_emcee fit (N={x.size}).")
+
+        p_t = float(np.clip(completeness_target, 1e-6, 1.0 - 1e-6))
+        n_det = float(np.sum(y))
+        if n_det == 0.0 or n_det == float(x.size):
+            # A one-sided grid contains no information about the transition;
+            # the posterior would be set by the prior bounds, not the data.
+            raise RuntimeError(
+                "Completeness grid is one-sided (all detections or all "
+                "misses); the transition is not sampled."
+            )
+        # The target completeness must be bracketed by the empirical
+        # recovery fractions at the grid ends; otherwise the fit can return
+        # a prior-dominated m50 that looks like a measurement.
+        emp_ends = []
+        for m in (float(np.min(x)), float(np.max(x))):
+            mm = x == m
+            emp_ends.append(float(np.mean(y[mm])))
+        if not (emp_ends[1] <= p_t <= emp_ends[0]):
+            raise RuntimeError(
+                "Completeness target %.2f not bracketed by grid ends "
+                "(recovery %.2f -> %.2f); refusing prior-dominated fit."
+                % (p_t, emp_ends[0], emp_ends[1])
+            )
 
         def log_prior(theta):
             m50, log_s = theta
@@ -1742,11 +3807,12 @@ class Limits:
         burn_frac = float(lim_cfg.get("logistic_emcee_burnin_frac", 0.3))
         burn_frac = max(0.1, min(burn_frac, 0.7))
 
-        # init walkers around (m_guess, log(span/4))
+        # init walkers around (m_guess, log(span/4)); use the instance RNG so
+        # rng_seed reproducibility applies to the logistic fit too.
         ndim = 2
         p0 = np.zeros((nwalkers, ndim), dtype=float)
-        p0[:, 0] = float(m_guess) + 0.05 * np.random.randn(nwalkers)
-        p0[:, 1] = np.log(max(0.1, span / 4.0)) + 0.25 * np.random.randn(nwalkers)
+        p0[:, 0] = float(m_guess) + 0.05 * self._rng.standard_normal(nwalkers)
+        p0[:, 1] = np.log(max(0.1, span / 4.0)) + 0.25 * self._rng.standard_normal(nwalkers)
 
         sampler = emcee.EnsembleSampler(nwalkers, ndim, log_prob)
         sampler.run_mcmc(p0, nsteps, progress=False)
@@ -1756,9 +3822,70 @@ class Limits:
         if flat.shape[0] < 50:
             raise RuntimeError("Too few posterior samples after burn-in.")
 
+        # Enforce convergence rather than trusting a chain that happened to
+        # finish: R-hat, ESS, and acceptance fraction are checked and a
+        # non-converged fit falls back to the bisection result upstream.
+        try:
+            from utils.mcmc_diagnostics import assess_convergence
+
+            _conv = assess_convergence(
+                # emcee returns (steps, walkers, params); the diagnostics
+                # want (walkers, steps, params).
+                np.transpose(
+                    sampler.get_chain(discard=discard), (1, 0, 2)
+                ),
+                sampler.acceptance_fraction,
+            )
+            if not _conv.converged:
+                raise RuntimeError(
+                    "logistic_emcee chain failed convergence checks "
+                    "(flags=0x%x, rhat=%s, ess=%s, acc=%.3f)."
+                    % (
+                        int(_conv.flags),
+                        (
+                            "%.3f" % _conv.rhat
+                            if np.isfinite(_conv.rhat)
+                            else "nan"
+                        ),
+                        (
+                            "%.0f" % _conv.n_eff
+                            if np.isfinite(_conv.n_eff)
+                            else "nan"
+                        ),
+                        float(_conv.acceptance_fraction),
+                    )
+                )
+        except ImportError:
+            logger.debug(
+                "utils.mcmc_diagnostics unavailable; skipping convergence check."
+            )
+
         m50_samp = flat[:, 0]
-        m50 = float(np.nanmedian(m50_samp))
-        m50_err = float(0.5 * (np.nanpercentile(m50_samp, 84) - np.nanpercentile(m50_samp, 16)))
+        s_samp = np.exp(flat[:, 1])
+        # Transform each posterior sample to the magnitude at which completeness
+        # equals completeness_target (m = m50 + s*ln((1-p)/p); reduces to m50
+        # for p=0.5) so non-50% targets get the correct posterior.
+        m_targ_samp = m50_samp + s_samp * np.log((1.0 - p_t) / p_t)
+        m50 = float(np.nanmedian(m_targ_samp))
+        m50_err = float(
+            0.5
+            * (np.nanpercentile(m_targ_samp, 84) - np.nanpercentile(m_targ_samp, 16))
+        )
+
+        # Reject posteriors pinned to the prior edge or landing far outside
+        # the sampled grid - both mean the likelihood did not locate m50.
+        _x_lo, _x_hi = float(np.min(x)), float(np.max(x))
+        _edge = np.abs(m50_samp - float(m_guess)) > 4.9
+        if (
+            not (_x_lo - 1.0 <= m50 <= _x_hi + 1.0)
+            or float(np.mean(_edge)) > 0.5
+        ):
+            raise RuntimeError(
+                "logistic_emcee result (%.3f) lies outside the sampled grid "
+                "[%.2f, %.2f] or is pinned at the prior bound; the data did "
+                "not constrain the transition."
+                % (m50, _x_lo, _x_hi)
+            )
 
         # Always write a diagnostic plot for the logistic completeness fit.
         try:
@@ -1772,34 +3899,55 @@ class Limits:
             if not outdir:
                 outdir = "."
             os.makedirs(outdir, exist_ok=True)
-            save_png = os.path.join(outdir, f"Completeness_LogisticEMCEE_{base}.png")
+            save_png = os.path.join(
+                outdir, f"Completeness_EMCEE_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+            )
+
+            from plotting_utils import apply_autophot_mplstyle
+
+            apply_autophot_mplstyle()
 
             # empirical completeness per mag point
             emp = []
+            emp_err = []
             for m in mags:
-                emp.append(
-                    float(np.mean(y[x == float(m)]) if np.any(x == float(m)) else np.nan)
-                )
+                mask = x == float(m)
+                n = int(np.sum(mask))
+                if n > 0:
+                    p = float(np.mean(y[mask]))
+                    emp.append(p)
+                    emp_err.append(np.sqrt(p * (1.0 - p) / n))
+                else:
+                    emp.append(np.nan)
+                    emp_err.append(np.nan)
             emp = np.asarray(emp, float)
+            emp_err = np.asarray(emp_err, float)
 
+            apply_autophot_mplstyle()
             fig, ax = plt.subplots(figsize=set_size(340, 1))
-            ax.plot(mags, emp, "o", ms=4, color="0.2", label="empirical")
+            ax.errorbar(
+                mags, emp, yerr=emp_err,
+                fmt="o", ms=4, color=PLOT_COLORS.get('epsf_recovery', '#7A86B5'), ecolor="0.6",
+                capsize=4 / 4, elinewidth=0.5, label="empirical",
+            )
 
             # median model curve
             s_med = float(np.exp(np.nanmedian(flat[:, 1])))
             mm = np.linspace(np.nanmin(mags), np.nanmax(mags), 200)
             p_med = 1.0 / (1.0 + np.exp(np.clip((mm - m50) / s_med, -60, 60)))
-            ax.plot(mm, p_med, "-", lw=0.5, color="#1f77b4", label="logistic (median)")
+            ax.plot(mm, p_med, "-", lw=0.5, color=PLOT_COLORS.get('fwhm_rejected', '#C97B74'), label="logistic (median)")
 
             ax.axhline(float(completeness_target), color="0.6", lw=0.5, ls="--")
             ax.axvline(float(m50), color="k", lw=0.5, ls="--", label=f"m50={m50:.3f}")
-            ax.set_xlabel("Injected ePSF instrumental magnitude")
+            ax.set_xlabel("Injected ePSF Instrumental Magnitude [mag]")
             ax.set_ylabel("Recovery fraction")
 
             ax.invert_xaxis()
-            ax.legend(loc="upper left", fontsize=7, frameon=False)
-            fig.tight_layout()
-            fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor="white")
+            # x is inverted (bright on the left): the completeness curve
+            # occupies the upper-left plateau, so put the legend lower-left.
+            ax.legend(loc="lower left", fontsize=8, frameon=False)
+            safe_tight_layout(fig)
+            fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
         except Exception:
             pass
@@ -1810,6 +3958,83 @@ class Limits:
     # S/N vs magnitude diagnostic
     # -----------------------------------------------------------------------
 
+    def _bootstrap_m50_uncertainty(
+        self,
+        flag_by_mag: dict,
+        completeness_target: float,
+        group: int = 1,
+    ) -> float:
+        """
+        Site-resample bootstrap for the limiting-magnitude uncertainty.
+
+        For each evaluated magnitude we hold the *set* of per-site detection
+        flags fixed and resample sites with replacement, then refit the
+        logistic completeness curve and record the magnitude at
+        ``completeness_target``.  The scatter of the resulting magnitudes is
+        the Monte-Carlo error due to *which sites were drawn* -- the dominant
+        uncertainty that the two-endpoint interpolation error misses.
+
+        ``group`` is the number of consecutive flag entries belonging to one
+        physical site (the jitter repetitions): those share the local
+        environment and must be resampled together.  Falls back to
+        trial-level resampling when the flag count is not a multiple of
+        ``group``.
+
+        Runs entirely on cached flags; no extra photometry trials are needed.
+
+        Returns NaN when there are too few converged resamples.
+        """
+        lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
+        n_boot = int(lim_cfg.get("m50_bootstrap_n", 200))
+        if n_boot <= 0:
+            return np.nan
+
+        mags = np.asarray(sorted(flag_by_mag), dtype=float)
+        flag_sets = [np.asarray(flag_by_mag[m], dtype=bool) for m in mags]
+        n_per = np.asarray([len(f) for f in flag_sets], dtype=int)
+        n_tot = int(n_per.sum())
+        n_det = int(sum(int(f.sum()) for f in flag_sets))
+        if mags.size < 2 or n_tot == 0 or n_det == 0 or n_det == n_tot:
+            return np.nan
+
+        # The same physical sites (in the same order) are injected at every
+        # magnitude, so a hard site is hard at every magnitude.  Resampling
+        # each magnitude independently would discard that correlation and
+        # underestimate the uncertainty -- draw one site-index set shared by
+        # all magnitudes.  Requires identical flag order across mags.
+        if not np.all(n_per == n_per[0]):
+            logger = logging.getLogger(__name__)
+            logger.debug(
+                "m50 bootstrap skipped: flag counts differ across magnitudes"
+            )
+            return np.nan
+        n_sites = int(n_per[0])
+
+        p_t = float(np.clip(completeness_target, 1e-6, 1.0 - 1e-6))
+        rng = self._rng
+        group = int(group) if group and int(group) > 1 else 1
+        if n_sites % group != 0:
+            group = 1
+        n_groups = n_sites // group
+        m_targets = []
+        for _ in range(n_boot):
+            g_idx = rng.integers(0, n_groups, n_groups)
+            # Expand group indices to consecutive per-trial indices so all
+            # repetitions of a resampled site move together.
+            site_idx = (
+                np.repeat(g_idx * group, group)
+                + np.tile(np.arange(group), n_groups)
+            )
+            y = np.concatenate([f[site_idx] for f in flag_sets])
+            x = np.repeat(mags, n_sites)
+            m50_b, s_b = _logistic_completeness_mle(x, y)
+            if np.isfinite(m50_b) and np.isfinite(s_b) and s_b > 0:
+                m_targets.append(_logistic_m_at_target(m50_b, s_b, p_t))
+
+        if len(m_targets) < max(20, n_boot // 4):
+            return np.nan
+        return float(np.nanstd(np.asarray(m_targets)))
+
     def analyze_snr_vs_magnitude(
         self,
         sources: pd.DataFrame,
@@ -1819,11 +4044,10 @@ class Limits:
         plot: bool = True,
     ) -> dict:
         """
-        Analyze the relationship between S/N and apparent magnitude for sources.
+        Group catalog sources by S/N and summarize their apparent magnitudes.
 
-        Groups sources by S/N ranges and calculates statistics of their apparent magnitudes.
-        This helps validate completeness plot calculations by showing what actual sources
-        in the data have at different S/N levels.
+        Cross-check for the completeness plot: shows what real sources look
+        like at each S/N level.
 
         Parameters
         ----------
@@ -1847,22 +4071,19 @@ class Limits:
         
         if snr_bins is None:
             snr_bins = [3, 5, 10, 20, 50, 100]
-        
-        # Ensure SNR column exists
+
         if "SNR" not in sources.columns:
             logger.error("Source catalog missing SNR column")
             return {}
         
-        # Calculate apparent magnitudes using same scale as limiting magnitude
-        # Pipeline convention: inst_mag = -2.5 * log10(ADU / exposure_time)
-        exposure_time = float(self.input_yaml.get("exposure_time", 1.0))
-        if exposure_time <= 0:
-            exposure_time = 1.0
-
         if "flux_AP" in sources.columns:
-            # flux_AP is already in ADU/s from aperture.py, so mag() can be used directly
+            # flux_AP is e-/s from Aperture.measure; mag() is instrumental in that system
             from functions import mag
-            sources["apparent_mag"] = sources["flux_AP"].apply(mag) + zeropoint
+            sources["apparent_mag"] = (
+                mag(sources["flux_AP"].values)
+                + zeropoint
+                + _ap_diff_resid(self.input_yaml)
+            )
             logger.info("Using pipeline convention: mag(flux_AP/s) + zeropoint")
         elif "mag" in sources.columns:
             # Use existing magnitude column (assuming it's apparent)
@@ -1870,11 +4091,9 @@ class Limits:
         else:
             logger.error("Source catalog missing flux_AP or mag column")
             return {}
-        
-        # Filter out invalid magnitudes
+
         sources = sources[np.isfinite(sources["apparent_mag"]) & np.isfinite(sources["SNR"])]
-        
-        # Group by S/N bins
+
         results = {}
         for i in range(len(snr_bins) - 1):
             snr_min = snr_bins[i]
@@ -1893,7 +4112,7 @@ class Limits:
                     "mag_max": float(np.max(bin_sources["apparent_mag"])),
                 }
         
-        logger.info(f"S/N vs magnitude analysis: {len(results)} bins with data")
+        logger.info("S/N vs magnitude analysis: %s bins with data", len(results))
         for bin_name, stats in results.items():
             logger.info(
                 f"  S/N {bin_name}: n={stats['count']}, "
@@ -1929,40 +4148,39 @@ class Limits:
         )
         if not write_dir:
             write_dir = "."
-        
+
+        apply_autophot_mplstyle()
+
         fig, ax = plt.subplots(figsize=set_size(340, 1.5))
         
-        # Scatter plot of all sources
         sc = ax.scatter(
             sources["SNR"],
             sources["apparent_mag"],
             s=get_marker_size('medium'),
             alpha=0.3,
-            color="tab:blue",
+            color=PLOT_COLORS.get('snr_mag_scatter', '#7FB0A8'),
             label="Sources",
         )
         
-        # Add median markers for each S/N bin
         for bin_name, stats in results.items():
             ax.plot(
                 stats["snr_median"],
                 stats["mag_median"],
                 "o",
-                color="red",
+                color=PLOT_COLORS.get('target', '#FF0000'),
                 markersize=8,
                 markeredgecolor="black",
                 markeredgewidth=1.0,
                 label=f"Median ({bin_name})" if bin_name == "3-5" else "",
             )
-            # Add error bar
             ax.errorbar(
                 stats["snr_median"],
                 stats["mag_median"],
                 yerr=stats["mag_std"],
                 fmt="none",
-                color="red",
-                linewidth=0.5,
-                capsize=3,
+                color=PLOT_COLORS.get('target', '#FF0000'),
+                elinewidth=0.5,
+                capsize=8 / 4,
                 alpha=0.7,
             )
         
@@ -1970,15 +4188,17 @@ class Limits:
         ax.set_ylabel("Apparent magnitude [mag]", fontsize=10)
         ax.set_xscale("log")
         ax.invert_yaxis()
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=8, frameon=False)
         ax.grid(True, alpha=0.3, linestyle="--")
         
-        fig.tight_layout()
-        save_loc = os.path.join(write_dir, f"SNR_vs_Magnitude_{base}.png")
-        fig.savefig(save_loc, dpi=150, bbox_inches="tight", facecolor="white")
+        safe_tight_layout(fig)
+        save_loc = os.path.join(
+            write_dir, f"SNR_vs_Mag_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+        )
+        fig.savefig(save_loc, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
         
-        logger.info(f"S/N vs magnitude plot saved to {save_loc}")
+        logger.info("S/N vs magnitude plot saved to %s", save_loc)
 
     # -----------------------------------------------------------------------
     # Diagnostic plot
@@ -1993,7 +4213,7 @@ class Limits:
         bisect_steps,
         inject_lmag,
         completeness_target,
-        DETECTION_BETA_THRESH,
+        detection_cutoff,
         zeropoint,
         recovery_method,
         epsf_model=None,
@@ -2009,26 +4229,38 @@ class Limits:
         orig_position=None,
         target_name=None,
         exposure_time=None,
+        cutout_cx=None,
+        cutout_cy=None,
+        snr_limit=None,
+        snr_gate_factor=None,
+        avoid_positions=None,
+        multi_snr_details=None,
+        fig=None,
+        gs=None,
+        inset_row=1,
+        draw_main_plot=True,
     ) -> None:
         """
         Plot completeness curve with injection examples.
         If sample_mags is None, only shows bracket/bisect trajectories (no bar chart).
+        If multi_snr_details is provided, draws all S/N thresholds' trajectories
+        with distinct colors on the same plot.
+        If fig/gs are provided, uses them instead of creating a new figure.
+        inset_row controls which GridSpec row to use for insets (default=1).
+        draw_main_plot=False skips the main completeness plot (for adding inset rows only).
         """
         logger = logging.getLogger(__name__)
-        
-        # Select appropriate zeropoint based on recovery method
+
+        # The apparent-mag axis uses the zeropoint for the recovery method.
         if image_zeropoint is not None:
             recovery_method_upper = str(recovery_method).strip().upper()
             if recovery_method_upper in ("PSF", "EMCEE"):
                 selected_zeropoint = image_zeropoint.get("PSF", {}).get("zeropoint", zeropoint)
-                logger.info(f"Using PSF zeropoint: {selected_zeropoint}")
             else:  # AP method
                 selected_zeropoint = image_zeropoint.get("AP", {}).get("zeropoint", zeropoint)
-                logger.info(f"Using AP zeropoint: {selected_zeropoint}")
         else:
             selected_zeropoint = zeropoint
-            logger.info("Using provided zeropoint (image_zeropoint not available)")
-        # Skip bar chart processing if sample_mags is None
+        # sample_mags=None -> trajectory only, no bar chart.
         if sample_mags is not None:
             order = np.argsort(sample_mags)
             mags_sorted = sample_mags[order]
@@ -2050,402 +4282,705 @@ class Limits:
             write_dir = "."
         os.makedirs(write_dir, exist_ok=True)
 
-        # Use the project-wide plotting style for consistency.
         try:
-            dir_path = os.path.dirname(os.path.realpath(__file__))
-            plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+            apply_autophot_mplstyle()
         except Exception:
-            # Fall back silently if the style cannot be loaded.
+            # Style is optional; plot still works without it.
             pass
 
         plt.ioff()
+
+        owns_figure = fig is None
+        if owns_figure:
+            apply_autophot_mplstyle()
+            # Main completeness plot on top, injection examples below.
+            fig = plt.figure(figsize=set_size(540, 1.35))
+            gs = GridSpec(2, 4, figure=fig, height_ratios=[1.5, 1], wspace=0.3, hspace=0.45)
+        else:
+            if gs is None:
+                raise ValueError("gs must be provided when fig is provided")
+
+        # Main completeness plot (spans all columns in row 0)
+        if draw_main_plot:
+            ax = fig.add_subplot(gs[0, :])
+
+        # Trajectories are drawn as scatter + arrows, not a polyline: a single
+        # line makes the bisection look like it "jumps" across large intervals.
+
+        if draw_main_plot:
+            if mags_sorted is not None:
+                widths = 0.15
+                n_trials = np.array([max(1, len(g)) for g in groups_sorted], dtype=float)
+                p = np.clip(medians_sorted, 0.0, 1.0)
+                p_percent = p * 100
+                # Binomial standard error (normal approx) for visual guidance.
+                p_err = np.sqrt(np.maximum(p * (1.0 - p) / n_trials, 0.0)) * 100
+
+                ax.bar(
+                    mags_sorted,
+                    p_percent,
+                    width=widths,
+                    color="#B0C4DE",
+                    edgecolor="#4D4D4D",
+                    linewidth=0.5,
+                    zorder=2,
+                )
+                ax.errorbar(
+                    mags_sorted,
+                    p_percent,
+                    yerr=p_err,
+                    fmt="none",
+                    ecolor="#4D4D4D",
+                    elinewidth=0.5,
+                    capsize=get_marker_size('medium') / 4,
+                    zorder=3,
+                )
+
+            # Adopted limit: use the interpolated m50 (inject_lmag) rather than the
+            # last evaluated step (which can be above/below 50%).
+            adopted_mag = float(inject_lmag) if np.isfinite(inject_lmag) else np.nan
+
+            # ---- Bracket/bisection search trajectories & adopted-limit lines ----
+            # Color palette for multi-S/N thresholds (up to 6 distinct)
+            _palette = [
+                ("#2196F3", "#1565C0"),  # blue / dark-blue
+                ("#F44336", "#B71C1C"),  # red / dark-red
+                ("#4CAF50", "#1B5E20"),  # green / dark-green
+                ("#FF9800", "#E65100"),  # orange / dark-orange
+                ("#9C27B0", "#4A148C"),  # purple / dark-purple
+                ("#17A2B8", "#0D6577"),  # muted teal / dark-teal (was neon cyan)
+            ]
+            _markers = ["o", "s", "^", "D", "v", "P"]
+
+            if multi_snr_details is not None and len(multi_snr_details) > 1:
+                # --- Multi-SNR: draw all thresholds with distinct colours ---
+                for idx, detail in enumerate(multi_snr_details):
+                    d_snr = detail.get("snr_limit")
+                    d_bracket = detail.get("bracket_steps", [])
+                    d_bisect = detail.get("bisect_steps", [])
+                    d_lmag = detail.get("inject_lmag", np.nan)
+                    d_ctarget = detail.get("completeness_target", 0.5)
+
+                    c_brk, c_bis = _palette[idx % len(_palette)]
+                    mk = _markers[idx % len(_markers)]
+                    tag = f"S/N$\\geq${d_snr:.0f}" if d_snr is not None else f"#{idx+1}"
+
+                    if d_bracket:
+                        bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in d_bracket])
+                        bc_pct = np.asarray(bc, float) * 100.0
+                        bm = np.asarray(bm, float)
+                        ax.scatter(bm, bc_pct, s=16, color=c_brk, alpha=0.85,
+                                   edgecolors="none", marker=mk,
+                                   label=f"Bracket ({tag})", zorder=4)
+                        for i in range(len(bm) - 1):
+                            ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
+                                        xytext=(bm[i], bc_pct[i]),
+                                        arrowprops=dict(arrowstyle="->", color=c_brk,
+                                                        lw=0.5, alpha=0.6))
+
+                    if d_bisect:
+                        bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in d_bisect])
+                        bc_pct = np.asarray(bc, float) * 100.0
+                        bm = np.asarray(bm, float)
+                        ax.scatter(bm, bc_pct, s=16, color=c_bis, alpha=0.85,
+                                   edgecolors="none", marker=mk,
+                                   label=f"Bisection ({tag})", zorder=5)
+                        for i in range(len(bm) - 1):
+                            ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
+                                        xytext=(bm[i], bc_pct[i]),
+                                        arrowprops=dict(arrowstyle="->", color=c_bis,
+                                                        lw=0.5, alpha=0.6))
+
+                    d_adopted = float(d_lmag) if np.isfinite(d_lmag) else np.nan
+                    if np.isfinite(d_adopted):
+                        ax.axvline(d_adopted, color=c_brk, lw=0.8, ls="--",
+                                   label=f"m50 = {d_adopted:.2f} ({tag})",
+                                   zorder=6, alpha=0.9)
+                        ax.scatter([d_adopted], [float(d_ctarget) * 100.0],
+                                   s=32, marker="D", c=c_brk,
+                                   edgecolors="white", linewidth=0.4, zorder=7)
+            else:
+                # --- Single-SNR: original behaviour ---
+                snr_label = ""
+                if snr_limit is not None:
+                    snr_label = f" (S/N $\\geq$ {snr_limit:.0f})"
+                    if (
+                        snr_gate_factor is not None
+                        and np.isfinite(snr_gate_factor)
+                        and not np.isclose(float(snr_gate_factor), 1.0)
+                    ):
+                        snr_label += f" cal $\\times${float(snr_gate_factor):.2f}"
+
+                if bracket_steps:
+                    bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in bracket_steps])
+                    bc_percent = np.asarray(bc, float) * 100.0
+                    bm = np.asarray(bm, float)
+                    ax.scatter(bm, bc_percent, s=14, color=PLOT_COLORS.get('reference', '#0072B2'), alpha=0.8,
+                               edgecolors="none", label=f"Bracket search{snr_label}", zorder=4)
+                    for i in range(len(bm) - 1):
+                        ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
+                                    xytext=(bm[i], bc_percent[i]),
+                                    arrowprops=dict(arrowstyle="->", color=PLOT_COLORS.get('reference', '#0072B2'),
+                                                    lw=0.5, alpha=0.7))
+
+                if bisect_steps:
+                    bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in bisect_steps])
+                    bc_percent = np.asarray(bc, float) * 100.0
+                    bm = np.asarray(bm, float)
+                    ax.scatter(bm, bc_percent, s=14, color=PLOT_COLORS.get('psf', '#00AA00'), alpha=0.8,
+                               edgecolors="none", label=f"Bisection{snr_label}", zorder=5)
+                    for i in range(len(bm) - 1):
+                        ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
+                                    xytext=(bm[i], bc_percent[i]),
+                                    arrowprops=dict(arrowstyle="->", color=PLOT_COLORS.get('psf', '#00AA00'),
+                                                    lw=0.5, alpha=0.7))
+
+                if np.isfinite(adopted_mag):
+                    ax.axvline(adopted_mag, color="k", lw=0.6, ls="--",
+                               label=f"Adopted limit m50 = {adopted_mag:.2f}{snr_label}",
+                               zorder=6)
+                    try:
+                        ax.scatter([adopted_mag], [float(completeness_target) * 100.0],
+                                   s=28, marker="D", c="k", edgecolors="white",
+                                   linewidth=0.4, zorder=7)
+                    except Exception:
+                        pass
+
+            ax.axhline(50, color="0.7", lw=0.5, ls="--", zorder=0)
+            ax.text(0.02, 50, "50%", transform=ax.get_yaxis_transform(),
+                    va="bottom", ha="left", color="0.5")
+
+            if completeness_target != 0.5:
+                target_percent = completeness_target * 100
+                ax.axhline(target_percent, color="0.7", lw=0.5, ls="-.", zorder=0)
+                ax.text(0.98, target_percent, f"{int(target_percent)}%",
+                        transform=ax.get_yaxis_transform(), va="bottom",
+                        ha="right", color="0.5")
+
+            ax.set_xlabel("Injected Instrumental Magnitude [mag]", fontsize=9)
+            ax.set_ylabel("Recovery fraction [%]", fontsize=9)
+            
+            # Apparent-magnitude secondary axis, if a zeropoint is available.
+            secax = None
+            if selected_zeropoint is not None and np.isfinite(
+                float(selected_zeropoint)
+            ):
+                # A non-finite zeropoint (fit failed on this field) would
+                # poison the transform and crash the draw with
+                # "Axis limits cannot be NaN or Inf".
+                _zp = float(selected_zeropoint)
+                secax = ax.secondary_xaxis(
+                    "top",
+                    functions=(
+                        lambda m, zp=_zp: m + zp,
+                        lambda m, zp=_zp: m - zp,
+                    ),
+                )
+                secax.set_xlabel("Apparent Magnitude [mag]")
+                # The monotonic transform already sets the direction;
+                # secax.invert_xaxis() would double-invert it.
+
+            # Legend entries are reordered by role (bracket / bisection / m50)
+            # so that with ncol=3 column-major filling, each column holds one
+            # role and each row one S/N threshold.
+            _hh, _ll = ax.get_legend_handles_labels()
+            _role = {"Bracket": 0, "Bisection": 1, "m50": 2, "Adopted": 2}
+            _order = sorted(
+                range(len(_ll)),
+                key=lambda i: _role.get(_ll[i].split(" ")[0], 3),
+            )
+            ax.legend(
+                [_hh[i] for i in _order], [_ll[i] for i in _order],
+                loc="lower left",
+                fontsize=8, frameon=False, ncol=3,
+                handlelength=1.5, columnspacing=1.0,
+            )
         
-        # Create figure with main completeness plot on top, injection examples below
-        fig = plt.figure(figsize=set_size(540, 1.5))
-        gs = GridSpec(3, 3, figure=fig, height_ratios=[1.5, 1, 1])
-        
-        # Top row: Main completeness plot (spans all columns)
-        ax = fig.add_subplot(gs[0, :])
-
-        # Bar chart removed - using only bracket and bisect search trajectories
-        if mags_sorted is not None:
-            widths = 0.15
-            n_trials = np.array([max(1, len(g)) for g in groups_sorted], dtype=float)
-            p = np.clip(medians_sorted, 0.0, 1.0)
-            p_percent = p * 100  # Convert to percentage
-            # Binomial standard error (normal approx) for visual guidance.
-            p_err = np.sqrt(np.maximum(p * (1.0 - p) / n_trials, 0.0)) * 100  # Convert to percentage
-
-            ax.bar(
-                mags_sorted,
-                p_percent,
-                width=widths,
-                color="#B0C4DE",
-                edgecolor="#4D4D4D",
-                linewidth=0.5,
-                zorder=2,
-            )
-            ax.errorbar(
-                mags_sorted,
-                p_percent,
-                yerr=p_err,
-                fmt="none",
-                ecolor="#4D4D4D",
-                elinewidth=0.5,
-                capsize=2,
-                zorder=3,
-            )
-
-        # Bracket and bisect search trajectories.
-        if bracket_steps:
-            bm, bc, _ = zip(*bracket_steps)  # Unpack 3 values: (mag, detection_rate, recovered_flux)
-            bc_percent = [c * 100 for c in bc]  # Convert to percentage
-            ax.plot(
-                bm,
-                bc_percent,
-                "-",
-                ms=get_marker_size('medium'),
-                lw=0.5,
-                color="#0000FF",
-            )
-            # Add arrows for jumps > 0.1 mag
-            for i in range(len(bm) - 1):
-                mag_jump = abs(bm[i+1] - bm[i])
-                if mag_jump > 0.1:
-                    ax.annotate('', xy=(bm[i+1], bc_percent[i+1]), xytext=(bm[i], bc_percent[i]),
-                               arrowprops=dict(arrowstyle='->', color='#0000FF', lw=0.5))
-        if bisect_steps:
-            bm, bc, _ = zip(*bisect_steps)  # Unpack 3 values: (mag, detection_rate, recovered_flux)
-            bc_percent = [c * 100 for c in bc]  # Convert to percentage
-            ax.plot(
-                bm,
-                bc_percent,
-                "--",
-                ms=get_marker_size('medium'),
-                lw=0.5,
-                color="#00AA00",
-            )
-            # Add arrows for jumps > 0.1 mag
-            for i in range(len(bm) - 1):
-                mag_jump = abs(bm[i+1] - bm[i])
-                if mag_jump > 0.1:
-                    ax.annotate('', xy=(bm[i+1], bc_percent[i+1]), xytext=(bm[i], bc_percent[i]),
-                               arrowprops=dict(arrowstyle='->', color='#00AA00', lw=0.5))
-
-        # Reference lines.
-        ax.axhline(50, color="0.7", lw=0.5, ls="--", zorder=0)
-        ax.text(
-            0.02,
-            50,
-            "50%",
-            transform=ax.get_yaxis_transform(),
-            va="bottom",
-            ha="left",
-            color="0.5",
-        )
-
-        if completeness_target != 0.5:
-            target_percent = completeness_target * 100
-            ax.axhline(target_percent, color="0.7", lw=0.5, ls="-.", zorder=0)
-            ax.text(
-                0.98,
-                target_percent,
-                f"{int(target_percent)}%",
-                transform=ax.get_yaxis_transform(),
-                va="bottom",
-                ha="right",
-                color="0.5",
-            )
-
-        if np.isfinite(inject_lmag):
-            ax.axvline(
-                inject_lmag,
-                color="k",
-                lw=0.5,
-                ls="--",
-                label="Adopted limit",
-            )
-        
-        # Add axis labels to main completeness plot
-        ax.set_xlabel("Injected brightness [mag]", fontsize=9)
-        ax.set_ylabel("Recovery fraction [%]", fontsize=9)
-        
-
-        # Optional apparent-magnitude secondary axis.
-        if selected_zeropoint is not None:
-            # Capture by value to avoid late-binding lambda bug
-            _zp = float(selected_zeropoint)
-            secax = ax.secondary_xaxis(
-                "top",
-                functions=(
-                    lambda m, zp=_zp: m + zp,
-                    lambda m, zp=_zp: m - zp,
-                ),
-            )
-            secax.set_xlabel("Apparent brightness [mag]")
-            # Do NOT call secax.invert_xaxis() — secondary axis shares
-            # direction with primary; inversion is inherited automatically.
-
-        fig.tight_layout()
-        
-        # Add injection cutout panels below main plot if data available
+        # Injection cutout panels below the main plot, if data are available.
         if epsf_model is not None and cutout is not None and position is not None and \
            np.isfinite(inject_lmag) and flux_for_mag is not None:
             ny_c, nx_c = cutout.shape
-            target_x   = (nx_c - 1) / 2.0
-            target_y   = (ny_c - 1) / 2.0
+            # get_cutout's true center handles partial cutouts; fall back to
+            # the geometric center when it was not recorded.
+            if cutout_cx is not None and cutout_cy is not None:
+                target_x = float(cutout_cx)
+                target_y = float(cutout_cy)
+                logger.info("Using true target center: (%.2f, %.2f)", target_x, target_y)
+            else:
+                target_x   = (nx_c - 1) / 2.0
+                target_y   = (ny_c - 1) / 2.0
+                logger.info("Using geometric center: (%.2f, %.2f)", target_x, target_y)
 
-            # aperture_radius and fwhm for subpanel use
             fwhm            = float(self.input_yaml.get("fwhm", 3.0))
             phot_cfg        = self.input_yaml.get("photometry", {})
             aperture_radius = float(phot_cfg.get("aperture_radius", fwhm))
             lim_cfg         = self.input_yaml.get("limiting_magnitude") or {}
 
-            # Define target magnitudes for subpanel injection
-            # Convert instrumental limiting magnitude to apparent magnitude
-            # selected_zeropoint already computed at top of function
-            if selected_zeropoint is not None and np.isfinite(float(selected_zeropoint)):
-                limiting_apparent_mag = inject_lmag + float(selected_zeropoint)
-            else:
-                limiting_apparent_mag = inject_lmag  # Fallback to instrumental if no zeropoint
+            # ------------------------------------------------------------------
+            # Choose demo injection magnitudes based on *recovery fraction* so the
+            # 3 cutouts remain meaningful even when m50 lies near the search edge.
+            #
+            # Requested: show ~100%, 80%, and 50% recoverable injections.
+            # ------------------------------------------------------------------
+            zp_ok = selected_zeropoint is not None and np.isfinite(float(selected_zeropoint))
+            zp_val = float(selected_zeropoint) if zp_ok else 0.0
+
+            def _mag_at_recovery(p_target: float) -> float:
+                """Return instrumental magnitude at which completeness ~ p_target."""
+                steps = []
+                for s in (bracket_steps or []) + (bisect_steps or []):
+                    try:
+                        m0 = float(s[0])
+                        c0 = float(s[1])
+                        # s[2] is flux, s[3] is flux_err (not used here)
+                    except Exception:
+                        continue
+                    if np.isfinite(m0) and np.isfinite(c0):
+                        steps.append((m0, float(np.clip(c0, 0.0, 1.0))))
+                if len(steps) < 2:
+                    return float(inject_lmag)
+
+                # Sort bright -> faint (increasing mag). Enforce a monotone non-increasing
+                # completeness curve to make interpolation stable under Monte-Carlo noise.
+                steps.sort(key=lambda t: t[0])
+                m_arr = np.asarray([t[0] for t in steps], dtype=float)
+                c_arr = np.asarray([t[1] for t in steps], dtype=float)
+                c_mono = np.maximum.accumulate(c_arr[::-1])[::-1]  # non-increasing vs mag
+
+                # Find first crossing from above to below p_target.
+                for j in range(1, len(m_arr)):
+                    c0, c1 = c_mono[j - 1], c_mono[j]
+                    if (c0 >= p_target) and (c1 <= p_target) and (c0 != c1):
+                        w = float((p_target - c0) / (c1 - c0))
+                        w = float(np.clip(w, 0.0, 1.0))
+                        return float(m_arr[j - 1] + w * (m_arr[j] - m_arr[j - 1]))
+
+                # If we never cross, clamp to range end that is "closest" in probability.
+                # p high -> choose brightest; p low -> choose faintest.
+                if p_target >= float(np.nanmax(c_mono)):
+                    return float(m_arr[0])
+                return float(m_arr[-1])
+
+            m50_inst = float(inject_lmag)
+            m80_inst = float(_mag_at_recovery(0.80))
+            m100_inst = float(_mag_at_recovery(0.99))  # "100%" in practice
+
+            inst_targets = [m50_inst, m80_inst, m100_inst]
+            mag_targets = [m + zp_val for m in inst_targets] if zp_ok else inst_targets
             
-            # Start at limiting magnitude, then brighter magnitudes
-            mag_offsets = [0.0, -0.5, -1.0]  # Limiting mag, 0.2 mag brighter, 0.5 mag brighter
-            mag_targets = [limiting_apparent_mag + offset for offset in mag_offsets]
-            
-            # Calculate background RMS for S/N scaling (robust estimator)
-            from astropy.stats import mad_std
+            # Background RMS for S/N scaling of the demo injections.
             if background_rms is not None:
-                # Use median of provided RMS map (excludes sources)
+                # Median of the provided RMS map (already source-masked).
                 background_rms_scalar = float(np.nanmedian(background_rms))
             else:
-                # Fallback: use MAD which is robust to sources
-                background_rms_scalar = float(mad_std(cutout, ignore_nan=True))
+                # Biweight scale so sources in the cutout do not bias the
+                # estimate and quantized data does not staircase it.
+                background_rms_scalar = biweight_sky_sigma(cutout)
 
-            # Create normalized PSF for subpanel injection (same as used for calibration)
-            # epsf_model is an ImagePSF object, access its data array
-            psf_data = epsf_model.data if hasattr(epsf_model, 'data') else epsf_model
-            cx, cy = psf_data.shape[1] // 2, psf_data.shape[0] // 2
-            oversampling = getattr(epsf_model, "oversampling", 1)
-            if isinstance(oversampling, (list, tuple, np.ndarray)):
-                oversampling = int(oversampling[0])
-            elif np.isscalar(oversampling) and oversampling > 1:
-                oversampling = int(oversampling)
+            raw_os_plot = getattr(epsf_model, "oversampling", 1)
+            if isinstance(raw_os_plot, (list, tuple, np.ndarray)):
+                oversampling_plot = int(raw_os_plot[0])
+            elif np.isscalar(raw_os_plot) and raw_os_plot > 1:
+                oversampling_plot = int(raw_os_plot)
             else:
-                oversampling = 1
-                
-            # Evaluate PSF at center with flux=1.0
-            gridx, gridy = np.meshgrid(np.arange(psf_data.shape[1]), np.arange(psf_data.shape[0]))
-            psf_os = epsf_model.evaluate(x=gridx, y=gridy, flux=1.0, x_0=cx, y_0=cy)
-            
-            # Downsample if needed
-            psf_unit = (
-                self._downsample_psf(psf_os, oversampling)
-                if oversampling > 1
-                else psf_os
-            )
-            
-            # Normalize PSF to sum to 1.0 (flux=1.0 means total counts = 1.0)
-            psf_sum = np.sum(psf_unit)
-            if psf_sum > 0:
-                psf_unit = psf_unit / psf_sum
+                oversampling_plot = 1
 
-            # ── Demo injection site selection ─────────────────────────────────────────
+            # -- Demo injection site selection -----------------------------------------
             #
             # Priority:
-            #   1. Quietest valid site from injection_df (lowest |flux_AP|).
+            #   1. Quietest valid site from injection_df (lowest |SNR|).
             #   2. Random circumference point (never always index 0 = top-right).
             #
             # Valid = within cutout bounds (with fwhm margin) AND at least
             #         (2*aperture_radius + fwhm) from the transient position.
-            # ─────────────────────────────────────────────────────────────────────────
+            # -------------------------------------------------------------------------
             min_sep   = 2.0 * aperture_radius + fwhm
             px_margin = float(np.ceil(fwhm))
             inj_dist  = float(lim_cfg.get("inject_source_location", 3.0)) * fwhm
+            try:
+                _avoid_plot = np.asarray(avoid_positions, dtype=float).reshape(-1, 2)
+                _avoid_plot = _avoid_plot[np.isfinite(_avoid_plot).all(axis=1)]
+            except (TypeError, ValueError):
+                _avoid_plot = np.empty((0, 2), dtype=float)
+
+            def _clear_of_transients(sx, sy):
+                if float(np.hypot(sx - target_x, sy - target_y)) < min_sep:
+                    return False
+                if _avoid_plot.size:
+                    _d = np.hypot(
+                        _avoid_plot[:, 0] - float(sx),
+                        _avoid_plot[:, 1] - float(sy),
+                    )
+                    if float(np.min(_d)) < min_sep:
+                        return False
+                return True
 
             demo_x = demo_y = None
 
             if injection_df is not None and len(injection_df) > 0:
-                flux_col = "flux_AP" if "flux_AP" in injection_df.columns else None
+                snr_col = "SNR" if "SNR" in injection_df.columns else None
                 scored   = []
                 for _, site in injection_df.iterrows():
                     sx, sy = float(site["x_pix"]), float(site["y_pix"])
-                    # Bounds check with margin
                     if not (
                         px_margin <= sx <= nx_c - 1 - px_margin
                         and px_margin <= sy <= ny_c - 1 - px_margin
                     ):
                         continue
-                    # Must be far enough from the transient
-                    if float(np.hypot(sx - target_x, sy - target_y)) < min_sep:
+                    if not _clear_of_transients(sx, sy):
                         continue
-                    score = float(abs(site[flux_col])) if flux_col else 0.0
+                    # Skip sites on invalid/no-data pixels.
+                    xi = int(np.round(sx))
+                    yi = int(np.round(sy))
+                    if xi < 0 or yi < 0 or xi >= nx_c or yi >= ny_c:
+                        continue
+                    v0 = float(cutout[yi, xi])
+                    if not np.isfinite(v0):
+                        continue
+                    # Consistent with main injection-site selection: score by |SNR|.
+                    if snr_col is not None:
+                        try:
+                            score = float(abs(float(site[snr_col])))
+                        except Exception:
+                            score = float("inf")
+                    else:
+                        score = float("inf")
                     scored.append((score, sx, sy))
 
                 if scored:
-                    scored.sort(key=lambda t: t[0])   # ascending → quietest first
+                    scored.sort(key=lambda t: t[0])   # ascending -> quietest first
                     _, demo_x, demo_y = scored[0]
 
             if demo_x is None:
-                # Random circumference fallback – not always top-right (index 0)
-                pts     = points_in_circum(inj_dist, center=[target_x, target_y], n=8)
-                rng_idx = int(self._rng.integers(0, len(pts)))
-                demo_x  = float(np.clip(pts[rng_idx][0], px_margin, nx_c - 1 - px_margin))
-                demo_y  = float(np.clip(pts[rng_idx][1], px_margin, ny_c - 1 - px_margin))
-                logger.warning(
-                    "Subpanel demo site: fallback circumference point [%d] (%.1f, %.1f)",
-                    rng_idx, demo_x, demo_y,
-                )
+                # Try each circumference point; pick first one with full annulus clearance
+                annulus_margin = aperture_radius + fwhm * 2.0  # must fit full annulus
+                pts = points_in_circum(inj_dist, center=[target_x, target_y], n=8)
+                for rng_idx in self._rng.permutation(len(pts)).tolist():
+                    cx_try = float(pts[rng_idx][0])
+                    cy_try = float(pts[rng_idx][1])
+                    if (
+                        annulus_margin <= cx_try <= nx_c - 1 - annulus_margin
+                        and annulus_margin <= cy_try <= ny_c - 1 - annulus_margin
+                        and _clear_of_transients(cx_try, cy_try)
+                    ):
+                        xi = int(np.round(cx_try))
+                        yi = int(np.round(cy_try))
+                        if 0 <= xi < nx_c and 0 <= yi < ny_c:
+                            v0 = float(cutout[yi, xi])
+                            if not np.isfinite(v0):
+                                continue
+                        demo_x = cx_try
+                        demo_y = cy_try
+                        break
+                if demo_x is None:
+                    # Last resort: choose the in-bounds circumference point with
+                    # the largest clearance to every transient.
+                    _best = None
+                    _best_sep = -np.inf
+                    for cx_try, cy_try in np.asarray(pts, dtype=float):
+                        if not (
+                            annulus_margin <= cx_try <= nx_c - 1 - annulus_margin
+                            and annulus_margin <= cy_try <= ny_c - 1 - annulus_margin
+                        ):
+                            continue
+                        _seps = [
+                            float(np.hypot(cx_try - target_x, cy_try - target_y))
+                        ]
+                        if _avoid_plot.size:
+                            _seps.append(
+                                float(
+                                    np.min(
+                                        np.hypot(
+                                            _avoid_plot[:, 0] - cx_try,
+                                            _avoid_plot[:, 1] - cy_try,
+                                        )
+                                    )
+                                )
+                            )
+                        _sep = min(_seps)
+                        if _sep > _best_sep:
+                            _best_sep = _sep
+                            _best = (cx_try, cy_try)
+                    if _best is None:
+                        _best = (target_x, target_y)
+                    demo_x, demo_y = float(_best[0]), float(_best[1])
+                    logger.warning(
+                        "Circumference demo sites constrained; using best-clearance "
+                        "site (%.1f, %.1f), nearest transient %.1f px",
+                        demo_x,
+                        demo_y,
+                        float(_best_sep),
+                    )
+
+            # Initialize per-panel locals before the loop so a failed panel
+            # cannot leak stale values into later panels or the site-map panel.
+            transient_label = "1"
+
+            def _confined(ax_, x_, y_, txt_, fs_, ha_, va_):
+                """Adjust anchor/alignment so a boxed label fits inside the axes."""
+                try:
+                    _fw, _fh = ax_.figure.get_size_inches()
+                    _pos = ax_.get_position()
+                    _xw0, _xw1 = ax_.get_xlim()
+                    _yw0, _yw1 = ax_.get_ylim()
+                    # Approx text extent in data units (0.6 em per char
+                    # plus a little room for the bbox padding).
+                    _w = (len(txt_) * 0.6 * fs_ / 72.0 + 0.10) \
+                        / max(_pos.width * _fw, 1e-6) * abs(_xw1 - _xw0)
+                    _h = (fs_ * 1.5 / 72.0 + 0.08) \
+                        / max(_pos.height * _fh, 1e-6) * abs(_yw1 - _yw0)
+                except Exception:
+                    return x_, y_, ha_, va_
+                _span_x, _span_y = abs(_xw1 - _xw0), abs(_yw1 - _yw0)
+                _xlo, _xhi = min(_xw0, _xw1), max(_xw0, _xw1)
+                _ylo, _yhi = min(_yw0, _yw1), max(_yw0, _yw1)
+                if _w >= _span_x:
+                    x_, ha_ = (_xlo + _xhi) / 2.0, 'center'
+                elif (ha_ == 'left' and x_ + _w > _xhi) or \
+                     (ha_ == 'center' and x_ + _w / 2 > _xhi) or \
+                     (ha_ == 'right' and x_ > _xhi):
+                    x_, ha_ = _xhi, 'right'
+                elif (ha_ == 'right' and x_ - _w < _xlo) or \
+                     (ha_ == 'center' and x_ - _w / 2 < _xlo) or \
+                     (ha_ == 'left' and x_ < _xlo):
+                    x_, ha_ = _xlo, 'left'
+                if _h >= _span_y:
+                    y_, va_ = (_ylo + _yhi) / 2.0, 'center'
+                elif (va_ == 'bottom' and y_ + _h > _yhi) or \
+                     (va_ == 'center' and y_ + _h / 2 > _yhi) or \
+                     (va_ == 'top' and y_ > _yhi):
+                    y_, va_ = _yhi, 'top'
+                elif (va_ == 'top' and y_ - _h < _ylo) or \
+                     (va_ == 'center' and y_ - _h / 2 < _ylo) or \
+                     (va_ == 'bottom' and y_ < _ylo):
+                    y_, va_ = _ylo, 'bottom'
+                return x_, y_, ha_, va_
+
+            # Gridspec columns are resized to the panel aspects once the
+            # first zoom window is known (see inside the loop).
+            _inset_geom_done = False
 
             for i, mag_target in enumerate(mag_targets):
-                ax_inject = fig.add_subplot(gs[1, i])
-                
+                ax_inject = fig.add_subplot(gs[inset_row, i])
+                flux_hat = np.nan
+                snr_meas = None
+                recovered_apparent = np.nan
+
                 try:
-                    # Create a cutout-sized grid
                     ny, nx = cutout.shape
                     y_grid, x_grid = np.mgrid[0:ny, 0:nx]
-                    logger.debug(f"Subpanel: cutout shape=({ny},{nx}), grid shape={y_grid.shape}, {x_grid.shape}")
-                    
-                    # Target is always at cutout centre by construction.
-                    x_center = (nx - 1) / 2.0
-                    y_center = (ny - 1) / 2.0
-                    
-                    # Inject PSF at this magnitude
-                    injected = cutout.copy()
+                    logger.debug("Subpanel: cutout shape=(%s,%s), grid shape=%s, %s", ny, nx, y_grid.shape, x_grid.shape)
 
-                    # Calculate flux needed to achieve target magnitude
-                    # flux_for_mag expects instrumental magnitude, so convert from apparent
+                    if cutout_cx is not None and cutout_cy is not None:
+                        x_center = float(cutout_cx)
+                        y_center = float(cutout_cy)
+                    else:
+                        # Partial cutout: geometric center is the fallback.
+                        x_center = (nx - 1) / 2.0
+                        y_center = (ny - 1) / 2.0
+
+                    injected = cutout.copy()
+                    # Mask only NaN/inf pixels: zero-valued pixels can be valid
+                    # bright sources after sky subtraction.
+                    invalid_mask = ~np.isfinite(injected)
+                    # No-data must stay NaN even after injection.
+                    injected = np.asarray(injected, dtype=float)
+                    injected[invalid_mask] = np.nan
+
+                    # flux_for_mag takes instrumental magnitudes.
                     if selected_zeropoint is not None:
                         inst_mag_target = mag_target - selected_zeropoint
                     else:
-                        inst_mag_target = mag_target  # Fallback if no zeropoint
-                    flux_adu = flux_for_mag(inst_mag_target)  # Total flux to inject
+                        inst_mag_target = mag_target  # no zeropoint available
+                    flux_adu = flux_for_mag(inst_mag_target)
 
-                    # Add PSF flux to cutout at demo location
                     inject_x = demo_x
                     inject_y = demo_y
                     # inject_x/inject_y are in cutout-local coordinates (from injection_df["x_pix"]/["y_pix"])
 
-                    # Use normalized PSF for subpanel injection (same as used for calibration)
-                    # This ensures flux=1.0 means exactly 1 total count
-                    
-                    # Ensure PSF fits within cutout
-                    psf_h, psf_w = psf_unit.shape
-                    cutout_h, cutout_w = cutout.shape
-                    
-                    # Reduced verbosity - removed detailed PSF shape logging
-                    
-                    # Trim PSF if it's larger than cutout
-                    if psf_h > cutout_h or psf_w > cutout_w:
-                        # Center the PSF and trim to fit
-                        h_start = (psf_h - cutout_h) // 2
-                        w_start = (psf_w - cutout_w) // 2
-                        h_end = h_start + cutout_h
-                        w_end = w_start + cutout_w
-                        psf_trim = psf_unit[h_start:h_end, w_start:w_end]
-                    else:
-                        psf_trim = psf_unit.copy()
-                    
-                    # Reduced verbosity - removed injected shape logging
-                    
-                    # Use PSF evaluate function for injection
-                    # Create a grid for the cutout
                     ny, nx = cutout.shape
-                    gridx_cutout, gridy_cutout = np.meshgrid(np.arange(nx), np.arange(ny))
-                    
-                    # Use PSF evaluate function for injection
-                    psf_inject = epsf_model.evaluate(
-                        x=gridx_cutout, 
-                        y=gridy_cutout, 
-                        flux=flux_adu,  # Use raw counts directly
-                        x_0=inject_x, 
-                        y_0=inject_y
+                    psf_inject = _render_epsf_on_cutout(
+                        epsf_model,
+                        ny,
+                        nx,
+                        float(inject_x),
+                        float(inject_y),
+                        float(flux_adu),
+                        oversampling_plot,
                     )
-                    
-                    # No downsampling needed - gridx_cutout is already at pixel resolution
-                    
-                    # Reduced verbosity - removed PSF injection shape logging
-                    
+                    # Do not inject into invalid pixels.
+                    try:
+                        psf_inject = np.asarray(psf_inject, dtype=float)
+                        psf_inject[invalid_mask] = 0.0
+                    except Exception:
+                        pass
                     injected += psf_inject
+                    # Re-impose invalid mask for display (do not let injection fill no-data areas).
+                    injected_disp = np.asarray(injected, dtype=float).copy()
+                    injected_disp[invalid_mask] = np.nan
                     
-                    # Zoom centred on TARGET so it always appears in the centre of the panel.
-                    # The zoom radius is large enough to include the injection site with margin.
+                    # Zoom centred between target and injection site so both
+                    # appear in the panel; radius covers the site with margin.
                     inject_distance = float(np.sqrt(
                         (inject_x - x_center)**2 + (inject_y - y_center)**2
                     ))
-                    # Center zoom between target and injection site
                     mid_x = (x_center + inject_x) / 2.0
                     mid_y = (y_center + inject_y) / 2.0
                     half_dist = inject_distance / 2.0
                     zoom_radius = half_dist + max(3.0 * fwhm, 2.0 * aperture_radius)
 
-                    # Clamp to cutout boundaries
                     x0_zoom = int(max(0, np.floor(mid_x - zoom_radius)))
                     x1_zoom = int(min(nx, np.ceil(mid_x + zoom_radius)))
                     y0_zoom = int(max(0, np.floor(mid_y - zoom_radius)))
                     y1_zoom = int(min(ny, np.ceil(mid_y + zoom_radius)))
 
-                    # Guard: zoom must have non-zero area
                     if x1_zoom <= x0_zoom or y1_zoom <= y0_zoom:
                         logger.warning("Zoom region has zero area; skipping subpanel.")
                         raise ValueError("Zero-area zoom region")
 
-                    # Extract zoomed background_rms region for aperture measurement
                     background_rms_zoom = None
                     if background_rms is not None:
                         background_rms_zoom = background_rms[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
                         background_rms_zoom = np.abs(np.asarray(background_rms_zoom, dtype=float))
 
-                    # Short aliases used by the S/N block
                     x0_z, x1_z, y0_z, y1_z = x0_zoom, x1_zoom, y0_zoom, y1_zoom
                     bkgrms_zoom = background_rms_zoom
 
                     logger.debug(
-                        "Subpanel zoom: cutout=(%dx%d), target=(%.1f,%.1f), "
-                        "injection=(%.1f,%.1f), inject_distance=%.1f px, zoom_radius=%.1f px, "
+                        "Subpanel zoom: cutout=(%dx%d), target=(%.1f,%.1f), injection=(%.1f,%.1f), inject_distance=%.1f px, zoom_radius=%.1f px, "
                         "zoom=[%d:%d, %d:%d]",
                         nx, ny, x_center, y_center,
                         inject_x, inject_y, inject_distance, zoom_radius,
                         x0_zoom, x1_zoom, y0_zoom, y1_zoom,
                     )
 
-                    # Display the full injected cutout, zoom with set_xlim/ylim
+                    # imshow the full cutout; the zoom is applied via set_xlim/ylim.
                     from astropy.visualization import ZScaleInterval
                     zscale = ZScaleInterval()
-                    finite = injected[np.isfinite(injected)]
+                    finite = injected_disp[np.isfinite(injected_disp)]
                     if finite.size:
                         lower, upper = np.percentile(finite, [0.5, 99.5])
-                        vmin, vmax = zscale.get_limits(np.clip(injected, lower, upper))
+                        vmin, vmax = zscale.get_limits(np.clip(injected_disp, lower, upper))
                     else:
-                        vmin, vmax = np.nanmin(injected), np.nanmax(injected)
-                    im = ax_inject.imshow(injected, origin='lower', cmap='viridis', vmin=vmin, vmax=vmax)
+                        vmin, vmax = np.nanmin(injected_disp), np.nanmax(injected_disp)
+                    cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
+                    cmap = cmap.with_extremes(bad="none")
+                    im = ax_inject.imshow(
+                        np.ma.array(injected_disp, mask=~np.isfinite(injected_disp)),
+                        origin="lower",
+                        cmap=cmap,
+                        vmin=vmin,
+                        vmax=vmax,
+                    )
+                    overlay_mask_hatch(ax_inject, ~np.isfinite(injected_disp))
                     ax_inject.set_xlim(x0_zoom, x1_zoom)
                     ax_inject.set_ylim(y0_zoom, y1_zoom)
 
-                    # Mark transient position (center of cutout, where actual target is)
+                    if not _inset_geom_done:
+                        _inset_geom_done = True
+                        try:
+                            # Equal-aspect thumbnails shrink inside cells that
+                            # do not match the data aspect. Give each column a
+                            # width proportional to its panel aspect (the three
+                            # zoom panels share one window; the sites panel
+                            # shows the full cutout) and resize the figure so
+                            # the inset row height matches too.
+                            az = (x1_zoom - x0_zoom) / max(
+                                float(y1_zoom - y0_zoom), 1.0
+                            )
+                            ac = float(nx) / max(float(ny), 1.0)
+                            col_aspects = [az, az, az, ac]
+                            if gs.ncols == len(col_aspects):
+                                gs.set_width_ratios(col_aspects)
+                            spp = gs.get_subplot_params(fig)
+                            ws = float(spp.wspace or 0.0)
+                            hs = float(spp.hspace or 0.0)
+                            hratios = [
+                                float(h)
+                                for h in (
+                                    gs.get_height_ratios()
+                                    or [1.0] * gs.nrows
+                                )
+                            ]
+                            fig_w = float(fig.get_size_inches()[0])
+                            # Margin estimates only; tight_layout refines the
+                            # actual margins at save time.
+                            margin_w, margin_h = 1.15, 1.35
+                            grid_w = max(fig_w - margin_w, 1.0)
+                            row_unit = grid_w / (
+                                sum(col_aspects)
+                                * (1.0 + ws * (gs.ncols - 1) / gs.ncols)
+                            )
+                            grid_h = row_unit * sum(hratios) * (
+                                1.0 + hs * (gs.nrows - 1) / gs.nrows
+                            )
+                            fig_h = float(
+                                np.clip(grid_h + margin_h, 3.0, 24.0)
+                            )
+                            fig.set_size_inches(fig_w, fig_h)
+                        except Exception:
+                            pass
+
+                    # Transient marker at the cutout centre.
                     from matplotlib.patches import Circle
                     transient_marker = Circle((x_center, y_center), radius=aperture_radius,
-                                            edgecolor='red', facecolor='none', linestyle='-', linewidth=0.5)
+                                            edgecolor=PLOT_COLORS.get('target', '#FF0000'), facecolor='none', linestyle='-', linewidth=0.5)
                     ax_inject.add_patch(transient_marker)
-                    # Use target_name with TNS prefix if available, otherwise use '1'
+                    if _avoid_plot.size:
+                        for _ax0, _ay0 in _avoid_plot:
+                            ax_inject.add_patch(
+                                Circle(
+                                    (_ax0, _ay0),
+                                    radius=aperture_radius,
+                                    edgecolor="#17A2B8",
+                                    facecolor="none",
+                                    linestyle=":",
+                                    linewidth=0.5,
+                                )
+                            )
+                    # Label with target_name (TNS-prefixed) or '1' as fallback.
                     if target_name and target_name.strip():
-                        # Get TNS prefix from input_yaml if available
                         name_prefix = self.input_yaml.get("name_prefix", "")
                         objname = self.input_yaml.get("objname", target_name)
-                        # Add prefix if it exists and is not already in the name
+                        # Guard against double-prefixing.
                         if name_prefix and name_prefix.strip() and not target_name.startswith(name_prefix):
                             transient_label = f"{name_prefix}{objname}"
                         else:
                             transient_label = target_name
                     else:
                         transient_label = '1'
-                    ax_inject.text(x_center, y_center + aperture_radius, transient_label,
-                                   color='red', fontsize=8, ha='center', va='bottom')
 
-                    # Mark injected source location with aperture circle
-                    # Circle centre is in cutout-local coordinates (imshow displays full cutout)
+                    # Labels are placed on the outward side of each circle along
+                    # the target->injection axis, so the transient and S/N labels
+                    # can never overlap regardless of the demo-site geometry.
+                    # _confined() then slides each box back inside the axes so
+                    # text is never clipped by the panel boundary.
+                    _lbl_dx = float(inject_x - x_center)
+                    _lbl_dy = float(inject_y - y_center)
+                    _lbl_d = float(np.hypot(_lbl_dx, _lbl_dy))
+                    if _lbl_d < 1e-3:
+                        _lbl_ux, _lbl_uy = 0.0, 1.0
+                    else:
+                        _lbl_ux, _lbl_uy = _lbl_dx / _lbl_d, _lbl_dy / _lbl_d
+                    _lbl_pad = aperture_radius + 1.0
+
+                    _tx, _ty = (x_center - _lbl_ux * _lbl_pad,
+                                y_center - _lbl_uy * _lbl_pad)
+                    _tha = 'right' if _lbl_ux > 0.35 else ('left' if _lbl_ux < -0.35 else 'center')
+                    _tva = 'top' if _lbl_uy > 0.35 else ('bottom' if _lbl_uy < -0.35 else 'center')
+                    _tx, _ty, _tha, _tva = _confined(
+                        ax_inject, _tx, _ty, transient_label, 8, _tha, _tva)
+                    ax_inject.text(
+                        _tx, _ty, transient_label,
+                        color=PLOT_COLORS.get('target', '#FF0000'), fontsize=8,
+                        ha=_tha, va=_tva,
+                        bbox=dict(boxstyle="round,pad=0.15", facecolor="white", alpha=0.8, linewidth=0),
+                        clip_on=True,
+                    )
+
+                    # Injection-site circle in cutout-local coordinates.
                     aperture_circle = Circle((inject_x, inject_y), radius=aperture_radius,
-                                           edgecolor='navy', facecolor='none', linestyle='--', linewidth=0.5)
+                                           edgecolor='white', facecolor='none', linestyle='--', linewidth=0.5)
                     ax_inject.add_patch(aperture_circle)
                     
                     try:
@@ -2456,7 +4991,7 @@ class Limits:
                         inj_y_z = inject_y - y0_zoom
 
                         if recovery_method_upper == "PSF":
-                            # Fast weighted-least-squares PSF S/N — same estimator as _injection_worker.
+                            # Fast weighted-least-squares PSF S/N - same estimator as _injection_worker.
                             phot_cfg_l = self.input_yaml.get("photometry") or {}
                             scale_v    = float(phot_cfg_l.get("psf_fit_shape_vfaint_scale_fwhm", 2.0))
                             half_s     = int(np.ceil(max(3.0, scale_v * fwhm)))
@@ -2466,24 +5001,25 @@ class Limits:
                             y0s = max(0, int(np.floor(inj_y_z)) - half_s)
                             y1s = min(nyiz, int(np.floor(inj_y_z)) + half_s + 2)
                             data_s   = np.asarray(injected_zoom[y0s:y1s, x0s:x1s], float)
-                            # Construct stamp grid in CUTOUT-LOCAL coordinates
-                            x0s_cut = x0s + x0_zoom  # cutout-local stamp left edge
-                            x1s_cut = x1s + x0_zoom
-                            y0s_cut = y0s + y0_zoom
-                            y1s_cut = y1s + y0_zoom
-                            gxs, gys = np.meshgrid(
-                                np.arange(x0s_cut, x1s_cut),
-                                np.arange(y0s_cut, y1s_cut),
-                            )
-                            psf1 = np.asarray(
-                                epsf_model.evaluate(x=gxs, y=gys, flux=1.0,
-                                                    x_0=inject_x, y_0=inject_y),
-                                float,
+                            # Render the unit-flux PSF on the stamp via the same
+                            # flux-conserving path used for injection and for
+                            # counts_ref calibration.  A raw evaluate() on the
+                            # detector grid returns subpixel-density values for
+                            # oversampled models, biasing flux_hat ~osamp^2 too
+                            # high (Mag_out ~3 mag too bright at osamp=4).
+                            psf1 = _render_epsf_on_cutout(
+                                epsf_model,
+                                int(y1s - y0s),
+                                int(x1s - x0s),
+                                float(inj_x_z - x0s),
+                                float(inj_y_z - y0s),
+                                1.0,
+                                oversampling_plot,
                             )
                             if bkgrms_zoom is not None:
                                 var_s = np.maximum(bkgrms_zoom[y0s:y1s, x0s:x1s] ** 2, 1e-30)
                             else:
-                                sig_s = float(np.nanstd(data_s))
+                                sig_s = biweight_sky_sigma(data_s)
                                 var_s = np.full_like(data_s, max(sig_s ** 2, 1e-30))
                             ok_s = np.isfinite(data_s) & np.isfinite(psf1) & (var_s > 0)
                             snr  = np.nan
@@ -2503,9 +5039,9 @@ class Limits:
                                     flux_hat = float(theta_s[0])
                                     flux_err = float(np.sqrt(max(cov_s[0, 0], 0.0)))
                                     if np.isfinite(flux_err) and flux_err > 0:
-                                        snr = flux_hat / flux_err
+                                        snr = np.abs(flux_hat) / flux_err
 
-                        else:  # AP / EMCEE → aperture photometry
+                        else:  # AP / EMCEE -> aperture photometry
                             ap_obj   = Aperture(input_yaml=self.input_yaml, image=injected_zoom)
                             snr_df   = pd.DataFrame({"x_pix": [inj_x_z], "y_pix": [inj_y_z]})
                             snr_meas = ap_obj.measure(
@@ -2516,7 +5052,7 @@ class Limits:
                             if not np.isfinite(snr):
                                 fl  = float(snr_meas["flux_AP"].iloc[0])
                                 ns  = float(snr_meas["noiseSky"].iloc[0])
-                                snr = fl / ns if ns > 0 else 0.0
+                                snr = np.abs(fl) / ns if ns > 0 else 0.0
 
                         if not np.isfinite(snr):
                             raise ValueError("SNR not finite; using fallback")
@@ -2532,63 +5068,271 @@ class Limits:
                         )
                         snr   = sig / noise if noise > 0 else 0.0
 
+                    _sx, _sy = (inject_x + _lbl_ux * _lbl_pad,
+                                inject_y + _lbl_uy * _lbl_pad)
+                    _sha = 'left' if _lbl_ux > 0.35 else ('right' if _lbl_ux < -0.35 else 'center')
+                    _sva = 'bottom' if _lbl_uy > 0.35 else ('top' if _lbl_uy < -0.35 else 'center')
+                    _snr_txt = f"S/N={snr:.1f}"
+                    _sx, _sy, _sha, _sva = _confined(
+                        ax_inject, _sx, _sy, _snr_txt, 8, _sha, _sva)
                     ax_inject.text(
-                        inject_x, inject_y + aperture_radius,
-                        f"S/N={snr:.1f}",
-                        color="navy", fontsize=8, ha="center", va="bottom",
+                        _sx, _sy, _snr_txt,
+                        color='white', fontsize=8,
+                        ha=_sha, va=_sva,
+                        bbox=dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.7, linewidth=0),
+                        clip_on=True,
                     )
-                
-                    # Set title with injected magnitude
-                    ax_inject.set_title(f'Injected mag = {mag_target:.2f}', fontsize=9)
-                    
-                    # Add apparent magnitude text in lower left corner
-                    # mag_target is already the injected apparent magnitude; no recomputation needed
+
+                    # Panel order matches mag_targets: 50%, 80%, ~100% recovery.
+                    try:
+                        _lbl = ["50%", "80%", "100%"][int(i)]
+                    except Exception:
+                        _lbl = ""
+                    ax_inject.set_title(
+                        f"Mag$_{{in}}$ = {mag_target:.2f}" + (f" ({_lbl})" if _lbl else ""),
+                        fontsize=9,
+                    )
+
+                    # Recovered apparent magnitude, lower-left corner.
                     if selected_zeropoint is not None:
-                        apparent_mag_inj = mag_target
-                        ax_inject.text(
-                            0.05, 0.05,
-                            f"In: {apparent_mag_inj:.2f}",
-                            transform=ax_inject.transAxes,
-                            color="white", fontsize=7, ha="left", va="bottom",
-                            bbox=dict(boxstyle="round", facecolor="black", alpha=0.5),
-                        )
+                        # flux_hat/snr_meas were reset at the top of this
+                        # iteration, so no stale values leak across panels.
+                        if recovery_method_upper == "PSF" and np.isfinite(flux_hat):
+                            # flux_hat is the PSF flux parameter; scale by
+                            # counts_ref/exposure_time to get e-/s.
+                            if counts_ref is not None and exposure_time is not None and counts_ref > 0 and exposure_time > 0:
+                                recovered_flux_e_per_s = flux_hat * counts_ref / exposure_time
+                                _r = float(recovered_flux_e_per_s)
+                                recovered_inst = -2.5 * np.log10(_r) if _r > 0 else float("nan")
+                                recovered_apparent = recovered_inst + selected_zeropoint
+                        elif recovery_method_upper in ["AP", "EMCEE"]:
+                            # AP/EMCEE: aperture flux from snr_meas is already e-/s.
+                            try:
+                                recovered_flux = float(snr_meas["flux_AP"].iloc[0])
+                                recovered_inst = -2.5 * np.log10(recovered_flux) if recovered_flux > 0 else float("nan")
+                                recovered_apparent = (
+                                    recovered_inst
+                                    + selected_zeropoint
+                                    + _ap_diff_resid(self.input_yaml)
+                                )
+                            except Exception:
+                                pass
+
+                        if np.isfinite(recovered_apparent):
+                            ax_inject.text(
+                                0.05, 0.05,
+                                f"Mag$_{{out}}$: {recovered_apparent:.2f}",
+                                transform=ax_inject.transAxes,
+                                color="white", fontsize=7, ha="left", va="bottom",
+                                bbox=dict(boxstyle="round", facecolor="black", alpha=0.7),
+                                clip_on=True,
+                            )
                     
-                    # Add colorbar
-                    cbar = plt.colorbar(im, ax=ax_inject, fraction=0.046, pad=0.04)
-                    cbar.ax.tick_params(labelsize=8)
+                    # No per-panel colorbar: at thumbnail size it is unreadable and
+                    # costs ~20% of the image width. The S/N and Mag_out labels carry
+                    # the quantitative information.
                     ax_inject.set_xlabel('X [pixels]', fontsize=8)
                     if i == 0:
                         ax_inject.set_ylabel('Y [pixels]', fontsize=8)
+                        if snr_limit is not None:
+                            # Row label anchored to the leftmost panel so it
+                            # tracks the row regardless of GridSpec ratios or
+                            # tight_layout adjustments.
+                            ax_inject.text(
+                                -0.55, 0.5, f"S/N $\\geq$ {snr_limit:.0f}",
+                                transform=ax_inject.transAxes, rotation=90,
+                                ha='center', va='center',
+                                fontsize=9, fontweight='bold',
+                            )
                     else:
+                        # All thumbnails share the same zoom window; the y-axis
+                        # only needs labelling on the first panel.
                         ax_inject.set_ylabel('')
+                        ax_inject.tick_params(labelleft=False)
                     ax_inject.tick_params(labelsize=8)
                 except Exception as e:
-                    # If injection fails, just show the original cutout
+                    # Show the original cutout when the demo injection fails.
                     import traceback
-                    logger.warning(f"Subpanel injection failed for mag={mag_target:.2f}: {e}")
-                    logger.debug(f"Subpanel injection traceback:\n{traceback.format_exc()}")
+                    logger.warning("Subpanel injection failed for mag=%.2f: %s", mag_target, e)
+                    logger.debug("Subpanel injection traceback:\n%s", traceback.format_exc())
                     ny, nx = cutout.shape
                     from astropy.visualization import simple_norm
                     norm = simple_norm(cutout, 'sqrt', percent=99.5)
-                    ax_inject.imshow(cutout, origin='lower', cmap='viridis', norm=norm)
+                    cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
+                    cmap = cmap.with_extremes(bad="none")
+                    # Mask NaN/inf only; zeros can be real sky-subtracted pixels.
+                    cut_disp = np.asarray(cutout, dtype=float).copy()
+                    ax_inject.imshow(
+                        np.ma.array(cut_disp, mask=~np.isfinite(cut_disp)),
+                        origin="lower",
+                        cmap=cmap,
+                        norm=norm,
+                    )
+                    overlay_mask_hatch(ax_inject, ~np.isfinite(cut_disp))
                     ax_inject.set_xlim(0, nx)
                     ax_inject.set_ylim(0, ny)
                     ax_inject.set_title(f'Injection failed', fontsize=9)
                     ax_inject.set_xlabel('X [pixels]', fontsize=8)
                     if i == 0:
                         ax_inject.set_ylabel('Y [pixels]', fontsize=8)
+                        if snr_limit is not None:
+                            ax_inject.text(
+                                -0.55, 0.5, f"S/N $\\geq$ {snr_limit:.0f}",
+                                transform=ax_inject.transAxes, rotation=90,
+                                ha='center', va='center',
+                                fontsize=9, fontweight='bold',
+                            )
                     else:
                         ax_inject.set_ylabel('')
+                        ax_inject.tick_params(axis='y', labelleft=False)
                     ax_inject.tick_params(labelsize=8)
-        
-        fig.tight_layout()
-        save_loc_png = os.path.join(write_dir, f"Completeness_{base}.png")
-        fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
-        plt.close(fig)
+
+            # Fourth panel: original cutout with all injection sites marked.
+            if cutout is not None and injection_df is not None and len(injection_df) > 0:
+                ax_sites = fig.add_subplot(gs[inset_row, 3])
+                ny, nx = cutout.shape
+
+                from astropy.visualization import simple_norm
+                norm = simple_norm(cutout, 'sqrt', percent=99.5)
+                cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
+                cmap = cmap.with_extremes(bad="none")
+                # Mask NaN/inf only; zeros can be real sky-subtracted pixels.
+                cut_disp = np.asarray(cutout, dtype=float).copy()
+                ax_sites.imshow(
+                    np.ma.array(cut_disp, mask=~np.isfinite(cut_disp)),
+                    origin="lower",
+                    cmap=cmap,
+                    norm=norm,
+                )
+                overlay_mask_hatch(ax_sites, ~np.isfinite(cut_disp))
+                ax_sites.set_xlim(0, nx)
+                ax_sites.set_ylim(0, ny)
+
+                from matplotlib.patches import Circle
+                target_marker = Circle((target_x, target_y), radius=aperture_radius,
+                                      edgecolor=PLOT_COLORS.get('target', '#FF0000'), facecolor='none', linestyle='-', linewidth=0.5)
+                ax_sites.add_patch(target_marker)
+                if _avoid_plot.size:
+                    for _ax0, _ay0 in _avoid_plot:
+                        ax_sites.add_patch(
+                            Circle(
+                                (_ax0, _ay0),
+                                radius=aperture_radius,
+                                edgecolor="#17A2B8",
+                                facecolor="none",
+                                linestyle=":",
+                                linewidth=0.8,
+                            )
+                        )
+                _stx, _sty, _stha, _stva = _confined(
+                    ax_sites, target_x, target_y + aperture_radius,
+                    transient_label, 8, 'center', 'bottom')
+                ax_sites.text(_stx, _sty, transient_label,
+                             color=PLOT_COLORS.get('target', '#FF0000'), fontsize=8,
+                             ha=_stha, va=_stva,
+                             bbox=dict(boxstyle="round,pad=0.15", facecolor="white", alpha=0.8, linewidth=0),
+                             clip_on=True)
+
+                for _, site in injection_df.iterrows():
+                    sx, sy = float(site["x_pix"]), float(site["y_pix"])
+                    if not (np.isfinite(sx) and np.isfinite(sy)):
+                        continue
+                    site_circle = Circle((sx, sy), radius=aperture_radius,
+                                        edgecolor=PLOT_COLORS.get('injection_site', '#00E5FF'), facecolor='none', linestyle='--', linewidth=0.9)
+                    ax_sites.add_patch(site_circle)
+                    ax_sites.plot([sx], [sy], '+', color=PLOT_COLORS.get('injection_site', '#00E5FF'), markersize=5, markeredgewidth=0.9)
+
+                ax_sites.set_title("Injection sites", fontsize=9)
+                ax_sites.set_xlabel('X [pixels]', fontsize=8)
+                ax_sites.set_ylabel('Y [pixels]', fontsize=8)
+                ax_sites.tick_params(labelsize=8)
+
+                # Site markers have no other label; name them inside the
+                # main completeness panel (upper right stays empty on the
+                # descending recovery curve).  The former figure-level
+                # legend above the axes overlapped the top-axis label.
+                if draw_main_plot:
+                    import matplotlib.lines as mlines
+
+                    _site_color = PLOT_COLORS.get(
+                        'injection_site', '#00E5FF'
+                    )
+                    _prev_leg = ax.get_legend()
+                    if _prev_leg is not None:
+                        ax.add_artist(_prev_leg)
+                    ax.legend(
+                        handles=[
+                            mlines.Line2D(
+                                [], [], marker="+", linestyle="None",
+                                color=_site_color, markersize=6,
+                                markeredgewidth=0.9,
+                                label="Injection site",
+                            )
+                        ],
+                        loc="upper right",
+                        ncol=1,
+                        fontsize=8,
+                        frameon=True,
+                        framealpha=0.85,
+                        edgecolor="0.7",
+                    )
+
+            # Dashed lines at the top of the main plot marking the demo
+            # injection magnitudes.
+            if draw_main_plot:
+                from matplotlib.transforms import blended_transform_factory
+                ymin, ymax = ax.get_ylim()
+                y_bottom = ymax - 0.05 * (ymax - ymin)  # 5% from top in data coordinates
+                y_top = ymax
+                if secax is not None:
+                    xvals = list(mag_targets)  # already apparent mags
+                    xtrans = secax.transData
+                else:
+                    # Convert apparent targets back to instrumental for the primary axis.
+                    if selected_zeropoint is not None and np.isfinite(float(selected_zeropoint)):
+                        # The AP inst scale carries the rescaled-aperture
+                        # residual: inst = apparent - zp - resid.  EMCEE is
+                        # on the PSF total-flux scale and needs no residual.
+                        _x_resid = (
+                            _ap_diff_resid(self.input_yaml)
+                            if str(recovery_method).strip().upper() == "AP"
+                            else 0.0
+                        )
+                        xvals = [
+                            float(m) - float(selected_zeropoint) - _x_resid
+                            for m in mag_targets
+                        ]
+                    else:
+                        xvals = list(mag_targets)
+                    xtrans = ax.transData
+                transform = blended_transform_factory(xtrans, ax.transData)
+                for xv in xvals:
+                    if not np.isfinite(xv):
+                        continue
+                    ax.plot(
+                        [xv, xv],
+                        [y_bottom, y_top],
+                        color=PLOT_COLORS.get('target', '#FF0000'),
+                        alpha=0.55,
+                        linewidth=1.2,
+                        linestyle="--",
+                        marker=None,
+                        markevery=None,
+                        zorder=6,
+                        clip_on=False,
+                        transform=transform,
+                    )
+
+        if owns_figure:
+            safe_tight_layout(fig, pad=0.8, h_pad=0.6, w_pad=0.6)
+            save_loc_png = os.path.join(
+                write_dir, f"Completeness_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+            )
+            fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
+            plt.close(fig)
 
         # ---- Plot injection recovery vs magnitude (apparent vs instrumental) ----
         if bracket_steps or bisect_steps or extended_steps:
-            # Check configuration to see if injection recovery plot should be generated
             plot_injection_recovery = (self.input_yaml.get("limiting_magnitude") or {}).get("plot_injection_recovery", False)
             if plot_injection_recovery:
                 self._plot_injection_recovery(
@@ -2622,71 +5366,119 @@ class Limits:
         recovery_method=None,
     ) -> None:
         """
-        Plot injected apparent magnitude vs recovered apparent magnitude.
-        Shows photometry recovery: detected sources follow a 1:1 line,
-        non-detected sources flatten out. Also plots catalog sources for comparison.
+        Plot injected vs recovered apparent magnitude.
+
+        Detected sources follow the 1:1 line; non-detections flatten out.
+        Catalog sources are overplotted for comparison.
         """
         import matplotlib.pyplot as plt
         from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width, get_okabe_color
 
         logger = logging.getLogger(__name__)
 
-        # Use extended_steps if available, otherwise fall back to bracket/bisect steps
+        # Prefer the denser extended grid; bracket/bisect steps are the fallback.
         all_steps = extended_steps if extended_steps else (bracket_steps + bisect_steps)
         if not all_steps:
             logger.warning("No injection steps to plot")
             return
 
-        # Extract magnitudes, detection rates, and recovered fluxes
         inst_mags = np.array([step[0] for step in all_steps])
         det_rates = np.array([step[1] for step in all_steps])
         recovered_fluxes = np.array([step[2] for step in all_steps])
+        # Extract flux errors if available (step[3] when present; tolerate
+        # mixed-arity step tuples so a missing field cannot crash the plot).
+        recovered_flux_errs = np.array(
+            [float(step[3]) if len(step) > 3 else np.nan for step in all_steps],
+            dtype=float,
+        )
 
-        logger.info(f"Debug: inst_mags range: {inst_mags.min():.2f} to {inst_mags.max():.2f}")
-        logger.info(f"Debug: selected_zeropoint: {selected_zeropoint}")
-        logger.info(f"Debug: det_rates range: {det_rates.min():.2f} to {det_rates.max():.2f}")
-
-        # Convert to apparent magnitudes
-        injected_apparent = inst_mags + selected_zeropoint
-        logger.info(f"Debug: injected_apparent range: {injected_apparent.min():.2f} to {injected_apparent.max():.2f}")
+        
+        # Apparent mags need a zeropoint; without one, plot instrumental
+        # magnitudes (zeropoint = 0) rather than crashing.
+        try:
+            zp_eff = float(selected_zeropoint)
+        except (TypeError, ValueError):
+            zp_eff = np.nan
+        if not np.isfinite(zp_eff):
+            zp_eff = 0.0
+            logger.info("No zeropoint available; injection-recovery plot uses instrumental magnitudes.")
+        injected_apparent = inst_mags + zp_eff
+        # TODO: Add zeropoint error propagation when zeropoint error is available
 
         # Convert recovered flux to instrumental magnitude, then to apparent
         # The recovered flux units depend on recovery_method:
-        # - AP method: flux_AP is already ADU/s (divided by exposure_time in Aperture.measure())
+        # - AP method: flux_AP is already e-/s (divided by exposure_time in Aperture.measure()).
         # - PSF/EMCEE methods: flux_hat is the PSF flux parameter (dimensionless scaling factor)
-        #   To convert to actual flux: flux_actual = flux_hat * counts_ref / exposure_time
-        logger.info(f"Debug: recovery_method={recovery_method}, counts_ref={counts_ref}, exposure_time={exposure_time}")
-        logger.info(f"Debug: recovered_fluxes sample: {recovered_fluxes[:3]}")
-
+        #   To convert to physical flux rate: flux_e_per_s = flux_hat * counts_ref / exposure_time
+        
         recovery_method_upper = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
         if recovery_method_upper == "AP":
-            # AP method: flux_AP is already ADU/s, apply mag() directly
-            recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
-        else:
-            # PSF/EMCEE methods: flux_hat is PSF flux parameter (dimensionless)
-            # Convert to actual flux: flux_actual = flux_hat * counts_ref / exposure_time
-            if counts_ref is not None and exposure_time is not None and counts_ref > 0 and exposure_time > 0:
-                recovered_flux_adu_per_s = recovered_fluxes * counts_ref / exposure_time
-                recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_adu_per_s, 1e-30))
+            # flux_AP is already e-/s; non-positive flux -> NaN, matching
+            # functions.mag.
+            recovered_fluxes_safe = np.asarray(recovered_fluxes, float).copy()
+            recovered_fluxes_safe[recovered_fluxes_safe <= 0] = np.nan
+            recovered_inst = -2.5 * np.log10(recovered_fluxes_safe)
+            if recovered_flux_errs is not None:
+                recovered_flux_errs_safe = np.maximum(np.asarray(recovered_flux_errs, float), 1e-30)
+                recovered_inst_err = (2.5 / np.log(10)) * (recovered_flux_errs_safe / recovered_fluxes_safe)
             else:
-                # Fallback: treat as raw ADU divided by exposure_time
-                if exposure_time is not None and exposure_time > 0:
-                    recovered_flux_adu_per_s = recovered_fluxes / exposure_time
-                    recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_adu_per_s, 1e-30))
+                recovered_inst_err = np.full_like(recovered_inst, np.nan)
+        else:
+            # PSF/EMCEE: flux_hat is a dimensionless PSF amplitude;
+            # flux_e_per_s = flux_hat * counts_ref / exposure_time.
+            if counts_ref is not None and exposure_time is not None and counts_ref > 0 and exposure_time > 0:
+                recovered_flux_e_per_s = recovered_fluxes * counts_ref / exposure_time
+                recovered_flux_e_per_s_safe = np.asarray(recovered_flux_e_per_s, float).copy()
+                recovered_flux_e_per_s_safe[recovered_flux_e_per_s_safe <= 0] = np.nan
+                recovered_inst = -2.5 * np.log10(recovered_flux_e_per_s_safe)
+                if recovered_flux_errs is not None:
+                    # delta(F*counts_ref/t) = deltaF * counts_ref/t
+                    recovered_flux_e_per_s_err = recovered_flux_errs * counts_ref / exposure_time
+                    recovered_flux_e_per_s_err_safe = np.maximum(np.asarray(recovered_flux_e_per_s_err, float), 1e-30)
+                    recovered_inst_err = (2.5 / np.log(10)) * (recovered_flux_e_per_s_err_safe / recovered_flux_e_per_s_safe)
                 else:
-                    recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+                    recovered_inst_err = np.full_like(recovered_inst, np.nan)
+            else:
+                # Fallback: treat as raw integrated e- divided by exposure_time.
+                if exposure_time is not None and exposure_time > 0:
+                    recovered_flux_e_per_s = recovered_fluxes / exposure_time
+                    recovered_flux_e_per_s_safe = np.asarray(recovered_flux_e_per_s, float).copy()
+                    recovered_flux_e_per_s_safe[recovered_flux_e_per_s_safe <= 0] = np.nan
+                    recovered_inst = -2.5 * np.log10(recovered_flux_e_per_s_safe)
+                    if recovered_flux_errs is not None:
+                        recovered_flux_e_per_s_err = recovered_flux_errs / exposure_time
+                        recovered_flux_e_per_s_err_safe = np.maximum(np.asarray(recovered_flux_e_per_s_err, float), 1e-30)
+                        recovered_inst_err = (2.5 / np.log(10)) * (recovered_flux_e_per_s_err_safe / recovered_flux_e_per_s_safe)
+                    else:
+                        recovered_inst_err = np.full_like(recovered_inst, np.nan)
+                else:
+                    recovered_fluxes_safe = np.asarray(recovered_fluxes, float).copy()
+                    recovered_fluxes_safe[recovered_fluxes_safe <= 0] = np.nan
+                    recovered_inst = -2.5 * np.log10(recovered_fluxes_safe)
+                    recovered_inst_err = np.full_like(recovered_inst, np.nan)
         
-        logger.info(f"Debug: recovered_inst sample: {recovered_inst[:3]}")
-        recovered_apparent = recovered_inst + selected_zeropoint
+        logger.info("Debug: recovered_inst sample: %s", recovered_inst[:3])
+        # AP recovery measures through the rescaled diff aperture; the
+        # residual puts the recovered inst scale back on the ZP_AP scale.
+        _rec_resid = (
+            _ap_diff_resid(self.input_yaml) if recovery_method_upper == "AP" else 0.0
+        )
+        recovered_apparent = recovered_inst + zp_eff + _rec_resid
+        # Apparent error omits the (unknown) zeropoint error term for now.
+        if recovered_inst_err is not None:
+            recovered_apparent_err = np.sqrt(recovered_inst_err**2)  # TODO: add zeropoint error when available
+        else:
+            recovered_apparent_err = np.full_like(recovered_apparent, np.nan)
 
         # Separate detected vs non-detected (use 50% threshold)
         detected_mask = det_rates >= 0.5
         detected_injected = injected_apparent[detected_mask]
         detected_recovered = recovered_apparent[detected_mask]
+        detected_recovered_err = recovered_apparent_err[detected_mask]
         nondet_injected = injected_apparent[~detected_mask]
         nondet_recovered = recovered_apparent[~detected_mask]
 
-        # Compute errorbars: group by injected magnitude and compute std of recovered magnitudes
+        # Per-magnitude scatter of recovered mags, for the errorbar overlay.
         unique_mags = np.unique(injected_apparent)
         recovered_means = []
         recovered_stds = []
@@ -2698,7 +5490,6 @@ class Limits:
         recovered_means = np.array(recovered_means)
         recovered_stds = np.array(recovered_stds)
 
-        # Get catalog sources for comparison
         catalog = getattr(self, 'catalog', None)
         transient_apparent = None
         zeropoint_apparent = None
@@ -2707,40 +5498,31 @@ class Limits:
             if use_filter and use_filter in catalog.columns and "flux_AP" in catalog.columns:
                 catalog_flux = catalog["flux_AP"].values
                 catalog_apparent = catalog[use_filter].values
-                # Filter out invalid values
                 valid_mask = np.isfinite(catalog_flux) & np.isfinite(catalog_apparent)
                 catalog_flux = catalog_flux[valid_mask]
                 catalog_apparent = catalog_apparent[valid_mask]
 
-                # Try to find transient/target source by position
+                # Locate the transient in the catalog by position.
                 if position is not None and "x_pix" in catalog.columns and "y_pix" in catalog.columns:
                     tx, ty = position
                     catalog_x = catalog["x_pix"].values
                     catalog_y = catalog["y_pix"].values
-                    # Find source closest to target position
                     distances = np.sqrt((catalog_x - tx)**2 + (catalog_y - ty)**2)
                     target_idx = np.argmin(distances)
-                    if distances[target_idx] < 5.0:  # Within 5 pixels
+                    if distances[target_idx] < 5.0:  # 5 px match tolerance
                         transient_apparent = catalog_apparent[target_idx]
 
-                # Get zeropoint calibration sources (sources used for zeropoint fitting)
-                # These are typically the catalog sources that passed quality cuts
+                # Calibration sources = catalog rows that passed the quality cuts.
                 zeropoint_apparent = catalog_apparent.copy()
             else:
-                catalog_inst = None
                 catalog_apparent = None
                 zeropoint_apparent = None
         else:
-            catalog_inst = None
             catalog_apparent = None
             zeropoint_apparent = None
 
-        # Use the project-wide plotting style
         try:
-            dir_path = os.path.dirname(os.path.realpath(__file__))
-            style_path = os.path.join(dir_path, "autophot.mplstyle")
-            if os.path.exists(style_path):
-                plt.style.use(style_path)
+            apply_autophot_mplstyle()
         except Exception:
             pass
 
@@ -2748,7 +5530,6 @@ class Limits:
         fig, ax = plt.subplots(figsize=set_size(340, 1))
         plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
 
-        # Plot zeropoint calibration sources (catalog sources used for zeropoint)
         if zeropoint_apparent is not None and len(zeropoint_apparent) > 0:
             ax.scatter(
                 zeropoint_apparent,
@@ -2762,7 +5543,6 @@ class Limits:
                 zorder=5,
             )
 
-        # Plot transient/target source if available
         if transient_apparent is not None and np.isfinite(transient_apparent):
             ax.scatter(
                 transient_apparent,
@@ -2777,22 +5557,24 @@ class Limits:
                 zorder=25,
             )
 
-        # Plot detected injected sources
         if len(detected_injected) > 0:
-            ax.scatter(
+            ax.errorbar(
                 detected_injected,
                 detected_recovered,
-                s=get_marker_size('medium'),
-                c=get_okabe_color('blue'),
+                yerr=detected_recovered_err,
+                fmt='o',
+                ms=get_marker_size('medium'),
+                color=get_okabe_color('blue'),
+                ecolor='lightgrey',
                 alpha=get_alpha('dark'),
-                marker='o',
-                edgecolors='black',
-                linewidth=0.5,
+                capsize=get_marker_size('medium') / 4,
+                elinewidth=0.5,
+                markeredgecolor='black',
+                markeredgewidth=0.5,
                 label=f"Detected injected [{len(detected_injected)}]",
                 zorder=10,
             )
 
-        # Plot non-detected injected sources
         if len(nondet_injected) > 0:
             ax.scatter(
                 nondet_injected,
@@ -2806,7 +5588,7 @@ class Limits:
                 zorder=8,
             )
 
-        # Plot 1:1 line (expected for perfect recovery)
+        # 1:1 locus = perfect recovery.
         if len(injected_apparent) > 0:
             mag_range = np.linspace(np.min(injected_apparent), np.max(injected_apparent), 100)
             ax.plot(
@@ -2819,24 +5601,22 @@ class Limits:
                 label="Expected (1:1)",
             )
 
-        # Plot errorbars (mean recovered magnitude with std at each injected magnitude)
         if len(unique_mags) > 0:
             ax.errorbar(
                 unique_mags,
                 recovered_means,
-                xerr=None,  # No error on injected magnitude (known value)
-                yerr=recovered_stds,  # Error on recovered magnitude (measured)
+                xerr=None,  # injected magnitude is a known value
+                yerr=recovered_stds,  # measured scatter on the recovered magnitude
                 fmt='none',
                 color=get_okabe_color('blue'),
                 alpha=get_alpha('medium'),
-                lw=0.5,
-                capsize=2,
+                elinewidth=0.5,
+                capsize=get_marker_size('medium') / 4,
                 zorder=7,
             )
 
-        # Mark limiting magnitude as vertical red line
         if np.isfinite(inject_lmag):
-            limit_apparent = inject_lmag + selected_zeropoint
+            limit_apparent = inject_lmag + zp_eff
             ax.axvline(
                 x=limit_apparent,
                 color=get_okabe_color('red'),
@@ -2857,11 +5637,11 @@ class Limits:
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='none'),
             )
 
-        # Mark transient magnitude as vertical blue line
+        # Transient line uses the same colour as the transient marker.
         if transient_apparent is not None and np.isfinite(transient_apparent):
             ax.axvline(
                 x=transient_apparent,
-                color=get_okabe_color('blue'),
+                color=get_okabe_color('vermilion'),
                 linestyle="-",
                 lw=0.5,
                 zorder=20,
@@ -2875,30 +5655,319 @@ class Limits:
                 va='top',
                 ha='right',
                 fontsize=7,
-                color=get_okabe_color('blue'),
+                color=get_okabe_color('vermilion'),
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='none'),
             )
 
-        # Labels and styling
         ax.set_xlabel("Injected Apparent Magnitude [mag]", fontsize=9)
         ax.set_ylabel("Recovered Apparent Magnitude [mag]", fontsize=9)
         ax.invert_xaxis()
         ax.invert_yaxis()
 
-        # Set axis limits based on data range
+        # Set axis limits based on data range (NaN-tolerant: recovered mags are
+        # NaN for non-detections, which would otherwise poison the limits).
         all_mags = np.concatenate([injected_apparent, recovered_apparent])
-        if len(all_mags) > 0:
-            mag_min = np.min(all_mags)
-            mag_max = np.max(all_mags)
-            margin = 0.5  # 0.5 mag margin
-            ax.set_xlim(mag_max + margin, mag_min - margin)  # Inverted for magnitude
-            ax.set_ylim(mag_max + margin, mag_min - margin)  # Inverted for magnitude
-        ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2, fontsize=7)
+        finite_mags = all_mags[np.isfinite(all_mags)]
+        if finite_mags.size > 0:
+            mag_min = np.min(finite_mags)
+            mag_max = np.max(finite_mags)
+            margin = 0.5
+            ax.set_xlim(mag_max + margin, mag_min - margin)
+            ax.set_ylim(mag_max + margin, mag_min - margin)
+        ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                  frameon=False, ncol=2, fontsize=8)
         ax.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
 
-        fig.tight_layout()
-        save_path = os.path.join(write_dir, f"InjectionRecovery_{base}.png")
+        safe_tight_layout(fig)
+        save_path = os.path.join(
+            write_dir, f"Injection_Recovery_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+        )
         fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 
-        logger.info(f"Saved injection recovery plot to {save_path}")
+        logger.debug("Saved injection recovery plot to %s", save_path)
+
+    # -----------------------------------------------------------------------
+    # Combined completeness plot for multi-S/N thresholds
+    # -----------------------------------------------------------------------
+
+    def _plot_completeness_combined(self, all_details: list) -> None:
+        """
+        Draw a single completeness plot with bracket/bisect trajectories
+        from multiple S/N threshold runs overlaid in distinct colors,
+        plus injection cutout inset panels for EACH S/N threshold.
+
+        Parameters
+        ----------
+        all_details : list of dicts returned by get_injected_limit(_return_details=True)
+        """
+        logger = logging.getLogger(__name__)
+
+        if not all_details:
+            return
+
+        # Create figure with enough rows: 1 main plot + 1 row per threshold
+        n = len(all_details)
+        from matplotlib.gridspec import GridSpec
+        apply_autophot_mplstyle()
+        fig = plt.figure(figsize=set_size(540, 1 + 0.5 * n))
+        gs = GridSpec(1 + n, 4, figure=fig, height_ratios=[1.5] + [1] * n,
+                      wspace=0.3, hspace=0.4)
+
+        # Use the first (primary) threshold's detail to drive the main plot
+        # and first inset row, then add additional rows for remaining thresholds.
+        primary = all_details[0]
+
+        # Main plot + first inset row (primary threshold)
+        self._plot_completeness(
+            None,  # No sample_mags
+            None,  # No completeness_groups
+            None,  # No medians
+            primary.get("bracket_steps", []),
+            primary.get("bisect_steps", []),
+            primary.get("inject_lmag", np.nan),
+            primary.get("completeness_target", 0.5),
+            primary.get("detection_cutoff"),
+            primary.get("zeropoint"),
+            primary.get("recovery_method"),
+            epsf_model=primary.get("epsf_model"),
+            cutout=primary.get("cutout"),
+            position=primary.get("position"),
+            background_rms=primary.get("background_rms"),
+            flux_for_mag=primary.get("flux_for_mag"),
+            image_zeropoint=primary.get("image_zeropoint"),
+            injection_df=primary.get("injection_df"),
+            F_ref=primary.get("F_ref"),
+            counts_ref=primary.get("counts_ref"),
+            exposure_time=primary.get("exposure_time"),
+            extended_steps=[],
+            orig_position=None,
+            target_name=self.input_yaml.get("target_name", None),
+            cutout_cx=primary.get("cutout_cx"),
+            cutout_cy=primary.get("cutout_cy"),
+            snr_limit=primary.get("snr_limit"),
+            avoid_positions=primary.get("avoid_positions"),
+            multi_snr_details=all_details,
+            fig=fig,
+            gs=gs,
+            inset_row=1,
+            draw_main_plot=True,
+        )
+
+        # Inset rows for the remaining thresholds: per-threshold values come
+        # from `detail`; image/PSF objects are shared across thresholds and
+        # come from `primary`.
+        for idx, detail in enumerate(all_details[1:], start=2):
+            self._plot_completeness(
+                None, None, None,
+                detail.get("bracket_steps", []),
+                detail.get("bisect_steps", []),
+                detail.get("inject_lmag", np.nan),
+                detail.get("completeness_target", 0.5),
+                detail.get("detection_cutoff"),
+                detail.get("zeropoint"),
+                detail.get("recovery_method"),
+                epsf_model=primary.get("epsf_model"),
+                cutout=primary.get("cutout"),
+                position=primary.get("position"),
+                background_rms=primary.get("background_rms"),
+                flux_for_mag=primary.get("flux_for_mag"),
+                image_zeropoint=primary.get("image_zeropoint"),
+                injection_df=primary.get("injection_df"),
+                F_ref=primary.get("F_ref"),
+                counts_ref=primary.get("counts_ref"),
+                exposure_time=primary.get("exposure_time"),
+                extended_steps=[],
+                orig_position=None,
+                target_name=self.input_yaml.get("target_name", None),
+                cutout_cx=primary.get("cutout_cx"),
+                cutout_cy=primary.get("cutout_cy"),
+                snr_limit=detail.get("snr_limit"),
+                avoid_positions=detail.get(
+                    "avoid_positions", primary.get("avoid_positions")
+                ),
+                multi_snr_details=None,
+                fig=fig,
+                gs=gs,
+                inset_row=idx,
+                draw_main_plot=False,
+            )
+
+        # S/N row labels are drawn by _plot_completeness on the leftmost panel
+        # of each inset row (axis-anchored, so they track the row).
+
+        safe_tight_layout(fig)
+        fpath = str(self.input_yaml.get("fpath", "frame"))
+        base = os.path.splitext(os.path.basename(fpath))[0]
+        write_dir = (
+            str(self.input_yaml.get("write_dir"))
+            if self.input_yaml.get("write_dir") not in (None, "", "None")
+            else os.path.dirname(fpath)
+        )
+        if not write_dir:
+            write_dir = "."
+        os.makedirs(write_dir, exist_ok=True)
+        save_loc_png = os.path.join(
+            write_dir, f"Completeness_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+        )
+        fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        logger.debug("Combined completeness plot saved: %s", save_loc_png)
+
+    # -----------------------------------------------------------------------
+    # Multi-S/N injection limiting magnitude
+    # -----------------------------------------------------------------------
+
+    def get_injected_limits_multi_snr(
+        self,
+        full_image: np.ndarray,
+        position,
+        epsf_model=None,
+        initialGuess: float = -5.0,
+        snr_thresholds: list = None,
+        detection_cutoff: float | None = None,
+        plot: bool = True,
+        background_rms: np.ndarray = None,
+        subtraction_ready: bool = False,
+        zeropoint: float = None,
+        n_jobs: int = None,
+        image_zeropoint: dict = None,
+        avoid_positions=None,
+    ) -> dict:
+        """
+        Calculate limiting magnitudes for multiple S/N thresholds using injection/recovery.
+
+        This function runs the injection limiting magnitude analysis for each specified
+        S/N threshold and returns structured results with all limits and comparisons.
+
+        Parameters
+        ----------
+        full_image      : full 2-D science image (pre-subtraction)
+        position        : (x, y) target pixel coords used to centre the cutout
+        epsf_model      : photutils ePSF model
+        initialGuess    : starting instrumental magnitude for the bracket
+        snr_thresholds  : list of S/N thresholds (e.g., [3.0, 5.0]). If None, uses config
+        detection_cutoff: legacy beta threshold (unused; retained for backwards compatibility)
+        plot            : save diagnostic completeness PDF for each S/N threshold
+        background_rms  : full-frame RMS map (optional)
+        subtraction_ready: unused placeholder
+        zeropoint       : adds an apparent-magnitude axis to the plot
+        n_jobs          : worker processes; None defaults to 1 (serial)
+        avoid_positions : additional full-frame ``(x, y)`` transient positions
+                          that injected sources must not overlap
+
+        Returns
+        -------
+        dict - results for each S/N threshold with limiting magnitudes and comparisons
+        """
+        logger = logging.getLogger(__name__)
+        
+        # Fall back to the configured thresholds.
+        if snr_thresholds is None:
+            lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
+            snr_thresholds = lim_cfg.get("snr_thresholds", [3.0])
+        
+        # Ensure we have valid thresholds.  Accept a scalar or any sequence;
+        # coerce each entry to float so keys and S/N gates are consistent.
+        if isinstance(snr_thresholds, (int, float, np.floating, np.integer)):
+            snr_thresholds = [snr_thresholds]
+        elif isinstance(snr_thresholds, tuple):
+            snr_thresholds = list(snr_thresholds)
+        if not isinstance(snr_thresholds, list) or not snr_thresholds:
+            logger.warning("Invalid snr_thresholds, using default [3.0]")
+            snr_thresholds = [3.0]
+        try:
+            snr_thresholds = [float(s) for s in snr_thresholds]
+        except (TypeError, ValueError):
+            logger.warning("Non-numeric snr_thresholds %r; using default [3.0]", snr_thresholds)
+            snr_thresholds = [3.0]
+        
+        logger.info("Calculating injection limits for S/N thresholds: %s", snr_thresholds)
+        
+        results = {}
+        # Collect per-threshold details for the combined completeness plot
+        all_details = []
+        
+        # One limiting magnitude per S/N threshold; individual plots are
+        # suppressed because a single combined plot is drawn at the end.
+        for snr in snr_thresholds:
+            try:
+                logger.info("Calculating limiting magnitude for S/N >= %s", snr)
+                detail = self.get_injected_limit(
+                    full_image=full_image,
+                    position=position,
+                    epsf_model=epsf_model,
+                    initialGuess=initialGuess,
+                    detection_limit=snr,
+                    detection_cutoff=detection_cutoff,
+                    plot=False,
+                    background_rms=background_rms,
+                    subtraction_ready=subtraction_ready,
+                    zeropoint=zeropoint,
+                    n_jobs=n_jobs,
+                    image_zeropoint=image_zeropoint,
+                    _return_details=True,
+                    avoid_positions=avoid_positions,
+                )
+                limit = detail["inject_lmag"]
+                all_details.append(detail)
+                # Normalize the key to float so [3, 5] and [3.0, 5.0] produce
+                # identical 'snr_3.0'/'snr_5.0' keys for downstream lookups.
+                results[f'snr_{float(snr)}'] = {
+                    'limiting_mag': limit,
+                    'limiting_mag_err': detail.get('inject_lmag_err', np.nan),
+                    'snr_threshold': snr,
+                    'valid': np.isfinite(limit),
+                    'snr_gate_factor': detail.get('snr_gate_factor', np.nan),
+                    'limiting_mag_raw': detail.get('inject_lmag_raw', np.nan),
+                }
+                logger.info("S/N %s limiting magnitude: %.3f", snr, limit)
+            except Exception as e:
+                logger.error("Failed to calculate S/N %s limiting magnitude: %s", snr, e)
+                results[f'snr_{float(snr)}'] = {
+                    'limiting_mag': np.nan,
+                    'snr_threshold': snr,
+                    'valid': False,
+                    'error': str(e)
+                }
+        
+        # Add comparison metrics if we have multiple valid results
+        valid_results = {k: v for k, v in results.items() if v.get('valid', False)}
+        if len(valid_results) >= 2:
+            sorted_thresholds = sorted([float(k.split('_')[1]) for k in valid_results.keys()])
+            
+            comparisons = {}
+            for i in range(len(sorted_thresholds) - 1):
+                snr_low = sorted_thresholds[i]
+                snr_high = sorted_thresholds[i + 1]
+                
+                mag_low = valid_results[f'snr_{snr_low}']['limiting_mag']
+                mag_high = valid_results[f'snr_{snr_high}']['limiting_mag']
+                
+                if np.isfinite(mag_low) and np.isfinite(mag_high):
+                    delta_mag = mag_high - mag_low
+                    comparisons[f'snr_{snr_high}_vs_{snr_low}'] = {
+                        'delta_mag': delta_mag,
+                        'snr_low': snr_low,
+                        'snr_high': snr_high,
+                        'mag_low': mag_low,
+                        'mag_high': mag_high
+                    }
+            
+            results['comparisons'] = comparisons
+            logger.info("Generated %s S/N threshold comparisons", len(comparisons))
+        
+        # Adaptive threshold recommendation
+        lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
+        if lim_cfg.get("adaptive_snr_selection", False):
+            adaptive_threshold = 5.0 if 5.0 in snr_thresholds else max(snr_thresholds)
+            results['adaptive_threshold'] = adaptive_threshold
+            logger.info("Adaptive S/N threshold recommendation: %s", adaptive_threshold)
+        
+        if plot and all_details:
+            try:
+                self._plot_completeness_combined(all_details)
+            except Exception as exc:
+                logger.warning("Combined completeness plot failed: %s", exc)
+        
+        return results

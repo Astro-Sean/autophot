@@ -77,6 +77,8 @@ def _run_single_image(
     fits_path: str,
     yaml_path: str,
     prepare_template: bool = False,
+    suppress_output: bool = False,
+    verbose_args: List[str] | None = None,
 ) -> Tuple[str, int]:
     """
     Run the existing single-image pipeline (main.py) on one FITS file.
@@ -94,11 +96,18 @@ def _run_single_image(
     ]
     if prepare_template:
         cmd.append("-temp")
+    if verbose_args:
+        cmd.extend(verbose_args)
 
-    # Inherit stdout/stderr so logs appear live for each subprocess.
-    # This keeps behaviour close to calling main.py directly.
+    # Inherit stdout/stderr so logs appear live for each subprocess in serial mode.
+    # In parallel mode, suppress child output to avoid interleaved terminal noise;
+    # each main.py still writes per-image log files.
     try:
-        result = subprocess.run(cmd, check=False)
+        kwargs = {"check": False}
+        if suppress_output:
+            from subprocess import DEVNULL
+            kwargs.update({"stdout": DEVNULL, "stderr": DEVNULL})
+        result = subprocess.run(cmd, **kwargs)
         return fits_path, result.returncode
     except Exception:
         # Treat unexpected failures as non-zero for reporting.
@@ -114,7 +123,6 @@ def _build_file_list(args: argparse.Namespace) -> List[str]:
     if args.file_list:
         files.extend(_read_file_list(args.file_list))
 
-    # Basic normalisation and existence check
     resolved: List[str] = []
     for f in files:
         p = Path(f).expanduser()
@@ -177,6 +185,24 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Pass the -temp flag through to main.py for all images.",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Debug verbosity for each image (passes -v to main.py).",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Warnings/errors only for each image (passes -q to main.py).",
+    )
+    parser.add_argument(
+        "--verbose-level",
+        default=None,
+        metavar="LEVEL",
+        help="Explicit per-image verbosity: 0/1/2 or quiet, normal, debug.",
+    )
 
     return parser.parse_args(list(argv) if argv is not None else None)
 
@@ -194,6 +220,15 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     print(f"Found {n_files} FITS file(s). Running up to {jobs} job(s) in parallel.")
 
+    # Forward CLI verbosity flags to each per-image main.py subprocess.
+    verbose_args: List[str] = []
+    if args.verbose:
+        verbose_args = ["-v"]
+    elif args.quiet:
+        verbose_args = ["-q"]
+    elif args.verbose_level:
+        verbose_args = ["--verbose-level", args.verbose_level]
+
     failures: List[str] = []
 
     with ProcessPoolExecutor(max_workers=jobs) as executor:
@@ -203,6 +238,8 @@ def main(argv: Iterable[str] | None = None) -> int:
                 f,
                 args.config,
                 args.prepare_template,
+                jobs > 1,
+                verbose_args,
             ): f
             for f in fits_files
         }

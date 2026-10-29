@@ -23,7 +23,7 @@ def test_dynamic_filter_system():
     for filt in standard_filters:
         result = normalize_photometric_filter_name(filt, available_filters=available_standard)
         assert result == filt, f"Standard filter {filt} failed: got {result}"
-    print("✓ All standard filters work")
+    print("PASS All standard filters work")
     
     # Test 2: Arbitrary filter names should be accepted
     print("\n2. Testing arbitrary filter names...")
@@ -33,7 +33,7 @@ def test_dynamic_filter_system():
     for filt in arbitrary_filters:
         result = normalize_photometric_filter_name(filt, available_filters=available_arbitrary)
         assert result == filt, f"Arbitrary filter {filt} failed: got {result}"
-    print("✓ All arbitrary filters accepted")
+    print("PASS All arbitrary filters accepted")
     
     # Test 3: Mixed standard and arbitrary filters
     print("\n3. Testing mixed standard and arbitrary filters...")
@@ -43,7 +43,7 @@ def test_dynamic_filter_system():
     for filt in mixed_filters:
         result = normalize_photometric_filter_name(filt, available_filters=available_mixed)
         assert result == filt, f"Mixed filter {filt} failed: got {result}"
-    print("✓ Mixed filters work correctly")
+    print("PASS Mixed filters work correctly")
     
     # Test 4: sanitize_photometric_filters with arbitrary filters
     print("\n4. Testing sanitize_photometric_filters with arbitrary filters...")
@@ -57,7 +57,7 @@ def test_dynamic_filter_system():
     
     assert set(cleaned) == set(expected_cleaned), f"Cleaned mismatch: got {cleaned}, expected {expected_cleaned}"
     assert set(dropped) == set(expected_dropped), f"Dropped mismatch: got {dropped}, expected {expected_dropped}"
-    print("✓ sanitize_photometric_filters works correctly")
+    print("PASS sanitize_photometric_filters works correctly")
     
     # Test 5: Case insensitive matching
     print("\n5. Testing case insensitive matching...")
@@ -67,7 +67,7 @@ def test_dynamic_filter_system():
     for filt in case_filters:
         result = normalize_photometric_filter_name(filt, available_filters=available_case)
         assert result in available_case, f"Case insensitive filter {filt} failed: got {result}"
-    print("✓ Case insensitive matching works")
+    print("PASS Case insensitive matching works")
     
     # Test 6: Fuzzy matching
     print("\n6. Testing fuzzy matching...")
@@ -78,10 +78,10 @@ def test_dynamic_filter_system():
         result = normalize_photometric_filter_name(filt, available_filters=available_fuzzy)
         assert result is not None, f"Fuzzy matching failed for {filt}"
         print(f"  {filt} -> {result}")
-    print("✓ Fuzzy matching works")
+    print("PASS Fuzzy matching works")
     
     print("\n" + "=" * 50)
-    print("✅ ALL TESTS PASSED!")
+    print("SUCCESS ALL TESTS PASSED!")
     print("The dynamic filter system is correctly set up to accept arbitrary filter names.")
     
     return True
@@ -95,12 +95,12 @@ def test_edge_cases():
     # Test with None
     result = normalize_photometric_filter_name(None)
     assert result is None, "None should return None"
-    print("✓ None handling works")
+    print("PASS None handling works")
     
     # Test with empty string
     result = normalize_photometric_filter_name("")
     assert result is None, "Empty string should return None"
-    print("✓ Empty string handling works")
+    print("PASS Empty string handling works")
     
     # Test with non-photometric keys
     non_photo = ['RA', 'DEC', 'name', 'mag_err']
@@ -109,21 +109,21 @@ def test_edge_cases():
     for filt in non_photo:
         result = normalize_photometric_filter_name(filt, available_filters=available)
         assert result is None, f"Non-photometric {filt} should return None"
-    print("✓ Non-photometric keys correctly rejected")
+    print("PASS Non-photometric keys correctly rejected")
     
     # Test with no available_filters (backward compatibility)
     result = normalize_photometric_filter_name('U')
     assert result == 'U', "Backward compatibility failed"
-    print("✓ Backward compatibility maintained")
+    print("PASS Backward compatibility maintained")
     
-    print("✅ ALL EDGE CASE TESTS PASSED!")
+    print("SUCCESS ALL EDGE CASE TESTS PASSED!")
 
 if __name__ == "__main__":
     try:
         test_dynamic_filter_system()
         test_edge_cases()
-        print("\n🎉 Dynamic filter system is working correctly!")
+        print("\nSUCCESS Dynamic filter system is working correctly!")
         print("Users can now use ANY filter name with custom catalogs or transmission curves.")
     except Exception as e:
-        print(f"\n❌ TEST FAILED: {e}")
+        print(f"\nFAIL TEST FAILED: {e}")
         sys.exit(1)

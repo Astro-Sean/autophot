@@ -1,38 +1,81 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Created on Wed Jul 17 13:01:06 2024
+"""Image masking utilities for AutoPHOT.
 
-@author: seanbrennan
+Wraps the ``maximask`` external tool to generate pixel-quality masks
+(cosmic rays, hot/dead columns, saturated pixels, etc.) and provides
+helpers to combine selected mask layers into a single boolean array.
+
+The mask layer codes follow the maximask convention:
+
+    =====  ============================================
+    Code   Layer
+    =====  ============================================
+    CR     Cosmic rays
+    HCL    Hot columns / lines
+    DCL    Dead columns / lines / clusters
+    BG     Background artefacts
+    DP     Dead pixels
+    P      Persistence
+    TRL    Trails
+    FR     Fringe patterns
+    NEB    Nebulosities
+    SAT    Saturated pixels
+    SP     Diffraction spikes
+    OV     Overscanned pixels
+    BBG    Bright background pixels
+    =====  ============================================
 """
 
-# =============================================================================
-#
-# =============================================================================
+import logging
+import os
+import subprocess
+
+import numpy as np
+from astropy.io import fits
+
+logger = logging.getLogger(__name__)
 
 
 def append_id(filename):
+    """Insert ``.mask`` before the file extension.
+
+    Parameters
+    ----------
+    filename : str
+        Original filename (e.g. ``image.fits``).
+
+    Returns
+    -------
+    str
+        Masked filename (e.g. ``image.mask.fits``).
+    """
     return "{0}{2}.{1}".format(*filename.rsplit(".", 1) + [".mask"])
 
 
 def is_program_installed(program_name):
-    import subprocess
+    """Check whether *program_name* is on the system ``PATH``.
 
+    Parameters
+    ----------
+    program_name : str
+        Executable name to search for (e.g. ``"maximask"``).
+
+    Returns
+    -------
+    bool
+        ``True`` if the program is found, ``False`` otherwise.
+    """
     try:
-        # Run 'which' command to check if the program is installed
         result = subprocess.run(
             ["which", program_name],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        # If the command is found, it returns a path, otherwise the output is empty
-        if result.returncode == 0:
-            return True
-        else:
-            return False
+        return result.returncode == 0
     except Exception as exc:
-        logging.getLogger(__name__).error(
+        logger.error(
             "Error while checking for program '%s': %s",
             program_name,
             exc,
@@ -41,18 +84,24 @@ def is_program_installed(program_name):
         return False
 
 
-# =============================================================================
-#
-# =============================================================================
 def run_maximask_with_file(filename):
+    """Run ``maximask`` on *filename* and return the output mask path.
 
-    import os, subprocess
+    Parameters
+    ----------
+    filename : str
+        Path to the FITS image to mask.
 
-    logger = logging.getLogger(__name__)
+    Returns
+    -------
+    str or None
+        Path to the generated ``*.mask.fits`` file, or ``None`` if
+        maximask is not installed or fails.
+    """
     program_name = "maximask"
     if is_program_installed(program_name):
         try:
-            # Run maximask with the given filename and suppress output
+            # maximask is chatty on stdout/stderr - silence it
             subprocess.run(
                 [program_name, filename],
                 stdout=subprocess.DEVNULL,
@@ -78,32 +127,40 @@ def run_maximask_with_file(filename):
                 exc_info=True,
             )
     else:
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "%s is not installed; cannot generate image mask.", program_name
         )
         return None
 
 
-# =============================================================================
-#
-# =============================================================================
+def create_image_mask(filename, layers=None):
+    """Create a combined integer mask from a maximask output file.
 
+    Parameters
+    ----------
+    filename : str or None
+        Path to the ``*.mask.fits`` file produced by :func:`run_maximask_with_file`.
+        If ``None``, returns ``None`` immediately.
+    layers : list of str, optional
+        Maximask layer codes to include (default ``["CR"]`` - cosmic rays only).
+        See the module docstring for the full list of codes.
 
-def create_image_mask(filename, layers=["CR"]):
-    import numpy as np
-    import os
-    from astropy.io import fits
-    from functions import border_msg
+    Returns
+    -------
+    numpy.ndarray or None
+        2-D integer array (1 = masked, 0 = clean) with the same shape as
+        the input image, or ``None`` if *filename* is ``None``.
+    """
+    if layers is None:
+        layers = ["CR"]
+
+    from functions import log_step
 
     if filename is None:
         return None
 
     fname = os.path.basename(filename)
-
-    import logging
-
-    logger = logging.getLogger(__name__)
-    logger.info(border_msg(f"Creating mask for {fname}"))
+    logger.info(log_step(f"Mask: {fname}"))
 
     maximask_masks = {
         "CR": [0, "Cosmic Rays"],
@@ -122,7 +179,6 @@ def create_image_mask(filename, layers=["CR"]):
     }
 
     with fits.open(filename) as hdul:
-        # Iterate through each HDU (Header Data Unit)
         imgs = hdul[0].data
         # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
         if imgs.dtype.kind != 'f':
@@ -134,12 +190,12 @@ def create_image_mask(filename, layers=["CR"]):
 
     for layer in selected_layers:
         logger.info("\t> Adding %s layer to mask", layer[1])
-        mask += imgs[layer[0]]
+        # Non-finite pixels (chip gaps / bad columns) are not flags: treat
+        # them as unset so they do not poison the sum with NaN and reach the
+        # final astype(int) below.
+        mask += np.nan_to_num(
+            imgs[layer[0]], nan=0.0, posinf=0.0, neginf=0.0
+        )
 
     mask[mask > 1] = 1
     return mask.astype(int)
-
-
-# =============================================================================
-#
-# =============================================================================

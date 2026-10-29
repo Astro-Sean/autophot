@@ -1,52 +1,104 @@
 [build-system]
-requires = ["setuptools>=69", "wheel", "numpy>=1.26,<2"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "autophot"
-version = "0.1.19"
+version = "1.3.2"
 description = "AutoPHOT object photometry pipeline (CCD/NIR; calibrated aperture/PSF photometry; template subtraction)."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12,<3.13"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{name = "AutoPHOT contributors"}]
+keywords = ["astronomy", "photometry", "transients", "image subtraction", "lightcurve"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Astronomy",
+]
 dependencies = [
-  "astroalign==2.6.1",
-  "astropy==6.1.6",
-  "astroquery==0.4.7",
+  "astroalign>=2.6.2",
+  "astropy>=7.0",
+  "astroquery>=0.4.11",
   "astroscrappy==1.2.0",
-  "emcee==3.1.6",
-  "lmfit==1.3.2",
-  "matplotlib==3.10.0",
-  "numpy>=1.26,<2",
-  "pandas==2.2.3",
-  "photutils==2.0.2",
-  "PyYAML==6.0.2",
-  "reproject==0.14.1",
-  "requests==2.32.3",
-  "scikit-image==0.25.0",
-  "scikit-learn>=1.3",
-  "scipy==1.15.1",
-  "tqdm>=4.66",
+  "corner>=2.2.3",
+  "ccdproc>=2.5.1",
+  "emcee>=3.1.6",
+  "lmfit>=1.3.4",
+  "matplotlib>=3.10",
+  "numpy>=2.0",
+  "pandas>=3.0",
+  # photutils 3.1 provides the compiled aperture/deblend/catalog paths the
+  # pipeline uses (AperturePhotometry, n_threads, pixel-integrated PRFs).
+  "photutils>=3.1",
+  "PyYAML>=6.0",
+  # pyvo ships its own SAMP implementation from 1.9; 1.8.x imports the
+  # astropy.samp module deprecated under astropy 8.
+  "pyvo>=1.9",
+  "reproject>=0.20",
+  "requests>=2.34",
+  "scikit-image>=0.24",
+  "scikit-learn>=1.9",
+  "scipy>=1.17",
+  "sfft==1.7.3",
+  "sip_tpv==1.1",
+  "tqdm>=4.68",
+  # SFFT dependencies
+  "fastremap>=1.20",
+  "llvmlite>=0.36",
+  "numba>=0.53",
+  "pyfftw>=0.12",
+  "sep>=1.0",
 ]
 
 [project.optional-dependencies]
 # Pip-only dependencies (not consistently available on conda channels).
 # Install as needed, e.g. `pip install -e ".[refcat,sfft]"`.
 refcat = ["mastcasjobs==0.0.7"]
-sfft = ["sfft==1.6.3"]
+sfft = ["sfft==1.7.3"]
 aafitrans = ["aafitrans==0.2.1"]
-all = ["mastcasjobs==0.0.7", "sfft==1.6.3", "aafitrans==0.2.1"]
+# Optional alignment methods (each falls back to swarp→reproject→astroalign if unavailable)
+spalipy = ["spalipy>=3.5"]
+tweakwcs = ["tweakwcs>=0.8"]
+chi2-shift = ["image-registration>=0.2"]
+all = ["mastcasjobs==0.0.7", "sfft==1.7.3", "aafitrans==0.2.1", "spalipy>=3.5", "tweakwcs>=0.8", "image-registration>=0.2"]
+test = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/Astro-Sean/autophot"
+Repository = "https://github.com/Astro-Sean/autophot"
+Issues = "https://github.com/Astro-Sean/autophot/issues"
+Publication = "https://ui.adsabs.harvard.edu/abs/2022A&A...667A..62B"
 
 [project.scripts]
 autophot-main = "main:run_photometry"
 autophot-driver = "autophot:main"
 autophot-gaia-curves = "autophot_gaia_curves.cli:main"
+autophot-inspect-telescope = "inspect_telescope:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "mcmc: marks tests that run MCMC sampling",
+    "injection: marks tests that run injection/recovery experiments",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    # photutils 3.1 emits PhotutilsDeprecationWarning, which subclasses
+    # astropy's AstropyDeprecationWarning (an AstropyWarning), not
+    # DeprecationWarning - without this the filter above misses it.
+    "ignore::astropy.utils.exceptions.AstropyDeprecationWarning",
+]
 
 [tool.setuptools]
 include-package-data = true
 py-modules = [
+  "additional_targets",
   "aperture",
   "autophot",
   "autophot_tokens",
@@ -54,14 +106,17 @@ py-modules = [
   "batch_main",
   "catalog",
   "check",
+  "color_correction",
   "cosmic",
   "functions",
+  "inspect_telescope",
   "fwhm",
   "lightcurve",
   "limits",
   "main",
   "mask",
   "plot",
+  "plotting_utils",
   "prepare",
   "psf",
   "templates",
@@ -74,9 +129,6 @@ py-modules = [
 include = ["utils*", "databases*", "autophot_gaia_curves*"]
 
 [tool.setuptools.package-data]
-databases = ["*.yml"]
+databases = ["*.yml", "*.mplstyle", "extinction/*.txt"]
 utils = ["*.py"]
-
-[tool.setuptools.data-files]
-"." = ["autophot.mplstyle"]
 

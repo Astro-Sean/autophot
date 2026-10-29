@@ -7,6 +7,8 @@ TELESCOP, INSTRUME, FILTER, EXPTIME, GAIN, RDNOISE, OBSMJD from existing keyword
 
 import sys
 from pathlib import Path
+
+import numpy as np
 from astropy.io import fits
 
 
@@ -49,9 +51,16 @@ def get_secondary_header(hdul: fits.HDUList) -> fits.Header | None:
 
 
 def fix_panstarrs_header(h):
-    """
-    Patch a Pan-STARRS header in-place so it works smoothly with autophot.
-    Tries to reuse existing values; only fills or renames when missing.
+    """Patch a Pan-STARRS FITS header in-place for autophot compatibility.
+
+    Fills in ``TELESCOP``, ``INSTRUME``, ``FILTER``, ``EXPTIME``, ``GAIN``,
+    ``RDNOISE``, and ``OBSMJD`` by reusing existing alternate keywords.
+    Also copies HIERARCH WCS keywords to their standard flat names.
+
+    Parameters
+    ----------
+    h : astropy.io.fits.Header
+        Header to modify in-place.
     """
     # --- Telescope / instrument ---
     h.setdefault("TELESCOP", "Pan-STARRS1")
@@ -110,8 +119,47 @@ def fix_panstarrs_header(h):
         if mjd is not None:
             h["OBSMJD"] = mjd
 
+    # --- WCS keywords (for template alignment) ---
+    # Copy WCS keywords if present in header but not in standard locations
+    wcs_keywords = [
+        'CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2',
+        'CTYPE1', 'CTYPE2', 'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2',
+        'CDELT1', 'CDELT2', 'CROTA2', 'CUNIT1', 'CUNIT2',
+        'PV1_0', 'PV1_1', 'PV1_2', 'PV1_3', 'PV1_4', 'PV1_5',
+        'PV1_6', 'PV1_7', 'PV1_8', 'PV1_9', 'PV1_10',
+        'PV1_11', 'PV1_12', 'PV1_13', 'PV1_14', 'PV1_15',
+        'PV1_16', 'PV1_17', 'PV1_18', 'PV1_19', 'PV1_20',
+        'PV2_0', 'PV2_1', 'PV2_2', 'PV2_3', 'PV2_4', 'PV2_5',
+        'PV2_6', 'PV2_7', 'PV2_8', 'PV2_9', 'PV2_10',
+        'PV2_11', 'PV2_12', 'PV2_13', 'PV2_14', 'PV2_15',
+        'PV2_16', 'PV2_17', 'PV2_18', 'PV2_19', 'PV2_20',
+        'SIPNAME', 'A_ORDER', 'B_ORDER', 'AP_ORDER', 'BP_ORDER',
+    ]
+    # Also check for HIERARCH versions of WCS keywords
+    for key in list(h.keys()):
+        key_str = str(key)
+        if key_str.startswith('HIERARCH'):
+            # Extract the base keyword after HIERARCH
+            parts = key_str.split()
+            if len(parts) > 1:
+                base_key = parts[1]
+                if base_key not in wcs_keywords:
+                    wcs_keywords.append(base_key)
+                # Copy to standard keyword name if not already present
+                if base_key not in h and key in h:
+                    h[base_key] = h[key]
+
 
 def main(root, recursive=False):
+    """Fix all Pan-STARRS FITS files under *root*.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Directory containing FITS files to patch.
+    recursive : bool, optional
+        If ``True``, search sub-directories recursively (default ``False``).
+    """
     root = Path(root).expanduser().resolve()
     if recursive:
         files = sorted(root.rglob("*.fits"))
@@ -124,12 +172,15 @@ def main(root, recursive=False):
     print(f"Updating {len(files)} FITS file(s) under {root}.")
     for f in files:
         try:
-            with fits.open(f, mode="readonly", do_not_scale_image_data=True) as hdul:
+            # Read with scaling ENABLED so BZERO/BSCALE are applied to the
+            # pixel data and BLANK pixels become NaN.  PS1 warps are stored
+            # as scaled int16 in a compressed HDU; writing the raw codes
+            # (do_not_scale_image_data=True) into a plain image loses the
+            # scaling keywords and leaves a ~-BZERO pedestal in the data.
+            with fits.open(f, mode="readonly") as hdul:
                 primary_header = hdul[0].header.copy()
                 primary_data = hdul[0].data
-                # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
-                if primary_data is not None and primary_data.dtype.kind != 'f':
-                    primary_data = primary_data.astype(np.float32)
+                data_hdu = 0
                 if primary_data is None and len(hdul) > 1:
                     for i in range(1, len(hdul)):
                         if (
@@ -137,7 +188,30 @@ def main(root, recursive=False):
                             and getattr(hdul[i].data, "ndim", 0) == 2
                         ):
                             primary_data = hdul[i].data
+                            data_hdu = i
                             break
+
+                # Integer storage with BLANK but no BZERO/BSCALE means the
+                # scaling was already stripped by an earlier rewrite - the
+                # stored codes are not physical units and the transform
+                # cannot be recovered from this file alone.
+                _data_hdr = hdul[data_hdu].header
+                if (
+                    _data_hdr.get("BITPIX", -32) > 0
+                    and "BLANK" in _data_hdr
+                    and "BZERO" not in _data_hdr
+                    and "BSCALE" not in _data_hdr
+                ):
+                    print(
+                        f"  WARNING: {f.name} is integer data with BLANK\n"
+                        "  but no BZERO/BSCALE - scaling may already have\n"
+                        "  been stripped; pixel values may not be physical\n"
+                        "  units."
+                    )
+
+                # Store physical values as float32 (also keeps NaN chip gaps).
+                if primary_data is not None:
+                    primary_data = np.asarray(primary_data, dtype=np.float32)
 
                 secondary = get_secondary_header(hdul)
                 if secondary is not None:
@@ -146,6 +220,22 @@ def main(root, recursive=False):
                     combined = primary_header
 
                 fix_panstarrs_header(combined)
+
+                # The written data are materialised physical float32 - drop
+                # storage-level keywords that would double-apply on read
+                # (BZERO/BSCALE) or are invalid for float data (BLANK), plus
+                # any tiled-compression keys describing the original storage.
+                for _k in list(combined.keys()):
+                    _ks = str(_k)
+                    if (
+                        _ks in ("BZERO", "BSCALE", "BLANK", "ZIMAGE", "ZCMPTYPE",
+                                "ZBITPIX", "ZNAXIS", "ZPCOUNT", "ZGCOUNT",
+                                "ZSCALE", "ZZERO", "ZBLANK", "ZQUANTIZ",
+                                "ZDITHER0", "ZSIMPLE", "ZTENSION", "ZEXTEND",
+                                "ZHECKSUM", "ZDATASUM")
+                        or _ks.startswith(("ZTILE", "ZNAME", "ZVAL", "ZNAXIS"))
+                    ):
+                        combined.remove(_k)
 
                 tmp_path = f.with_suffix(f.suffix + ".tmp")
                 from functions import safe_fits_write

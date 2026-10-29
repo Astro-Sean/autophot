@@ -194,11 +194,12 @@ def _piecewise_eval(mags, errs, base, c1, c2, segments, sigma):
         a[m] = ai
         b[m] = bi
     val = mb + a * x + b
-    coef_map = {base: 1.0, c1: a, c2: -a}
-    merged = {}
-    for band, coef in coef_map.items():
-        merged[band] = merged.get(band, 0.0) + coef
-    err = _propagate(list(merged.items()), errs, sigma, len(x))
+    # Coefficients must be accumulated: base can coincide with a color
+    # band (e.g. r via g-r), and a dict literal would drop it.
+    coef_map = {}
+    for band, coef in ((base, 1.0), (c1, a), (c2, -a)):
+        coef_map[band] = coef_map.get(band, 0.0) + coef
+    err = _propagate(list(coef_map.items()), errs, sigma, len(x))
     return val, err
 
 

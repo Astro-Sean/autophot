@@ -37,7 +37,7 @@ import pandas as pd
 from astropy.io import fits
 
 from aperture import Aperture
-from functions import beta_aperture, mag, points_in_circum
+from functions import beta_aperture, cap_console_lines, mag, points_in_circum
 from psf import MCMCFitter
 
 
@@ -45,6 +45,23 @@ logger = logging.getLogger(__name__)
 
 
 def _read_fits_2d(path: str) -> np.ndarray:
+    """Read a 2-D image array from a FITS file.
+
+    Parameters
+    ----------
+    path : str
+        Path to the FITS file.
+
+    Returns
+    -------
+    np.ndarray
+        2-D float array.
+
+    Raises
+    ------
+    ValueError
+        If the primary HDU is not 2-D.
+    """
     with fits.open(path, memmap=False) as hdul:
         data = hdul[0].data
     arr = np.asarray(data, dtype=float)
@@ -54,6 +71,23 @@ def _read_fits_2d(path: str) -> np.ndarray:
 
 
 def _extract_stamp(image: np.ndarray, x0: float, y0: float, half: int) -> tuple[np.ndarray, int, int]:
+    """Extract a ``(2*half+2)`` pixel stamp centred on ``(x0, y0)``.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Full 2-D image.
+    x0, y0 : float
+        Centre pixel coordinates.
+    half : int
+        Half-width of the stamp.
+
+    Returns
+    -------
+    tuple of (np.ndarray, int, int)
+        ``(stamp, x_origin, y_origin)`` where the origins are the
+        top-left pixel indices of the stamp in the full image.
+    """
     ny, nx = image.shape
     xi = int(np.floor(float(x0)))
     yi = int(np.floor(float(y0)))
@@ -83,15 +117,23 @@ def _recover_psf_mcmc_snr(
     batch_steps: int,
     jitter_scale: float,
 ) -> tuple[float, float]:
-    """
-    Fit flux,x0,y0 with emcee and return (snr, flux_hat).
+    """Fit flux, x0, y0 with emcee and return ``(snr, flux_hat)``.
+
+    Uses :class:`psf.MCMCFitter` to sample the posterior of an ePSF
+    model placed on the stamp and derives the S/N from the flux
+    posterior.
+
+    Returns
+    -------
+    tuple of (float, float)
+        ``(snr, flux_hat)`` - signal-to-noise and median recovered flux.
+        Both are ``np.nan`` if the fit fails.
     """
     ny, nx = data2d.shape
     gx, gy = np.meshgrid(np.arange(nx), np.arange(ny))
 
     model = epsf_model.copy()
     # Model coordinates are *absolute within this stamp* (not full image).
-    # Set initial guesses.
     model.x_0.value = float(x0)
     model.y_0.value = float(y0)
     model.flux.value = max(1e-6, float(getattr(model, "flux", 1.0)))
@@ -132,11 +174,18 @@ def _recover_psf_mcmc_snr(
     except Exception:
         flux_hat, flux_err = np.nan, np.nan
 
-    snr = flux_hat / flux_err if np.isfinite(flux_hat) and np.isfinite(flux_err) and flux_err > 0 else np.nan
+    # Signed S/N: a negative flux excursion is noise, not a recovery (matches
+    # the signed criterion used by limits.py).
+    snr = (
+        flux_hat / flux_err
+        if np.isfinite(flux_hat) and np.isfinite(flux_err) and flux_err > 0
+        else np.nan
+    )
     return float(snr), float(flux_hat)
 
 
 def main() -> int:
+    """CLI entry point - run injection/recovery and print limiting magnitude."""
     ap = argparse.ArgumentParser(description="emcee injection/recovery limiting magnitude")
     ap.add_argument("--fits", required=True, help="Science image FITS path")
     ap.add_argument("--epsf-pickle", required=True, help="Pickled photutils/astropy ePSF model")
@@ -179,6 +228,7 @@ def main() -> int:
         format="%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%H:%M:%S",
     )
+    cap_console_lines(logging.getLogger().handlers, extra_reserve=11)
 
     img = _read_fits_2d(args.fits)
     rms = _read_fits_2d(args.rms_fits) if args.rms_fits else None
@@ -187,6 +237,20 @@ def main() -> int:
         epsf_model = pickle.load(f)
 
     rng = np.random.default_rng(args.seed)
+
+    # Minimal config for the aperture measurement helper.  Aperture.measure
+    # reads fwhm, imageFilter, gain, exposure_time and the aperture radius
+    # from this mapping (see aperture.Aperture.measure).
+    ap_input_yaml = {
+        "fwhm": float(args.fwhm_px),
+        "imageFilter": "R",
+        "gain": float(args.gain),
+        "exposure_time": 1.0,
+        "read_noise": float(args.read_noise),
+        "photometry": {
+            "aperture_radius": max(1.5 * float(args.fwhm_px), 2.0),
+        },
+    }
 
     # Use a cutout for speed.
     cut_half = int(np.ceil(max(20.0, 8.0 * float(args.fwhm_px))))
@@ -204,7 +268,7 @@ def main() -> int:
     inj_dist = float(args.inject_radius_fwhm) * float(args.fwhm_px)
     pts = points_in_circum(inj_dist, center=(x_c, y_c), n=int(args.n_sites))
     df_sites = pd.DataFrame({"x_pix": [p[0] for p in pts], "y_pix": [p[1] for p in pts]})
-    ini_ap = Aperture(input_yaml={"fwhm": float(args.fwhm_px), "photometry": {}}, image=cut)
+    ini_ap = Aperture(input_yaml=ap_input_yaml, image=cut)
     df_meas = ini_ap.measure(sources=df_sites, plot=False, background_rms=rms_cut, verbose=0)
     p_det = df_meas.apply(
         lambda row: beta_aperture(n=3.0, flux_aperture=row["flux_AP"], sigma=row["noiseSky"], npix=row["area"]),
@@ -243,10 +307,18 @@ def main() -> int:
                     epsf_model.evaluate(x=gx, y=gy, flux=F, x_0=x_inj, y_0=y_inj),
                     dtype=float,
                 )
+                # Realize the source's own shot noise (same model as
+                # limits.py): without it only the sky fluctuates and the
+                # completeness transition is artificially sharp.
+                if args.gain > 0:
+                    psf_e = np.clip(psf_img * float(args.gain), 0.0, None)
+                    psf_img = psf_img + (
+                        rng.poisson(psf_e) - psf_e
+                    ) / float(args.gain)
                 new_img = cut + psf_img
 
                 # Beta (aperture-based)
-                ap0 = Aperture(input_yaml={"fwhm": float(args.fwhm_px), "photometry": {}}, image=new_img)
+                ap0 = Aperture(input_yaml=ap_input_yaml, image=new_img)
                 mres = ap0.measure(pd.DataFrame({"x_pix": [x_inj], "y_pix": [y_inj]}), plot=False, background_rms=rms_cut, verbose=0)
                 beta_p = beta_aperture(
                     n=3.0,

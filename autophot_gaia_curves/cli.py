@@ -45,6 +45,24 @@ def main() -> None:
         default=Path("svo_curves"),
         help="Directory to cache SVO-downloaded curves",
     )
+    parser.add_argument(
+        "--min-sources",
+        type=int,
+        default=25,
+        help="Grow the cone until this many XP sources are found (0 disables)",
+    )
+    parser.add_argument(
+        "--max-radius-deg",
+        type=float,
+        default=1.0,
+        help="Hard cap on cone growth [deg]",
+    )
+    parser.add_argument(
+        "--grow-factor",
+        type=float,
+        default=1.5,
+        help="Radius multiplier per retry while under --min-sources",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -52,6 +70,12 @@ def main() -> None:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
+    try:
+        from functions import cap_console_lines
+    except ImportError:
+        pass
+    else:
+        cap_console_lines(logging.getLogger().handlers, extra_reserve=26)
 
     builder = GaiaCurveCatalogBuilder()
     local_curves = builder.parse_mapping(args.curve, "--curve")
@@ -66,6 +90,10 @@ def main() -> None:
         out_csv=args.out_csv,
         svo_filters=svo_curves if svo_curves else None,
         curve_cache_dir=args.curve_cache_dir,
+        gaia_xp_show_progress=True,
+        gaia_xp_min_sources=args.min_sources,
+        gaia_xp_max_radius_deg=args.max_radius_deg,
+        gaia_xp_grow_factor=args.grow_factor,
     )
 
 

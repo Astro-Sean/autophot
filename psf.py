@@ -11,34 +11,64 @@ autophot pipeline.
 # ---------------------------------------------------------------------------
 # Standard library
 # ---------------------------------------------------------------------------
+import hashlib
 import inspect
+import itertools
 import logging
+import math
 import os
 import time
 import traceback
 import copy
+import warnings
 from dataclasses import dataclass
 from math import ceil
+
+# Safeguard: force BLAS/OpenMP to 1 thread before importing numpy.  The MCMC
+# fitter spawns worker processes that inherit this environment; without the
+# cap each worker would open a full OpenBLAS/MKL thread pool and oversubscribe
+# the machine (same convention as aperture.py/main.py).
+for _env in (
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ[_env] = "1"
 
 # ---------------------------------------------------------------------------
 # Third-party
 # ---------------------------------------------------------------------------
 import numpy as np
 import pandas as pd
-import corner
+try:
+    import corner  # type: ignore
+except Exception:  # pragma: no cover
+    corner = None
 import emcee
-from emcee import autocorr
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from matplotlib.gridspec import GridSpec
+# Suppress emcee's autocorrelation warning logger. When quiet=True is passed
+# to get_autocorr_time, emcee logs via logging.warning() instead of raising,
+# producing a flood of "chain is shorter than 50x" messages during adaptive
+# MCMC. These are expected during early iterations and not actionable.
+logging.getLogger("emcee.autocorr").setLevel(logging.ERROR)
 from matplotlib.patches import Circle, Ellipse, Rectangle
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (needed for 3D projection)
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import (
+    gaussian_filter,
+    map_coordinates,
+    maximum_filter,
+)
 from scipy.spatial import cKDTree
 from scipy.fft import fft2, fftshift
 from scipy.optimize import least_squares
+from scipy.special import gammaincc
+from types import SimpleNamespace
 from typing import Optional, Any
 
 # ---------------------------------------------------------------------------
@@ -47,6 +77,7 @@ from typing import Optional, Any
 import astropy.units as u
 from astropy.io import fits
 from astropy.nddata import NDData, StdDevUncertainty
+from astropy.utils.exceptions import AstropyUserWarning
 from astropy.stats import SigmaClip, mad_std, sigma_clipped_stats
 from astropy.table import QTable, Table
 from astropy.visualization import ImageNormalize, LinearStretch, ZScaleInterval
@@ -57,7 +88,12 @@ from astropy.modeling.fitting import TRFLSQFitter, SLSQPLSQFitter
 # Photutils
 # ---------------------------------------------------------------------------
 from photutils.background import LocalBackground, MedianBackground
-from photutils.centroids import centroid_com, centroid_2dg, centroid_sources
+from photutils.centroids import (
+    centroid_com,
+    centroid_2dg,
+    centroid_sources,
+    centroid_symmetry,
+)
 from photutils.psf import (
     EPSFBuilder,
     EPSFFitter,
@@ -67,17 +103,275 @@ from photutils.psf import (
     SourceGrouper,
     IterativePSFPhotometry,
     ImagePSF,
+    GriddedPSFModel,
 )
+
+try:
+    # photutils >=3.1 carries the pixel-integrated analytic PRF
+    # models; earlier releases do not, so the boxcar-integrated
+    # kernel path below remains as the fallback.
+    from photutils.psf import MoffatPRF
+except ImportError:
+    MoffatPRF = None
+
 from photutils.detection import DAOStarFinder
 from photutils.segmentation import detect_threshold
 from photutils.utils import calc_total_error
 from photutils.utils.cutouts import overlap_slices
 
 # ---------------------------------------------------------------------------
+# photutils version compatibility
+# ---------------------------------------------------------------------------
+# photutils >=3.0: build_epsf(stars, epsf=init_epsf) -> EPSFBuildResults
+# photutils  <3.0: build_epsf(stars, init_epsf=init_epsf) -> (epsf, fitted_stars)
+import inspect as _inspect
+
+_build_epsf_sig = _inspect.signature(EPSFBuilder.build_epsf)
+_EPSF_KWARG = "epsf" if "epsf" in _build_epsf_sig.parameters else "init_epsf"
+
+# photutils >=3.0: PSFPhotometry(local_bkg_estimator=...)
+# photutils  <3.0: PSFPhotometry(localbkg_estimator=...)
+_psfphot_sig = _inspect.signature(PSFPhotometry.__init__)
+_LOCALBKG_KWARG = (
+    "local_bkg_estimator"
+    if "local_bkg_estimator" in _psfphot_sig.parameters
+    else "localbkg_estimator"
+)
+
+# photutils >=3.0: make_residual_image(..., include_local_bkg=...)
+# photutils  <3.0: make_residual_image(..., include_localbkg=...)
+_residual_sig = _inspect.signature(PSFPhotometry.make_residual_image)
+_INCLUDE_LOCALBKG_KWARG = (
+    "include_local_bkg"
+    if "include_local_bkg" in _residual_sig.parameters
+    else "include_localbkg"
+)
+
+
+def _call_build_epsf(builder, epsfstars, init_epsf):
+    """Call build_epsf with the version-correct init-epsf kwarg."""
+    return builder.build_epsf(epsfstars, **{_EPSF_KWARG: init_epsf})
+
+
+_deprecated_key_warned = set()
+
+
+def _cfg_get_renamed(cfg, new_key, old_key, default, log):
+    """Read ``new_key`` from ``cfg``, falling back to deprecated ``old_key``.
+
+    The old key is still honoured (a one-time warning is logged) so
+    existing input.yaml files keep working.
+    """
+    if new_key in cfg:
+        return cfg[new_key]
+    if old_key in cfg and old_key not in _deprecated_key_warned:
+        log.warning(
+            "photometry.%s is deprecated; rename it to %s.",
+            old_key,
+            new_key,
+        )
+        _deprecated_key_warned.add(old_key)
+    return cfg.get(old_key, default)
+
+
+def _positive_flux_policy(phot_cfg, is_difference_image):
+    """Whether the fitted PSF amplitude is bounded at >= 0.
+
+    ``psf_fit_positive_flux`` is the master switch.  On difference
+    images the bound still applies by default - a faded source pinned
+    at ~0 reports a clean non-detection, and the inverted-image retry
+    (check_inverted_image) still measures it via the raw bootstrap
+    flux.  ``psf_diff_negative_flux`` opts out where signed residuals
+    are wanted directly.
+    """
+    if not bool(phot_cfg.get("psf_fit_positive_flux", True)):
+        return False
+    if is_difference_image and bool(
+        phot_cfg.get("psf_diff_negative_flux", False)
+    ):
+        return False
+    return True
+
+
+class _ConstantLocalBackground:
+    """photutils-compatible local-background estimator returning a constant.
+
+    Used as the last-resort target-fit background when every annulus is
+    too NaN-heavy to measure: a 1-2 px fallback annulus would sit inside
+    the PSF core and still fail, while the global median is at least a
+    self-consistent sky estimate.  photutils >=3.0 rejects non-
+    LocalBackground estimators, so the target fit instead supplies the
+    constant through the init_params 'local_bkg' column (which overrides
+    the estimator); this class is kept for older-photutils call sites.
+    """
+
+    def __init__(self, value: float):
+        self.value = float(value)
+
+    def __call__(self, data, x, y, mask=None):
+        return np.full(len(np.atleast_1d(x)), self.value, dtype=float)
+
+
+class _BoundedShiftEPSFBuilder(EPSFBuilder):
+    """EPSFBuilder with a bound on cumulative star-centre drift.
+
+    photutils refits each star's centre against the current ePSF with no
+    bound on the fitted shift.  On undersampled data a too-narrow model
+    drags every star's peak pixel onto the core, collapsing the star
+    ensemble onto one or two pixel-phase classes -- the rest of the
+    oversampled grid is then cubic-interpolated rather than measured.
+    Clamping the cumulative drift to ``max_shift_px`` of the measured
+    cutout centre keeps the phase classes populated; legitimate
+    corrections are <0.3 px since the measured centroid is already good
+    to ~0.01 px.
+    """
+
+    def __init__(self, *args, max_shift_px=1.0, orig_centres=None,
+                 epsf_history=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._max_shift_px = float(max_shift_px)
+        # Shared across builders within one build attempt so the bound
+        # applies to the total drift, not per-phase drift.
+        self._orig_centres = orig_centres if orig_centres is not None else {}
+        # Per-flat-star squared centre movement from the last convergence
+        # check (NaN for fit-failed stars); identifies the sources still
+        # drifting when the build fails to converge.
+        self._last_move = None
+        # Per-iteration ePSF history shared across every builder of one
+        # attempt (coarse/refine/prune/retry): photutils stores each
+        # completed iteration via ``self._epsf.append(epsf)`` in its build
+        # loop, so injecting the caller's list is what populates the
+        # history.  When a late build crashes the newest completed model
+        # can then be salvaged instead of losing the empirical PSF
+        # entirely.  Only inject when the base class actually exposes the
+        # list -- a photutils refactor that dropped it should disable
+        # salvage, not silently diverge.
+        self._epsf_hist = epsf_history
+        if epsf_history is not None and isinstance(
+            getattr(self, "_epsf", None), list
+        ):
+            self._epsf = epsf_history
+        # The astropy objective is weights*(model - data): a masked pixel
+        # still reads NaN in the cutout data and 0*NaN propagates into
+        # the objective, raising NonFiniteValueError and aborting the
+        # whole build on one bad star.  Drop non-finite inputs from each
+        # star fit where the fitter supports it.
+        _fk = getattr(self, "_fitter_kwargs", None)
+        try:
+            if isinstance(_fk, dict) and "filter_non_finite" in _inspect.signature(
+                self.fitter.__call__
+            ).parameters:
+                _fk["filter_non_finite"] = True
+        except Exception:
+            pass
+
+    def _process_iteration(self, stars, epsf, iter_num, **kwargs):
+        res = super()._process_iteration(
+            stars, epsf, iter_num, **kwargs
+        )
+        # photutils >=3.1 dropped the builder's ``self._epsf`` history
+        # list; when it is absent keep feeding the caller-provided list
+        # with each completed iteration's model so a later crash can be
+        # salvaged.  Under <3.1 the base build loop appends to _epsf
+        # itself, so this branch stays inert there.
+        try:
+            if getattr(self, "_epsf", None) is None and isinstance(
+                self._epsf_hist, list
+            ):
+                self._epsf_hist.append(res[0])
+        except Exception:
+            pass
+        return res
+
+    def _fit_star(self, epsf, star, *args, **kwargs):
+        # One pathological cutout must not abort the whole build:
+        # photutils only converts benign statuses into fit failures, so
+        # a fitter exception (e.g. NonFiniteValueError from a non-finite
+        # pixel surviving inside the fit region, or a diverging model)
+        # propagates and kills build_epsf.  Report any per-star fit
+        # crash as "fit did not converge"; the normal machinery then
+        # excludes the source after a few iterations while the rest of
+        # the pool still yields a model.
+        try:
+            return super()._fit_star(epsf, star, *args, **kwargs)
+        except Exception:
+            star = copy.copy(star)
+            star._fit_info = None
+            star._fit_error_status = 2
+            return star
+
+    def _fit_stars(self, epsf, stars):
+        for s in stars.all_stars:
+            key = getattr(s, "id_label", id(s))
+            if key not in self._orig_centres:
+                self._orig_centres[key] = tuple(s.cutout_center)
+        stars = super()._fit_stars(epsf, stars)
+        m = self._max_shift_px
+        if m <= 0:
+            return stars
+        for s in stars.all_stars:
+            if not hasattr(s, "cutout_center"):
+                continue
+            orig = self._orig_centres.get(getattr(s, "id_label", id(s)))
+            if orig is None:
+                continue
+            cx, cy = s.cutout_center
+            nx = min(max(cx, orig[0] - m), orig[0] + m)
+            ny = min(max(cy, orig[1] - m), orig[1] + m)
+            if (nx, ny) != (cx, cy):
+                s.cutout_center = (nx, ny)
+        return stars
+
+    def _check_convergence(self, stars, centers, fit_failed):
+        res = super()._check_convergence(stars, centers, fit_failed)
+        # Store the per-star squared centre movement expanded to the
+        # flat-star order so the caller can prune the entries still
+        # moving after a non-converged build.  photutils <3.1 returned
+        # the per-star array as res[1]; >=3.1 returns
+        # (converged, fraction, max_dist_sq, new_centers), so the
+        # per-star term is recomputed from the centers argument there.
+        try:
+            move = np.full(len(stars.all_stars), np.nan)
+            good = np.logical_not(np.asarray(fit_failed, bool))
+            per_star = None
+            try:
+                r1 = np.asarray(res[1], dtype=float)
+                if r1.ndim > 0 and r1.size == int(good.sum()):
+                    per_star = r1
+            except (TypeError, IndexError):
+                per_star = None
+            if per_star is None:
+                new_centers = np.asarray(
+                    stars.cutout_center_flat, dtype=float
+                )
+                dd = np.sum(
+                    (new_centers - np.asarray(centers, dtype=float)) ** 2,
+                    axis=1,
+                )
+                per_star = dd[good]
+            move[good] = per_star
+            self._last_move = move
+        except Exception:
+            self._last_move = None
+        return res
+
+# ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import border_msg, set_size, log_warning_from_exception
-from plotting_utils import get_marker_size
+from functions import (
+    log_step,
+    set_size,
+    log_warning_from_exception,
+    photutils_n_threads,
+    psf_photometry_threads,
+    STATUS,
+)
+from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
+from aperture import (
+    gain_e_per_adu_from_header,
+    resolve_exposure_time_seconds,
+    resolve_gain_e_per_adu,
+)
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -88,7 +382,7 @@ logger = logging.getLogger(__name__)
 def _nddata_clone(nd: NDData, data: Optional[np.ndarray] = None) -> NDData:
     """
     Clone an NDData object without relying on NDData.copy() (not present in older astropy).
-    Preserves uncertainty, unit, wcs, and meta.
+    Preserves uncertainty, unit, wcs, mask, and meta.
     """
     new_data = np.array(nd.data, copy=True) if data is None else data
     unc = getattr(nd, "uncertainty", None)
@@ -100,11 +394,15 @@ def _nddata_clone(nd: NDData, data: Optional[np.ndarray] = None) -> NDData:
             new_unc = StdDevUncertainty(arr)
         except Exception:
             new_unc = copy.deepcopy(unc)
+    new_mask = getattr(nd, "mask", None)
+    if new_mask is not None:
+        new_mask = np.array(new_mask, copy=True)
     return NDData(
         new_data,
         uncertainty=new_unc,
         unit=getattr(nd, "unit", None),
         wcs=getattr(nd, "wcs", None),
+        mask=new_mask,
         meta=copy.deepcopy(getattr(nd, "meta", {})),
     )
 
@@ -114,24 +412,114 @@ def _nddata_clone(nd: NDData, data: Optional[np.ndarray] = None) -> NDData:
 # ===========================================================================
 
 
+def _sanitize_error_array(err: np.ndarray, fallback: float) -> np.ndarray:
+    """Floor a per-pixel sigma array and replace non-finite values.
+
+    np.maximum floors zeros but lets NaN/inf through; photutils fitters
+    abort the whole fit on non-finite errors. Pixels with non-finite
+    errors get the median finite sigma (typical weight) or ``fallback``
+    when nothing finite remains. NaN-data pixels are masked downstream,
+    so this only affects finite-data pixels with uncomputable errors.
+    """
+    np.maximum(err, 1e-12, out=err)
+    bad = ~np.isfinite(err)
+    if np.any(bad):
+        finite = err[~bad]
+        fill = float(np.median(finite)) if finite.size else float(fallback)
+        err[bad] = fill
+    return err
+
+
 def _odd(n: int) -> int:
     """Return *n* if odd, else *n* + 1."""
     n = int(n)
     return n + (n % 2 == 0)
 
 
-def get_quartic_kernel(oversample: int = 4, kernel_size: int = None) -> np.ndarray:
-    """
-    Quartic 2-D smoothing kernel for ePSF construction (Anderson & King 2000).
+def _odd_nearest(x: float) -> int:
+    """Nearest odd integer to *x* (>= 1); ties and exact integers round up."""
+    k = int(round(x))
+    if k % 2 == 0:
+        k += 1 if x >= k else -1
+    return max(1, k)
 
-    Fits a 2-D quartic polynomial via least-squares to an impulse target (1
-    at centre, 0 elsewhere) and returns the normalised result.
+
+def _odd_floor(x: float) -> int:
+    """Largest odd integer <= *x* (>= 1)."""
+    k = int(np.floor(x))
+    if k % 2 == 0:
+        k -= 1
+    return max(1, k)
+
+
+def _epsf_ee_radius_native(data, oversampling, ee_frac):
+    """Native-pixel radius enclosing *ee_frac* of the ePSF model flux.
+
+    Returns NaN when the stamp cannot support the measurement.  For a
+    gridded model (3-D data) the largest radius across cells is returned so
+    the caller's window covers every spatial variant.  Negative wing noise
+    is clipped so the cumulative sum stays monotonic.
+    """
+    a = np.asarray(data, dtype=float)
+    if a.ndim == 3:
+        radii = [
+            _epsf_ee_radius_native(cell, oversampling, ee_frac) for cell in a
+        ]
+        radii = [r for r in radii if np.isfinite(r)]
+        return float(np.max(radii)) if radii else np.nan
+    if a.ndim != 2 or a.size == 0:
+        return np.nan
+    a = np.where(np.isfinite(a), a, 0.0)
+    cy, cx = (np.array(a.shape) - 1) / 2.0
+    yy, xx = np.mgrid[0 : a.shape[0], 0 : a.shape[1]]
+    r = np.hypot(xx - cx, yy - cy) / max(int(oversampling), 1)
+    # Ring medians are robust to pixel noise: a noise-dominated wing has
+    # near-zero median and does not fake extended flux, while a real wing
+    # (which does contaminate a sky annulus) survives.
+    rbins = np.floor(r).astype(int)
+    n_ring = np.bincount(rbins.ravel())
+    ring_med = np.zeros(len(n_ring))
+    for ri in range(len(n_ring)):
+        vals = a[rbins == ri]
+        ring_med[ri] = np.median(vals) if vals.size else 0.0
+    # A noisy ePSF can carry a median-positive pedestal at large radius
+    # (a few-star build's noise floor), which reads as extended wings.
+    # Two guards reject it: subtract the outer-third pedestal level, then
+    # take the non-increasing envelope of what remains.  Real wings
+    # decline monotonically; a fluctuating floor dips to its lowest ring
+    # and contributes nothing beyond it.
+    floor_r0 = int(np.ceil(0.67 * (len(ring_med) - 1)))
+    if floor_r0 < len(ring_med) - 1:
+        floor = float(np.median(ring_med[floor_r0:]))
+        ring_med = np.clip(ring_med - floor, 0.0, None)
+    ring_med = np.minimum.accumulate(ring_med)
+    cum = np.cumsum(ring_med * n_ring)
+    total = float(cum[-1])
+    if not np.isfinite(total) or total <= 0:
+        return np.nan
+    k = int(np.searchsorted(cum, ee_frac * total))
+    return float(min(k, len(cum) - 1))
+
+
+def get_quartic_kernel(
+    oversample: int = 4, kernel_size: int = None, degree: int = None
+) -> np.ndarray:
+    """
+    Polynomial smoothing kernel for ePSF construction (Anderson & King 2000).
+
+    Fits a 2-D polynomial via least-squares to an impulse target (1 at
+    centre, 0 elsewhere) and returns the normalised result.
 
     Parameters
     ----------
     oversample   : int   oversampling factor; governs default kernel_size
     kernel_size  : int or None  odd kernel side length; defaults to
                    min(2*oversample + 1, 7)
+    degree       : int or None  polynomial degree; if None, quartic (4) for
+                   kernel_size >= 5 and quadratic (2) for 3x3. A 3x3 grid
+                   (9 points) cannot constrain the 14 free quartic terms --
+                   the least-squares fit then interpolates the impulse and
+                   returns an identity kernel, silently disabling smoothing.
 
     Returns
     -------
@@ -141,6 +529,11 @@ def get_quartic_kernel(oversample: int = 4, kernel_size: int = None) -> np.ndarr
         kernel_size = min(2 * oversample + 1, 7)
     if kernel_size % 2 == 0:
         kernel_size += 1
+    if kernel_size <= 1:
+        return np.ones((1, 1))
+
+    if degree is None:
+        degree = 4 if kernel_size >= 5 else 2
 
     half = kernel_size // 2
     y, x = np.mgrid[-half : half + 1, -half : half + 1]
@@ -148,46 +541,43 @@ def get_quartic_kernel(oversample: int = 4, kernel_size: int = None) -> np.ndarr
     target = np.zeros((kernel_size, kernel_size))
     target[half, half] = 1.0
 
+    if degree >= 4:
+        terms = [
+            x, y, x**2, x * y, y**2, x**3, x**2 * y, x * y**2, y**3,
+            x**4, x**3 * y, x**2 * y**2, x * y**3, y**4,
+        ]
+    else:
+        terms = [x, y, x**2, x * y, y**2]
+
     def _residuals(p):
-        model = (
-            1
-            + p[0] * x
-            + p[1] * y
-            + p[2] * x**2
-            + p[3] * x * y
-            + p[4] * y**2
-            + p[5] * x**3
-            + p[6] * x**2 * y
-            + p[7] * x * y**2
-            + p[8] * y**3
-            + p[9] * x**4
-            + p[10] * x**3 * y
-            + p[11] * x**2 * y**2
-            + p[12] * x * y**3
-            + p[13] * y**4
-        )
+        model = np.ones_like(x, dtype=float)
+        for coef, term in zip(p, terms):
+            model = model + coef * term
         return (model - target).ravel()
 
-    res = least_squares(_residuals, np.zeros(14))
-    p = res.x
-    kernel = (
-        1
-        + p[0] * x
-        + p[1] * y
-        + p[2] * x**2
-        + p[3] * x * y
-        + p[4] * y**2
-        + p[5] * x**3
-        + p[6] * x**2 * y
-        + p[7] * x * y**2
-        + p[8] * y**3
-        + p[9] * x**4
-        + p[10] * x**3 * y
-        + p[11] * x**2 * y**2
-        + p[12] * x * y**3
-        + p[13] * y**4
-    )
-    return kernel / kernel.sum()
+    res = least_squares(_residuals, np.zeros(len(terms)))
+    kernel = np.ones_like(x, dtype=float)
+    for coef, term in zip(res.x, terms):
+        kernel = kernel + coef * term
+    total = kernel.sum()
+    if not np.isfinite(total) or total == 0:
+        ident = np.zeros((kernel_size, kernel_size))
+        ident[half, half] = 1.0
+        return ident
+    kernel = kernel / total
+    # Reject degenerate fits: a smoothing kernel must be finite, peaked at
+    # its centre, and bounded in L1 norm (large negative sidelobes would
+    # sharpen/ring instead of smoothing).
+    l1 = float(np.sum(np.abs(kernel)))
+    if (
+        not np.all(np.isfinite(kernel))
+        or kernel[half, half] <= 0
+        or l1 > 3.0
+    ):
+        ident = np.zeros((kernel_size, kernel_size))
+        ident[half, half] = 1.0
+        return ident
+    return kernel
 
 
 def get_smoothing_kernel(
@@ -196,8 +586,10 @@ def get_smoothing_kernel(
     oversample: int = 4,
     kernel_size: int | None = None,
     kind: str = "quartic",
-    size_scale_fwhm: float = 0.8,
+    size_scale_px: float = 1.0,
     size_max: int = 9,
+    max_fwhm_frac: float = 1.25,
+    cap_min_px: float = 1.75,
 ) -> np.ndarray:
     """
     Return a smoothing kernel for ePSF construction.
@@ -208,33 +600,83 @@ def get_smoothing_kernel(
     Parameters
     ----------
     fwhm : float
-        PSF FWHM in native pixels.
+        PSF FWHM in native pixels.  Bounds the kernel footprint via
+        ``max_fwhm_frac``: smoothing on scales wider than the PSF core
+        broadens the ePSF measurably (synthetic undersampled builds:
+        ~1.1xFWHM footprint -> ~+3% FWHM, >=1.5xFWHM -> +10-25%), but on
+        real thin-sampled fields under-smoothing is worse -- the per-iteration
+        residual noise walks the ePSF core sharp, and ~1.25xFWHM kernels
+        recovered the true effective width where ~1xFWHM kernels collapsed
+        ~10% narrow.
     oversample : int
         ePSF oversampling factor (kernel is defined on the oversampled grid).
     kernel_size : int or None
-        Explicit odd kernel size on oversampled grid. If None, auto-size from
-        fwhm*oversample with a clamp.
-    kind : {"quartic","gaussian"}
-        Kernel family.
-    size_scale_fwhm : float
-        Auto kernel size scale, size ~= scale*(oversample*fwhm).
+        Explicit odd kernel size on oversampled grid. If None, auto-size to
+        ~``size_scale_px`` native pixels (kernel_size ~ scale*oversample).
+        Explicit sizes still respect the ``max_fwhm_frac`` footprint cap.
+    kind : {"quartic","quadratic","gaussian","auto","none"}
+        Kernel family.  "quadratic" forces the 2-D quadratic basis (also
+        used automatically when the kernel is smaller than 5x5, where a
+        quartic fit is underdetermined).  "auto" mirrors the photutils
+        3.1 'auto' option on the installed 3.0 API: a quartic kernel
+        sized to 0.7x the FWHM in oversampled grid points, disabled when
+        that footprint spans fewer than 5 grid points.  "none" returns
+        ``None``, which disables smoothing (EPSFBuilder accepts
+        ``smoothing_kernel=None``).
+    size_scale_px : float
+        Target kernel footprint in NATIVE pixels.  The Anderson & King (2000)
+        kernel is a 5x5 quartic on a 4x-oversampled grid (1.25 px footprint);
+        Godden & Blundell (2025, RAS TI) find ~1 px optimal -- larger kernels
+        erase real ePSF structure and introduce pixel-phase photometry
+        errors, while at small oversampling (1-2) smoothing should be minimal
+        or absent.  scale=1.0 reproduces the canonical behaviour
+        (osamp=4 -> 5x5, osamp=2 -> 3x3, osamp=1 -> identity).
     size_max : int
         Maximum auto kernel size (odd).
+    max_fwhm_frac : float
+        Footprint cap as a fraction of ``fwhm``.  The realised kernel is the
+        largest odd size whose footprint stays within the cap.  <=0 disables
+        the cap.
+    cap_min_px : float
+        Floor on the footprint cap in native pixels.  For the most
+        undersampled PSFs (FWHM ~1.5 px) a ~1.75 px kernel is still optimal
+        on synthetic builds -- the cap would otherwise forbid any effective
+        kernel.
     """
     try:
         osamp = max(1, int(oversample))
     except Exception:
         osamp = 1
 
-    if kernel_size is None:
+    explicit_size = kernel_size is not None
+    if explicit_size:
+        kernel_size = _odd(int(kernel_size))
+    else:
         try:
-            fw = float(fwhm)
+            scale_px = float(size_scale_px)
         except Exception:
-            fw = np.nan
-        base = 2 * osamp + 1  # conservative fallback
-        if np.isfinite(fw) and fw > 0:
-            base = int(np.ceil(float(size_scale_fwhm) * float(osamp) * fw))
-        base = max(3, base)
+            scale_px = 1.0
+        if not np.isfinite(scale_px) or scale_px <= 0:
+            scale_px = 1.0
+        _auto_cells = np.nan
+        if str(kind).strip().lower() == "auto":
+            # photutils 'auto' semantics: a least-squares quartic kernel
+            # whose footprint is 0.7x the ePSF FWHM in oversampled grid
+            # points.  The ePSF is the pixel-integrated PSF, so the image
+            # FWHM is the right proxy for its per-iteration width; fall
+            # back to 'quartic' when the FWHM is unmeasurable.
+            try:
+                _f_auto = float(fwhm)
+            except Exception:
+                _f_auto = np.nan
+            if np.isfinite(_f_auto) and _f_auto > 0:
+                scale_px = 0.7 * _f_auto
+                _auto_cells = scale_px * osamp
+            else:
+                logging.getLogger(__name__).warning(
+                    "psf_smoothing_kernel='auto' needs a finite FWHM; "
+                    "using 'quartic'."
+                )
         try:
             mx = int(size_max)
         except Exception:
@@ -242,11 +684,47 @@ def get_smoothing_kernel(
         mx = max(3, mx)
         if mx % 2 == 0:
             mx += 1
-        kernel_size = _odd(min(base, mx))
-    else:
-        kernel_size = _odd(int(kernel_size))
+        kernel_size = min(_odd_nearest(scale_px * osamp), mx)
+
+    try:
+        frac = float(max_fwhm_frac)
+    except Exception:
+        frac = 1.25
+    if frac > 0 and np.isfinite(fwhm) and float(fwhm) > 0:
+        try:
+            floor_px = float(cap_min_px)
+        except Exception:
+            floor_px = 1.75
+        if not np.isfinite(floor_px) or floor_px <= 0:
+            floor_px = 1.75
+        cap_px = max(floor_px, frac * float(fwhm))
+        cap_cells = _odd_floor(cap_px * osamp)
+        if kernel_size > cap_cells:
+            if explicit_size:
+                logging.getLogger(__name__).warning(
+                    "psf_smoothing_kernel_size=%d (footprint %.2f px) exceeds "
+                    "the %.2gxFWHM cap (%.2f px) -- capping to %d.",
+                    kernel_size,
+                    kernel_size / osamp,
+                    frac,
+                    cap_px,
+                    cap_cells,
+                )
+            kernel_size = cap_cells
 
     k = str(kind).strip().lower()
+    if k == "auto":
+        # photutils skips smoothing entirely when the 0.7xFWHM kernel
+        # would span fewer than 5 oversampled grid points (heavily
+        # undersampled ePSFs); the check uses the raw width, not the
+        # odd-rounded kernel size.
+        _width_cells = float(kernel_size) if explicit_size else _auto_cells
+        if np.isfinite(_width_cells) and _width_cells < 5:
+            return None
+        k = "quartic"
+    if k in ("none", "off", "false"):
+        # Explicit opt-out: EPSFBuilder accepts smoothing_kernel=None.
+        return None
     if k == "gaussian":
         # sigma in oversampled pixels; small sigma keeps the kernel local.
         sigma = max(0.6, 0.25 * float(kernel_size))
@@ -255,9 +733,2413 @@ def get_smoothing_kernel(
         ker = np.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
         ker = ker / np.sum(ker)
         return ker
+    if k not in ("quartic", "quadratic"):
+        log_module = logging.getLogger(__name__)
+        log_module.warning(
+            "Unknown psf_smoothing_kernel %r; using 'quartic'.",
+            kind,
+        )
+        k = "quartic"
+    # A 3x3 grid cannot constrain a quartic; force the quadratic basis.
+    degree = 2 if (k == "quadratic" or kernel_size < 5) else 4
+    return get_quartic_kernel(osamp, kernel_size, degree=degree)
 
-    # Default: quartic
-    return get_quartic_kernel(osamp, kernel_size)
+
+def _parse_spatial_grid(value) -> Optional[object]:
+    """Normalise the ``psf_spatial_grid`` config value.
+
+    Returns ``None`` when the spatially-varying PSF build is disabled,
+    ``"auto"`` for automatic grid sizing, or an int grid dimension N
+    (NxN cells, clamped to 2-3).
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        return "auto"
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("false", "off", "none", "0", ""):
+            return None
+        if v == "auto":
+            return "auto"
+        try:
+            value = int(v)
+        except ValueError:
+            return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    if n <= 1:
+        return None
+    return max(2, min(3, n))
+
+
+def _axis_edge_candidates(L, n, t, min_w):
+    """Candidate boundary vectors for one axis of an n-cell grid.
+
+    Yields strictly increasing edge vectors (length n + 1, endpoints
+    pinned to 0 and L) covering three families: the uniform split,
+    uniformly shifted splits, and placements where the interior edges
+    nearest the target coordinate ``t`` bracket it near a cell centre.
+    Every yielded vector keeps all cells at least ``min_w`` wide.
+    """
+    L = float(L)
+    w = L / n
+    base = np.linspace(0.0, L, n + 1)
+    spots = []
+    for i in range(1, n):
+        p = {float(base[i]), t - 0.5 * w, t + 0.5 * w}
+        for f in (-0.4, -0.25, 0.25, 0.4):
+            p.add(float(base[i]) + f * w)
+        spots.append(sorted(v for v in p if min_w <= v <= L - min_w))
+    if any(len(s) == 0 for s in spots):
+        return
+    seen = set()
+    for combo in itertools.product(*spots):
+        e = np.concatenate([[0.0], np.asarray(combo, float), [L]])
+        if np.any(np.diff(e) < min_w):
+            continue
+        key = tuple(np.round(e, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        yield e
+
+
+def _choose_target_aware_edges(
+    xs, ys, n, nx, ny, tx, ty, min_per_cell, require_all
+):
+    """Search non-uniform grid edges that centre the target's cell on it.
+
+    A layout is valid only when the cell containing ``(tx, ty)`` holds at
+    least ``min_per_cell`` candidates and the usual population rule
+    passes - every cell populated when ``require_all`` (auto sizing),
+    else at least half the cells.  Among valid layouts the score
+    maximises the target's normalised clearance to its nearest cell edge
+    (0.5 = dead centre), then prefers a better-populated target cell,
+    then more populated cells overall.  Returns ``(xedges, yedges,
+    counts)`` or ``None`` when no layout improves on failing the rules.
+    """
+    n_cells = n * n
+    min_populated = max(2, int(np.ceil(0.5 * n_cells)))
+    # Cells thinner than ~2 ePSF cutouts carry no independent spatial
+    # information; 15% of the uniform width is a conservative floor.
+    min_wx = max(30.0, 0.15 * nx / n)
+    min_wy = max(30.0, 0.15 * ny / n)
+    best = None
+    best_key = None
+    for xe in _axis_edge_candidates(nx, n, tx, min_wx):
+        for ye in _axis_edge_candidates(ny, n, ty, min_wy):
+            cnt, _, _ = np.histogram2d(ys, xs, bins=[ye, xe])
+            pop = cnt >= min_per_cell
+            ix = int(np.clip(np.digitize([tx], xe[1:-1]), 0, n - 1)[0])
+            iy = int(np.clip(np.digitize([ty], ye[1:-1]), 0, n - 1)[0])
+            if not pop[iy, ix]:
+                continue
+            if require_all:
+                if int(cnt.min()) < min_per_cell:
+                    continue
+            elif int(pop.sum()) < min_populated:
+                continue
+            fx = min(tx - xe[ix], xe[ix + 1] - tx) / (xe[ix + 1] - xe[ix])
+            fy = min(ty - ye[iy], ye[iy + 1] - ty) / (ye[iy + 1] - ye[iy])
+            key = (
+                min(fx, fy),
+                min(int(cnt[iy, ix]), 4 * min_per_cell),
+                int(pop.sum()),
+                int(cnt.min()),
+            )
+            if best_key is None or key > best_key:
+                best_key = key
+                best = (xe, ye, cnt.astype(int))
+    return best
+
+
+def _repair_starved_cells(
+    xs, ys, xe, ye, min_per_cell, min_w=30.0, tx=None, ty=None,
+    max_cells=None,
+):
+    """Grow or merge grid cells until every cell has >= min_per_cell.
+
+    Growth moves a shared edge outward into the neighbouring cell while
+    the neighbour keeps >= min_per_cell sources and >= min_w width.
+    Merging removes a shared interior edge, joining the whole row/column
+    pair -- a rectangular fiducial grid cannot express a single-cell
+    merge.  An axis is never merged below 2 cells.  The target's cell is
+    repaired first so the grid keeps its local PSF where it matters.
+    ``max_cells`` additionally caps the total cell count, merging the
+    least costly row/column pairs until the grid fits.
+    Returns ``(xedges, yedges, counts)`` after repair.
+    """
+    xe = np.asarray(xe, float).copy()
+    ye = np.asarray(ye, float).copy()
+    xs = np.asarray(xs, float)
+    ys = np.asarray(ys, float)
+
+    def _counts(xe_, ye_):
+        return np.histogram2d(ys, xs, bins=[ye_, xe_])[0].astype(int)
+
+    for _ in range(10):
+        cnt = _counts(xe, ye)
+        nyc, nxc = cnt.shape
+        starved = np.argwhere(cnt < min_per_cell)
+        if len(starved) == 0:
+            break
+        # Repair the target's cell first when it is starved.
+        pick = None
+        if tx is not None and ty is not None:
+            tix = int(np.clip(np.digitize([tx], xe[1:-1]), 0, nxc - 1)[0])
+            tiy = int(np.clip(np.digitize([ty], ye[1:-1]), 0, nyc - 1)[0])
+            if cnt[tiy, tix] < min_per_cell:
+                pick = (tiy, tix)
+        if pick is None:
+            order = np.argsort(cnt[starved[:, 0], starved[:, 1]])
+            iy0, ix0 = starved[order[0]]
+            pick = (int(iy0), int(ix0))
+        iy, ix = pick
+        deficit = min_per_cell - int(cnt[iy, ix])
+
+        moves = []
+        if ix > 0:
+            moves.append(("x", ix, -1))
+        if ix < nxc - 1:
+            moves.append(("x", ix + 1, +1))
+        if iy > 0:
+            moves.append(("y", iy, -1))
+        if iy < nyc - 1:
+            moves.append(("y", iy + 1, +1))
+
+        # 1) Try to grow: shift one shared edge into the neighbour so the
+        # starved cell annexes enough sources.  Moving an edge transfers
+        # sources across ALL rows/columns it bounds, not just the starved
+        # cell's -- accept a position only if it fixes the starved cell
+        # without pushing any cell in the robbed column/row below the
+        # floor.
+        grown = False
+        for axis, ei, d in moves:
+            if axis == "x":
+                n_i = ix + d
+                lo_n, hi_n = xe[n_i], xe[n_i + 1]
+                sel = (
+                    (ys >= ye[iy]) & (ys < ye[iy + 1])
+                    & (xs >= lo_n) & (xs < hi_n)
+                )
+                vals = np.sort(xs[sel])
+            else:
+                n_i = iy + d
+                lo_n, hi_n = ye[n_i], ye[n_i + 1]
+                sel = (
+                    (xs >= xe[ix]) & (xs < xe[ix + 1])
+                    & (ys >= lo_n) & (ys < hi_n)
+                )
+                vals = np.sort(ys[sel])
+            if d < 0:
+                vals = vals[::-1]  # nearest to shared edge first
+            # Candidate positions annex k of the neighbour's row/column
+            # sources; try the smallest that fixes the starved cell.
+            for take in range(deficit, len(vals) + 1):
+                new_edge = (
+                    vals[take - 1] - 1e-3 if d < 0 else vals[take - 1] + 1e-3
+                )
+                if d < 0 and new_edge - lo_n < min_w:
+                    break
+                if d > 0 and hi_n - new_edge < min_w:
+                    break
+                xe_t = xe.copy() if axis == "x" else xe
+                ye_t = ye.copy() if axis == "y" else ye
+                if axis == "x":
+                    xe_t[ei] = new_edge
+                else:
+                    ye_t[ei] = new_edge
+                c2 = _counts(xe_t, ye_t)
+                if axis == "x":
+                    robbed = c2[:, n_i]
+                    target_cell = c2[iy, ix]
+                else:
+                    robbed = c2[n_i, :]
+                    target_cell = c2[iy, ix]
+                if target_cell < min_per_cell:
+                    continue
+                if robbed.min() < min_per_cell:
+                    break  # farther positions only rob more
+                xe, ye = xe_t, ye_t
+                grown = True
+                break
+            if grown:
+                break
+
+        if grown:
+            continue
+
+        # 2) Merge: remove the shared edge whose removal leaves the best
+        # worst-cell count.  Whole row/column merge (rectangular grids
+        # cannot merge a single cell); never reduce an axis below 2 cells.
+        best = None
+        for axis, ei, d in moves:
+            if axis == "x":
+                if len(xe) <= 3:
+                    continue
+                xe2, ye2 = np.delete(xe, ei), ye
+            else:
+                if len(ye) <= 3:
+                    continue
+                ye2, xe2 = np.delete(ye, ei), xe
+            c2 = _counts(xe2, ye2)
+            key = (int(c2.min()),)
+            if best is None or key > best[0]:
+                best = (key, xe2, ye2)
+        if best is None:
+            break
+        _, xe, ye = best
+
+    # Enforce the cell budget: drop the interior edge whose removal keeps
+    # the best worst-cell count, until the grid fits max_cells.
+    if max_cells is not None:
+        while (len(xe) - 1) * (len(ye) - 1) > max_cells:
+            best = None
+            if len(xe) > 3:
+                for ei in range(1, len(xe) - 1):
+                    c2 = _counts(np.delete(xe, ei), ye)
+                    key = (int(c2.min()),)
+                    if best is None or key > best[0]:
+                        best = (key, np.delete(xe, ei), ye)
+            if len(ye) > 3:
+                for ei in range(1, len(ye) - 1):
+                    c2 = _counts(xe, np.delete(ye, ei))
+                    key = (int(c2.min()),)
+                    if best is None or key > best[0]:
+                        best = (key, xe, np.delete(ye, ei))
+            if best is None:
+                break
+            _, xe, ye = best
+
+    cnt = _counts(xe, ye)
+    n_starved = int(np.count_nonzero(cnt < min_per_cell))
+    if n_starved:
+        logging.getLogger(__name__).warning(
+            "Grid repair incomplete: %d of %d cells still have < %d "
+            "sources; those cells' local ePSFs will be under-constrained.",
+            n_starved,
+            int(cnt.size),
+            int(min_per_cell),
+        )
+    return xe, ye, cnt
+
+
+def _select_adaptive_oversample(
+    n_stars: int, phot_cfg: dict, min_samples: float = None
+) -> int:
+    """Adaptive ePSF oversampling factor for undersampled images.
+
+    With N stars and oversampling k each oversampled gridpoint is
+    constrained by ~N/k^2 star residuals (each star only lands on the
+    gridpoints of its own pixel-phase class).  Below ~3 samples per
+    gridpoint the sigma-clipped median cannot function: most cells hold
+    0-1 noisy residuals (empty cells are cubic-interpolated), so
+    single-star noise and contamination enter the ePSF at full
+    amplitude.  Production undersampled fields at ~1-3 samples/cell show
+    pathological wings (negative-flux fractions >0.5); at ~5+/cell the
+    same star pools produce clean stamps.  The earlier assumption that
+    thin sampling could be handled by the smoothing kernel alone does
+    not hold on real data, so the factor is chosen to keep the median
+    functional rather than maximise grid resolution.
+
+    Returns ``(oversample, understaffed)``: ``understaffed`` is True when
+    the star pool is too thin for the chosen factor to give ~min_samples
+    residuals per gridpoint, so the caller can flag the resulting ePSF as
+    low-confidence instead of treating a 1x fallback as healthy.
+    """
+    log = logging.getLogger(__name__)
+    n_final = int(n_stars)
+    hard_min = int(phot_cfg.get("psf_oversample_hard_min_stars", 5))
+    if n_final < hard_min:
+        # N < ~5 is also below what a 1x ePSF needs to be reliable: the
+        # caller must know the ensemble itself is understaffed, not just
+        # that oversampling was declined.
+        log.warning(
+            "Adaptive oversampling: only %d PSF stars (< %d threshold); "
+            "keeping oversample=1x. The 1x ePSF built from this pool is "
+            "likely noise-dominated - treat downstream PSF photometry as "
+            "low-confidence.",
+            n_final, hard_min,
+        )
+        return 1, True
+    if min_samples is None:
+        min_samples = float(
+            phot_cfg.get("psf_oversample_min_samples_per_pixel", 3.0)
+        )
+    else:
+        min_samples = float(min_samples)
+    max_os = max(1, int(phot_cfg.get("psf_oversample_max", 4)))
+    min_os = max(1, int(phot_cfg.get("psf_oversample_min_undersampled", 1)))
+    if min_samples > 0:
+        os_from_samples = int(np.floor(np.sqrt(n_final / min_samples)))
+    else:
+        os_from_samples = max_os
+    oversample = max(min_os, min(os_from_samples, max_os))
+    log.info(
+        "Adaptive oversampling: %d PSF stars -> %dx oversampling "
+        "(~%.1f samples/gridpoint; undersampled floor %dx, max %dx, "
+        "threshold %.2f samples/gridpoint)",
+        n_final, oversample, n_final / float(oversample) ** 2,
+        min_os, max_os, min_samples,
+    )
+    return oversample, n_final < int(
+        np.ceil(min_samples * oversample * oversample)
+    )
+
+
+def _epsf_phase_diagnostics(stars, oversample):
+    """Subpixel-phase coverage and uniformity of the fitted star centres.
+
+    The photutils ePSF guidance requires each of the ``oversample**2``
+    subpixel cells to hold several star centres (~10 for randomly placed
+    stars) and the fitted phases to be uniformly distributed: a strongly
+    non-uniform phase histogram indicates biased centres or a
+    heterogeneous star sample (mixed PSFs, saturated or contaminated
+    cutouts), and thin coverage leaves the oversampled grid
+    noise-dominated.
+
+    Returns a dict of diagnostics; ``uniform_p`` is the chi-square
+    uniformity p-value of the 2-D phase histogram (NaN when the pool is
+    too small for the test to be meaningful).
+    """
+    out = {
+        "n_stars": 0,
+        "samples_per_cell": float("nan"),
+        "coverage": float("nan"),
+        "min_cell": 0,
+        "max_cell": 0,
+        "uniform_p": float("nan"),
+    }
+    osamp = max(1, int(oversample))
+    centres = []
+    for s in stars if stars is not None else []:
+        try:
+            c = np.asarray(s.center, float)
+        except Exception:
+            continue
+        if c.size >= 2 and np.all(np.isfinite(c[:2])):
+            centres.append(c[:2])
+    if not centres:
+        return out
+    centres = np.asarray(centres, float)
+    n = centres.shape[0]
+    ph = centres - np.floor(centres)  # fractional pixel phase in [0, 1)
+    ix = np.clip((ph[:, 0] * osamp).astype(int), 0, osamp - 1)
+    iy = np.clip((ph[:, 1] * osamp).astype(int), 0, osamp - 1)
+    hist = np.zeros((osamp, osamp), dtype=int)
+    np.add.at(hist, (iy, ix), 1)
+    n_cells = osamp * osamp
+    out["n_stars"] = int(n)
+    out["samples_per_cell"] = n / float(n_cells)
+    out["coverage"] = float(np.count_nonzero(hist)) / float(n_cells)
+    out["min_cell"] = int(hist.min())
+    out["max_cell"] = int(hist.max())
+    # Chi-square uniformity is meaningful only once the expected count
+    # per cell is of order a few; sparse pools are non-uniform by chance.
+    if n >= 4 * n_cells:
+        expect = n / float(n_cells)
+        chi2 = float(np.sum((hist - expect) ** 2 / expect))
+        out["uniform_p"] = float(
+            gammaincc(0.5 * (n_cells - 1), 0.5 * chi2)
+        )
+    return out
+
+
+def pixel_integrate_oversampled(data: np.ndarray, oversampling: int) -> np.ndarray:
+    """Apply the square pixel-response to an oversampled PSF array.
+
+    An analytic model (e.g. a Moffat) evaluated on the oversampled grid is
+    the *continuous* PSF; detector data contain the *effective* PSF, i.e.
+    the continuous PSF convolved with the 1x1 native-pixel boxcar.  On a
+    k-oversampled grid a native pixel spans k grid cells, so the pixel
+    response is a k-point uniform filter per axis -- with half-weight edge
+    taps (trapezoid) for even k so the kernel stays centred on a grid point.
+    For undersampled data this is a non-negligible correction: the effective
+    PSF has a ~10% flatter peak and fatter wings than the continuous model.
+    """
+    arr = np.asarray(data, dtype=float)
+    try:
+        k = int(np.atleast_1d(oversampling)[0])
+    except (TypeError, ValueError, IndexError):
+        k = 1
+    k = max(1, k)
+    if k == 1:
+        return arr
+
+    if k % 2 == 0:
+        taps = np.ones(k + 1)
+        taps[0] = taps[-1] = 0.5
+    else:
+        taps = np.ones(k)
+    taps = taps / taps.sum()
+    box = np.outer(taps, taps)
+
+    from scipy.signal import fftconvolve
+
+    conv = fftconvolve(arr, box, mode="same")
+    total = float(np.nansum(conv))
+    if np.isfinite(total) and total > 0:
+        conv = conv / total
+    return conv
+
+
+def _epsf_residual_mad(stars, model, fit_rad_px: float) -> float:
+    """Median per-star residual MAD, normalised by star flux.
+
+    Each star is evaluated at its own cutout centre and flux
+    (``compute_residual_image`` registers the model there), so an
+    empirical model fitted to these stars has every advantage; losing to
+    the analytic model means the empirical model is degraded regardless
+    of shape gates.
+    """
+    if stars is None or model is None:
+        return float("nan")
+    mads = []
+    for s in stars:
+        try:
+            resid = np.asarray(s.compute_residual_image(model), dtype=float)
+            flux = float(getattr(s, "flux", np.nan))
+            if not np.isfinite(flux) or flux <= 0:
+                continue
+            yy, xx = np.indices(resid.shape)
+            cc = np.asarray(s.cutout_center, dtype=float)
+            rr = np.hypot(xx - cc[0], yy - cc[1])
+            vals = resid[rr < fit_rad_px] / flux
+            vals = vals[np.isfinite(vals)]
+            if vals.size < 9:
+                continue
+            mads.append(1.4826 * np.median(np.abs(vals - np.median(vals))))
+        except Exception:
+            continue
+    return float(np.median(mads)) if mads else float("nan")
+
+
+def _epsf_usable(model) -> bool:
+    """Whether an ePSF/PSF model holds finite data with a measurable core.
+
+    A non-converged ePSF built from junk cutouts is a flat noise plate:
+    it passes the finite/range checks yet has no half-max crossing, so
+    the FWHM is unmeasurable.  Such a model is not "degraded" - it is not
+    a PSF at all - so the caller's failure path must treat it as absent.
+    """
+    try:
+        d = np.asarray(getattr(model, "data", None), dtype=float)
+        if d is None or d.size == 0:
+            return False
+        fin = np.isfinite(d)
+        if fin.mean() < 0.5:
+            return False
+        vals = d[fin]
+        if not (np.ptp(vals) > 0 and np.nansum(vals) > 0):
+            return False
+        osamp = int(np.atleast_1d(getattr(model, "oversampling", 1))[0])
+        return np.isfinite(measure_epsf_fwhm_native(d, osamp))
+    except Exception:
+        return False
+
+
+def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
+    """Pixel-integrated Moffat ImagePSF at the given FWHM.
+
+    astropy's Moffat2DKernel calls the power-law index "alpha"; in
+    astronomy it is conventionally the Moffat beta index.  The continuous
+    Moffat is convolved with the square pixel response so the model is an
+    effective PSF, matching both the ePSF fixed point and what PSF
+    photometry needs on pixel-integrated data.  Without this the model is
+    systematically narrower than the true effective PSF on undersampled
+    data.  The stamp is rescaled to the photutils flux convention
+    sum == prod(oversampling); otherwise fitted fluxes come out osamp^2
+    too faint (~3 mag at osamp=4).
+    """
+    osamp = max(1, int(oversampling))
+    beta = max(1.1, float(beta))
+    fwhm = float(fwhm)
+    if not np.isfinite(fwhm) or fwhm <= 0:
+        logging.getLogger(__name__).warning(
+            "Analytic PSF got non-positive FWHM=%s; clamping to 2 px.",
+            fwhm,
+        )
+        fwhm = 2.0
+    # EPSFBuilder requires shape >= osamp * star_dim, plus one along an
+    # axis where that product is even (its own compute_epsf_shape
+    # convention); keep the stamp odd so the peak centres on a sample.
+    n_stamp = int(osamp * cutout_n)
+    if n_stamp % 2 == 0:
+        n_stamp += 1
+    ctr = (n_stamp - 1) / 2.0
+    if MoffatPRF is not None:
+        # photutils >=3.1.dev integrates the analytic Moffat over the
+        # detector pixel with Gauss-Legendre quadrature - exact where the
+        # boxcar path below is a sampled-kernel approximation (a few x
+        # 1e-4 on the peak at osamp=4).  The stamp is evaluated in
+        # native-pixel units so each grid value is the flux through the
+        # detector-pixel square centred there - the ePSF convention.
+        alpha_native = float(fwhm) / (
+            2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0)
+        )
+        yy, xx = np.indices((n_stamp, n_stamp))
+        model = MoffatPRF(
+            flux=1.0,
+            x_0=ctr / osamp,
+            y_0=ctr / osamp,
+            alpha=max(alpha_native, 1e-6),
+            beta=float(beta),
+        )
+        data = model(xx / osamp, yy / osamp)
+        total = float(np.nansum(data))
+        if np.isfinite(total) and total > 0:
+            data = data / total
+        data = data * float(osamp) ** 2
+        return ImagePSF(data=data, x_0=ctr, y_0=ctr, oversampling=osamp)
+    gamma = (osamp * fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0))
+    kernel = Moffat2DKernel(
+        gamma=max(float(gamma), 1e-6),
+        alpha=float(beta),
+        x_size=n_stamp,
+        y_size=n_stamp,
+    )
+    data = pixel_integrate_oversampled(kernel.array, osamp)
+    data = data * float(osamp) ** 2
+    return ImagePSF(data=data, x_0=ctr, y_0=ctr, oversampling=osamp)
+
+
+def _moffat_sum_profile(r, params, n_comp):
+    """Sum of ``n_comp`` Moffat profiles at radii ``r``.
+
+    ``params`` packs ``(amp, gamma, beta)`` triples, or
+    ``(amp, gamma, beta, ox, oy)`` 5-tuples for centre-offset
+    components.  An offset component's radial profile is evaluated
+    along its offset direction (``|r - |offset||``).
+    """
+    params = np.asarray(params, dtype=float).ravel()
+    step = params.size // n_comp
+    v = np.zeros_like(r, dtype=float)
+    for i in range(n_comp):
+        a, g, b = params[step * i : step * i + 3]
+        r_c = r
+        if step >= 5:
+            r_c = np.abs(
+                r - np.hypot(params[step * i + 3], params[step * i + 4])
+            )
+        v += a * (1.0 + (r_c / g) ** 2) ** (-b)
+    return v
+
+
+def _moffat_comps_image(xx, yy, comps, ellipticity=None):
+    """Evaluate the component sum on coordinate arrays.
+
+    ``comps`` entries are ``(amp, gamma, beta[, ox, oy])`` - the
+    optional centre offsets are how the composite represents PSF
+    asymmetry (coma, lopsided wings) that a concentric stack cannot
+    produce.  ``ellipticity`` is the shared ``(q, pa)`` metric applied
+    inside every component.  Coordinates are centred on the star;
+    offsets share their units.
+    """
+    out = np.zeros(np.broadcast(xx, yy).shape, dtype=float)
+    for c in comps:
+        a, g, b = float(c[0]), max(float(c[1]), 1e-6), float(c[2])
+        ox, oy = (float(c[3]), float(c[4])) if len(c) > 4 else (0.0, 0.0)
+        r = _elliptical_radius(xx - ox, yy - oy, ellipticity)
+        out += a * (1.0 + (r / g) ** 2) ** (-b)
+    return out
+
+
+def _elliptical_radius(dx, dy, ellipticity):
+    """Radius in the metric that makes an elongated PSF round.
+
+    ``ellipticity`` is ``(q, theta)``: minor/major axis ratio and the
+    PA of the major axis (radians, +x toward +y).  Returns the plain
+    Euclidean radius when ``ellipticity`` is None.
+    """
+    dx = np.asarray(dx, float)
+    dy = np.asarray(dy, float)
+    if ellipticity is None:
+        return np.hypot(dx, dy)
+    q, theta = ellipticity
+    ct, st = np.cos(theta), np.sin(theta)
+    xp = dx * ct + dy * st
+    yp = -dx * st + dy * ct
+    return np.hypot(xp, yp / max(float(q), 0.1))
+
+
+def _ensemble_ellipticity(stars, fwhm):
+    """Shared PSF elongation (axis ratio, position angle) of the star set.
+
+    Bad tracking/defocus leaves every point source elongated along a
+    common direction (a trailed PSF is a streak).  Circular analytic
+    models then misrepresent the image: per-star second moments are
+    measured inside ~1.5 FWHM of the cutout centre, and the ensemble
+    median axis ratio plus the doubled-angle PA coherence decide
+    whether the elongation is systematic enough to apply.  Returns
+    ``(q, theta)`` with ``q = b/a in (0,1]`` and ``theta`` the PA of
+    the major axis (radians, +x toward +y), or ``None`` when the field
+    is round or the PAs are incoherent.
+    """
+    if stars is None or len(stars) == 0:
+        return None
+    fwhm = max(1.0, float(fwhm))
+    qs, thetas, wts = [], [], []
+    for s in stars:
+        data = np.asarray(getattr(s, "data", None), float)
+        if data.ndim != 2 or data.size == 0:
+            continue
+        ny, nx = data.shape
+        cc = getattr(s, "cutout_center", None)
+        cc = (
+            np.asarray(cc, float)
+            if cc is not None
+            else np.array([(nx - 1) / 2.0, (ny - 1) / 2.0])
+        )
+        yy, xx = np.indices(data.shape)
+        dx, dy = xx - cc[0], yy - cc[1]
+        rr = np.hypot(dx, dy)
+        ok = np.isfinite(data) & (rr < 1.5 * fwhm)
+        m = getattr(s, "mask", None)
+        if m is not None:
+            ok &= ~np.asarray(m, bool)
+        w = np.asarray(getattr(s, "weights", None), float)
+        if w.shape == data.shape:
+            ok &= w > 0
+        if int(ok.sum()) < 9:
+            continue
+        v = np.where(ok, np.clip(data, 0.0, None), 0.0)
+        tot = float(v.sum())
+        if not np.isfinite(tot) or tot <= 0:
+            continue
+        mxx = float((v * dx * dx).sum() / tot)
+        myy = float((v * dy * dy).sum() / tot)
+        mxy = float((v * dx * dy).sum() / tot)
+        tr, det = mxx + myy, mxx * myy - mxy * mxy
+        disc = tr * tr / 4.0 - det
+        if not np.isfinite(disc) or disc < 0 or tr <= 0:
+            continue
+        sq = np.sqrt(disc)
+        lam_a, lam_b = 0.5 * tr + sq, max(0.5 * tr - sq, 1e-9)
+        qs.append(np.sqrt(lam_b / lam_a))
+        thetas.append(0.5 * np.arctan2(2.0 * mxy, mxx - myy))
+        wts.append(tot)
+    if len(qs) < 3:
+        return None
+    qs = np.asarray(qs)
+    thetas = np.asarray(thetas)
+    wts = np.asarray(wts)
+    # Double the angle so the 180-degree PA ambiguity is removed before
+    # the coherence/weighted-mean tests.
+    z = wts * np.exp(2j * thetas)
+    coh = float(np.abs(z.sum()) / np.sum(wts))
+    q_med = float(np.median(qs))
+    # Coherence gate: random PAs average |exp(2i*theta)| ~ 1/sqrt(N)
+    # (~0.35 at N=8, p99 ~0.72), while a shared trail direction with
+    # +/-15 deg of per-star scatter stays above ~0.8.  0.7 separates
+    # the two; below it no single PA represents the field and a round
+    # model is the honest fallback.
+    if not np.isfinite(q_med) or q_med > 0.9 or coh < 0.7:
+        return None
+    theta = 0.5 * np.arctan2(z.sum().imag, z.sum().real)
+    return max(q_med, 0.1), float(theta)
+
+
+def _composite_star_profile(s, fwhm, ellipticity, snr_min=5.0):
+    """Per-star arrays shared by the composite fit and the analytic plot.
+
+    Returns ``dict(data, ok, rr, flux, cc, x_ok, y_ok, v)`` where
+    ``data`` is the pedestal-subtracted cutout, ``ok`` marks the usable
+    fit pixels, ``rr`` is the (possibly elliptical) radius in native
+    pixels, ``flux`` the normalisation, ``cc`` the measured cutout
+    centre, ``x_ok``/``y_ok`` the pixel coordinates of the fit pixels,
+    and ``v`` the normalised data values on them - or None when the
+    cutout is unusable.  ``snr_min`` floors the peak detection
+    significance (peak above sky / sky sigma): a cutout that does not
+    clearly contain a star drags the shared profile instead of
+    constraining it.  Keeping the selection here means the diagnostic
+    plot shows residuals for exactly the stars the joint fit used.
+    """
+    data = np.asarray(getattr(s, "data", None), float)
+    if data.size == 0:
+        return None
+    ny, nx = data.shape
+    cc_attr = getattr(s, "cutout_center", None)
+    if cc_attr is None:
+        cc = np.array([(nx - 1) / 2.0, (ny - 1) / 2.0])
+    else:
+        cc = np.asarray(cc_attr, float)
+    yy, xx = np.indices(data.shape)
+    rr = _elliptical_radius(xx - cc[0], yy - cc[1], ellipticity)
+    ok = np.isfinite(data)
+    m = getattr(s, "mask", None)
+    if m is not None:
+        ok &= ~np.asarray(m, bool)
+    w = np.asarray(getattr(s, "weights", None), float)
+    if w.shape != data.shape:
+        w = np.ones_like(data)
+    ok &= w > 0
+    if int(ok.sum()) < 9:
+        return None
+    flux = float(getattr(s, "flux", np.nan))
+    if not np.isfinite(flux) or flux <= 0:
+        flux = np.nansum(np.where(ok & (rr < 1.5 * fwhm), data, 0.0))
+    if not np.isfinite(flux) or flux <= 0:
+        return None
+    # Per-cutout residual sky: the global mesh subtraction leaves a
+    # small offset that the positive-amplitude model cannot
+    # represent (a negative pedestal otherwise pins every fitted
+    # amplitude at zero).  Measure it outside ~4 FWHM so the star
+    # wings do not bias the estimate, then recompute the flux on the
+    # corrected cutout - rescaling an externally supplied aperture sum
+    # by the whole cutout area over-corrects it.  The same annulus
+    # gives the sky sigma for the detection gate below.
+    ann = ok & (rr > 4.0 * fwhm)
+    sigma_ann = float("nan")
+    if int(ann.sum()) >= 50:
+        _a = data[ann]
+        bkg_i = float(np.nanmedian(_a))
+        sigma_ann = 1.4826 * float(np.nanmedian(np.abs(_a - bkg_i)))
+        if np.isfinite(bkg_i):
+            data = data - bkg_i
+            flux = np.nansum(np.where(ok & (rr < 1.5 * fwhm), data, 0.0))
+    if not np.isfinite(flux) or flux <= 0:
+        return None
+    # A star whose normalised profile peaks far above unity has a
+    # misestimated flux (near-zero or background-swamped); its rows
+    # would dominate the joint fit and pin every amplitude at zero.
+    if float(np.nanmax(np.abs(data[ok] / flux))) > 1.0:
+        return None
+    # Detection gate: the peak pixel must clearly stand above the sky
+    # noise.  A noise clump that reaches the pool contributes nothing
+    # real to the shared shape and (fitted or not) only marks the
+    # ensemble as thinner than the cutout count suggests.
+    if (
+        float(snr_min) > 0
+        and np.isfinite(sigma_ann)
+        and sigma_ann > 0
+        and float(np.nanmax(data[ok])) / sigma_ann < float(snr_min)
+    ):
+        return None
+    return {
+        "data": data,
+        "ok": ok,
+        "rr": rr,
+        "flux": flux,
+        "cc": cc,
+        "x_ok": xx[ok],
+        "y_ok": yy[ok],
+        "v": data[ok] / flux,
+        # Detection significance in units of the sky sigma - the
+        # ordering and weighting key for the ensemble.
+        "snr": (
+            float(np.nanmax(data[ok])) / sigma_ann
+            if np.isfinite(sigma_ann) and sigma_ann > 0
+            else np.inf
+        ),
+        # Sky sigma in flux-normalised units: the noise floor of a
+        # residual panel drawn in the same units.
+        "sigma_norm": (
+            sigma_ann / flux
+            if np.isfinite(sigma_ann) and sigma_ann > 0
+            else np.nan
+        ),
+    }
+
+
+def _fit_moffat_composite_full(
+    stars,
+    fwhm,
+    max_components=3,
+    ellipticity=None,
+    center_free_px=1.5,
+    component_offsets=True,
+    offset_max_fwhm=0.5,
+    snr_min=5.0,
+):
+    """Joint composite-Moffat fit over every usable star cutout.
+
+    All stars are fitted simultaneously: the PSF shape (per-component
+    amplitude, gamma, beta, and optionally a small centre offset per
+    component) is shared, while each star contributes only its own
+    centre offset (dx, dy) and amplitude scale - the parameters that
+    legitimately differ between stars.  Per-star centres absorb
+    centroid error that would otherwise smear the stacked profile; the
+    amplitude absorbs flux-normalisation error.  Component offsets are
+    how an asymmetric PSF (coma, lopsided wings) is represented by a
+    sum of symmetric profiles.  ``max_components`` is the target count:
+    fits try it first (capped at ``n_stars - 1``) and step down only
+    when a fit fails to converge or its components collapse to noise
+    level; BIC arbitrates between the concentric and centre-offset
+    variants at equal surviving counts.  Once the shared shape is
+    chosen, each star's (dx, dy, amplitude) is polished independently
+    against its own cutout with the profile frozen - the values each
+    star's subtraction actually uses.
+
+    Returns ``(comps, star_fits)`` where ``comps`` is a list of
+    ``(amp, gamma, beta[, ox, oy])`` in native pixels (normalised
+    units, proportional flux renormalised to unity) and ``star_fits``
+    a list of ``(dx, dy, amp_scale)`` per usable star in input order
+    filtered the same way; ``(None, [])`` on failure.
+    """
+    from scipy.optimize import least_squares
+
+    infos = []
+    for s in stars:
+        info = _composite_star_profile(
+            s, fwhm, ellipticity, snr_min=snr_min
+        )
+        if info is not None:
+            infos.append(info)
+    if not infos:
+        return None, []
+    # Residuals are chi2-weighted (sky + source Poisson).  The earlier
+    # uniform-weight sqrt transform stabilised the wing noise but left
+    # the ~100 core pixels outvoted by thousands of sky pixels, which
+    # produced a systematic few-percent core oversubtraction; the
+    # robust loss still guards the fit against a bad cutout.
+    fwhm = max(0.5, float(fwhm))
+    for info in infos:
+        # Thin the sky pixels: the outer annulus only constrains the
+        # wing decay, so a strided subset carries the same information
+        # at a fraction of the residual-eval cost.  The core keeps
+        # every pixel.
+        rr_ok = np.hypot(
+            info["x_ok"] - info["cc"][0], info["y_ok"] - info["cc"][1]
+        )
+        sel = rr_ok < 2.5 * fwhm
+        sel[np.flatnonzero(~sel)[::3]] = True
+        info["x_ok"] = info["x_ok"][sel]
+        info["y_ok"] = info["y_ok"][sel]
+        info["v"] = info["v"][sel]
+    n_pix = int(sum(i["x_ok"].size for i in infos))
+    if n_pix < 30:
+        return None, []
+    peak = float(max(np.nanmax(i["v"]) for i in infos))
+    if not np.isfinite(peak) or peak <= 0:
+        return None, []
+
+    # The configured count is the target, not a ceiling: a single
+    # Moffat cannot reproduce a real PSF's sharp core plus extended
+    # wings, and under-fitting bright profiles is the dominant
+    # sparse-field failure mode.  Feasibility is still limited by
+    # independent stars - one cutout contributes ~400 correlated
+    # pixels but only one noisy PSF realisation - so the tried count
+    # is capped at n_stars - 1.
+    n_stars = len(infos)
+    k_try = max(1, min(int(max_components), max(1, n_stars - 1)))
+    if k_try < int(max_components):
+        logger.debug(
+            "Moffat composite: %d stars support at most %d component(s).",
+            n_stars,
+            k_try,
+        )
+    cfree = max(0.25, float(center_free_px))
+    off_max = max(0.25, float(offset_max_fwhm) * fwhm)
+
+    # Per-star weights: a faint, sky-limited cutout carries the same
+    # pixel count as a bright one but far less shape information, so
+    # equal row weights let it drag the shared profile.  Weight by the
+    # measured detection significance (peak/sky sigma), normalised to
+    # the ensemble median so the residual scale - and with it the BIC
+    # penalty and robust-loss tuning - is unchanged when all stars are
+    # comparable.  The per-pixel chi2 below already encodes sky noise;
+    # this extra term keeps a structured cutout whose annulus sigma
+    # understates its contamination from steering the ensemble.
+    _snr = np.array([i["snr"] for i in infos], float)
+    _snr_med = float(np.nanmedian(_snr[_snr > 0]))
+    if not np.isfinite(_snr_med) or _snr_med <= 0:
+        _snr_med = 1.0
+    _w_star = np.sqrt(np.clip(_snr / _snr_med, 0.1, 10.0))
+
+    def _model_sigma(m, info):
+        # Per-pixel noise in flux-normalised units: sky sigma plus the
+        # source Poisson term (Var(v) = counts/flux^2 = v/flux, taken
+        # on the model so the weight itself is noise-free).
+        _sky = info.get("sigma_norm", np.nan)
+        if not np.isfinite(_sky) or _sky <= 0:
+            _sky = 1.4826 * float(np.nanmedian(np.abs(info["v"])))
+        if not np.isfinite(_sky) or _sky <= 0:
+            _sky = 1e-3
+        return np.sqrt(_sky**2 + np.maximum(m, 0.0) / info["flux"])
+
+    def _resid(p, k, step):
+        comps = [
+            tuple(p[step * j : step * j + step]) for j in range(k)
+        ]
+        out = []
+        for i, info in enumerate(infos):
+            dx, dy, a = p[k * step + 3 * i : k * step + 3 * i + 3]
+            m = a * _moffat_comps_image(
+                info["x_ok"] - (info["cc"][0] + dx),
+                info["y_ok"] - (info["cc"][1] + dy),
+                comps,
+                ellipticity,
+            )
+            # Inverse-variance residuals: an equal-weight metric (the
+            # old sqrt transform) lets the thousands of wing and sky
+            # pixels swamp the ~100 core pixels, which shows up as a
+            # systematic few-percent oversubtraction at the core.
+            # chi2 restores the core's leverage on the shared shape.
+            out.append(
+                _w_star[i]
+                * (m - info["v"])
+                / np.maximum(_model_sigma(m, info), 1e-8)
+            )
+        return np.concatenate(out)
+
+    def _jac_sparsity(k, step):
+        # Block structure: shape parameters touch every row; each
+        # star's (dx, dy, a) touch only its own pixels.  Grouped finite
+        # differences then cost ~step+3 residual evals per iteration
+        # instead of one per parameter.
+        from scipy.sparse import lil_matrix
+
+        n_par = k * step + 3 * n_stars
+        J = lil_matrix((n_pix, n_par), dtype=np.uint8)
+        J[:, : k * step] = 1
+        row = 0
+        for i, info in enumerate(infos):
+            n_i = int(info["x_ok"].size)
+            J[row : row + n_i, k * step + 3 * i : k * step + 3 * i + 3] = 1
+            row += n_i
+        return J.tocsr()
+
+    # Descend from the requested count: every surviving component that
+    # carries >= 1% of the peak amplitude is real structure (core, mid,
+    # wing); a lower count is tried only when the higher one fails to
+    # converge or its components collapse below that floor.  BIC
+    # arbitrates only between variants that keep the same number of
+    # components - concentric vs centre-offset - not whether to use the
+    # requested count at all.
+    best = None  # (n_surviving, bic, comps, asym, sfits, k)
+    for k in range(k_try, 0, -1):
+        g0 = fwhm * np.array([0.8, 1.8, 4.5][:k])
+        b0 = np.array([4.5, 2.5, 1.7][:k])
+        a0 = peak * np.array([0.7, 0.25, 0.05][:k])
+        for asym in (False, True):
+            if asym and not component_offsets:
+                continue
+            step = 5 if asym else 3
+            p0, lo, hi = [], [], []
+            for j in range(k):
+                p0 += [a0[j], g0[j], b0[j]] + ([0.0, 0.0] if asym else [])
+                lo += [0.0, 0.2 * fwhm, 1.2] + (
+                    [-off_max, -off_max] if asym else []
+                )
+                # beta reaches ~30 at the Gaussian limit; a lower cap
+                # leaves real sharp-core fits pinned at the bound.
+                hi += [10.0 * peak, 12.0 * fwhm, 30.0] + (
+                    [off_max, off_max] if asym else []
+                )
+            # Per-star freedom is exactly position and amplitude: the
+            # shape stays shared, so a miscentred or misnormalised
+            # cutout cannot warp the common profile.
+            p0 += [0.0, 0.0, 1.0] * n_stars
+            lo += [-cfree, -cfree, 0.25] * n_stars
+            hi += [cfree, cfree, 4.0] * n_stars
+            p0 = np.asarray(p0, float)
+            lo = np.asarray(lo, float)
+            hi = np.asarray(hi, float)
+            # Robust loss: one mis-scaled or contaminated star must not
+            # drag the joint fit -- a plain L2 lets a single bad cutout
+            # pin every amplitude at zero (the model then lands inside
+            # the component-collapse filter and reports failure).
+            # Residuals are already in sigma units, so a fixed scale
+            # keeps the downweighting threshold at ~3 sigma instead of
+            # floating with the quality of the initial guess.
+            try:
+                sol = least_squares(
+                    lambda p: _resid(p, k, step),
+                    p0,
+                    bounds=(lo, hi),
+                    method="trf",
+                    loss="soft_l1",
+                    f_scale=3.0,
+                    jac_sparsity=_jac_sparsity(k, step),
+                    max_nfev=1500,
+                )
+            except Exception as _exc:
+                logger.debug(
+                    "Moffat composite fit failed for %d components%s: %s",
+                    k,
+                    " (offset)" if asym else "",
+                    _exc,
+                )
+                continue
+            if not sol.success or not np.isfinite(sol.x).all():
+                continue
+            nb = k * step
+            comps = [
+                tuple(float(vv) for vv in sol.x[step * j : step * j + step])
+                for j in range(k)
+            ]
+            # Drop collapsed components: a ~zero-amplitude term adds
+            # nothing and only marks the extra component count as wasted.
+            comps = [c for c in comps if c[0] > 0.01 * peak]
+            if not comps:
+                continue
+            sfits = [
+                tuple(float(vv) for vv in sol.x[nb + 3 * i : nb + 3 * i + 3])
+                for i in range(n_stars)
+            ]
+            # BIC in the estimated-variance form n*ln(rss/n) + p*ln(n).
+            # The chi2 residuals carry a calibrated scale, but a noise
+            # estimate absorbed in rss keeps the criterion valid when a
+            # cutout's annulus sigma is off.  It is used here only to
+            # rank variants that keep the same number of live
+            # components.
+            rss = max(
+                float(np.sum(np.asarray(_resid(sol.x, k, step)) ** 2)),
+                1e-30,
+            )
+            p_free = len(comps) * step + 3 * n_stars
+            bic = n_pix * np.log(rss / n_pix) + p_free * np.log(n_pix)
+            if best is None or (len(comps), -bic) > (best[0], -best[1]):
+                best = (len(comps), bic, comps, asym, sfits, k)
+        if best is not None and best[0] >= k_try:
+            # A full-count fit survived: no smaller count can carry
+            # more structure, so the descent stops here.
+            break
+    if best is None:
+        return None, []
+    _n_surv, bic, comps, asym, sfits, _k_sel = best
+    # Collapse the amp_k <-> a_i scale degeneracy: fold mean(a_i) into
+    # the component amplitudes so the composite stays in per-star
+    # flux-normalised units (a_i ~ 1 per star) and the fitted
+    # residuals are unchanged.
+    amp_mean = float(np.mean([s[2] for s in sfits]))
+    if np.isfinite(amp_mean) and amp_mean > 0:
+        comps = [tuple([c[0] * amp_mean] + list(c[1:])) for c in comps]
+        sfits = [(d[0], d[1], d[2] / amp_mean) for d in sfits]
+    # Per-star polish: the joint solve leaves each star's (dx, dy, a)
+    # at the ensemble compromise, which biases the subtraction that
+    # star actually receives.  With the shared profile frozen, refit
+    # the trio independently against each star's own pixels so the
+    # stored model is each cutout's own best position and scale.
+    polished = []
+    for i, info in enumerate(infos):
+        dx0, dy0, a0 = sfits[i]
+
+        def _star_resid(q, info=info):
+            dx, dy, a = q
+            m = a * _moffat_comps_image(
+                info["x_ok"] - (info["cc"][0] + dx),
+                info["y_ok"] - (info["cc"][1] + dy),
+                comps,
+                ellipticity,
+            )
+            return (m - info["v"]) / np.maximum(
+                _model_sigma(m, info), 1e-8
+            )
+
+        try:
+            sq = least_squares(
+                _star_resid,
+                [dx0, dy0, a0],
+                bounds=([-cfree, -cfree, 0.25], [cfree, cfree, 4.0]),
+                method="trf",
+                loss="soft_l1",
+                f_scale=1.0,
+                max_nfev=200,
+            )
+            if sq.success and np.isfinite(sq.x).all():
+                polished.append(tuple(float(vv) for vv in sq.x))
+                continue
+        except Exception:
+            pass
+        polished.append(sfits[i])
+    sfits = polished
+    logger.debug(
+        "Moffat composite: %d component(s)%s kept "
+        "(tried %d, bic=%.4g).",
+        len(comps),
+        " +offsets" if asym else "",
+        k_try,
+        bic,
+    )
+    return comps, sfits
+
+
+def _fit_moffat_composite(
+    stars,
+    fwhm,
+    max_components=3,
+    ellipticity=None,
+    center_free_px=1.5,
+    component_offsets=True,
+    offset_max_fwhm=0.5,
+    snr_min=5.0,
+):
+    """Fit a sum of Moffats to the stacked PSF-star cutouts.
+
+    A single Moffat cannot represent a real PSF, whose narrow core and
+    extended wings need different slopes; a 2-3 component sum can.  All
+    cutout pixels are fitted jointly with per-pixel inverse-variance
+    (chi2) weights so the core keeps its leverage against the many wing
+    and sky pixels, with only the per-star position and amplitude free.
+    ``max_components`` is the target count - fits try it first and step
+    down only when a fit fails or its components collapse; BIC
+    arbitrates between the concentric and centre-offset variants at
+    equal surviving counts.  After the shared shape is selected, each
+    star's (x, y, amplitude) is refit independently against its own
+    cutout with the profile frozen.
+    Returns a list of ``(amp, gamma, beta[, ox, oy])`` in native pixels
+    (per-star flux-normalised units), or None.
+    """
+    comps, _ = _fit_moffat_composite_full(
+        stars,
+        fwhm,
+        max_components=max_components,
+        ellipticity=ellipticity,
+        center_free_px=center_free_px,
+        component_offsets=component_offsets,
+        offset_max_fwhm=offset_max_fwhm,
+        snr_min=snr_min,
+    )
+    return comps
+
+
+def _default_moffat_composite(fwhm, beta):
+    """Canonical three-component PSF when no stars are available to fit.
+
+    A dominant core at the image FWHM plus progressively wider, fainter
+    wing terms: closer to a real seeing PSF than a single Moffat while
+    still needing only the measured FWHM.  Fractions are flux shares,
+    converted to peak amplitudes via the Moffat integral
+    ``flux = amp * pi * gamma^2 / (beta - 1)``.
+    """
+    spec = (
+        (0.85, 1.0, max(1.1, float(beta))),
+        (0.12, 2.2, 2.5),
+        (0.03, 4.5, 1.7),
+    )
+    comps = []
+    for frac, fscale, b in spec:
+        gamma = (fscale * fwhm) / (
+            2.0 * np.sqrt(2.0 ** (1.0 / b) - 1.0)
+        )
+        amp = frac * (b - 1.0) / (np.pi * gamma**2)
+        comps.append((amp, gamma, b))
+    return comps
+
+
+def _composite_moffat_psf(components, oversampling, cutout_n, ellipticity=None):
+    """ImagePSF stamp from a sum-of-Moffats profile.
+
+    Same conventions as ``_analytic_moffat_psf``: the continuous profile
+    is evaluated on the oversampled grid, pixel-integrated, and rescaled
+    to ``sum == prod(oversampling)``.  Component ``gamma`` values are in
+    native pixels, so radii are converted from grid units before
+    evaluation.  The stamp carries ``_autophot_kind`` for the
+    PSFBUILD/psf_model provenance record.
+    """
+    osamp = max(1, int(oversampling))
+    # EPSFBuilder requires the ePSF grid to span each star cutout, plus one
+    # along an axis where osamp * star_dim is even (its compute_epsf_shape
+    # convention); keep the stamp odd so the peak centres on a sample.
+    n = int(osamp * cutout_n)
+    if n % 2 == 0:
+        n += 1
+    ctr = (n - 1) / 2.0
+    yy, xx = np.indices((n, n))
+    data = None
+    used_prf = False
+    if ellipticity is None and MoffatPRF is not None:
+        # A circular sum-of-Moffats is a sum of MoffatPRFs, each giving
+        # the exact analytic integral over a detector pixel
+        # (Gauss-Legendre quadrature) - including at osamp=1, where the
+        # boxcar path below samples the continuous profile without
+        # integrating.  Centre offsets become per-component x_0/y_0;
+        # comps carry peak amplitude, so flux = amp*pi*gamma^2/(beta-1).
+        parts = []
+        for c in components:
+            a, g, b = float(c[0]), max(float(c[1]), 1e-6), float(c[2])
+            if not (np.isfinite(a) and np.isfinite(b) and a > 0 and b > 1.0):
+                parts = None
+                break
+            ox, oy = (
+                (float(c[3]), float(c[4])) if len(c) > 4 else (0.0, 0.0)
+            )
+            parts.append(
+                MoffatPRF(
+                    flux=a * np.pi * g**2 / (b - 1.0),
+                    x_0=ctr / osamp + ox,
+                    y_0=ctr / osamp + oy,
+                    alpha=g,
+                    beta=b,
+                )
+            )
+        if parts:
+            data = np.zeros((n, n), dtype=float)
+            for mdl in parts:
+                data = data + np.asarray(
+                    mdl(xx / osamp, yy / osamp), dtype=float
+                )
+            used_prf = True
+    if data is None:
+        # The fitted gammas are intrinsic (de-elongated) radii, so the stamp
+        # is evaluated on the same elliptical metric to restore the true
+        # 2-D shape - a trailed/defocused PSF stays elongated.  Component
+        # centre offsets (grid units) represent the asymmetry the fit found.
+        data = _moffat_comps_image(
+            (xx - ctr) / osamp, (yy - ctr) / osamp, components, ellipticity
+        )
+        data = pixel_integrate_oversampled(data, osamp)
+    # pixel_integrate_oversampled only normalises when it convolves; at
+    # osamp==1 it returns the raw profile, so normalise unconditionally
+    # before the photutils flux-convention rescale.
+    total = float(np.nansum(data))
+    if np.isfinite(total) and total > 0:
+        data = data / total
+    data = data * float(osamp) ** 2
+    stamp = ImagePSF(data=data, x_0=ctr, y_0=ctr, oversampling=osamp)
+    stamp._autophot_kind = (
+        "analytic-composite" if len(components) > 1 else "analytic-moffat"
+    )
+    stamp._autophot_ellipticity = ellipticity
+    stamp._autophot_integration = "moffatprf" if used_prf else "boxcar"
+    # Kept on the stamp so the analytic diagnostic plot can draw the
+    # per-component lines; _autophot_fitted is set True by callers that
+    # fitted (rather than canonical) components.
+    stamp._autophot_components = [
+        tuple(float(v) for v in c) for c in components
+    ]
+    stamp._autophot_fitted = False
+    # (dx, dy, amp_scale) per fitted star when the joint fit ran.
+    stamp._autophot_star_fits = None
+    return stamp
+
+
+def _analytic_psf_stamp(
+    fwhm,
+    oversampling,
+    cutout_n,
+    beta,
+    stars=None,
+    max_components=3,
+    phot_cfg=None,
+):
+    """Analytic PSF model and its fitted components.
+
+    With ``stars`` a multi-Moffat composite is fitted to the cutouts
+    (joint fit: shared shape, per-star position and amplitude free);
+    without them the fixed canonical composite is used.  Returns
+    ``(stamp, components)``; ``components`` is the canonical fallback
+    when the fit fails.
+    """
+    cfg = phot_cfg or {}
+    comps = None
+    sfits = None
+    ellipticity = None
+    fitted = False
+    if stars is not None and len(stars) > 0:
+        try:
+            ellipticity = _ensemble_ellipticity(stars, fwhm)
+        except Exception as _exc:
+            logger.debug(
+                "Ensemble ellipticity failed in stamp seed: %s", _exc
+            )
+            ellipticity = None
+        try:
+            comps, sfits = _fit_moffat_composite_full(
+                stars,
+                fwhm,
+                max_components=max_components,
+                ellipticity=ellipticity,
+                center_free_px=float(
+                    cfg.get("psf_analytic_center_free_px", 1.5)
+                ),
+                component_offsets=bool(
+                    cfg.get("psf_analytic_component_offsets", True)
+                ),
+                offset_max_fwhm=float(
+                    cfg.get("psf_analytic_offset_max_fwhm", 0.5)
+                ),
+                snr_min=float(cfg.get("psf_analytic_min_snr", 5.0)),
+            )
+            fitted = comps is not None
+        except Exception as _exc:
+            logger.debug(
+                "Moffat composite fit failed in stamp seed: %s", _exc
+            )
+            comps = None
+    if comps is None:
+        comps = _default_moffat_composite(fwhm, beta)
+        sfits = None
+    stamp = _composite_moffat_psf(
+        comps, oversampling, cutout_n, ellipticity=ellipticity
+    )
+    if not _epsf_usable(stamp):
+        # A degenerate composite fit (too few stars to constrain a
+        # core+wing model) renders a flat plate; fall back to the
+        # canonical profile so this path always yields a usable model.
+        comps = _default_moffat_composite(fwhm, beta)
+        stamp = _composite_moffat_psf(
+            comps, oversampling, cutout_n, ellipticity=ellipticity
+        )
+        fitted = False
+        sfits = None
+    stamp._autophot_fitted = fitted
+    stamp._autophot_star_fits = sfits
+    return stamp, comps
+
+
+def _connected_source_groups(x, y, min_separation):
+    """Integer group IDs for positions linked by pairwise proximity.
+
+    photutils uses connected groups for blended-source PSF fits.  Computing
+    the same components here lets target fits keep held/free centroid bounds
+    separate only when sources are far enough apart to be independent.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n = len(x)
+    parent = np.arange(n, dtype=int)
+
+    def _find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def _union(i, j):
+        ri, rj = _find(i), _find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    sep2 = float(min_separation) ** 2
+    for i in range(n):
+        if not (np.isfinite(x[i]) and np.isfinite(y[i])):
+            continue
+        d2 = (x[i + 1 :] - x[i]) ** 2 + (y[i + 1 :] - y[i]) ** 2
+        near = np.flatnonzero(d2 <= sep2) + i + 1
+        for j in near:
+            if np.isfinite(x[j]) and np.isfinite(y[j]):
+                _union(i, int(j))
+
+    roots = np.array([_find(i) for i in range(n)], dtype=int)
+    _, group_ids = np.unique(roots, return_inverse=True)
+    return group_ids.astype(int)
+
+
+def _psf_pair_separation_drop(xy, min_sep_px, dup_px, rank):
+    """Boolean drop mask for the PSF-candidate pair-separation rule.
+
+    The candidate pool merges entries from several source lists, so a
+    close pair can arrive through different lists and dodge every
+    per-list isolation check.  Two candidates closer than
+    ``min_sep_px`` are either the same star centroided twice or an
+    unresolved blend; both corrupt the ePSF core.  Positions nearer
+    than ``dup_px`` are treated as duplicate detections of one star
+    (the lower-ranked entry is dropped); a wider sub-``min_sep_px``
+    pair is a genuine blend and both entries are dropped.
+    """
+    xy = np.asarray(xy, dtype=float)
+    n = len(xy)
+    drop = np.zeros(n, dtype=bool)
+    if n < 2 or min_sep_px <= 0:
+        return drop
+    fin = np.isfinite(xy).all(axis=1)
+    if fin.sum() < 2:
+        return drop
+    from scipy.spatial import cKDTree
+
+    fin_idx = np.where(fin)[0]
+    tree = cKDTree(xy[fin])
+    rank = np.asarray(rank, dtype=float)
+    rank = np.where(np.isfinite(rank), rank, -np.inf)
+    for pi, pj in tree.query_pairs(min_sep_px):
+        i, j = fin_idx[pi], fin_idx[pj]
+        if np.hypot(xy[i, 0] - xy[j, 0], xy[i, 1] - xy[j, 1]) < dup_px:
+            drop[i if rank[i] < rank[j] else j] = True
+        else:
+            drop[i] = drop[j] = True
+    return drop
+
+
+def _psf_mask_distances(image, mask, xy):
+    """Distance (px) from each candidate to the nearest bad pixel.
+
+    Bad pixels are non-finite image pixels plus every pixel set in
+    ``mask`` (chip gaps, saturation, streaks, cosmic rays).  Returns
+    ``inf`` for candidates with non-finite coordinates and everywhere
+    when no bad pixels exist, so the result can be thresholded
+    directly.
+    """
+    image = np.asarray(image)
+    # np.isfinite works on float32/int directly; an astype(float) here
+    # would copy the full image just to probe finiteness.
+    bad = ~np.isfinite(image)
+    if mask is not None and np.shape(mask) == image.shape:
+        bad = bad | np.asarray(mask, dtype=bool)
+    xy = np.asarray(xy, dtype=float)
+    dist = np.full(len(xy), np.inf)
+    if len(xy) == 0 or not np.any(bad):
+        return dist
+    from scipy.ndimage import distance_transform_edt
+
+    distmap = distance_transform_edt(~bad)
+    fin = np.isfinite(xy).all(axis=1)
+    if fin.any():
+        xi = np.clip(np.rint(xy[fin, 0]).astype(int), 0, distmap.shape[1] - 1)
+        yi = np.clip(np.rint(xy[fin, 1]).astype(int), 0, distmap.shape[0] - 1)
+        dist[fin] = distmap[yi, xi]
+    return dist
+
+
+def _psf_spike_flag_counts(mask, xy, radius):
+    """Flagged-pixel counts in a square region around each candidate.
+
+    A diffraction spike is flagged along its arm pixels, which can start
+    outside the stellar core; a distance-to-nearest-pixel check misses a
+    star whose arm only becomes detectable further out.  Counting
+    flagged pixels inside the ePSF stamp footprint is the source-level
+    reading of the per-pixel mask.  Box sums come from an integral image
+    so each candidate costs O(1).
+    """
+    xy = np.asarray(xy, dtype=float)
+    counts = np.zeros(len(xy), dtype=np.int64)
+    if mask is None or len(xy) == 0:
+        return counts
+    mask = np.asarray(mask, dtype=bool)
+    if not np.any(mask):
+        return counts
+    ny, nx = mask.shape
+    ii = np.zeros((ny + 1, nx + 1), dtype=np.int64)
+    ii[1:, 1:] = mask.cumsum(axis=0).cumsum(axis=1)
+    r = max(int(radius), 1)
+    fin = np.isfinite(xy).all(axis=1)
+    if not fin.any():
+        return counts
+    xi = np.rint(xy[fin, 0]).astype(int)
+    yi = np.rint(xy[fin, 1]).astype(int)
+    x0 = np.clip(xi - r, 0, nx)
+    x1 = np.clip(xi + r + 1, 0, nx)
+    y0 = np.clip(yi - r, 0, ny)
+    y1 = np.clip(yi + r + 1, 0, ny)
+    counts[fin] = ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]
+    return counts
+
+
+def _psf_shape_outlier_indices(
+    stars, fwhm, nsigma=4.0, max_frac=0.3, min_keep=4, abs_fwhm_floor=0.3
+):
+    """Indices of ePSF-star cutouts inconsistent with the ensemble shape.
+
+    A converged ePSF needs self-consistent cutouts: one or two poor
+    sources (miscentered, contaminated, deviant morphology) leave the
+    recentering chasing disagreement, so the build never converges and
+    the model collapses.  Each flux-normalised cutout is scored by the
+    MAD of its residual against the pixel-wise median stack inside
+    ~1.5 FWHM; scores beyond ``nsigma`` of the robust ensemble scatter
+    are returned, bounded by ``max_frac`` and ``min_keep``.  The clip
+    iterates: the template and scatter are rebuilt from survivors after
+    each pass, so second-tier deviants that hide below a junk-inflated
+    threshold are caught once the worst offenders are removed.
+
+    ``abs_fwhm_floor`` adds an ensemble-independent criterion: a cutout
+    whose own measured FWHM is below ``abs_fwhm_floor * fwhm`` is a
+    hot-pixel/cosmic-ray cluster regardless of the ensemble norm --
+    when defects dominate the pool the median template is defect-shaped
+    and the relative test flags real stars instead.  Absolute-floor
+    rejects bypass the ``max_frac`` budget but never push the pool below
+    ``min_keep``.
+    """
+    n = len(stars)
+    if n < max(5, int(min_keep) + 1):
+        return []
+    fwhm = max(1.0, float(fwhm))
+    vs, masks = [], []
+    for s in stars:
+        d = np.asarray(getattr(s, "data", None), float)
+        if d.ndim != 2:
+            return []
+        w = np.asarray(getattr(s, "weights", None), float)
+        m = np.isfinite(d)
+        if np.shape(w) == d.shape:
+            m &= np.isfinite(w) & (w > 0)
+        mk = getattr(s, "mask", None)
+        if mk is not None and np.shape(mk) == d.shape:
+            m &= ~np.asarray(mk, bool)
+        fl = float(getattr(s, "flux", np.nan))
+        if not np.isfinite(fl) or fl <= 0:
+            fl = np.nansum(np.where(m, np.clip(d, 0.0, None), 0.0))
+        if not np.isfinite(fl) or fl <= 0:
+            fl = 1.0
+        vs.append(np.where(np.isfinite(d), d / fl, np.nan))
+        masks.append(m)
+    stack_v = np.stack(vs)
+    stack_m = np.stack(masks)
+    ny, nx = stack_v.shape[1:]
+    yy, xx = np.indices((ny, nx))
+    win = np.hypot(xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0) < 1.5 * fwhm
+    keep_cap = n - int(min_keep)
+    if keep_cap <= 0:
+        return []
+    # Absolute size floor: a cutout far sharper than the image FWHM is a
+    # hot-pixel/CR cluster even when the defect-dominated ensemble makes
+    # it look typical.  These bypass the max_frac budget (they are not
+    # ensemble outliers) but still respect the min_keep ceiling.
+    abs_bad = []
+    if abs_fwhm_floor > 0:
+        for i in range(n):
+            mf = measure_epsf_fwhm_native(vs[i], 1)
+            if np.isfinite(mf) and mf < abs_fwhm_floor * fwhm:
+                abs_bad.append(i)
+    max_drop_total = min(max(1, int(np.floor(max_frac * n))), keep_cap)
+    drop = list(abs_bad[:keep_cap])
+    alive = np.ones(n, dtype=bool)
+    if drop:
+        alive[drop] = False
+    n_rel_dropped = 0
+    # Stars kept only via keep-floor pixel masking (contamination check)
+    # carry an off-nominal core by construction; they are still scored,
+    # but never anchor the "good star" template.
+    _tmpl_ok = np.array(
+        [not getattr(s, "_autophot_maskkept", False) for s in stars]
+    )
+    # Iterative sigma-clip: a single pass leaves the ensemble MAD inflated
+    # by the deviants themselves, so second-tier outliers hide below the
+    # threshold.  Rebuilding the median stack from survivors each round
+    # tightens the threshold until no new outlier appears.  Budgets are
+    # cumulative across rounds.
+    med_floor = np.inf
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for _ in range(5):
+            idx = np.flatnonzero(alive)
+            if idx.size < max(5, int(min_keep) + 1):
+                break
+            if len(drop) >= keep_cap or n_rel_dropped >= max_drop_total:
+                break
+            tmpl_sel = alive & _tmpl_ok
+            if not tmpl_sel.any():
+                tmpl_sel = alive
+            tmpl = np.nanmedian(
+                np.where(stack_m[tmpl_sel], stack_v[tmpl_sel], np.nan), axis=0
+            )
+            # Per-star pixel noise in flux-normalised units: the residual
+            # of a faint star against the (bright-star) median template is
+            # dominated by its own shot noise, so an unnormalised score
+            # flags the faintest pool members regardless of shape.
+            ann_noise = np.full(n, np.nan)
+            _ann_m = (
+                np.hypot(xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0)
+                > 2.0 * fwhm
+            )
+            for i in idx:
+                av = stack_v[i][stack_m[i] & _ann_m]
+                av = av[np.isfinite(av)]
+                if av.size < 9:
+                    continue
+                _am = np.median(av)
+                ann_noise[i] = 1.4826 * np.median(np.abs(av - _am))
+            scores = np.full(n, np.nan)
+            for i in idx:
+                ok = (
+                    stack_m[i]
+                    & np.isfinite(tmpl)
+                    & np.isfinite(stack_v[i])
+                    & win
+                )
+                if int(ok.sum()) < 9:
+                    continue
+                if not np.isfinite(ann_noise[i]) or ann_noise[i] <= 0:
+                    continue
+                dev = stack_v[i][ok] - tmpl[ok]
+                scores[i] = (
+                    1.4826 * np.median(np.abs(dev - np.median(dev)))
+                ) / ann_noise[i]
+            fin = np.isfinite(scores) & alive
+            if int(fin.sum()) < 4:
+                break
+            med = float(np.median(scores[fin]))
+            mad = 1.4826 * float(np.median(np.abs(scores[fin] - med)))
+            # Absolute floor: near-identical stars leave mad ~ 0 and any
+            # tiny deviation would flag.  The floor tracks the tightest
+            # ensemble median seen so far rather than the live one, so a
+            # contaminant that keeps the survivor median inflated cannot
+            # grow its own tolerance round over round.
+            med_floor = min(med_floor, med)
+            thr = med + max(nsigma * mad, med_floor)
+            budget = min(
+                max_drop_total - n_rel_dropped, keep_cap - len(drop)
+            )
+            cand = [
+                i
+                for i in np.argsort(-scores)
+                if fin[i] and scores[i] > thr
+            ][:budget]
+            if not cand:
+                break
+            drop.extend(cand)
+            alive[cand] = False
+            n_rel_dropped += len(cand)
+    return sorted(drop)
+
+
+def measure_epsf_fwhm_native(epsf_data: np.ndarray, oversampling: int) -> float:
+    """FWHM of an (oversampled) ePSF array in native pixels.
+
+    Azimuthally-averaged profile about the array centre; the FWHM is twice
+    the radius where the profile first falls below half the peak value
+    (linear interpolation between radial bins).
+    """
+    d = np.asarray(epsf_data, dtype=float)
+    if d.ndim != 2 or not np.isfinite(d).any():
+        return float("nan")
+    try:
+        osamp = max(1, int(np.atleast_1d(oversampling)[0]))
+    except (TypeError, ValueError, IndexError):
+        osamp = 1
+
+    ny, nx = d.shape
+    cy, cx = (ny - 1) / 2.0, (nx - 1) / 2.0
+    yy, xx = np.indices(d.shape)
+    r = np.hypot(xx - cx, yy - cy) / osamp
+    peak = float(np.nanmax(d))
+    if not np.isfinite(peak) or peak <= 0:
+        return float("nan")
+
+    r_max = min(nx, ny) / (2.0 * osamp)
+    edges = np.arange(0.0, r_max + 0.05, 0.05)
+    if edges.size < 3:
+        return float("nan")
+    prof = np.full(edges.size - 1, np.nan)
+    for i in range(edges.size - 1):
+        m = (r >= edges[i]) & (r < edges[i + 1])
+        if m.any():
+            prof[i] = float(np.nanmean(d[m]))
+    # Bin 0 samples the central pixel only for even-shaped arrays; the peak
+    # pixel value anchors the half-max crossing either way.
+    half = 0.5 * peak
+    r_mid = 0.5 * (edges[:-1] + edges[1:])
+    good = np.isfinite(prof)
+    if not good.any():
+        return float("nan")
+    prof, r_mid = prof[good], r_mid[good]
+    if prof[0] <= half:
+        return float("nan")
+    below = np.where(prof <= half)[0]
+    if below.size == 0:
+        return float("nan")  # never drops to half-max: unresolved/near-constant
+    i = below[0]
+    if i == 0:
+        return 2.0 * r_mid[0]
+    # Interpolate between the last bin above half-max and the first below.
+    f = (prof[i - 1] - half) / max(prof[i - 1] - prof[i], 1e-30)
+    return float(2.0 * (r_mid[i - 1] + f * (r_mid[i] - r_mid[i - 1])))
+
+
+def clean_epsf_stamp(
+    epsf_data: np.ndarray,
+    oversampling: int,
+    fwhm_native: float,
+    wing_start_fwhm: float = 1.5,
+    wing_end_fwhm: float = 3.5,
+    wing_sigma_px: float = 1.25,
+    edge_px: float = 2.0,
+    flatten_fwhm: float = 3.5,
+    flatten_width_px: float = 2.0,
+) -> np.ndarray:
+    """Post-build cleanup of unphysical ePSF stamp artifacts.
+
+    Two artifacts are suppressed while the photometric core is untouched:
+
+    * Gridpoint-scale wing speckle: with ~n_stars/osamp^2 samples per
+      gridpoint the sigma-clipped residual median is noisy, so the wings
+      carry pixel-to-pixel speckle at a few percent of peak.  The stamp
+      is blended toward a Gaussian-smoothed copy between
+      ``wing_start_fwhm`` and ``wing_end_fwhm`` (radial weight 1 -> 0).
+      The sigma is kept sub-pixel so coherent resampling ringing (real
+      signal, ~1-2 px period) survives while uncorrelated speckle is
+      suppressed.  Wing cleaning only runs at ``oversampling >= 2``: at
+      1x the native-pixel ringing and noise cannot be distinguished, so
+      smoothing there would erase real flux.  Beyond ``flatten_fwhm``
+      the wings blend to the azimuthal-median radial profile: real wing
+      flux there is below the gridpoint-noise floor, so the profile is
+      the better estimate and only residual mottle is removed.
+    * Stamp-edge artifacts: cutouts whose edge contains a neighbour or
+      unmasked feature leak a bright frame into the stacked ePSF.  A
+      ~27 px cutout edge holds no real PSF flux (>= 5xFWHM), so the
+      outer ``edge_px`` native pixels are tapered linearly to zero.
+
+    The output is rescaled to the input sum so the photutils flux
+    convention (sum == prod(oversampling)) is preserved exactly.
+    """
+    d = np.asarray(epsf_data, dtype=float)
+    if d.ndim != 2 or not np.isfinite(d).any():
+        return d
+    try:
+        osamp = max(1, int(np.atleast_1d(oversampling)[0]))
+    except (TypeError, ValueError, IndexError):
+        osamp = 1
+    total_in = float(np.nansum(d))
+
+    ny, nx = d.shape
+    cy, cx = (ny - 1) / 2.0, (nx - 1) / 2.0
+    yy, xx = np.indices(d.shape)
+    r_native = np.hypot(xx - cx, yy - cy) / osamp
+
+    # Edge taper: force the outer ~edge_px native pixels to zero
+    # linearly -- no real PSF flux lives at the cutout border.  Applied
+    # before smoothing so a leaked edge feature cannot bleed inward
+    # through the smoothed copy.
+    out = d.copy()
+    if edge_px > 0:
+        e = float(edge_px) * osamp
+        dr_edge = np.minimum.reduce([xx, yy, nx - 1 - xx, ny - 1 - yy])
+        taper = np.clip(dr_edge / e, 0.0, 1.0)
+        out = out * taper
+
+    # Wing denoise: blend tapered -> Gaussian-smoothed between r1 and r2.
+    if osamp >= 2 and np.isfinite(fwhm_native) and fwhm_native > 0:
+        r1 = float(wing_start_fwhm) * fwhm_native
+        r2 = max(r1 + 0.25, float(wing_end_fwhm) * fwhm_native)
+        sigma_grid = max(0.5, float(wing_sigma_px)) * osamp
+        # Contamination clip: a leaked neighbour blob is azimuthally
+        # localised, while real wing structure (resampling ringing, PSF
+        # ellipticity) is coherent around the radius.  Reference the
+        # azimuthal median per ~1 px radius bin: blobs stand out as
+        # positive excursions and are replaced by the local wing level.
+        # Runs BEFORE the Gaussian smooth so smeared blob light cannot
+        # re-enter through the blend.
+        wing_zone = r_native > r1
+        if wing_zone.any():
+            rb = np.floor(r_native).astype(int)
+            ref = np.zeros_like(out)
+            for k in np.unique(rb[wing_zone]):
+                m = rb == k
+                ref[m] = np.median(out[m]) if m.any() else 0.0
+            resid = out - ref
+            resid_w = resid[wing_zone]
+            mad = 1.4826 * np.median(np.abs(resid_w - np.median(resid_w)))
+            blob_lim = max(0.025 * float(np.nanmax(np.abs(d))), 8.0 * mad)
+            blob = wing_zone & (resid > blob_lim)
+            if blob.any():
+                out[blob] = ref[blob]
+        smoothed = gaussian_filter(np.nan_to_num(out, nan=0.0), sigma=sigma_grid)
+        w = np.clip((r2 - r_native) / (r2 - r1), 0.0, 1.0)
+        out = w * out + (1.0 - w) * smoothed
+        # Far-wing flattening: beyond ``flatten_fwhm`` the real wing flux
+        # is below the ePSF gridpoint-noise floor (measured: real star
+        # stacks carry ~2x less azimuthal variance there than the raw
+        # stamp), so the azimuthal-median radial profile is the better
+        # estimate of the true wing.  Blend the smoothed stamp toward it
+        # across ``flatten_width_px`` native pixels; the radial profile
+        # (and hence the photometric wings) is preserved, only the
+        # residual mottle is removed.  0 disables.
+        r3 = float(flatten_fwhm) * fwhm_native if flatten_fwhm > 0 else 0.0
+        if r3 > 0:
+            rbins = np.arange(0.0, float(np.nanmax(r_native)) + 0.5, 0.5)
+            cents, meds = [], []
+            for bi in range(len(rbins) - 1):
+                bm = (r_native >= rbins[bi]) & (r_native < rbins[bi + 1])
+                vals = out[bm]
+                vals = vals[np.isfinite(vals)]
+                if vals.size >= 8:
+                    cents.append(0.5 * (rbins[bi] + rbins[bi + 1]))
+                    meds.append(float(np.median(vals)))
+            if len(cents) >= 3:
+                prof = np.interp(
+                    r_native.ravel(), cents, meds
+                ).reshape(out.shape)
+                w2 = np.clip(
+                    (r_native - r3)
+                    / max(0.5, float(flatten_width_px)),
+                    0.0, 1.0,
+                )
+                out = (1.0 - w2) * out + w2 * prof
+
+    # A kept degraded model can carry NaN pixels; leaving them in the
+    # stamp would propagate NaNs through ImagePSF.evaluate into the
+    # photometry.  Zero them before the flux renormalisation.
+    out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+    total_out = float(np.nansum(out))
+    if total_in > 0 and np.isfinite(total_out) and total_out > 0:
+        out = out * (total_in / total_out)
+    return out
+
+
+def convolve_psf_stamp(
+    psf_data: np.ndarray,
+    kernel_2d: np.ndarray,
+    oversampling: int = 1,
+    return_stages: bool = False,
+):
+    """Convolve a (possibly oversampled) PSF stamp with a native-pixel kernel.
+
+    The ePSF array samples the continuous PSF on a grid ``oversampling``
+    times finer than the detector pixels.  A native-pixel kernel (e.g. the
+    SFFT matching kernel or a Gaussian difference kernel) must therefore be
+    applied in native pixel space: the ePSF is resampled onto the native
+    grid, convolved, then resampled back onto the original oversampled grid.
+
+    Resampling uses `scipy.ndimage.map_coordinates` with the exact grid
+    mapping ``over = c_over + k * (native - c_native)`` rather than
+    `scipy.ndimage.zoom`, whose ``(n_in - 1)/(n_out - 1)`` index mapping
+    introduces a fractional stretch (e.g. ~1.7% for a 101 px stamp at 4x)
+    and a half-pixel class of centre offsets for even oversampling factors.
+    At integer sample coordinates (odd cutouts under the photutils ePSF
+    convention) the cubic interpolant returns the exact grid values, so the
+    downsampling is a lossless strided extraction in the common case.
+
+    Parameters
+    ----------
+    psf_data : np.ndarray
+        PSF image on the (possibly oversampled) ePSF grid.
+    kernel_2d : np.ndarray
+        Convolution kernel defined in *native* detector pixels.
+    oversampling : int
+        ePSF oversampling factor k (1 = already native resolution).
+    return_stages : bool
+        If True, also return the intermediate native-resolution arrays
+        (pre- and post-convolution) for diagnostics/plotting.
+
+    Returns
+    -------
+    conv : np.ndarray
+        Convolved PSF on the original grid, renormalized to unit sum in
+        native space (when the convolved flux is positive and finite).
+    (native_in, native_out) : tuple of np.ndarray, only if return_stages
+    """
+    from scipy.signal import fftconvolve
+
+    data = np.asarray(psf_data, dtype=float)
+    kernel = np.asarray(kernel_2d, dtype=float)
+    try:
+        k = int(np.atleast_1d(oversampling)[0])
+    except (TypeError, ValueError, IndexError):
+        k = 1
+    k = max(1, k)
+
+    sy, sx = data.shape
+    cy_over, cx_over = (sy - 1) / 2.0, (sx - 1) / 2.0
+
+    # Native grid size.  photutils ePSF grids satisfy S = k*n + 1 (even k)
+    # or S = k*n (odd k); n = round((S - 1)/k) recovers n in both cases.
+    ny = max(1, int(round((sy - 1) / k)))
+    nx = max(1, int(round((sx - 1) / k)))
+    cy_nat, cx_nat = (ny - 1) / 2.0, (nx - 1) / 2.0
+
+    if k > 1:
+        # Native pixel j samples the oversampled grid at
+        # c_over + k * (j - c_nat).
+        jy = cy_over + k * (np.arange(ny) - cy_nat)
+        jx = cx_over + k * (np.arange(nx) - cx_nat)
+        gy, gx = np.meshgrid(jy, jx, indexing="ij")
+        native = map_coordinates(
+            data, [gy, gx], order=3, mode="constant", cval=0.0
+        )
+    else:
+        native = data
+
+    conv_native = fftconvolve(native, kernel, mode="same")
+    total = float(np.nansum(conv_native))
+    if np.isfinite(total) and total > 0:
+        conv_native = conv_native / total
+
+    if k > 1:
+        # Oversampled index p maps back to native coordinate
+        # c_nat + (p - c_over)/k.
+        py = cy_nat + (np.arange(sy) - cy_over) / k
+        px = cx_nat + (np.arange(sx) - cx_over) / k
+        gy2, gx2 = np.meshgrid(py, px, indexing="ij")
+        conv = map_coordinates(
+            conv_native, [gy2, gx2], order=3, mode="constant", cval=0.0
+        )
+        # A cubic interpolant of a unit-sum native stamp only approximates
+        # sum == k^2 on the oversampled grid (the photutils unit-flux
+        # convention).  Renormalize so every fitted flux inherits the exact
+        # scale.
+        _conv_sum = float(np.nansum(conv))
+        if np.isfinite(_conv_sum) and _conv_sum > 0:
+            conv = conv * (float(k * k) / _conv_sum)
+    else:
+        conv = conv_native
+
+    if return_stages:
+        return conv, native, conv_native
+    return conv
+
+
+def convolve_epsf_with_kernel(epsf_model, kernel_2d):
+    """Convolve an ImagePSF/ePSF model with a native-pixel kernel.
+
+    Returns
+    -------
+    (model, native_in, native_out) : tuple
+        *model* is a new `~photutils.psf.ImagePSF` on the same oversampled
+        grid as the input (same flux, origin, oversampling); *native_in*
+        and *native_out* are the native-resolution PSF before and after
+        convolution (for diagnostics).
+    """
+    data = np.asarray(epsf_model.data, dtype=float)
+    oversamp = getattr(epsf_model, "oversampling", 1)
+    try:
+        k = int(np.atleast_1d(oversamp)[0])
+    except (TypeError, ValueError, IndexError):
+        k = 1
+    k = max(1, k)
+
+    conv, native, conv_native = convolve_psf_stamp(
+        data, kernel_2d, k, return_stages=True
+    )
+
+    flux = getattr(epsf_model, "flux", 1.0)
+    x_0 = getattr(epsf_model, "x_0", 0.0)
+    y_0 = getattr(epsf_model, "y_0", 0.0)
+    model = ImagePSF(
+        data=conv,
+        flux=float(getattr(flux, "value", flux)),
+        x_0=float(getattr(x_0, "value", x_0)),
+        y_0=float(getattr(y_0, "value", y_0)),
+        origin=getattr(epsf_model, "origin", None),
+        oversampling=k,
+    )
+    return model, native, conv_native
+
+
+def convolve_gridded_epsf_with_kernel(epsf_model, kernels):
+    """Convolve each cell of a GriddedPSFModel with its own kernel.
+
+    The SFFT matching kernel is spatially varying, so each grid cell's
+    ePSF must be convolved with the kernel realized at that cell's
+    fiducial position - a single kernel evaluated at the image centre or
+    target position is wrong for every other cell.
+
+    Parameters
+    ----------
+    epsf_model : GriddedPSFModel
+        The spatially-varying ePSF grid.
+    kernels : sequence of 2-D ndarray
+        Native-pixel kernels, one per grid cell, in the same order as
+        ``epsf_model.grid_xypos``.
+
+    Returns
+    -------
+    (model, native_in, native_out) : tuple
+        *model* is a new `~photutils.psf.GriddedPSFModel`; *native_in* and
+        *native_out* are the (n_cell, ny, nx) native-resolution cubes
+        before and after convolution (for diagnostics).
+    """
+    xypos = np.asarray(epsf_model.grid_xypos, dtype=float)
+    data_cube = np.asarray(epsf_model.data, dtype=float)
+    if len(kernels) != len(xypos):
+        raise ValueError(
+            f"{len(kernels)} kernels for {len(xypos)} grid cells"
+        )
+    try:
+        k = int(np.atleast_1d(epsf_model.oversampling)[0])
+    except (TypeError, ValueError, IndexError):
+        k = 1
+    k = max(1, k)
+    osamp_pair = tuple(int(v) for v in np.atleast_1d(epsf_model.oversampling))
+    if len(osamp_pair) == 1:
+        osamp_pair = (osamp_pair[0], osamp_pair[0])
+
+    conv_cells = []
+    native_in = []
+    native_out = []
+    for i in range(len(xypos)):
+        conv, native, conv_native = convolve_psf_stamp(
+            data_cube[i], np.asarray(kernels[i], dtype=float), k,
+            return_stages=True,
+        )
+        conv_cells.append(conv)
+        native_in.append(native)
+        native_out.append(conv_native)
+
+    # Rebuild the gridded model directly (grid_from_epsfs is deprecated in
+    # photutils 3.0); grid order follows grid_xypos, which _define_grid
+    # re-sorts internally, so any consistent ordering works.
+    meta = {
+        "grid_xypos": [tuple(p) for p in xypos],
+        "oversampling": osamp_pair,
+        "fill_value": getattr(epsf_model, "fill_value", 0.0),
+    }
+    model = GriddedPSFModel(
+        NDData(np.stack(conv_cells, axis=0), meta=meta),
+        fill_value=meta["fill_value"],
+    )
+    return model, np.stack(native_in, axis=0), np.stack(native_out, axis=0)
+
+
+def epsf_at_position(epsf_model, x, y):
+    """Realize the local PSF at detector position ``(x, y)`` as an ImagePSF.
+
+    For a `~photutils.psf.GriddedPSFModel` this bilinearly interpolates the
+    per-cell ePSFs at (x, y); for any other model the input is returned
+    unchanged.  Used where downstream code renders the PSF on cutout-local
+    coordinates (e.g. limiting-magnitude injection), since a gridded model
+    would interpret those local coordinates as detector positions.
+    """
+    if not isinstance(epsf_model, GriddedPSFModel):
+        return epsf_model
+    data_cube = np.asarray(epsf_model.data, dtype=float)
+    ny_s, nx_s = data_cube.shape[1:]
+    osamp = np.atleast_1d(epsf_model.oversampling)
+    k_y = max(1, int(osamp[0]))
+    k_x = max(1, int(osamp[-1]))
+    # GriddedPSFModel.origin is (x, y, grid-axis) - the stamp centre.
+    ox = float(np.atleast_1d(epsf_model.origin)[0])
+    oy = float(np.atleast_1d(epsf_model.origin)[1])
+    # evaluate() maps detector offsets to stamp indices via origin, so
+    # sampling at x + (j - ox)/k_x returns the interpolated stamp array.
+    jj, ii = np.meshgrid(np.arange(nx_s), np.arange(ny_s))
+    xg = float(x) + (jj - ox) / k_x
+    yg = float(y) + (ii - oy) / k_y
+    stamp = np.asarray(
+        epsf_model.evaluate(
+            xg, yg, flux=1.0, x_0=float(x), y_0=float(y)
+        ),
+        dtype=float,
+    )
+    return ImagePSF(
+        data=stamp,
+        flux=1.0,
+        x_0=ox,
+        y_0=oy,
+        origin=(ox, oy),
+        oversampling=(k_y, k_x),
+    )
+
+
+def matched_filter_detection_prob(
+    ndimage, epsf_model, x_fit, y_fit, half_box, inverted=False
+):
+    """Matched-filter detection probability for a PSF-shaped source.
+
+    Compares the sky-only model (H0) against PSF + sky (H1) in the
+    square box of half-size ``half_box`` centred on ``(x_fit, y_fit)``.
+    For a linear Gaussian model the log-likelihood ratio reduces to the
+    matched-filter SNR,
+
+        z = a * sqrt(sum_i w_i p_i^2),    a = sum_i w_i p_i d_i / sum_i w_i p_i^2
+
+    with ``w = 1/sigma^2`` -- the Neyman-Pearson-optimal statistic for a
+    source at a known position (Zackay & Ofek 2016; the Mattox+ 1996
+    test statistic).  Forced photometry supplies the position a priori,
+    so no look-elsewhere trials factor applies (cf. Vio & Andreani 2016).
+
+    ``z`` is signed by the best amplitude, so PSF-shaped negative
+    residuals (oversubtraction dips) drive the probability toward 0
+    rather than reporting a high unsigned significance.  It is then
+    divided by ``clip(sqrt(reduced_chi2), 1, 10)`` -- the same chi2
+    error inflation applied to the reported flux errors -- so
+    noise-inconsistent residuals pull the result toward 0.5.  Finally,
+    the probability is multiplied by a shape factor that suppresses it
+    when a narrower (cosmic-ray-like) or broader (extended-source)
+    Gaussian template -- or a PSF dipole (misregistration residual) --
+    explains the box better than the PSF does: the empirical
+    star/galaxy/artifact discrimination the raw matched filter cannot
+    provide.
+
+    Parameters
+    ----------
+    ndimage : `~astropy.nddata.NDData`
+        Cutout data with optional ``StdDevUncertainty`` (sigma, not
+        variance).  Evaluated in the same pixel frame as ``x_fit``.
+    epsf_model : photutils PSF model
+        ImagePSF or GriddedPSFModel; the local PSF is realised via
+        `epsf_at_position` so gridded models work on cutout frames.
+    x_fit, y_fit : float
+        Fitted source position in the ndimage pixel frame.
+    half_box : int
+        Half-size of the evaluation box in pixels.
+    inverted : bool
+        Evaluate on the sign-flipped image (transient in the template),
+        so the probability consistently means "a transient is present".
+
+    Returns
+    -------
+    (prob, z, delta_chi2) : tuple of float
+        ``prob`` = Phi(z/inflate) in (0, 1): ~0.5 at noise level, -> 1
+        for real sources, -> 0 for PSF-shaped negative dips.  ``z`` is
+        the signed matched-filter SNR and ``delta_chi2`` = z^2 is the
+        chi2 improvement over the sky-only model.  All NaN when the
+        statistic cannot be evaluated.
+    """
+    nan3 = (np.nan, np.nan, np.nan)
+    try:
+        data = np.asarray(ndimage.data, dtype=float)
+        sigma = (
+            np.asarray(ndimage.uncertainty.array, dtype=float)
+            if getattr(ndimage, "uncertainty", None) is not None
+            else None
+        )
+        half = max(2, int(half_box))
+        xc, yc = int(round(x_fit)), int(round(y_fit))
+        yslc = slice(max(0, yc - half), min(data.shape[0], yc + half + 1))
+        xslc = slice(max(0, xc - half), min(data.shape[1], xc + half + 1))
+        d = data[yslc, xslc]
+        if d.size == 0 or not np.isfinite(d).any():
+            return nan3
+        yy_b, xx_b = np.mgrid[yslc, xslc]
+        # Sky level: median of the box's outer ring, matching the
+        # annulus-scale background the fitter subtracts.
+        rr_b = np.hypot(xx_b - x_fit, yy_b - y_fit)
+        sky_px = d[np.isfinite(d) & (rr_b > half - 1.0)]
+        bkg = float(np.median(sky_px)) if sky_px.size >= 5 else 0.0
+        model = epsf_at_position(epsf_model, x_fit, y_fit)
+        p = np.asarray(
+            model.evaluate(xx_b, yy_b, flux=1.0, x_0=x_fit, y_0=y_fit),
+            dtype=float,
+        )
+        if p.shape != d.shape:
+            return nan3
+        d = (-1.0 if inverted else 1.0) * (d - bkg)
+        if sigma is not None:
+            s = sigma[yslc, xslc]
+            w = np.where(np.isfinite(s) & (s > 0), 1.0 / (s * s), 0.0)
+        else:
+            w = np.isfinite(d).astype(float)
+        ok = np.isfinite(d) & np.isfinite(p) & (w > 0) & (p > 0)
+        if np.count_nonzero(ok) < 5:
+            return nan3
+        den = float(np.sum(w[ok] * p[ok] * p[ok]))
+        if den <= 0:
+            return nan3
+        a = float(np.sum(w[ok] * p[ok] * d[ok])) / den
+        z = a * np.sqrt(den)
+        chi2_s = float(np.sum(w[ok] * (d[ok] - a * p[ok]) ** 2))
+        dof = max(1, int(np.count_nonzero(ok)) - 1)
+        inflate = float(np.clip(np.sqrt(max(chi2_s / dof, 1.0)), 1.0, 10.0))
+        # Shape check via model comparison: the PSF must be the best
+        # template for this excess.  A narrower (cosmic-ray / hot-pixel)
+        # or broader (unresolved galaxy, blend) template that explains
+        # the residuals better means the signal is not PSF-shaped, so
+        # the detection probability is suppressed.  Using a comparison
+        # instead of raw chi2 keeps real sources unpenalised when the
+        # noise model is merely underestimated (chi2_red > 1 across the
+        # board -- common on correlated-noise difference images) as long
+        # as the PSF is still the best shape.
+        rr2 = (xx_b - x_fit) ** 2 + (yy_b - y_fit) ** 2
+        # PSF width from the flux-weighted second moment of the template
+        # -- model-agnostic (works for empirical ePSFs).
+        psum = float(np.sum(p[ok] * rr2[ok])) / max(float(np.sum(p[ok])), 1e-30)
+        sig_psf = float(np.sqrt(max(psum, 0.1)))
+        pen = 0.0
+        for s_alt in (max(0.4, 0.35 * sig_psf), 2.0 * sig_psf):
+            g = np.exp(-0.5 * rr2 / (s_alt * s_alt))
+            g /= max(float(g[ok].max()), 1e-30)
+            den_a = float(np.sum(w[ok] * g[ok] * g[ok]))
+            if den_a <= 0:
+                continue
+            a_a = float(np.sum(w[ok] * g[ok] * d[ok])) / den_a
+            chi2_a = float(np.sum(w[ok] * (d[ok] - a_a * g[ok]) ** 2))
+            pen = max(pen, chi2_s - chi2_a)
+        # Dipole alternative: imperfect astrometric alignment or kernel
+        # matching leaves +PSF/-PSF pairs ~1 PSF width apart, nearly
+        # indistinguishable from a real source at marginal S/N (the
+        # dominant difference-image artifact class -- cf. Zackay & Ofek
+        # 2017 on S_corr's artifact rejection).  Test four orientations;
+        # the signed amplitude is fit like the other alternatives.
+        for ang in (0.0, 0.5 * math.pi, 0.25 * math.pi, 0.75 * math.pi):
+            g_d = np.asarray(
+                model.evaluate(
+                    xx_b,
+                    yy_b,
+                    flux=1.0,
+                    x_0=x_fit + sig_psf * math.cos(ang),
+                    y_0=y_fit + sig_psf * math.sin(ang),
+                )
+            ) - np.asarray(
+                model.evaluate(
+                    xx_b,
+                    yy_b,
+                    flux=1.0,
+                    x_0=x_fit - sig_psf * math.cos(ang),
+                    y_0=y_fit - sig_psf * math.sin(ang),
+                )
+            )
+            den_d = float(np.sum(w[ok] * g_d[ok] * g_d[ok]))
+            if den_d <= 0:
+                continue
+            a_d = float(np.sum(w[ok] * g_d[ok] * d[ok])) / den_d
+            chi2_d = float(np.sum(w[ok] * (d[ok] - a_d * g_d[ok]) ** 2))
+            pen = max(pen, chi2_s - chi2_d)
+        w_shape = math.exp(-0.5 * pen / dof)
+        prob = (
+            0.5 * (1.0 + math.erf(z / inflate / math.sqrt(2.0))) * w_shape
+        )
+        return prob, z, z * z
+    except Exception:
+        return nan3
+
+
+def empirical_false_alarm_prob(
+    ndimage,
+    epsf_model,
+    x_fit,
+    y_fit,
+    prob_row,
+    half_box,
+    inverted=False,
+    n_trials=60,
+    r_in=0.0,
+    r_out=None,
+    min_sites=20,
+    rng=None,
+    mask=None,
+    exclude_xy=None,
+    exclude_radius=0.0,
+    z_row=None,
+):
+    """Empirical false-alarm probability from blank sites on the same frame.
+
+    The analytic sigma model used by `matched_filter_detection_prob`
+    ignores inter-pixel correlation introduced by the subtraction kernel
+    and residual ePSF systematics, so its Gaussian p-value can be badly
+    wrong on difference images.  Instead of whitening the image (the
+    ZOGY ``S_corr`` route), this measures the null distribution directly:
+    it evaluates the same statistic at ``n_trials`` random blank
+    positions in an annulus around ``(x_fit, y_fit)`` and returns the
+    empirical tail fraction. When ``z_row`` is provided, it compares the
+    unsaturated matched-filter S/N; otherwise it compares ``prob_detect``,
+    which can round to 1.0 at high significance.
+
+    Parameters
+    ----------
+    ndimage : `~astropy.nddata.NDData`
+        Wide-field data + ``StdDevUncertainty`` in the frame of
+        ``x_fit``/``y_fit``.  Use the full image, not the target cutout
+        -- the cutout is usually too small to hold the annulus.
+    epsf_model : photutils PSF model
+        Same model used for the target's ``prob_detect``.
+    x_fit, y_fit : float
+        Position around which blank sites are drawn.
+    prob_row : float
+        The row's ``prob_detect`` value, used when ``z_row`` is unavailable.
+    half_box : int
+        Same evaluation-box half-size used for ``prob_detect``.
+    inverted : bool
+        Evaluate the sign-flipped statistic so inverted rows compare
+        against the matching null.
+    n_trials : int
+        Number of valid blank sites to draw.
+    r_in, r_out : float
+        Annulus inner/outer radius in pixels.  ``r_in`` must exceed the
+        target's PSF wings (>= ~3 FWHM).  ``r_out`` defaults to
+        ``r_in + 10 * half_box``.
+    min_sites : int
+        Minimum valid sites before the estimate is reported; below this
+        the returned probability is NaN.
+    rng : `~numpy.random.Generator`, optional
+        Draws blank positions; a fresh default generator is used when
+        None.
+    mask : ndarray of bool, optional
+        Reject sites whose centre pixel is masked.
+    exclude_xy, exclude_radius : array-like, float
+        Reject sites within ``exclude_radius`` of a listed position
+        (detected/catalogued objects).
+    z_row : float, optional
+        Unsaturated matched-filter S/N to use for the empirical tail comparison.
+
+    Returns
+    -------
+    (p_false, n_sites) : tuple of float, int
+        ``p_false`` is the (+1)/(n+1) corrected tail fraction, NaN when
+        fewer than ``min_sites`` valid sites were drawn.
+    """
+    try:
+        if rng is None:
+            rng = np.random.default_rng()
+        half = max(2, int(half_box))
+        ny, nx = np.asarray(ndimage.data).shape
+        if r_out is None:
+            r_out = float(r_in) + 10.0 * half
+        r_out = min(
+            float(r_out),
+            float(x_fit) - half - 1.0,
+            float(y_fit) - half - 1.0,
+            nx - float(x_fit) - half - 1.0,
+            ny - float(y_fit) - half - 1.0,
+        )
+        if r_out <= r_in:
+            return np.nan, 0
+        try:
+            _z_row = float(z_row)
+        except (TypeError, ValueError):
+            _z_row = np.nan
+        _use_z = np.isfinite(_z_row)
+        try:
+            _target_stat = _z_row if _use_z else float(prob_row)
+        except (TypeError, ValueError):
+            return np.nan, 0
+        if not np.isfinite(_target_stat):
+            return np.nan, 0
+        mask_arr = np.asarray(mask, dtype=bool) if mask is not None else None
+        excl_tree = None
+        if exclude_xy is not None:
+            excl = np.asarray(exclude_xy, dtype=float)
+            if excl.ndim == 2 and excl.shape[0]:
+                excl = excl[np.isfinite(excl).all(axis=1)]
+                if excl.shape[0]:
+                    excl_tree = cKDTree(excl)
+        stats_blank = []
+        tries = 0
+        while len(stats_blank) < int(n_trials) and tries < 20 * int(n_trials):
+            tries += 1
+            ang = rng.uniform(0.0, 2.0 * np.pi)
+            rad = rng.uniform(float(r_in), r_out)
+            xb = float(x_fit) + rad * np.cos(ang)
+            yb = float(y_fit) + rad * np.sin(ang)
+            if not (half <= xb < nx - half and half <= yb < ny - half):
+                continue
+            if mask_arr is not None and mask_arr[int(round(yb)), int(round(xb))]:
+                continue
+            if excl_tree is not None:
+                d_ex, _ = excl_tree.query([xb, yb], k=1)
+                if np.isfinite(d_ex) and d_ex < float(exclude_radius):
+                    continue
+            pb, zb, _ = matched_filter_detection_prob(
+                ndimage, epsf_model, xb, yb, half, inverted=inverted
+            )
+            blank_stat = zb if _use_z else pb
+            if np.isfinite(blank_stat):
+                stats_blank.append(float(blank_stat))
+        n_sites = len(stats_blank)
+        if n_sites < int(min_sites):
+            return np.nan, n_sites
+        p_false = float(
+            (np.count_nonzero(np.asarray(stats_blank) >= _target_stat) + 1)
+            / (n_sites + 1)
+        )
+        return p_false, n_sites
+    except Exception:
+        return np.nan, 0
+
+
+def _propagated_centroid_err(flux, error, xcen, ycen):
+    """1-sigma centroid error propagated from a per-pixel error array.
+
+    For x_c = sum(f_i x_i)/sum(f_i) with independent per-pixel noise the
+    leading propagation term is sqrt(sum(s_i^2 (x_i - x_c)^2))/sum(f_i);
+    likewise for y.  Returns (x_err, y_err), NaN when not computable.
+    """
+    if error is None:
+        return np.nan, np.nan
+    flux = np.asarray(flux, dtype=float)
+    err = np.asarray(error, dtype=float)
+    if err.shape != flux.shape:
+        return np.nan, np.nan
+    ok = np.isfinite(flux) & np.isfinite(err) & (flux > 0)
+    total = float(np.nansum(np.where(ok, flux, 0.0)))
+    if total <= 0 or not np.any(ok):
+        return np.nan, np.nan
+    yy, xx = np.mgrid[0 : flux.shape[0], 0 : flux.shape[1]]
+    xerr = (
+        np.sqrt(np.nansum(np.where(ok, err**2 * (xx - xcen) ** 2, 0.0)))
+        / total
+    )
+    yerr = (
+        np.sqrt(np.nansum(np.where(ok, err**2 * (yy - ycen) ** 2, 0.0)))
+        / total
+    )
+    # photutils 3.1 centroid_err floor: the error cannot fall below the
+    # variance of a uniform distribution across one pixel, which prevents
+    # a near-zero error when the flux carrying the noise spans <1 pixel.
+    floor = np.sqrt(np.nansum(np.where(ok, err**2, 0.0)) / 12.0) / total
+    return float(max(xerr, floor)), float(max(yerr, floor))
 
 
 def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None):
@@ -291,36 +3173,53 @@ def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None)
     # Preserve NaNs instead of setting to 0.0
     flux[flux < 0] = np.nan
 
-    total = float(np.sum(flux))
-    if total <= 0:
+    # nansum: masked/negative pixels were just set to NaN above, and
+    # np.sum would turn the whole centroid NaN if even one pixel is.
+    total = float(np.nansum(flux))
+    if not np.isfinite(total) or total <= 0:
         return np.nan, np.nan, np.nan, np.nan
 
-    xcen = float(np.sum(flux * xx) / total)
-    ycen = float(np.sum(flux * yy) / total)
+    xcen = float(np.nansum(flux * xx) / total)
+    ycen = float(np.nansum(flux * yy) / total)
 
-    # Variance about centroid under the same flux model.
-    xvar = float(np.sum(flux * (xx - xcen) ** 2) / total)
-    yvar = float(np.sum(flux * (yy - ycen) ** 2) / total)
-
-    # COM uncertainty proxy; preserve original behaviour/scale.
-    xerr = float(np.sqrt(xvar / total)) if xvar >= 0 else np.nan
-    yerr = float(np.sqrt(yvar / total)) if yvar >= 0 else np.nan
+    # Noise-propagated errors only: without an error array the 1-sigma
+    # errors are NaN, matching photutils 3.1 SourceCatalog centroid_err
+    # semantics.
+    xerr, yerr = _propagated_centroid_err(flux, error, xcen, ycen)
 
     return xcen, ycen, xerr, yerr
+
+
+def _centroid_2dg_quiet(data, **kwargs):
+    """2D Gaussian centroid with singular-fit covariance warnings contained."""
+    with warnings.catch_warnings(), np.errstate(
+        divide="ignore", over="ignore", invalid="ignore"
+    ):
+        warnings.filterwarnings(
+            "ignore",
+            category=RuntimeWarning,
+            module=r"astropy\.modeling\.fitting",
+        )
+        return centroid_2dg(data, **kwargs)
 
 
 def centroid_2dg_with_error(data, mask=None, error=None, xpeak=None, ypeak=None):
     """
     2D Gaussian centroid compatible with centroid_sources_with_error (4-tuple API).
-    Uses error for weighting when provided; returns (x, y, nan, nan) for uncertainties.
+    Uses error for weighting when provided; uncertainties come from the
+    same propagated-noise term as centroid_com_with_error (Gaussian-fit
+    covariances are not exposed by centroid_2dg).
     """
-    xcen, ycen = centroid_2dg(data, mask=mask, error=error)
-    return (
-        float(np.atleast_1d(xcen)[0]),
-        float(np.atleast_1d(ycen)[0]),
-        np.nan,
-        np.nan,
-    )
+    xcen, ycen = _centroid_2dg_quiet(data, mask=mask, error=error)
+    xcen = float(np.atleast_1d(xcen)[0])
+    ycen = float(np.atleast_1d(ycen)[0])
+    xerr = yerr = np.nan
+    if np.isfinite(xcen) and np.isfinite(ycen):
+        flux = np.asarray(data, dtype=float)
+        if mask is not None:
+            flux = np.where(mask, np.nan, flux)
+        xerr, yerr = _propagated_centroid_err(flux, error, xcen, ycen)
+    return xcen, ycen, xerr, yerr
 
 
 def _centroid_sources_with_error_impl(
@@ -374,6 +3273,7 @@ def _centroid_sources_with_error_impl(
     centroid_kwargs = {k: v for k, v in kwargs.items() if k in spec.parameters}
 
     xcentroids, ycentroids, xerrs, yerrs = [], [], [], []
+    n_fully_masked = 0
 
     for xp, yp in zip(xpos, ypos, strict=True):
         slices_large, slices_small = overlap_slices(
@@ -389,9 +3289,15 @@ def _centroid_sources_with_error_impl(
         )
 
         if np.all(mask_cutout):
-            raise ValueError(
-                f"Cutout for source at ({xp:.1f}, {yp:.1f}) is fully masked."
-            )
+            # A fully masked cutout has no centroid information; mark it
+            # NaN like a failed fit and continue so one bad source does
+            # not abort centroids for the rest of the list.
+            n_fully_masked += 1
+            xcentroids.append(np.nan)
+            ycentroids.append(np.nan)
+            xerrs.append(np.nan)
+            yerrs.append(np.nan)
+            continue
 
         centroid_kwargs["mask"] = mask_cutout
         err_arr = centroid_kwargs.get("error")
@@ -402,7 +3308,17 @@ def _centroid_sources_with_error_impl(
         centroid_kwargs.pop("ypeak", None)
 
         try:
-            xcen, ycen, xerr, yerr = centroid_func(data_cutout, **centroid_kwargs)
+            with warnings.catch_warnings(), np.errstate(
+                divide="ignore", over="ignore", invalid="ignore"
+            ):
+                warnings.filterwarnings(
+                    "ignore",
+                    category=RuntimeWarning,
+                    module=r"astropy\.modeling\.fitting",
+                )
+                xcen, ycen, xerr, yerr = centroid_func(
+                    data_cutout, **centroid_kwargs
+                )
         except (ValueError, TypeError):
             xcen, ycen, xerr, yerr = np.nan, np.nan, np.nan, np.nan
 
@@ -410,6 +3326,13 @@ def _centroid_sources_with_error_impl(
         ycentroids.append(ycen + slices_large[0].start)
         xerrs.append(xerr)
         yerrs.append(yerr)
+
+    if n_fully_masked:
+        logger.debug(
+            "%d of %d centroid cutouts were fully masked; centroids set to NaN.",
+            n_fully_masked,
+            len(xpos),
+        )
 
     return (
         np.array(xcentroids),
@@ -431,6 +3354,112 @@ class Covariance:
     cov_matrix: np.ndarray
 
 
+def _arr_fingerprint(a):
+    """NaN-safe content fingerprint for eval-context matching.
+
+    ``None`` passes through unchanged; arrays hash their C-contiguous
+    float64 bytes, so a pickled copy in a multiprocessing worker still
+    matches the context built in the parent.  The old two-moment
+    fingerprint (shape + sum + sum-of-squares) collided on permutations
+    and on arrays differing only where weight==0, which would have
+    silently reused a stale inv_var/log_const for an entire MCMC run.
+    """
+    if a is None:
+        return None
+    arr = np.ascontiguousarray(np.asarray(a, float))
+    if arr.size == 0:
+        return (arr.shape, "")
+    return (
+        arr.shape,
+        hashlib.sha1(arr.tobytes()).hexdigest(),
+    )
+
+
+_MCMC_POS_KEYS = ("x_0", "y_0", "xcenter", "ycenter", "x_mean", "y_mean")
+
+
+def _apply_position_bounds(model, initial_params, delta):
+    """Restrict position parameters to ``p0 +/- delta`` without widening
+    any bounds already set on the model.
+
+    photutils writes per-source bounds from its ``xy_bounds`` onto the
+    model before handing it to the fitter (``x_0_0``/``x_0_1`` in grouped
+    fits), so the delta window is *intersected* with existing bounds --
+    the tighter of the two wins.  Overwriting them blindly would let a
+    centroid-held source wander the full delta under MCMC; ignoring the
+    existing bounds would also drop the configured xy_bounds entirely.
+    startswith, not substring matching: "x_0" occurs inside "flux_0".
+    """
+    for pname, p0 in zip(model.param_names, np.asarray(initial_params, float)):
+        if not any(pname.startswith(k) for k in _MCMC_POS_KEYS):
+            continue
+        lo_m, hi_m = getattr(model, pname).bounds
+        lo = float(p0) - float(delta)
+        hi = float(p0) + float(delta)
+        if lo_m is not None:
+            lo = max(lo, lo_m)
+        if hi_m is not None:
+            hi = min(hi, hi_m)
+        getattr(model, pname).bounds = (lo, hi)
+
+
+class _PositiveFluxFitter:
+    """Fitter proxy that pins flux/amplitude parameters at >= 0.
+
+    photutils builds the actual fit model internally -- a copied PSF
+    model for single sources, a dynamically generated flat model
+    (``flux_0``, ``flux_1``, ...) for groups -- and the flat model does
+    not carry bounds over from the template.  Applying the bound here,
+    on the model the fitter is actually called with, covers both cases
+    for every bound-aware fitter (TRF/SLSQP bounds, MCMCFitter's prior,
+    PoissonLikelihoodFitter's step projection).
+
+    ``__call__`` must expose ``maxiter`` explicitly: PSFPhotometry
+    inspects the signature and drops ``fitter_maxiters`` when it is
+    absent.  All other attributes (``fit_info`` etc.) delegate to the
+    wrapped fitter.
+    """
+
+    _FLUX_KEYS = ("flux", "amplitude", "amp")
+
+    def __init__(self, fitter):
+        self._wrapped_fitter = fitter
+        # photutils passes the astropy spelling ``maxiter``; the in-house
+        # MCMC/Poisson fitters spell it ``maxiters``.  Resolve the wrapped
+        # fitter's accepted name once so the cap lands under the right
+        # keyword, and drop it when the fitter accepts neither.
+        try:
+            _params = inspect.signature(fitter).parameters
+        except (TypeError, ValueError):
+            _params = {}
+        if "maxiter" in _params:
+            self._maxiter_kw = "maxiter"
+        elif "maxiters" in _params:
+            self._maxiter_kw = "maxiters"
+        else:
+            self._maxiter_kw = None
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped_fitter, name)
+
+    def __call__(self, model, x, y, data, weights=None, maxiter=None, **kwargs):
+        for pname in getattr(model, "param_names", ()):
+            if not any(k in pname.lower() for k in self._FLUX_KEYS):
+                continue
+            try:
+                par = getattr(model, pname)
+                lo, hi = par.bounds
+                if lo is None or lo < 0.0:
+                    par.bounds = (0.0, hi)
+            except Exception:
+                continue
+        if maxiter is not None and self._maxiter_kw is not None:
+            kwargs[self._maxiter_kw] = maxiter
+        return self._wrapped_fitter(
+            model, x, y, data, weights=weights, **kwargs
+        )
+
+
 # ===========================================================================
 # MCMCFitter
 # ===========================================================================
@@ -441,11 +3470,25 @@ class MCMCFitter:
     Adaptive emcee-based fitter with the same __call__ signature as the
     photutils least-squares fitters.
 
-    Changes vs. original
-    --------------------
-    * No re-imports inside __call__ or run_mcmc.
-    * logger obtained once at top of __call__ rather than twice.
-    * Covariance now a dataclass (no behavioural change).
+    Key implementation details
+    --------------------------
+    * Save/restore in log_likelihood: each walker evaluation saves the model
+      parameters, sets new ones, evaluates, then restores - avoiding a deep
+      model.copy() per likelihood call (the dominant MCMC cost).
+    * Parameter-aware jitter in _jitter_within_bounds: position parameters
+      (x_0, y_0) get an absolute pixel jitter ``scale``, while flux/shape
+      parameters get a relative jitter ``scale * max(|p0|, 1)``.  This prevents
+      the old ``scale * |p0|`` rule from producing ~2 px position scatter for
+      coordinates near 100, which was far larger than the PSF posterior width
+      and caused walkers to pile up at bounds.
+    * Rejection-sampling boundary guard: out-of-bound trials are resampled
+      rather than reflected, eliminating boundary-clustering artifacts.
+    * Mixed proposal moves: 70% StretchMove + 30% DEMove for better mixing in
+      correlated PSF posteriors.
+    * Variance floor: per-pixel variance clipped to 1e-30 to prevent
+      division-by-zero / log(0) at masked/saturated pixels.
+    * fit_info reset on counter==0 so stale per_source records from a prior
+      .fit() call on a different tier do not corrupt index arithmetic.
     """
 
     # When nsteps is None, run until convergence (tau < adaptive_tau_target) up to this cap.
@@ -453,21 +3496,25 @@ class MCMCFitter:
 
     def __init__(
         self,
-        nwalkers: int = 50,
+        nwalkers: int = 64,
         nsteps: Optional[int] = 5000,
-        delta: float = 10.0,
+        delta: float = 5.0,
         burnin_frac: float = 0.3,
         thin: int = 10,
         random_state=None,
         inplace=None,
-        adaptive_tau_target: int = 50,
-        min_autocorr_N: int = 100,
+        adaptive_tau_target: int = 100,
+        min_autocorr_N: int = 300,
         batch_steps: int = 100,
-        jitter_scale: float = 0.01,
+        early_stop: bool = True,
+        jitter_scale: float = 0.02,
         use_nddata_uncertainty: bool = False,
         gain: float = 1.0,
         readnoise: float = 0.0,
         background_rms=None,
+        threads: int = 1,
+        store_samples: bool = False,
+        allow_negative_flux: bool = False,
     ):
         self.nwalkers = int(nwalkers)
         self.nsteps = int(nsteps) if nsteps is not None else None
@@ -477,7 +3524,16 @@ class MCMCFitter:
         self.adaptive_tau_target = adaptive_tau_target
         self.min_autocorr_N = min_autocorr_N
         self.batch_steps = int(batch_steps)
+        self.early_stop = bool(early_stop)
+        self._ll_ctx = None
+        self._last_tau = None
         self.jitter_scale = float(jitter_scale)
+        self.threads = int(threads)
+        self.store_samples = bool(store_samples)
+        # When True, the flux prior allows negative values (for difference-image
+        # photometry of fading sources).  Default False preserves existing
+        # behavior for science images.
+        self.allow_negative_flux = bool(allow_negative_flux)
         self.random_state = (
             np.random.RandomState(random_state)
             if random_state is not None
@@ -492,6 +3548,22 @@ class MCMCFitter:
         self._readnoise = float(readnoise)
         self._background_rms = background_rms
 
+    def __getstate__(self):
+        # The sampler owns the worker pool and the bound log_prob_fn, so it
+        # cannot be pickled; workers only need the plain attributes.  The
+        # default random_state is the np.random module itself, which also
+        # cannot be pickled - and only the parent's _jitter_within_bounds
+        # uses it, before the pool starts.
+        state = self.__dict__.copy()
+        state["sampler"] = None
+        state["random_state"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if self.random_state is None:
+            self.random_state = np.random
+
     # ---- Prior / likelihood -----------------------------------------------
 
     def _in_bounds(self, value, bounds):
@@ -499,13 +3571,135 @@ class MCMCFitter:
         hi = np.inf if bounds[1] is None else bounds[1]
         return lo <= value <= hi
 
+    def _build_eval_context(self, model, x, y, data, weights, noise_variance):
+        """Precompute per-fit constants for the likelihood and prior.
+
+        These run inside log_prob which is called nwalkers * nsteps
+        times; hoisting the broadcasts, variance build, and the
+        parameter-name string parsing removes the per-call overhead.
+        """
+        ctx = {"ok": False}
+        try:
+            data = np.asarray(data, float)
+            if np.isscalar(noise_variance):
+                var = np.full(data.shape, float(noise_variance))
+            else:
+                var = np.broadcast_to(
+                    np.asarray(noise_variance, float), data.shape
+                ).copy()
+            if weights is not None:
+                w = np.broadcast_to(np.asarray(weights, float), data.shape)
+                var = var / np.clip(w, 1e-12, None) ** 2
+            var = np.clip(var, 1e-30, None)
+            ctx["inv_var"] = 1.0 / var
+            ctx["log_const"] = 0.5 * float(
+                np.sum(np.log(2.0 * np.pi * var))
+            )
+
+            lo, hi, neg_forbid, pos_req = [], [], [], []
+            for name in model.param_names:
+                bounds = getattr(model, name).bounds
+                lo.append(-np.inf if bounds[0] is None else bounds[0])
+                hi.append(np.inf if bounds[1] is None else bounds[1])
+                n = name.lower()
+                neg_forbid.append(
+                    any(k in n for k in ("flux", "amplitude", "amp"))
+                    and not self.allow_negative_flux
+                )
+                pos_req.append(
+                    any(
+                        k in n
+                        for k in ("sigma", "stddev", "fwhm", "alpha", "beta")
+                    )
+                )
+            ctx["lo"] = np.asarray(lo, float)
+            ctx["hi"] = np.asarray(hi, float)
+            ctx["neg_forbid"] = np.asarray(neg_forbid, bool)
+            ctx["pos_req"] = np.asarray(pos_req, bool)
+
+            # Fingerprint the inputs this context was built for.  The fast
+            # paths in log_prior/log_likelihood reuse the precomputed
+            # variance and bounds, which are only valid while the caller
+            # passes these same inputs.
+            ctx["fp"] = (
+                _arr_fingerprint(x),
+                _arr_fingerprint(y),
+                _arr_fingerprint(data),
+                _arr_fingerprint(weights),
+                _arr_fingerprint(noise_variance),
+                tuple(model.param_names),
+            )
+
+            # evaluate() skips the astropy parameter machinery
+            # (validation, broadcasting, unit handling) and is ~5-7x
+            # faster than parameters= + __call__.  Signatures differ
+            # across model types, so use it only after verifying it
+            # reproduces model(x, y) exactly for this model.
+            ctx["evaluate"] = False
+            try:
+                p0 = np.asarray(model.parameters, float)
+                trial = np.asarray(model.evaluate(x, y, *p0))
+                ref = np.asarray(model(x, y))
+                ctx["evaluate"] = (
+                    trial.shape == ref.shape
+                    and np.allclose(trial, ref, equal_nan=True)
+                )
+            except Exception:
+                pass
+
+            ctx["ok"] = True
+        except Exception:
+            pass
+        return ctx
+
+    @staticmethod
+    def _ctx_fresh(ctx, model, x, y, data, weights, noise_variance):
+        """Verify the cached eval context still matches the call's inputs.
+
+        A stale context would silently reuse a previous fit's variance
+        and bounds, so a mismatch must fall back to the slow path.
+        """
+        fp = ctx.get("fp")
+        if fp is None:
+            return True
+        return fp == (
+            _arr_fingerprint(x),
+            _arr_fingerprint(y),
+            _arr_fingerprint(data),
+            _arr_fingerprint(weights),
+            _arr_fingerprint(noise_variance),
+            tuple(model.param_names),
+        )
+
     def log_prior(self, params, model):
+        ctx = getattr(self, "_ll_ctx", None)
+        if (
+            ctx is not None
+            and ctx["ok"]
+            # The bounds in ctx are model-specific; everything else in the
+            # fingerprint belongs to the likelihood inputs and is checked
+            # there instead.
+            and (ctx.get("fp") or (None,))[-1] == tuple(model.param_names)
+        ):
+            p = np.asarray(params, float)
+            if np.any(p < ctx["lo"]) or np.any(p > ctx["hi"]):
+                return -np.inf
+            if ctx["neg_forbid"].any() and np.any(p[ctx["neg_forbid"]] < 0):
+                return -np.inf
+            if ctx["pos_req"].any() and np.any(p[ctx["pos_req"]] <= 0):
+                return -np.inf
+            return 0.0
+
         for name, param_value in zip(model.param_names, params):
             if not self._in_bounds(param_value, getattr(model, name).bounds):
                 return -np.inf
             n = name.lower()
             if any(k in n for k in ("flux", "amplitude", "amp")) and param_value < 0:
-                return -np.inf
+                # Allow negative flux for difference-image photometry
+                # (fading sources).  The sign is checked separately in
+                # the detection logic, so this only affects the prior.
+                if not self.allow_negative_flux:
+                    return -np.inf
             if (
                 any(k in n for k in ("sigma", "stddev", "fwhm", "alpha", "beta"))
                 and param_value <= 0
@@ -514,6 +3708,30 @@ class MCMCFitter:
         return 0.0
 
     def log_likelihood(self, params, model, x, y, data, weights, noise_variance):
+        ctx = getattr(self, "_ll_ctx", None)
+        if (
+            ctx is not None
+            and ctx["ok"]
+            and self._ctx_fresh(ctx, model, x, y, data, weights, noise_variance)
+        ):
+            # Fast path: variance and the log-normalisation were
+            # precomputed once per fit in _build_eval_context.
+            params = np.asarray(params, float)
+            if ctx["evaluate"]:
+                mu = model.evaluate(x, y, *params)
+            else:
+                saved_params = model.parameters.copy()
+                try:
+                    model.parameters = params
+                    mu = model(x, y)
+                finally:
+                    model.parameters = saved_params
+            resid = np.asarray(data, float) - mu
+            return (
+                -0.5 * float(np.sum(resid * resid * ctx["inv_var"]))
+                - ctx["log_const"]
+            )
+
         x = np.asarray(x, float)
         y = np.asarray(y, float)
         data = np.asarray(data, float)
@@ -536,21 +3754,30 @@ class MCMCFitter:
                 except Exception:
                     return -np.inf
 
+        # Save/restore parameters on the shared model instead of deep-copying
+        # the entire model object per likelihood evaluation (called nwalkers *
+        # nsteps times).  This is safe because emcee evaluates log_posterior
+        # sequentially within each process (multiprocessing workers each get
+        # their own pickled model copy).
+        saved_params = model.parameters.copy()
         model.parameters = params
         mu = model(x, y)
         resid = data - mu
+        model.parameters = saved_params
 
         if weights is not None:
             var = var / np.clip(weights, 1e-12, None) ** 2
 
-        if not np.all(var > 0):
-            return -np.inf
+        # Clip variance to a positive floor to prevent division-by-zero / log(0)
+        # at bad pixels (e.g. saturated or masked pixels with zero uncertainty).
+        var = np.clip(var, 1e-30, None)
 
         return -0.5 * np.sum(resid**2 / var + np.log(2.0 * np.pi * var))
 
     def log_posterior(self, params, model, x, y, data, weights, noise_variance):
-        # model.copy() is unnecessary for serial emcee (default) and expensive
-        # Called nwalkers * nsteps times (e.g. 50 * 5000 = 250,000 times)
+        # Called nwalkers * nsteps times.  log_likelihood saves/restores the
+        # shared model's parameters around each evaluation, so no per-walker
+        # model.copy() is needed here.
         lp = self.log_prior(params, model)
         if not np.isfinite(lp):
             return -np.inf
@@ -561,21 +3788,54 @@ class MCMCFitter:
     # ---- Walker initialisation --------------------------------------------
 
     def _jitter_within_bounds(self, initial_params, model, scale: float = None):
-        """Scatter walkers near initial params (scale ~ 1% of typical magnitude) for better mixing."""
+        """Scatter walkers near initial params with parameter-aware scaling.
+
+        * Position parameters (x_0, y_0) get an absolute jitter in pixels
+          (``scale``), not a relative jitter proportional to their absolute
+          coordinate.  The old ``scale * abs(p)`` gave ~2 px scatter for
+          x_0=100 with scale=0.02, which is orders of magnitude larger than
+          the PSF posterior width and caused walkers to pile up at bounds.
+        * Flux / amplitude parameters get a relative jitter
+          ``scale * max(|p0|, 1)`` so bright and faint sources both get
+          meaningful spread.
+        * Out-of-bound trials are rejected and resampled rather than
+          reflected, eliminating boundary-clustering artifacts.
+        """
         if scale is None:
             scale = self.jitter_scale
         ndim = len(initial_params)
         pos = np.empty((self.nwalkers, ndim), float)
+        _eps = 1e-6  # keep walkers strictly inside bounds
+
+        def _jitter_for_param(p0, name):
+            n = name.lower()
+            if any(k in n for k in ("x_0", "y_0", "xcenter", "ycenter", "x_mean", "y_mean")):
+                # Absolute pixel jitter; coordinate-independent
+                return float(scale)
+            # Relative jitter for flux / shape / other scale parameters
+            return float(scale * max(abs(p0), 1.0))
+
+        abs_jitter = np.array(
+            [_jitter_for_param(p, n) for p, n in zip(initial_params, model.param_names)],
+            float,
+        )
+
         for i in range(self.nwalkers):
-            trial = initial_params + scale * self.random_state.randn(ndim)
+            trial = np.empty(ndim, float)
             for j, name in enumerate(model.param_names):
                 lo, hi = getattr(model, name).bounds
                 lo = -1e18 if lo is None else lo
                 hi = 1e18 if hi is None else hi
-                if trial[j] < lo:
-                    trial[j] = lo + (lo - trial[j])
-                if trial[j] > hi:
-                    trial[j] = hi - (trial[j] - hi)
+                # Rejection sample within bounds (almost always accepted with
+                # the small jitter scales used here; avoids reflection artifacts).
+                for _ in range(100):
+                    val = initial_params[j] + abs_jitter[j] * self.random_state.randn()
+                    if lo + _eps <= val <= hi - _eps:
+                        trial[j] = val
+                        break
+                else:
+                    # Fallback: clamp to interior (extremely rare)
+                    trial[j] = float(np.clip(initial_params[j], lo + _eps, hi - _eps))
             pos[i] = trial
         return pos
 
@@ -589,19 +3849,58 @@ class MCMCFitter:
         background_rms=None,
         psf_error_floor_frac=0.0,
         smooth_variance_sigma=0.0,
+        is_background_subtracted=False,
     ):
         """
         Compute per-pixel sigma in electrons matching create_nddata_with_fitting_weights.
+
+        Note: ``data`` is the cutout from ndimage.data, which is already in
+        electrons (image * gain).  Do NOT multiply by gain again.
         """
-        image_e = np.asarray(data, float) * float(gain)
-        bkg_rms_e = (
-            np.zeros_like(image_e)
-            if background_rms is None
-            else np.asarray(background_rms, float) * float(gain)
-        )
-        bkg_error = np.sqrt(bkg_rms_e**2 + float(readnoise) ** 2)
+        image_e = np.asarray(data, float)  # already in e- from NDData
+        if background_rms is None:
+            bkg_rms_e = np.zeros_like(image_e)
+        else:
+            bkg_rms_arr = np.asarray(background_rms, float)
+            # Replace non-finite values (chip gaps, interpolation failures)
+            # with the median of finite values so the error model doesn't break.
+            if bkg_rms_arr.ndim == 2 and np.any(~np.isfinite(bkg_rms_arr)):
+                _finite_median = float(np.nanmedian(bkg_rms_arr))
+                if not np.isfinite(_finite_median) or _finite_median <= 0:
+                    _finite_median = float(readnoise) if readnoise > 0 else 1.0
+                bkg_rms_arr = np.where(
+                    np.isfinite(bkg_rms_arr), bkg_rms_arr, _finite_median
+                )
+            if bkg_rms_arr.shape == image_e.shape:
+                bkg_rms_e = bkg_rms_arr * float(gain)
+            elif bkg_rms_arr.ndim == 0 or np.prod(bkg_rms_arr.shape) == 1:
+                bkg_rms_e = np.full_like(image_e, bkg_rms_arr.item() * float(gain))
+            else:
+                try:
+                    bkg_rms_e = np.broadcast_to(bkg_rms_arr * float(gain), image_e.shape)
+                except ValueError:
+                    raise ValueError(
+                        f"background_rms shape {background_rms.shape} incompatible with data shape {image_e.shape}"
+                    )
+        # background_rms from Background2D already includes read noise.
+        # Do NOT add readnoise^2 again -- that double-counts it.
+        if background_rms is None:
+            bkg_error = np.full_like(image_e, float(readnoise))
+        else:
+            bkg_error = bkg_rms_e  # already includes sky Poisson + read noise
+
+        # Poisson variance term for calc_total_error.
+        # For background-subtracted data, the sky Poisson + read noise are
+        # already encoded in bkg_error (= bkg_rms_e).  The Poisson term from
+        # the source itself is only meaningful for positive pixels (real
+        # source photons).  calc_total_error already drops the Poisson term
+        # for negative pixels (returns only bkg_error), which is physically
+        # correct for difference images where negative pixels are noise
+        # fluctuations with no source photons.
+        poisson_e = image_e
+        
         total_error = calc_total_error(
-            data=image_e, bkg_error=bkg_error, effective_gain=1.0
+            data=poisson_e, bkg_error=bkg_error, effective_gain=1.0
         )
 
         if psf_error_floor_frac > 0:
@@ -613,7 +3912,9 @@ class MCMCFitter:
                 total_error, float(smooth_variance_sigma), mode="nearest"
             )
 
-        return np.maximum(total_error, 1e-12)
+        return _sanitize_error_array(
+            total_error, max(float(readnoise), 1.0)
+        )
 
     # ---- MCMC run ---------------------------------------------------------
 
@@ -629,14 +3930,63 @@ class MCMCFitter:
         log,
         maxiters=None,
     ):
-        pos0 = self._jitter_within_bounds(initial_params, model)
         ndim = len(initial_params)
+        # Affine-invariant moves need at least ~2*ndim walkers to sample the
+        # parameter space; a smaller ensemble silently produces degenerate
+        # chains instead of failing.
+        min_walkers = 2 * ndim + 2
+        if self.nwalkers < min_walkers:
+            log.warning(
+                "[MCMC] nwalkers=%d too small for ndim=%d; using %d.",
+                self.nwalkers,
+                ndim,
+                min_walkers,
+            )
+            self.nwalkers = min_walkers
+        pos0 = self._jitter_within_bounds(initial_params, model)
 
-        self.sampler = emcee.EnsembleSampler(
-            self.nwalkers,
-            ndim,
-            self.log_posterior,
+        # Use a mixture of moves optimized for PSF fitting convergence.
+        # StretchMove is the default affine-invariant proposal; DEMove
+        # (differential evolution) improves mixing in correlated posteriors.
+        _moves = [
+            (emcee.moves.StretchMove(a=2.0), 0.7),
+            (emcee.moves.DEMove(), 0.3),
+        ]
+        sampler_kwargs = dict(
+            nwalkers=self.nwalkers,
+            ndim=ndim,
+            log_prob_fn=self.log_posterior,
             args=(model, x, y, data, weights, noise_variance),
+            moves=_moves,
+        )
+        pool = None
+        if self.threads > 1:
+            try:
+                from multiprocessing import Pool
+                # Cap at physical CPU count; more workers than cores only
+                # adds context-switch overhead for this light log_prob.
+                workers = min(self.threads, os.cpu_count() or 1)
+                pool = Pool(processes=workers)
+                sampler_kwargs["pool"] = pool
+                log.debug("[MCMC] Using %d parallel threads", workers)
+            except Exception as exc:
+                log.warning("[MCMC] Could not create pool with %d threads: %s; falling back to serial", self.threads, exc)
+
+        self.sampler = emcee.EnsembleSampler(**sampler_kwargs)
+
+        # emcee 3.1 snapshots global np.random into the sampler at
+        # construction, so the moves are unseeded even when self.random_state
+        # is a seeded RandomState (which only drives the walker-init jitter).
+        # Derive a dedicated per-sampler state so proposals are reproducible.
+        if isinstance(self.random_state, np.random.RandomState):
+            self.sampler.random_state = np.random.RandomState(
+                self.random_state.randint(0, 2**32 - 1)
+            )
+
+        # Precompute the likelihood/prior invariants once per fit; they
+        # would otherwise be rebuilt on every log_prob call.
+        self._ll_ctx = self._build_eval_context(
+            model, x, y, data, weights, noise_variance
         )
 
         total_steps = 0
@@ -649,41 +3999,90 @@ class MCMCFitter:
                 max_steps,
             )
 
-        while total_steps < max_steps:
-            batch_n = min(self.batch_steps, max_steps - total_steps)
-            self.sampler.run_mcmc(
-                pos0 if total_steps == 0 else None,
-                batch_n,
-                progress=False,
-            )
-            total_steps += batch_n
+        # Adaptive convergence always applies when nsteps was not explicitly
+        # set (nsteps=None).  With a fixed nsteps, emcee_early_stop lets a
+        # converged chain finish early instead of burning evaluations.
+        adaptive = self.nsteps is None or self.early_stop
 
-            # Start autocorrelation checks only after enough steps per walker.
-            if total_steps >= self.min_autocorr_N:
+        # The context and the worker pool must be released even when the
+        # sampler raises: a stale context would silently apply this fit's
+        # variance to a later log_likelihood call.
+        try:
+            while total_steps < max_steps:
+                batch_n = min(self.batch_steps, max_steps - total_steps)
+                self.sampler.run_mcmc(
+                    pos0 if total_steps == 0 else None,
+                    batch_n,
+                    progress=False,
+                )
+                total_steps += batch_n
+
+                if not adaptive:
+                    continue
+
+                # Start autocorrelation checks only after enough steps per walker.
+                # emcee's get_autocorr_time issues warnings when the chain is
+                # shorter than 50*tau - which is exactly the regime we're in
+                # during early iterations.  Suppress these warnings aggressively
+                # since they're expected and not actionable.
+                if total_steps >= self.min_autocorr_N:
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings("ignore", message=".*chain is shorter.*")
+                            warnings.filterwarnings("ignore", message=".*autocorrelation.*")
+                            tau = self.sampler.get_autocorr_time(quiet=True)
+                        # Convergence is governed by the SLOWEST parameter:
+                        # a mean over per-parameter taus lets a single
+                        # slow-mixing parameter (e.g. flux in a degenerate
+                        # fit) pass the threshold unconverged.
+                        tau_est = np.nanmax(tau)
+                        # Standard emcee recommendation: each walker must run for at
+                        # least 50 * tau steps.  We use adaptive_tau_target*tau as
+                        # the convergence threshold (default 100) to ensure a
+                        # healthy effective sample size
+                        # (n_eff ~ n_walkers * (total_steps - burnin) / thin / tau).
+                        # The old 50*tau threshold produced n_eff ~ 92, which is
+                        # marginal for reliable posterior contours.
+                        if (
+                            np.isfinite(tau_est)
+                            and total_steps > self.adaptive_tau_target * tau_est
+                        ):
+                            log.info(
+                                "[MCMC] Converged at %d steps, tau=%.1f",
+                                total_steps,
+                                tau_est,
+                            )
+                            break
+                    except emcee.autocorr.AutocorrError as exc:
+                        log.debug("[MCMC] tau estimation failed: %s", exc)
+        finally:
+            self._ll_ctx = None
+            if pool is not None:
                 try:
-                    # get_chain() is (nsteps, nwalkers, ndim); time axis is 0
-                    tau = autocorr.integrated_time(self.sampler.get_chain(), axis=0)
-                    tau_est = np.nanmean(tau)
-                    if np.isfinite(tau_est) and tau_est < self.adaptive_tau_target:
-                        log.info(
-                            "[MCMC] Converged at %d steps, tau=%.1f",
-                            total_steps,
-                            tau_est,
-                        )
-                        break
-                except Exception as exc:
-                    log.debug("[MCMC] tau estimation failed: %s", exc)
+                    pool.close()
+                    pool.join()
+                except Exception:
+                    pass
+
+        if total_steps >= max_steps and adaptive:
+            log.warning(
+                "[MCMC] Reached max_steps (%d) without full convergence; results may be unreliable",
+                max_steps,
+            )
 
         acc = float(np.mean(self.sampler.acceptance_fraction))
         tau_arr = None
         try:
-            tau_arr = self.sampler.get_autocorr_time(quiet=True)
-            log.info(f"[MCMC] acc={acc:.3f}  tau~{np.nanmean(tau_arr):.1f}")
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*chain is shorter.*")
+                warnings.filterwarnings("ignore", message=".*autocorrelation.*")
+                tau_arr = self.sampler.get_autocorr_time(quiet=True)
+            log.info("[MCMC] acc=%.3f  tau~%.1f", acc, np.nanmean(tau_arr))
         except Exception:
-            log.info(f"[MCMC] acc={acc:.3f}")
+            log.info("[MCMC] acc=%.3f", acc)
         self._last_tau = tau_arr  # for discard/thin in __call__
 
-        if not 0.15 <= acc <= 0.7:
+        if not 0.15 <= acc <= 0.8:
             log.warning("[MCMC] Suboptimal acceptance; consider tuning delta/nwalkers")
 
     # ---- __call__ ---------------------------------------------------------
@@ -723,23 +4122,30 @@ class MCMCFitter:
             else np.array(initial_params, float)
         )
         fitted_model = model.copy()
-
-        for pname, p0 in zip(fitted_model.param_names, initial_params):
-            if pname in ("x_0", "y_0"):
-                getattr(fitted_model, pname).bounds = (p0 - self.delta, p0 + self.delta)
+        _apply_position_bounds(fitted_model, initial_params, self.delta)
 
         if use_nddata_uncertainty:
-            # _recompute_noise_variance returns per-pixel sigma; likelihood expects variance (sigma^2)
-            sigma = self._recompute_noise_variance(
-                data,
-                gain=gain,
-                readnoise=readnoise,
-                background_rms=background_rms,
-                psf_error_floor_frac=psf_error_floor_frac,
-                smooth_variance_sigma=smooth_variance_sigma,
-            )
-            noise_variance = np.asarray(sigma, float) ** 2
-            weights = None  # use our variance only; avoid double-counting if caller passed weights
+            if weights is not None:
+                # Trust photutils' weights from the original NDData uncertainty (computed on
+                # the full non-background-subtracted image). Convert inverse-weights to variance.
+                w = np.asarray(weights, float)
+                noise_variance = 1.0 / np.clip(w, 1e-30, None) ** 2
+                log.debug("[MCMC] Using photutils NDData weights for variance.")
+            else:
+                # Fallback: recompute from the cutout.  Add bkg_rms^2 to the Poisson term
+                # because data is background-subtracted and the Poisson noise from the sky
+                # is missing.  For Poisson background, variance ~ mean ~ rms^2.
+                sigma = self._recompute_noise_variance(
+                    data,
+                    gain=gain,
+                    readnoise=readnoise,
+                    background_rms=background_rms,
+                    psf_error_floor_frac=psf_error_floor_frac,
+                    smooth_variance_sigma=smooth_variance_sigma,
+                    is_background_subtracted=True,
+                )
+                noise_variance = np.asarray(sigma, float) ** 2
+            weights = None  # variance now fully encodes uncertainty
         else:
             # If the caller provides an explicit per-pixel variance map, treat it
             # as authoritative and ignore extra weights to avoid ambiguity.
@@ -754,7 +4160,13 @@ class MCMCFitter:
                 except Exception:
                     pass
 
-        log.info(f"[MCMC] Fitting source {self.counter + 1} (adaptive)")
+        # Reset per-source accumulator so stale records from a previous .fit()
+        # call on a different tier do not corrupt index arithmetic in _psf_fit.
+        if self.counter == 0:
+            self.fit_info["per_source"] = []
+            self.fit_info["samples"] = {}
+
+        log.info("[MCMC] Fitting source %s (adaptive)", self.counter + 1)
         self.run_mcmc(
             fitted_model,
             x,
@@ -776,8 +4188,11 @@ class MCMCFitter:
         if tau_arr is not None and np.any(np.isfinite(tau_arr)):
             tau_max = float(np.nanmax(tau_arr))
             if tau_max >= 1:
+                # Emcee docs recommend discarding the first 10--50 * tau steps as
+                # burn-in.  The old 2*tau was far too short, leaving significant
+                # burn-in contamination in the corner-plot samples.
                 discard = max(
-                    discard, min(int(2 * tau_max), self.sampler.iteration // 2)
+                    discard, min(int(10 * tau_max), self.sampler.iteration // 2)
                 )
                 # Ensure thinning is not weaker than tau/2 (reduce correlated samples).
                 thin = max(1, thin, int(np.ceil(tau_max / 2)))
@@ -785,23 +4200,70 @@ class MCMCFitter:
         chain = self.sampler.get_chain(discard=discard, thin=thin, flat=True)
         logp = self.sampler.get_log_prob(discard=discard, thin=thin, flat=True)
 
+        # Warn when the effective sample size is too low for reliable contours.
+        if chain.shape[0] > 0 and tau_arr is not None:
+            tau_max_post = float(np.nanmax(tau_arr))
+            if tau_max_post >= 1:
+                n_eff = chain.shape[0] / tau_max_post
+                if n_eff < 100:
+                    log.warning(
+                        "[MCMC] Low effective sample size: n_eff ~ %.0f "
+                        "(chain length %d, tau ~ %.1f). Corner contours may be noisy.",
+                        n_eff, chain.shape[0], tau_max_post,
+                    )
+
         if chain.shape[0] == 0:
-            log.error("[MCMC] No samples after burn-in/thinning.")
+            # The returned point estimate is the LSQ initial guess, NOT a
+            # posterior - mark the record so callers do not mistake the
+            # fallback for a sampled result (NaN errors alone are easy to
+            # drop silently downstream).
+            log.error(
+                "[MCMC] No samples after burn-in/thinning; returning "
+                "initial parameters with fit_failed flag."
+            )
             per16 = per50 = per84 = best_params = initial_params.copy()
+            perr_lo = perr_hi = perr_sym = np.full_like(best_params, np.nan)
         else:
             per16 = np.nanpercentile(chain, 16, axis=0)
             per50 = np.nanpercentile(chain, 50, axis=0)
             per84 = np.nanpercentile(chain, 84, axis=0)
             best_params = per50
+            perr_lo = best_params - per16
+            perr_hi = per84 - best_params
 
         fitted_model.parameters = best_params
 
-        perr_lo = best_params - per16
-        perr_hi = per84 - best_params
-        perr_sym = np.maximum(0.5 * (perr_lo + perr_hi), 0.0)
+        # Use chain standard deviation for parameter errors instead of the
+        # symmetric percentile average.  The standard deviation is consistent
+        # with LSQ's sqrt(diag(param_cov)) and captures the full posterior
+        # width including skewness, which the percentile average underestimates
+        # by ~30-50% for right-skewed flux posteriors at low S/N.
+        if chain.shape[0] > 10:
+            try:
+                _cov_full = np.cov(chain, rowvar=False)
+                if _cov_full.shape == (len(best_params), len(best_params)) and np.all(np.isfinite(_cov_full)):
+                    perr_sym = np.sqrt(np.maximum(np.diag(_cov_full), 0.0))
+                    fitted_model.cov_matrix = Covariance(_cov_full)
+                else:
+                    perr_sym = np.full_like(best_params, np.nan)
+                    fitted_model.cov_matrix = Covariance(np.diag(np.full_like(best_params, np.nan)))
+            except Exception:
+                perr_sym = np.full_like(best_params, np.nan)
+                fitted_model.cov_matrix = Covariance(np.diag(np.full_like(best_params, np.nan)))
+        elif chain.shape[0] > 0:
+            # Too few samples for reliable covariance -- use sample std as fallback
+            perr_sym = np.nanstd(chain, axis=0)
+            fitted_model.cov_matrix = Covariance(np.diag(perr_sym ** 2))
+        else:
+            perr_sym = np.full_like(best_params, np.nan)
+            fitted_model.cov_matrix = Covariance(np.diag(np.full_like(best_params, np.nan)))
 
         fitted_model.stds = perr_sym
-        fitted_model.cov_matrix = Covariance(np.diag(perr_sym**2))
+
+        # photutils checks 'param_cov' in fit_info to decide whether to set
+        # the NO_COVARIANCE flag (bit 16).  Without this key, photutils marks
+        # the fit as lacking a covariance matrix even though we computed one.
+        self.fit_info["param_cov"] = fitted_model.cov_matrix.cov_matrix
 
         record = {
             "src_index": self.counter,
@@ -809,10 +4271,19 @@ class MCMCFitter:
             "p16": per16.copy(),
             "p50": per50.copy(),
             "p84": per84.copy(),
+            "param_errs": perr_sym.copy(),
+            "fit_failed": bool(chain.shape[0] == 0),
         }
         self.fit_info["per_source"].append(record)
-        self.fit_info["samples"][self.counter] = chain
-        self.fit_info["log_prob"] = logp
+        if chain.shape[0] == 0:
+            self.fit_info["fit_failed"] = True
+        if self.store_samples:
+            self.fit_info["samples"][self.counter] = chain
+            self.fit_info["log_prob"] = logp
+        # Release the raw chain and log-prob arrays now that summary stats are
+        # extracted - the full chain can be ~8 MB per source (50 walkers x 5000
+        # steps x 4 params) and accumulates across all sources in a batch.
+        del chain, logp
         self.fit_info["param_errs"] = perr_sym
         self.fit_info["param_errs_lower"] = perr_lo
         self.fit_info["param_errs_upper"] = perr_hi
@@ -822,9 +4293,14 @@ class MCMCFitter:
             np.mean(self.sampler.acceptance_fraction)
         )
         self.fit_info["total_steps"] = int(self.sampler.iteration)
+        # Release the sampler object so its internal chain buffer
+        # (n_walkers x n_steps x n_params) is freed for each source.
+        # The chain extracted above is already stored in fit_info["samples"]
+        # for corner-plot use; we don't need the sampler any further.
+        self.sampler = None
 
         self.counter += 1
-        log.info(f"[MCMC] elapsed={time.time() - t0:.3f}s")
+        log.info("[MCMC] elapsed=%.3fs", time.time() - t0)
         return fitted_model
 
 # ===========================================================================
@@ -840,10 +4316,10 @@ class PoissonLikelihoodFitter:
     fitting is superior to chi-squared methods for PSF photometry.
     
     The likelihood function is:
-        L = ∏ e^(-n̄_i) * n̄_i^(n_i) / n_i!
-    ln(L) = Σ [-n̄_i + ln(n̄_i) - n_i ln(n_i) + n_i]
+        L = prod e^(-n_i) * n_i^(n_i) / n_i!
+    ln(L) = Sigma [-n_i + ln(n_i) - n_i ln(n_i) + n_i]
     
-    where n̄_i = A * P(x_i - s_x, y_i - s_y) + B
+    where n_i = A * P(x_i - s_x, y_i - s_y) + B
     A = source amplitude, B = background, s_x, s_y = position
     """
     
@@ -860,13 +4336,14 @@ class PoissonLikelihoodFitter:
         self.max_step_cuts = int(max_step_cuts)
         self.max_position_step = float(max_position_step)
         self.max_total_position_change = float(max_total_position_change)
-        self.fit_info = {"iterations": 0, "final_lnL": np.nan, "converged": False}
+        self.fit_info = {"iterations": 0, "final_lnL": np.nan, "converged": False, "per_source": []}
+        self.counter = 0
     
     def _log_likelihood(self, data, model):
         """
         Compute Poisson log-likelihood.
 
-        ln(L) = Σ [n_i * ln(n̄_i) - n̄_i]
+        ln(L) = Sigma [n_i * ln(n_i) - n_i]
         Only terms depending on model parameters matter for optimization.
         """
         n_i = np.asarray(data, float)
@@ -877,46 +4354,95 @@ class PoissonLikelihoodFitter:
 
         return float(lnL)
     
-    def _compute_derivatives(self, data, model, x, y, params, param_names):
+    def _compute_derivatives(self, data, model, x, y, params, param_names, noise_variance=None):
         """
         Compute first and second derivatives of ln(L) w.r.t. parameters.
-        
+
         Following Fermilab document Appendix A:
-        ∂lnL/∂α_k = Σ (dlnL/dn̄_i) * (∂n̄_i/∂α_k)
-        ∂²lnL/∂α_l∂α_k = Σ (d²lnL/dn̄_i²) * (∂n̄_i/∂α_k) * (∂n̄_i/∂α_l)
-        
-        where dlnL/dn̄_i = -1 + 1/n̄_i
-              d²lnL/dn̄_i² = -1/n̄_i²
+        dlnL/dalpha_k = Sigma (dlnL/dn_i) * (dn_i/dalpha_k)
+        d^2lnL/dalpha_ldalpha_k = Sigma (d^2lnL/dn_i^2) * (dn_i/dalpha_k) * (dn_i/dalpha_l)
+
+        where dlnL/dn_bar = n_i/n_bar - 1
+              d^2lnL/dn_bar^2 = -n_i/n_bar^2 (expected value -1/n_bar)
+
+        When noise_variance is provided (per-pixel background+read noise variance),
+        the pixel variance is n_bar + sigma_bkg^2 and the Hessian's second
+        derivative becomes:
+              d^2lnL/dn_i^2 = -1/(n_bar + sigma_bkg^2)
+        This combines source Poisson noise with background Gaussian noise,
+        consistent with the LSQ fitter's full noise model.  Without this,
+        errors are severely underestimated for faint sources where background
+        dominates.
         """
         n_i = np.asarray(data, float)
-        n_bar = np.asarray(model, float)
-        n_bar = np.clip(n_bar, 1e-10, None)
+        model_0 = np.asarray(model(x, y), float)
+        n_bar = np.clip(model_0, 1e-10, None)
+
+        # dlnL/dn_bar = n_i/n_bar - 1 for lnL = sum(n_i*ln(n_bar) - n_bar).
+        # Omitting n_i here would push every step toward n_bar=1 instead of
+        # the data.
+        dlnL_dnbar = n_i / n_bar - 1.0
+        # Fisher scoring: the expected curvature is E[-n_i/n_bar^2] =
+        # -1/n_bar (since E[n_i] = n_bar).  Using the observed -n_i/n_bar^2
+        # or the wrong -1/n_bar^2 over-weights pixels where the model is
+        # near zero.
+        d2lnL_dnbar2 = -1.0 / n_bar
+
+        # Include background+read noise in the curvature.  A pixel with
+        # Poisson source mean n_bar plus Gaussian background variance nv has
+        # total variance n_bar + nv, so the expected Fisher curvature is
+        # -1/(n_bar + nv).  Adding -1/nv on top of -1/n_bar double-counts
+        # the information and underestimates parameter errors by up to ~2x
+        # (the two terms only agree in the n_bar >> nv limit).
+        if noise_variance is not None:
+            nv = np.asarray(noise_variance, float)
+            if nv.ndim == 0 and float(nv) > 0:
+                d2lnL_dnbar2 = -1.0 / (n_bar + float(nv))
+            elif nv.shape == n_bar.shape:
+                nv_safe = np.clip(nv, 1e-30, None)
+                d2lnL_dnbar2 = -1.0 / (n_bar + nv_safe)
         
-        dlnL_dnbar = -1.0 + 1.0 / n_bar
-        d2lnL_dnbar2 = -1.0 / n_bar**2
-        
-        # Numerical derivatives of model w.r.t. parameters
-        epsilon = 1e-8
+        # Numerical derivatives of model w.r.t. parameters.  Central
+        # differences (second-order) rather than forward: the forward
+        # 1e-8-relative step was dominated by float round-off for near-zero
+        # parameters and its truncation error propagated straight into the
+        # Hessian, i.e. into the reported parameter errors.  Steps are
+        # per-type: positions get a fixed sub-pixel step (meaningful even
+        # at x_0=0), flux-like params get a relative step floored at a
+        # fraction of the brightest pixel.
         n_params = len(params)
         dmodel_dparams = []
-        
+        _pix_scale = max(1.0, float(np.nanmax(np.abs(n_i))))
+
         try:
             for i in range(n_params):
+                name = param_names[i] if i < len(param_names) else ""
+                if name in ("x_0", "y_0"):
+                    eps_i = 1e-3
+                elif "flux" in name:
+                    eps_i = max(1e-4 * abs(params[i]), 1e-6 * _pix_scale)
+                else:
+                    eps_i = max(1e-6, 1e-4 * abs(params[i]))
                 params_plus = params.copy()
-                params_plus[i] += epsilon
+                params_plus[i] += eps_i
                 model.parameters = params_plus
                 model_plus = model(x, y)
-                dmodel_dparams.append((model_plus - model_0) / epsilon)
+                params_minus = params.copy()
+                params_minus[i] -= eps_i
+                model.parameters = params_minus
+                model_minus = model(x, y)
+                dmodel_dparams.append(
+                    (model_plus - model_minus) / (2.0 * eps_i)
+                )
         finally:
             # Always restore original parameters, even if exception occurs
             model.parameters = params
         
-        # Build gradient
         gradient = np.zeros(n_params)
         for i in range(n_params):
             gradient[i] = np.sum(dlnL_dnbar * dmodel_dparams[i])
         
-        # Build Hessian (using first term only, per Fermilab document)
+        # Gauss-Newton Hessian: first term only, per Fermilab document.
         hessian = np.zeros((n_params, n_params))
         for i in range(n_params):
             for j in range(n_params):
@@ -928,7 +4454,7 @@ class PoissonLikelihoodFitter:
         """
         Solve for parameter updates using Newton-Raphson step.
         
-        H * δα = -∇lnL
+        H * deltaalpha = -gradlnL
         """
         try:
             delta = np.linalg.solve(hessian, -gradient)
@@ -970,7 +4496,7 @@ class PoissonLikelihoodFitter:
         initial_params : array_like
             Initial parameter values
         noise_variance : array_like, optional
-            Noise variance (not used in Poisson likelihood)
+            Noise variance (per-pixel background+read noise variance)
         
         Returns
         -------
@@ -980,15 +4506,51 @@ class PoissonLikelihoodFitter:
         log = logging.getLogger(__name__)
         
         self._data_shape = data.shape
+
+        # Convert photutils weights (1/sigma) to noise_variance for the
+        # Hessian-based error estimation.  Without this, the Poisson-only
+        # Hessian misses background noise and underestimates errors for
+        # faint sources where background dominates.
+        #
+        # The weights are built from ``calc_total_error``, so their variance
+        # already contains the source Poisson term ``max(data, 0)`` on top of
+        # the background+read variance.  ``_compute_derivatives`` adds n_bar
+        # for the source, so strip the observed source term here to leave
+        # noise_variance as the background+read variance only - otherwise the
+        # source photons are counted twice in the Fisher curvature.
+        if noise_variance is None and weights is not None:
+            w = np.asarray(weights, float)
+            total_var = 1.0 / np.clip(w, 1e-30, None) ** 2
+            _source_var = np.clip(np.asarray(data, float), 0.0, None)
+            if _source_var.shape == total_var.shape:
+                total_var = total_var - _source_var
+            noise_variance = np.clip(total_var, 1e-30, None)
         
         if initial_params is None:
-            # Use current model parameters as initial guess
             initial_params = np.array(model.parameters, float)
         
         params = initial_params.copy()
         param_names = model.param_names
-        
-        # Store original position for position change tracking
+
+        # Honour parameter bounds set on the model (e.g. flux >= 0 from
+        # psf_fit_positive_flux).  Newton steps are projected onto the
+        # bound rather than rejected: a clipped step that still raises
+        # lnL is a valid update, and a pinned parameter simply stops
+        # moving.
+        _plo = np.full(len(params), -np.inf)
+        _phi = np.full(len(params), np.inf)
+        for _bi, _bname in enumerate(param_names):
+            try:
+                _bb = getattr(model, _bname).bounds
+            except Exception:
+                continue
+            if _bb is not None:
+                if _bb[0] is not None:
+                    _plo[_bi] = float(_bb[0])
+                if _bb[1] is not None:
+                    _phi[_bi] = float(_bb[1])
+        _has_bounds = np.isfinite(_plo) | np.isfinite(_phi)
+
         x_idx = param_names.index('x_0') if 'x_0' in param_names else -1
         y_idx = param_names.index('y_0') if 'y_0' in param_names else -1
         original_position = np.array([params[x_idx], params[y_idx]]) if x_idx >= 0 else None
@@ -999,63 +4561,61 @@ class PoissonLikelihoodFitter:
         lnL = -np.inf   # Initialize to handle maxiters=0 edge case
         
         for iteration in range(self.maxiters):
-            # Evaluate model at current parameters
             model.parameters = params
             current_model = model(x, y)
-            
-            # Compute log-likelihood
+
             lnL = self._log_likelihood(data, current_model)
-            
-            # Check convergence
+
             if iteration > 0 and abs(lnL - prev_lnL) < self.lnL_tolerance:
                 converged = True
-                log.info(f"[PoissonFitter] Converged at iteration {iteration}")
+                log.info("[PoissonFitter] Converged at iteration %s", iteration)
                 break
             
             prev_lnL = lnL
             
-            # Compute derivatives
-            gradient, hessian = self._compute_derivatives(data, current_model, x, y, params, param_names)
-            
-            # Solve for parameter update
+            # noise_variance feeds the Hessian's background term.  Pass the
+            # callable model: _compute_derivatives evaluates it internally
+            # and needs it again for numerical parameter derivatives.
+            gradient, hessian = self._compute_derivatives(data, model, x, y, params, param_names, noise_variance=noise_variance)
+
             delta = self._solve_linear_system(gradient, hessian)
-            
-            # Apply step with reduction if needed
+
             step_reduction = 1.0
             n_cuts = 0
-            
+
             while n_cuts < self.max_step_cuts:
-                # Apply reduced step
                 trial_params = params + delta * step_reduction
-                
-                # Check position constraints
+
                 if original_position is not None:
                     trial_position = np.array([trial_params[x_idx], trial_params[y_idx]])
                     position_change = np.linalg.norm(trial_position - original_position)
-                    
-                    # Enforce maximum position change per step
+
                     if position_change > self.max_position_step:
-                        # Scale down the position part of delta (work on a copy)
+                        # Clip the position part of delta on a copy.
                         clipped_delta = delta.copy()
                         scale = self.max_position_step / position_change
                         clipped_delta[x_idx] *= scale
                         clipped_delta[y_idx] *= scale
                         trial_params = params + clipped_delta * step_reduction
                         position_change = np.linalg.norm(trial_params[x_idx:x_idx+2] - original_position)
-                
-                # Ensure n_bar > 0
+
+                if _has_bounds.any():
+                    trial_params = np.clip(trial_params, _plo, _phi)
+
+                # Reject only non-finite renders: _log_likelihood clips
+                # n_bar at 1e-10, so exact zeros (e.g. an ePSF model
+                # evaluated a hair outside its interpolator domain) are
+                # penalized correctly rather than vetoing the whole step.
                 model.parameters = trial_params
                 trial_model = model(x, y)
-                if np.all(trial_model > 0):
-                    # Check if likelihood increased
+                if np.all(np.isfinite(trial_model)):
                     trial_lnL = self._log_likelihood(data, trial_model)
-                    
+
                     if trial_lnL > lnL:
                         params = trial_params
                         lnL = trial_lnL
                         break
                     else:
-                        # Reduce step size
                         step_reduction *= 0.5
                         n_cuts += 1
                 else:
@@ -1063,33 +4623,569 @@ class PoissonLikelihoodFitter:
                     n_cuts += 1
             
             if n_cuts >= self.max_step_cuts:
-                log.warning(f"[PoissonFitter] Max step cuts reached at iteration {iteration}")
+                log.warning("[PoissonFitter] Max step cuts reached at iteration %s", iteration)
         
-        # Check total position change
         if original_position is not None:
             final_position = np.array([params[x_idx], params[y_idx]])
             total_position_change = np.linalg.norm(final_position - original_position)
             if total_position_change > self.max_total_position_change:
-                log.warning(f"[PoissonFitter] Total position change {total_position_change:.2f} exceeds limit {self.max_total_position_change}")
+                log.warning("[PoissonFitter] Total position change %.2f exceeds limit %s", total_position_change, self.max_total_position_change)
         
-        # Update model with final parameters
         model.parameters = params
-        
+
         self.fit_info["iterations"] = iteration + 1
         self.fit_info["final_lnL"] = lnL
         self.fit_info["converged"] = converged
-        
+
         if not converged:
-            log.warning(f"[PoissonFitter] Did not converge in {self.maxiters} iterations")
-        
-        log.info(f"[PoissonFitter] Final lnL: {lnL:.3f}, iterations: {iteration + 1}")
-        
+            log.warning("[PoissonFitter] Did not converge in %s iterations", self.maxiters)
+
+        log.info("[PoissonFitter] Final lnL: %.3f, iterations: %s", lnL, iteration + 1)
+
+        # Parameter errors from the inverse Hessian (covariance).  The
+        # Hessian of the log-likelihood is negative definite at the
+        # maximum, so the Fisher information is -H; inverting H directly
+        # gives a negative-definite "covariance" whose diagonal fails the
+        # positivity check below.
+        try:
+            # Re-compute Hessian at final parameters with background noise
+            _, final_hessian = self._compute_derivatives(data, model, x, y, params, param_names, noise_variance=noise_variance)
+
+            information = -0.5 * (final_hessian + final_hessian.T)
+            # A rank-deficient information matrix (an unconstrained or
+            # degenerate parameter direction) still pinv()s to a
+            # minimum-norm covariance whose errors look plausible but are
+            # meaningless - flag it rather than reporting silently.
+            _info_rank = np.linalg.matrix_rank(information)
+            if _info_rank < information.shape[0]:
+                log.warning(
+                    "[PoissonFitter] Rank-deficient information matrix "
+                    "(%d/%d); reported errors are unreliable",
+                    _info_rank,
+                    information.shape[0],
+                )
+            cov_matrix = np.linalg.pinv(information)
+
+            if np.all(np.isfinite(cov_matrix)) and np.all(np.diag(cov_matrix) > 0):
+                param_errors = np.sqrt(np.diag(cov_matrix))
+
+                # Store errors on the model when it exposes the attributes.
+                if hasattr(model, 'stds'):
+                    model.stds = param_errors
+                if hasattr(model, 'cov_matrix'):
+                    model.cov_matrix = Covariance(cov_matrix)
+
+                # ISSUE 4: Set param_cov in fit_info so photutils doesn't
+                # set the NO_COVARIANCE flag (bit 16).
+                self.fit_info["param_cov"] = cov_matrix
+
+                log.info("[PoissonFitter] Parameter errors computed from Hessian")
+            else:
+                log.warning("[PoissonFitter] Invalid covariance matrix, errors not set")
+        except Exception as e:
+            log.warning("[PoissonFitter] Failed to compute parameter errors: %s", e)
+
+        # Store per-source record for consistent error propagation in fit()
+        param_errors = getattr(model, 'stds', None)
+        if param_errors is not None:
+            param_errors = np.asarray(param_errors, float)
+            p16 = params - param_errors
+            p84 = params + param_errors
+        else:
+            p16 = params.copy()
+            p84 = params.copy()
+        record = {
+            "src_index": self.counter,
+            "param_names": list(param_names),
+            "p16": p16.copy(),
+            "p50": params.copy(),
+            "p84": p84.copy(),
+            "param_errs": param_errors.copy() if param_errors is not None else np.full_like(params, np.nan),
+        }
+        self.fit_info["per_source"].append(record)
+        self.fit_info["param_errs"] = param_errors if param_errors is not None else np.full_like(params, np.nan)
+        self.counter += 1
+
         return model
 
 
 # ===========================================================================
 # psf class
 # ===========================================================================
+
+
+def _first_col(df, candidates):
+    """Return the first column name from *candidates* that exists in *df*, or None."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def plot_analytic_psf(
+    stamp,
+    stars=None,
+    fwhm_native=None,
+    save_path=None,
+    max_stars=8,
+    cmap="viridis",
+    snr_min=5.0,
+):
+    """Diagnostic figure for an analytic composite-Moffat PSF.
+
+    Left block: one row per star that entered the joint fit - the
+    pedestal-subtracted, flux-normalised cutout beside its residual
+    against the model.  ``snr_min`` must match the value the fit ran
+    with so the plotted set stays the fitted set.  Right block: the
+    delivered stamp with central x/y cuts, and one line per Moffat
+    component so each term's contribution to the profile is visible
+    directly.
+    """
+    log = logging.getLogger(__name__)
+    try:
+        data = np.asarray(getattr(stamp, "data", None), float)
+        if data is None or data.ndim != 2 or data.size == 0:
+            log.warning("Analytic PSF plot needs a 2-D stamp.")
+            return None
+        osamp = max(1, int(np.atleast_1d(getattr(stamp, "oversampling", 1))[0]))
+        comps = getattr(stamp, "_autophot_components", None)
+        if not comps:
+            log.warning("Analytic PSF plot needs stamp._autophot_components.")
+            return None
+        comps = [tuple(map(float, c)) for c in comps]
+        ell = getattr(stamp, "_autophot_ellipticity", None)
+        fitted = bool(getattr(stamp, "_autophot_fitted", False))
+        kind = str(getattr(stamp, "_autophot_kind", "analytic"))
+
+        fwhm_plot = fwhm_native
+        if fwhm_plot is None or not np.isfinite(fwhm_plot):
+            fwhm_plot = measure_epsf_fwhm_native(data, osamp)
+
+        # Same per-star prep as the joint fit, so the plotted set is
+        # exactly the set that constrained the model; sfits carries the
+        # fitted per-star (dx, dy, amp_scale) so the residuals are the
+        # ones the optimiser actually produced.
+        sfits = getattr(stamp, "_autophot_star_fits", None) or []
+        infos = []
+        if stars and np.isfinite(fwhm_plot):
+            for s in stars:
+                info = _composite_star_profile(
+                    s, float(fwhm_plot), ell, snr_min=snr_min
+                )
+                if info is not None:
+                    infos.append(info)
+        if sfits and len(sfits) != len(infos):
+            sfits = []
+        infos = infos[: max(1, int(max_stars))]
+        sfits = sfits[: max(1, int(max_stars))]
+        # Highest-significance constraints on top: the rows stay a
+        # positional pair with sfits, so both lists sort together.
+        if infos:
+            _order = np.argsort([-i["snr"] for i in infos])
+            infos = [infos[o] for o in _order]
+            if len(sfits) == len(infos):
+                sfits = [sfits[o] for o in _order]
+        n_rows = max(1, len(infos))
+
+        def _star_model(info, k):
+            dx, dy, a = (
+                sfits[k] if k < len(sfits) else (0.0, 0.0, 1.0)
+            )
+            return a * _moffat_comps_image(
+                info["x_ok"] - (info["cc"][0] + dx),
+                info["y_ok"] - (info["cc"][1] + dy),
+                comps,
+                ell,
+            )
+
+        # Component stamps in the delivered display convention: the
+        # stamp is osamp**2 * raw/total after pixel integration.
+        ny, nx = data.shape
+        ctr = (nx - 1) / 2.0
+        yy, xx = np.indices(data.shape)
+        # Per-component maps honour each component's centre offset -
+        # the asymmetry the joint fit found.
+        comp_raw = [
+            c[0]
+            * (
+                1.0
+                + (
+                    _elliptical_radius(
+                        xx - ctr - osamp * (c[3] if len(c) > 4 else 0.0),
+                        yy - ctr - osamp * (c[4] if len(c) > 4 else 0.0),
+                        ell,
+                    )
+                    / (osamp * max(float(c[1]), 1e-6))
+                )
+                ** 2
+            )
+            ** (-float(c[2]))
+            for c in comps
+        ]
+        tot = float(np.nansum(np.sum(comp_raw, axis=0)))
+        if not np.isfinite(tot) or tot <= 0:
+            tot = 1.0
+        comp_disp = [
+            pixel_integrate_oversampled(c, osamp) * osamp**2 / tot
+            for c in comp_raw
+        ]
+        # Central cuts (average the two middle rows/cols so even-sized
+        # stamps stay centred).
+        _cy = (ny - 1) / 2.0
+        _cy0, _cy1 = int(np.floor(_cy)), int(np.ceil(_cy))
+        _cx = (nx - 1) / 2.0
+        _cx0, _cx1 = int(np.floor(_cx)), int(np.ceil(_cx))
+        stamp_cut_x = 0.5 * (data[_cy0, :] + data[_cy1, :])
+        stamp_cut_y = 0.5 * (data[:, _cx0] + data[:, _cx1])
+
+        scale = 1.0 / osamp
+        # One field of view for the whole figure: every image panel
+        # (stamp, star cutouts, residuals) shows the same window in
+        # native pixels centred on the source, so features line up 1:1
+        # in scale between panels.  The window is the smaller of the
+        # stamp half-size and the star-cutout half-size - the stamp is
+        # cropped to the region the stars actually constrained, and a
+        # cutout wider than the stamp is cropped to the model.
+        _hw = min(nx, ny) * scale / 2.0
+        for _i in infos:
+            _hw = min(_hw, min(_i["data"].shape) / 2.0)
+
+        apply_autophot_mplstyle()
+        fig = plt.figure(
+            figsize=(10.5, max(4.6, 1.5 * n_rows + 0.8)),
+            constrained_layout=False,
+        )
+        gs = GridSpec(
+            1, 2, figure=fig, width_ratios=[2.0, 3.0], wspace=0.22
+        )
+        # ---- left: per-star cutout | residual -------------------------
+        gsL = gs[0].subgridspec(n_rows, 2, wspace=0.05, hspace=0.12)
+        if infos:
+            try:
+                _cmap_dat = plt.get_cmap(cmap).with_extremes(bad="0.8")
+            except Exception:
+                _cmap_dat = cmap
+            for k, info in enumerate(infos):
+                ny_s, nx_s = info["data"].shape
+                # Extent in native px centred on the cutout middle -
+                # the same frame and scale as the stamp panel.
+                ext_s = (
+                    -nx_s / 2.0,
+                    nx_s / 2.0,
+                    -ny_s / 2.0,
+                    ny_s / 2.0,
+                )
+                norm_2d = np.where(
+                    info["ok"], info["data"] / info["flux"], np.nan
+                )
+                resid_2d = np.full(norm_2d.shape, np.nan)
+                resid_2d[info["ok"]] = (
+                    info["data"][info["ok"]] / info["flux"]
+                    - _star_model(info, k)
+                )
+                ax_d = fig.add_subplot(gsL[k, 0])
+                ax_r = fig.add_subplot(gsL[k, 1])
+                # Per-star zscale over the usable pixels only - masked
+                # and non-finite pixels must not set the stretch.  The
+                # panel shows normalised values, so the limits are
+                # computed on them too.
+                try:
+                    _vi, _va = ZScaleInterval().get_limits(
+                        info["data"][info["ok"]] / info["flux"]
+                    )
+                except Exception:
+                    _vi, _va = np.nanpercentile(
+                        norm_2d[np.isfinite(norm_2d)], [1.0, 99.9]
+                    )
+                ax_d.imshow(
+                    np.ma.masked_invalid(norm_2d),
+                    extent=ext_s,
+                    origin="lower",
+                    cmap=_cmap_dat,
+                    vmin=_vi,
+                    vmax=_va,
+                    interpolation="none",
+                )
+                # Same colour scheme as the star panel, limits set
+                # individually per cutout: each residual gets its own
+                # zscale over usable pixels, with a 3-sigma floor so a
+                # noise-only panel does not over-amplify mottle.
+                _rf = resid_2d[np.isfinite(resid_2d)]
+                try:
+                    _ri, _ra = ZScaleInterval().get_limits(_rf)
+                except Exception:
+                    _ri, _ra = (
+                        np.nanpercentile(_rf, [0.5, 99.5])
+                        if _rf.size
+                        else (-1.0, 1.0)
+                    )
+                _sig_n = info.get("sigma_norm", np.nan)
+                if np.isfinite(_sig_n) and _sig_n > 0:
+                    _ri = min(_ri, -3.0 * _sig_n)
+                    _ra = max(_ra, 3.0 * _sig_n)
+                if not np.isfinite(_ri):
+                    _ri = -1.0
+                if not np.isfinite(_ra) or _ra <= _ri:
+                    _ra = _ri + 1e-12
+                ax_r.imshow(
+                    np.ma.masked_invalid(resid_2d),
+                    extent=ext_s,
+                    origin="lower",
+                    cmap=_cmap_dat,
+                    vmin=_ri,
+                    vmax=_ra,
+                    interpolation="none",
+                )
+                for _a in (ax_d, ax_r):
+                    _a.set_xlim(-_hw, _hw)
+                    _a.set_ylim(-_hw, _hw)
+                # Cross at the fitted star centre: the per-star
+                # position freedom of the joint fit, drawn in the
+                # centred cutout frame.
+                _dx, _dy = (
+                    (sfits[k][0], sfits[k][1])
+                    if k < len(sfits)
+                    else (0.0, 0.0)
+                )
+                _mx = info["cc"][0] + _dx + 0.5 - nx_s / 2.0
+                _my = info["cc"][1] + _dy + 0.5 - ny_s / 2.0
+                ax_d.plot(
+                    [_mx], [_my], marker="+", color="w", ms=5, mew=0.7
+                )
+                _snr_i = info.get("snr", np.nan)
+                ax_d.set_ylabel(
+                    f"s{k}"
+                    + (f"\n{_snr_i:.0f}" if np.isfinite(_snr_i) else ""),
+                    fontsize=6,
+                )
+                # Ticks carry the shared pixel scale; labels only where
+                # they cannot collide with a neighbouring panel.
+                _last = k == len(infos) - 1
+                for _a, _t in (
+                    (ax_d, "star" if k == 0 else None),
+                    (ax_r, "resid" if k == 0 else None),
+                ):
+                    _a.tick_params(
+                        labelsize=6,
+                        length=2,
+                        labelbottom=_last,
+                        labelleft=_a is ax_d,
+                    )
+                    if _t:
+                        _a.set_title(_t, fontsize=8)
+                if _last:
+                    ax_d.set_xlabel("X [px]", fontsize=7)
+                    ax_r.set_xlabel("X [px]", fontsize=7)
+        else:
+            ax_note = fig.add_subplot(gsL[:, :])
+            ax_note.text(
+                0.5,
+                0.5,
+                "no usable star cutouts",
+                ha="center",
+                va="center",
+                fontsize=9,
+                transform=ax_note.transAxes,
+            )
+            ax_note.axis("off")
+
+        # ---- right: stamp + cuts + per-component lines ----------------
+        # Classic image-plus-projections layout: the x cut shares the
+        # stamp's x axis below it, the y cut shares the y axis on its
+        # right, and the empty corner takes the component legend.  The
+        # spacings leave room for tick labels; the shared axes keep the
+        # panels aligned with the image.
+        # Panels are placed by hand in figure fraction: imshow forces
+        # aspect="equal", and the stamp window is square, so a
+        # square-in-inches image axes never shrinks and the
+        # projections land flush on its real edges - the alignment the
+        # aperture/PSF target figures get from append_axes, without
+        # depending on a GridSpec cell's size.  The legend fills the
+        # empty corner between the two projections.
+        fig_w, fig_h = fig.get_size_inches()
+        rx0, rx1 = 0.46, 0.985
+        ry0, ry1 = 0.06, 0.90
+        proj, padx, pady = 0.30, 0.012, 0.016
+        _side_in = min(
+            (rx1 - rx0 - padx) / (1.0 + proj) * fig_w,
+            (ry1 - ry0 - pady) / (1.0 + proj) * fig_h,
+        )
+        w_img = _side_in / fig_w
+        h_img = _side_in / fig_h
+        ix = rx0 + max(
+            0.0, (rx1 - rx0 - (w_img * (1.0 + proj) + padx)) / 2.0
+        )
+        iy = ry0 + max(
+            0.0, (ry1 - ry0 - (h_img * (1.0 + proj) + pady)) / 2.0
+        )
+        ax_xb = fig.add_axes([ix, iy, w_img, proj * h_img])
+        ax_img = fig.add_axes(
+            [ix, iy + proj * h_img + pady, w_img, h_img]
+        )
+        ax_yr = fig.add_axes(
+            [ix + w_img + padx, iy + proj * h_img + pady,
+             proj * w_img, h_img]
+        )
+        ax_lg = fig.add_axes(
+            [ix + w_img + padx, iy, proj * w_img, proj * h_img]
+        )
+        ax_xb.sharex(ax_img)
+        ax_yr.sharey(ax_img)
+        ax_lg.axis("off")
+
+        extent = [-nx * scale / 2.0, nx * scale / 2.0,
+                  -ny * scale / 2.0, ny * scale / 2.0]
+        # Stamp in the same units as the star panels - fractional flux
+        # per native pixel (the stamp's osamp^2 flux convention divided
+        # back out).  The zscale limits are computed on the inner ~2
+        # FWHM only: on the full stamp the smooth wing pixels dominate
+        # the sorted-value fit and the resulting vmax saturates a disk
+        # far larger than any star core, which no longer looks like a
+        # PSF.  On failure, a log stretch with a four-decade floor
+        # keeps the inner wings visible without haze filling the panel.
+        dens = data / float(osamp) ** 2
+        _rr_dens = np.hypot(xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0) * scale
+        _lim_rad = 2.0 * fwhm_plot if np.isfinite(fwhm_plot) else _hw
+        _dens_lim = dens[np.isfinite(dens) & (_rr_dens <= _lim_rad)]
+        try:
+            _zi = ZScaleInterval()
+            vmin, vmax = _zi.get_limits(_dens_lim)
+            norm = None
+        except Exception:
+            _pos = _dens_lim[_dens_lim > 0]
+            if _pos.size:
+                vmax = float(np.nanmax(_pos))
+                vmin = float(np.nanpercentile(_pos, 1.0))
+                norm = LogNorm(vmin=max(vmin, vmax * 1e-4), vmax=vmax)
+            else:
+                norm = None
+                vmin = vmax = None
+        try:
+            _cmap = plt.get_cmap(cmap).with_extremes(bad="none")
+        except Exception:
+            _cmap = cmap
+        ax_img.imshow(
+            np.ma.array(dens, mask=~np.isfinite(dens)),
+            extent=extent,
+            origin="lower",
+            cmap=_cmap,
+            interpolation="none",
+            norm=norm,
+            vmin=None if norm is not None else vmin,
+            vmax=None if norm is not None else vmax,
+        )
+        overlay_mask_hatch(ax_img, ~np.isfinite(dens), extent=extent)
+        # Same field of view as the star cutouts: shared x/y axes then
+        # crop the projections to the identical window.
+        ax_img.set_xlim(-_hw, _hw)
+        ax_img.set_ylim(-_hw, _hw)
+        ax_img.axvline(0.0, color="w", lw=0.5, alpha=0.8, ls="--")
+        ax_img.axhline(0.0, color="w", lw=0.5, alpha=0.8, ls="--")
+        if np.isfinite(fwhm_plot):
+            ax_img.add_patch(
+                Circle(
+                    (0.0, 0.0),
+                    0.5 * float(fwhm_plot),
+                    fill=False,
+                    color="white",
+                    ls="--",
+                    lw=0.8,
+                )
+            )
+        _info = [
+            kind,
+            f"{len(comps)} component"
+            + ("s" if len(comps) != 1 else "")
+            + (" (fitted)" if fitted else " (canonical)"),
+            f"{len(infos)} star" + ("s" if len(infos) != 1 else ""),
+        ]
+        if np.isfinite(fwhm_plot):
+            _info.append(f"FWHM={float(fwhm_plot):.2f} px")
+        ax_img.text(
+            0.98,
+            0.98,
+            "\n".join(_info),
+            transform=ax_img.transAxes,
+            ha="right",
+            va="top",
+            fontsize=7,
+            color="white",
+        )
+        ax_img.set_ylabel("Y [px]", fontsize=8)
+        ax_img.set_title("Analytic PSF model", fontsize=9)
+        # The x cut below carries the shared X labels; repeating them
+        # under the image would crowd the narrow panel gap.
+        ax_img.tick_params(axis="x", labelbottom=False)
+
+        x_phys = (np.arange(nx) + 0.5) * scale - nx * scale / 2.0
+        y_phys = (np.arange(ny) + 0.5) * scale - ny * scale / 2.0
+        _comp_colors = plt.get_cmap("tab10").colors
+        # Stamp central cuts as the reference; each component as its own
+        # line; their sum should overlay the reference cut.  Density
+        # units (fractional flux per native px) match the image panel;
+        # values are drawn x1e-3 so the axis labels carry the scale and
+        # no offset text can collide with the adjacent panels.
+        _fs = 1e3 / float(osamp) ** 2
+        cut_x = stamp_cut_x * _fs
+        cut_y = stamp_cut_y * _fs
+        ax_xb.step(
+            x_phys, cut_x, color="0.4", lw=0.9, where="mid",
+            label="stamp",
+        )
+        sum_cut_x = np.zeros(nx)
+        for k, cd in enumerate(comp_disp):
+            cut = 0.5 * (cd[_cy0, :] + cd[_cy1, :]) * _fs
+            sum_cut_x += cut
+            ax_xb.step(
+                x_phys,
+                cut,
+                color=_comp_colors[k % 10],
+                lw=0.8,
+                where="mid",
+                label=f"c{k + 1}",
+            )
+        ax_xb.step(x_phys, sum_cut_x, color="k", lw=1.2, where="mid", label="sum")
+
+        ax_yr.plot(
+            cut_y, y_phys, color="0.4", lw=0.9, drawstyle="steps-mid",
+        )
+        sum_cut_y = np.zeros(ny)
+        for k, cd in enumerate(comp_disp):
+            cut = 0.5 * (cd[:, _cx0] + cd[:, _cx1]) * _fs
+            sum_cut_y += cut
+            ax_yr.plot(cut, y_phys, color=_comp_colors[k % 10], lw=0.8, drawstyle="steps-mid")
+        ax_yr.plot(sum_cut_y, y_phys, color="k", lw=1.2, drawstyle="steps-mid")
+
+        ax_xb.axvline(0.0, color="0.3", lw=0.5, alpha=0.8, ls="--")
+        ax_yr.axhline(0.0, color="0.3", lw=0.5, alpha=0.8, ls="--")
+        ax_xb.set_ylabel("Flux/px (x1e-3)", fontsize=7)
+        ax_xb.set_xlabel("X [px]", fontsize=8)
+        # Component key in the otherwise-empty corner panel - inside
+        # ax_xb it sat on top of the wing decay it describes.
+        _h, _l = ax_xb.get_legend_handles_labels()
+        ax_lg.legend(
+            _h, _l, loc="upper left", fontsize=7, frameon=False,
+            borderaxespad=0.1, handlelength=1.4,
+        )
+        # Flux ticks on top so they cannot collide with the legend or
+        # the stamp panel; the y position labels stay on ax_img.
+        ax_yr.xaxis.tick_top()
+        ax_yr.xaxis.set_label_position("top")
+        ax_yr.tick_params(axis="x", labelsize=6, length=2, pad=2)
+        ax_yr.set_xlabel("Flux/px (x1e-3)", fontsize=7)
+        ax_yr.tick_params(axis="y", labelleft=False)
+
+        if save_path:
+            fig.savefig(
+                save_path, dpi=150, bbox_inches="tight", facecolor="white"
+            )
+            plt.close(fig)
+            return None
+        plt.close(fig)
+        return fig
+    except Exception as exc:
+        log.error("Analytic PSF plot failed: %s", exc)
+        return None
 
 
 class PSF:
@@ -1113,6 +5209,28 @@ class PSF:
         self.input_yaml = input_yaml
         self.image = image
         self.header = header
+        # Provenance of the last build(): "epsf" (empirical, from image
+        # sources), "gridded-epsf-NxM" (spatially varying empirical), or
+        # "none".  The photometry PSF is always built from field sources;
+        # a failed build returns None (aperture-only) rather than
+        # substituting an analytic model.
+        self.psf_model_kind = "none"
+        # True/False once an empirical EPSFBuilder run produces a result;
+        # stays None when no empirical attempt ran (or none was built).
+        # ``psf_converged_relaxed`` marks a verdict accepted at the relaxed
+        # centre-movement bound rather than the strict photutils threshold.
+        self.psf_converged = None
+        self.psf_converged_relaxed = False
+        self.psf_ensemble_understaffed = False
+        # Set when the kept ePSF grid holds fewer than ~4 grid points per
+        # FWHM (the photutils ``oversampling >= 4/FWHM`` rule) - the model
+        # cannot resolve the core and is low-confidence even if it
+        # converged.
+        self.psf_grid_underresolved = False
+        # Subpixel-phase diagnostics of the fitted star centres; set after
+        # a successful empirical build (None otherwise).
+        self.psf_phase_diag = None
+        self.psf_phase_nonuniform = False
 
     # -----------------------------------------------------------------------
     # Centroiding
@@ -1170,12 +5288,38 @@ class PSF:
         optionally plus a PSF-model-mismatch floor and optional smoothing.
         """
         image_e = np.asarray(image, float) * float(gain)
-        bkg_rms_e = (
-            np.zeros_like(image_e)
-            if background_rms is None
-            else np.asarray(background_rms, float) * float(gain)
-        )
-        bkg_error = np.sqrt(bkg_rms_e**2 + float(read_noise) ** 2)
+        if background_rms is None:
+            bkg_rms_e = np.zeros_like(image_e)
+        else:
+            bkg_rms_arr = np.asarray(background_rms, float)
+            # Replace non-finite values (chip gaps, interpolation failures)
+            # with the median of finite values so the error model doesn't break.
+            if bkg_rms_arr.ndim == 2 and np.any(~np.isfinite(bkg_rms_arr)):
+                _finite_median = float(np.nanmedian(bkg_rms_arr))
+                if not np.isfinite(_finite_median) or _finite_median <= 0:
+                    _finite_median = float(read_noise) if read_noise > 0 else 1.0
+                bkg_rms_arr = np.where(
+                    np.isfinite(bkg_rms_arr), bkg_rms_arr, _finite_median
+                )
+            if bkg_rms_arr.shape == image_e.shape:
+                bkg_rms_e = bkg_rms_arr * float(gain)
+            elif bkg_rms_arr.ndim == 0 or np.prod(bkg_rms_arr.shape) == 1:
+                bkg_rms_e = np.full_like(image_e, bkg_rms_arr.item() * float(gain))
+            else:
+                try:
+                    bkg_rms_e = np.broadcast_to(bkg_rms_arr * float(gain), image_e.shape)
+                except ValueError:
+                    raise ValueError(
+                        f"background_rms shape {background_rms.shape} incompatible with data shape {image_e.shape}"
+                    )
+        # background_rms from Background2D (BiweightScaleBackgroundRMS) measures
+        # the actual per-pixel scatter, which already includes read noise.  Do
+        # NOT add read_noise^2 again -- that double-counts it and inflates PSF
+        # flux errors, especially for faint sources where RN dominates.
+        if background_rms is None:
+            bkg_error = np.full_like(image_e, float(read_noise))
+        else:
+            bkg_error = bkg_rms_e  # already includes sky Poisson + read noise
         total_error = calc_total_error(
             data=image_e, bkg_error=bkg_error, effective_gain=1.0
         )
@@ -1189,7 +5333,9 @@ class PSF:
                 total_error, float(smooth_variance_sigma), mode="nearest"
             )
 
-        np.maximum(total_error, 1e-12, out=total_error)
+        _sanitize_error_array(
+            total_error, max(float(read_noise), 1.0)
+        )
 
         return NDData(
             data=image_e,
@@ -1235,14 +5381,17 @@ class PSF:
 
             dropped = int((~keep).sum())
             if dropped:
-                log.info(f"[robust_extract_stars] Dropped {dropped} near-edge sources")
+                log.info("[robust_extract_stars] Dropped %s near-edge sources", dropped)
 
             x, y = x[keep], y[keep]
             if x.size == 0:
                 log.error("[robust_extract_stars] No candidates after edge filter")
                 return EPSFStars([]), Table()
 
-            # Centroiding.
+            # ---- Centroiding ----
+            # For undersampled data (FWHM <= threshold, default 2.5 px), centroiding is critical:
+            # a single pass with a large box can jump to a neighbouring source.
+            # We use a two-pass approach with adaptive box sizes.
             phot_cfg = self.input_yaml.get("photometry", {}) or {}
             undersampled_thr = float(
                 phot_cfg.get("undersampled_fwhm_threshold", 2.5)
@@ -1253,55 +5402,1300 @@ class PSF:
                     bool(fwhm is not None and float(fwhm) <= undersampled_thr),
                 )
             )
-            cen_func = centroid_2dg if undersampled_mode else centroid_com
-            cen_box = _odd(max(7, int(np.ceil(3.0 * max(1.0, fwhm or 2.0)))))
+
+            fwhm_eff = max(1.0, float(fwhm or 2.0))
+
+            if undersampled_mode:
+                # Smaller boxes for undersampled data to avoid neighbour pickup.
+                # First pass: 2*FWHM (min 5) to get close; second pass: 1.5*FWHM (min 5) to refine.
+                cen_box_1 = _odd(max(5, int(np.ceil(2.0 * fwhm_eff))))
+                cen_box_2 = _odd(max(5, int(np.ceil(1.5 * fwhm_eff))))
+                cen_func = _centroid_2dg_quiet
+            else:
+                # Well-sampled: larger boxes are safe.
+                cen_box_1 = _odd(max(7, int(np.ceil(3.0 * fwhm_eff))))
+                cen_box_2 = _odd(max(7, int(np.ceil(2.0 * fwhm_eff))))
+                cen_func = centroid_com
+
+            log.info(
+                "[robust_extract_stars] Centroiding %d sources (undersampled=%s, "
+                "fwhm=%.2f, func=%s, box=%d->%d)",
+                len(x), undersampled_mode, fwhm_eff,
+                cen_func.__name__, cen_box_1, cen_box_2,
+            )
 
             if weightmap is None:
-                weightmap = 1.0 / ndimage.uncertainty.array**2  # 1/variance for chi^2 fitting
+                if ndimage.uncertainty is not None and ndimage.uncertainty.array is not None:
+                    # The astropy fit objective is weights*(model - data), so
+                    # a chi^2 fit needs weights = 1/sigma.  Passing
+                    # 1/sigma^2 squares the inverse uncertainty a second
+                    # time: high-S/N core pixels are over-weighted relative
+                    # to the wings, biasing the ePSF core sharp and leaving
+                    # the wings unconstrained.
+                    sigma = np.asarray(ndimage.uncertainty.array, dtype=float)
+                    weightmap = np.zeros_like(sigma)
+                    good_sigma = np.isfinite(sigma) & (sigma > 0)
+                    weightmap[good_sigma] = 1.0 / sigma[good_sigma]
+                    # Masked/non-finite pixels carry no information: zero
+                    # their weight so they can never enter the residual
+                    # stack (the per-star mask zeroing below re-applies
+                    # this, but the map itself must also be clean for
+                    # the uniform-map fast path).
+                    weightmap[~np.isfinite(np.asarray(ndimage.data))] = 0.0
+                    if ndimage.mask is not None:
+                        weightmap[np.asarray(ndimage.mask, dtype=bool)] = 0.0
+                else:
+                    weightmap = np.ones_like(ndimage.data, dtype=float)
 
+            # Non-finite pixels must be masked explicitly - otherwise each
+            # centroid_sources call warns that it auto-masked them.
+            _cen_mask = ~np.isfinite(np.asarray(ndimage.data))
+
+            # --- Pass 1: initial centroid with larger box ---
             try:
-                x_cen, y_cen = centroid_sources(
-                    ndimage.data, x, y, box_size=cen_box, centroid_func=cen_func
+                x_c1, y_c1 = centroid_sources(
+                    ndimage.data, x, y, box_size=cen_box_1,
+                    centroid_func=cen_func, mask=_cen_mask,
                 )
             except Exception as exc:
                 log.warning(
-                    f"[robust_extract_stars] Centroiding failed ({exc}); using COM"
+                    f"[robust_extract_stars] Pass 1 centroiding failed ({exc}); using COM"
                 )
-                x_cen, y_cen = centroid_sources(
-                    ndimage.data, x, y, box_size=cen_box, centroid_func=centroid_com
+                x_c1, y_c1 = centroid_sources(
+                    ndimage.data, x, y, box_size=cen_box_1,
+                    centroid_func=centroid_com, mask=_cen_mask,
                 )
 
+            # --- Pass 2: refine with smaller box centered on pass-1 result ---
+            good1 = np.isfinite(x_c1) & np.isfinite(y_c1)
+            x_c2 = x_c1.copy()
+            y_c2 = y_c1.copy()
+            if np.any(good1):
+                try:
+                    x_r, y_r = centroid_sources(
+                        ndimage.data,
+                        x_c1[good1], y_c1[good1],
+                        box_size=cen_box_2, centroid_func=cen_func,
+                        mask=_cen_mask,
+                    )
+                    x_c2[good1] = x_r
+                    y_c2[good1] = y_r
+                except Exception as exc:
+                    log.debug(
+                        f"[robust_extract_stars] Pass 2 centroiding failed ({exc}); "
+                        "using pass-1 results"
+                    )
+
+            x_cen, y_cen = x_c2, y_c2
+
+            # --- Centroid quality checks ---
             good = np.isfinite(x_cen) & np.isfinite(y_cen)
+
+            # Offset rejection: reject sources where centroid jumped far from
+            # the initial SExtractor position (likely centroided on a neighbour).
+            offset = np.sqrt((x_cen - x) ** 2 + (y_cen - y) ** 2)
+            max_offset = max(2.0, 1.5 * fwhm_eff)
+            too_far = good & (offset > max_offset)
+            if np.any(too_far):
+                log.info(
+                    "[robust_extract_stars] Rejected %d sources with centroid offset > %.2f px "
+                    "(mean offset of rejected: %.2f px)",
+                    int(too_far.sum()), max_offset,
+                    float(np.nanmean(offset[too_far])),
+                )
+            good &= ~too_far
+
+            # Peak-pixel cross-check for undersampled data:
+            # For undersampled data, the centroid should be close to the brightest pixel.
+            # If it's not, the centroid was likely pulled by a neighbour.
+            if undersampled_mode and np.any(good):
+                peak_offsets = np.full(len(x_cen), np.nan)
+                for i in np.where(good)[0]:
+                    xc, yc = x_cen[i], y_cen[i]
+                    px = int(round(xc))
+                    py = int(round(yc))
+                    r = max(1, int(fwhm_eff))
+                    y0 = max(0, py - r)
+                    y1 = min(ny, py + r + 1)
+                    x0 = max(0, px - r)
+                    x1 = min(nx, px + r + 1)
+                    sub = ndimage.data[y0:y1, x0:x1]
+                    if sub.size > 0 and np.any(np.isfinite(sub)):
+                        py_local, px_local = np.unravel_index(
+                            np.nanargmax(sub), sub.shape
+                        )
+                        peak_x = x0 + px_local
+                        peak_y = y0 + py_local
+                        peak_offsets[i] = np.sqrt(
+                            (peak_x - xc) ** 2 + (peak_y - yc) ** 2
+                        )
+                # Reject if centroid is more than 1.5 pixels from peak (for FWHM < 2,
+                # the PSF core is 1-2 pixels, so centroid should be very close to peak)
+                peak_thresh = max(1.0, fwhm_eff * 0.75)
+                bad_peak = good & np.isfinite(peak_offsets) & (peak_offsets > peak_thresh)
+                if np.any(bad_peak):
+                    log.info(
+                        "[robust_extract_stars] Rejected %d undersampled sources "
+                        "with centroid > %.2f px from peak pixel",
+                        int(bad_peak.sum()), peak_thresh,
+                    )
+                good &= ~bad_peak
+
             n_bad = int((~good).sum())
             if n_bad:
-                log.info(f"[robust_extract_stars] Dropped {n_bad} non-finite centroids")
+                log.info(
+                    "[robust_extract_stars] Dropped %d sources total (non-finite/offset/peak)",
+                    n_bad,
+                )
+
+            if np.any(good):
+                surv_offsets = offset[good]
+                log.info(
+                    "[robust_extract_stars] Centroid quality: mean offset=%.3f px, "
+                    "median=%.3f px, max=%.3f px (n=%d)",
+                    float(np.nanmean(surv_offsets)),
+                    float(np.nanmedian(surv_offsets)),
+                    float(np.nanmax(surv_offsets)),
+                    int(good.sum()),
+                )
+
             x_cen, y_cen = x_cen[good], y_cen[good]
 
             if x_cen.size == 0:
-                log.error("[robust_extract_stars] No valid centroids")
+                log.error("[robust_extract_stars] No valid centroids after quality checks")
                 return EPSFStars([]), Table()
 
             stars_tbl = Table({"x": x_cen, "y": y_cen})
             epsfstars = extract_stars(ndimage, stars_tbl, size=cutout_shape)
-            log.info(f"[robust_extract_stars] Extracted {len(epsfstars)} cutouts")
+            log.info("[robust_extract_stars] Extracted %s cutouts", len(epsfstars))
 
-            # Assign per-pixel weights if provided.
-            weight_nddata = NDData(weightmap)
-            weight_cutouts = extract_stars(weight_nddata, stars_tbl, size=cutout_shape)
+            # Filter out stars with NaN or masked pixels in the *central* region.
+            # Edge NaNs (common near image boundaries) are acceptable; only reject
+            # if the core PSF region is contaminated.
+            ny_cut, nx_cut = cutout_shape
+            # Core = central 50% of cutout (where PSF flux is concentrated)
+            cy_core = slice(ny_cut // 4, 3 * ny_cut // 4)
+            cx_core = slice(nx_cut // 4, 3 * nx_cut // 4)
+            
+            all_data = np.stack([star.data for star in epsfstars])
+            core_regions = all_data[:, cy_core, cx_core]
 
-            if len(weight_cutouts) == len(epsfstars):
-                for star, wcut in zip(epsfstars, weight_cutouts):
-                    star.weights = wcut.data.astype(float)
-            else:
-                log.warning(
-                    "[robust_extract_stars] Weight/star count mismatch; skipping weights"
+            core_bad = ~np.isfinite(core_regions)
+
+            # Merge per-star masks; stars without one contribute no masked pixels.
+            star_masks = [getattr(star, 'mask', None) for star in epsfstars]
+            has_any_mask = any(m is not None for m in star_masks)
+            if has_any_mask:
+                mask_stack = np.zeros_like(all_data, dtype=bool)
+                for i, m in enumerate(star_masks):
+                    if m is not None:
+                        mask_stack[i] = m
+                core_bad |= mask_stack[:, cy_core, cx_core]
+            
+            core_bad_frac = np.sum(core_bad, axis=(1, 2)) / core_regions[0].size
+            
+            # Accept stars with <5% bad pixels in core
+            valid_mask = core_bad_frac < 0.05
+            valid_indices = np.where(valid_mask)[0]
+
+            n_rejected = len(epsfstars) - len(valid_indices)
+            if n_rejected > 0:
+                log.info(
+                    f"[robust_extract_stars] Rejected {n_rejected} cutouts with NaN/masked pixels "
+                    f"in central region ({n_rejected}/{len(epsfstars)})"
                 )
+                epsfstars = EPSFStars([epsfstars._data[i] for i in valid_indices])
+                stars_tbl = stars_tbl[valid_indices]
+
+            if len(epsfstars) == 0:
+                log.error("[robust_extract_stars] No valid cutouts after NaN/mask filtering")
+                return EPSFStars([]), Table()
+
+            # ---- Cutout contamination check ----
+            # Reject cutouts with non-background flux in the outer annulus from
+            # neighbouring stars, galaxies, trails, or streaks that catalog-level
+            # isolation checks miss.  Uses pixel-level tests: azimuthal asymmetry,
+            # edge flux elevation, and radial non-monotonicity.
+            epsfstars, stars_tbl = self._check_cutout_contamination(
+                epsfstars, stars_tbl, cutout_shape, fwhm_eff, log,
+                phot_cfg=phot_cfg,
+            )
+
+            if len(epsfstars) == 0:
+                log.error(
+                    "[robust_extract_stars] No valid cutouts after contamination check"
+                )
+                return EPSFStars([]), Table()
+
+            # Reject stars still carrying masked/non-finite pixels inside
+            # the flux-normalisation circle.  The ePSF build normalises
+            # each star within aperture_radius, so masked pixels there
+            # silently shrink the normalised area and bias that star's
+            # flux scale relative to the ensemble.  This runs after the
+            # contamination check on purpose: its keep-floor path masks
+            # annulus pixels (r >= ~1.5*FWHM) that can still land inside
+            # the normalisation circle.
+            _norm_r = float(phot_cfg.get("aperture_radius") or np.nan)
+            if not np.isfinite(_norm_r) or _norm_r <= 0:
+                _norm_r = 1.5 * fwhm_eff
+            _norm_frac_max = float(
+                phot_cfg.get("psf_norm_radius_mask_frac_max", 0.0)
+            )
+            _norm_rescue_frac_max = float(
+                phot_cfg.get("psf_norm_radius_mask_frac_rescue_max", 0.25)
+            )
+            _min_cand = max(4, int(phot_cfg.get("psf_min_candidates", 8)))
+            # photutils >=3.0 dropped norm_radius: each star is normalised
+            # by the interpolated sum over the WHOLE cutout, so masked
+            # pixels anywhere corrupt the flux scale, not just those inside
+            # the norm circle.  Gate on the same signature the builder
+            # call uses and apply a looser whole-cutout cap in that case.
+            try:
+                _bld_has_norm_radius = (
+                    "norm_radius"
+                    in _inspect.signature(EPSFBuilder.__init__).parameters
+                )
+            except Exception:
+                _bld_has_norm_radius = True
+            _cut_frac_max = float(
+                phot_cfg.get("psf_norm_cutout_mask_frac_max", 0.15)
+            )
+            _nyy, _nxx = np.mgrid[:ny_cut, :nx_cut]
+            _in_norm = (
+                np.hypot(
+                    _nyy - (ny_cut - 1) / 2.0, _nxx - (nx_cut - 1) / 2.0
+                )
+                <= _norm_r
+            )
+            _norm_frac = np.zeros(len(epsfstars))
+            _cut_frac = np.zeros(len(epsfstars))
+            for _si, _st in enumerate(epsfstars):
+                _bad = ~np.isfinite(np.asarray(_st.data, float))
+                _m = getattr(_st, "mask", None)
+                if _m is not None:
+                    _bad |= np.asarray(_m, dtype=bool)
+                _norm_frac[_si] = np.sum(_bad & _in_norm) / float(
+                    _in_norm.sum()
+                )
+                if not _bld_has_norm_radius:
+                    _cut_frac[_si] = float(np.mean(_bad))
+            _norm_keep = _norm_frac <= _norm_frac_max
+            if not _bld_has_norm_radius:
+                _norm_keep &= _cut_frac <= _cut_frac_max
+            if not _norm_keep.all():
+                # Keep-floor rescue: on a sparse field a strict cut can
+                # starve the build (observed: 5 -> 3 stars).  Rescue the
+                # least-bad cutouts while their masked fraction inside the
+                # normalisation circle stays under the rescue cap -- a
+                # partially masked star still contributes valid samples,
+                # and its masked pixels carry weight 0.
+                if int(_norm_keep.sum()) < _min_cand:
+                    # Rescue ranking uses the metric that actually enters
+                    # the normalisation denominator.
+                    _rank_frac = (
+                        _norm_frac
+                        if _bld_has_norm_radius
+                        else np.maximum(_norm_frac, _cut_frac)
+                    )
+                    _rej = np.flatnonzero(~_norm_keep)
+                    _rej = _rej[np.argsort(_rank_frac[_rej])]
+                    _n_rescued = 0
+                    for _ri in _rej:
+                        if int(_norm_keep.sum()) >= _min_cand:
+                            break
+                        if _rank_frac[_ri] <= _norm_rescue_frac_max:
+                            _norm_keep[_ri] = True
+                            _n_rescued += 1
+                    if _n_rescued:
+                        log.info(
+                            "[robust_extract_stars] Keep-floor rescue: "
+                            "keeping %d cutouts with <= %.0f%% masked "
+                            "pixels inside the normalisation radius to "
+                            "avoid starving the ePSF build (%d/%d kept)",
+                            _n_rescued,
+                            100.0 * _norm_rescue_frac_max,
+                            int(_norm_keep.sum()),
+                            len(epsfstars),
+                        )
+            if not _norm_keep.all():
+                _keep_idx = np.where(_norm_keep)[0]
+                log.info(
+                    "[robust_extract_stars] Rejected %d cutouts with "
+                    "masked/non-finite pixels inside the normalisation "
+                    "radius %.1f px (%d/%d)",
+                    int((~_norm_keep).sum()), _norm_r,
+                    int((~_norm_keep).sum()), len(epsfstars),
+                )
+                epsfstars = EPSFStars([epsfstars._data[i] for i in _keep_idx])
+                stars_tbl = stars_tbl[_keep_idx]
+
+            if len(epsfstars) == 0:
+                log.error(
+                    "[robust_extract_stars] No valid cutouts after "
+                    "normalisation-radius mask filtering"
+                )
+                return EPSFStars([]), Table()
+
+            # Assign per-pixel weights if provided (lazy: skip if uniform)
+            if weightmap is not None:
+                # Check if weightmap is uniform (all same value) - skip extraction in that case
+                weight_arr = np.asarray(weightmap)
+                if weight_arr.size > 0:
+                    weight_min = np.nanmin(weight_arr)
+                    weight_max = np.nanmax(weight_arr)
+                    weight_variation = (weight_max - weight_min) / max(abs(weight_min), 1e-10)
+                    
+                    if weight_variation < 0.01:  # <1% variation = effectively uniform
+                        uniform_weight = float(np.nanmean(weight_arr))
+                        for star in epsfstars:
+                            # Scalar weights break photutils' _fit_star
+                            # (weights[large_slc] on a float), and the mask
+                            # must be re-applied so the contamination zeros
+                            # set above are not wiped by the assignment.
+                            w = np.full(star.data.shape, uniform_weight)
+                            w[star.mask] = 0.0
+                            star.weights = w
+                        log.info(
+                            "[robust_extract_stars] Using uniform weight %.4g (skipping per-star extraction)",
+                            uniform_weight
+                        )
+                    else:
+                        weight_nddata = NDData(weightmap)
+                        weight_cutouts = extract_stars(weight_nddata, stars_tbl, size=cutout_shape)
+
+                        if len(weight_cutouts) == len(epsfstars):
+                            for star, wcut in zip(epsfstars, weight_cutouts):
+                                w = wcut.data.astype(float)
+                                w[star.mask] = 0.0
+                                star.weights = w
+                        else:
+                            log.warning(
+                                "[robust_extract_stars] Weight/star count mismatch; skipping weights"
+                            )
+
+            # A non-finite cutout pixel keeps its NaN in star.data even
+            # though photutils already zeroed its weight, and the
+            # fit objective is weights*(model - data) so 0*NaN still
+            # aborts the whole ePSF build (NonFiniteValueError on
+            # resampled/masked frames).  Zero the non-finite data and
+            # weights in place: masked pixels contribute nothing
+            # downstream.
+            for _st in epsfstars:
+                _bad = ~np.isfinite(np.asarray(_st.data))
+                if _bad.any():
+                    _st.data[_bad] = 0.0
+                _w = getattr(_st, "weights", None)
+                if _w is not None:
+                    _badw = ~np.isfinite(np.asarray(_w))
+                    if _badw.any():
+                        _st.weights[_badw] = 0.0
 
             return epsfstars, stars_tbl
 
         except Exception:
-            log.error("[robust_extract_stars] Fatal:\n" + traceback.format_exc())
+            log.error("[robust_extract_stars] Fatal:\n%s", traceback.format_exc())
             return EPSFStars([]), Table()
+
+    # -----------------------------------------------------------------------
+    # Cutout contamination check
+    # -----------------------------------------------------------------------
+
+    def _check_cutout_contamination(
+        self, epsfstars, stars_tbl, cutout_shape, fwhm_eff, log, phot_cfg=None
+    ):
+        """
+        Reject PSF-star cutouts with non-background flux in the outer annulus.
+
+        Three pixel-level tests on the outer annulus (beyond 2*FWHM from
+        centre):
+
+        1. **Azimuthal asymmetry**: divide the annulus into 4 quadrants and
+           compare their median flux.  One-sided contamination (neighbour
+           wings, trail crossing) produces asymmetric quadrant medians.
+        2. **Edge flux elevation**: compare median flux in the outermost
+           ring to the annulus median.  Elevated edges indicate a
+           neighbour's PSF wings entering the cutout.
+        3. **Radial non-monotonicity**: check that concentric ring medians
+           decrease outward.  A reversal (outer ring brighter than inner
+           ring) indicates a contaminating source in the outer region.
+
+        Parameters
+        ----------
+        epsfstars : EPSFStars
+        stars_tbl : astropy Table
+        cutout_shape : (ny, nx)
+        fwhm_eff : float
+        log : Logger
+        phot_cfg : dict or None
+
+        Returns
+        -------
+        (EPSFStars, Table)  filtered
+        """
+        if phot_cfg is None:
+            phot_cfg = self.input_yaml.get("photometry", {}) or {}
+
+        do_check = bool(phot_cfg.get("psf_cutout_contamination_check", True))
+        if not do_check or len(epsfstars) == 0:
+            return epsfstars, stars_tbl
+
+        # Both thresholds are measured in units of the annulus MAD sigma,
+        # not flux fractions -- the ``*_frac`` key names are legacy and
+        # still honoured.  The old 0.3 defaults flagged any star whose
+        # quadrant medians (or consecutive ring medians) differed by a
+        # third of the noise sigma; real sky gradients, PSF ellipticity,
+        # and photon noise trip that constantly, pushing most of the pool
+        # into the masked keep-floor path.
+        asym_thresh = float(
+            _cfg_get_renamed(
+                phot_cfg,
+                "psf_contam_asymmetry_sigma",
+                "psf_contam_asymmetry_frac",
+                3.0,
+                log,
+            )
+        )
+        edge_sigma = float(phot_cfg.get("psf_contam_edge_excess_sigma", 3.0))
+        radial_reversal_sigma = float(
+            _cfg_get_renamed(
+                phot_cfg,
+                "psf_contam_radial_reversal_sigma",
+                "psf_contam_radial_reversal_frac",
+                3.0,
+                log,
+            )
+        )
+        border_sigma = float(
+            phot_cfg.get("psf_contam_border_excess_sigma", 3.0)
+        )
+        min_keep_frac = float(
+            phot_cfg.get("psf_build_min_keep_frac_after_cut", 0.60)
+        )
+        min_candidates = max(4, int(phot_cfg.get("psf_min_candidates", 8)))
+
+        ny_c, nx_c = cutout_shape
+        cy_c, cx_c = (ny_c - 1) / 2.0, (nx_c - 1) / 2.0
+
+        # Annulus: from 2*FWHM to cutout edge
+        ann_inner = max(2, int(np.ceil(2.0 * fwhm_eff)))
+        ann_outer = min(cy_c, cx_c)
+        if ann_outer - ann_inner < 2:
+            log.debug(
+                "[contamination] Cutout too small for annulus "
+                "(inner=%d, outer=%.0f); skipping.",
+                ann_inner, ann_outer,
+            )
+            return epsfstars, stars_tbl
+
+        _yy, _xx = np.ogrid[:ny_c, :nx_c]
+        _rr = np.sqrt((_xx - cx_c) ** 2 + (_yy - cy_c) ** 2)
+        annulus = (_rr >= ann_inner) & (_rr < ann_outer)
+
+        q_masks = [
+            annulus & (_xx > cx_c) & (_yy < cy_c),
+            annulus & (_xx > cx_c) & (_yy >= cy_c),
+            annulus & (_xx <= cx_c) & (_yy >= cy_c),
+            annulus & (_xx <= cx_c) & (_yy < cy_c),
+        ]
+
+        # Concentric rings for radial monotonicity
+        n_rings = 4
+        ring_edges = np.linspace(ann_inner, ann_outer, n_rings + 1)
+        ring_masks = []
+        for ir in range(n_rings):
+            rm = (_rr >= ring_edges[ir]) & (_rr < ring_edges[ir + 1])
+            ring_masks.append(rm)
+
+        # Edge ring (outermost 3 px within annulus)
+        edge_ring = (_rr >= ann_outer - 3) & (_rr < ann_outer)
+
+        # Inner reference ring (just inside annulus)
+        inner_ring = (_rr >= ann_inner) & (_rr < ann_inner + 2)
+
+        # Border mask: actual cutout boundary pixels (outermost row/col on each side)
+        border_mask = np.zeros((ny_c, nx_c), dtype=bool)
+        border_mask[0, :] = True
+        border_mask[-1, :] = True
+        border_mask[:, 0] = True
+        border_mask[:, -1] = True
+        # Also include the 2nd row/col (common for neighbour wings to spill in)
+        border_mask[1, :] = True
+        border_mask[-2, :] = True
+        border_mask[:, 1] = True
+        border_mask[:, -2] = True
+
+        n_stars = len(epsfstars)
+        all_data = np.stack([np.asarray(star.data, float) for star in epsfstars])
+
+        # --- Batched per-star statistics (vectorized over the cutout stack) ---
+        # finite_stack[i] = unmasked finite pixels of star i.
+        finite_stack = np.isfinite(all_data)
+        for i, star in enumerate(epsfstars):
+            m = getattr(star, "mask", None)
+            if m is not None:
+                finite_stack[i] &= ~np.asarray(m, bool)
+        # -inf fill for the extrema filter so masked/non-finite pixels can
+        # never register as local maxima.
+        data_ninf = np.where(finite_stack, all_data, -np.inf)
+        # Fill masked/non-finite pixels in place: every later use of the
+        # clean stack already pairs values with finite_stack (or reduces
+        # with NaN-aware functions), so an unmasked copy is not needed.
+        all_data[~finite_stack] = np.nan
+        data_clean = all_data
+
+        reject_flags = np.zeros(n_stars, dtype=bool)
+        reasons_by_star = [[] for _ in range(n_stars)]
+
+        ann_pix = data_clean[:, annulus]  # (N, n_annulus)
+        n_ann = np.sum(np.isfinite(ann_pix), axis=1)
+        # Original gate: stars with <10 finite annulus pixels skip all tests.
+        gate = n_ann >= 10
+
+        _secondary_peak_sigma = float(
+            phot_cfg.get("psf_contam_secondary_peak_sigma", 5.0)
+        )
+        _secondary_peak_dist_thresh = max(2.0, 1.0 * fwhm_eff)
+        streak_sigma = float(phot_cfg.get("psf_contam_streak_sigma", 5.0))
+        _annulus_peak_sigma = float(
+            phot_cfg.get("psf_contam_annulus_peak_sigma", 5.0)
+        )
+        _flux_excess_sigma = float(
+            phot_cfg.get("psf_contam_flux_excess_sigma", 10.0)
+        )
+        _core_ellip_max = float(
+            phot_cfg.get("psf_contam_core_ellipticity_max", 0.15)
+        )
+        _core_ellip_snr_min = float(
+            phot_cfg.get("psf_contam_core_ellipticity_snr_min", 8.0)
+        )
+        _border_max_thresh = float(
+            phot_cfg.get("psf_contam_border_max_sigma", 8.0)
+        )
+        _hotpix_sigma = float(
+            phot_cfg.get("psf_contam_hotpix_sigma", 5.0)
+        )
+        _hotpix_max_peak_frac = float(
+            phot_cfg.get("psf_contam_hotpix_max_peak_frac", 0.65)
+        )
+        _cog_enabled = bool(phot_cfg.get("psf_contam_cog_check", True))
+        _cog_sigma = float(phot_cfg.get("psf_contam_cog_sigma", 5.0))
+        _cog_max_dev = float(phot_cfg.get("psf_contam_cog_max_dev", 0.30))
+        _cog_moffat_dev = float(
+            phot_cfg.get("psf_contam_cog_moffat_max_dev", 0.15)
+        )
+        _cog_snr_min = float(phot_cfg.get("psf_contam_cog_snr_min", 15.0))
+
+        core_mask = _rr < ann_inner
+        near_center = _rr < max(1.0, 0.5 * fwhm_eff)
+        ann_total = int(np.sum(annulus))
+
+        with warnings.catch_warnings():
+            # All-NaN reductions warn; a NaN result is treated as "no
+            # evidence" below and never flags a star.
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+
+            # MAD-based annulus sigma (nanstd would be inflated by the
+            # contaminating pixels being detected).
+            ann_median = np.nanmedian(ann_pix, axis=1)
+            ann_mad = np.nanmedian(
+                np.abs(ann_pix - ann_median[:, None]), axis=1
+            )
+            ann_std = np.where(
+                np.isfinite(ann_mad) & (ann_mad > 0), 1.4826 * ann_mad, 1e-10
+            )
+            ann_std = np.maximum(ann_std, 1e-10)
+
+            # Background level: median of the inner ring (closest to sky,
+            # least affected by PSF wings or edge contamination).
+            inner_pix = data_clean[:, inner_ring]
+            n_inner = np.sum(np.isfinite(inner_pix), axis=1)
+            inner_med = np.nanmedian(inner_pix, axis=1)
+            bg_level = np.where(n_inner > 0, inner_med, ann_median)
+
+            # Test 1: Azimuthal asymmetry.  Denominator is ann_std only so
+            # the test is not suppressed when the entire annulus is elevated.
+            # Quadrants have different pixel counts, so reduce each to (N,)
+            # before stacking to (N, 4).  A quadrant with no finite pixels
+            # falls back to the annulus median.
+            q_meds = np.stack(
+                [
+                    np.where(
+                        np.sum(np.isfinite(data_clean[:, qm]), axis=1) > 0,
+                        np.nanmedian(data_clean[:, qm], axis=1),
+                        np.nan,
+                    )
+                    for qm in q_masks
+                ],
+                axis=1,
+            )
+            q_meds = np.where(np.isfinite(q_meds), q_meds, ann_median[:, None])
+            q_mean = np.mean(q_meds, axis=1)
+            q_frac = np.max(np.abs(q_meds - q_mean[:, None]), axis=1) / (
+                ann_std + 1e-10
+            )
+            flag_asym = gate & (q_frac > asym_thresh)
+
+            # Test 2: Edge-ring elevation relative to the inner-ring level
+            # (catches cases where the whole annulus is elevated but the
+            # edge is even higher).
+            edge_pix = data_clean[:, edge_ring]
+            n_edge = np.sum(np.isfinite(edge_pix), axis=1)
+            edge_med = np.nanmedian(edge_pix, axis=1)
+            edge_excess = (edge_med - inner_med) / ann_std
+            flag_edge = (
+                gate & (n_edge > 0) & (n_inner > 0) & (edge_excess > edge_sigma)
+            )
+
+            # Test 2b: Outermost 2 rows/cols -- most sensitive to neighbour
+            # flux spilling in from beyond the cutout.
+            border_pix = data_clean[:, border_mask]
+            n_border = np.sum(np.isfinite(border_pix), axis=1)
+            border_excess = (
+                np.nanmedian(border_pix, axis=1) - bg_level
+            ) / ann_std
+            border_max_excess = (
+                np.nanmax(border_pix, axis=1) - bg_level
+            ) / ann_std
+            flag_border = gate & (n_border > 4) & (border_excess > border_sigma)
+            flag_border_max = (
+                gate & (n_border > 4) & (border_max_excess > _border_max_thresh)
+            )
+
+            # Test 3: Radial non-monotonicity -- an outer ring brighter than
+            # the previous ring indicates a contaminant in the outer region.
+            ring_meds = np.stack(
+                [
+                    np.where(
+                        np.sum(np.isfinite(data_clean[:, rm]), axis=1) > 0,
+                        np.nanmedian(data_clean[:, rm], axis=1),
+                        np.nan,
+                    )
+                    for rm in ring_masks
+                ],
+                axis=1,
+            )
+            increase = ring_meds[:, 1:] - ring_meds[:, :-1]
+            rev = np.isfinite(increase) & (
+                increase > radial_reversal_sigma * ann_std[:, None]
+            )
+            flag_reversal = gate & np.any(rev, axis=1)
+            first_rev = np.argmax(rev, axis=1)  # valid only where flag_reversal
+
+            # Tests 4 & 6: local maxima -- one batched filter call for the
+            # whole stack (vs two per-star calls previously).  The filter
+            # runs on the full cutout (not the core-restricted fill), which
+            # is marginally more conservative at the core/annulus boundary.
+            max_filt = maximum_filter(data_ninf, size=(1, 3, 3))
+            local_max = (data_ninf == max_filt) & finite_stack
+            peak_excess = data_ninf - bg_level[:, None, None]
+
+            # Test 4: off-centre secondary peak in the core (blended
+            # neighbour within 2*FWHM that the annulus tests miss).
+            core_pix = data_clean[:, core_mask]
+            n_core = np.sum(np.isfinite(core_pix), axis=1)
+            lm_core = local_max & core_mask[None] & ~near_center[None]
+            lm_core[:, int(cy_c), int(cx_c)] = False
+            cond_core = (
+                lm_core
+                & (_rr[None] > _secondary_peak_dist_thresh)
+                & (peak_excess > _secondary_peak_sigma * ann_std[:, None, None])
+            )
+            flag_second = gate & (n_core > 10) & np.any(cond_core, axis=(1, 2))
+            # For the log message: the strongest qualifying peak per star.
+            core_sig = np.where(
+                cond_core, peak_excess / ann_std[:, None, None], -np.inf
+            ).reshape(n_stars, -1)
+            core_best = np.argmax(core_sig, axis=1)
+            second_sig = core_sig[np.arange(n_stars), core_best]
+            _biy, _bix = np.unravel_index(core_best, data_ninf.shape[1:])
+            second_dist = np.hypot(_bix - cx_c, _biy - cy_c)
+
+            # Test 6: any local maximum in the annulus above sigma -- a direct
+            # detection of a faint contaminating star that the median-based
+            # tests can miss.
+            cond_ann = (local_max & annulus[None]) & (
+                peak_excess > _annulus_peak_sigma * ann_std[:, None, None]
+            )
+            flag_ann_peak = gate & np.any(cond_ann, axis=(1, 2))
+            ann_sig = np.where(
+                cond_ann, peak_excess / ann_std[:, None, None], -np.inf
+            ).reshape(n_stars, -1)
+            ann_best = np.argmax(ann_sig, axis=1)
+            ann_peak_sig = ann_sig[np.arange(n_stars), ann_best]
+            _aiy, _aix = np.unravel_index(ann_best, data_ninf.shape[1:])
+            ann_peak_dist = np.hypot(_aix - cx_c, _aiy - cy_c)
+
+            # Test 5: streaks -- any row, column, or main diagonal whose
+            # annulus median is significantly elevated.
+            ann_data = np.where(annulus[None] & finite_stack, data_clean, np.nan)
+            row_meds = np.nanmedian(ann_data, axis=2)  # per-row medians
+            n_row = np.sum(np.isfinite(row_meds), axis=1)
+            row_dev = np.nanmax(row_meds, axis=1) - np.nanmedian(row_meds, axis=1)
+            flag_row = gate & (n_row > 3) & (row_dev > streak_sigma * ann_std)
+
+            col_meds = np.nanmedian(ann_data, axis=1)  # per-column medians
+            n_col = np.sum(np.isfinite(col_meds), axis=1)
+            col_dev = np.nanmax(col_meds, axis=1) - np.nanmedian(col_meds, axis=1)
+            flag_col = gate & (n_col > 3) & (col_dev > streak_sigma * ann_std)
+
+            diag_hits = np.zeros(n_stars, dtype=bool)
+            diag_dev = np.full(n_stars, np.nan)
+            diag_label = np.empty(n_stars, dtype=object)
+            for _lbl, _dg in (
+                ("streak_diag1", np.diagonal(ann_data, axis1=1, axis2=2)),
+                (
+                    "streak_diag2",
+                    np.diagonal(ann_data[:, :, ::-1], axis1=1, axis2=2),
+                ),
+            ):
+                n_d = np.sum(np.isfinite(_dg), axis=1)
+                dev = np.nanmax(_dg, axis=1) - np.nanmedian(_dg, axis=1)
+                hit = (n_d > 3) & (dev > streak_sigma * ann_std)
+                upd = hit & ~diag_hits  # first flagged diagonal wins the label
+                diag_dev = np.where(upd, dev, diag_dev)
+                for _i in np.flatnonzero(upd):
+                    diag_label[_i] = _lbl
+                diag_hits |= hit
+            flag_diag = gate & diag_hits
+
+            # Test 7: total positive flux excess in the annulus vs the
+            # expected noise-only (half-Gaussian) excess.
+            pos_excess = np.nansum(
+                np.clip(ann_pix - bg_level[:, None], 0, None), axis=1
+            )
+            expected_excess = 0.5 * n_ann * ann_std
+            excess_ratio = pos_excess / np.maximum(expected_excess, 1e-10)
+            flag_flux = gate & (n_ann > 10) & (excess_ratio > _flux_excess_sigma)
+
+            # Test 8: core ellipticity (close blends inside ~1-2 FWHM that
+            # don't form a separate local maximum).
+            ellip = np.full(n_stars, np.nan)
+            core_tot = np.zeros(n_stars)
+            core_peak_snr = np.zeros(n_stars)
+            if _core_ellip_max > 0:
+                core_e = np.where(
+                    core_mask[None] & finite_stack,
+                    data_clean - bg_level[:, None, None],
+                    0.0,
+                )
+                core_tot = np.sum(core_e, axis=(1, 2))
+                core_peak_snr = np.nanmax(
+                    np.where(
+                        core_mask[None] & finite_stack,
+                        data_clean - bg_level[:, None, None],
+                        np.nan,
+                    ),
+                    axis=(1, 2),
+                ) / ann_std
+                # Moment weights must be non-negative: pixels below the
+                # background act as negative weights and can drive the
+                # second-moment sum through zero, which inflates the
+                # ellipticity to ~1e10 on noise-dominated cores.
+                core_w = np.clip(core_e, 0.0, None)
+                w_tot = np.sum(core_w, axis=(1, 2))
+                safe_w = np.where(w_tot > 0, w_tot, np.nan)
+                dx = _xx - cx_c
+                dy = _yy - cy_c
+                cx2 = np.sum(core_w * dx * dx, axis=(1, 2)) / safe_w
+                cy2 = np.sum(core_w * dy * dy, axis=(1, 2)) / safe_w
+                cxy = np.sum(core_w * dx * dy, axis=(1, 2)) / safe_w
+                mom_sum = cx2 + cy2
+                ellip = np.where(
+                    np.isfinite(mom_sum) & (mom_sum > 0),
+                    np.sqrt((cx2 - cy2) ** 2 + 4 * cxy ** 2)
+                    / np.where(mom_sum > 0, mom_sum, np.nan),
+                    np.nan,
+                )
+            # The shape test needs real signal in the core: below the
+            # peak-SNR floor the moments are noise-dominated and cannot
+            # distinguish a close blend from sky fluctuations.
+            _ellip_meas = (
+                gate
+                & (core_tot > 0)
+                & (core_peak_snr >= _core_ellip_snr_min)
+                & np.isfinite(ellip)
+            )
+            _ellip_thr = _core_ellip_max
+            if _core_ellip_max > 0 and np.count_nonzero(_ellip_meas) >= 3:
+                _emed = float(np.median(ellip[_ellip_meas]))
+                if _emed > _core_ellip_max:
+                    # Field-wide elongation (trailed/defocused PSF): flag
+                    # only cores more elongated than the shared shape, or
+                    # every real star earns a blend strike.
+                    _ellip_thr = _emed + 0.15
+            flag_ellip = _ellip_meas & (ellip > _ellip_thr)
+
+            # Test 9: hot-pixel cluster.  A defect cluster concentrates
+            # nearly all of its core flux into 1-2 pixels even when the
+            # cluster itself spans several pixels, so its peak-to-core-flux
+            # fraction approaches 1; a genuine PSF spreads the same flux
+            # across the seeing disk.  The annulus tests cannot see this
+            # (symmetric cores leave clean annuli), and the ellipticity
+            # test cannot either (a symmetric blob has ~0 ellipticity).
+            # ``psf_contam_hotpix_sigma`` <= 0 disables the test.
+            flag_hotpix = np.zeros(n_stars, dtype=bool)
+            peak_fracs = np.full(n_stars, np.nan)
+            if _hotpix_sigma > 0 and np.isfinite(_hotpix_max_peak_frac):
+                hp_r = max(1.5, 0.5 * fwhm_eff)
+                hp_core = _rr <= hp_r
+                hp_pix = data_clean[:, hp_core]
+                hp_n = np.sum(np.isfinite(hp_pix), axis=1)
+                hp_sum = np.nansum(np.clip(hp_pix, 0.0, None), axis=1)
+                hp_peak = np.nanmax(hp_pix, axis=1)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    peak_fracs = np.where(
+                        hp_sum > 0, hp_peak / np.maximum(hp_sum, 1e-10), np.nan
+                    )
+                flag_hotpix = (
+                    gate
+                    & (hp_n >= 5)
+                    & np.isfinite(peak_fracs)
+                    & (peak_fracs > _hotpix_max_peak_frac)
+                )
+
+            # Test 10: curve of growth.  Enclosed flux in concentric
+            # apertures normalised by the plateau flux removes the
+            # brightness scale, so all genuine point sources share one
+            # growth curve: defect spikes saturate early, and extended or
+            # wing-contaminated sources rise late.  A cutout is flagged
+            # when its curve is an outlier against the ensemble of clean
+            # stars OR lies outside a family of plausible Moffat
+            # encircled-energy profiles -- the second condition keeps the
+            # test working when the pool is dominated by non-stellar
+            # cutouts.
+            flag_cog = np.zeros(n_stars, dtype=bool)
+            cog_dev = np.full(n_stars, np.nan)
+            if _cog_enabled:
+                cog_radii = np.array(
+                    [0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0]
+                ) * fwhm_eff
+                cog_radii = cog_radii[
+                    (cog_radii >= 1.5) & (cog_radii <= ann_outer - 1.0)
+                ]
+                if cog_radii.size >= 3:
+                    n_rad = cog_radii.size
+                    cog_flux = np.full((n_stars, n_rad), np.nan)
+                    sub = data_clean - bg_level[:, None, None]
+                    for k, r in enumerate(cog_radii):
+                        apm = _rr < r
+                        n_ap = float(np.sum(apm))
+                        n_fin = np.sum(apm[None] & finite_stack, axis=(1, 2))
+                        cog_flux[:, k] = np.where(
+                            n_fin >= 0.7 * n_ap,
+                            np.nansum(sub[:, apm], axis=1),
+                            np.nan,
+                        )
+                    # Normalise by the plateau (max enclosed flux), not the
+                    # outermost aperture: for a faint star the large outer
+                    # aperture is noise-dominated and a negative pixel-sum
+                    # fluctuation would shrink the denominator and inflate
+                    # every inner EE fraction.
+                    cog_max = np.nanmax(cog_flux, axis=1)
+                    cog_norm = cog_flux / np.where(
+                        cog_max > 0, cog_max, np.nan
+                    )[:, None]
+                    cog_valid = np.count_nonzero(
+                        np.isfinite(cog_norm), axis=1
+                    ) >= 3
+                    # The EE fractions are only meaningful with real
+                    # signal in the core; below the S/N floor the plateau
+                    # estimate is dominated by aperture-noise selection
+                    # bias and noise spikes look like growth-curve
+                    # outliers.  The gate uses the quieter of the annulus
+                    # and edge-ring MADs: a diffuse blob inflates the
+                    # annulus MAD with its own wings and would otherwise
+                    # evade the very test meant to catch it.
+                    _edge_std = 1.4826 * np.nanmedian(
+                        np.abs(edge_pix - edge_med[:, None]), axis=1
+                    )
+                    _pix_noise = np.maximum(
+                        np.minimum(
+                            ann_std,
+                            np.where(
+                                np.isfinite(_edge_std) & (_edge_std > 0),
+                                _edge_std,
+                                ann_std,
+                            ),
+                        ),
+                        1e-10,
+                    )
+                    _cog_peak_snr = (
+                        np.nanmax(data_clean[:, near_center], axis=1)
+                        - bg_level
+                    ) / _pix_noise
+                    cog_valid &= _cog_peak_snr >= _cog_snr_min
+                    # Per-aperture EE-fraction noise: background-limited
+                    # aperture noise over the star's plateau flux.  Keeps
+                    # low-S/N curves from tripping the deviation
+                    # thresholds on shot noise alone.
+                    cog_err = _pix_noise[:, None] * np.sqrt(
+                        np.pi * cog_radii[None, :] ** 2
+                    ) / np.abs(cog_max[:, None])
+                    # Absolute reference: Moffat EE family spanning the
+                    # plausible beta range and an asymmetric FWHM slack
+                    # for measurement error and core ellipticity (a junk
+                    # pool biases fwhm_eff low, so allow more slack
+                    # upward).
+                    env_lo = np.full(n_rad, np.inf)
+                    env_hi = np.full(n_rad, -np.inf)
+                    for _b in (2.5, 3.5, 5.0, 7.0):
+                        for _f in (0.75, 1.0, 1.4):
+                            _rd = (0.5 * _f * fwhm_eff) / np.sqrt(
+                                2.0 ** (1.0 / _b) - 1.0
+                            )
+                            _ee = 1.0 - (
+                                1.0 + (cog_radii / _rd) ** 2
+                            ) ** (1.0 - _b)
+                            env_lo = np.minimum(env_lo, _ee)
+                            env_hi = np.maximum(env_hi, _ee)
+                    dev_mof = np.maximum(
+                        cog_norm - env_hi[None] - 3.0 * cog_err,
+                        env_lo[None] - cog_norm - 3.0 * cog_err,
+                    )
+                    max_mof = np.nanmax(
+                        np.where(np.isfinite(dev_mof), dev_mof, 0.0), axis=1
+                    )
+                    flag_cog |= cog_valid & (max_mof > _cog_moffat_dev)
+                    # Ensemble reference restricted to Moffat-consistent
+                    # cutouts: in a pool dominated by spikes or galaxies a
+                    # plain median converges on the junk curve and would
+                    # flag the real stars instead.
+                    dev_abs = np.full((n_stars, n_rad), np.nan)
+                    max_abs = np.full(n_stars, np.nan)
+                    ref_sel = (
+                        cog_valid
+                        & (max_mof <= _cog_moffat_dev)
+                        & ~(
+                            flag_asym | flag_edge | flag_border
+                            | flag_border_max | flag_reversal | flag_second
+                            | flag_row | flag_col | flag_diag
+                            | flag_ann_peak | flag_flux | flag_ellip
+                            | flag_hotpix
+                        )
+                    )
+                    if np.count_nonzero(ref_sel) < 3:
+                        # The ensemble CoG test has collapsed to the
+                        # generic Moffat envelope only - in a
+                        # defect-dominated pool that is exactly when the
+                        # stronger star-vs-star comparison is needed, so
+                        # surface the degradation rather than losing it.
+                        log.info(
+                            "[contamination] ensemble CoG reference has "
+                            "only %d clean comparators (<3); CoG test falls "
+                            "back to the Moffat-envelope check alone.",
+                            int(np.count_nonzero(ref_sel)),
+                        )
+                    if np.count_nonzero(ref_sel) >= 3:
+                        cog_med = np.nanmedian(cog_norm[ref_sel], axis=0)
+                        cog_mad = 1.4826 * np.nanmedian(
+                            np.abs(cog_norm[ref_sel] - cog_med[None]), axis=0
+                        )
+                        # A zero MAD on near-identical profiles would flag
+                        # sub-percent EE scatter; floor it at a level real
+                        # stars always share.
+                        cog_scale = np.maximum(cog_mad, 0.04)
+                        dev_abs = np.abs(cog_norm - cog_med[None])
+                        dev_sig = dev_abs / np.sqrt(
+                            cog_scale[None] ** 2 + (3.0 * cog_err) ** 2
+                        )
+                        max_abs = np.nanmax(
+                            np.where(np.isfinite(dev_abs), dev_abs, -np.inf),
+                            axis=1,
+                        )
+                        max_sig = np.nanmax(
+                            np.where(np.isfinite(dev_sig), dev_sig, -np.inf),
+                            axis=1,
+                        )
+                        flag_cog |= cog_valid & (
+                            (max_sig > _cog_sigma) | (max_abs > _cog_max_dev)
+                        )
+                    cog_dev = np.where(
+                        cog_valid,
+                        np.fmax(
+                            np.where(np.isfinite(max_abs), max_abs, 0.0),
+                            max_mof,
+                        ),
+                        np.nan,
+                    )
+
+        # Test 0: masked-pixel fraction in annulus (per-star hardware masks).
+        # Unlike the flux tests this does not require the >=10-pixel gate:
+        # a heavily masked cutout is bad regardless of flux statistics.
+        for i, star in enumerate(epsfstars):
+            m = getattr(star, "mask", None)
+            if m is None or ann_total == 0:
+                continue
+            mask_frac = float(np.sum(np.asarray(m, bool)[annulus])) / ann_total
+            if mask_frac > 0.10:
+                reasons_by_star[i].append(f"masked_frac={mask_frac:.2f}")
+                reject_flags[i] = True
+
+        # Assemble per-star reject reasons (same ordering as the original
+        # per-star loop: asym, edge, border, radial, secondary, streaks,
+        # annulus peak, flux excess, ellipticity, hot-pixel cluster).
+        for i in np.flatnonzero(flag_asym):
+            reasons_by_star[i].append(f"asymmetry={q_frac[i]:.2f}")
+        for i in np.flatnonzero(flag_edge):
+            reasons_by_star[i].append(f"edge_excess={edge_excess[i]:.1f}sigma")
+        for i in np.flatnonzero(flag_border):
+            reasons_by_star[i].append(f"border_excess={border_excess[i]:.1f}sigma")
+        for i in np.flatnonzero(flag_border_max):
+            reasons_by_star[i].append(
+                f"border_bright_pixel={border_max_excess[i]:.1f}sigma"
+            )
+        for i in np.flatnonzero(flag_reversal):
+            j = int(first_rev[i])
+            reasons_by_star[i].append(
+                f"radial_reversal_ring{j + 1}={increase[i, j] / ann_std[i]:.1f}sigma"
+            )
+        for i in np.flatnonzero(flag_second):
+            reasons_by_star[i].append(
+                f"secondary_peak={second_sig[i]:.1f}sigma@{second_dist[i]:.1f}px"
+            )
+        for i in np.flatnonzero(flag_row):
+            reasons_by_star[i].append(
+                f"streak_row={row_dev[i] / ann_std[i]:.1f}sigma"
+            )
+        for i in np.flatnonzero(flag_col):
+            reasons_by_star[i].append(
+                f"streak_col={col_dev[i] / ann_std[i]:.1f}sigma"
+            )
+        for i in np.flatnonzero(flag_diag):
+            reasons_by_star[i].append(
+                f"{diag_label[i]}={diag_dev[i] / ann_std[i]:.1f}sigma"
+            )
+        for i in np.flatnonzero(flag_ann_peak):
+            reasons_by_star[i].append(
+                f"annulus_peak={ann_peak_sig[i]:.1f}sigma@{ann_peak_dist[i]:.1f}px"
+            )
+        for i in np.flatnonzero(flag_flux):
+            reasons_by_star[i].append(
+                f"flux_excess={excess_ratio[i]:.1f}x_expected"
+            )
+        for i in np.flatnonzero(flag_ellip):
+            reasons_by_star[i].append(f"core_ellipticity={ellip[i]:.3f}")
+        for i in np.flatnonzero(flag_hotpix):
+            reasons_by_star[i].append(
+                f"hot_pixel_cluster={peak_fracs[i]:.2f}"
+            )
+        for i in np.flatnonzero(flag_cog):
+            reasons_by_star[i].append(f"cog_dev={cog_dev[i]:.2f}")
+
+        reject_flags |= (
+            flag_asym | flag_edge | flag_border | flag_border_max
+            | flag_reversal | flag_second | flag_row | flag_col | flag_diag
+            | flag_ann_peak | flag_flux | flag_ellip | flag_hotpix
+            | flag_cog
+        )
+        reject_reasons = [
+            f"  star {i}: {', '.join(reasons_by_star[i])}"
+            for i in range(n_stars)
+            if reasons_by_star[i]
+        ]
+
+        n_rejected = int(reject_flags.sum())
+        if n_rejected == 0:
+            return epsfstars, stars_tbl
+
+        n_kept = n_stars - n_rejected
+        min_keep = max(min_candidates, int(np.ceil(min_keep_frac * n_stars)))
+
+        # Separate hardware-defect rejections (masked pixels from trails/streaks/
+        # saturation) from flux-based contamination rejections.  Hardware-defect
+        # rejections are ALWAYS applied -- a trail-contaminated cutout should never
+        # enter the ePSF build, regardless of how few clean stars remain.
+        hw_reject = np.zeros(n_stars, dtype=bool)
+        for i in range(n_stars):
+            m = getattr(epsfstars[i], "mask", None)
+            if reject_flags[i] and m is not None:
+                ann_masked = np.sum(np.asarray(m, bool)[annulus])
+                ann_total = np.sum(annulus)
+                if ann_total > 0 and (ann_masked / ann_total) > 0.10:
+                    hw_reject[i] = True
+
+        # A discrete secondary peak inside the maskable radius is
+        # unrepairable: the mask-keep path below only blanks pixels
+        # outside ~1.5*FWHM, so a detected neighbour sitting inside the
+        # fit region would still enter the ePSF stack unchanged.  Such
+        # stars are always rejected alongside the hardware defects, even
+        # when the keep-floor binds.  Core ellipticity stays in the
+        # flux-based class -- on undersampled cores the second-moment
+        # test is noisy enough to flag clean stars.
+        _mask_inner = max(2.0, float(np.ceil(1.5 * fwhm_eff)))
+        _core_reject_enabled = bool(
+            phot_cfg.get("psf_contam_core_reject", True)
+        )
+        core_reject = np.zeros(n_stars, dtype=bool)
+        if _core_reject_enabled:
+            core_reject = flag_second & (second_dist < _mask_inner)
+        # Curve-of-growth failures are unrepairable for the same reason a
+        # close secondary peak is: the defect is the core profile itself,
+        # not localisable pixels annulus masking could blank.
+        _cog_always_reject = bool(
+            phot_cfg.get("psf_contam_cog_always_reject", True)
+        )
+        cog_reject = flag_cog if _cog_always_reject else np.zeros(
+            n_stars, dtype=bool
+        )
+        unrepairable = hw_reject | core_reject | cog_reject
+
+        # Always apply hardware-defect and core-contamination rejections
+        keep_idx = np.where(~unrepairable)[0]
+        n_hw_rejected = int(hw_reject.sum())
+        n_core_rejected = int((core_reject & ~hw_reject).sum())
+        n_cog_rejected = int(
+            (cog_reject & ~(hw_reject | core_reject)).sum()
+        )
+        if n_core_rejected > 0:
+            log.info(
+                "[contamination] Rejected %d core-contaminated cutouts "
+                "(secondary peak < %.0fpx): masking cannot repair "
+                "a detected neighbour inside the fit region.",
+                n_core_rejected, _mask_inner,
+            )
+        if n_cog_rejected > 0:
+            log.info(
+                "[contamination] Rejected %d cutouts on curve-of-growth "
+                "deviation: a non-stellar core profile cannot be "
+                "repaired by masking.",
+                n_cog_rejected,
+            )
+
+        # For remaining flux-based rejections, apply min_keep_frac safety net
+        remaining_reject = reject_flags & ~unrepairable
+        n_flux_rejected = int(remaining_reject.sum())
+        n_after_hw = len(keep_idx)
+        min_keep_flux = max(min_candidates, int(np.ceil(min_keep_frac * n_stars)))
+
+        if n_after_hw - n_flux_rejected < min_keep_flux:
+            # Keep-floor binding: dropping the flagged cutouts would starve
+            # the ePSF build.  Instead, mask the contaminating pixels
+            # (weight=0/masked) so neighbour flux never enters the residual
+            # stack while each star's core still contributes samples.  A
+            # pixel is masked only if it is an outlier within its own
+            # concentric ring -- a compact blob deviates from its ring,
+            # whereas the star's radially-symmetric wing elevates the whole
+            # ring and survives.
+            _mask_sigma = float(
+                phot_cfg.get("psf_contam_mask_ring_sigma", 3.0)
+            )
+            # 1-px radial bands from 1.5*FWHM to the cutout edge.  Bands
+            # narrow enough that a wing gradient does not inflate the band
+            # MAD, and starting inside the annulus catches blobs sitting in
+            # the photometry fit region.
+            band_masks = [
+                (_rr >= r0) & (_rr < r0 + 1.0)
+                for r0 in np.arange(_mask_inner, ann_outer, 1.0)
+            ]
+            n_pix_masked = 0
+            n_masked_stars = 0
+            for i in np.where(remaining_reject)[0]:
+                star = epsfstars._data[i]
+                contam = np.zeros((ny_c, nx_c), dtype=bool)
+                for rm in band_masks:
+                    pix = data_clean[i][rm]
+                    pix = pix[np.isfinite(pix)]
+                    if pix.size < 5:
+                        continue
+                    med = float(np.median(pix))
+                    std = 1.4826 * float(np.median(np.abs(pix - med)))
+                    if not np.isfinite(std) or std <= 0:
+                        continue
+                    contam |= (
+                        rm
+                        & finite_stack[i]
+                        & (all_data[i] > med + _mask_sigma * std)
+                    )
+                # The flux tests flag pixels at r >= 2*fwhm; for deeply
+                # undersampled PSFs the repair band can start outside
+                # that, leaving flagged pixels unmasked.  Clamp the band
+                # to the first flagged radius (still never the core).
+                _ann_first = max(1, int(np.ceil(2.0 * fwhm_eff)))
+                if _mask_inner > _ann_first:
+                    log.debug(
+                        "[contamination] mask repair inner radius %.1f "
+                        "exceeds flagged annulus start %d; clamping.",
+                        _mask_inner, _ann_first,
+                    )
+                    _mask_inner = _ann_first
+                contam &= _rr >= _mask_inner  # never mask the core
+                if contam.any():
+                    # weights/mask are created by robust_extract_stars for
+                    # the normal path but are not guaranteed by photutils
+                    # for direct callers; initialise rather than assume.
+                    if getattr(star, "weights", None) is None:
+                        star.weights = np.ones(
+                            star.data.shape, dtype=float
+                        )
+                    if getattr(star, "mask", None) is None:
+                        star.mask = np.zeros(
+                            star.data.shape, dtype=bool
+                        )
+                    star.weights[contam] = 0.0
+                    star.mask[contam] = True
+                    # Flag for downstream consumers (e.g. the shape-outlier
+                    # pass): this star passed only via keep-floor masking,
+                    # so it must not anchor the "good star" template.
+                    star._autophot_maskkept = True
+                    # Drop cached lazyproperties so the residual stack sees
+                    # the updated mask.
+                    for attr in ("_xyidx_centered", "_data_values_normalized"):
+                        star.__dict__.pop(attr, None)
+                    n_pix_masked += int(contam.sum())
+                    n_masked_stars += 1
+            log.info(
+                "[contamination] Would reject %d/%d cutouts total "
+                "(%d hardware-defect, %d core-unrepairable, "
+                "%d growth-curve, %d flux-based). Keep-floor bound "
+                "(%d would remain < %d min): keeping the %d flux-flagged "
+                "cutouts but masking %d contaminating annulus pixels "
+                "in %d of them (cores retained).",
+                n_rejected, n_stars, n_hw_rejected, n_core_rejected,
+                n_cog_rejected, n_flux_rejected,
+                n_after_hw - n_flux_rejected, min_keep_flux,
+                n_flux_rejected, n_pix_masked, n_masked_stars,
+            )
+            # Per-star flag reasons are invisible at INFO when the
+            # keep-floor binds; the flag-type breakdown and per-star list
+            # keep the masked set auditable at DEBUG.
+            _breakdown = {
+                "asymmetry": flag_asym, "edge": flag_edge,
+                "border": flag_border | flag_border_max,
+                "radial_reversal": flag_reversal,
+                "secondary_peak": flag_second, "streak": flag_row | flag_col | flag_diag,
+                "annulus_peak": flag_ann_peak, "flux_excess": flag_flux,
+                "core_ellipticity": flag_ellip, "cog": flag_cog,
+            }
+            log.debug(
+                "[contamination] mask-keep flag breakdown: %s",
+                ", ".join(
+                    f"{k}={int(v.sum())}" for k, v in _breakdown.items()
+                ),
+            )
+            for r in reject_reasons:
+                log.debug(r)
+        else:
+            keep_idx = np.where(~reject_flags)[0]
+
+        n_final_rejected = n_stars - len(keep_idx)
+        if n_final_rejected == 0:
+            return epsfstars, stars_tbl
+
+        log.info(
+            "[contamination] Rejected %d/%d PSF-star cutouts "
+            "(%d hardware-defect, %d core-unrepairable, %d growth-curve, "
+            "%d flux-based)",
+            n_final_rejected, n_stars, n_hw_rejected, n_core_rejected,
+            n_cog_rejected,
+            n_final_rejected - n_hw_rejected - n_core_rejected
+            - n_cog_rejected,
+        )
+        for r in reject_reasons:
+            log.debug(r)
+
+        filtered = EPSFStars([epsfstars._data[i] for i in keep_idx])
+        filtered_tbl = stars_tbl[keep_idx]
+        return filtered, filtered_tbl
 
     # -----------------------------------------------------------------------
     # FFT outlier detection
@@ -1310,6 +6704,21 @@ class PSF:
     def compute_power_spectrum(self, cutout: np.ndarray) -> np.ndarray:
         """2-D power spectrum of *cutout* via FFT."""
         return np.abs(fftshift(fft2(cutout))) ** 2
+
+    def compute_power_spectrum_batch(self, cutouts: np.ndarray) -> np.ndarray:
+        """Batch 2-D power spectrum for multiple cutouts via FFT.
+        
+        Parameters
+        ----------
+        cutouts : np.ndarray
+            Stack of cutouts with shape (N, ny, nx)
+            
+        Returns
+        -------
+        np.ndarray
+            Power spectra with shape (N, ny, nx)
+        """
+        return np.abs(fftshift(fft2(cutouts, axes=(1, 2)), axes=(1, 2))) ** 2
 
     def detect_fft_outliers(
         self,
@@ -1321,19 +6730,18 @@ class PSF:
         """
         Remove ePSF cutouts whose power spectrum deviates from the typical (median) spectrum.
 
-        Uses a robust per-star scalar: either median or mean of per-pixel normalized
-        deviations. Scale (dispersion) is MAD or std per pixel across stars. This avoids
-        rejecting good stars when a few contaminants inflate the variance.
+        Uses a per-star scalar (median or mean of per-pixel normalized
+        deviations) with a per-pixel MAD or std scale across stars, so a few
+        contaminants cannot inflate the variance and reject good stars.
         """
-        spectra = []
-        for st in epsfstars:
-            d = st.data.copy()
-            d -= np.nanmin(d)
-            # Preserve NaNs instead of setting to 0.0
-            d[d < 0] = np.nan
-            spectra.append(self.compute_power_spectrum(d))
-
-        spectra = np.array(spectra, dtype=float)
+        cutouts = np.stack([st.data for st in epsfstars])
+        # Subtract minimum per cutout, preserve NaNs for negative values
+        cutouts_min = np.nanmin(cutouts, axis=(1, 2), keepdims=True)
+        cutouts_norm = cutouts - cutouts_min
+        cutouts_norm = np.where(cutouts_norm < 0, np.nan, cutouts_norm)
+        
+        spectra = self.compute_power_spectrum_batch(cutouts_norm)
+        
         med = np.nanmedian(spectra, axis=0)
         if use_mad:
             # MAD along axis=0; 1.4826 for consistency with Gaussian
@@ -1367,6 +6775,7 @@ class PSF:
         usePSFlist: bool = False,
         numSources: int = 250,
         mask=None,
+        spike_mask=None,
         background_rms=None,
         threshold_limit: float = 5.0,
         SNR_limit: list = None,
@@ -1375,39 +6784,95 @@ class PSF:
         make_template_psf: bool = False,
     ):
         """
-        Build an ePSF model from robustly selected, spatially uniform stars.
+        Build an ePSF model from vetted, spatially uniform stars.
 
         Returns
         -------
         (epsf, df) or (None, None) on failure
         """
         if SNR_limit is None:
-            SNR_limit = [5, 1e6]
+            SNR_limit = [10, 1e6]
 
         log = logging.getLogger(__name__)
+        self.psf_model_kind = "none"
+        self.n_epsf_stars = None
+        # True/False for the empirical ePSF build; None when no empirical
+        # attempt ran or before the build.
+        self.psf_converged = None
+        self.psf_converged_relaxed = False
+        # Set when the surviving star pool is too thin for even a 1x ePSF
+        # to be reliable - the build still runs, but the caller should
+        # treat the model as low-confidence.
+        self.psf_ensemble_understaffed = False
+        # True when the surviving pool piles up at the FWHM floor
+        # (hot-pixel/CR clusters masquerading as small sources).  The
+        # analytic swap must not fire on it - a Moffat fit to defect
+        # cutouts delivers a junk model with a sane-looking stamp.
+        self.psf_pool_defect_dominated = False
+        # Underresolved = kept ePSF grid below ~4 points/FWHM; the
+        # phase_* attributes carry the fitted-centre phase diagnostics.
+        self.psf_grid_underresolved = False
+        self.psf_phase_diag = None
+        self.psf_phase_nonuniform = False
 
         # ---- nested helpers ------------------------------------------------
         def _validate_epsfstars(epsfstars_obj, cutout_shape, fit_boxsize):
             cy = (cutout_shape[0] - 1) / 2.0
             cx = (cutout_shape[1] - 1) / 2.0
             lim = 0.45 * (fit_boxsize - 1)
+            # Aligned frames can carry NaN/masked pixels over a large
+            # fraction of the area (chip gaps, resampling), so requiring a
+            # fully-finite stamp discards good stars whose NaNs sit
+            # harmlessly in the outer annulus -- photutils excludes masked
+            # pixels from the ePSF fit anyway.  Validate the core instead:
+            # require a mostly-valid fit-box window and use a mask-aware
+            # centroid there purely as a rejection test.  The extraction
+            # centroid (two-pass centroid_sources) is already good to
+            # ~0.01 px; overwriting cutout_center with this crude
+            # 10%-of-peak COM injected star-to-star phase jitter and also
+            # moved the origin the bounded-shift clamp anchors to.
+            nyc, nxc = cutout_shape
+            half = int(np.ceil(fit_boxsize / 2.0))
+            iy0 = max(0, int(np.floor(cy)) - half)
+            iy1 = min(nyc, int(np.ceil(cy)) + half + 1)
+            ix0 = max(0, int(np.floor(cx)) - half)
+            ix1 = min(nxc, int(np.ceil(cx)) + half + 1)
+            yy, xx = np.mgrid[iy0:iy1, ix0:ix1]
             kept = []
             for st in epsfstars_obj:
                 try:
                     data = np.asarray(st.data, float)
-                    if (
-                        data.ndim != 2
-                        or not np.isfinite(data).all()
-                        or np.nansum(data) <= 0
-                    ):
+                    if data.ndim != 2 or np.nansum(data) <= 0:
                         continue
-                    y0, x0 = getattr(st, "cutout_center", (cy, cx))
-                    if not (np.isfinite(y0) and np.isfinite(x0)):
+                    sub = data[iy0:iy1, ix0:ix1].astype(float, copy=True)
+                    _m = getattr(st, "mask", None)
+                    if _m is not None:
+                        sub[np.asarray(_m, dtype=bool)[iy0:iy1, ix0:ix1]] = np.nan
+                    # A core window that is mostly masked/non-finite cannot
+                    # constrain the ePSF core shape; outer-stamp NaNs are
+                    # irrelevant because they never enter the window.
+                    if np.isfinite(sub).mean() < 0.5:
                         continue
-                    if np.hypot(x0 - cx, y0 - cy) > lim:
+                    w = np.clip(sub - np.nanmedian(sub), 0.0, None)
+                    w[~np.isfinite(w)] = 0.0
+                    w_max = float(w.max())
+                    if w_max <= 0:
                         continue
+                    # Isophotal floor so faint neighbour wings inside the
+                    # window cannot pull the centroid.
+                    w = np.where(w > 0.1 * w_max, w, 0.0)
+                    w_tot = float(w.sum())
+                    if w_tot <= 0:
+                        continue
+                    lx = float((xx * w).sum() / w_tot)
+                    ly = float((yy * w).sum() / w_tot)
+                    if np.hypot(lx - cx, ly - cy) > lim:
+                        continue
+                    # Do NOT overwrite st.cutout_center: the extraction
+                    # centroid is more accurate than this isophotal COM.
                     kept.append(st)
-                except Exception:
+                except Exception as _exc:
+                    log.debug("Isophotal COM check failed for a star: %s", _exc)
                     continue
             return EPSFStars(kept) if kept else EPSFStars([])
 
@@ -1424,91 +6889,87 @@ class PSF:
             )
 
         def _select_uniform(df, num_keep, image_shape, xcol, ycol, snrcol, thrcol):
+            """Vectorized spatially-uniform star selection (O(N log N))."""
             if df.empty:
                 return df
             ny, nx = image_shape
-            work = df.copy()
-            work = work[np.isfinite(work[xcol]) & np.isfinite(work[ycol])]
-            if work.empty:
-                return work
-
-            if snrcol and snrcol in work.columns:
-                work["_rank"] = work[snrcol].values
-            elif thrcol and thrcol in work.columns:
-                work["_rank"] = work[thrcol].values
+            
+            # Work with numpy arrays for speed (avoid DataFrame copies)
+            mask_finite = np.isfinite(df[xcol].values) & np.isfinite(df[ycol].values)
+            if not mask_finite.any():
+                return df.iloc[:0]  # Empty DataFrame with same columns
+            
+            # Get ranking values (higher = better)
+            if snrcol and snrcol in df.columns:
+                rank_vals = df[snrcol].values[mask_finite]
+            elif thrcol and thrcol in df.columns:
+                rank_vals = df[thrcol].values[mask_finite]
             else:
                 fluxcol = next(
-                    (
-                        c
-                        for c in ("flux_psf", "flux_ap", "flux", "FLUX_AUTO")
-                        if c in work.columns
-                    ),
+                    (c for c in ("flux_psf", "flux_ap", "flux", "FLUX_AUTO") if c in df.columns),
                     None,
                 )
-                work["_rank"] = (
-                    work[fluxcol].values
-                    if fluxcol
-                    else np.random.default_rng(42).random(len(work))
-                )
+                rank_vals = df[fluxcol].values[mask_finite] if fluxcol else np.ones(mask_finite.sum())
+            
+            x_vals = df[xcol].values[mask_finite]
+            y_vals = df[ycol].values[mask_finite]
+            idx_vals = df.index[mask_finite]
+            
             # Grid size: aim for ~num_keep cells but at least 2x2
             side = int(np.ceil(np.sqrt(max(4, num_keep))))
-            xedges = np.linspace(0, nx, side + 1)
-            yedges = np.linspace(0, ny, side + 1)
-            xi = np.clip(np.digitize(work[xcol].values, xedges) - 1, 0, side - 1)
-            yi = np.clip(np.digitize(work[ycol].values, yedges) - 1, 0, side - 1)
-            work["_cell"] = yi * side + xi
-            # Shuffle cell order so we do not preferentially select from any
-            # particular region purely due to indexing.
+            
+            xi = np.clip((x_vals / nx * side).astype(int), 0, side - 1)
+            yi = np.clip((y_vals / ny * side).astype(int), 0, side - 1)
+            cell_ids = yi * side + xi
+            
+            # Shuffle cell order so filling is not biased toward one corner.
             rng = np.random.default_rng(42)
-            cells = np.arange(side * side, dtype=int)
-            rng.shuffle(cells)
+            cell_order = np.arange(side * side)
+            rng.shuffle(cell_order)
 
-            selected_idx = []
-            # First pass: take the best source from each non-empty cell.
-            for cell in cells:
-                rows = work[work["_cell"] == cell]
-                if rows.empty:
-                    continue
-                best_idx = rows["_rank"].astype(float).idxmax()
-                selected_idx.append(best_idx)
-                if len(selected_idx) >= num_keep:
+            # Sort by (cell_id, rank desc) so each cell's members are
+            # contiguous and best-first: pass k then simply takes the k-th
+            # member of each cell.  This is O(N log N) instead of rescanning
+            # all N candidates for every cell on every pass.
+            order = np.lexsort((-rank_vals, cell_ids))
+            cells_sorted = cell_ids[order]
+            uniq_cells, starts = np.unique(cells_sorted, return_index=True)
+            sizes = np.diff(np.append(starts, cells_sorted.size))
+            cell_span = {
+                int(c): (int(s), int(n))
+                for c, s, n in zip(uniq_cells, starts, sizes)
+            }
+
+            # Process cells in multiple passes until we have enough stars
+            # (9 passes: member indices 0-8, matching the original 1..9 loop)
+            selected_indices = []
+            for pass_num in range(9):
+                if len(selected_indices) >= num_keep:
                     break
-
-            # If we still need more, take second-best, third-best, ... per cell
-            # in additional passes before falling back to global ranking. This
-            # keeps the sample more spatially uniform across the image.
-            pass_num = 2
-            while len(selected_idx) < num_keep:
-                added_this_pass = 0
-                for cell in cells:
-                    rows = work[work["_cell"] == cell].sort_values(
-                        "_rank", ascending=False
-                    )
-                    if rows.empty:
-                        continue
-                    # Skip any rows already chosen in previous passes
-                    rows = rows[~rows.index.isin(selected_idx)]
-                    if rows.empty:
-                        continue
-                    best_idx = rows["_rank"].astype(float).idxmax()
-                    selected_idx.append(best_idx)
-                    added_this_pass += 1
-                    if len(selected_idx) >= num_keep:
-                        break
-                if added_this_pass == 0:
+                added = False
+                for cell_id in cell_order:
+                    span = cell_span.get(int(cell_id))
+                    if span is not None and span[1] > pass_num:
+                        selected_indices.append(order[span[0] + pass_num])
+                        added = True
+                        if len(selected_indices) >= num_keep:
+                            break
+                if not added:
                     break
+            
+            # Shortfall: top up from the global ranking.
+            if len(selected_indices) < num_keep:
+                n_needed = num_keep - len(selected_indices)
+                all_indices = np.arange(len(idx_vals))
+                remaining_mask = ~np.isin(all_indices, selected_indices, assume_unique=True)
+                remaining_indices = all_indices[remaining_mask]
+                remaining_ranks = rank_vals[remaining_indices]
+                best_remaining = remaining_indices[np.argsort(-remaining_ranks)[:n_needed]]
+                selected_indices.extend(best_remaining)
 
-            selected = work.loc[selected_idx].copy()
-            if len(selected) < num_keep:
-                remaining = work.drop(index=selected.index).sort_values(
-                    "_rank", ascending=False
-                )
-                selected = pd.concat(
-                    [selected, remaining.head(num_keep - len(selected))], axis=0
-                )
-            return selected.drop(
-                columns=["_rank", "_cell"], errors="ignore"
-            ).reset_index(drop=True)
+            # Map back to original DataFrame indices.
+            final_idx = idx_vals[selected_indices[:num_keep]]
+            return df.loc[final_idx].reset_index(drop=True)
 
         # ---- main ----------------------------------------------------------
         try:
@@ -1517,13 +6978,27 @@ class PSF:
                 if isinstance(usePSFlist, str)
                 else psfSources.copy()
             )
-            log.info(f"Building ePSF from {len(df)} sources")
+            log.info("Building ePSF from %s sources", len(df))
+            _xy_in = _locate_columns(df)[:2]
+            if _xy_in[0] is not None and _xy_in[1] is not None:
+                log.debug(
+                    "PSF pool coordinates:\n%s",
+                    df[[_xy_in[0], _xy_in[1]]].to_string(index=False),
+                )
 
             # Exclude saturated and streaky/elongated sources from PSF building.
             # For small candidate pools, apply these cuts adaptively so we do not
             # over-prune and end up with an unstable ePSF from too few stars.
             phot_cfg = self.input_yaml.get("photometry", {}) or {}
-            saturate = float(self.input_yaml.get("saturate", np.inf))
+            _spatial_grid = _parse_spatial_grid(
+                phot_cfg.get("psf_spatial_grid", False)
+            )
+            # Use consistent fallback with main.py
+            try:
+                from main import SATURATE_INTERNAL_FALLBACK
+            except ImportError:
+                SATURATE_INTERNAL_FALLBACK = np.inf
+            saturate = float(self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK))
             saturate_frac = float(phot_cfg.get("psf_saturate_fraction", 0.9))
             min_psf_candidates = int(phot_cfg.get("psf_min_candidates", 8))
             min_psf_candidates = max(4, min_psf_candidates)
@@ -1540,7 +7015,79 @@ class PSF:
             snr_min_eff = float(phot_cfg.get("psf_snr_min", SNR_limit[0]))
             snr_max_eff = float(phot_cfg.get("psf_snr_max", SNR_limit[1]))
 
+            # Strike counter for the multi-fail veto below.  Every
+            # quality cut is keep-floor-gated so a sparse pool is not
+            # starved one cut at a time; the side effect is that a
+            # compact defect can dodge each cut individually and still
+            # reach the ePSF.  Candidates failing
+            # psf_defect_veto_min_fails or more cuts are removed
+            # unconditionally at the end of the chain.
+            _veto_min_fails = int(
+                phot_cfg.get("psf_defect_veto_min_fails", 2)
+            )
+            df["_psf_veto"] = 0
+            df["_psf_veto_names"] = ""
+
+            # Pool size at the START of the vetting cascade: the keep
+            # floors and the majority-fail strike exemption are anchored
+            # to this, not the live len(df) -- against a shrinking base,
+            # each cut's keep fraction quietly compounds (N cuts that may
+            # each drop ~40% can starve the pool far below the intended
+            # floor) and a defect minority can become a majority of the
+            # late-stage pool and stop accruing strikes.
             n_before = len(df)
+
+            # Scope of the majority-fail strike exemption inside
+            # _add_strike: on crowded or undersampled fields the
+            # compactness measures misfire at field level (crowding
+            # inflates FLAGS, few-pixel PSFs shrink FLUX_RADIUS/A_IMAGE),
+            # so a majority-fail cut there is a field property, not a
+            # defect signal.  On a sparse, well-sampled image a
+            # majority-fail COMPACTNESS cut instead marks a
+            # defect-dominated pool -- resampled hot-pixel/CR clusters
+            # sit at star-like FWHM and only the concentration measures
+            # see them.  Those strikes must count or the veto can never
+            # reach a junk pool (observed: GROND g field, ePSF built from
+            # resampled defect clusters after fr_min/pk_ap were both
+            # majority-fail exempted).
+            _crowded_vet = bool(phot_cfg.get("crowded_field", False))
+            try:
+                _fwhm_vet = float(self.input_yaml.get("fwhm", np.nan))
+            except (TypeError, ValueError):
+                _fwhm_vet = np.nan
+            _undersampled_vet = np.isfinite(_fwhm_vet) and _fwhm_vet <= float(
+                phot_cfg.get("undersampled_fwhm_threshold", 2.5)
+            )
+            _COMPACT_STRIKES = frozenset({"fr_min", "pk_ap", "ab_min"})
+
+            def _add_strike(bad_mask, name):
+                # Record the failing check per candidate so the veto log
+                # can report which cuts actually emptied the pool.  A cut
+                # that fails the majority of the ORIGINAL pool is usually
+                # measuring a field-level property (undersampled
+                # FLUX_RADIUS, crowded-field FLAGS), not defective
+                # sources -- counting those failures lets a few
+                # co-misfiring cuts hand every survivor >= min_fails
+                # strikes and veto the whole pool (observed: 45/45 ZTF
+                # candidates dropped via flags+fr_min+ab_min, all
+                # majority-fail cuts).
+                # Compactness strikes escape the exemption on fields that
+                # can support them, except when literally every current
+                # candidate fails -- a 100% failure is always a misfire.
+                n_bad = int(np.asarray(bad_mask).sum())
+                if n_bad == 0:
+                    return
+                if n_bad >= 0.5 * n_before:
+                    if (
+                        name not in _COMPACT_STRIKES
+                        or _crowded_vet
+                        or _undersampled_vet
+                        or n_bad >= len(bad_mask)
+                    ):
+                        return
+                df["_psf_veto"] += bad_mask.astype(int)
+                df.loc[bad_mask, "_psf_veto_names"] += name + ";"
+
             # When the starting pool is modest, relax shape/saturation cuts slightly.
             if n_before <= max(2 * min_psf_candidates, 20):
                 saturate_frac = max(saturate_frac, 0.97)
@@ -1557,9 +7104,13 @@ class PSF:
                 )
                 if peak_col is not None:
                     sat_cut = saturate_frac * saturate
-                    ok = df[peak_col] < sat_cut
+                    peak_vals = pd.to_numeric(df[peak_col], errors="coerce")
+                    # NaN peak cannot be judged; keep it rather than issue
+                    # a phantom strike to supplement rows missing the column.
+                    ok = (peak_vals < sat_cut) | peak_vals.isna()
                     n_sat = (~ok).sum()
                     if n_sat > 0:
+                        _add_strike(~ok, "sat")
                         n_keep = int(np.sum(ok))
                         if n_keep >= min_psf_candidates:
                             df = df[ok].copy()
@@ -1577,15 +7128,975 @@ class PSF:
                     f"PSF candidates after saturation cuts: {len(df)}/{n_before}"
                 )
 
+            # ---- SExtractor FLAGS cut (blended sources) ----
+            # Reject sources that SExtractor flagged as blended (FLAGS >= 2).
+            # Blended sources have unreliable shapes/photometry even after
+            # SExtractor deblending, and corrupt the ePSF core and wings.
+            # FLAGS=0 (clean) and FLAGS=1 (nearby but not blended) are kept.
+            _flags_col = next(
+                (c for c in ("flags", "FLAGS") if c in df.columns), None
+            )
+            if _flags_col is not None:
+                psf_flags_max = int(phot_cfg.get("psf_flags_max", 1))
+                flag_vals = pd.to_numeric(df[_flags_col], errors="coerce").fillna(0).astype(int)
+                ok_flags = flag_vals <= psf_flags_max
+                _add_strike(~ok_flags, "flags")
+                n_keep_flags = int(ok_flags.sum())
+                min_keep_flags = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                )
+                if n_keep_flags >= min_keep_flags:
+                    n_drop_flags = int((~ok_flags).sum())
+                    if n_drop_flags > 0:
+                        df = df[ok_flags].copy()
+                        log.info(
+                            "PSF FLAGS cut (<= %d): removed %d blended/flagged candidates (%d kept)",
+                            psf_flags_max, n_drop_flags, n_keep_flags,
+                        )
+                else:
+                    log.info(
+                        "Skipping FLAGS cut (<= %d): would leave only %d candidates (< %d).",
+                        psf_flags_max, n_keep_flags, min_keep_flags,
+                    )
+
+            # ---- Elongation cut ----
+            # Reject trailed or elongated stars (e.g. from tracking errors or
+            # stellar blends) whose shapes would widen the ePSF core.
+            # SExtractor provides ELONGATION = a/b (semimajor / semiminor axis
+            # ratio); astropy SourceCatalog provides the equivalent as
+            # "elongation" or can be derived from "semimajor_sigma"/
+            # "semiminor_sigma".  Supported column names:
+            #   ELONGATION, elongation, ELLIPTICITY, ellipticity
+            # ellipticity = 1 - b/a, so the cut elongation_max <-> (1 - 1/elong)
+            elong_max = float(phot_cfg.get("psf_elongation_max", 1.5))
+            # Field-shared elongation (the image PSF itself is trailed or
+            # defocused): also scales the flux-radius and minor-axis size
+            # floors below, which are otherwise calibrated for round PSFs.
+            _elong_med = np.nan
+            elong_col = next(
+                (c for c in ["ELONGATION", "elongation"] if c in df.columns), None
+            )
+            # The merged pool mixes frames with disjoint columns: only the
+            # catalogue supplement carries ELONGATION, so derive a/b from
+            # SExtractor's A_IMAGE/B_IMAGE to fill the gaps.
+            _a_el = next((c for c in ("a", "A_IMAGE") if c in df.columns), None)
+            _b_el = next((c for c in ("b", "B_IMAGE") if c in df.columns), None)
+            _elong_vals = (
+                pd.to_numeric(df[elong_col], errors="coerce")
+                if elong_col is not None
+                else None
+            )
+            if _a_el is not None and _b_el is not None:
+                _a_v = pd.to_numeric(df[_a_el], errors="coerce")
+                _b_v = pd.to_numeric(df[_b_el], errors="coerce")
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    _derived = pd.Series(
+                        np.where(
+                            (_b_v > 0) & np.isfinite(_a_v) & np.isfinite(_b_v),
+                            _a_v / _b_v,
+                            np.nan,
+                        ),
+                        index=df.index,
+                    )
+                _elong_vals = (
+                    _derived
+                    if _elong_vals is None
+                    else _elong_vals.fillna(_derived)
+                )
+            ellip_col = next(
+                (c for c in ["ELLIPTICITY", "ellipticity"] if c in df.columns), None
+            ) if _elong_vals is None else None
+            if _elong_vals is not None and np.isfinite(elong_max) and elong_max > 0:
+                # A field-wide elongated PSF (tracking drift, defocus)
+                # pushes every real star past the absolute cut; flag only
+                # outliers beyond the shared morphology, or the whole
+                # pool earns elong strikes.
+                _elong_thr = elong_max
+                _elong_fin = _elong_vals[np.isfinite(_elong_vals)]
+                if len(_elong_fin) >= 3:
+                    _elong_med = float(np.median(_elong_fin))
+                    if _elong_med > elong_max:
+                        _elong_thr = _elong_med * 1.3
+                # NaN elongation is unmeasurable, not elongated; otherwise
+                # every supplement row missing the column earns a strike.
+                ok_elong = (_elong_vals <= _elong_thr) | _elong_vals.isna()
+                _add_strike(~ok_elong, "elong")
+                n_keep_elong = int(ok_elong.sum())
+                min_keep_elong = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                )
+                if n_keep_elong >= min_keep_elong:
+                    n_drop_elong = int((~ok_elong).sum())
+                    if n_drop_elong > 0:
+                        df = df[ok_elong].copy()
+                        if _elong_thr > elong_max:
+                            log.info(
+                                "PSF elongation cut relaxed to %.2f "
+                                "(field median %.2f exceeds configured "
+                                "%.2f - elongated image PSF)",
+                                _elong_thr,
+                                _elong_med,
+                                elong_max,
+                            )
+                        log.info(
+                            "PSF elongation cut (<= %.2f): removed %d elongated candidates (%d kept)",
+                            _elong_thr,
+                            n_drop_elong,
+                            n_keep_elong,
+                        )
+                else:
+                    log.info(
+                        "Skipping elongation cut (<= %.2f): would leave only %d candidates (< %d).",
+                        _elong_thr,
+                        n_keep_elong,
+                        min_keep_elong,
+                    )
+            elif ellip_col is not None and np.isfinite(elong_max) and elong_max > 0:
+                # Convert elongation_max to ellipticity: e = 1 - 1/elong
+                ellip_max = 1.0 - 1.0 / elong_max
+                _ellip_vals = pd.to_numeric(df[ellip_col], errors="coerce")
+                _ellip_thr = ellip_max
+                _ellip_fin = _ellip_vals[np.isfinite(_ellip_vals)]
+                _ellip_med = np.nan
+                if len(_ellip_fin) >= 3:
+                    _ellip_med = float(np.median(_ellip_fin))
+                    if _ellip_med < 1.0:
+                        _elong_med = 1.0 / (1.0 - _ellip_med)
+                    if _ellip_med > ellip_max:
+                        # Same field-elongation rescue as the elongation
+                        # cut: 1.3x the median in a/b space.
+                        _ellip_thr = 1.0 - 1.0 / (1.3 / (1.0 - _ellip_med))
+                ok_ellip = (_ellip_vals <= _ellip_thr) | _ellip_vals.isna()
+                _add_strike(~ok_ellip, "ellip")
+                n_keep_ellip = int(ok_ellip.sum())
+                min_keep_ellip = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                )
+                if n_keep_ellip >= min_keep_ellip:
+                    n_drop_ellip = int((~ok_ellip).sum())
+                    if n_drop_ellip > 0:
+                        df = df[ok_ellip].copy()
+                        if _ellip_thr > ellip_max:
+                            log.info(
+                                "PSF ellipticity cut relaxed to %.3f "
+                                "(field median %.3f exceeds configured "
+                                "%.3f - elongated image PSF)",
+                                _ellip_thr,
+                                _ellip_med,
+                                ellip_max,
+                            )
+                        log.info(
+                            "PSF ellipticity cut (<= %.3f, equiv. elong=%.2f): removed %d elongated candidates (%d kept)",
+                            _ellip_thr,
+                            1.0 / max(1.0 - _ellip_thr, 1e-3),
+                            n_drop_ellip,
+                            n_keep_ellip,
+                        )
+                else:
+                    log.info(
+                        "Skipping ellipticity cut (<= %.3f): would leave only %d candidates (< %d).",
+                        _ellip_thr,
+                        n_keep_ellip,
+                        min_keep_ellip,
+                    )
+
+            # ---- FWHM consistency cut ----
+            # Reject sources whose FWHM is inconsistent with the image FWHM.
+            # Cosmic rays have abnormally small FWHM; extended defects/galaxies
+            # have abnormally large FWHM.  This is the primary defense against
+            # cosmic rays entering the ePSF build, especially when cosmic ray
+            # removal is disabled or misses some events.
+            _fwhm_cols_psf = ("fwhm", "FWHM", "FWHM_IMAGE", "fwhm_image")
+            _fwhm_col_psf = next(
+                (c for c in _fwhm_cols_psf if c in df.columns), None
+            )
+            if _fwhm_col_psf is not None:
+                _fwhm_ref = float(
+                    self.input_yaml.get("fwhm", 3.0)
+                )
+                if not (np.isfinite(_fwhm_ref) and _fwhm_ref > 0):
+                    _fwhm_ref = 3.0
+                fwhm_min_frac = float(phot_cfg.get("psf_fwhm_min_frac", 0.5))
+                fwhm_max_frac = float(phot_cfg.get("psf_fwhm_max_frac", 2.5))
+                fwhm_lo = fwhm_min_frac * _fwhm_ref
+                fwhm_hi = fwhm_max_frac * _fwhm_ref
+                src_fwhm = pd.to_numeric(df[_fwhm_col_psf], errors="coerce")
+                ok_fwhm = src_fwhm.between(fwhm_lo, fwhm_hi, inclusive="both")
+                # Reject NaN FWHM sources: a source with unmeasurable FWHM is
+                # more likely a cosmic ray or defect than a real star.  Only
+                # keep NaN FWHM sources if rejecting them would leave too few
+                # candidates (safety bypass).
+                ok_fwhm_nan = src_fwhm.isna()
+                ok_fwhm_with_nan = ok_fwhm | ok_fwhm_nan
+                n_keep_with_nan = int(ok_fwhm_with_nan.sum())
+                n_keep_no_nan = int(ok_fwhm.sum())
+                min_keep_fwhm = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                )
+                # Prefer rejecting NaN FWHM sources, but keep them if needed
+                if n_keep_no_nan >= min_keep_fwhm:
+                    ok_fwhm = ok_fwhm  # reject NaN FWHM
+                else:
+                    ok_fwhm = ok_fwhm_with_nan  # keep NaN FWHM (safety)
+                _add_strike(~ok_fwhm, "fwhm")
+                n_keep_fwhm = int(ok_fwhm.sum())
+                if n_keep_fwhm >= min_keep_fwhm:
+                    n_drop_fwhm = int((~ok_fwhm).sum())
+                    if n_drop_fwhm > 0:
+                        df = df[ok_fwhm].copy()
+                        log.info(
+                            "PSF FWHM consistency cut ([%.2f, %.2f] px = [%.1f, %.1f] x FWHM): "
+                            "removed %d candidates (%d kept)",
+                            fwhm_lo, fwhm_hi, fwhm_min_frac, fwhm_max_frac,
+                            n_drop_fwhm, n_keep_fwhm,
+                        )
+                else:
+                    log.info(
+                        "Skipping FWHM consistency cut ([%.2f, %.2f] px): would leave only "
+                        "%d candidates (< %d).",
+                        fwhm_lo, fwhm_hi, n_keep_fwhm, min_keep_fwhm,
+                    )
+                # Defect-dominance diagnostic: a genuine stellar pool
+                # clusters around the image FWHM, while hot-pixel/CR
+                # clusters pile up just above the lower bound.  When a
+                # large fraction of the survivors hugs fwhm_lo the pool is
+                # likely defect-dominated rather than undersampled.
+                _fwhm_surv = pd.to_numeric(
+                    df[_fwhm_col_psf], errors="coerce"
+                )
+                _fwhm_fin = _fwhm_surv[np.isfinite(_fwhm_surv)]
+                if len(_fwhm_fin) >= 5:
+                    _near_lo = float(
+                        np.mean(_fwhm_fin.values <= 1.2 * fwhm_lo)
+                    )
+                    _near_lo_frac = float(
+                        phot_cfg.get("psf_defect_dominance_frac", 0.4)
+                    )
+                    if _near_lo > _near_lo_frac:
+                        self.psf_pool_defect_dominated = True
+                        log.warning(
+                            "PSF pool may be defect-dominated: %.0f%% of "
+                            "candidates sit within 20%% of the lower FWHM "
+                            "bound (%.2f px = %.1f x image FWHM). Hot-pixel "
+                            "clusters and cosmic rays masquerade as "
+                            "small-FWHM sources; consider enabling cosmic "
+                            "ray removal.",
+                            100 * _near_lo, fwhm_lo, fwhm_min_frac,
+                        )
+
+            # ---- FWHM sigma-clipping (always applied) ----
+            # Ensure all PSF sources have roughly the same FWHM by rejecting
+            # outliers relative to the candidate distribution itself. This
+            # removes extended galaxies (large FWHM) and cosmic rays (small
+            # FWHM) that survived the absolute FWHM consistency cut above.
+            if _fwhm_col_psf is not None and len(df) >= 5:
+                src_fwhm = pd.to_numeric(df[_fwhm_col_psf], errors="coerce")
+                finite_fwhm = src_fwhm[np.isfinite(src_fwhm)]
+                if len(finite_fwhm) >= 5:
+                    from astropy.stats import sigma_clip as _sigma_clip
+                    # Per-source FWHM measurements are intrinsically noisier
+                    # on undersampled images (centroid jitter on a few bright
+                    # pixels inflates the scatter), so use a looser clip there
+                    # to avoid discarding genuine stars.
+                    _us_thr_clip = float(
+                        phot_cfg.get("undersampled_fwhm_threshold", 2.5)
+                    )
+                    try:
+                        _fwhm_img_clip = float(self.input_yaml.get("fwhm", np.nan))
+                    except (TypeError, ValueError):
+                        _fwhm_img_clip = np.nan
+                    _undersampled_clip = (
+                        np.isfinite(_fwhm_img_clip)
+                        and _fwhm_img_clip <= _us_thr_clip
+                    )
+                    _clip_sigma = float(
+                        phot_cfg.get(
+                            "psf_fwhm_clip_sigma_undersampled"
+                            if _undersampled_clip
+                            else "psf_fwhm_clip_sigma",
+                            3.5 if _undersampled_clip else 2.5,
+                        )
+                    )
+                    # MAD-based clip via fwhm_outlier_clip: plain std is
+                    # inflated by the outliers themselves and absorbs them,
+                    # while an unfloored MAD collapses onto the majority
+                    # locus on defect-dominated pools and would flag the
+                    # real stellar side - the helper floors the scatter at
+                    # 10% of the median to avoid both failure modes.
+                    from functions import fwhm_outlier_clip
+
+                    _rej_clip, _clip_med, _clip_eff = fwhm_outlier_clip(
+                        src_fwhm.to_numpy(dtype=float), sigma=_clip_sigma
+                    )
+                    ok_fwhm_clip = ~_rej_clip
+                    # Same veto hookup as every other cut: a source that
+                    # is an FWHM outlier AND fails elsewhere is a defect,
+                    # not an unlucky star -- previously this cut was
+                    # invisible to the multi-fail veto.
+                    _add_strike(~ok_fwhm_clip, "fwhm_clip")
+                    n_drop_clip = int((~ok_fwhm_clip).sum())
+                    n_keep_clip = int(ok_fwhm_clip.sum())
+                    # Evidence-based cut, so its floor is a small absolute
+                    # count rather than the target pool size: FWHM outliers
+                    # (galaxies, blends) reaching the ePSF build do more harm
+                    # than a smaller clean pool, and a starved pool is
+                    # recoverable via the supplement path.  Tying the floor
+                    # to psf_min_candidates made the clip dead below it -
+                    # observed on GROND_g_TDP6_cor_ana_8_MJD61230_30707 where
+                    # a 26 px FWHM galaxy survived into the build.
+                    min_keep_clip = max(
+                        3,
+                        int(phot_cfg.get("psf_fwhm_clip_min_keep", 4)),
+                    )
+                    if n_drop_clip > 0:
+                        if n_keep_clip >= min_keep_clip:
+                            df = df[ok_fwhm_clip].copy()
+                            log.info(
+                                "PSF FWHM sigma-clip (%.1f sigma%s): removed %d FWHM outliers (%d kept, "
+                                "median FWHM=%.2f px)",
+                                _clip_sigma,
+                                ", undersampled" if _undersampled_clip else "",
+                                n_drop_clip, n_keep_clip,
+                                _clip_med,
+                            )
+                        else:
+                            log.info(
+                                "Skipping FWHM sigma-clip (%.1f sigma): would leave only "
+                                "%d candidates (< %d).",
+                                _clip_sigma, n_keep_clip, min_keep_clip,
+                            )
+
+            # ---- FLUX_RADIUS cut (cosmic ray rejection) ----
+            # SExtractor's FLUX_RADIUS is the half-light radius.  Real stars
+            # have FLUX_RADIUS ~ 0.5 * FWHM / 2.355 ~ 0.21 * FWHM.  Cosmic
+            # rays are sharp spikes with FLUX_RADIUS typically < 1 px,
+            # regardless of the image FWHM.  This is one of the most reliable
+            # SExtractor-based CR discriminators: it measures flux
+            # concentration directly, unlike FWHM, which is unreliable for
+            # CR-like sources.
+            _fr_col = next(
+                (c for c in ("flux_radius", "FLUX_RADIUS") if c in df.columns), None
+            )
+            if _fr_col is not None:
+                _fr_ref = float(self.input_yaml.get("fwhm", 3.0))
+                if not (np.isfinite(_fr_ref) and _fr_ref > 0):
+                    _fr_ref = 3.0
+                _fr_min_frac = float(phot_cfg.get("psf_flux_radius_min_frac", 0.3))
+                _fr_lo = _fr_min_frac * _fr_ref
+                if np.isfinite(_elong_med) and _elong_med > elong_max:
+                    # FLUX_RADIUS is circularised: a field-shared axis
+                    # ratio q = b/a shrinks it by ~sqrt(q) relative to a
+                    # round PSF of the same image FWHM.
+                    _fr_lo = _fr_lo * min(1.0, np.sqrt(1.0 / _elong_med))
+                fr_vals = pd.to_numeric(df[_fr_col], errors="coerce")
+                ok_fr = fr_vals >= _fr_lo
+                ok_fr = ok_fr | fr_vals.isna()  # keep NaN (can't judge)
+                _add_strike(~ok_fr, "fr_min")
+                n_keep_fr = int(ok_fr.sum())
+                min_keep_fr = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                )
+                if n_keep_fr >= min_keep_fr:
+                    n_drop_fr = int((~ok_fr).sum())
+                    if n_drop_fr > 0:
+                        df = df[ok_fr].copy()
+                        log.info(
+                            "PSF FLUX_RADIUS cut (>= %.2f px = %.1f x FWHM): "
+                            "removed %d CR-like candidates (%d kept)",
+                            _fr_lo, _fr_min_frac, n_drop_fr, n_keep_fr,
+                        )
+                else:
+                    log.info(
+                        "Skipping FLUX_RADIUS cut (>= %.2f px): would leave only "
+                        "%d candidates (< %d).",
+                        _fr_lo, n_keep_fr, min_keep_fr,
+                    )
+
+            # ---- Peak-to-aperture flux ratio cut (cosmic ray rejection) ----
+            # Cosmic rays are sharp spikes: most flux is in 1-2 pixels, so
+            # peak_flux / flux_AP is very high (-> 1.0 for a single-pixel CR).
+            # Real stars have extended PSF profiles: for a Gaussian with FWHM=F,
+            # peak/flux_AP ~ 1/(2pi(F/2.355)^2).  For F=8.66 px this is ~0.014;
+            # for F=3 px it's ~0.10.  A CR with peak/flux_AP > 0.5 is
+            # unmistakable.  The threshold is adaptive: max(configured value,
+            # 5x the expected ratio for the image FWHM).
+            _pk_col = next(
+                (c for c in ("peak_flux", "FLUX_MAX", "peak") if c in df.columns), None
+            )
+            _ap_col = next(
+                (c for c in ("flux_AP", "flux_ap", "FLUX_AUTO", "flux_auto")
+                 if c in df.columns), None
+            )
+            if _pk_col is not None and _ap_col is not None:
+                _pk_ref = float(self.input_yaml.get("fwhm", 3.0))
+                if not (np.isfinite(_pk_ref) and _pk_ref > 0):
+                    _pk_ref = 3.0
+                _expected_ratio = 1.0 / (2.0 * np.pi * (_pk_ref / 2.355) ** 2)
+                _pk_ratio_cfg = float(
+                    phot_cfg.get("psf_peak_to_aperture_ratio_max", 0.0)
+                )
+                # Default: 5x the expected ratio, capped at 0.5.  A hard
+                # 0.80 ceiling also applies to the configured value: ratios
+                # that high are all-flux-in-1-2-pixel hot-pixel clusters,
+                # not undersampled stars.
+                _pk_ratio_max = min(
+                    0.80, max(_pk_ratio_cfg, min(0.5, 5.0 * _expected_ratio))
+                )
+                if _pk_ratio_max > 0:
+                    pk_vals = pd.to_numeric(df[_pk_col], errors="coerce")
+                    # flux_AP is an e-/s rate on aperture-measured rows
+                    # (measure() convention) but raw FLUX_AUTO in image
+                    # units on detection-table supplements, while
+                    # peak_flux/FLUX_MAX is always image units -- the
+                    # naive ratio is inflated by exposure_time/gain on
+                    # measured rows and flags every real star (observed:
+                    # raw ratios ~50-75 on a GROND field whose true
+                    # ratios were ~0.2-0.3).  maxPixel (peak e-/s) is
+                    # written only on measured rows, so preferring it
+                    # keeps numerator and denominator in the same unit
+                    # per row.
+                    if "maxPixel" in df.columns:
+                        _mx_vals = pd.to_numeric(
+                            df["maxPixel"], errors="coerce"
+                        )
+                        pk_vals = _mx_vals.where(
+                            np.isfinite(_mx_vals), pk_vals
+                        )
+                    ap_vals = pd.to_numeric(df[_ap_col], errors="coerce")
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        ratio = np.where(
+                            (ap_vals > 0) & np.isfinite(pk_vals) & np.isfinite(ap_vals),
+                            pk_vals / ap_vals, np.nan,
+                        )
+                    ok_pk = pd.Series(ratio, index=df.index)
+                    ok_pk = (ok_pk <= _pk_ratio_max) | ok_pk.isna()
+                    _add_strike(~ok_pk, "pk_ap")
+                    n_keep_pk = int(ok_pk.sum())
+                    min_keep_pk = max(
+                        min_psf_candidates,
+                        int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                    )
+                    if n_keep_pk >= min_keep_pk:
+                        n_drop_pk = int((~ok_pk).sum())
+                        if n_drop_pk > 0:
+                            df = df[ok_pk].copy()
+                            log.info(
+                                "PSF peak/aperture ratio cut (<= %.3f, expected "
+                                "%.3f for FWHM=%.1f): removed %d CR-like "
+                                "candidates (%d kept)",
+                                _pk_ratio_max, _expected_ratio, _pk_ref,
+                                n_drop_pk, n_keep_pk,
+                            )
+                    else:
+                        log.info(
+                            "Skipping peak/aperture ratio cut (<= %.3f): would "
+                            "leave only %d candidates (< %d).",
+                            _pk_ratio_max, n_keep_pk, min_keep_pk,
+                        )
+
+            # ---- Minimum A/B size cut (cosmic ray rejection) ----
+            # SExtractor's A_IMAGE and B_IMAGE are the semi-major and semi-minor
+            # axes of the source profile.  Real stars have A ~ B ~ FWHM/2.355.
+            # Cosmic rays have A, B < 1-2 px regardless of image FWHM.  Reject
+            # sources where the smaller axis is below a threshold that scales
+            # with the image FWHM (so it works for both undersampled and
+            # well-sampled images).
+            _ab_cols = [c for c in ("a", "b", "A_IMAGE", "B_IMAGE") if c in df.columns]
+            if len(_ab_cols) >= 2:
+                _ab_ref = float(self.input_yaml.get("fwhm", 3.0))
+                if not (np.isfinite(_ab_ref) and _ab_ref > 0):
+                    _ab_ref = 3.0
+                # Threshold = max(fixed floor, fraction of FWHM)
+                _ab_min_floor = float(phot_cfg.get("psf_min_ab_pixels", 0.0))
+                _ab_min_frac = float(phot_cfg.get("psf_min_ab_frac", 0.3))
+                _ab_min = max(_ab_min_floor, _ab_min_frac * _ab_ref)
+                if _ab_min > 0:
+                    _a_col = next(
+                        (c for c in ("a", "A_IMAGE") if c in df.columns), None
+                    )
+                    _b_col = next(
+                        (c for c in ("b", "B_IMAGE") if c in df.columns), None
+                    )
+                    a_vals = pd.to_numeric(df[_a_col], errors="coerce")
+                    b_vals = pd.to_numeric(df[_b_col], errors="coerce")
+                    _b_min = _ab_min
+                    if np.isfinite(_elong_med) and _elong_med > elong_max:
+                        # Field-shared elongation makes every star's
+                        # minor axis small; a compact defect is small on
+                        # BOTH axes, so the major axis still carries the
+                        # full CR signature while b relaxes with q = b/a.
+                        _b_min = _ab_min * min(1.0, 1.0 / _elong_med)
+                    ok_ab = (a_vals >= _ab_min) & (b_vals >= _b_min)
+                    ok_ab = ok_ab | a_vals.isna() | b_vals.isna()
+                    _add_strike(~ok_ab, "ab_min")
+                    n_keep_ab = int(ok_ab.sum())
+                    min_keep_ab = max(
+                        min_psf_candidates,
+                        int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                    )
+                    if n_keep_ab >= min_keep_ab:
+                        n_drop_ab = int((~ok_ab).sum())
+                        if n_drop_ab > 0:
+                            df = df[ok_ab].copy()
+                            if _b_min < _ab_min:
+                                log.info(
+                                    "PSF A/B minor-axis floor relaxed to "
+                                    "%.1f px (field elongation %.1f - "
+                                    "elongated image PSF)",
+                                    _b_min,
+                                    _elong_med,
+                                )
+                            log.info(
+                                "PSF A/B size cut (a >= %.1f, b >= %.1f px): removed %d "
+                                "CR-like candidates (%d kept)",
+                                _ab_min,
+                                _b_min,
+                                n_drop_ab,
+                                n_keep_ab,
+                            )
+                    else:
+                        log.info(
+                            "Skipping A/B size cut (>= %.1f px): would leave "
+                            "only %d candidates (< %d).",
+                            _ab_min,
+                            n_keep_ab,
+                            min_keep_ab,
+                        )
+
+            # ---- Sharpness cut ----
+            # IRAFStarFinder provides a "sharpness" column that discriminates
+            # point sources (~0.5-0.8 for Gaussian PSF) from extended galaxies
+            # (sharpness > 1.0). Reject sources with abnormally high sharpness.
+            _sharp_col = next(
+                (c for c in ("sharpness", "sharp", "SHARPNESS") if c in df.columns), None
+            )
+            if _sharp_col is not None:
+                sharp_max = float(phot_cfg.get("psf_sharpness_max", 1.0))
+                sharp_vals = pd.to_numeric(df[_sharp_col], errors="coerce")
+                ok_sharp = sharp_vals <= sharp_max
+                ok_sharp = ok_sharp | sharp_vals.isna()  # keep NaN (can't judge)
+                _add_strike(~ok_sharp, "sharp")
+                n_keep_sharp = int(ok_sharp.sum())
+                min_keep_sharp = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                )
+                if n_keep_sharp >= min_keep_sharp:
+                    n_drop_sharp = int((~ok_sharp).sum())
+                    if n_drop_sharp > 0:
+                        df = df[ok_sharp].copy()
+                        log.info(
+                            "PSF sharpness cut (<= %.2f): removed %d extended candidates (%d kept)",
+                            sharp_max, n_drop_sharp, n_keep_sharp,
+                        )
+                else:
+                    log.info(
+                        "Skipping sharpness cut (<= %.2f): would leave only %d candidates (< %d).",
+                        sharp_max, n_keep_sharp, min_keep_sharp,
+                    )
+
+            # ---- Profile-concentration cut (replaces CLASS_STAR) ----
+            # SExtractor's CLASS_STAR neural classifier is uncalibrated on
+            # some cameras (all values ~0 or ~1), so stellarity is measured
+            # directly from the profile: a point source's half-light radius
+            # is ~0.5-0.7x its FWHM (Gaussian 0.60, Moffat ~0.55-0.65), while
+            # galaxies and extended defects are systematically larger.
+            # The FLUX_RADIUS lower bound above already rejects CR-like
+            # spikes; this upper bound rejects extended profiles.
+            _fr_col_hi = next(
+                (c for c in ("flux_radius", "FLUX_RADIUS", "r50") if c in df.columns),
+                None,
+            )
+            _fw_col_hi = next(
+                (c for c in ("fwhm", "FWHM", "fwhm_image") if c in df.columns),
+                None,
+            )
+            fr_max_frac = float(phot_cfg.get("psf_flux_radius_max_frac", 0.9))
+            if (
+                _fr_col_hi is not None
+                and _fw_col_hi is not None
+                and np.isfinite(fr_max_frac)
+                and fr_max_frac > 0
+            ):
+                _fr_hi = pd.to_numeric(df[_fr_col_hi], errors="coerce")
+                _fw_hi = pd.to_numeric(df[_fw_col_hi], errors="coerce")
+                _prof_ratio = _fr_hi / _fw_hi.where(_fw_hi > 0)
+                ok_prof = (_prof_ratio <= fr_max_frac) | _prof_ratio.isna()
+                _add_strike(~ok_prof, "profile")
+                n_keep_prof = int(ok_prof.sum())
+                min_keep_prof = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                )
+                if n_keep_prof >= min_keep_prof:
+                    n_drop_prof = int((~ok_prof).sum())
+                    if n_drop_prof > 0:
+                        df = df[ok_prof].copy()
+                        log.info(
+                            "PSF profile cut (FLUX_RADIUS <= %.2fxFWHM): "
+                            "removed %d extended candidates (%d kept)",
+                            fr_max_frac, n_drop_prof, n_keep_prof,
+                        )
+                else:
+                    log.info(
+                        "Skipping profile cut (FLUX_RADIUS <= %.2fxFWHM): "
+                        "would leave only %d candidates (< %d).",
+                        fr_max_frac, n_keep_prof, min_keep_prof,
+                    )
+
+            # ---- Neighbour-isolation cut ----
+            # Reject stars that have a close companion within isolation_radius
+            # pixels. Blended cutouts corrupt the ePSF core and wings.
+            # fwhm is resolved later in build(); read a preliminary value here
+            # from the header / input_yaml for the isolation radius only.
+            _hdr = self.header if self.header is not None else {}
+            _fwhm_for_iso = float(
+                _hdr.get("FWHM", _hdr.get("fwhm",
+                    self.input_yaml.get("fwhm", 3.0)
+                ))
+            )
+            if not (np.isfinite(_fwhm_for_iso) and _fwhm_for_iso > 0):
+                _fwhm_for_iso = 3.0
+            iso_r = float(phot_cfg.get("psf_isolation_radius_fwhm", 3.0)) * _fwhm_for_iso
+            xcol_now, ycol_now = _locate_columns(df)[:2]
+            if xcol_now is not None and ycol_now is not None and iso_r > 0 and len(df) >= 2:
+                xs = df[xcol_now].to_numpy(dtype=float)
+                ys = df[ycol_now].to_numpy(dtype=float)
+                # Check isolation against ALL catalog sources (not just PSF
+                # candidates).  A PSF candidate may have a nearby non-candidate
+                # neighbour (galaxy, blended source, filtered detection) that
+                # would contaminate the cutout.  The raw SExtractor catalog is
+                # stored in input_yaml by main.py for this purpose.
+                _all_cat = (
+                    self.input_yaml.get("photometry", {}).get("last_raw_sex_catalog")
+                )
+                _neighbour_coords = None
+                if _all_cat is not None and len(_all_cat) > 0:
+                    _ax = next((c for c in (xcol_now, "x_pix", "X_IMAGE") if c in _all_cat.columns), None)
+                    _ay = next((c for c in (ycol_now, "y_pix", "Y_IMAGE") if c in _all_cat.columns), None)
+                    if _ax is not None and _ay is not None:
+                        _neighbour_coords = np.column_stack([
+                            pd.to_numeric(_all_cat[_ax], errors="coerce"),
+                            pd.to_numeric(_all_cat[_ay], errors="coerce"),
+                        ])
+                        _neighbour_coords = _neighbour_coords[
+                            np.isfinite(_neighbour_coords[:, 0])
+                            & np.isfinite(_neighbour_coords[:, 1])
+                        ]
+                from scipy.spatial import cKDTree
+                if _neighbour_coords is not None and len(_neighbour_coords) >= 2:
+                    # Check against ALL catalog sources (including non-candidates)
+                    neighbour_tree = cKDTree(_neighbour_coords)
+                    counts = neighbour_tree.query_ball_point(
+                        np.column_stack([xs, ys]), r=iso_r, return_length=True
+                    )
+                    isolated = counts <= 1  # only self within iso_r
+                    _iso_source = "all catalog sources"
+                else:
+                    # Fallback: pairwise check among PSF candidates only
+                    tree = cKDTree(np.column_stack([xs, ys]))
+                    pairs = tree.query_ball_point(np.column_stack([xs, ys]), r=iso_r)
+                    isolated = np.array([len(p) == 1 for p in pairs])
+                    _iso_source = "PSF candidates only"
+                _add_strike(~isolated, "isolation")
+                n_keep_iso = int(isolated.sum())
+                min_keep_iso = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                )
+                if n_keep_iso >= min_keep_iso:
+                    n_drop_iso = int((~isolated).sum())
+                    if n_drop_iso > 0:
+                        df = df[isolated].copy()
+                        log.info(
+                            "PSF isolation cut (r=%.1f px = %.1f FWHM, vs %s): removed %d blended candidates (%d kept)",
+                            iso_r,
+                            float(phot_cfg.get("psf_isolation_radius_fwhm", 3.0)),
+                            _iso_source,
+                            n_drop_iso,
+                            n_keep_iso,
+                        )
+                else:
+                    log.info(
+                        "Skipping isolation cut (r=%.1f px, vs %s): would leave only %d candidates (< %d).",
+                        iso_r, _iso_source, n_keep_iso, min_keep_iso,
+                    )
+
+            # ---- Multi-fail defect veto ----
+            # The per-cut keep-floor guards protect sparse pools from
+            # being starved one cut at a time, but they also let a
+            # compact defect (cosmic ray, hot pixel, bad-column blob)
+            # survive by dodging each cut individually.  A candidate
+            # failing several independent quality cuts is a defect, not
+            # a star: veto it unconditionally.  Majority-fail cuts only
+            # contribute strikes for compactness measures on
+            # non-crowded, well-sampled fields (see _add_strike), so this
+            # fires on defect subsets and defect-dominated pools, not on
+            # field-wide misfires like undersampled FLUX_RADIUS or
+            # crowded-field FLAGS.
+            if _veto_min_fails > 0:
+                _vetoed = df["_psf_veto"] >= _veto_min_fails
+                _n_veto = int(_vetoed.sum())
+                if _n_veto:
+                    _strike_hist = (
+                        df.loc[_vetoed, "_psf_veto_names"]
+                        .str.split(";")
+                        .explode()
+                        .loc[lambda s: s != ""]
+                        .value_counts()
+                    )
+                    df = df.loc[~_vetoed].copy()
+                    log.info(
+                        "PSF defect veto: removed %d candidates failing "
+                        ">= %d quality cuts (%d kept); strikes: %s",
+                        _n_veto,
+                        _veto_min_fails,
+                        len(df),
+                        ", ".join(
+                            f"{k}={v}" for k, v in _strike_hist.items()
+                        )
+                        or "none",
+                    )
+            if len(df) > 0:
+                _dbg_cols = [
+                    c
+                    for c in (
+                        xcol_now,
+                        ycol_now,
+                        "fwhm",
+                        "peak_flux",
+                        "flux_AP",
+                        "snr",
+                        "SNR",
+                    )
+                    if c is not None and c in df.columns
+                ]
+                _keep_dbg = (
+                    df.loc[:, _dbg_cols].copy() if _dbg_cols else None
+                )
+                if _keep_dbg is not None:
+                    _keep_dbg["strikes"] = df["_psf_veto"].values
+                    _keep_dbg["strike_names"] = (
+                        df["_psf_veto_names"].str.rstrip(";").values
+                    )
+                    log.debug(
+                        "PSF candidates surviving quality cuts:\n%s",
+                        _keep_dbg.to_string(index=False),
+                    )
+            df = df.drop(
+                columns=["_psf_veto", "_psf_veto_names"], errors="ignore"
+            )
+
+            # ---- Candidate pair-separation cut ----
+            # The pool merges entries from several source lists
+            # (catalogue, filtered detections, raw detections), so the
+            # per-list isolation checks cannot see a close pair that
+            # arrives through different lists.  Two candidates closer
+            # than ~1 FWHM are either the same star centroided twice or
+            # an unresolved blend; both corrupt the ePSF core.
+            _pair_sep_fwhm = float(
+                phot_cfg.get("psf_min_pair_separation_fwhm", 1.0)
+            )
+            _dup_px = float(phot_cfg.get("psf_dup_radius_px", 2.0))
+            if (
+                _pair_sep_fwhm > 0
+                and xcol_now is not None
+                and ycol_now is not None
+                and len(df) >= 2
+            ):
+                _rank_col = next(
+                    (
+                        c
+                        for c in (
+                            "SNR", "snr", "signal_to_noise", "flux_snr",
+                            "threshold", "flux_AP", "flux_ap", "FLUX_AUTO",
+                        )
+                        if c in df.columns
+                    ),
+                    None,
+                )
+                _drop_pair = _psf_pair_separation_drop(
+                    df[[xcol_now, ycol_now]].to_numpy(dtype=float),
+                    _pair_sep_fwhm * _fwhm_for_iso,
+                    _dup_px,
+                    pd.to_numeric(
+                        df[_rank_col], errors="coerce"
+                    ).to_numpy(dtype=float)
+                    if _rank_col is not None
+                    else np.zeros(len(df), dtype=float),
+                )
+                if _drop_pair.any():
+                    df = df.loc[~_drop_pair].copy()
+                    log.info(
+                        "PSF pair-separation cut (< %.1f px = %.1f FWHM): "
+                        "removed %d close/blended or duplicate candidates "
+                        "(%d kept)",
+                        _pair_sep_fwhm * _fwhm_for_iso, _pair_sep_fwhm,
+                        int(_drop_pair.sum()), len(df),
+                    )
+
+            # ---- Defect-mask proximity cut ----
+            # Supplement-pool members bypass the defect-proximity
+            # rejection applied to the FWHM source list upstream, so
+            # repeat it here on the build mask: a candidate whose core
+            # overlaps a chip gap, saturated streak, or cosmic-ray
+            # region cannot be repaired by per-pixel weights.
+            if (
+                xcol_now is not None
+                and ycol_now is not None
+                and len(df) > 0
+            ):
+                _mask_dist = _psf_mask_distances(
+                    self.image, mask,
+                    df[[xcol_now, ycol_now]].to_numpy(dtype=float),
+                )
+                # Mask inside the stellar core is unrecoverable:
+                # always reject, no keep-floor.
+                _core_r = (
+                    float(phot_cfg.get("psf_mask_core_min_dist_fwhm", 0.75))
+                    * _fwhm_for_iso
+                )
+                if _core_r > 0:
+                    _core_hit = _mask_dist <= _core_r
+                    if _core_hit.any():
+                        df = df.loc[~_core_hit].copy()
+                        _mask_dist = _mask_dist[~_core_hit]
+                        log.info(
+                            "PSF mask-core cut: removed %d candidates "
+                            "within %.1f px (%.2f FWHM) of masked pixels "
+                            "(%d kept)",
+                            int(_core_hit.sum()), _core_r,
+                            _core_r / max(_fwhm_for_iso, 1e-9), len(df),
+                        )
+                # Wider proximity cut matching the upstream FWHM-source
+                # exclusion radius; keep-floor-gated like the other
+                # cuts since a distant mask edge only clips the cutout
+                # wings.
+                _prox_fwhm = float(
+                    phot_cfg.get("psf_defect_exclusion_fwhm", 2.0)
+                )
+                _prox_r = _prox_fwhm * _fwhm_for_iso
+                if _prox_r > _core_r and len(df) > 0:
+                    _prox_hit = _mask_dist <= _prox_r
+                    _n_keep_prox = int((~_prox_hit).sum())
+                    _min_keep_prox = max(
+                        min_psf_candidates,
+                        int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
+                    )
+                    if _n_keep_prox >= _min_keep_prox:
+                        if _prox_hit.any():
+                            df = df.loc[~_prox_hit].copy()
+                            log.info(
+                                "PSF defect-proximity cut (<= %.1f px = "
+                                "%.1f FWHM of masked pixels): removed %d "
+                                "candidates (%d kept)",
+                                _prox_r, _prox_fwhm,
+                                int(_prox_hit.sum()), len(df),
+                            )
+                    else:
+                        log.info(
+                            "Skipping defect-proximity cut (<= %.1f px): "
+                            "would leave only %d candidates (< %d).",
+                            _prox_r, _n_keep_prox, _min_keep_prox,
+                        )
+
+            # ---- Diffraction-spike stamp contamination ----
+            # MaxiMask flags spike *pixels* along the arms; the distance
+            # cut above only rejects a candidate whose centroid sits near
+            # a flagged pixel.  An arm that the network only picks up
+            # away from the core still crosses the ePSF stamp, so count
+            # flagged pixels inside the stamp footprint instead.
+            if (
+                spike_mask is not None
+                and np.shape(spike_mask) == np.shape(self.image)
+                and xcol_now is not None
+                and ycol_now is not None
+                and len(df) > 0
+            ):
+                _spike_min = int(phot_cfg.get("psf_spike_min_flagged_px", 20))
+                if _spike_min > 0:
+                    _spike_r = max(
+                        1.0,
+                        float(
+                            phot_cfg.get("psf_spike_flag_radius_fwhm", 4.0)
+                        )
+                        * _fwhm_for_iso,
+                    )
+                    _spike_cnt = _psf_spike_flag_counts(
+                        spike_mask,
+                        df[[xcol_now, ycol_now]].to_numpy(dtype=float),
+                        _spike_r,
+                    )
+                    _spike_hit = _spike_cnt >= _spike_min
+                    if _spike_hit.any():
+                        _n_keep_spike = int((~_spike_hit).sum())
+                        _min_keep_spike = max(
+                            min_psf_candidates,
+                            int(
+                                np.ceil(
+                                    min_keep_frac_after_cut
+                                    * max(1, n_before)
+                                )
+                            ),
+                        )
+                        if _n_keep_spike >= _min_keep_spike:
+                            df = df.loc[~_spike_hit].copy()
+                            log.info(
+                                "PSF spike-stamp cut (>= %d flagged px "
+                                "within %.1f px = %.1f FWHM): removed %d "
+                                "spike-contaminated candidates (%d kept)",
+                                _spike_min, _spike_r,
+                                _spike_r / max(_fwhm_for_iso, 1e-9),
+                                int(_spike_hit.sum()), len(df),
+                            )
+                        else:
+                            log.info(
+                                "Skipping spike-stamp cut: would leave "
+                                "only %d candidates (< %d).",
+                                _n_keep_spike, _min_keep_spike,
+                            )
+
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]
+            # Gridded-PSF cell builds set a per-cell base so their diagnostic
+            # files do not overwrite each other or the field-wide products.
+            base = str(self.input_yaml.get("_psf_base_override") or base)
             oversample = max(
                 1, int(self.input_yaml["photometry"].get("psf_oversample", 1))
             )
+            
+            # Adaptive oversampling parameters.
+            # BUG: "psf_auto_oversample_undersampled" is the documented,
+            # default-True switch (see default_input.yml) for auto-enabling
+            # 4x oversampling on undersampled data. The code previously read
+            # only the unrelated "oversample_psf" key (default False), so the
+            # documented default behaviour never actually activated -- even
+            # existing input.yaml files that already carry
+            # "psf_auto_oversample_undersampled: true" (from the shared
+            # template) still had "oversample_psf: false" alongside it, so a
+            # plain fallback (.get with a default) would not have fixed
+            # already-generated configs. Treat the two as OR'd: adaptive
+            # oversampling is enabled if either flag is true.
+            oversample_psf = bool(
+                self.input_yaml["photometry"].get("oversample_psf", False)
+            ) or bool(
+                self.input_yaml["photometry"].get(
+                    "psf_auto_oversample_undersampled", True
+                )
+            )
+            # oversample_psf_fwhm is deprecated; oversampling now uses
+            # undersampled_fwhm_threshold (default 2.5 px) for consistency
+            # with the rest of the codebase. Kept for backward compatibility.
+            oversample_psf_fwhm = float(self.input_yaml["photometry"].get("oversample_psf_fwhm", 2.5))
 
             if make_template_psf:
-                # Template/science header may lack APER, GAIN, FWHM; use fallbacks.
+                # Template header may lack APER/FWHM; gain must be present (e-/ADU).
                 _fwhm_h = float(self.header.get("FWHM", self.header.get("fwhm", 3.0)))
                 _aper = self.header.get("APER", self.header.get("aper"))
                 aperture_radius = float(
@@ -1594,9 +8105,23 @@ class PSF:
                     else self.input_yaml.get("photometry", {}).get("aperture_radius")
                     or 1.5 * _fwhm_h
                 )
-                _gain = self.header.get("GAIN", self.header.get("gain"))
-                gain = float(
-                    _gain if _gain is not None else self.input_yaml.get("gain", 1.0)
+                try:
+                    gain, tpl_gain_key = gain_e_per_adu_from_header(
+                        self.header, None
+                    )
+                except ValueError as exc:
+                    # PS1 skycell stacks and many survey references omit GAIN; PSF build
+                    # needs a finite value (same convention as main.py for template fpath).
+                    log.warning(
+                        "Template PSF build: no usable GAIN in reference header (%s). "
+                        "Using gain=1.0 e-/ADU; noise model may be approximate.",
+                        exc,
+                    )
+                    gain, tpl_gain_key = 1.0, "assumed_1.0_template_no_header_gain"
+                log.info(
+                    "Template PSF build: gain=%.5g e-/ADU (%s)",
+                    float(gain),
+                    tpl_gain_key,
                 )
                 _fwhm = self.header.get("FWHM", self.header.get("fwhm"))
                 fwhm = float(
@@ -1606,7 +8131,7 @@ class PSF:
                 aperture_radius = float(
                     self.input_yaml["photometry"]["aperture_radius"]
                 )
-                gain = float(self.input_yaml["gain"])
+                gain = resolve_gain_e_per_adu(None, self.input_yaml)
                 fwhm = float(self.input_yaml["fwhm"])
 
             scale = float(self.input_yaml["scale"])
@@ -1634,8 +8159,14 @@ class PSF:
                         break
             if fwhm_candidates is not None and fwhm_candidates.size >= 3:
                 fwhm_psf = float(np.nanmedian(fwhm_candidates))
-                fwhm_guard_lo = 0.5 * fwhm_input
-                fwhm_guard_hi = 2.0 * fwhm_input
+                fwhm_guard_lo_frac = float(
+                    phot_cfg.get("psf_fwhm_guard_lo_frac", 0.8)
+                )
+                fwhm_guard_hi_frac = float(
+                    phot_cfg.get("psf_fwhm_guard_hi_frac", 1.3)
+                )
+                fwhm_guard_lo = fwhm_guard_lo_frac * fwhm_input
+                fwhm_guard_hi = fwhm_guard_hi_frac * fwhm_input
                 if np.isfinite(fwhm_input) and fwhm_input > 0:
                     if fwhm_psf < fwhm_guard_lo or fwhm_psf > fwhm_guard_hi:
                         log.warning(
@@ -1659,9 +8190,13 @@ class PSF:
             fwhm_arcsec = float(fwhm * pixel_scale) if has_pixel_scale else np.nan
 
             # Adaptive geometric boost for coarse/undersampled data.
-            # Coarser sampling generally needs larger windows to capture wings robustly.
+            # Coarser sampling needs larger windows to capture the wings.
+            # Read undersampled_fwhm_threshold early so it's available for all boost/checks.
+            undersampled_fwhm_threshold = float(
+                phot_cfg.get("undersampled_fwhm_threshold", 2.5)
+            )
             build_sampling_boost = 1.0
-            if fwhm <= 2.5:
+            if fwhm <= undersampled_fwhm_threshold:
                 build_sampling_boost += 0.20
             if has_pixel_scale and pixel_scale >= 0.8:
                 build_sampling_boost += 0.10
@@ -1669,29 +8204,37 @@ class PSF:
                 build_sampling_boost += 0.10
             build_boost_cap = float(phot_cfg.get("psf_build_sampling_boost_max", 1.6))
 
-            # Detect undersampling: FWHM <= 2 pixels is a typical regime where
-            # a PSF spans only a handful of pixels across the core and is at
-            # high risk of aliasing.  We *do not* change the oversampling
-            # factor automatically (user controls this via config), but we
-            # still adapt centroiding and cutout sizes below.
-            undersampled_fwhm_threshold = float(
-                phot_cfg.get("undersampled_fwhm_threshold", 2.5)
-            )
-            undersampled = fwhm <= undersampled_fwhm_threshold
+            # Detect undersampling using the standard config key (default 2.5 px).
+            # This is consistent with main.py, catalog.py, and robust_extract_stars,
+            # which all read "undersampled_fwhm_threshold" from the same config.
+            # Previously this line used oversample_psf_fwhm (1.5 px) when
+            # oversample_psf was True, which was too restrictive: ZTF images with
+            # FWHM ~2 px were classified as well-sampled, disabling all
+            # undersampled protections (relaxed cuts, Gaussian kernel, build
+            # boost, and 4x oversampling itself).
+            #
+            # Classify on fwhm_input (the global image FWHM), not the
+            # re-estimated PSF-star FWHM: the re-estimation is clamped to
+            # [0.8, 1.3]x the input value but can still drift across the 2.5-px
+            # boundary (e.g. 2.46 -> 2.56 px) and silently disable every
+            # undersampled protection on borderline images.  The re-estimated
+            # fwhm is still used for build geometry (fit box, cutout, kernel).
+            undersampled = fwhm_input <= undersampled_fwhm_threshold
+            
             if undersampled:
                 build_boost_cap_u = float(
                     phot_cfg.get("psf_build_sampling_boost_max_undersampled", 2.2)
                 )
                 build_boost_cap = max(build_boost_cap, build_boost_cap_u)
             build_sampling_boost = float(min(build_sampling_boost, max(1.0, build_boost_cap)))
-            if undersampled and oversample <= 1:
-                log.info(
-                    "Image appears undersampled (FWHM=%.2f pix) and psf_oversample=%d; "
-                    "consider increasing psf_oversample in the config if enough PSF "
-                    "stars are available.",
-                    fwhm,
-                    oversample,
-                )
+            
+            # Adaptive oversampling based on FWHM threshold and star count.
+            # The actual oversampling factor is set AFTER star extraction and
+            # filtering, when the final PSF star count is known. This prevents
+            # over-oversampling with few stars (noisy ePSF) and allows higher
+            # oversampling with many stars (better sub-pixel resolution).
+            # For now, just flag whether adaptive oversampling is enabled.
+            _adaptive_oversample_enabled = oversample_psf and undersampled and oversample <= 1
             if undersampled and bool(
                 phot_cfg.get("psf_disable_build_quality_cuts_undersampled", True)
             ):
@@ -1703,7 +8246,6 @@ class PSF:
                     undersampled_fwhm_threshold,
                 )
 
-            # Image preprocessing.
             img = np.array(self.image, float)
             # Preserve NaNs (chip gaps) instead of replacing with median
             if mask is not None and mask.shape == img.shape:
@@ -1712,19 +8254,42 @@ class PSF:
             # Use a PSF-shape-aware centroiding choice: for clearly
             # undersampled data, a 2-D Gaussian centroid is generally more
             # stable than a pure centre-of-mass on a few bright pixels.
-            recenter_func = centroid_2dg if undersampled else centroid_com
-            log.info(
-                f"FWHM={fwhm:.2f} pix  recenter={recenter_func.__name__}  "
-                f"oversample={oversample}x"
+            # For well-sampled stars photutils 3.1 defaults EPSFBuilder to
+            # centroid_symmetry (the Anderson 2016 ePSF centre), which does
+            # not get dragged by asymmetric structure around the core the
+            # way a centre of mass is - fitted positions sit up to ~0.1 px
+            # closer to the optical-model centre on asymmetric PSFs.
+            recenter_func = (
+                _centroid_2dg_quiet if undersampled else centroid_symmetry
             )
 
             # Centroid and fit windows scale with FWHM, but must remain odd.
-            cen_box = _odd(max(7, int(np.ceil(2.0 * fwhm))))
+            # For undersampled data, use a smaller recentering box to avoid
+            # picking up neighbouring sources during EPSFBuilder recentering.
+            if undersampled:
+                cen_box = _odd(max(5, int(np.ceil(1.5 * fwhm))))
+            else:
+                cen_box = _odd(max(7, int(np.ceil(2.0 * fwhm))))
+
+            log.debug(
+                f"FWHM={fwhm:.2f} pix  recenter={recenter_func.__name__}  "
+                f"recenter_box={cen_box}  oversample={oversample}x"
+                + (" (pre-adaptive)" if _adaptive_oversample_enabled else "")
+            )
+            # The build fit_boxsize MUST match (or exceed) the photometry
+            # fit_shape scale.  If the build box is smaller, the ePSF wings
+            # beyond the build box are poorly constrained, and sigma clipping
+            # during stacking can bias them toward the faint-star profile.
+            # This creates magnitude-dependent flux bias (bright sources
+            # underestimated) -> slope > 1 in zeropoint plots.
+            phot_fit_shape_scale = float(
+                phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0)
+            )
             fit_boxsize_scale_base = float(
-                phot_cfg.get("psf_fit_boxsize_scale_fwhm", 2.5)
+                phot_cfg.get("psf_fit_boxsize_scale_fwhm", phot_fit_shape_scale)
             )
             fit_boxsize_scale = fit_boxsize_scale_base * build_sampling_boost
-            fit_box_min_arcsec = float(phot_cfg.get("psf_fit_box_min_arcsec", 2.5))
+            fit_box_min_arcsec = float(phot_cfg.get("psf_fit_box_min_arcsec", 3.0))
             fit_box_min_px = (
                 fit_box_min_arcsec / pixel_scale if has_pixel_scale else np.nan
             )
@@ -1736,64 +8301,286 @@ class PSF:
                 )
             )
 
-            # PSF cutout size: use both the configured angular scale and the
-            # image-space FWHM to guarantee that even undersampled wings are
-            # represented.  For undersampled images the FWHM constraint
-            # dominates; for well-sampled data this reduces to the previous
-            # behaviour.
+            # Safety: ensure build fit_boxsize is sufficiently larger than the
+            # photometry fit_shape.  The build uses the re-estimated PSF-star
+            # FWHM, which can be sharper than the global FWHM.  Even when
+            # fit_box = fit_shape, the ePSF wings at the edge of the fit window
+            # are poorly constrained (EE can be < 95%), causing magnitude-
+            # dependent flux bias.  Use 1.3x to ensure wings are data-driven
+            # beyond the photometry fit window.
+            _phot_fit_shape_min = _odd(
+                max(
+                    7,
+                    int(phot_fit_shape_scale * fwhm_input * build_sampling_boost),
+                    int(np.ceil(fit_box_min_px)) if np.isfinite(fit_box_min_px) else 0,
+                )
+            )
+            if undersampled:
+                _phot_fit_shape_min = _odd(max(_phot_fit_shape_min, 9))
+            _build_box_min = _odd(int(np.ceil(_phot_fit_shape_min * 1.3)))
+            if fit_boxsize < _build_box_min:
+                log.info(
+                    "Build fit_boxsize %d < 1.3x photometry fit_shape %d (PSF-star FWHM=%.2f, global FWHM=%.2f); "
+                    "enlarging build box for better wing constraint.",
+                    fit_boxsize, _build_box_min, fwhm, fwhm_input,
+                )
+                fit_boxsize = _build_box_min
+
+            # Cap the build fit box in undersampled regime.  fit_shape only
+            # bounds the per-star flux+shift fit each iteration -- the
+            # residual stack always uses the whole cutout -- so an oversized
+            # box buys no extra wing constraint.  On a ~2 px PSF a 7xFWHM
+            # box makes the affine fit sky-noise dominated: fitted centers
+            # wander (final_center_accuracy ~1 px), the build never
+            # converges, and the stacked ePSF can collapse narrow or
+            # degenerate (observed on SN2022mop undersampled fields).
+            if undersampled:
+                fit_box_max_scale = float(
+                    phot_cfg.get("psf_fit_boxsize_max_scale_fwhm", 4.5)
+                )
+                _fit_box_cap = max(
+                    5, _odd_nearest(fit_box_max_scale * fwhm)
+                )
+                if fit_boxsize > _fit_box_cap:
+                    log.info(
+                        "Undersampled: capping build fit_boxsize %d -> %d px "
+                        "(%.2fxFWHM); larger boxes destabilise the per-star "
+                        "flux/shift fit without improving wing constraint.",
+                        fit_boxsize, _fit_box_cap, fit_box_max_scale,
+                    )
+                    fit_boxsize = _fit_box_cap
+
+            # PSF cutout size: wing coverage is a physical property of the
+            # PSF (set by FWHM and wing slope), not of the sampling -- the
+            # build boost exists to give the fit box subpixel margin on
+            # undersampled data and is not applied here.  The legacy
+            # 2*scale term is also dropped: `scale` is the SExtractor
+            # *detection* box half-size (floored at scale_min_px), and on
+            # undersampled fields it inflated the cutout to ~20x FWHM --
+            # mostly neighbour-contamination surface the keep-floor then
+            # has to mask pixel-by-pixel.
+            #
+            # The primary sizing is encircled-energy based: the radius
+            # enclosing psf_cutout_ee_fraction of the analytic init
+            # profile, plus a FWHM-scaled margin, sets the diameter.
+            # Compact PSFs get smaller stamps (less sky surface for
+            # neighbour contamination and a smaller residual stack);
+            # broad-wing profiles get larger ones.  The formula result
+            # stays as the fallback when the EE measurement cannot run.
+            moffat_beta = max(
+                1.1, float(phot_cfg.get("psf_init_moffat_beta", 4.765))
+            )
             cutout_size_scale_base = float(
                 phot_cfg.get("psf_cutout_size_scale_fwhm", 10.0)
             )
-            cutout_size_scale = cutout_size_scale_base * build_sampling_boost
             cutout_min_arcsec = float(phot_cfg.get("psf_cutout_min_arcsec", 9.0))
             cutout_min_px = cutout_min_arcsec / pixel_scale if has_pixel_scale else np.nan
-            cutout_n = _odd(
+            _cutout_from_formula = _odd(
                 max(
                     12,
-                    int(2 * scale),  # legacy behaviour (arcsec scale)
-                    int(cutout_size_scale * fwhm),  # configurable wing coverage
+                    int(cutout_size_scale_base * fwhm),  # configurable wing coverage
                     int(np.ceil(cutout_min_px)) if np.isfinite(cutout_min_px) else 0,
+                    int(2 * fit_boxsize + 5),  # fit region + annulus margin
                 )
             )
+            # Floors that apply regardless of the EE result: the fit
+            # region plus an annulus for the contamination tests, the
+            # arcsecond coverage minimum, and the absolute stamp minimum.
+            _cutout_floor = _odd(
+                max(
+                    12,
+                    int(np.ceil(cutout_min_px)) if np.isfinite(cutout_min_px) else 0,
+                    int(2 * fit_boxsize + 5),
+                )
+            )
+            cutout_n = _cutout_from_formula
+            _ee_frac_target = float(
+                phot_cfg.get("psf_cutout_ee_fraction", 0.9995)
+            )
+            _ee_margin_fwhm = float(
+                phot_cfg.get("psf_cutout_ee_margin_fwhm", 1.0)
+            )
+            if 0.0 < _ee_frac_target < 1.0:
+                try:
+                    # Stars are not extracted yet, so the EE profile comes
+                    # from the core component of the analytic init
+                    # composite: a Moffat of beta=psf_init_moffat_beta at
+                    # the image FWHM.  The wider prior components have
+                    # heavy tails whose high-EE radius exceeds any
+                    # sensible stamp; the margin term covers the near
+                    # wings instead.  The 12xFWHM probe bounds the search:
+                    # a profile whose EE radius exceeds it saturates at
+                    # the probe edge, capping the cutout at ~14xFWHM.
+                    _ee_comps = _default_moffat_composite(fwhm, moffat_beta)[0:1]
+                    _ee_probe_n = _odd(max(25, int(np.ceil(12.0 * fwhm))))
+                    _ee_stamp = _composite_moffat_psf(
+                        _ee_comps, 4, _ee_probe_n
+                    )
+                    _ee_r_native = _epsf_ee_radius_native(
+                        np.asarray(_ee_stamp.data, dtype=float),
+                        4,
+                        _ee_frac_target,
+                    )
+                    if np.isfinite(_ee_r_native) and _ee_r_native > 0:
+                        _ee_diameter = 2.0 * (
+                            _ee_r_native + _ee_margin_fwhm * fwhm
+                        )
+                        _cutout_from_ee = _odd(
+                            max(_cutout_floor, int(np.ceil(_ee_diameter)))
+                        )
+                        log.info(
+                            "PSF cutout sizing: EE(%.2f%%) radius=%.1f px "
+                            "+ %.1f FWHM margin -> diameter %.1f px -> "
+                            "cutout_n=%d (formula would give %d)",
+                            100.0 * _ee_frac_target,
+                            _ee_r_native,
+                            _ee_margin_fwhm,
+                            _ee_diameter,
+                            _cutout_from_ee,
+                            _cutout_from_formula,
+                        )
+                        cutout_n = _cutout_from_ee
+                    else:
+                        log.debug(
+                            "EE-based cutout sizing returned radius=%s; "
+                            "using formula sizing.",
+                            _ee_r_native,
+                        )
+                except Exception as _ee_exc:
+                    log.debug(
+                        "EE-based cutout sizing failed (%s); using formula "
+                        "sizing.",
+                        _ee_exc,
+                    )
+            # Spatial-grid cell builds pass a fixed cutout so every cell
+            # stacks into identical stamp shapes regardless of per-cell
+            # FWHM re-estimation drift.  The field-wide value is already
+            # EE-optimised; GriddedPSFModel requires one shared shape.
+            _fixed_cutout = phot_cfg.get("_psf_fixed_cutout")
+            if _fixed_cutout is not None:
+                cutout_n = _odd(
+                    max(fit_boxsize + 3, int(_fixed_cutout))
+                )
             cutout_shape = (cutout_n, cutout_n)
             if fit_boxsize >= cutout_n - 2:
-                fit_boxsize = _odd(cutout_n - 3)
+                _fit_boxsize_clamped = _odd(cutout_n - 3)
+                log.warning(
+                    "PSF build: fit_boxsize %d exceeds cutout size %d; clamping to %d. "
+                    "This may violate the 1.3x photometry fit_shape safety margin "
+                    "(min required: %d px), risking under-constrained ePSF wings. "
+                    "Consider increasing psf_cutout_size_scale_fwhm.",
+                    fit_boxsize, cutout_n, _fit_boxsize_clamped, _build_box_min,
+                )
+                fit_boxsize = _fit_boxsize_clamped
 
-            log.info(f"Initial sources: {len(df)}")
+            # The photometry PSF is always empirical: the composite-Moffat
+            # model fitted below seeds the ePSF iteration and serves as the
+            # residual diagnostic, but it is never substituted for the
+            # delivered model.  A build that produces no usable empirical
+            # model returns None (aperture-only photometry downstream).
+
+            log.debug("Initial sources: %s", len(df))
             if threshold_limit_eff is not None and "threshold" in df.columns:
-                mask_thr = df["threshold"] > threshold_limit_eff
+                _thr_vals = pd.to_numeric(df["threshold"], errors="coerce")
+                mask_thr = (_thr_vals > threshold_limit_eff) | _thr_vals.isna()
                 n_keep_thr = int(np.sum(mask_thr))
                 min_keep_thr = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_thr >= min_keep_thr:
                     df = df[mask_thr]
                 else:
-                    log.info(
-                        "Skipping threshold cut (>%s): would leave %d candidates (< required %d).",
-                        threshold_limit_eff,
-                        n_keep_thr,
-                        min_keep_thr,
+                    # Keep-floor relaxes the strict cut so the build is
+                    # not starved, but a sub-noise "candidate" still adds
+                    # only junk samples.  Apply a hard floor so the
+                    # relaxed pool cannot include pure background peaks.
+                    _thr_hard = float(
+                        phot_cfg.get("psf_threshold_hard_min", 3.0)
                     )
-            if "SNR" in df.columns:
-                mask_snr = (df["SNR"] >= snr_min_eff) & (df["SNR"] <= snr_max_eff)
+                    if _thr_hard > 0 and _thr_hard < threshold_limit_eff:
+                        # NaN is unmeasured, not sub-noise; only drop rows
+                        # with a real below-floor value.
+                        _hard = (_thr_vals > _thr_hard) | _thr_vals.isna()
+                        _n_hard = int(np.sum(_hard))
+                        if 0 < _n_hard < len(df):
+                            log.info(
+                                "Keep-floor threshold cut at %.1f: dropping "
+                                "%d sub-noise candidates (strict cut >%s "
+                                "would leave %d < required %d).",
+                                _thr_hard,
+                                len(df) - _n_hard,
+                                threshold_limit_eff,
+                                n_keep_thr,
+                                min_keep_thr,
+                            )
+                            df = df[_hard]
+                        else:
+                            log.info(
+                                "Skipping threshold cut (>%s): would leave %d candidates (< required %d).",
+                                threshold_limit_eff,
+                                n_keep_thr,
+                                min_keep_thr,
+                            )
+                    else:
+                        log.info(
+                            "Skipping threshold cut (>%s): would leave %d candidates (< required %d).",
+                            threshold_limit_eff,
+                            n_keep_thr,
+                            min_keep_thr,
+                        )
+            _snr_cols = [
+                c
+                for c in ("SNR", "snr", "signal_to_noise", "flux_snr")
+                if c in df.columns
+            ]
+            if _snr_cols:
+                # Coalesce across the alias columns: supplemented sources
+                # can carry "snr" while "SNR" is NaN -- a first-match column
+                # pick lets NaN rows bypass the cut entirely.  Rows still
+                # NaN after coalescing have no measured S/N and cannot meet
+                # the guarantee, so they fail rather than pass through.
+                _snr_vals = None
+                for _c in _snr_cols:
+                    _v = pd.to_numeric(df[_c], errors="coerce")
+                    _snr_vals = (
+                        _v if _snr_vals is None else _snr_vals.fillna(_v)
+                    )
+                mask_snr = (_snr_vals >= snr_min_eff) & (
+                    _snr_vals <= snr_max_eff
+                )
                 n_keep_snr = int(np.sum(mask_snr))
                 min_keep_snr = max(
                     min_psf_candidates,
-                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                    int(np.ceil(min_keep_frac_after_cut * max(1, n_before))),
                 )
                 if n_keep_snr >= min_keep_snr:
                     df = df[mask_snr]
                 else:
                     log.info(
-                        "Skipping strict SNR cut ([%s, %s]): would leave %d candidates (< required %d).",
+                        "Skipping strict SNR cut ([%s, %s]): would leave %d candidates (< required %d); hard floor still applies.",
                         snr_min_eff,
                         snr_max_eff,
                         n_keep_snr,
                         min_keep_snr,
                     )
-            log.info(f"Sources after cuts: {len(df)}")
+                # Absolute floor: applies even when the strict cut was
+                # relaxed (sparse pool) or disabled (undersampled mode), so
+                # no sub-floor source ever reaches the ePSF build.  A pool
+                # emptied here falls through to the analytic-PSF path.
+                _snr_hard = float(phot_cfg.get("psf_snr_hard_min", 10.0))
+                if _snr_hard > 0 and len(df) > 0:
+                    _cur_snr = _snr_vals.loc[df.index]
+                    _hard = _cur_snr >= _snr_hard
+                    _n_drop = int((~_hard).sum())
+                    if _n_drop:
+                        log.info(
+                            "Hard SNR floor (>= %.1f): dropping %d candidates.",
+                            _snr_hard,
+                            _n_drop,
+                        )
+                        df = df[_hard]
+            log.debug("Sources after cuts: %s", len(df))
 
             if len(df) == 0:
                 log.error("No PSF candidates after filtering.")
@@ -1846,7 +8633,7 @@ class PSF:
                 snrcol=snrcol,
                 thrcol=thrcol,
             )
-            log.info(
+            log.debug(
                 f"Using {len(df_uniform)}/{len(df)} PSF candidates after spatial downselection"
             )
             df = df_uniform
@@ -1854,11 +8641,52 @@ class PSF:
             if "SNR" in df.columns:
                 df = df.sort_values("SNR", ascending=False).reset_index(drop=True)
 
+            # --- Spatially-varying PSF: per-cell ePSF -> GriddedPSFModel ---
+            # Only attempted when psf_spatial_grid is enabled AND every (or
+            # enough, per fill policy) detector cell has >=
+            # psf_grid_min_stars_per_cell vetted stars.  Any insufficiency
+            # or failure falls back to the single field-averaged ePSF below.
+            # Skipped for template-PSF builds: those consumers expect a
+            # single 2-D stamp.
+            if _spatial_grid is not None and not make_template_psf:
+                _grid_res = None
+                try:
+                    _grid_res = self._build_spatial_grid_epsf(
+                        df,
+                        xcol=xcol,
+                        ycol=ycol,
+                        grid_mode=_spatial_grid,
+                        phot_cfg=phot_cfg,
+                        fwhm=fwhm,
+                        undersampled=undersampled,
+                        oversample_psf=oversample_psf,
+                        oversample=oversample,
+                        cutout_n=cutout_n,
+                        mask=mask,
+                        background_rms=background_rms,
+                        threshold_limit=threshold_limit,
+                        SNR_limit=SNR_limit,
+                        filename_prefix=filename_prefix,
+                    )
+                except Exception as _grid_exc:
+                    log.warning(
+                        "Spatially-varying ePSF build failed (%s); "
+                        "falling back to the single field-averaged ePSF.",
+                        _grid_exc,
+                    )
+                if _grid_res is not None:
+                    return _grid_res
+                log.info(
+                    "Spatially-varying PSF not used; continuing with the "
+                    "single field-averaged ePSF."
+                )
+
             ndimage = self.create_nddata_with_fitting_weights(
-                image=self.image.copy(),
-                gain=float(self.input_yaml.get("gain", gain)),
+                image=self.image,
+                gain=float(gain),
                 read_noise=float(self.input_yaml.get("read_noise", 0.0)),
                 background_rms=background_rms,
+                mask=mask,
             )
 
             epsfstars, stars_tbl = self.robust_extract_stars(
@@ -1869,13 +8697,50 @@ class PSF:
                 log.error("All PSF-star candidates rejected.")
                 return None, df
 
-            # Optional: remove pathological PSF-star cutouts (blends, cosmic rays) via
-            # power-spectrum comparison. Configurable; uses robust MAD + median deviation.
+            # Reject cutouts whose extracted centre is too far from the
+            # cutout's geometric centre (bad centroid/extraction that slipped
+            # past robust_extract_stars, e.g. from a subsequent neighbour pull
+            # during centroid_sources refinement).  These can corrupt the ePSF
+            # core if fed into EPSFBuilder.
+            n_pre_validate = len(epsfstars)
+            epsfstars = _validate_epsfstars(epsfstars, cutout_shape, fit_boxsize)
+            n_dropped_validate = n_pre_validate - len(epsfstars)
+            if n_dropped_validate > 0:
+                log.info(
+                    "PSF-star cutout validation: rejected %d/%d stars "
+                    "(unusable core or centroid > 0.45*fit_boxsize from "
+                    "centre)",
+                    n_dropped_validate, n_pre_validate,
+                )
+            if len(epsfstars) == 0:
+                log.error("All PSF-star candidates rejected by cutout validation.")
+                return None, df
+
+            # Optional: remove pathological PSF-star cutouts (blends, cosmic
+            # rays) via power-spectrum comparison; uses MAD + median deviation.
             fft_cfg = phot_cfg if phot_cfg is not None else {}
             do_fft = fft_cfg.get("psf_fft_rejection", True)
             fft_n_sigma = float(fft_cfg.get("psf_fft_n_sigma", 4.0))
-            fft_min_frac = float(fft_cfg.get("psf_fft_min_frac_keep", 0.25))
+            fft_min_frac = float(fft_cfg.get("psf_fft_min_frac_keep", 0.5))
             fft_min_abs = max(5, int(fft_cfg.get("psf_fft_min_stars", 10)))
+
+            # For undersampled data, high-frequency cutout power is dominated
+            # by subpixel-phase sampling jitter rather than by artifacts, so
+            # the FFT outlier metric is unreliable at the normal threshold.
+            # Rather than disabling the pass entirely, relax n_sigma so only
+            # extreme outliers are flagged: cosmic-ray/hot-pixel clusters have
+            # a near-flat azimuthal power spectrum that deviates far more than
+            # any sampling-jitter excursion.
+            if do_fft and undersampled and bool(
+                fft_cfg.get("psf_fft_disable_undersampled", True)
+            ):
+                fft_n_sigma = max(fft_n_sigma, 6.0)
+                log.info(
+                    "Undersampled regime: FFT threshold relaxed to %.1f sigma "
+                    "(subpixel-phase jitter dominates; only extreme defects "
+                    "flagged).",
+                    fft_n_sigma,
+                )
 
             if do_fft and len(epsfstars) >= 8:
                 epsfstars_clean = self.detect_fft_outliers(
@@ -1918,24 +8783,186 @@ class PSF:
             elif do_fft and len(epsfstars) < 8:
                 log.info("Skipping FFT rejection (fewer than 8 PSF stars).")
 
+            # ---- Ensemble-shape outlier rejection ----
+            # A converged ePSF needs self-consistent cutouts: one or two
+            # poor sources (miscentered, contaminated, deviant
+            # morphology) leave the recentering chasing disagreement and
+            # the build never converges.  Unlike the FFT metric this
+            # tests the image-domain shape, so it still works on
+            # undersampled and elongated fields where power spectra are
+            # dominated by sampling jitter or the shared trail.
+            if bool(phot_cfg.get("psf_shape_outlier_rejection", True)) and len(
+                epsfstars
+            ) >= int(phot_cfg.get("psf_shape_outlier_min_stars", 6)):
+                try:
+                    _drop_idx = _psf_shape_outlier_indices(
+                        epsfstars,
+                        fwhm,
+                        nsigma=float(phot_cfg.get("psf_shape_outlier_nsigma", 4.0)),
+                        max_frac=float(phot_cfg.get("psf_shape_outlier_max_frac", 0.3)),
+                        min_keep=max(
+                            int(phot_cfg.get("psf_shape_outlier_min_keep", 4)),
+                            min_psf_candidates // 2,
+                        ),
+                        abs_fwhm_floor=float(
+                            phot_cfg.get(
+                                "psf_shape_outlier_abs_fwhm_floor", 0.3
+                            )
+                        ),
+                    )
+                except Exception as _shape_err:
+                    # A filter failure must never cost the whole build.
+                    log.warning(
+                        "PSF shape-outlier check failed (%s); keeping all stars.",
+                        _shape_err,
+                    )
+                    _drop_idx = []
+                if _drop_idx:
+                    log.info(
+                        "Rejected %d/%d PSF stars as shape outliers "
+                        "(median-stack residual > %.1f sigma of the "
+                        "ensemble scatter).",
+                        len(_drop_idx),
+                        len(epsfstars),
+                        float(phot_cfg.get("psf_shape_outlier_nsigma", 4.0)),
+                    )
+                    _drop_set = set(_drop_idx)
+                    epsfstars = EPSFStars(
+                        [s for i, s in enumerate(epsfstars) if i not in _drop_set]
+                    )
+
+            # ---- Pool composition diagnostic ----
+            # Ensemble-relative vetoes (shape outlier, FFT) cannot fix a
+            # pool that is mostly defects: the ensemble norm IS the defect
+            # population.  Measure each surviving cutout's FWHM directly
+            # and warn when a large fraction is far sharper than the image
+            # FWHM -- the signature of a hot-pixel/CR-dominated pool.
+            if len(epsfstars) >= 10:
+                _fwhm_check = []
+                for _s in epsfstars:
+                    _d = np.asarray(getattr(_s, "data", None), float)
+                    if _d.ndim == 2:
+                        _fwhm_check.append(measure_epsf_fwhm_native(_d, 1))
+                _fwhm_arr = np.array(
+                    [f for f in _fwhm_check if np.isfinite(f)]
+                )
+                if len(_fwhm_arr) > 5:
+                    _n_small = int(np.sum(_fwhm_arr < 0.5 * fwhm))
+                    _dom_frac = float(
+                        phot_cfg.get("psf_defect_dominance_frac", 0.4)
+                    )
+                    if _n_small / len(_fwhm_arr) > _dom_frac:
+                        log.warning(
+                            "PSF pool appears dominated by defects: %.0f%% "
+                            "of candidates have FWHM < 50%% of image FWHM "
+                            "(%.2f px). Consider enabling cosmic ray "
+                            "removal.",
+                            100 * _n_small / len(_fwhm_arr), fwhm,
+                        )
+
+            # ---- Adaptive oversampling based on final PSF star count ----
+            # Choose the highest factor that still leaves ~min_samples
+            # residuals per oversampled grid cell; starved high-factor
+            # builds are noise-dominated in the wings (see
+            # _select_adaptive_oversample).
+            if _adaptive_oversample_enabled:
+                oversample, _thin = _select_adaptive_oversample(
+                    len(epsfstars), phot_cfg
+                )
+                if _thin:
+                    self.psf_ensemble_understaffed = True
+            elif oversample * max(fwhm, 1e-3) < 4.0:
+                # photutils guideline: the ePSF grid needs ~4 points per
+                # FWHM for the cubic-spline interpolation to be accurate
+                # (oversampling >= 4/FWHM; e.g. x4 at FWHM~1.3 px, x2 at
+                # 2 px, x1 at >=4 px).
+                log.warning(
+                    "ePSF grid holds %.1f points per FWHM (%dx at "
+                    "FWHM=%.2f px); the photutils guideline is ~4 -- the "
+                    "grid cannot resolve the core. Enable "
+                    "psf_auto_oversample_undersampled or raise "
+                    "psf_oversample.",
+                    oversample * fwhm, oversample, fwhm,
+                )
+
             smooth_kind = str(phot_cfg.get("psf_smoothing_kernel", "quartic")).strip().lower()
             smooth_size = phot_cfg.get("psf_smoothing_kernel_size", None)
-            smooth_scale = float(phot_cfg.get("psf_smoothing_kernel_size_scale_fwhm", 0.8))
+            # Kernel footprint in NATIVE pixels: ~1 px is the Anderson & King
+            # (2000) canonical choice (5x5 quartic on a 4x-oversampled grid)
+            # and matches Godden & Blundell (2025, RAS TI): larger footprints
+            # erase real ePSF structure and inflate pixel-phase errors.
+            smooth_scale = float(
+                phot_cfg.get("psf_smoothing_kernel_size_scale_px", 1.0)
+            )
             smooth_max = int(phot_cfg.get("psf_smoothing_kernel_size_max", 9))
+
+            # Thin-sampling boost.  Each oversampled gridpoint is constrained
+            # by ~n_stars/oversample^2 samples; when that effective sample
+            # count is low the ePSF is noise-dominated and the "minimum
+            # kernel that removes the noise" (Godden & Blundell 2025) is
+            # wider than 1 px.  A footprint-f kernel averages ~(f*os)^2
+            # gridpoint cells, so residual noise ~ 1/(f*sqrt(n_eff)) and the
+            # variance-equalising footprint is ~ sqrt(n_target/n_eff) px.
+            # The footprint is capped at ~1xFWHM inside get_smoothing_kernel:
+            # past that the kernel erases the core itself (synthetic
+            # undersampled builds show ~+3% ePSF broadening at ~1.1xFWHM and
+            # +10-25% beyond ~1.5xFWHM).
+            n_final = len(epsfstars)
+            _samp_target = float(
+                phot_cfg.get("psf_smoothing_kernel_target_samples", 10.0)
+            )
+            _boost_max = float(
+                phot_cfg.get("psf_smoothing_kernel_boost_max", 2.5)
+            )
+            n_eff = n_final / max(1, oversample) ** 2
+            if _samp_target > 0 and n_eff > 0:
+                boost = float(
+                    np.clip(np.sqrt(_samp_target / n_eff), 1.0,
+                            max(1.0, _boost_max))
+                )
+            else:
+                boost = 1.0
+            if boost > 1.0:
+                smooth_scale *= boost
+                log.info(
+                    "Smoothing kernel footprint boosted x%.2f for thin "
+                    "sampling (n=%d stars, %.1f samples/gridpoint at x%d): "
+                    "footprint %.2f native px",
+                    boost, int(n_final), n_eff, oversample, smooth_scale,
+                )
+
             smooth_kernel = get_smoothing_kernel(
                 fwhm,
                 oversample=oversample,
                 kernel_size=(int(smooth_size) if smooth_size is not None else None),
                 kind=smooth_kind,
-                size_scale_fwhm=smooth_scale,
+                size_scale_px=smooth_scale,
                 size_max=smooth_max,
+                max_fwhm_frac=float(
+                    phot_cfg.get("psf_smoothing_kernel_max_fwhm_frac", 1.25)
+                ),
+                cap_min_px=float(
+                    phot_cfg.get("psf_smoothing_kernel_cap_min_px", 1.75)
+                ),
             )
+            if smooth_kernel is None:
+                log.debug("ePSF smoothing kernel: disabled (psf_smoothing_kernel=none)")
+            else:
+                log.debug(
+                    "ePSF smoothing kernel: %s %dx%d (footprint %.2f native px, "
+                    "oversample=x%d)",
+                    smooth_kind,
+                    int(smooth_kernel.shape[0]),
+                    int(smooth_kernel.shape[1]),
+                    float(smooth_kernel.shape[0]) / max(1, oversample),
+                    int(oversample),
+                )
 
             # Use aperture_radius for PSF normalization to ensure consistent flux scale with aperture photometry.
             # This ensures PSF and AP photometry measure flux over the same effective area.
             norm_radius = float(aperture_radius)
 
-            log.info(
+            log.debug(
                 "PSF build FWHM: input=%.2f px, used=%.2f px; normalisation radius=%.2f px (same as photometry aperture_radius); oversample=x%d",
                 fwhm_input,
                 fwhm,
@@ -1947,6 +8974,31 @@ class PSF:
             epsf_clip_maxiters = int(
                 max(1, phot_cfg.get("psf_build_sigma_clip_maxiters", 15))
             )
+            
+            # Adaptive sigma clipping based on number of PSF stars.
+            # With few stars (<20), use less aggressive clipping to avoid over-pruning
+            # With many stars (>100), can use more aggressive clipping.
+            # len(epsfstars), not len(df): df is the pre-extraction candidate
+            # pool and can be far larger than the stars that survived the
+            # centroid/contamination/FFT cuts the clip actually applies to.
+            auto_sigma_clip = bool(phot_cfg.get("psf_adaptive_sigma_clip", True))
+            if auto_sigma_clip:
+                n_stars = len(epsfstars)
+                if n_stars < 20:
+                    epsf_clip_sigma = 3.0
+                    epsf_clip_maxiters = 5
+                    log.debug(
+                        "Adaptive sigma clipping: using less aggressive settings (sigma=%.1f, maxiters=%d) for %d stars",
+                        epsf_clip_sigma, epsf_clip_maxiters, n_stars
+                    )
+                elif n_stars > 100:
+                    epsf_clip_sigma = 5.0
+                    epsf_clip_maxiters = 20
+                    log.debug(
+                        "Adaptive sigma clipping: using more aggressive settings (sigma=%.1f, maxiters=%d) for %d stars",
+                        epsf_clip_sigma, epsf_clip_maxiters, n_stars
+                    )
+            
             sigma_clip_epsf = SigmaClip(
                 sigma=epsf_clip_sigma,
                 cenfunc=np.nanmedian,
@@ -1954,150 +9006,1684 @@ class PSF:
                 maxiters=epsf_clip_maxiters,
             )
             log.info(
-                border_msg("PSF build parameters")
-                + "\n"
-                + (
-                    "  make_template_psf: {make_template_psf}\n"
-                    "  candidates: initial={n_before}, after_cuts={n_after}, used_after_uniform={n_uniform}\n"
-                    "  selection cuts: min_candidates={min_psf_candidates}, threshold_limit={threshold_limit}, "
-                    "SNR_limit=[{snr_lo}, {snr_hi}], min_keep_frac_after_cut={min_keep_frac_after_cut:.2f}, "
-                    "saturate_frac={saturate_frac:.2f}\n"
-                    "  geometry: fwhm_input={fwhm_input:.2f}px, fwhm_used={fwhm_used:.2f}px, "
-                    "fwhm_arcsec={fwhm_arcsec}, pixel_scale={pixel_scale}, "
-                    "build_sampling_boost={build_sampling_boost:.2f}, "
-                    "oversample=x{oversample}, recenter={recenter}, cen_box={cen_box}px, fit_box={fit_box}px, cutout={cutout}px\n"
-                    "  normalization: aperture_radius={aperture_radius:.2f}px (same as photometry)\n"
-                    "  epsf builder: sigma_clip={epsf_clip_sigma:.2f}, sigma_clip_maxiters={epsf_clip_maxiters}, "
-                    "maxiters=10, smoothing_kernel=quartic\n"
-                    "  fft rejection: enabled={fft_enabled}, n_sigma={fft_n_sigma:.2f}, "
-                    "min_frac_keep={fft_min_frac:.2f}, min_stars={fft_min_abs}"
-                ).format(
-                    make_template_psf=bool(make_template_psf),
-                    n_before=int(n_before),
-                    n_after=int(len(df)),
-                    n_uniform=int(len(df_uniform)),
-                    min_psf_candidates=int(min_psf_candidates),
-                    threshold_limit=(
-                        float(threshold_limit_eff)
-                        if threshold_limit_eff is not None
-                        else np.nan
-                    ),
-                    snr_lo=float(snr_min_eff),
-                    snr_hi=float(snr_max_eff),
-                    min_keep_frac_after_cut=float(min_keep_frac_after_cut),
-                    saturate_frac=float(saturate_frac),
-                    fwhm_input=float(fwhm_input),
-                    fwhm_used=float(fwhm),
-                    fwhm_arcsec=(
-                        f"{fwhm_arcsec:.2f}\"" if np.isfinite(fwhm_arcsec) else "unknown"
-                    ),
-                    pixel_scale=(
-                        f"{pixel_scale:.3f} arcsec/px"
-                        if has_pixel_scale
-                        else "unknown"
-                    ),
-                    build_sampling_boost=float(build_sampling_boost),
-                    oversample=int(oversample),
-                    recenter=str(recenter_func.__name__),
-                    cen_box=int(cen_box),
-                    fit_box=int(fit_boxsize),
-                    cutout=int(cutout_n),
-                    aperture_radius=float(aperture_radius),
-                    epsf_clip_sigma=float(epsf_clip_sigma),
-                    epsf_clip_maxiters=int(epsf_clip_maxiters),
-                    fft_enabled=bool(do_fft),
-                    fft_n_sigma=float(fft_n_sigma),
-                    fft_min_frac=float(fft_min_frac),
-                    fft_min_abs=int(fft_min_abs),
-                )
+                "ePSF build: candidates=%d->%d->%d | fwhm=%.2f->%.2f px (%s) | "
+                "oversample=x%d recenter=%s | cutout=%dpx fit_box=%dpx | "
+                "fft_reject=%s (n_sigma=%.2f)",
+                int(n_before), int(len(df)), int(len(df_uniform)),
+                float(fwhm_input), float(fwhm),
+                f"{fwhm_arcsec:.2f}\"" if np.isfinite(fwhm_arcsec) else "unknown",
+                int(oversample), str(recenter_func.__name__),
+                int(cutout_n), int(fit_boxsize),
+                str(bool(do_fft)), float(fft_n_sigma),
             )
-            log.info(
+            log.debug(
+                "ePSF build details: make_template_psf=%s | cuts: min_cand=%d "
+                "threshold=%s SNR=[%s,%s] keep_frac=%.2f saturate_frac=%.2f | "
+                "norm: aperture=%.2fpx | epsf: sigma_clip=%.2f maxiters=%d | "
+                "fft: min_frac_keep=%.2f min_stars=%d",
+                str(bool(make_template_psf)),
+                int(min_psf_candidates),
+                str(float(threshold_limit_eff) if threshold_limit_eff is not None else np.nan),
+                str(float(snr_min_eff)), str(float(snr_max_eff)),
+                float(min_keep_frac_after_cut), float(saturate_frac),
+                float(aperture_radius),
+                float(epsf_clip_sigma), int(epsf_clip_maxiters),
+                float(fft_min_frac), int(fft_min_abs),
+            )
+            log.debug(
                 "PSF build windows: fit_box=%.2f*FWHM (base %.2f, min %.2f arcsec) -> %d px, "
                 "cutout=%.2f*FWHM (base %.2f, min %.2f arcsec) -> %d px, sigma_clip=%.2f (%d iters)",
                 fit_boxsize_scale,
                 fit_boxsize_scale_base,
                 fit_box_min_arcsec,
                 fit_boxsize,
-                cutout_size_scale,
+                cutout_size_scale_base,
                 cutout_size_scale_base,
                 cutout_min_arcsec,
                 cutout_n,
                 epsf_clip_sigma,
                 epsf_clip_maxiters,
             )
-            epsf_builder = EPSFBuilder(
-                oversampling=oversample,
-                recentering_func=recenter_func,
-                recentering_boxsize=cen_box,
-                recentering_maxiters=100,
-                fitter=EPSFFitter(fit_boxsize=fit_boxsize),
-                maxiters=10,
-                norm_radius=norm_radius,
-                sigma_clip=sigma_clip_epsf,
-                smoothing_kernel=smooth_kernel,
-                progress_bar=False,
+            # Adaptive iteration strategy: start with fewer iterations, increase if not converged
+            # This reduces average build time significantly while maintaining quality
+            adaptive_iters = bool(phot_cfg.get("psf_adaptive_iterations", True))
+            base_maxiters = int(phot_cfg.get("psf_maxiters_initial", 5)) if adaptive_iters else 10
+            max_maxiters = int(phot_cfg.get("psf_maxiters_max", 10))
+            # Undersampled builds use a relaxed center_accuracy (see below);
+            # the settled point lands at ~7-9 iterations on thin-sampled
+            # fields, beyond the default 5-iter first pass.  Give the first
+            # pass enough headroom to converge directly rather than paying
+            # for a retry rebuild every time.
+            if undersampled and adaptive_iters:
+                base_maxiters = max(base_maxiters, min(max_maxiters, 10))
+            
+            # Build EPSFBuilder kwargs.  photutils >=3.0 takes the fit box via
+            # ``fit_shape``; older versions take an EPSFFitter(fit_boxsize=...)
+            # instance.  Note ``center_accuracy`` (not "accuracy_threshold") is
+            # the convergence parameter -- it tests *centering* stability, not
+            # shape.  On undersampled data the default is unreachable (see
+            # _attempt_epsf_build), so it is relaxed there; elsewhere the
+            # default is kept since tightening only burns iterations.
+            _bld_params = _inspect.signature(EPSFBuilder.__init__).parameters
+
+            _fwhm_lo = float(phot_cfg.get("psf_epsf_fwhm_min_frac", 0.85))
+            _fwhm_hi = float(phot_cfg.get("psf_epsf_fwhm_max_frac", 1.5))
+            # Non-converged models inside this band but outside
+            # [fwhm_min, fwhm_max] are marginal misses -- thin clean
+            # pools land there as readily as defect stacks, so the
+            # residual gate below arbitrates.  Outside it the discard
+            # is unconditional: ~0.5x readings are resampled-defect
+            # stacks, not stars.
+            _fwhm_rej_lo = float(
+                phot_cfg.get("psf_epsf_fwhm_discard_min_frac", 0.6)
+            )
+            _fwhm_rej_hi = float(
+                phot_cfg.get("psf_epsf_fwhm_discard_max_frac", 2.0)
+            )
+            # A real PSF is positive; only noise and resampling ringing
+            # produce negative flux.  A large negative-flux fraction on a
+            # raw build means the residual median is noise-drawn (too few
+            # samples per oversampled grid cell) -- production fields show
+            # clean builds below ~0.15 and starved ones above ~0.5.
+            _negfrac_max = float(
+                phot_cfg.get("psf_epsf_negfrac_max", 0.4)
+            )
+            _res_gate = bool(
+                phot_cfg.get("psf_epsf_residual_gate", True)
+            )
+            _res_ratio_max = float(
+                phot_cfg.get("psf_epsf_residual_ratio_max", 1.3)
             )
 
-            # Initialise ePSF from a Moffat profile. The wing parameter is
-            # configurable; larger values approach Gaussian-like cores.
-            moffat_alpha = float(phot_cfg.get("psf_init_moffat_beta", 4.765))
-            moffat_alpha = max(1.1, moffat_alpha)
-            moffat_gamma = (oversample * fwhm) / (
-                2.0 * np.sqrt(2.0 ** (1.0 / moffat_alpha) - 1.0)
+            # Coarse-to-fine schedule for undersampled osamp>=2 builds:
+            # a wide-kernel first phase produces a smooth model so the
+            # shift refit cannot drag stars onto a shared pixel-phase
+            # class; the nominal kernel then refines the detail.  In
+            # native-pixel kernel footprint; 0 disables.
+            _c2f_px = float(
+                phot_cfg.get("psf_epsf_coarse_kernel_px", 2.0)
             )
-            log.info(
-                "ePSF init kernel: moffat_beta=%g, gamma=%g px, size=%dx%d",
-                moffat_alpha,
-                float(moffat_gamma),
-                int(oversample * cutout_n),
-                int(oversample * cutout_n),
+            # Bound on cumulative star-centre drift in the shift refit;
+            # keeps phase classes populated on undersampled builds.
+            _max_shift = float(
+                phot_cfg.get("psf_epsf_max_star_shift_px", 1.0)
             )
-            kernel = Moffat2DKernel(
-                gamma=max(float(moffat_gamma), 1e-6),
-                alpha=float(moffat_alpha),
-                x_size=oversample * cutout_n,
-                y_size=oversample * cutout_n,
-            )
-            cutout_ctr = (oversample * cutout_n - 1) / 2.0
-            init_epsf = ImagePSF(
-                data=kernel.array,
-                x_0=cutout_ctr,
-                y_0=cutout_ctr,
-                oversampling=oversample,
+            # Non-converged builds get one rebuild after dropping the
+            # stars still drifting (and any photutils excluded for
+            # repeated fit failures): one or two poor sources can keep
+            # the ensemble from ever settling.  Shares the
+            # shape-outlier removal bounds so the pool cannot starve.
+            _prune_unsettled = bool(phot_cfg.get("psf_prune_unsettled_retry", True))
+            _prune_max_frac = float(phot_cfg.get("psf_prune_unsettled_max_frac", 0.4))
+            _prune_min_keep = max(
+                int(phot_cfg.get("psf_shape_outlier_min_keep", 4)),
+                min_psf_candidates // 2,
             )
 
-            epsf, fitted_stars = epsf_builder.build_epsf(epsfstars, init_epsf=init_epsf)
+            def _attempt_epsf_build(osamp_c):
+                """Run the ePSF build (plus iteration retry) at ``osamp_c``.
 
-            # EPSFBuilder already normalizes to unit sum within norm_radius.
-            # Do not apply secondary normalization as it corrupts the flux scale
-            # by dividing by total array sum (including wings outside norm_radius).
-
-            if oversample > 1:
-                self.plot_oversampled_psf(
-                    epsf,
-                    oversample=oversample,
-                    save_path=os.path.join(
-                        write_dir, f"PSF_Image_{base}.png"
+                Returns ``(epsf, fitted_stars, final_acc, init_epsf, fwhm_meas)``
+                where ``fwhm_meas`` is the measured ePSF FWHM in native pixels
+                (NaN when the model is unusable).
+                """
+                # Smoothing kernel for this grid: the thin-sampling boost is
+                # recomputed per candidate because n_eff scales with osamp^2.
+                _n_eff_c = n_final / max(1, osamp_c) ** 2
+                if _samp_target > 0 and _n_eff_c > 0:
+                    _boost_c = float(
+                        np.clip(np.sqrt(_samp_target / _n_eff_c), 1.0,
+                                max(1.0, _boost_max))
+                    )
+                else:
+                    _boost_c = 1.0
+                kern_c = get_smoothing_kernel(
+                    fwhm,
+                    oversample=osamp_c,
+                    kernel_size=(
+                        int(smooth_size) if smooth_size is not None else None
+                    ),
+                    kind=smooth_kind,
+                    size_scale_px=smooth_scale * _boost_c / boost,
+                    size_max=smooth_max,
+                    max_fwhm_frac=float(
+                        phot_cfg.get("psf_smoothing_kernel_max_fwhm_frac", 1.25)
+                    ),
+                    cap_min_px=float(
+                        phot_cfg.get("psf_smoothing_kernel_cap_min_px", 1.75)
                     ),
                 )
 
+                _kw = dict(
+                    oversampling=osamp_c,
+                    recentering_func=recenter_func,
+                    recentering_boxsize=cen_box,
+                    recentering_maxiters=50 if adaptive_iters else 100,
+                    maxiters=base_maxiters,
+                    sigma_clip=sigma_clip_epsf,
+                    smoothing_kernel=kern_c,
+                    progress_bar=False,
+                )
+                # photutils 3.1 anti-alias filter: the default passband
+                # (0.8, or 0.7 at osamp=2) removes real signal near
+                # 1 cycle/pix on strongly undersampled data; upstream
+                # recommends 0.85-0.9 there.  Only applies when an
+                # oversampled grid exists.
+                if (
+                    undersampled
+                    and osamp_c >= 2
+                    and "alias_passband" in _bld_params
+                ):
+                    _kw["alias_passband"] = float(
+                        phot_cfg.get(
+                            "psf_epsf_alias_passband_undersampled", 0.9
+                        )
+                    )
+                # 3.1 wing smoothing (past 3.5 FWHM) lowers wing noise but
+                # upstream warns it degrades the wings of a strongly
+                # undersampled ePSF at oversampling 1.
+                if "wing_smoothing" in _bld_params:
+                    _kw["wing_smoothing"] = bool(
+                        phot_cfg.get("psf_epsf_wing_smoothing", True)
+                    ) and not (undersampled and osamp_c == 1)
+                # 3.1 convergence is fraction-based (a few drifting stars
+                # no longer force maxiters); expose the knob so a strict
+                # all-stars build remains reachable.
+                if "converged_fraction" in _bld_params:
+                    _kw["converged_fraction"] = float(
+                        phot_cfg.get("psf_epsf_converged_fraction", 0.95)
+                    )
+                # On undersampled data the default 1e-3 px center-accuracy is
+                # unreachable: with ~n_stars/osamp^2 samples per gridpoint the
+                # fitted star centers jitter by ~0.03-0.1 px between iterations
+                # forever, so "converged" is never reached and the retry keeps
+                # stacking noise-drawn residuals (the ePSF core drifts sharp,
+                # measured on undersampled SN2022mop fields).  A ~0.05 px
+                # threshold (~3% of FWHM, and far below the 0.4-px centroiding
+                # accuracy the photometry needs) stops the iteration as soon
+                # as the centers settle instead of accumulating noise.
+                if undersampled:
+                    _kw["center_accuracy"] = float(
+                        phot_cfg.get("psf_center_accuracy_undersampled", 0.05)
+                    )
+                if "center_accuracy" not in _bld_params:
+                    _kw.pop("center_accuracy", None)
+                # Cap the inner LM iterations of each star fit: well-posed
+                # fits converge in ~10, so 100 (the photutils default) only
+                # wastes cycles on stars that will be excluded anyway.
+                if "fitter_maxiters" in _bld_params:
+                    _kw["fitter_maxiters"] = int(
+                        phot_cfg.get("psf_epsf_fitter_maxiters", 50)
+                    )
+                if "fit_shape" in _bld_params:
+                    _kw["fit_shape"] = fit_boxsize
+                else:
+                    _kw["fitter"] = EPSFFitter(fit_boxsize=fit_boxsize)
+                # photutils <3.0 normalises each star inside norm_radius;
+                # pass the photometry aperture radius so the ePSF flux
+                # scale matches the AP scale.  photutils >=3.0 dropped the
+                # parameter (stars normalise by total cutout flux), so
+                # gate on the signature.
+                if "norm_radius" in _bld_params:
+                    _kw["norm_radius"] = norm_radius
+                # Bound the cumulative star-centre drift when supported:
+                # an unbounded refit collapses the ensemble onto shared
+                # pixel-phase classes on undersampled data.  All builders
+                # in this attempt share one origin map so the bound is
+                # cumulative across phases and retries.  The subclass is
+                # used even with the bound off (max_shift_px<=0) because
+                # it also records per-star centre movement for the
+                # non-converged prune-retry below.
+                _BuilderCls = EPSFBuilder
+                _bld_extra = {}
+                _shift_orig = {}
+                _epsf_hist = []
+                if (
+                    hasattr(EPSFBuilder, "_fit_stars")
+                    and hasattr(EPSFBuilder, "_fit_star")
+                    and hasattr(EPSFBuilder, "_check_convergence")
+                ):
+                    _BuilderCls = _BoundedShiftEPSFBuilder
+                    _bld_extra = dict(
+                        max_shift_px=_max_shift,
+                        orig_centres=_shift_orig,
+                        epsf_history=_epsf_hist,
+                    )
+                builder = _BuilderCls(**_kw, **_bld_extra)
+
+                # Coarse phase for undersampled osamp>=2 builds: the first
+                # iterations from the analytic seed are when the shift
+                # refit can drag stars onto shared phase classes.  A
+                # wide-kernel pass first yields a smooth model that keeps
+                # stars near their measured phases (measured: 0/9 empty
+                # classes and negfrac 0.08 at x3, vs 3/9 empty and 0.23
+                # single-pass); the nominal kernel then refines detail.
+                kern_wide = None
+                _p1_iters = 0
+                if (
+                    undersampled
+                    and osamp_c >= 2
+                    and _c2f_px > 0
+                    and kern_c is not None
+                ):
+                    kern_wide = get_smoothing_kernel(
+                        fwhm,
+                        oversample=osamp_c,
+                        kernel_size=None,
+                        kind=smooth_kind,
+                        size_scale_px=_c2f_px,
+                        size_max=smooth_max,
+                        max_fwhm_frac=float(
+                            phot_cfg.get(
+                                "psf_smoothing_kernel_max_fwhm_frac", 1.25
+                            )
+                        ),
+                        cap_min_px=float(
+                            phot_cfg.get(
+                                "psf_smoothing_kernel_cap_min_px", 1.75
+                            )
+                        ),
+                    )
+                    if kern_wide is not None:
+                        _p1_iters = min(4, max(2, base_maxiters // 3))
+
+                # Initialise ePSF from the analytic model.  The helper
+                # applies the pixel response and the photutils flux
+                # convention.  psf_use_analytic_init=False seeds the
+                # build from scratch instead -- a wrong analytic seed can
+                # pull the empirical solution toward the model shape, and
+                # disabling it is the clean A/B test for that.
+                init_epsf_c = _composite_moffat_psf(
+                    _analytic_comps,
+                    osamp_c,
+                    cutout_n,
+                    ellipticity=_analytic_ell,
+                )
+                _init_seed = (
+                    init_epsf_c
+                    if bool(phot_cfg.get("psf_use_analytic_init", True))
+                    else None
+                )
+                if osamp_c == oversample:
+                    log.debug(
+                        "ePSF init kernel: %d-component composite, "
+                        "fitted=%s, size=%dx%d",
+                        len(_analytic_comps),
+                        _analytic_fitted,
+                        init_epsf_c.data.shape[1],
+                        init_epsf_c.data.shape[0],
+                    )
+
+                epsf_c = fitted_c = None
+                acc_c = float("nan")
+                res = None
+                conv_c = None
+                _res_builder = None
+                _stars_work = epsfstars
+                if _p1_iters > 0:
+                    # Coarse phase: wide kernel, settled stars carry over.
+                    _kw1 = dict(
+                        _kw,
+                        smoothing_kernel=kern_wide,
+                        maxiters=_p1_iters,
+                    )
+                    builder1 = _BuilderCls(**_kw1, **_bld_extra)
+                    try:
+                        res1 = _call_build_epsf(
+                            builder1, epsfstars, _init_seed
+                        )
+                    except Exception as _p1_exc:
+                        log.warning(
+                            "ePSF coarse phase raised %s: %s",
+                            type(_p1_exc).__name__, _p1_exc,
+                        )
+                        res1 = None
+                    if (
+                        res1 is not None
+                        and hasattr(res1, "epsf")
+                        and _epsf_usable(res1.epsf)
+                    ):
+                        _kw2 = dict(
+                            _kw, maxiters=max(1, base_maxiters - _p1_iters)
+                        )
+                        builder2 = _BuilderCls(**_kw2, **_bld_extra)
+                        try:
+                            res = _call_build_epsf(
+                                builder2, res1.fitted_stars, res1.epsf
+                            )
+                            _res_builder = builder2
+                        except Exception as _p2_exc:
+                            log.warning(
+                                "ePSF refine phase raised %s: %s; keeping "
+                                "coarse-phase model.",
+                                type(_p2_exc).__name__, _p2_exc,
+                            )
+                        if res is None:
+                            res = res1
+                            _res_builder = builder1
+                if res is None:
+                    try:
+                        res = _call_build_epsf(
+                            builder, epsfstars, _init_seed
+                        )
+                        _res_builder = builder
+                    except Exception as _build_exc:
+                        log.warning(
+                            "ePSF build raised %s: %s",
+                            type(_build_exc).__name__, _build_exc,
+                        )
+                        res = None
+                # A crash discards the whole result even when earlier
+                # iterations produced a healthy model.  Salvage the
+                # newest completed ePSF from the shared build history:
+                # a slightly non-settled empirical model is still usable.
+                # It is reported as non-converged so the quality gates,
+                # prune loop, and adaptive retry still see it.
+                if res is None and bool(
+                    phot_cfg.get("psf_salvage_partial_epsf", True)
+                ):
+                    for _h in reversed(_epsf_hist):
+                        if _epsf_usable(_h):
+                            res = SimpleNamespace(
+                                epsf=_h,
+                                fitted_stars=_stars_work,
+                                iterations=len(_epsf_hist),
+                                converged=False,
+                                final_center_accuracy=None,
+                                n_excluded_stars=0,
+                                excluded_star_indices=[],
+                            )
+                            _res_builder = builder
+                            log.warning(
+                                "ePSF build crashed; salvaging the last "
+                                "completed iteration's empirical model "
+                                "(converged=no)."
+                            )
+                            break
+                # photutils >=3.0 returns EPSFBuildResults; <3.0 returns
+                # (epsf, fitted_stars).
+                if res is not None and hasattr(res, "epsf"):
+                    epsf_c = res.epsf
+                    fitted_c = res.fitted_stars
+                    conv_c = bool(getattr(res, "converged", False))
+                    self.psf_converged_relaxed = False
+                    acc_c = (
+                        float(res.final_center_accuracy)
+                        if res.final_center_accuracy is not None
+                        else float("nan")
+                    )
+                    _conv_frac = getattr(res, "final_converged_fraction", None)
+                    _asym = getattr(res, "center_asymmetry", None)
+                    log.info(
+                        "ePSF build (oversample=x%d): converged=%s, "
+                        "iterations=%d, final_center_accuracy=%.4g px"
+                        "%s%s",
+                        osamp_c, res.converged, res.iterations, acc_c,
+                        (
+                            f", converged_fraction={float(_conv_frac):.3f}"
+                            if _conv_frac is not None
+                            else ""
+                        ),
+                        (
+                            ", center_asymmetry="
+                            + np.array2string(
+                                np.asarray(_asym, float), precision=3
+                            )
+                            if _asym is not None
+                            else ""
+                        ),
+                    )
+                    _n_excl = int(getattr(res, "n_excluded_stars", 0) or 0)
+                    if _n_excl > 0:
+                        log.info(
+                            "ePSF build excluded %d star(s) after repeated "
+                            "fit failures (indices %s)",
+                            _n_excl,
+                            getattr(res, "excluded_star_indices", []),
+                        )
+                    # ---- Non-converged: iteratively prune unsettled ----
+                    # The build converges only when every fitted star's
+                    # centre stops moving; a few poor sources keep
+                    # drifting forever and take the model with them.  Each
+                    # round drops the stars still moving past
+                    # center_accuracy on the last iteration (plus any
+                    # photutils excluded for repeated fit failures) and
+                    # rebuilds on the cleaned pool.  Rounds repeat until
+                    # convergence or the total-removal budget is spent --
+                    # a single pass is often insufficient because the
+                    # next cohort of movers only becomes identifiable
+                    # after the worst offenders are gone.
+                    if _prune_unsettled and not res.converged:
+                        _rounds_max = max(
+                            1,
+                            int(phot_cfg.get("psf_prune_unsettled_rounds", 3)),
+                        )
+                        _budget = min(
+                            max(
+                                1,
+                                int(np.floor(_prune_max_frac * len(_stars_work))),
+                            ),
+                            len(_stars_work) - _prune_min_keep,
+                        )
+                        _work_orig = list(range(len(_stars_work)))
+                        _n_dropped = 0
+                        for _pr in range(_rounds_max):
+                            if (
+                                res is None
+                                or not hasattr(res, "epsf")
+                                or res.converged
+                                or len(_stars_work) <= _prune_min_keep
+                                or _n_dropped >= _budget
+                            ):
+                                break
+                            # Suspect and mover indices are relative to
+                            # the pool that produced ``res`` -- the
+                            # current working pool.
+                            _suspects = []
+                            for _i in getattr(res, "excluded_star_indices", None) or []:
+                                if int(_i) not in _suspects:
+                                    _suspects.append(int(_i))
+                            _mv = getattr(_res_builder, "_last_move", None)
+                            _acc2 = getattr(_res_builder, "center_accuracy_sq", None)
+                            if (
+                                _mv is not None
+                                and _acc2 is not None
+                                and len(_mv) == len(_stars_work)
+                            ):
+                                _mv = np.asarray(_mv, float)
+                                for _i in np.argsort(
+                                    -np.where(np.isfinite(_mv), _mv, -1.0)
+                                ):
+                                    if _mv[_i] >= _acc2 and int(_i) not in _suspects:
+                                        _suspects.append(int(_i))
+                            _remaining = min(
+                                _budget - _n_dropped,
+                                len(_stars_work) - _prune_min_keep,
+                            )
+                            _drop_w = [
+                                i for i in _suspects if 0 <= i < len(_stars_work)
+                            ][: max(0, _remaining)]
+                            if not _drop_w:
+                                break
+                            _drop_set = set(_drop_w)
+                            _pruned = EPSFStars(
+                                [
+                                    s
+                                    for i, s in enumerate(_stars_work)
+                                    if i not in _drop_set
+                                ]
+                            )
+                            _seed_p = epsf_c if _epsf_usable(epsf_c) else _init_seed
+                            _drop_orig = sorted(_work_orig[i] for i in _drop_w)
+                            log.info(
+                                "ePSF did not converge; removing %d "
+                                "star(s) that never settled or failed "
+                                "fitting (indices %s) and rebuilding "
+                                "with %d stars",
+                                len(_drop_w),
+                                _drop_orig,
+                                len(_pruned),
+                            )
+                            builder_p = _BuilderCls(**_kw, **_bld_extra)
+                            try:
+                                res_p = _call_build_epsf(builder_p, _pruned, _seed_p)
+                            except Exception as _p_exc:
+                                log.warning(
+                                    "ePSF prune-retry raised %s: %s; "
+                                    "keeping last model.",
+                                    type(_p_exc).__name__,
+                                    _p_exc,
+                                )
+                                break
+                            if res_p is None or not hasattr(res_p, "epsf"):
+                                break
+                            log.info(
+                                "ePSF prune-retry (oversample=x%d): "
+                                "converged=%s, iterations=%d, "
+                                "final_center_accuracy=%.4g px",
+                                osamp_c,
+                                res_p.converged,
+                                res_p.iterations,
+                                (
+                                    float(res_p.final_center_accuracy)
+                                    if res_p.final_center_accuracy
+                                    is not None
+                                    else float("nan")
+                                ),
+                            )
+                            if not (
+                                res_p.converged
+                                or _epsf_usable(res_p.epsf)
+                            ):
+                                # The cleaned build produced nothing
+                                # worth keeping; stop spending budget.
+                                break
+                            res = res_p
+                            _res_builder = builder_p
+                            _stars_work = _pruned
+                            _work_orig = [i for i in _work_orig if i not in _drop_set]
+                            _n_dropped += len(_drop_w)
+                            epsf_c = res_p.epsf
+                            fitted_c = res_p.fitted_stars
+                            conv_c = bool(res_p.converged)
+                            acc_c = (
+                                float(res_p.final_center_accuracy)
+                                if res_p.final_center_accuracy is not None
+                                else float("nan")
+                            )
+                    if (
+                        adaptive_iters
+                        and not res.converged
+                        and base_maxiters < max_maxiters
+                    ):
+                        # Continue iterating from the first-pass model for the
+                        # remaining budget rather than rebuilding from the
+                        # analytic seed: the iteration is Markovian in the
+                        # current ePSF, so base+retry iterations land at the
+                        # same endpoint as a fresh max_maxiters run at half
+                        # the cost.  Revert to the analytic seed when the
+                        # first-pass model is degenerate -- a bad seed would
+                        # just propagate.
+                        _retry_iters = max_maxiters - base_maxiters
+                        _seed_r = epsf_c if _epsf_usable(epsf_c) else _init_seed
+                        log.info(
+                            "ePSF did not converge in %d iterations; "
+                            "continuing for %d more",
+                            base_maxiters,
+                            _retry_iters,
+                        )
+                        _kw_retry = dict(
+                            _kw,
+                            recentering_maxiters=100,
+                            maxiters=_retry_iters,
+                        )
+                        builder_retry = _BuilderCls(
+                            **_kw_retry, **_bld_extra
+                        )
+                        try:
+                            res_r = _call_build_epsf(
+                                builder_retry, _stars_work, _seed_r
+                            )
+                        except Exception as _retry_exc:
+                            # A crashed retry (e.g. the recentering function
+                            # chokes on a degenerate intermediate ePSF) must
+                            # not discard the usable first-pass model.
+                            log.warning(
+                                "ePSF retry raised %s: %s; keeping "
+                                "first-pass model.",
+                                type(_retry_exc).__name__, _retry_exc,
+                            )
+                            res_r = None
+                        if res_r is not None and hasattr(res_r, "epsf"):
+                            _n_excl_r = int(getattr(res_r, "n_excluded_stars", 0) or 0)
+                            if _n_excl_r > 0:
+                                log.info(
+                                    "ePSF retry excluded %d star(s) after "
+                                    "repeated fit failures (indices %s)",
+                                    _n_excl_r,
+                                    getattr(res_r, "excluded_star_indices", []),
+                                )
+                            # The retry ran on the current working pool, so
+                            # its builder's per-star movement record is the
+                            # freshest convergence evidence regardless of
+                            # whether the model is kept.
+                            _res_builder = builder_retry
+                            if res_r.converged:
+                                log.info(
+                                    "ePSF converged after %d total "
+                                    "iterations",
+                                    base_maxiters + int(res_r.iterations),
+                                )
+                                res = res_r
+                                epsf_c = res_r.epsf
+                                fitted_c = res_r.fitted_stars
+                                conv_c = True
+                                acc_c = (
+                                    float(res_r.final_center_accuracy)
+                                    if res_r.final_center_accuracy is not None
+                                    else float("nan")
+                                )
+                            else:
+                                log.warning(
+                                    "ePSF did NOT converge after %d total "
+                                    "iterations", max_maxiters
+                                )
+                        elif res_r is not None:
+                            epsf_c, fitted_c = res_r
+                            conv_c = True
+                    elif not res.converged:
+                        log.warning(
+                            "ePSF build did NOT converge; PSF model may be "
+                            "unreliable."
+                        )
+                    # Strict convergence (1e-3 px default) can be
+                    # unreachable when star centroids are S/N-limited:
+                    # well-posed builds plateau at a few milli-pixel
+                    # per-iteration jitter.  If the final-iteration
+                    # movement is already below a relaxed bound the model
+                    # had effectively settled -- accept it and report it
+                    # as such rather than a failed build.
+                    if not conv_c:
+                        _relax_px = float(
+                            phot_cfg.get("psf_center_accuracy_relaxed_px", 0.01)
+                        )
+                        _mv_fin = getattr(_res_builder, "_last_move", None)
+                        _strict_px = float(
+                            np.sqrt(getattr(_res_builder, "center_accuracy_sq", np.nan))
+                        )
+                        if _relax_px > 0 and _mv_fin is not None:
+                            _mm = np.asarray(_mv_fin, float)
+                            _mm = _mm[np.isfinite(_mm)]
+                            if _mm.size and float(np.sqrt(_mm.max())) < _relax_px:
+                                conv_c = True
+                                self.psf_converged_relaxed = True
+                                log.info(
+                                    "ePSF effectively settled: final "
+                                    "centre movement %.4g px < relaxed "
+                                    "bound %.4g px (strict threshold "
+                                    "%.4g px)",
+                                    float(np.sqrt(_mm.max())),
+                                    _relax_px,
+                                    _strict_px,
+                                )
+                elif res is not None:
+                    # Old-photutils tuple result carries no convergence
+                    # flag; a completed build counts as converged.
+                    epsf_c, fitted_c = res
+                    conv_c = True
+
+                meas_c = (
+                    measure_epsf_fwhm_native(
+                        np.asarray(epsf_c.data, float), osamp_c
+                    )
+                    if epsf_c is not None and _epsf_usable(epsf_c)
+                    else float("nan")
+                )
+                return epsf_c, fitted_c, acc_c, init_epsf_c, meas_c, conv_c
+
+            # On undersampled fields the high-oversampling build can collapse
+            # narrow: each star lands only on the gridpoints of its own
+            # pixel-phase class, so with ~n_stars/osamp^2 samples per
+            # gridpoint the sigma-clipped median residual is fragile, and the
+            # unbounded per-star shift fit lets centres migrate onto a shared
+            # phase (measured on SN2022mop undersampled fields: the ePSF
+            # converged to ~0.7x the true effective FWHM).  Descend the
+            # oversampling ladder before giving up on the empirical model --
+            # at osamp=1 every star constrains every gridpoint and the build
+            # recovered the true ~2 px effective width in 2 iterations.
+            _osamp_ladder = [oversample]
+            # Gridded-PSF cell builds freeze the ladder: per-cell descent
+            # produces shape-inconsistent stamps that cannot stack into a
+            # GriddedPSFModel; a cell that cannot hold the shared factor is
+            # filled from a neighbour instead.
+            _freeze_osamp = bool(phot_cfg.get("_psf_freeze_oversample", False))
+            if undersampled and oversample > 1 and not _freeze_osamp:
+                # Step down one factor at a time: with the coarse-to-fine
+                # schedule, osamp=3 is often viable where osamp=4 starved,
+                # and keeps finer core resolution than jumping to 1x.
+                _osamp_ladder.extend(range(oversample - 1, 0, -1))
+
+            # Fit the analytic model once on the final star set: a sum of
+            # Moffats captures core-plus-wing structure a single Moffat
+            # cannot.  The same components seed every ladder attempt and
+            # serve as the residual-accuracy diagnostic.  Shared elongation
+            # (trailed/defocused fields) is measured once and applied to
+            # both the fit metric and the stamp so the analytic model
+            # keeps the image's true 2-D shape.
+            _analytic_ell = None
+            try:
+                _analytic_ell = _ensemble_ellipticity(epsfstars, fwhm)
+            except Exception as _exc:
+                log.debug("Ensemble ellipticity estimate failed: %s", _exc)
+                _analytic_ell = None
+            if _analytic_ell is not None:
+                log.info(
+                    "PSF stars are elongated: axis ratio %.2f at PA %.0f deg; "
+                    "the analytic model and ePSF seed will be elongated to match.",
+                    _analytic_ell[0],
+                    np.degrees(_analytic_ell[1]),
+                )
+            try:
+                _analytic_comps, _analytic_sfits = (
+                    _fit_moffat_composite_full(
+                        epsfstars,
+                        fwhm,
+                        max_components=int(
+                            phot_cfg.get("psf_analytic_components", 3)
+                        ),
+                        ellipticity=_analytic_ell,
+                        center_free_px=float(
+                            phot_cfg.get("psf_analytic_center_free_px", 1.5)
+                        ),
+                        component_offsets=bool(
+                            phot_cfg.get("psf_analytic_component_offsets", True)
+                        ),
+                        offset_max_fwhm=float(
+                            phot_cfg.get("psf_analytic_offset_max_fwhm", 0.5)
+                        ),
+                        snr_min=float(
+                            phot_cfg.get("psf_analytic_min_snr", 5.0)
+                        ),
+                    )
+                )
+            except Exception as _af_exc:
+                log.debug(
+                    "Joint composite-Moffat fit failed: %s", _af_exc
+                )
+                _analytic_comps, _analytic_sfits = None, None
+            if _analytic_comps is None:
+                _analytic_comps = _default_moffat_composite(fwhm, moffat_beta)
+                _analytic_fitted = False
+            else:
+                _analytic_fitted = True
+                log.info(
+                    "Analytic PSF model: fitted %d-component Moffat "
+                    "composite to %d PSF stars (joint fit, per-star "
+                    "position+amplitude free).",
+                    len(_analytic_comps),
+                    len(_analytic_sfits),
+                )
+
+            epsf = fitted_stars = None
+            _final_acc = float("nan")
+            _epsf_fwhm_meas = float("nan")
+            # Analytic init on the accepted rung's grid, for the residual
+            # accuracy gate below.
+            init_kept = None
+            # Track the grid the kept model actually lives on: downstream
+            # consumers (stamp cleanup, encircled-energy diagnostic, the
+            # oversampled plot) scale by ``oversample``, which is wrong if a
+            # degraded lower-oversampling model is kept.
+            _kept_osamp = oversample
+            # Quality flags for the attempt that produced the kept model
+            # (the loop-local _acc_bad/_neg_bad always describe the LAST
+            # attempt, which may differ from the kept one).
+            _kept_acc_bad = False
+            _kept_neg_bad = False
+            for _osamp_c in _osamp_ladder:
+                epsf_c, fitted_c, acc_c, init_c, meas_c, conv_c = (
+                    _attempt_epsf_build(_osamp_c)
+                )
+                self.psf_converged = conv_c
+                # A star centre still wandering by more than ~half a FWHM
+                # on the final iteration is unregistered -- the stacked
+                # ePSF is built from misaligned cutouts (blocky core,
+                # leaked contamination).  Production undersampled fields
+                # show a clean break: settled builds end <0.5 px, degraded
+                # ones >1 px, independent of the fit box size.
+                _acc_bad = np.isfinite(acc_c) and acc_c > max(
+                    1.0, 0.5 * fwhm
+                )
+                # The ePSF is the effective (pixel-integrated) PSF, so a
+                # measurement well *below* the image FWHM is unphysical --
+                # pixel integration can only broaden -- and indicates a
+                # degraded build (thin sampling, phase collapse,
+                # non-convergence).
+                _fwhm_bad = np.isfinite(meas_c) and (
+                    meas_c < _fwhm_lo * fwhm or meas_c > _fwhm_hi * fwhm
+                )
+                # A NaN measurement on a "usable" model means the profile
+                # never crosses half-max -- degenerate even if finite.
+                # Wing-quality gate: at osamp>=2 a starved build (few
+                # samples per grid cell) acquires a large negative-flux
+                # fraction even when acc/FWHM look fine -- FWHM gates
+                # cannot see wing noise.  Skipped at osamp=1, where real
+                # resampling ringing legitimately rings below zero and no
+                # lower rung exists anyway.
+                _neg_bad = False
+                if _osamp_c >= 2 and epsf_c is not None and _epsf_usable(
+                    epsf_c
+                ):
+                    _d_c = np.asarray(epsf_c.data, dtype=float)
+                    _tot_c = float(np.nansum(_d_c))
+                    if _tot_c > 0:
+                        _neg_bad = (
+                            -float(np.nansum(_d_c[_d_c < 0])) / _tot_c
+                            > _negfrac_max
+                        )
+                _good = (
+                    epsf_c is not None
+                    and _epsf_usable(epsf_c)
+                    and np.isfinite(meas_c)
+                    and not _acc_bad
+                    and not _fwhm_bad
+                    and not _neg_bad
+                )
+                if _good:
+                    epsf, fitted_stars = epsf_c, fitted_c
+                    _final_acc = acc_c
+                    _epsf_fwhm_meas = meas_c
+                    _kept_osamp = _osamp_c
+                    init_kept = init_c
+                    if _osamp_c != oversample:
+                        log.info(
+                            "ePSF recovered at oversample=x%d (from x%d): "
+                            "measured FWHM %.2f px vs image FWHM %.2f px.",
+                            _osamp_c, oversample, meas_c, fwhm,
+                        )
+                    break
+                if len(_osamp_ladder) > 1 and _osamp_c != _osamp_ladder[-1]:
+                    _why = (
+                        "no usable model"
+                        if epsf_c is None or not _epsf_usable(epsf_c)
+                        else (
+                            "degenerate centre fit "
+                            f"(final_center_accuracy={acc_c:.3g} px)"
+                            if _acc_bad
+                            else (
+                                "degenerate profile (no half-max crossing)"
+                                if not np.isfinite(meas_c)
+                                else (
+                                    f"measured FWHM {meas_c:.2f} px outside "
+                                    f"[{_fwhm_lo:.2f}, {_fwhm_hi:.2f}]x image "
+                                    f"FWHM {fwhm:.2f} px"
+                                    if _fwhm_bad
+                                    else "noise-dominated wings "
+                                    f"(negative-flux fraction > "
+                                    f"{_negfrac_max:.2f})"
+                                )
+                            )
+                        )
+                    )
+                    log.warning(
+                        "ePSF at oversample=x%d degraded: %s; retrying at "
+                        "lower oversampling.",
+                        _osamp_c, _why,
+                    )
+                # Keep the latest produced attempt for diagnostics or the
+                # no-fallback path; a crashed attempt must not clobber a
+                # previously-kept model.
+                if epsf_c is not None:
+                    epsf = epsf_c
+                    fitted_stars = fitted_c
+                    _final_acc = acc_c
+                    _epsf_fwhm_meas = meas_c
+                    _kept_osamp = _osamp_c
+                    init_kept = init_c
+                    _kept_acc_bad = _acc_bad
+                    _kept_neg_bad = _neg_bad
+            oversample = _kept_osamp
+
+            # Starved-ensemble bookkeeping must precede the quality-gate
+            # discards below: on < psf_empirical_min_stars the fitted
+            # analytic composite is the honest deliverable rather than
+            # no model at all.
+            n_epsf_stars = len(
+                fitted_stars if fitted_stars is not None else epsfstars
+            )
+            self.n_epsf_stars = int(n_epsf_stars)
+            _emp_floor = int(
+                phot_cfg.get("psf_empirical_min_stars", 6)
+            )
+            _delivered_analytic = False
+
+            def _analytic_deliverable():
+                """``(stamp, fwhm)`` for a sane fitted analytic model,
+                else None.  The swap uses the wide discard band, not
+                the quality band: a sparse-field Moffat fit reads
+                ~10-15% narrower than the empirical FWHM without being
+                degenerate - only a model that is plainly not the PSF
+                (defect-stack scale) blocks it.  The stamp is the
+                ladder's analytic seed when one was kept; when every
+                rung failed outright (init_kept is None) it is rebuilt
+                here on the kept grid."""
+                if (
+                    undersampled
+                    or _freeze_osamp
+                    or self.psf_pool_defect_dominated
+                    or not bool(
+                        phot_cfg.get("psf_analytic_fallback", True)
+                    )
+                    or not _analytic_fitted
+                ):
+                    log.debug(
+                        "Analytic swap unavailable: undersampled=%s "
+                        "freeze=%s defect_pool=%s fallback=%s fitted=%s",
+                        undersampled,
+                        _freeze_osamp,
+                        self.psf_pool_defect_dominated,
+                        bool(
+                            phot_cfg.get("psf_analytic_fallback", True)
+                        ),
+                        _analytic_fitted,
+                    )
+                    return None
+                _st = init_kept
+                if _st is None:
+                    try:
+                        _st = _composite_moffat_psf(
+                            _analytic_comps,
+                            _kept_osamp,
+                            cutout_n,
+                            ellipticity=_analytic_ell,
+                        )
+                    except Exception as _st_exc:
+                        log.debug(
+                            "Analytic stamp rebuild failed: %s", _st_exc
+                        )
+                        return None
+                if not _epsf_usable(_st):
+                    return None
+                _af = measure_epsf_fwhm_native(
+                    np.asarray(_st.data, float), _kept_osamp
+                )
+                if np.isfinite(_af) and (
+                    _fwhm_rej_lo * fwhm <= _af <= _fwhm_rej_hi * fwhm
+                ):
+                    return _st, _af
+                log.debug(
+                    "Analytic swap rejected: stamp FWHM %.3g px outside "
+                    "[%.2f, %.2f]x image FWHM %.2f px.",
+                    _af, _fwhm_rej_lo, _fwhm_rej_hi, fwhm,
+                )
+                return None
+
+            # Grid-resolution adequacy of the KEPT rung: the photutils
+            # guideline is ~4 grid points per FWHM (oversampling >=
+            # 4/FWHM).  The ladder may have descended below that to keep
+            # the median functional - the model then cannot resolve the
+            # core and is low-confidence even when it converged.
+            if oversample * max(fwhm, 1e-3) < 4.0:
+                self.psf_grid_underresolved = True
+                log.warning(
+                    "Kept ePSF at x%d oversampling holds only %.1f grid "
+                    "points per FWHM (FWHM=%.2f px; guideline ~4) -- the "
+                    "empirical model cannot resolve the core; treat PSF "
+                    "photometry as low-confidence.",
+                    oversample, oversample * fwhm, fwhm,
+                )
+
+            # Residual accuracy gate on the accepted empirical model: a
+            # build can pass every shape gate yet still represent the
+            # stars worse than the pixel-integrated analytic model (the
+            # ePSF is fitted to these stars, so it has every advantage --
+            # measured: degraded production stamps fit 3-16x worse than
+            # the analytic model while good builds sit at ~parity).  When
+            # the gate fires and a sane analytic deliverable exists the
+            # analytic composite is delivered: an empirical model that
+            # loses on its own training stars carries noise, not signal
+            # (J2344: ePSF epochs median chi2 ~11 vs ~1.7 for the
+            # analytic-composite epochs).  Set psf_epsf_residual_swap off
+            # to keep the old always-empirical behaviour.
+            if (
+                _good
+                and _res_gate
+                and init_kept is not None
+                and _epsf_usable(init_kept)
+            ):
+                _stars_eval = (
+                    fitted_stars if fitted_stars is not None else epsfstars
+                )
+                _fit_rad = max(3.0, 0.5 * fit_boxsize)
+                _mad_emp = _epsf_residual_mad(
+                    _stars_eval, epsf, _fit_rad
+                )
+                _mad_ana = _epsf_residual_mad(
+                    _stars_eval, init_kept, _fit_rad
+                )
+                if (
+                    np.isfinite(_mad_emp)
+                    and np.isfinite(_mad_ana)
+                    and _mad_ana > 0
+                ):
+                    log.info(
+                        "ePSF residual accuracy: empirical star-residual "
+                        "MAD %.4f vs analytic %.4f (fit radius %.1f px, "
+                        "%d stars)",
+                        _mad_emp, _mad_ana, _fit_rad, len(_stars_eval),
+                    )
+                    if _mad_emp > _res_ratio_max * _mad_ana:
+                        _ad = (
+                            _analytic_deliverable()
+                            if bool(
+                                phot_cfg.get(
+                                    "psf_epsf_residual_swap", True
+                                )
+                            )
+                            else None
+                        )
+                        if _ad is not None:
+                            _astamp, _af = _ad
+                            log.warning(
+                                "Empirical ePSF fits the PSF stars %.2fx "
+                                "worse than the analytic composite "
+                                "(residual MAD %.4f vs %.4f) -- "
+                                "delivering the fitted analytic composite "
+                                "(FWHM %.2f px) instead of the degraded "
+                                "empirical model.",
+                                _mad_emp / _mad_ana,
+                                _mad_emp,
+                                _mad_ana,
+                                _af,
+                            )
+                            epsf = _astamp
+                            epsf._autophot_fitted = _analytic_fitted
+                            epsf._autophot_star_fits = _analytic_sfits
+                            _epsf_fwhm_meas = _af
+                            _delivered_analytic = True
+                        else:
+                            log.warning(
+                                "Empirical ePSF fits the PSF stars %.2fx "
+                                "worse than the analytic composite "
+                                "(residual MAD %.4f vs %.4f) -- the "
+                                "empirical model is degraded, but no sane "
+                                "analytic substitute exists, so it is "
+                                "kept.",
+                                _mad_emp / _mad_ana, _mad_emp, _mad_ana,
+                            )
+                        # Honest accounting: a model that fits its own stars
+                        # grossly worse than the analytic fallback has not
+                        # converged to the data, whatever the shape gates say.
+                        self.psf_converged = False
+
+            if not _good:
+                _fwhm_bad = np.isfinite(_epsf_fwhm_meas) and (
+                    _epsf_fwhm_meas < _fwhm_lo * fwhm
+                    or _epsf_fwhm_meas > _fwhm_hi * fwhm
+                )
+                if not _epsf_usable(epsf):
+                    _ad = (
+                        _analytic_deliverable()
+                        if n_epsf_stars < _emp_floor
+                        else None
+                    )
+                    if _ad is not None:
+                        _astamp, _af = _ad
+                        log.warning(
+                            "ePSF build produced no usable model and "
+                            "the post-vetting ensemble is starved (%d "
+                            "stars < psf_empirical_min_stars=%d) -- "
+                            "delivering the fitted analytic composite "
+                            "(FWHM %.2f px).",
+                            n_epsf_stars, _emp_floor, _af,
+                        )
+                        epsf = _astamp
+                        epsf._autophot_fitted = _analytic_fitted
+                        epsf._autophot_star_fits = _analytic_sfits
+                        _epsf_fwhm_meas = _af
+                        _delivered_analytic = True
+                    else:
+                        log.error("ePSF build produced no usable model.")
+                        return None, df
+                elif _fwhm_bad:
+                    if not bool(self.psf_converged):
+                        # Two independent failure signals agree: the fit
+                        # never settled AND the model's FWHM misses the
+                        # image-FWHM band.  For a GROSS miss (outside
+                        # [discard_min, discard_max]x) that is a defect
+                        # stack (hot-pixel/CR-dominated pool) or noise,
+                        # not a degraded star ensemble -- observed ePSFs
+                        # built from resampled defect clusters read
+                        # ~0.5x the image FWHM and produce garbage
+                        # photometry.  A MARGINAL miss is ambiguous:
+                        # thin-but-clean pools also drift a few tenths
+                        # of the band edge without settling.  Arbitrate
+                        # with the residual gate -- a defect stack fits
+                        # its own members far worse than the analytic
+                        # composite; a clean thin pool does not.
+                        _gross = (
+                            _epsf_fwhm_meas < _fwhm_rej_lo * fwhm
+                            or _epsf_fwhm_meas > _fwhm_rej_hi * fwhm
+                        )
+                        _rescue = False
+                        if _gross:
+                            _fwhm_verdict = (
+                                f"FWHM miss is gross (outside "
+                                f"[{_fwhm_rej_lo:.2f}, "
+                                f"{_fwhm_rej_hi:.2f}]x)"
+                            )
+                        elif _kept_acc_bad or _kept_neg_bad:
+                            _fwhm_verdict = (
+                                "build also failed the centre-accuracy "
+                                "or negative-flux gates"
+                            )
+                        elif not _res_gate:
+                            _fwhm_verdict = "residual gate is disabled"
+                        elif init_kept is None or not _epsf_usable(
+                            init_kept
+                        ):
+                            _fwhm_verdict = (
+                                "no usable analytic seed to compare "
+                                "against"
+                            )
+                        else:
+                            _stars_eval = (
+                                fitted_stars
+                                if fitted_stars is not None
+                                else epsfstars
+                            )
+                            _fit_rad = max(3.0, 0.5 * fit_boxsize)
+                            _mad_emp = _epsf_residual_mad(
+                                _stars_eval, epsf, _fit_rad
+                            )
+                            _mad_ana = _epsf_residual_mad(
+                                _stars_eval, init_kept, _fit_rad
+                            )
+                            if (
+                                np.isfinite(_mad_emp)
+                                and np.isfinite(_mad_ana)
+                                and _mad_ana > 0
+                            ):
+                                _rescue = _mad_emp <= (
+                                    _res_ratio_max * _mad_ana
+                                )
+                                _fwhm_verdict = (
+                                    f"residual MAD {_mad_emp:.4f} vs "
+                                    f"analytic {_mad_ana:.4f} "
+                                    f"(limit {_res_ratio_max:.2f}x)"
+                                )
+                            else:
+                                _fwhm_verdict = (
+                                    "residual comparison unmeasurable"
+                                )
+                        if _rescue:
+                            # A non-converged model that fits its own
+                            # stars no worse than the analytic seed is a
+                            # thin-but-clean pool, not a defect stack.
+                            log.warning(
+                                "ePSF measured FWHM %.2f px is outside "
+                                "[%.2f, %.2f]x the image FWHM %.2f px "
+                                "and the build never converged, but the "
+                                "empirical model fits its own stars at "
+                                "least as well as the analytic seed "
+                                "(%s) -- keeping the degraded model.",
+                                _epsf_fwhm_meas,
+                                _fwhm_lo,
+                                _fwhm_hi,
+                                fwhm,
+                                _fwhm_verdict,
+                            )
+                        else:
+                            # Returning None drops the field to
+                            # aperture-only photometry - unless the
+                            # ensemble is starved, where the fitted
+                            # analytic composite is the better
+                            # deliverable than no PSF model at all.
+                            _ad = (
+                                _analytic_deliverable()
+                                if n_epsf_stars < _emp_floor
+                                else None
+                            )
+                            if _ad is not None:
+                                _astamp, _af = _ad
+                                log.warning(
+                                    "ePSF measured FWHM %.2f px is "
+                                    "outside [%.2f, %.2f]x the image "
+                                    "FWHM %.2f px and the build never "
+                                    "converged (%s), but the "
+                                    "post-vetting ensemble is starved "
+                                    "(%d stars < "
+                                    "psf_empirical_min_stars=%d) -- "
+                                    "delivering the fitted analytic "
+                                    "composite (FWHM %.2f px) "
+                                    "instead of discarding the field.",
+                                    _epsf_fwhm_meas,
+                                    _fwhm_lo,
+                                    _fwhm_hi,
+                                    fwhm,
+                                    _fwhm_verdict,
+                                    n_epsf_stars,
+                                    _emp_floor,
+                                    _af,
+                                )
+                                epsf = _astamp
+                                epsf._autophot_fitted = _analytic_fitted
+                                epsf._autophot_star_fits = (
+                                    _analytic_sfits
+                                )
+                                _epsf_fwhm_meas = _af
+                                _delivered_analytic = True
+                            else:
+                                log.warning(
+                                    "ePSF measured FWHM %.2f px is "
+                                    "outside [%.2f, %.2f]x the image "
+                                    "FWHM %.2f px and the build never "
+                                    "converged (%s) -- discarding the "
+                                    "empirical model and falling back "
+                                    "to aperture-only photometry.",
+                                    _epsf_fwhm_meas,
+                                    _fwhm_lo,
+                                    _fwhm_hi,
+                                    fwhm,
+                                    _fwhm_verdict,
+                                )
+                                return None, df
+                    else:
+                        # A measured FWHM outside [min_frac, max_frac]x the
+                        # image FWHM marks a degraded model (noise-broadened,
+                        # centroid-smeared, defect-dominated).  Non-Gaussian
+                        # PSFs (defocused top-hats, trailed cores) can also
+                        # miss the half-max band while still matching the
+                        # data; the photometric model stays what the stars
+                        # converged to either way.
+                        log.warning(
+                            "ePSF measured FWHM %.2f px is outside "
+                            "[%.2f, %.2f]x the image FWHM %.2f px -- keeping "
+                            "the degraded empirical model (the PSF is always "
+                            "built from the image's own stars).",
+                            _epsf_fwhm_meas, _fwhm_lo, _fwhm_hi, fwhm,
+                        )
+                else:
+                    log.warning(
+                        "ePSF build did not pass the quality gates "
+                        "(final_center_accuracy=%.3g px, measured FWHM=%.3g px) "
+                        "-- keeping the degraded empirical model.",
+                        _final_acc,
+                        _epsf_fwhm_meas,
+                    )
+
+            # Optional post-build cleanup on the empirical model only
+            # (OPT-IN): with ~n/osamp^2 samples per gridpoint the ePSF
+            # wings carry uncorrelated speckle noise, and contaminated-star
+            # cutouts can leak a bright frame at the stamp edge.  The
+            # cleanup preserves the core, the coarse resampling ringing,
+            # and the sum == prod(oversampling) flux convention exactly --
+            # but it still modifies the empirical profile after the fit
+            # (edge taper, wing smoothing beyond 1.5*FWHM, radial
+            # flattening beyond 3.5*FWHM), which can bias the encircled
+            # energy and symmetrise real ellipticity.  Default off: the
+            # photometric model should be what the stars converged to.
+            if (
+                bool(phot_cfg.get("psf_epsf_wing_smooth", False))
+                and not _delivered_analytic
+            ):
+                try:
+                    epsf.data[:] = clean_epsf_stamp(
+                        np.asarray(epsf.data, float),
+                        oversample,
+                        fwhm,
+                        wing_start_fwhm=float(
+                            phot_cfg.get(
+                                "psf_epsf_wing_smooth_start_fwhm", 1.5
+                            )
+                        ),
+                        wing_end_fwhm=float(
+                            phot_cfg.get("psf_epsf_wing_smooth_end_fwhm", 3.5)
+                        ),
+                        wing_sigma_px=float(
+                            phot_cfg.get("psf_epsf_wing_smooth_sigma_px", 1.25)
+                        ),
+                        edge_px=float(
+                            phot_cfg.get("psf_epsf_edge_taper_px", 2.0)
+                        ),
+                        flatten_fwhm=float(
+                            phot_cfg.get("psf_epsf_wing_flatten_fwhm", 3.5)
+                        ),
+                        flatten_width_px=float(
+                            phot_cfg.get("psf_epsf_wing_flatten_width_px", 2.0)
+                        ),
+                    )
+                    # Re-measure: wing blending can shift the half-max
+                    # crossing slightly.
+                    _epsf_fwhm_meas = measure_epsf_fwhm_native(
+                        np.asarray(epsf.data, float), oversample
+                    )
+                except Exception as _clean_err:
+                    log.debug("ePSF stamp cleanup failed: %s", _clean_err)
+
+            # EPSFBuilder already normalises the ePSF to sum ==
+            # prod(oversampling) (the photutils convention for flux=total).
+            # Do not apply secondary normalization as it corrupts the flux
+            # scale by dividing by total array sum (including wings outside
+            # norm_radius).
+
+            # ---- ePSF quality diagnostics ----
+            # n_epsf_stars (the pool actually built from, after
+            # shape-outlier and non-convergence pruning) was computed
+            # above the quality-gate block; the starved-ensemble swap
+            # needs it there.
+            if n_epsf_stars < 20:
+                log.warning(
+                    "ePSF built from only %d stars -- model may be noisy, "
+                    "especially in the wings.  Consider relaxing PSF source "
+                    "selection cuts or increasing psf_min_candidates.",
+                    n_epsf_stars,
+                )
+
+            # Subpixel-phase diagnostics (photutils ePSF guidance): each
+            # of the oversample**2 phase cells should hold several fitted
+            # star centres (~10 for randomly placed stars) and the phases
+            # should be uniform.  Strong non-uniformity indicates biased
+            # centres or a heterogeneous star sample (mixed PSFs,
+            # saturated or contaminated cutouts) rather than a fixable
+            # build problem.
+            self.psf_phase_diag = _epsf_phase_diagnostics(
+                fitted_stars, oversample
+            )
+            _ph = self.psf_phase_diag
+            if _ph["n_stars"] > 0:
+                log.info(
+                    "ePSF subpixel-phase sampling: %.1f stars/cell over %d "
+                    "cells (%.0f%% populated; guideline ~10/cell)",
+                    _ph["samples_per_cell"],
+                    oversample * oversample,
+                    100.0 * _ph["coverage"],
+                )
+                if _ph["samples_per_cell"] < 10.0:
+                    log.info(
+                        "ePSF phase sampling %.1f stars/cell is below the "
+                        "~10/cell guideline for randomly placed stars -- "
+                        "the oversampled grid is thinly constrained.",
+                        _ph["samples_per_cell"],
+                    )
+                _ph_alpha = float(
+                    phot_cfg.get("psf_epsf_phase_uniformity_alpha", 0.01)
+                )
+                if (
+                    np.isfinite(_ph["uniform_p"])
+                    and _ph["uniform_p"] < _ph_alpha
+                ):
+                    self.psf_phase_nonuniform = True
+                    log.warning(
+                        "Subpixel phases of the fitted PSF-star centres "
+                        "are strongly non-uniform (chi-square p=%.3g over "
+                        "%d cells): indicates biased centres or a "
+                        "heterogeneous star sample -- inspect the pool "
+                        "for mixed PSFs, saturated or contaminated "
+                        "cutouts.",
+                        _ph["uniform_p"],
+                        oversample * oversample,
+                    )
+
+            # Post-vetting empirical floor: the ensemble that ACTUALLY
+            # built the ePSF is often thinner than the pool that passed
+            # the main-driver gate -- isolation, contamination and shape
+            # vetting all run inside the build.  Below
+            # psf_empirical_min_stars a native-resolution ePSF is just a
+            # noisy stack where every grid cell carries star noise, so on
+            # well-sampled data deliver the fitted analytic composite
+            # instead (the joint Moffat fit is constrained by every pixel
+            # of every cutout).  Undersampled images keep the empirical
+            # model -- an analytic profile cannot represent pixel-phase
+            # structure -- and frozen-oversample grid cells keep it
+            # because a GriddedPSFModel stacks per-cell empirical stamps.
+            if n_epsf_stars < _emp_floor and not _delivered_analytic:
+                _ad = _analytic_deliverable()
+                if _ad is not None:
+                    _astamp, _ana_fwhm = _ad
+                    log.warning(
+                        "Post-vetting ePSF ensemble starved: %d "
+                        "stars < psf_empirical_min_stars=%d -- "
+                        "delivering the fitted analytic composite "
+                        "(FWHM %.2f px) instead of the thin "
+                        "empirical model.",
+                        n_epsf_stars, _emp_floor, _ana_fwhm,
+                    )
+                    epsf = _astamp
+                    epsf._autophot_fitted = _analytic_fitted
+                    epsf._autophot_star_fits = _analytic_sfits
+                    _epsf_fwhm_meas = _ana_fwhm
+                    _delivered_analytic = True
+                elif self.psf_pool_defect_dominated:
+                    # The swap must not fire here: the analytic fit ran
+                    # on defect cutouts, so its sane-looking stamp is
+                    # the defect model, not the PSF.
+                    log.warning(
+                        "Post-vetting ePSF ensemble starved (%d stars) "
+                        "on a defect-dominated pool -- no analytic "
+                        "substitute is safe; keeping the thin empirical "
+                        "model.",
+                        n_epsf_stars,
+                    )
+                elif (
+                    not undersampled
+                    and not _freeze_osamp
+                    and bool(phot_cfg.get("psf_analytic_fallback", True))
+                    and _analytic_fitted
+                ):
+                    # The swap was expected to apply but the analytic
+                    # stamp itself is unusable or misses the discard
+                    # band.
+                    _af_chk = (
+                        measure_epsf_fwhm_native(
+                            np.asarray(init_kept.data, float), _kept_osamp
+                        )
+                        if init_kept is not None
+                        else float("nan")
+                    )
+                    log.warning(
+                        "Analytic composite FWHM %.3g px is outside "
+                        "[%.2f, %.2f]x the image FWHM %.2f px (or no "
+                        "usable analytic stamp exists) -- keeping the "
+                        "thin empirical model despite the starved "
+                        "ensemble.",
+                        _af_chk, _fwhm_rej_lo, _fwhm_rej_hi, fwhm,
+                    )
+                if not _delivered_analytic:
+                    # The thin empirical model is kept but marked so the
+                    # provenance suffix is not read as a full ePSF.
+                    self.psf_ensemble_understaffed = True
+
+            # STATUS one-liner naming the kept model (empirical ePSF), the
+            # star pool, oversampling, the convergence verdict, and
+            # measured vs image FWHM.  For undersampled data the effective
+            # PSF is pixel-integrated, so a measured FWHM ~5-10% broader
+            # than the input is expected.
+            _model_txt = (
+                "analytic-composite" if _delivered_analytic else "epsf"
+            )
+            _conv_txt = (
+                "unknown"
+                if self.psf_converged is None
+                else (
+                    "yes (relaxed)"
+                    if self.psf_converged and self.psf_converged_relaxed
+                    else ("yes" if self.psf_converged else "no")
+                )
+            )
+            _fwhm_txt = (
+                f" | measured FWHM {_epsf_fwhm_meas:.2f} px (image {fwhm:.2f} px)"
+                if np.isfinite(_epsf_fwhm_meas)
+                else ""
+            )
+            log.log(
+                STATUS,
+                "PSF model: %s | built from %d stars | oversample=x%d | "
+                "ePSF converged: %s%s",
+                _model_txt,
+                int(n_epsf_stars),
+                int(oversample),
+                _conv_txt,
+                _fwhm_txt,
+            )
+
+            # Compute encircled energy at the photometry fit_shape radius.
+            # If EE is significantly < 1.0 at fit_shape, the ePSF wings are
+            # truncated and photometry will be biased.
+            # Compute the expected photometry fit_shape from the same config
+            # used in fit() so this diagnostic works in build().
+            _phot_fs_scale = float(
+                phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0)
+            )
+            _phot_fit_min_arcsec = float(
+                phot_cfg.get("psf_fit_shape_bright_min_arcsec", 3.0)
+            )
+            _phot_fit_min_px = (
+                _phot_fit_min_arcsec / pixel_scale if has_pixel_scale else np.nan
+            )
+            _phot_fit_shape_val = _odd(
+                max(
+                    7,
+                    int(_phot_fs_scale * fwhm * build_sampling_boost),
+                    int(np.ceil(_phot_fit_min_px)) if np.isfinite(_phot_fit_min_px) else 0,
+                )
+            )
+            if undersampled:
+                _phot_fit_shape_val = _odd(max(_phot_fit_shape_val, 9))
+            try:
+                epsf_data = np.asarray(epsf.data, float)
+                epsf_total = float(np.nansum(epsf_data))
+                if epsf_total > 0:
+                    ny_e, nx_e = epsf_data.shape
+                    cy_e, cx_e = (ny_e - 1) / 2.0, (nx_e - 1) / 2.0
+                    yy, xx = np.ogrid[:ny_e, :nx_e]
+                    rr = np.sqrt((xx - cx_e)**2 + (yy - cy_e)**2)
+                    # Radius in pixels (accounting for oversampling)
+                    fit_shape_radius_px = _phot_fit_shape_val / 2.0 * oversample
+                    ee_at_fitshape = float(
+                        np.nansum(epsf_data[rr <= fit_shape_radius_px]) / epsf_total
+                    )
+                    log.info(
+                        "ePSF encircled energy at fit_shape radius (%.1f px) = %.3f",
+                        _phot_fit_shape_val / 2.0, ee_at_fitshape,
+                    )
+                    if ee_at_fitshape < 0.95:
+                        log.warning(
+                            "ePSF encircled energy at fit_shape radius is only %.1f%% -- "
+                            "wings may be truncated.  This can cause magnitude-dependent "
+                            "flux bias (slope != 1 in zeropoint plot).",
+                            ee_at_fitshape * 100,
+                        )
+                    # Check for residual background in ePSF edge pixels
+                    edge_pixels = np.concatenate([
+                        epsf_data[0, :].ravel(),
+                        epsf_data[-1, :].ravel(),
+                        epsf_data[:, 0].ravel(),
+                        epsf_data[:, -1].ravel(),
+                    ])
+                    edge_median = float(np.nanmedian(edge_pixels))
+                    edge_frac = abs(edge_median) / max(abs(epsf_total), 1e-10)
+                    if edge_frac > 1e-4:
+                        log.warning(
+                            "ePSF edge pixels have median=%.3e (fraction=%.2e of total) -- "
+                            "possible residual background in ePSF model.  This can cause "
+                            "magnitude-dependent flux bias.",
+                            edge_median, edge_frac,
+                        )
+            except Exception as _diag_err:
+                log.debug("ePSF diagnostic failed: %s", _diag_err)
+
+            # The stamp plot is the primary visual PSF diagnostic; produce
+            # it at every oversampling factor (osamp=1 stamps are the
+            # common robust-regime product, not an edge case).  Suppressed
+            # for internal builds (per-cell grid builds pass plot=False -
+            # their diagnostics live in PSF_Grid_*).  Analytic models get
+            # the composite diagnostic instead: per-star residuals plus
+            # per-component projection lines are the information a fitted
+            # Moffat sum can show and a bare stamp cannot.
+            if plot:
+                if _delivered_analytic:
+                    try:
+                        plot_analytic_psf(
+                            epsf,
+                            stars=epsfstars,
+                            fwhm_native=fwhm,
+                            snr_min=float(
+                                phot_cfg.get("psf_analytic_min_snr", 5.0)
+                            ),
+                            save_path=os.path.join(
+                                write_dir,
+                                f"PSF_Analytic_{base}{get_plot_ext(self.input_yaml)}",
+                            ),
+                        )
+                    except Exception as _ap_exc:
+                        log.warning(
+                            "Analytic PSF plot failed: %s", _ap_exc
+                        )
+                else:
+                    self.plot_oversampled_psf(
+                        epsf,
+                        oversample=oversample,
+                        save_path=os.path.join(
+                            write_dir, f"PSF_Image_{base}{get_plot_ext(self.input_yaml)}"
+                        ),
+                        fwhm_native=fwhm,
+                    )
+
             save_path = os.path.join(write_dir, f"{filename_prefix}_{base}.fits")
             from functions import safe_fits_write
-            safe_fits_write(save_path, np.asarray(epsf.data, float), fits.Header())
-            self._create_psf_visualization(
-                fitted_stars,
-                epsf,
-                cutout_shape[0],
-                norm_radius,
-                write_dir,
-                f"{filename_prefix}_{base}",
-                use_log_scale=False,  # Set to True for log color scale on 2D PSF
+            # Record the ePSF grid convention so downstream consumers (ZOGY
+            # PSF stamps, ImagePSF reloads) can recover the native-pixel
+            # sampling.  Without OVERSAMP a 4x-oversampled stamp is read back
+            # as if it were a native-resolution PSF (4x too wide).
+            _psf_hdr = fits.Header()
+            try:
+                _osamp = int(np.atleast_1d(getattr(epsf, "oversampling", 1))[0])
+            except Exception:
+                _osamp = int(oversample)
+            _psf_hdr["OVERSAMP"] = (
+                _osamp, "ePSF oversampling factor (grid px per native px)"
+            )
+            _psf_hdr["PSFNPIX"] = (int(cutout_n), "ePSF native-pixel cutout size")
+            _psf_hdr["FWHM_PIX"] = (float(fwhm), "Image FWHM in native pixels")
+            if np.isfinite(_epsf_fwhm_meas):
+                _psf_hdr["EPSFFWHM"] = (
+                    float(_epsf_fwhm_meas),
+                    "Measured ePSF FWHM in native pixels",
+                )
+            _psf_hdr["NPSFSTAR"] = (int(n_epsf_stars), "Stars used in ePSF build")
+            # Record the measured ensemble elongation even when the
+            # empirical model survived: it documents the field shape and
+            # explains any elongated analytic fallback.
+            _ell_tag = _analytic_ell
+            if _ell_tag is None:
+                _ell_tag = getattr(epsf, "_autophot_ellipticity", None)
+            if _ell_tag is not None:
+                _psf_hdr["PSFELLIP"] = (
+                    float(_ell_tag[0]),
+                    "Measured PSF-star axis ratio b/a (elongated field)",
+                )
+                _psf_hdr["PSFPA"] = (
+                    float(np.degrees(_ell_tag[1])),
+                    "Measured PSF major-axis PA, deg (+x toward +y)",
+                )
+            self.psf_model_kind = _model_txt
+            _psf_hdr["PSFBUILD"] = (
+                self.psf_model_kind,
+                "PSF model construction method",
+            )
+            if self.psf_converged is not None:
+                _psf_hdr["PSFCONV"] = (
+                    bool(self.psf_converged),
+                    "Empirical ePSF build converged",
+                )
+            _orig = getattr(epsf, "origin", None)
+            if _orig is not None:
+                _psf_hdr["PSFX0"] = (
+                    float(np.atleast_1d(_orig)[0]),
+                    "ePSF x origin (oversampled array coord)",
+                )
+                _psf_hdr["PSFY0"] = (
+                    float(np.atleast_1d(_orig)[-1]),
+                    "ePSF y origin (oversampled array coord)",
+                )
+            safe_fits_write(save_path, np.asarray(epsf.data, float), _psf_hdr)
+            # The visualisation is diagnostic only: a failure here (e.g.
+            # fitted_stars absent after a fallback) must not discard the
+            # successfully built and written ePSF.
+            if plot:
+                try:
+                    self._create_psf_visualization(
+                        fitted_stars,
+                        epsf,
+                        cutout_shape[0],
+                        norm_radius,
+                        write_dir,
+                        f"{filename_prefix}_{base}",
+                        use_log_scale=False,  # Set to True for log color scale on 2D PSF
+                    )
+                except Exception as _viz_err:
+                    log.warning("PSF visualisation failed: %s", _viz_err)
+
+            # One-line verdict so the run log always states whether the
+            # empirical build settled.  _conv_txt is reused from the
+            # STATUS model summary above - nothing between them changes
+            # the verdict.
+            log.info(
+                "PSF model: %s | ePSF converged: %s | PSF stars: %d | "
+                "oversample=x%d",
+                self.psf_model_kind,
+                _conv_txt,
+                int(n_epsf_stars),
+                int(oversample),
             )
 
             return epsf, df
 
         except Exception as exc:
-            log.error(f"[build] Fatal: {exc}\n{traceback.format_exc()}")
+            log.error("[build] Fatal: %s\n%s", exc, traceback.format_exc())
+            # No analytic substitution: a crashed build reports no model
+            # and the caller falls back to aperture-only photometry.
             return None, None
 
     # -----------------------------------------------------------------------
@@ -2113,15 +10699,18 @@ class PSF:
         use_zscale: bool = True,
         zscale_contrast: float = 0.25,
         use_log_scale: bool = False,
+        fwhm_native: Optional[float] = None,
     ):
         """
         Three-panel figure: oversampled PSF image + X/Y projections.
+
+        Axes are in native-pixel units so the ePSF width is directly
+        comparable to the image FWHM.  When ``fwhm_native`` is given, a
+        dashed circle of radius FWHM/2 marks the expected core size on the
+        image panel (with half-FWHM guides on the projections), and the
+        measured ePSF FWHM is shown in the title.
         """
         log = logging.getLogger(__name__)
-
-        if oversample <= 1:
-            log.info("Skipping PSF plot: oversample <= 1.")
-            return None
 
         try:
             data = np.asarray(psf_model.data, float)
@@ -2133,7 +10722,6 @@ class PSF:
                 # Preserve NaNs instead of replacing with 0
                 data[~np.isfinite(data)] = np.nan
 
-            # Display limits.
             if use_zscale:
                 try:
                     vmin, vmax = ZScaleInterval(contrast=zscale_contrast).get_limits(
@@ -2147,58 +10735,125 @@ class PSF:
             else:
                 vmin, vmax = np.nanmin(data), np.nanmax(data)
 
-            _style = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-            )
-            if os.path.exists(_style):
-                plt.style.use(_style)
+            apply_autophot_mplstyle()
             fig, ax = plt.subplots(figsize=set_size(540, 1))
             divider = make_axes_locatable(ax)
             ax_R = divider.append_axes("right", size="25%", pad=0.25, sharey=ax)
             ax_B = divider.append_axes("bottom", size="25%", pad=0.25, sharex=ax)
 
             ny, nx = data.shape
-            extent = [0, nx, 0, ny]
+            scale = 1.0 / max(1, int(oversample))
+            extent = [0.0, nx * scale, 0.0, ny * scale]
+            epsf_fwhm_meas = measure_epsf_fwhm_native(data, oversample)
 
-            # Use log scale if requested (ensuring positive values for LogNorm)
+            # LogNorm requires strictly positive values.
             if use_log_scale:
-                # Shift data to be positive for log scale
                 data_for_plot = data - np.nanmin(data) + 1e-10
                 norm = LogNorm(vmin=vmin - np.nanmin(data) + 1e-10, vmax=vmax - np.nanmin(data) + 1e-10)
             else:
                 data_for_plot = data
                 norm = None
 
+            # Non-finite regions get a transparent fill plus a hatch overlay.
+            try:
+                _cmap = plt.get_cmap(cmap).copy() if isinstance(cmap, str) else cmap
+                _cmap = _cmap.copy() if hasattr(_cmap, "copy") else _cmap
+                _cmap = _cmap.with_extremes(bad="none")
+            except Exception:
+                _cmap = cmap
+
+            # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
+            # which could be valid sources
+            _mask = ~np.isfinite(data_for_plot)
             im = ax.imshow(
-                data_for_plot,
+                np.ma.array(data_for_plot, mask=_mask),
                 extent=extent,
                 origin="lower",
-                cmap=cmap,
+                cmap=_cmap,
                 interpolation="none",
                 norm=norm,
                 vmin=None if use_log_scale else vmin,
                 vmax=None if use_log_scale else vmax,
             )
+            overlay_mask_hatch(ax, _mask, extent=extent)
 
-            cx, cy = nx // 2, ny // 2
-            ax.axvline(cx, color="white", lw=0.5, alpha=0.8, ls="--")
-            ax.axhline(cy, color="white", lw=0.5, alpha=0.8, ls="--")
-            ax.set_title(f"Oversample={oversample}x", fontsize=8, pad=2)
-            ax.set_xlabel("Pixels")
-            ax.set_ylabel("Pixels")
+            cx, cy = nx * scale / 2.0, ny * scale / 2.0
+            ax.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
+            ax.axhline(cy, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
+            _has_fwhm = fwhm_native is not None and np.isfinite(fwhm_native)
+            if _has_fwhm:
+                ax.add_patch(
+                    Circle(
+                        (cx, cy),
+                        0.5 * float(fwhm_native),
+                        fill=False,
+                        color="white",
+                        ls="--",
+                        lw=0.8,
+                    )
+                )
+            # Annotation inside the image panel (top right, one entry
+            # per line) -- a title above the axes collides with the
+            # right projection panel.
+            _info_lines = [f"Oversample={oversample}x"]
+            if np.isfinite(epsf_fwhm_meas):
+                _info_lines.append(f"ePSF FWHM={epsf_fwhm_meas:.2f} px")
+            if _has_fwhm:
+                _info_lines.append(f"image FWHM={float(fwhm_native):.2f} px")
+            ax.text(
+                0.98,
+                0.98,
+                "\n".join(_info_lines),
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=7,
+                color="white",
+            )
+            # The image x ticks are hidden; the shared x label lives on
+            # the bottom projection panel.
+            ax.set_ylabel("Y [native px]")
             ax.set_xticks([])
 
-            x_phys = np.arange(nx)
-            y_phys = np.arange(ny)
-            hx = data.mean(axis=0)
-            hy = data.mean(axis=1)
+            x_phys = (np.arange(nx) + 0.5) * scale
+            y_phys = (np.arange(ny) + 0.5) * scale
+            # Projections must tolerate NaNs in the PSF array.
+            # Convert once and reuse for both axes to avoid a second allocation.
+            _data_f = np.asarray(data, dtype=float)
+            hx = np.nanmean(_data_f, axis=0)
+            hy = np.nanmean(_data_f, axis=1)
+            del _data_f
 
-            ax_B.step(x_phys, hx, color="black", lw=0.5, where="mid")
-            ax_R.step(hy, y_phys, color="black", lw=0.5, where="mid")
-            ax_B.axvline(cx, color="black", lw=0.5, alpha=0.8, ls="--")
-            ax_R.axhline(cy, color="black", lw=0.5, alpha=0.8, ls="--")
-            ax_B.set_ylabel("Intensity")
-            ax_B.set_xlabel("X Pixels")
+            ax_B.step(x_phys, hx, color=PLOT_COLORS.get('psf', '#00AA00'), lw=0.5, where="mid")
+            # Right panel: step() steps along x-axis (value), but we need
+            # stepping along y-axis (coordinate) to match the orientation.
+            _n_r = len(hy)
+            if _n_r > 0:
+                _y_e = np.empty(2 * _n_r)
+                for i in range(_n_r):
+                    _y_e[2 * i] = i * scale
+                    _y_e[2 * i + 1] = (i + 1) * scale
+                ax_R.plot(np.repeat(hy, 2), _y_e, color=PLOT_COLORS.get('psf', '#00AA00'), lw=0.5)
+            ax_B.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
+            ax_R.axhline(cy, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
+            if _has_fwhm:
+                for sgn in (-1.0, 1.0):
+                    ax_B.axvline(
+                        cx + sgn * 0.5 * float(fwhm_native),
+                        color=PLOT_COLORS.get('spine_color', '#000000'),
+                        lw=0.5,
+                        alpha=0.5,
+                        ls=":",
+                    )
+                    ax_R.axhline(
+                        cy + sgn * 0.5 * float(fwhm_native),
+                        color=PLOT_COLORS.get('spine_color', '#000000'),
+                        lw=0.5,
+                        alpha=0.5,
+                        ls=":",
+                    )
+            ax_B.set_ylabel("Mean flux [norm.]", fontsize=7)
+            ax_B.set_xlabel("X [native px]")
             ax_R.yaxis.tick_right()
             ax_R.tick_params(axis="x", rotation=90)
 
@@ -2217,17 +10872,976 @@ class PSF:
                 plt.close(fig)
                 return None
 
-            # plt.tight_layout()
-            plt.show()
+            # No save path: close figure and return it without displaying.
+            # Per-image diagnostic plots should never block the pipeline.
+            plt.close(fig)
             return fig
 
         except Exception as exc:
-            log.error(f"PSF plot failed: {exc}")
+            log.error("PSF plot failed: %s", exc)
             return None
 
     # -----------------------------------------------------------------------
     # PSF visualisation (star cutouts + ePSF)
     # -----------------------------------------------------------------------
+
+    def _build_spatial_grid_epsf(
+        self,
+        df,
+        xcol,
+        ycol,
+        grid_mode,
+        phot_cfg,
+        fwhm,
+        undersampled,
+        oversample_psf,
+        oversample,
+        cutout_n=None,
+        mask=None,
+        background_rms=None,
+        threshold_limit=5.0,
+        SNR_limit=None,
+        filename_prefix="PSF_model_image",
+    ):
+        """Build a `~photutils.psf.GriddedPSFModel`: one ePSF per detector cell.
+
+        Every populated cell runs the full single-field build (candidate
+        vetting, cutout extraction, EPSFBuilder, post-build gates) on its
+        own star subset, so each cell model is individually gated by the
+        same quality machinery as the single ePSF.  Cells below
+        ``psf_grid_min_stars_per_cell`` are first grown into a neighbour's
+        territory then merged with it (the grid may become rectangular,
+        e.g. 2x3); cells that still cannot be rescued - and cells whose
+        own build fails its gates - are copied from the nearest
+        successful cell (``psf_spatial_fill_missing="nearest"``) or veto
+        the whole grid (``"fail"``).
+
+        Returns ``(GriddedPSFModel, df)`` or ``None`` when the field
+        cannot support a grid - the caller then falls back to the single
+        field-averaged ePSF.
+        """
+        log = logging.getLogger(__name__)
+        min_per_cell = max(
+            1, int(phot_cfg.get("psf_grid_min_stars_per_cell", 25))
+        )
+        fill_mode = str(
+            phot_cfg.get("psf_spatial_fill_missing", "nearest")
+        ).strip().lower()
+        if fill_mode not in ("nearest", "fail"):
+            log.warning(
+                "Unknown psf_spatial_fill_missing %r; using 'nearest'.",
+                fill_mode,
+            )
+            fill_mode = "nearest"
+
+        ny_img, nx_img = np.asarray(self.image).shape[:2]
+        xs_all = pd.to_numeric(df[xcol], errors="coerce").to_numpy(float)
+        ys_all = pd.to_numeric(df[ycol], errors="coerce").to_numpy(float)
+        finite_xy = np.isfinite(xs_all) & np.isfinite(ys_all)
+        df = df.loc[finite_xy].reset_index(drop=True)
+        xs_all = xs_all[finite_xy]
+        ys_all = ys_all[finite_xy]
+        if len(df) < 4:
+            log.info(
+                "Spatially-varying PSF: only %d vetted stars; cannot grid.",
+                len(df),
+            )
+            return None
+
+        # The target position is read whenever it is known in the build
+        # image's detector frame: target-aware edge placement uses it,
+        # and the psf_grid_require_target_cell gate needs it to know
+        # which cell must hold a real build.
+        target_xy = None
+        try:
+            _tx = float(self.input_yaml.get("target_x_pix"))
+            _ty = float(self.input_yaml.get("target_y_pix"))
+        except (TypeError, ValueError):
+            _tx = _ty = None
+        if (
+            _tx is not None
+            and np.isfinite(_tx)
+            and np.isfinite(_ty)
+            and 0.0 <= _tx <= nx_img
+            and 0.0 <= _ty <= ny_img
+        ):
+            target_xy = (_tx, _ty)
+
+        target_aware = bool(phot_cfg.get("psf_grid_target_aware", True))
+
+        def _assign(n, require_all=False):
+            xe = ye = cnt = None
+            if target_xy is not None and target_aware:
+                got = _choose_target_aware_edges(
+                    xs_all, ys_all, n, float(nx_img), float(ny_img),
+                    target_xy[0], target_xy[1], min_per_cell,
+                    require_all=require_all,
+                )
+                if got is not None:
+                    xe, ye, cnt = got
+            if xe is None:
+                xe = np.linspace(0.0, float(nx_img), n + 1)
+                ye = np.linspace(0.0, float(ny_img), n + 1)
+                cnt = np.zeros((n, n), dtype=int)
+                np.add.at(
+                    cnt,
+                    (
+                        np.clip(np.digitize(ys_all, ye[1:-1]), 0, n - 1),
+                        np.clip(np.digitize(xs_all, xe[1:-1]), 0, n - 1),
+                    ),
+                    1,
+                )
+            # Starved cells are first grown into a neighbour's territory,
+            # then merged with it, so the surviving cells all carry >=
+            # min_per_cell candidates; only cells that cannot be rescued
+            # (axes already at 2 cells) fall through to fill/fail.
+            min_w = max(
+                20.0,
+                0.15 * float(nx_img) / n,
+                0.15 * float(ny_img) / n,
+            )
+            # A spatial grid below 2x2 is degenerate, so the cap is
+            # floored at 4 cells.
+            max_cells = max(
+                4, int(phot_cfg.get("psf_grid_max_cells", 6))
+            )
+            xe, ye, cnt = _repair_starved_cells(
+                xs_all, ys_all, xe, ye, min_per_cell, min_w=min_w,
+                tx=target_xy[0] if target_xy is not None else None,
+                ty=target_xy[1] if target_xy is not None else None,
+                max_cells=max_cells,
+            )
+            nxc, nyc = len(xe) - 1, len(ye) - 1
+            xi = np.clip(np.digitize(xs_all, xe[1:-1]), 0, nxc - 1)
+            yi = np.clip(np.digitize(ys_all, ye[1:-1]), 0, nyc - 1)
+            return xi, yi, xe, ye, cnt
+
+        if str(grid_mode) == "auto":
+            chosen = None
+            for cand in (3, 2):
+                xi, yi, xe, ye, cnt = _assign(cand, require_all=True)
+                if cnt.min() >= min_per_cell:
+                    chosen = (xi, yi, xe, ye, cnt)
+                    break
+            if chosen is None:
+                log.info(
+                    "psf_spatial_grid=auto: no 3x3 or 2x2 split (after "
+                    "cell grow/merge) gives >= %d stars per cell "
+                    "(%d stars); single ePSF.",
+                    min_per_cell,
+                    len(df),
+                )
+                return None
+            xi, yi, xe, ye, cnt = chosen
+        else:
+            xi, yi, xe, ye, cnt = _assign(int(grid_mode))
+
+        nx_c, ny_c = len(xe) - 1, len(ye) - 1
+
+        fid_x = 0.5 * (xe[:-1] + xe[1:])
+        fid_y = 0.5 * (ye[:-1] + ye[1:])
+        target_cell = None
+        if target_xy is not None:
+            target_cell = (
+                int(
+                    np.clip(
+                        np.digitize([target_xy[0]], xe[1:-1]), 0, nx_c - 1
+                    )[0]
+                ),
+                int(
+                    np.clip(
+                        np.digitize([target_xy[1]], ye[1:-1]), 0, ny_c - 1
+                    )[0]
+                ),
+            )
+        populated = cnt >= min_per_cell
+        n_pop = int(populated.sum())
+        n_cells = nx_c * ny_c
+        # A grid mostly assembled from copied cells carries no spatial
+        # information - require at least half the cells to be real builds.
+        min_populated = max(2, int(np.ceil(0.5 * n_cells)))
+        if n_pop < min_populated:
+            log.info(
+                "Spatially-varying PSF %dx%d: only %d/%d cells have >= %d "
+                "stars (need >= %d populated); single ePSF.",
+                nx_c, ny_c, n_pop, n_cells, min_per_cell, min_populated,
+            )
+            return None
+        if fill_mode == "fail" and n_pop < n_cells:
+            log.info(
+                "Spatially-varying PSF %dx%d: %d/%d cells under-populated "
+                "and psf_spatial_fill_missing='fail'; single ePSF.",
+                nx_c, ny_c, n_cells - n_pop, n_cells,
+            )
+            return None
+
+        if target_cell is not None and not (
+            np.allclose(xe, np.linspace(0.0, float(nx_img), nx_c + 1))
+            and np.allclose(ye, np.linspace(0.0, float(ny_img), ny_c + 1))
+        ):
+            _tix, _tiy = target_cell
+            log.info(
+                "Spatially-varying PSF: target-aware edges put target "
+                "(%.1f, %.1f) in cell (x%d, y%d) spanning x[%.0f, %.0f] "
+                "y[%.0f, %.0f] with %d candidates.",
+                target_xy[0], target_xy[1], _tix, _tiy,
+                xe[_tix], xe[_tix + 1], ye[_tiy], ye[_tiy + 1],
+                int(cnt[_tiy, _tix]),
+            )
+
+        # All cells must share one oversampling to stack into a grid;
+        # freeze the adaptive pick at the weakest populated cell's star
+        # count -- each cell builds with only its own subset, so sizing
+        # the factor off the field-wide pool would overshoot the samples
+        # per gridpoint that thin cells can support.
+        osamp_fixed = max(1, int(oversample))
+        if oversample_psf and undersampled and osamp_fixed <= 1:
+            # Cells hold only a few tens of stars, so the field-wide
+            # minimum-samples floor (~3, the bare minimum for the
+            # sigma-clipped median) is too permissive: at exactly
+            # n/min_samples gridpoints a boundary-count cell lands one
+            # factor too high and collapses.  Use a stricter floor and
+            # discount candidates by the expected vetting survival so
+            # the weakest cell is the one sized for.
+            _grid_min_samp = float(
+                phot_cfg.get("psf_grid_min_samples_per_gridpoint", 4.5)
+            )
+            _survival = float(
+                phot_cfg.get("psf_grid_oversample_survival_frac", 0.75)
+            )
+            osamp_fixed = int(
+                _select_adaptive_oversample(
+                    int(cnt[populated].min() * _survival),
+                    phot_cfg,
+                    min_samples=_grid_min_samp,
+                )[0]
+            )
+
+        base = str(self.input_yaml.get("base", "image"))
+        cell_phot = dict(phot_cfg)
+        cell_phot.update(
+            # A per-cell build is itself a complete single-ePSF build:
+            # recursion is disabled so a failed cell reports failure
+            # (fill/fail decides) rather than recursing into the grid
+            # path again.
+            psf_spatial_grid=False,
+            oversample_psf=False,
+            psf_auto_oversample_undersampled=False,
+            psf_oversample=osamp_fixed,
+            # Per-cell builds must share one oversampling AND one cutout
+            # size to stack into a GriddedPSFModel; freeze both so
+            # per-cell FWHM re-estimation cannot diverge the stamp shape.
+            _psf_freeze_oversample=True,
+            _psf_fixed_cutout=cutout_n,
+            # Thin cells (~tens of stars) need stronger residual
+            # smoothing to damp per-gridpoint noise at x>=2 oversampling.
+            # The iteration budget is intentionally NOT raised: on
+            # undersampled data convergence is unreachable and extra
+            # iterations only accumulate centre-drift noise.
+            psf_smoothing_kernel_target_samples=float(
+                phot_cfg.get("psf_grid_cell_smoothing_target", 15.0)
+            ),
+        )
+        cell_yaml = dict(self.input_yaml)
+        cell_yaml["photometry"] = cell_phot
+
+        # Per-cell artefacts (FITS stamps, any plots) go to PSF_MODELS/;
+        # filenames carry the grid shape so a 3x2 cell is not confused
+        # with a 3x3 one.
+        models_dir = os.path.join(
+            self.input_yaml["write_dir"], "PSF_MODELS"
+        )
+        os.makedirs(models_dir, exist_ok=True)
+        cell_yaml["write_dir"] = models_dir
+
+        def _attempt_grid_build(osamp_val):
+            """Build every populated cell at one shared oversampling
+            factor.  Returns (cell_models, cell_dfs, canon_sig) or None
+            when too few cells produce usable models."""
+            cell_phot["psf_oversample"] = int(osamp_val)
+            cell_yaml["photometry"] = cell_phot
+            cell_models = {}
+            cell_stats = {}
+            cell_dfs = []
+            for iy in range(ny_c):
+                for ix in range(nx_c):
+                    if not populated[iy, ix]:
+                        continue
+                    sub = df[(xi == ix) & (yi == iy)]
+                    cy = dict(cell_yaml)
+                    cy["_psf_base_override"] = (
+                        f"grid{nx_c}x{ny_c}_{base}_cellx{ix}y{iy}"
+                    )
+                    m_c, df_c, cell_obj = None, None, None
+                    try:
+                        cell_obj = PSF(
+                            input_yaml=cy,
+                            image=self.image,
+                            header=self.header,
+                        )
+                        m_c, df_c = cell_obj.build(
+                            psfSources=sub,
+                            usePSFlist=False,
+                            numSources=len(sub),
+                            mask=mask,
+                            background_rms=background_rms,
+                            threshold_limit=threshold_limit,
+                            SNR_limit=SNR_limit,
+                            # Per-cell PSF_Image/PSF_Sources plots are
+                            # redundant with PSF_Grid_*; suppress them.
+                            plot=False,
+                            filename_prefix=filename_prefix,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "Spatially-varying PSF: cell (x%d, y%d) build "
+                            "failed: %s",
+                            ix, iy, exc,
+                        )
+                    if not (
+                        isinstance(m_c, ImagePSF) and _epsf_usable(m_c)
+                    ):
+                        log.warning(
+                            "Spatially-varying PSF: cell (x%d, y%d) produced "
+                            "no usable empirical ePSF; treating as unpopulated.",
+                            ix, iy,
+                        )
+                        continue
+                    # The candidate-count gate runs on the vetted pool; the
+                    # cell's own vetting may still have rejected most of them.
+                    # A cell only counts as populated if a reasonable fraction
+                    # of its candidates survived into the ePSF build.
+                    _n_used = getattr(cell_obj, "n_epsf_stars", None)
+                    _survival_floor = max(3, min_per_cell // 2)
+                    if _n_used is not None and _n_used < _survival_floor:
+                        log.warning(
+                            "Spatially-varying PSF: cell (x%d, y%d) kept only "
+                            "%d stars after vetting (< %d); treating as "
+                            "unpopulated.",
+                            ix, iy, _n_used, _survival_floor,
+                        )
+                        continue
+                    # A cell can complete every vetting step yet still stack
+                    # into a degenerate ePSF (e.g. a thin cell whose surviving
+                    # stars were mostly mask-trimmed).  Reuse the single-ePSF
+                    # FWHM sanity band: a collapsed or inflated cell model is
+                    # demoted to unpopulated so fill/fail decides.
+                    _cell_fwhm_meas = measure_epsf_fwhm_native(
+                        np.asarray(m_c.data, float), m_c.oversampling
+                    )
+                    # Cells use a wider FWHM band than the single-ePSF
+                    # gate: stamp FWHM measured from ~30-50 noisy star
+                    # stacks scatters by ~0.1-0.2 px, and real spatial
+                    # PSF variation is what the grid exists to capture.
+                    # Degenerate builds are caught by the negative-flux
+                    # and ensemble-consistency gates instead.
+                    _f_lo = float(
+                        phot_cfg.get("psf_grid_cell_fwhm_min_frac", 0.70)
+                    )
+                    _f_hi = float(
+                        phot_cfg.get("psf_grid_cell_fwhm_max_frac", 1.70)
+                    )
+                    if np.isfinite(_cell_fwhm_meas) and not (
+                        _f_lo * fwhm <= _cell_fwhm_meas <= _f_hi * fwhm
+                    ):
+                        log.warning(
+                            "Spatially-varying PSF: cell (x%d, y%d) ePSF FWHM "
+                            "%.2f px outside [%.2f, %.2f]x image FWHM %.2f px; "
+                            "treating as unpopulated.",
+                            ix, iy, _cell_fwhm_meas, _f_lo, _f_hi, fwhm,
+                        )
+                        continue
+                    # A starved stack can collapse to a sharp core with
+                    # ringing wings while its measured FWHM stays inside
+                    # the sanity band.  The ringing shows up as a high
+                    # negative-pixel fraction before the FWHM drifts out.
+                    # Unlike the single-ePSF psf_epsf_negfrac_max gate
+                    # this check is NOT exempt at osamp=1: there a noisy
+                    # grid has a strictly better rung left (the field-wide
+                    # ePSF fallback), and a cell whose stamp is mostly
+                    # negative pixels is suspect at any oversampling.
+                    _cell_data = np.asarray(m_c.data, float)
+                    _cell_peak = float(np.nanmax(_cell_data))
+                    _cell_sum = float(np.nansum(_cell_data))
+                    _cell_negfrac = float(np.mean(_cell_data < 0))
+                    _negfrac_max = float(
+                        phot_cfg.get("psf_grid_cell_negfrac_max", 0.10)
+                    )
+                    _neg_bad = _cell_negfrac > _negfrac_max
+                    if (
+                        not np.isfinite(_cell_peak)
+                        or _cell_peak <= 0
+                        or not np.isfinite(_cell_sum)
+                        or _cell_sum <= 0
+                        or _neg_bad
+                    ):
+                        _why = (
+                            f"{100.0 * _cell_negfrac:.0f}% negative pixels "
+                            f"vs {100.0 * _negfrac_max:.0f}% allowed"
+                            if _neg_bad
+                            else f"peak {_cell_peak:.3g}, sum {_cell_sum:.3g}"
+                        )
+                        log.warning(
+                            "Spatially-varying PSF: cell (x%d, y%d) ePSF "
+                            "degenerate (%s); treating as unpopulated.",
+                            ix, iy, _why,
+                        )
+                        continue
+                    cell_models[(ix, iy)] = m_c
+                    cell_stats[(ix, iy)] = (
+                        _cell_peak / _cell_sum,
+                        _cell_fwhm_meas,
+                    )
+                    if df_c is not None and len(df_c):
+                        df_c = df_c.copy()
+                        df_c["psf_grid_ix"] = ix
+                        df_c["psf_grid_iy"] = iy
+                        cell_dfs.append(df_c)
+                    log.info(
+                        "Spatially-varying PSF: cell (x%d, y%d) built from %d "
+                        "stars surviving vetting (of %d candidates; centre "
+                        "%.0f, %.0f).",
+                        ix, iy,
+                        int(_n_used) if _n_used is not None else int(cnt[iy, ix]),
+                        int(cnt[iy, ix]), fid_x[ix], fid_y[iy],
+                    )
+
+            # Cross-cell consistency: cells on one field share one PSF to
+            # within a modest spatial variation, so a cell whose sharpness
+            # (peak/sum -- normalisation-invariant) or FWHM disagrees with
+            # the ensemble median by more than the tolerance is a failed
+            # build that slipped through the per-cell gates.  Demote it so
+            # it is filled from a healthy neighbour rather than used.
+            _cons_max = float(
+                phot_cfg.get("psf_grid_cell_consistency_max", 1.6)
+            )
+            # Require >=5 built cells: at 3-4 cells the ensemble median is
+            # whichever 2 happen to agree, so a genuinely varying field -
+            # the case the grid exists to capture - would have its most
+            # different cell demoted to a neighbour copy.
+            _cons_min_cells = int(
+                phot_cfg.get("psf_grid_cell_consistency_min_cells", 5)
+            )
+            if _cons_max > 1.0 and len(cell_models) >= _cons_min_cells:
+                _sharp_med = float(
+                    np.median([cell_stats[k][0] for k in cell_models])
+                )
+                _fw_med = float(
+                    np.nanmedian([cell_stats[k][1] for k in cell_models])
+                )
+                for key in list(cell_models):
+                    sharp, fw = cell_stats[key]
+                    # sharpness ~ 1/FWHM^2 for a fixed profile shape, so
+                    # its tolerance is the square of the FWHM one.
+                    _sharp_bad = _sharp_med > 0 and (
+                        sharp / _sharp_med > _cons_max**2
+                        or _sharp_med / sharp > _cons_max**2
+                    )
+                    _fw_bad = (
+                        np.isfinite(fw)
+                        and np.isfinite(_fw_med)
+                        and _fw_med > 0
+                        and (
+                            fw / _fw_med > _cons_max
+                            or _fw_med / fw > _cons_max
+                        )
+                    )
+                    if _sharp_bad or _fw_bad:
+                        log.warning(
+                            "Spatially-varying PSF: cell %s ePSF inconsistent "
+                            "with the ensemble (sharpness %.3g vs median "
+                            "%.3g, FWHM %.2f vs median %.2f; tolerance "
+                            "x%.2f); treating as unpopulated.",
+                            key, sharp, _sharp_med, fw, _fw_med, _cons_max,
+                        )
+                        del cell_models[key]
+
+            # GriddedPSFModel needs identical stamp shape and oversampling in
+            # every cell; cells that descended the oversampling ladder or
+            # produced a different stamp size are demoted to unpopulated.
+            shape_groups = {}
+            for key, m in cell_models.items():
+                sig = (
+                    tuple(np.asarray(m.data).shape),
+                    tuple(int(v) for v in np.atleast_1d(m.oversampling)),
+                )
+                shape_groups.setdefault(sig, []).append(key)
+            if not shape_groups:
+                log.info("Spatially-varying PSF: no cell produced a usable ePSF.")
+                return None
+            canon_sig = max(shape_groups, key=lambda s: len(shape_groups[s]))
+            for key in list(cell_models):
+                sig = (
+                    tuple(np.asarray(cell_models[key].data).shape),
+                    tuple(int(v) for v in np.atleast_1d(cell_models[key].oversampling)),
+                )
+                if sig != canon_sig:
+                    log.warning(
+                        "Spatially-varying PSF: cell %s has shape %s "
+                        "(grid uses %s); treating as unpopulated.",
+                        key, sig, canon_sig,
+                    )
+                    del cell_models[key]
+            if len(cell_models) < min_populated:
+                log.info(
+                    "Spatially-varying PSF: only %d shape-consistent cells; "
+                    "single ePSF.",
+                    len(cell_models),
+                )
+                return None
+            if fill_mode == "fail" and len(cell_models) < n_cells:
+                log.info(
+                    "Spatially-varying PSF: %d cells failed their build and "
+                    "psf_spatial_fill_missing='fail'; single ePSF.",
+                    n_cells - len(cell_models),
+                )
+                return None
+
+            # The grid exists to put a local ePSF at the target; when the
+            # target's own cell could not be built, its "local" model is a
+            # copy of a distant cell and the interpolation buys nothing at
+            # the position that matters most.  Reject the attempt so the
+            # oversampling ladder can still rescue the cell at a lower
+            # factor; if no factor builds it the caller falls back to the
+            # field-wide ePSF.
+            if (
+                target_cell is not None
+                and bool(
+                    phot_cfg.get("psf_grid_require_target_cell", True)
+                )
+                and target_cell not in cell_models
+            ):
+                log.warning(
+                    "Spatially-varying PSF: target cell (x%d, y%d) has no "
+                    "usable ePSF at oversample=x%d "
+                    "(psf_grid_require_target_cell); rejecting this "
+                    "attempt.",
+                    target_cell[0], target_cell[1], osamp_val,
+                )
+                return None
+
+            return cell_models, cell_dfs, canon_sig
+
+        # If too few cells produce usable models at the picked factor,
+        # rebuild the whole grid at the next lower oversampling: the
+        # stamps stay shape-uniform within an attempt, and a thinner
+        # grid is more stable because every star then constrains every
+        # gridpoint.  Only the accepted attempt's models are used.
+        _osamp_ladder = [osamp_fixed]
+        if bool(phot_cfg.get("psf_grid_osamp_descent", True)):
+            _osamp_ladder += list(range(osamp_fixed - 1, 0, -1))
+        cell_models = None
+        for _li, _osamp_try in enumerate(_osamp_ladder):
+            _res = _attempt_grid_build(_osamp_try)
+            if _res is not None:
+                cell_models, cell_dfs, canon_sig = _res
+                if _osamp_try != osamp_fixed:
+                    log.info(
+                        "Spatially-varying PSF: grid accepted at "
+                        "reduced oversampling x%d (initial pick x%d).",
+                        _osamp_try, osamp_fixed,
+                    )
+                break
+            if _li + 1 < len(_osamp_ladder):
+                log.info(
+                    "Spatially-varying PSF: grid attempt at x%d did not "
+                    "pass acceptance; retrying the whole grid at x%d.",
+                    _osamp_try, _osamp_ladder[_li + 1],
+                )
+        if cell_models is None:
+            return None
+
+        # Fill empty cells from the nearest built cell (Euclidean in cell
+        # units); copies are full stamps, not references.
+        grid = {}
+        n_filled = 0
+        for iy in range(ny_c):
+            for ix in range(nx_c):
+                m = cell_models.get((ix, iy))
+                if m is None:
+                    best = min(
+                        cell_models,
+                        key=lambda c: (c[0] - ix) ** 2 + (c[1] - iy) ** 2,
+                    )
+                    if target_cell is not None and (ix, iy) == target_cell:
+                        # Reached only with psf_grid_require_target_cell
+                        # off: flag the provenance so the local model at the
+                        # position that matters is not silently a copy.
+                        log.warning(
+                            "Spatially-varying PSF: target cell (x%d, y%d) "
+                            "filled from cell (x%d, y%d) - local model is a "
+                            "neighbour copy, not measured.",
+                            ix, iy, best[0], best[1],
+                        )
+                    src = cell_models[best]
+
+                    def _pval(obj, name, default):
+                        v = getattr(obj, name, default)
+                        v = getattr(v, "value", v)
+                        return float(np.atleast_1d(v)[0])
+
+                    m = ImagePSF(
+                        data=np.array(src.data, dtype=float, copy=True),
+                        flux=_pval(src, "flux", 1.0),
+                        x_0=_pval(src, "x_0", 0.0),
+                        y_0=_pval(src, "y_0", 0.0),
+                        origin=getattr(src, "origin", None),
+                        oversampling=canon_sig[1],
+                    )
+                    n_filled += 1
+                grid[(ix, iy)] = m
+
+        epsf_list = []
+        xypos = []
+        for iy in range(ny_c):
+            for ix in range(nx_c):
+                epsf_list.append(grid[(ix, iy)])
+                xypos.append((float(fid_x[ix]), float(fid_y[iy])))
+
+        meta = {
+            "grid_xypos": xypos,
+            "oversampling": canon_sig[1],
+            "fill_value": 0.0,
+        }
+        gridded = GriddedPSFModel(
+            NDData(np.stack([np.asarray(m.data, float) for m in epsf_list]),
+                   meta=meta),
+            fill_value=0.0,
+        )
+        self.psf_model_kind = f"gridded-epsf-{nx_c}x{ny_c}"
+        self.psf_grid_xypos = xypos
+        log.info(
+            "Spatially-varying PSF: %dx%d GriddedPSFModel built "
+            "(%d cells built, %d filled from neighbours, %d stars total).",
+            nx_c, ny_c, len(cell_models), n_filled, len(df),
+        )
+        if target_cell is not None and target_cell not in cell_models:
+            log.warning(
+                "Spatially-varying PSF: the target's own cell (x%d, y%d) "
+                "could not be built and holds a copy of the nearest "
+                "healthy cell - the PSF at the target is not local. "
+                "Set psf_grid_require_target_cell: true (the default) to "
+                "fall back to the field-wide ePSF in this case.",
+                target_cell[0], target_cell[1],
+            )
+
+        df_out = (
+            pd.concat(cell_dfs, ignore_index=True) if cell_dfs else df
+        )
+
+        # FITS output: the standard-name file stays a 2-D ePSF stamp (the
+        # grid pinned at the image centre) so consumers expecting a single
+        # ePSF (SFFT prior vetting, ZOGY stamps, reloads) keep working; the
+        # full cube + grid fiducials go to PSF_model_grid_*.
+        try:
+            from functions import safe_fits_write
+
+            write_dir = self.input_yaml["write_dir"]
+            hdr = fits.Header()
+            hdr["PSFBUILD"] = (
+                self.psf_model_kind, "PSF model construction method"
+            )
+            hdr["NGRIDX"] = (nx_c, "ePSF grid cells along x")
+            hdr["NGRIDY"] = (ny_c, "ePSF grid cells along y")
+            hdr["NFILLED"] = (n_filled, "cells copied from nearest neighbour")
+            hdr["NPSFSTAR"] = (int(len(df)), "stars in the vetted pool")
+            hdr["FWHM_PIX"] = (float(fwhm), "image FWHM in native pixels")
+            for k_i, (gx, gy) in enumerate(xypos):
+                hdr[f"GX{k_i}"] = (float(gx), "grid fiducial x (detector px)")
+                hdr[f"GY{k_i}"] = (float(gy), "grid fiducial y (detector px)")
+
+            centre_model = epsf_at_position(
+                gridded, nx_img / 2.0, ny_img / 2.0
+            )
+            stamp2d = (
+                np.asarray(centre_model.data, dtype=float)
+                if centre_model is not None
+                else None
+            )
+            if stamp2d is not None and stamp2d.ndim == 2:
+                hdr_c = hdr.copy()
+                try:
+                    _osamp_c = int(
+                        np.atleast_1d(
+                            getattr(centre_model, "oversampling", 1)
+                        )[0]
+                    )
+                except Exception:
+                    _osamp_c = int(canon_sig[1][0])
+                hdr_c["OVERSAMP"] = (
+                    _osamp_c, "ePSF oversampling factor (grid px per native px)"
+                )
+                hdr_c["PSFNPIX"] = (
+                    max(1, int(round((min(stamp2d.shape) - 1) / _osamp_c))),
+                    "ePSF native-pixel cutout size",
+                )
+                _orig_c = getattr(centre_model, "origin", None)
+                if _orig_c is not None:
+                    hdr_c["PSFX0"] = (
+                        float(np.atleast_1d(_orig_c)[0]),
+                        "ePSF x origin (oversampled array coord)",
+                    )
+                    hdr_c["PSFY0"] = (
+                        float(np.atleast_1d(_orig_c)[-1]),
+                        "ePSF y origin (oversampled array coord)",
+                    )
+                safe_fits_write(
+                    os.path.join(
+                        models_dir, f"{filename_prefix}_{base}.fits"
+                    ),
+                    # ZOGY's kernel fit re-reads this stamp - keep the same
+                    # float64 precision as the grid model below.
+                    stamp2d.astype(np.float64),
+                    hdr_c,
+                )
+            safe_fits_write(
+                os.path.join(
+                    models_dir,
+                    f"PSF_model_grid{nx_c}x{ny_c}_{base}.fits",
+                ),
+                np.asarray(gridded.data, float),
+                hdr,
+            )
+        except Exception as _fits_exc:
+            log.warning("Gridded ePSF FITS write failed: %s", _fits_exc)
+
+        try:
+            self._plot_epsf_grid(
+                gridded,
+                nx_c,
+                ny_c,
+                xypos,
+                populated_cells=set(cell_models),
+                cell_counts=cnt,
+                write_dir=self.input_yaml["write_dir"],
+                base=base,
+                xedges=xe,
+                yedges=ye,
+                src_xy=(xs_all, ys_all, xi, yi),
+            )
+        except Exception as _plot_exc:
+            log.warning("Gridded ePSF plot failed: %s", _plot_exc)
+
+        return gridded, df_out
+
+    # Per-cell colours drawn from the RPTH-family palette used by
+    # PLOT_COLORS so each cell reads as a distinct unit on both the
+    # stamp panels and the science-image overlay.
+    _GRID_CELL_COLORS = (
+        "#005CAB", "#009E73", "#D9A020", "#E31B23", "#5B9BD5",
+        "#003366", "#4E857B", "#8FA9BD", "#CC79A7",
+    )
+
+    def _plot_epsf_grid(
+        self, gridded, nx_c, ny_c, xypos, populated_cells, cell_counts,
+        write_dir, base, xedges=None, yedges=None, src_xy=None,
+    ):
+        """Per-cell ePSF stamps (left) beside the science image overlaid
+        with the grid cells and their PSF stars (right)."""
+        from matplotlib.patches import Rectangle
+
+        apply_autophot_mplstyle()
+        plt.ioff()
+        cmap = plt.get_cmap("viridis").copy()
+        cmap = cmap.with_extremes(bad="none")
+
+        data_cube = np.asarray(gridded.data, dtype=float)
+        _img_arr = (
+            np.asarray(getattr(self.image, "data", self.image), float)
+            if self.image is not None
+            else None
+        )
+        has_img = _img_arr is not None and _img_arr.ndim == 2
+        # Size the figure from the content: the left block is exactly
+        # nx_c x ny_c square stamp panels, the right axes matches the
+        # image's native aspect -- otherwise equal-aspect imshow
+        # letterboxes and leaves dead space between the blocks.
+        _stamp_in = 2.1
+        _left_w = _stamp_in * nx_c
+        _content_h = max(_stamp_in * ny_c, 4.4)
+        if has_img:
+            _img_aspect = _img_arr.shape[0] / _img_arr.shape[1]
+            _right_w = _content_h / _img_aspect
+        else:
+            _right_w = 0.0
+        fig = plt.figure(
+            figsize=(_left_w + _right_w + 0.9, _content_h + 1.0)
+        )
+        # Explicit margins: subgridspec axes are "not compatible" with
+        # tight_layout, so its rect cannot reserve suptitle space here.
+        # No suptitle -- the user prefers title-free diagnostic figures.
+        gs = fig.add_gridspec(
+            1, 2,
+            width_ratios=[_left_w, _right_w] if has_img else [1, 1],
+            wspace=0.08,
+            left=0.03,
+            right=0.98,
+            top=0.98,
+            bottom=0.08,
+        )
+        cell_color = {}
+        for iy in range(ny_c):
+            for ix in range(nx_c):
+                cell_color[(ix, iy)] = self._GRID_CELL_COLORS[
+                    (iy * nx_c + ix) % len(self._GRID_CELL_COLORS)
+                ]
+
+        # Left: ny x nx per-cell ePSF stamps tiled edge-to-edge like the
+        # PSF_Sources panel; the cell tag is drawn inside each stamp in
+        # the cell's colour so no inter-panel gap is needed for titles.
+        # grid_xypos order is (iy-major): index = iy * nx_c + ix.
+        # Row 0 of a subgridspec is the TOP of the figure while cell
+        # iy=0 is the bottom of the image - flip rows so the stamp
+        # mosaic shares the science image's orientation.
+        left_sub = gs[0].subgridspec(ny_c, nx_c, hspace=0.02, wspace=0.02)
+        xy_arr = np.asarray(xypos, dtype=float)
+        xs_sorted = np.sort(np.unique(xy_arr[:, 0]))
+        ys_sorted = np.sort(np.unique(xy_arr[:, 1]))
+        for i, stamp in enumerate(data_cube):
+            gx, gy = xy_arr[i]
+            ix = int(np.searchsorted(xs_sorted, gx))
+            iy = int(np.searchsorted(ys_sorted, gy))
+            ax = fig.add_subplot(left_sub[ny_c - 1 - iy, ix])
+            try:
+                vmin, vmax = ZScaleInterval().get_limits(stamp)
+                norm = ImageNormalize(vmin=vmin, vmax=vmax)
+            except Exception:
+                norm = None
+            ax.imshow(
+                np.ma.array(stamp, mask=~np.isfinite(stamp)),
+                origin="lower",
+                cmap=cmap,
+                norm=norm,
+                interpolation="none",
+                aspect="equal",
+            )
+            overlay_mask_hatch(ax, ~np.isfinite(stamp))
+            built = (ix, iy) in populated_cells
+            n_stars = int(cell_counts[iy, ix])
+            tag = f"{n_stars}*" if built else f"fill({n_stars})"
+            cc = cell_color[(ix, iy)]
+            ax.text(
+                0.03,
+                0.97,
+                f"x{ix}y{iy} {tag}\n({gx:.0f},{gy:.0f})",
+                transform=ax.transAxes,
+                fontsize=7,
+                color="white",
+                va="top",
+                ha="left",
+                bbox=dict(
+                    facecolor=cc, edgecolor="none", alpha=0.85, pad=1.5
+                ),
+            )
+            for sp in ax.spines.values():
+                sp.set_edgecolor(cc)
+                sp.set_linewidth(2.2)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        # Right: the science image in the house greyscale with cell
+        # rectangles; each cell's PSF stars are square markers in that
+        # cell's colour (dashed border = cell filled from a neighbour
+        # rather than built).
+        if has_img:
+            ax_img = fig.add_subplot(gs[1])
+            img = _img_arr
+            cmap_img = plt.get_cmap(
+                PLOT_COLORS.get("image_cmap", "gray")
+            ).copy()
+            cmap_img = cmap_img.with_extremes(bad="none")
+            try:
+                vmin_i, vmax_i = ZScaleInterval().get_limits(img)
+                norm_i = ImageNormalize(vmin=vmin_i, vmax=vmax_i)
+            except Exception:
+                norm_i = None
+            ax_img.imshow(
+                np.ma.array(img, mask=~np.isfinite(img)),
+                origin="lower",
+                cmap=cmap_img,
+                norm=norm_i,
+                interpolation="none",
+            )
+            overlay_mask_hatch(ax_img, ~np.isfinite(img))
+            if xedges is not None and yedges is not None:
+                # Inset each cell's border a few px so neighbouring cells'
+                # shared edges do not overlap into an unreadable double
+                # line; all borders stay solid (filled cells are tagged
+                # in their stamp label).
+                _cell_pad = 0.015 * min(
+                    float(np.diff(xedges).min()),
+                    float(np.diff(yedges).min()),
+                )
+                for iy in range(ny_c):
+                    for ix in range(nx_c):
+                        ax_img.add_patch(
+                            Rectangle(
+                                (xedges[ix] + _cell_pad, yedges[iy] + _cell_pad),
+                                xedges[ix + 1] - xedges[ix] - 2 * _cell_pad,
+                                yedges[iy + 1] - yedges[iy] - 2 * _cell_pad,
+                                fill=False,
+                                edgecolor=cell_color[(ix, iy)],
+                                linewidth=2.0,
+                                linestyle="-",
+                            )
+                        )
+            if src_xy is not None:
+                xs_s, ys_s, xi_s, yi_s = src_xy
+                for iy in range(ny_c):
+                    for ix in range(nx_c):
+                        sel = (xi_s == ix) & (yi_s == iy)
+                        if np.any(sel):
+                            ax_img.scatter(
+                                xs_s[sel],
+                                ys_s[sel],
+                                marker="s",
+                                s=6,
+                                facecolors="none",
+                                edgecolors=cell_color[(ix, iy)],
+                                linewidths=0.4,
+                            )
+            # Transient position (same frame as the build image -- the
+            # pipeline re-derives target_*_pix from WCS after alignment).
+            _tx = self.input_yaml.get("target_x_pix")
+            _ty = self.input_yaml.get("target_y_pix")
+            if (
+                _tx is not None
+                and _ty is not None
+                and np.isfinite(float(_tx))
+                and np.isfinite(float(_ty))
+            ):
+                ax_img.scatter(
+                    [float(_tx)],
+                    [float(_ty)],
+                    marker="*",
+                    s=160,
+                    facecolors="none",
+                    # Magenta contrasts with all four cell colours and the
+                    # grayscale background.
+                    edgecolors="#FF00FF",
+                    linewidths=1.2,
+                    label="transient",
+                )
+                ax_img.legend(
+                    loc="upper right", fontsize=7, framealpha=0.7
+                )
+            ax_img.set_xlabel("x (pix)", fontsize=8)
+            ax_img.set_ylabel("y (pix)", fontsize=8)
+            # Keep the y label/ticks on the far side so they never
+            # overlap the stamp block in the narrow wspace gap.
+            ax_img.yaxis.set_label_position("right")
+            ax_img.yaxis.tick_right()
+            ax_img.tick_params(labelsize=7)
+
+        out = os.path.join(
+            write_dir,
+            f"PSF_Grid_{base}{get_plot_ext(self.input_yaml)}",
+        )
+        fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        logging.getLogger(__name__).info(
+            "Saved gridded ePSF diagnostic plot: %s", os.path.basename(out)
+        )
 
     def _create_psf_visualization(
         self, stars, epsf, star_shape, aperture_radius, write_dir, base, use_log_scale=True
@@ -2242,13 +11856,22 @@ class PSF:
         block_height = span_2d + span_3d
         total_rows = max(nrows, block_height)
 
-        _style = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-        )
-        if os.path.exists(_style):
-            plt.style.use(_style)
+        apply_autophot_mplstyle()
         plt.ioff()
-        fig = plt.figure(figsize=set_size(540, 1.3))
+        # Star cutouts are square equal-aspect images tiled with zero
+        # spacing, so the left-grid cells must be square or the stamps
+        # shrink inside them and leave gaps hspace=0 cannot remove.  The
+        # left subgrid splits its region into nrows equal rows regardless
+        # of the parent height_ratios, so square cells need
+        # fig_h*(top-bottom)/nrows == fig_w*(right-left)/col_units.
+        fig_w = set_size(540)[0]
+        g_left, g_right, g_bottom, g_top = 0.02, 0.98, 0.03, 0.93
+        col_units = ncols + 0.12 + 2.0  # star columns + gap + right block
+        fig_h = (
+            fig_w * (g_right - g_left) * nrows
+            / ((g_top - g_bottom) * col_units)
+        )
+        fig = plt.figure(figsize=(fig_w, fig_h))
         # Centre the right-hand block: equal empty rows above and below
         start_row = (total_rows - block_height) // 2
         height_ratios = [1] * total_rows
@@ -2261,6 +11884,10 @@ class PSF:
             ncols=ncols + 3,
             width_ratios=[1] * ncols + [0.12] + [1, 1],
             height_ratios=height_ratios,
+            left=g_left,
+            right=g_right,
+            bottom=g_bottom,
+            top=g_top,
             hspace=0,
             wspace=0,
         )
@@ -2276,26 +11903,52 @@ class PSF:
             xx, yy, x_0=star_shape / 2, y_0=star_shape / 2, flux=1
         )
 
-        all_data = np.concatenate([np.ravel(s) for s in stars] + [psf_model.ravel()])
-        vmin, vmax = ZScaleInterval().get_limits(all_data)
-        norm = ImageNormalize(vmin=vmin, vmax=vmax)
-
+        # Individual normalization per star (not global) for better visibility
+        cmap_vir = plt.get_cmap("viridis").copy()
+        cmap_vir = cmap_vir.with_extremes(bad="none")
         for i in range(num_stars):
             row, col = divmod(i, ncols)
             ax = fig.add_subplot(left_sub[row, col])
+            try:
+                vmin_i, vmax_i = ZScaleInterval().get_limits(stars[i])
+                norm_i = ImageNormalize(vmin=vmin_i, vmax=vmax_i)
+            except Exception:
+                # Fallback if zscale fails
+                norm_i = None
+            # Render star.mask alongside non-finite pixels so masked
+            # contaminant pixels are visible in the diagnostic rather than
+            # silently excluded only at fit time.
+            _star_mask = getattr(stars[i], "mask", None)
+            if _star_mask is not None:
+                _plot_mask = ~np.isfinite(stars[i]) | np.asarray(
+                    _star_mask, bool
+                )
+            else:
+                _plot_mask = ~np.isfinite(stars[i])
             ax.imshow(
-                stars[i],
+                np.ma.array(stars[i], mask=_plot_mask),
                 origin="lower",
-                cmap="viridis",
-                norm=norm,
+                cmap=cmap_vir,
+                norm=norm_i,
                 interpolation="none",
             )
-            ctr = [stars[i].shape[1] / 2, stars[i].shape[0] / 2]
+            overlay_mask_hatch(ax, _plot_mask)
+            # Use actual cutout_center if available, fallback to geometric
+            # center.  photutils stores cutout_center as (x, y), which is
+            # also the order matplotlib needs for the patch centre.
+            ctr = getattr(
+                stars[i],
+                "cutout_center",
+                (
+                    (stars[i].shape[1] - 1) / 2,
+                    (stars[i].shape[0] - 1) / 2,
+                ),
+            )
             ax.add_patch(
                 Circle(
                     ctr,
                     aperture_radius,
-                    color="#FF0000",
+                    color="white",
                     ls="-",
                     fill=False,
                     lw=0.5,
@@ -2316,9 +11969,7 @@ class PSF:
 
         vmin_p, vmax_p = ZScaleInterval().get_limits(psf_model)
 
-        # Use log scale if requested for 2D PSF
         if use_log_scale:
-            # Transform to log10 scale for display
             psf_model_plot = np.log10(np.maximum(psf_model, 1e-10))
             vmin_p_plot = np.log10(np.maximum(vmin_p, 1e-10))
             vmax_p_plot = np.log10(np.maximum(vmax_p, 1e-10))
@@ -2331,9 +11982,16 @@ class PSF:
 
         # 2D ePSF image (right side, top of right subgrid)
         ax_right = fig.add_subplot(right_sub[0, 0])
+        cmap_vir = plt.get_cmap("viridis").copy()
+        cmap_vir = cmap_vir.with_extremes(bad="none")
         im = ax_right.imshow(
-            psf_model_plot, origin="lower", cmap="viridis", norm=norm_p, interpolation="none"
+            np.ma.array(psf_model_plot, mask=~np.isfinite(psf_model_plot)),
+            origin="lower",
+            cmap=cmap_vir,
+            norm=norm_p,
+            interpolation="none",
         )
+        overlay_mask_hatch(ax_right, ~np.isfinite(psf_model_plot))
         ax_right.set_title(f"2D ePSF{title_suffix}", fontsize=8, pad=2)
         ax_right.set_xticks([])
         ax_right.set_yticks([])
@@ -2342,7 +12000,7 @@ class PSF:
             Circle(
                 ctr,
                 aperture_radius,
-                color="#FF0000",
+                color=PLOT_COLORS.get('epsf_aperture', '#CC79A7'),
                 ls="-",
                 fill=False,
                 lw=0.5,
@@ -2384,15 +12042,41 @@ class PSF:
         ax_right_3d.set_zticks([])
         ax_right_3d.view_init(elev=35, azim=135)
 
-        # Standardized PNG output.
-        psf_sources_png = os.path.join(write_dir, f"PSF_Sources_{base}.png")
+        # Overlay circles mark the normalisation radius; a single figure
+        # legend identifies them since per-stamp labels would be unreadable.
+        # The cutout circles are white for contrast but mean the same thing
+        # as the colored circle on the ePSF panel.
+        from matplotlib.lines import Line2D as _Line2D
+        fig.legend(
+            handles=[
+                _Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    linestyle="None",
+                    markersize=6,
+                    markerfacecolor="none",
+                    markeredgecolor=PLOT_COLORS.get('epsf_aperture', '#CC79A7'),
+                    label="Normalisation radius",
+                )
+            ],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.0),
+            ncol=1,
+            fontsize=8,
+            frameon=False,
+        )
+
+        psf_sources_png = os.path.join(
+            write_dir, f"PSF_Sources_{base}{get_plot_ext(self.input_yaml)}"
+        )
         fig.savefig(
             psf_sources_png,
             bbox_inches="tight",
             dpi=150,
             facecolor="white",
         )
-        plt.close()
+        plt.close(fig)
         return 1
 
     # -----------------------------------------------------------------------
@@ -2405,7 +12089,6 @@ class PSF:
 
         Works with both astropy Tables (.colnames) and pandas DataFrames (.columns).
         """
-        # Unified column-name lookup for both Table and DataFrame.
         col_names = tbl.colnames if hasattr(tbl, "colnames") else list(tbl.columns)
         for nm in names:
             if nm in col_names:
@@ -2435,6 +12118,12 @@ class PSF:
         xy_bounds=None,
         iterative: bool = False,
         inverted_image=None,  # Optional: external inverted image from main.py
+        mask=None,
+        null_image=None,
+        null_background_rms=None,
+        null_mask=None,
+        null_offset=None,
+        null_exclude_xy=None,
     ) -> pd.DataFrame:
         """
         Tiered-SNR PSF photometry with optional MCMC error propagation.
@@ -2445,14 +12134,36 @@ class PSF:
         """
         log = logging.getLogger(__name__)
         t0 = time.perf_counter()
-        log.info(border_msg(f"PSF photometry on {len(sources)} sources"))
+        if sources is None:
+            log.warning("PSF photometry: no sources provided (sources=None); skipping PSF fit.")
+            return sources
+        if len(sources) == 0:
+            log.info(log_step("PSF photometry: 0 sources"))
+            return sources
+        log.info(log_step(f"PSF photometry: {len(sources)} sources"))
 
         if epsf_model is None:
             log.info("No ePSF model; returning sources unchanged.")
             return sources
 
+        # Detect difference images via the actual CONVD keyword first.  FORCECON
+        # may record the requested mode (AUTO) while CONVD records the direction
+        # SFFT or ZOGY applied.  On difference images, negative PSF fluxes are
+        # physically meaningful (fading sources) and should NOT be clipped.
+        is_difference_image = False
+        if self.header is not None:
+            _convd = str(self.header.get("CONVD", "")).strip().upper()
+            _forcecon = str(self.header.get("FORCECON", "")).strip().upper()
+            _diff_kind = (
+                _convd
+                if _convd in ("REF", "SCI", "ZOGY")
+                else _forcecon
+            )
+            if _diff_kind in ("REF", "SCI", "AUTO", "ZOGY"):
+                is_difference_image = True
+
         fwhm = float(self.input_yaml.get("fwhm", 3.0))
-        exposure_time = float(self.input_yaml.get("exposure_time", 30.0))
+        exposure_time = resolve_exposure_time_seconds(None, self.input_yaml)
         image_filter = self.input_yaml.get("imageFilter", "")
         scale = self.input_yaml.get("scale", 0)
         # Use same aperture_radius as aperture photometry to ensure consistent flux scale
@@ -2466,6 +12177,20 @@ class PSF:
             aperture_radius = 1.5 * fwhm
         phot_cfg = self.input_yaml.get("photometry", {}) or {}
 
+        # Bound the fitted amplitude at >= 0: a positive-flux prior applied
+        # inside the fitter, not a post-fit NaN mask.  An unconstrained LSQ
+        # step can converge onto a negative-flux solution that no later
+        # step recovers from.
+        positive_flux_fit = _positive_flux_policy(phot_cfg, is_difference_image)
+        if is_difference_image:
+            log.info(
+                "PSF fit: detected difference image (CONVD=%s, FORCECON=%s); %s.",
+                _convd, _forcecon,
+                "negative fluxes will be preserved"
+                if not positive_flux_fit
+                else "fitted amplitudes are bounded at >=0",
+            )
+
         undersampled_fwhm_threshold = float(
             phot_cfg.get("undersampled_fwhm_threshold", 2.5)
         )
@@ -2478,19 +12203,13 @@ class PSF:
             pixel_scale = np.nan
         has_pixel_scale = np.isfinite(pixel_scale) and pixel_scale > 0
 
-        # Fit box sizes chosen to enclose several FWHM in each regime.
-        # We also apply an adaptive boost for undersampled/coarse-scale data.
-        fs_bright_scale = float(phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0))
-        fs_faint_scale = float(phot_cfg.get("psf_fit_shape_faint_scale_fwhm", 2.5))
-        fs_vfaint_scale = float(phot_cfg.get("psf_fit_shape_vfaint_scale_fwhm", 2.0))
-        
-        # Store base scales
-        base_bright_scale = fs_bright_scale
-        base_faint_scale = fs_faint_scale
-        base_vfaint_scale = fs_vfaint_scale
-        
+        # Fit box size chosen to enclose several FWHM.
+        # A single consistent fit_shape is used for ALL sources (target and catalog)
+        # to avoid magnitude-dependent flux bias from different fit box sizes.
+        fs_scale = float(phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0))
+
         fit_sampling_boost = 1.0
-        if fwhm <= 2.5:
+        if fwhm <= undersampled_fwhm_threshold:
             fit_sampling_boost += 0.20
         if has_pixel_scale and pixel_scale >= 0.8:
             fit_sampling_boost += 0.10
@@ -2506,41 +12225,17 @@ class PSF:
         if is_target_fit:
             target_shape_boost = max(1.0, target_shape_boost)
 
-        bright_min_arcsec = float(
+        fit_min_arcsec = float(
             phot_cfg.get("psf_fit_shape_bright_min_arcsec", 3.0)
         )
-        faint_min_arcsec = float(phot_cfg.get("psf_fit_shape_faint_min_arcsec", 2.5))
-        vfaint_min_arcsec = float(
-            phot_cfg.get("psf_fit_shape_vfaint_min_arcsec", 2.0)
-        )
-        bright_min_px = bright_min_arcsec / pixel_scale if has_pixel_scale else np.nan
-        faint_min_px = faint_min_arcsec / pixel_scale if has_pixel_scale else np.nan
-        vfaint_min_px = vfaint_min_arcsec / pixel_scale if has_pixel_scale else np.nan
+        fit_min_px = fit_min_arcsec / pixel_scale if has_pixel_scale else np.nan
 
-        fit_shape_bright = (
+        fit_shape = (
             _odd(
                 max(
                     7,
-                    int(fs_bright_scale * fwhm * fit_sampling_boost),
-                    int(np.ceil(bright_min_px)) if np.isfinite(bright_min_px) else 0,
-                )
-            ),
-        ) * 2
-        fit_shape_faint = (
-            _odd(
-                max(
-                    7,
-                    int(fs_faint_scale * fwhm * fit_sampling_boost),
-                    int(np.ceil(faint_min_px)) if np.isfinite(faint_min_px) else 0,
-                )
-            ),
-        ) * 2
-        fit_shape_vfaint = (
-            _odd(
-                max(
-                    7,
-                    int(fs_vfaint_scale * fwhm * fit_sampling_boost),
-                    int(np.ceil(vfaint_min_px)) if np.isfinite(vfaint_min_px) else 0,
+                    int(fs_scale * fwhm * fit_sampling_boost),
+                    int(np.ceil(fit_min_px)) if np.isfinite(fit_min_px) else 0,
                 )
             ),
         ) * 2
@@ -2549,15 +12244,68 @@ class PSF:
         # the first Airy ring / broader wings, helping the PSF distinguish
         # true point sources from neighbouring structure.
         if undersampled:
-            fit_shape_bright = (_odd(max(fit_shape_bright[0], 9)),) * 2
-            fit_shape_faint = (_odd(max(fit_shape_faint[0], 9)),) * 2
-            fit_shape_vfaint = (_odd(max(fit_shape_vfaint[0], 7)),) * 2
+            fit_shape = (_odd(max(fit_shape[0], 9)),) * 2
 
-        # Apply target_shape_boost when is_target_fit
+        # Grow the fit window until the model's encircled energy at the fit
+        # radius reaches psf_fit_shape_ee_min.  A window that truncates the
+        # wings leaves real flux to the local-background annulus, which the
+        # sky estimate then absorbs -- a brightness-dependent bias that
+        # shows up as slope != 1 in the zeropoint fit.
+        _ee_model_data = None
+        _ee_osamp = 1
+        _stamp_native = np.nan
+        _r_ee_annulus = np.nan
+        try:
+            _ee_model_data = np.asarray(epsf_model.data, dtype=float)
+            _ee_osamp = int(
+                np.atleast_1d(getattr(epsf_model, "oversampling", 1))[0]
+            )
+            _stamp_native = int(min(_ee_model_data.shape[-2:])) // max(
+                _ee_osamp, 1
+            )
+            _ee_fit_min = float(
+                phot_cfg.get("psf_fit_shape_ee_min", 0.95) or 0.95
+            )
+            if 0.0 < _ee_fit_min < 1.0:
+                _r_ee_fit = _epsf_ee_radius_native(
+                    _ee_model_data, _ee_osamp, _ee_fit_min
+                )
+                if np.isfinite(_r_ee_fit):
+                    _ee_box = _odd(2 * int(np.ceil(_r_ee_fit)) + 1)
+                    if _ee_box > _stamp_native:
+                        _ee_box = max(_odd_floor(_stamp_native), 1)
+                        log.warning(
+                            "ePSF wings reach the model stamp edge "
+                            "(r<%.1f px holds <%.0f%% of flux); capping "
+                            "fit_shape at %d.  Rebuild the ePSF with a "
+                            "larger cutout to constrain the wings.",
+                            _r_ee_fit,
+                            100.0 * _ee_fit_min,
+                            _ee_box,
+                        )
+                    if _ee_box > fit_shape[0]:
+                        log.info(
+                            "fit_shape %d -> %d so the model EE at the fit "
+                            "radius reaches %.0f%% (wing flux would "
+                            "otherwise bias the local background).",
+                            fit_shape[0],
+                            _ee_box,
+                            100.0 * _ee_fit_min,
+                        )
+                        fit_shape = (_ee_box,) * 2
+            _ee_ann_min = float(
+                phot_cfg.get("psf_localbkg_ee_min", 0.97) or 0.97
+            )
+            if 0.0 < _ee_ann_min < 1.0:
+                _r_ee_annulus = _epsf_ee_radius_native(
+                    _ee_model_data, _ee_osamp, _ee_ann_min
+                )
+        except Exception:
+            _ee_model_data = None
+            _r_ee_annulus = np.nan
+
         if is_target_fit:
-            fit_shape_bright = (_odd(int(fit_shape_bright[0] * target_shape_boost)),) * 2
-            fit_shape_faint = (_odd(int(fit_shape_faint[0] * target_shape_boost)),) * 2
-            fit_shape_vfaint = (_odd(int(fit_shape_vfaint[0] * target_shape_boost)),) * 2
+            fit_shape = (_odd(int(fit_shape[0] * target_shape_boost)),) * 2
 
         if xy_bounds is None:
             # Default xy-bounds are configured in arcseconds and converted to pixels.
@@ -2590,10 +12338,30 @@ class PSF:
                 # Legacy fallback when no explicit config is provided.
                 xy_bounds = 3.0 * fwhm if undersampled else 2.0 * fwhm
 
+            # For target fits, enforce a FWHM-relative minimum so the fit can
+            # always move enough to center on the correct source even when the
+            # initial WCS position is off by more than the arcsec-based bound
+            # (e.g. ZTF at 1"/px with fitting_xy_bounds=1" gives only 1 px,
+            #  which is less than half a FWHM and too restrictive).
+            if is_target_fit:
+                target_xy_min_fwhm = float(
+                    phot_cfg.get("fitting_xy_bounds_target_fwhm", 1.5)
+                )
+                target_xy_min_fwhm = max(0.5, min(target_xy_min_fwhm, 5.0))
+                xy_bounds_fwhm_floor = target_xy_min_fwhm * fwhm
+                if xy_bounds < xy_bounds_fwhm_floor:
+                    log.info(
+                        "Target fit: xy_bounds %.2f px < FWHM-relative floor %.2f px "
+                        "(%.1f*FWHM=%.1f px); using floor for robust re-centering.",
+                        float(xy_bounds), float(xy_bounds_fwhm_floor),
+                        target_xy_min_fwhm, float(fwhm),
+                    )
+                    xy_bounds = xy_bounds_fwhm_floor
+
         def _effective_xy_bounds_for_shape(fit_shape):
             """
             Constrain search bounds to be consistent with the PSF fit cutout.
-            A source cannot be robustly re-centered beyond roughly half the
+            A source cannot be reliably re-centered beyond roughly half the
             fit box width; keep margin to avoid edge-dominated solutions.
             """
             half_box = 0.5 * (min(fit_shape) - 1)
@@ -2601,9 +12369,7 @@ class PSF:
             max_from_shape = max(0.5, frac_limit * half_box)
             return float(max(0.5, min(float(xy_bounds), max_from_shape)))
 
-        xb_bright = _effective_xy_bounds_for_shape(fit_shape_bright)
-        xb_faint = _effective_xy_bounds_for_shape(fit_shape_faint)
-        xb_vfaint = _effective_xy_bounds_for_shape(fit_shape_vfaint)
+        xy_bounds_eff = _effective_xy_bounds_for_shape(fit_shape)
         cfg_xy_arcsec_log = phot_cfg.get("fitting_xy_bounds", 3.0)
         pix_scale_log = self.input_yaml.get("pixel_scale", None)
         if (
@@ -2612,76 +12378,54 @@ class PSF:
             and np.isfinite(float(pix_scale_log))
             and float(pix_scale_log) > 0
         ):
-            log.info(
-                "PSF fit bounds config:\n"
-                "\tfitting_xy_bounds=%.3g arcsec\n"
-                "\tpixel_scale=%.3g arcsec/px\n"
-                "\tbase_xy_bounds=%.3g px\n"
-                "\teffective per tier (bright/faint/very-faint)=%.3g/%.3g/%.3g px",
-                float(cfg_xy_arcsec_log),
-                float(pix_scale_log),
-                float(xy_bounds),
-                float(xb_bright),
-                float(xb_faint),
-                float(xb_vfaint),
+            log.debug(
+                "PSF fit bounds: xy_bounds=%.3g px (%.3g arcsec at %.3g arcsec/px), "
+                "effective=%.3g px",
+                float(xy_bounds), float(cfg_xy_arcsec_log), float(pix_scale_log),
+                float(xy_bounds_eff),
             )
         else:
-            log.info(
-                "PSF fit bounds config:\n"
-                "\tfitting_xy_bounds=%s arcsec\n"
-                "\tpixel_scale=%s arcsec/px\n"
-                "\tbase_xy_bounds=%.3g px\n"
-                "\teffective per tier (bright/faint/very-faint)=%.3g/%.3g/%.3g px",
-                str(cfg_xy_arcsec_log),
-                str(pix_scale_log),
-                float(xy_bounds),
-                float(xb_bright),
-                float(xb_faint),
-                float(xb_vfaint),
+            log.debug(
+                "PSF fit bounds: xy_bounds=%.3g px (%s arcsec at %s arcsec/px), "
+                "effective=%.3g px",
+                float(xy_bounds), str(cfg_xy_arcsec_log), str(pix_scale_log),
+                float(xy_bounds_eff),
             )
 
-        log.info(
-            "Fit shapes:\n"
-            "\tbright=%s\n"
-            "\tfaint=%s\n"
-            "\tvery-faint=%s\n"
-            "\txy_bounds=%.3g px\n"
-            "\tundersampled=%s",
-            str(fit_shape_bright),
-            str(fit_shape_faint),
-            str(fit_shape_vfaint),
-            float(xy_bounds),
-            str(bool(undersampled)),
-        )
         if is_target_fit:
             log.info(
-                "Target-fit shape scaling:\n"
-                "\tbright/faint/very-faint=%.3g/%.3g/%.3g * FWHM\n"
-                "\tfit_sampling_boost=%.3g\n"
-                "\ttarget_boost=%.3g\n"
-                "\tpixel_scale=%s arcsec/px",
-                fs_bright_scale,
-                fs_faint_scale,
-                fs_vfaint_scale,
-                fit_sampling_boost,
-                target_shape_boost,
+                "Target-fit:\tshape=%s | scale=%.2g FWHM | "
+                "boost=%.2g (target %.2g) | xy_bounds=%.3g px (eff=%.3g px) | "
+                "undersampled=%s | pix_scale=%s\"/px",
+                str(fit_shape[0]),
+                fs_scale,
+                fit_sampling_boost, target_shape_boost,
+                float(xy_bounds), float(xy_bounds_eff),
+                str(bool(undersampled)),
                 f"{pixel_scale:.3f}" if has_pixel_scale else "unknown",
             )
+        else:
+            log.debug(
+                "Fit shape: %s | xy_bounds=%.3g px | undersampled=%s",
+                str(fit_shape), float(xy_bounds), str(bool(undersampled)),
+            )
 
-        epsf_model_copy = epsf_model.copy()
-
+        # NDData creation already converts to float and allocates a new array in electrons,
+        # so avoid an extra self.image.copy() here (saves memory for large frames).
         ndimage = self.create_nddata_with_fitting_weights(
-            self.image.copy(),
-            gain=float(self.input_yaml.get("gain", 1.0)),
+            self.image,
+            gain=float(resolve_gain_e_per_adu(None, self.input_yaml)),
             read_noise=float(self.input_yaml.get("read_noise", 0.0)),
             background_rms=background_rms,
+            mask=mask,
         )
 
-        # Optional: create inverted image for detecting negative PSF dips (fading sources)
-        # OR use external inverted image passed from main.py
+        # Optional: inverted-image PSF retry for significant negative residuals.
+        # If check_inverted_image is False, we explicitly disable inverted handling
+        # and force the target PSF solution to be positive-only.
         check_inverted = bool(is_target_fit and phot_cfg.get("check_inverted_image", False))
         ndimage_inverted = None
-        if inverted_image is not None:
+        if check_inverted and inverted_image is not None:
             # Use external inverted image provided by main.py
             # Wrap it in NDData with same units/uncertainty as main image
             if isinstance(inverted_image, np.ndarray):
@@ -2691,14 +12435,66 @@ class PSF:
             log.info("Target PSF: using external inverted image from main.py for negative PSF detection.")
         elif check_inverted:
             try:
-                # Estimate background level from the image
+                # Estimate background level from the target's annulus region
                 image_data = np.array(ndimage.data, dtype=float, copy=True)
-                bkg_median = float(np.nanmedian(image_data))
-                # Subtract 2x background and take absolute value
-                # This flips negative PSF dips to positive peaks while keeping background at zero
-                inv_data = np.abs(image_data - 2.0 * bkg_median)
+                ny, nx = image_data.shape
+                
+                # Get annulus parameters (same as used for PSF fitting)
+                crowded_field = bool(phot_cfg.get("crowded_field", False))
+                gap_fwhm = float(phot_cfg.get("annulus_gap_fwhm", 0.75 if not crowded_field else 0.5))
+                width_fwhm = float(phot_cfg.get("annulus_width_fwhm", 2.0 if not crowded_field else 1.5))
+                
+                try:
+                    ap_size = float(phot_cfg.get("aperture_radius", aperture_radius))
+                except Exception:
+                    ap_size = float(aperture_radius)
+                
+                annulusIN = float(np.ceil(ap_size + gap_fwhm * fwhm))
+                annulusOUT = float(np.ceil(annulusIN + width_fwhm * fwhm))
+                
+                if is_target_fit and len(sources) == 1:
+                    x_target = float(sources["x_pix"].iloc[0])
+                    y_target = float(sources["y_pix"].iloc[0])
+                else:
+                    # Fallback to image center for non-target fits
+                    x_target = nx / 2.0
+                    y_target = ny / 2.0
+                
+                yy, xx = np.ogrid[:ny, :nx]
+                r2 = (xx - x_target)**2 + (yy - y_target)**2
+                in_annulus = (r2 >= annulusIN**2) & (r2 < annulusOUT**2)
+                
+                annulus_pixels = image_data[in_annulus]
+                finite_pixels = annulus_pixels[np.isfinite(annulus_pixels)]
+                
+                if len(finite_pixels) > 0:
+                    bkg_median = float(np.median(finite_pixels))
+                    log.info(
+                        "Target PSF: inverted image using annulus background (r_in=%.1f, r_out=%.1f, bkg=%.3g) "
+                        "from %d pixels.",
+                        annulusIN,
+                        annulusOUT,
+                        bkg_median,
+                        len(finite_pixels),
+                    )
+                else:
+                    # Fallback to global background if annulus is empty
+                    bkg_median = float(np.nanmedian(image_data))
+                    log.warning(
+                        "Target PSF: annulus has no finite pixels; falling back to global background bkg=%.3g.",
+                        bkg_median,
+                    )
+                
+                # Double background subtraction: subtract once to zero, again to negative, then flip
+                # Formula: -(image_data - 2*bkg_median)
+                # Background pixels: -(bkg - 2*bkg) = bkg (positive)
+                # Pixels below bg: -(bkg - delta - 2*bkg) = bkg + delta (more positive)
+                # Pixels above bg: -(bkg + delta - 2*bkg) = bkg - delta (less positive)
+                bkg_sub = image_data - bkg_median
+                bkg_sub2 = bkg_sub - bkg_median
+                inv_data = -bkg_sub2
                 ndimage_inverted = _nddata_clone(ndimage, data=inv_data)
-                log.info("Target PSF: will also fit on inverted image (subtract 2xbkg, abs) for negative PSF detection.")
+                log.info("Target PSF: inverted image built as -(data - 2*bkg) - double subtraction, keeping all values.")
             except Exception as exc:
                 log_warning_from_exception(log, "Failed to create inverted image for PSF fitting", exc)
                 ndimage_inverted = None
@@ -2726,18 +12522,188 @@ class PSF:
 
         x_all = np.asarray(sources["x_pix"], float)
         y_all = np.asarray(sources["y_pix"], float)
-        flux_all = np.asarray(sources[flux_col], float)
-        orig_idx = np.arange(len(sources)).astype(int)
-        valid = np.isfinite(x_all) & np.isfinite(y_all)
+        flux_all = np.asarray(sources[flux_col], float).copy()
+        # PSF model is fit to the same data as Aperture: image*gain in e-. The fit
+        # amplitude is *integrated* signal in the exposure (e-), never a rate.
+        # `flux_AP` / `maxPixel` / `sky_bkg_total_flux` are e-/s (or e-/s-like);
+        # `counts_AP` / `counts` are already per-frame integrated e-.
+        if flux_col in ("flux_AP", "maxPixel", "sky_bkg_total_flux"):
+            flux_all = flux_all * float(exposure_time)
+            log.info(
+                "PSF init: column %r is a per-second rate; multiplied by exposure_time=%.4g s "
+                "to match integrated e- in the frame.",
+                flux_col,
+                float(exposure_time),
+            )
+        elif flux_col == "flux":
+            log.info(
+                "PSF init: using column 'flux' as integrated e- in the frame; "
+                "if your table stores a rate, use flux_AP instead."
+            )
 
-        x, y, flux_ap = x_all[valid], y_all[valid], flux_all[valid]
+        orig_idx = np.arange(len(sources)).astype(int)
+        # For the target (single-source) fit, aperture photometry can legitimately fail
+        # (e.g. NaN-heavy difference cutouts, masked annulus, etc.). In that case flux_all
+        # may be NaN even though x/y are valid; do an image-based flux bootstrap
+        # so PSF fitting can still proceed and not poison downstream steps with NaNs.
+        if bool(is_target_fit) and len(sources) == 1 and not np.isfinite(flux_all[0]):
+            try:
+                xi = int(np.round(float(x_all[0])))
+                yi = int(np.round(float(y_all[0])))
+                data_e = np.asarray(ndimage.data, dtype=float)
+                if data_e.ndim == 2:
+                    half = int(max(4, np.ceil(1.5 * float(fwhm))))
+                    x0 = max(0, xi - half)
+                    x1 = min(data_e.shape[1], xi + half + 1)
+                    y0 = max(0, yi - half)
+                    y1 = min(data_e.shape[0], yi + half + 1)
+                    patch = data_e[y0:y1, x0:x1]
+                    if patch.size:
+                        # Check NaN fraction in patch - if too high, bootstrap is unreliable
+                        nan_frac = float(np.sum(~np.isfinite(patch))) / float(patch.size)
+                        if nan_frac > 0.5:
+                            log.warning(
+                                "Target PSF init: bootstrap patch has %.1f%% NaN pixels "
+                                "(near chip gap/edge); flux estimate may be unreliable.",
+                                nan_frac * 100.0,
+                            )
+                        # Median of finite pixels as background level (resistant to outliers).
+                        finite_vals = patch[np.isfinite(patch)]
+                        if len(finite_vals) > 0:
+                            bkg = float(np.median(finite_vals))
+                            # Conservative integrated-flux guess (electrons per frame).
+                            guess = float(np.nansum(np.clip(patch - bkg, 0.0, None)))
+                            if np.isfinite(guess) and guess > 0:
+                                flux_all[0] = guess
+                                log.info(
+                                    "Target PSF init: aperture flux missing; bootstrapped "
+                                    "flux from %dx%d patch (%.1f%% NaN) = %.3g e-",
+                                    int(patch.shape[1]),
+                                    int(patch.shape[0]),
+                                    nan_frac * 100.0,
+                                    float(guess),
+                                )
+                            else:
+                                log.warning(
+                                    "Target PSF init: bootstrap flux invalid (%.3g); "
+                                    "patch may be too NaN-heavy.",
+                                    guess,
+                                )
+                        else:
+                            log.warning(
+                                "Target PSF init: bootstrap patch has no finite pixels; "
+                                "cannot estimate flux."
+                            )
+            except Exception as exc:
+                log_warning_from_exception(
+                    log, "Target PSF init: flux bootstrap failed", exc
+                )
+
+        valid = np.isfinite(x_all) & np.isfinite(y_all) & np.isfinite(flux_all)
+        # For target fit, force inclusion even if flux was NaN before bootstrap
+        # (bootstrap should have fixed it). This prevents the target from being
+        # excluded from the valid mask.  Still require finite x/y positions -
+        # a NaN position means the centroid failed and PSF fitting cannot proceed.
+        # In multi-target fits, apply this to every target row (primary + additional).
+        if is_target_fit:
+            for _ti in range(len(valid)):
+                if not valid[_ti]:
+                    if np.isfinite(x_all[_ti]) and np.isfinite(y_all[_ti]) and np.isfinite(flux_all[_ti]):
+                        valid[_ti] = True
+                        log.info("Target PSF: forcing source %d into valid mask (flux now finite)", _ti)
+                    elif not np.isfinite(x_all[_ti]) or not np.isfinite(y_all[_ti]):
+                        log.warning(
+                            "Target PSF: source %d has non-finite x/y position (%.3g, %.3g); "
+                            "cannot force inclusion into PSF fit.",
+                            _ti,
+                            float(x_all[_ti]) if len(x_all) > _ti else float("nan"),
+                            float(y_all[_ti]) if len(y_all) > _ti else float("nan"),
+                        )
+                    else:
+                        log.warning("Target PSF: source %d flux still NaN after bootstrap; cannot force inclusion", _ti)
+        if is_target_fit and len(sources) == 1:
+            log.debug(
+                "Target PSF: after bootstrap - flux_all[0]=%.3g, x_all[0]=%.3g, y_all[0]=%.3g, valid=%s",
+                float(flux_all[0]) if len(flux_all) > 0 else float("nan"),
+                float(x_all[0]) if len(x_all) > 0 else float("nan"),
+                float(y_all[0]) if len(y_all) > 0 else float("nan"),
+                bool(valid[0]) if len(valid) > 0 else False,
+            )
+
+        x, y, flux_e_frame = x_all[valid], y_all[valid], flux_all[valid]
         idx_keep = orig_idx[valid]
+
+        # Preserve the raw bootstrap flux (before positive-clip) for the inverted-retry
+        # trigger.  On science images the MCMC prior hard-rejects flux < 0 and
+        # init_params clips to 1e-6, so by the time combined is built the negative
+        # bootstrap signal is gone (on difference images allow_negative_flux is set
+        # and the post-fit flux already carries the sign).  Storing it here lets
+        # us trigger the inverted retry before MCMC runs.
+        _bootstrap_flux_e = flux_e_frame.copy()  # unclipped, may be negative
+
+        # For very faint sources the flux guess can be near background; clip to a floor.
+        # Difference images with the signed-flux opt-out carry meaningful
+        # negative residuals: clip the magnitude only, or a fading source's
+        # negative init would start at +1e-6.  With the >=0 bound active a
+        # negative init is infeasible anyway - start it at the floor.
+        if is_difference_image and not positive_flux_fit:
+            flux_clipped = np.clip(flux_e_frame, -1e12, 1e12)
+            _tiny = np.abs(flux_clipped) < 1e-6
+            flux_clipped[_tiny] = np.sign(flux_e_frame[_tiny]) * 1e-6
+            flux_clipped[flux_clipped == 0] = 1e-6
+        else:
+            flux_clipped = np.clip(flux_e_frame, 1e-6, 1e12)
+        
+        # Resolve gain early -- needed for both flux boosting and Fisher SNR below.
+        # background_rms is in ADU (from photutils Background2D on the raw image).
+        # ndimage.uncertainty.array is in electrons (from create_nddata_with_fitting_weights
+        # where image_e = image * gain).  Normalise to ADU so the S/N formula's
+        # (bkgrmsval * gain) conversion is correct in all paths.
+        _gain_for_bkg = float(resolve_gain_e_per_adu(None, self.input_yaml))
+
+        # Additional sanity: if flux is too low relative to background RMS, boost it
+        # This prevents convergence issues for extremely faint sources.
+        # Use the local background_rms (passed as parameter) rather than global
+        # np.std of the entire image -- on difference images with large subtraction
+        # residuals, the global std is much larger than the actual per-pixel noise,
+        # which would inflate the initial flux guess and bias the PSF fit.
+        # Apply per-source in multi-target fits as well.
+        if is_target_fit:
+            if background_rms is not None:
+                _bkg_rms_for_boost = float(np.nanmedian(background_rms)) * _gain_for_bkg
+            else:
+                data_e = np.asarray(ndimage.data, dtype=float)
+                finite_vals = data_e[np.isfinite(data_e)] if data_e.ndim == 2 else np.array([])
+                if len(finite_vals) > 0:
+                    from astropy.stats import biweight_scale
+                    _bkg_rms_for_boost = float(biweight_scale(finite_vals))
+                else:
+                    _bkg_rms_for_boost = 5.0 * _gain_for_bkg
+            if not np.isfinite(_bkg_rms_for_boost) or _bkg_rms_for_boost <= 0:
+                _bkg_rms_for_boost = 5.0 * _gain_for_bkg
+            # Minimum 3-sigma above background (in electrons)
+            min_reasonable_flux = 3.0 * _bkg_rms_for_boost
+            for _fi in range(len(flux_clipped)):
+                # A negative residual on a difference image is a valid
+                # signed init (fading source), not a "too faint" guess:
+                # boosting it positive would erase the very signal the
+                # inverted-retry and negative-flux paths look for.
+                if is_difference_image and flux_clipped[_fi] <= 0:
+                    continue
+                if flux_clipped[_fi] < min_reasonable_flux:
+                    log.warning(
+                        "Target PSF init: source %d flux=%.3g e- is below 3-sigma threshold (%.3g e-); "
+                        "boosting to %.3g e- to improve convergence.",
+                        _fi, flux_clipped[_fi],
+                        min_reasonable_flux, min_reasonable_flux,
+                    )
+                    flux_clipped[_fi] = min_reasonable_flux
 
         init_params = QTable(
             {
                 "x": x,
                 "y": y,
-                "flux": u.Quantity(np.clip(flux_ap, 1e-6, 1e12), u.electron),
+                "flux": u.Quantity(flux_clipped, u.electron),
                 "__row": idx_keep,
             }
         )
@@ -2746,40 +12712,328 @@ class PSF:
             log.info("No valid sources; returning unchanged.")
             return sources
 
-        bkgrmsval = float(
-            np.nanmedian(background_rms)
-            if background_rms is not None
-            else np.nanmedian(ndimage.uncertainty.array)
-        )
-        # Statistical Fisher matrix formalism for PSF photometry SNR
-        # SNR = fs / sigma_fs where sigma_fs^2 = 1/F_11
-        # F_11 = sum(PSF_i^2 / sigma_i^2) where sigma_i^2 = (b/g) + (Nccd/g^2) + (fs * PSF_i/g)
-        # For a normalized PSF with sum(PSF_i^2) = C, this simplifies to:
-        # sigma_fs^2 = (b/g + Nccd/g^2) / C + fs / g
-        # where C is the sum of squared PSF values over the PSF footprint
-        # We approximate C ~ 1/(pi * fwhm^2) for a normalized Gaussian-like PSF
-        gain = float(self.input_yaml.get("gain", 1.0))
+        if background_rms is not None:
+            bkgrmsval = float(np.nanmedian(background_rms))  # ADU
+        else:
+            bkgrmsval = float(np.nanmedian(ndimage.uncertainty.array)) / _gain_for_bkg  # e- -> ADU
+        # If bkgrmsval is NaN (e.g., background_rms has NaN pixels near chip gaps),
+        # fall back to estimating from the data itself
+        if not np.isfinite(bkgrmsval):
+            # Estimate background RMS from finite pixels in the data.
+            # ndimage.data is in electrons (image * gain); convert back to ADU
+            # so the S/N formula's (bkgrmsval * gain) is correct.
+            data_finite = ndimage.data[np.isfinite(ndimage.data)]
+            if len(data_finite) > 0:
+                from astropy.stats import biweight_scale
+                bkgrmsval = float(biweight_scale(data_finite)) / _gain_for_bkg
+                log.warning(
+                    "PSF fit: background_rms is NaN; estimated from data biweight scale = %.3g ADU",
+                    bkgrmsval,
+                )
+            else:
+                # Last resort: use a conservative default based on typical values
+                bkgrmsval = 5.0  # Conservative default ADU
+                log.warning(
+                    "PSF fit: no finite pixels in data; using default background RMS = %.3g ADU",
+                    bkgrmsval,
+                )
+        # Statistical Fisher matrix formalism for PSF photometry SNR.
+        # For a normalized PSF (sum(PSF_i) = 1), the Fisher information for the
+        # total flux fs is:
+        #   F_11 = sum(PSF_i^2 / sigma_i^2)
+        # where sigma_i^2 is the per-pixel variance.  If all pixels share the
+        # same background variance sigma_pix^2, this simplifies to:
+        #   F_11 = C / sigma_pix^2 + 1/fs   (background + Poisson terms)
+        #   sigma_fs^2 = 1/F_11 = sigma_pix^2 / C + fs
+        # where C = sum(PSF_i^2) ~ 1/(4*pi*sigma^2) for a 2D Gaussian with
+        # sigma = fwhm * gaussian_fwhm_to_sigma.
+        # All quantities are in electrons to match the aperture photometry
+        # convention (image_e = image * gain).
+        gain = _gain_for_bkg  # reuse gain already resolved above
         read_noise = float(self.input_yaml.get("read_noise", 0.0))
-        fwhm = float(self.input_yaml.get("fwhm", 3.0))
-        # Approximate PSF normalization constant C ~ 1/(pi * fwhm^2)
-        psf_norm = 1.0 / (np.pi * fwhm**2)
-        # Background noise term: (b/g + Nccd/g^2) / C
-        # Convert bkgrmsval (ADU) to electrons, add read noise squared, divide by PSF norm
-        background_noise = (bkgrmsval * gain + read_noise**2) / gain / psf_norm
-        # Source photon noise term: fs / g (for normalized PSF)
-        # flux_ap is in ADU, convert to electrons then divide by gain
-        source_noise = flux_ap / gain
-        # Total variance (this gives a lower limit on SNR, as per CFHT document)
-        sigma_fs_sq = background_noise + source_noise
-        snr = (
+        fwhm_clamped = max(1.0, min(fwhm, 50.0))
+        # gaussian_fwhm_to_sigma = 1/(2*sqrt(2 ln 2)) = 0.4246609.  The
+        # previous constant (1/sqrt(2 ln 2)) is a HWHM conversion - it made
+        # sigma_pix 2x too wide and the analytic C 4x too small.
+        sigma_pix = fwhm_clamped * 0.42466090014400953
+        C = 1.0 / (4.0 * np.pi * sigma_pix ** 2)
+        C = max(C, 1e-6)
+        # The Gaussian C is exact only for a circular Gaussian PSF.  Measure
+        # the concentration of the actual model instead (Moffat wings,
+        # ellipticity, empirical/gridded ePSF all differ): for a unit-flux
+        # render, C = sum(P^2).  One render suffices - this only feeds the
+        # LSQ-vs-MCMC tiering heuristic.
+        try:
+            from limits import _render_epsf_on_cutout
+
+            _m_fisher = epsf_model
+            if isinstance(_m_fisher, GriddedPSFModel):
+                _m_fisher = epsf_at_position(
+                    _m_fisher,
+                    float(np.nanmedian(x)),
+                    float(np.nanmedian(y)),
+                )
+            _hs = max(9, int(np.ceil(3.0 * fwhm_clamped)))
+            _P = np.asarray(
+                _render_epsf_on_cutout(
+                    _m_fisher,
+                    2 * _hs + 1,
+                    2 * _hs + 1,
+                    float(_hs),
+                    float(_hs),
+                    1.0,
+                    getattr(_m_fisher, "oversampling", 1),
+                ),
+                dtype=float,
+            )
+            _C_meas = float(np.nansum(_P * _P))
+            if np.isfinite(_C_meas) and _C_meas > 0:
+                C = _C_meas
+        except Exception:
+            pass
+        # Per-pixel background variance in e-^2.
+        # background_rms from BiweightScaleBackgroundRMS already includes read
+        # noise, so do NOT add read_noise^2 again -- that double-counts it.
+        bkg_var_e2 = (bkgrmsval * gain) ** 2  # e-^2
+        # PSF photometry variance in e-^2 (background + Poisson)
+        sigma_fs_sq = bkg_var_e2 / C + np.abs(flux_e_frame)
+        sigma_fs_sq = np.maximum(sigma_fs_sq, 1e-10)
+        # PSF fitting S/N (dimensionless)
+        psf_snr = flux_e_frame / np.sqrt(sigma_fs_sq)
+        # aperture_snr is kept for tier classification (bright/faint/vfaint).
+        aperture_snr = (
             np.asarray(sources["SNR"], float)[valid]
             if "SNR" in sources.columns
-            else flux_ap / np.sqrt(np.maximum(sigma_fs_sq, 1e-10))
+            else psf_snr.copy()
         )
+        snr = aperture_snr  # used for tier masks below
+        # If S/N is still NaN (e.g., flux_e_frame is NaN despite bootstrap), set a default
+        if is_target_fit:
+            nan_snr_count = np.sum(~np.isfinite(snr))
+            if nan_snr_count > 0:
+                log.warning(
+                    "Target PSF: %d/%d sources have NaN S/N; flux_e_frame range=[%.3g, %.3g], "
+                    "sigma_fs_sq range=[%.3g, %.3g]; setting NaN S/N to 5.0",
+                    nan_snr_count, len(snr),
+                    float(np.min(flux_e_frame)) if len(flux_e_frame) > 0 else float("nan"),
+                    float(np.max(flux_e_frame)) if len(flux_e_frame) > 0 else float("nan"),
+                    float(np.min(sigma_fs_sq)) if len(sigma_fs_sq) > 0 else float("nan"),
+                    float(np.max(sigma_fs_sq)) if len(sigma_fs_sq) > 0 else float("nan"),
+                )
+                snr[~np.isfinite(snr)] = 5.0
 
         bright_mask = snr >= 8.0
         faint_mask = (snr >= 4.0) & (snr < 8.0)
         vfaint_mask = snr < 4.0
+        # A NaN S/N (e.g. unmeasurable bootstrap flux) passes none of the
+        # tier cuts, so the source would silently go unfitted.  Route it to
+        # the most conservative tier instead of dropping it.
+        _nan_snr = ~np.isfinite(snr)
+        if np.any(_nan_snr):
+            log.warning(
+                "PSF fit: %d/%d sources have NaN S/N; assigning to the "
+                "very-faint tier.",
+                int(np.sum(_nan_snr)),
+                len(snr),
+            )
+            vfaint_mask |= _nan_snr
+
+        # --- S/N-adaptive centroid freedom ----------------------------------
+        # A detected source may re-center within xy_bounds, which absorbs WCS
+        # error and proper motion.  A source that has faded below detection
+        # should not -- the fitter would otherwise chase the largest noise
+        # excursion inside the bound and report it as a detection.  Detection
+        # is tested anywhere inside the *free* window, so a real source
+        # displaced within the bound still counts.  Targets are always
+        # window-checked (few rows, and their aperture S/N may come from the
+        # catalog position); catalog sources shortcut via their aperture S/N
+        # when it already clears the threshold, which keeps large fields cheap.
+        _hold_px = phot_cfg.get("fitting_xy_bounds_hold_px", 0.5)
+        _det_snr_min = phot_cfg.get("fitting_xy_bounds_detect_snr", 4.0)
+        try:
+            _hold_px = max(0.01, float(_hold_px))  # photutils requires > 0
+        except (TypeError, ValueError):
+            _hold_px = 0.5
+        try:
+            _det_snr_min = float(_det_snr_min)
+        except (TypeError, ValueError):
+            _det_snr_min = 4.0
+        # Fold the measured astrometric uncertainty into the held bound:
+        # the residual scatter from the WCS-vs-PSF and science-vs-template
+        # offset diagnostics plus the median matched-source position
+        # error.  A bound tighter than the true astrometric scatter pins
+        # the model off the source and biases the forced flux.  The bound
+        # is capped at the free-fit bound so a held source never wanders
+        # further than a detected one may.
+        _hold_px_eff = _hold_px
+        if phot_cfg.get("fitting_xy_bounds_astrometric", True):
+            try:
+                _ast_var = 0.0
+                _ast_terms = []
+                for _pre in ("wcs_offset", "align_offset"):
+                    try:
+                        _rx = float(
+                            self.input_yaml.get(f"{_pre}_rms_x_px", np.nan)
+                        )
+                        _ry = float(
+                            self.input_yaml.get(f"{_pre}_rms_y_px", np.nan)
+                        )
+                        _pe = float(
+                            self.input_yaml.get(f"{_pre}_pos_err_px", np.nan)
+                        )
+                        _nn = int(self.input_yaml.get(f"{_pre}_n", 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if _nn < 3 or not (
+                        np.isfinite(_rx) and np.isfinite(_ry)
+                    ):
+                        continue
+                    _ast_var += _rx**2 + _ry**2
+                    _term = f"{_pre} rms=({_rx:.2f}, {_ry:.2f}) px"
+                    if np.isfinite(_pe):
+                        _ast_var += _pe**2
+                        _term += f" + pos_err {_pe:.2f} px"
+                    _ast_terms.append(_term)
+                if _ast_var > 0:
+                    _hold_px_eff = min(
+                        float(np.sqrt(_hold_px**2 + _ast_var)),
+                        float(xy_bounds_eff),
+                    )
+                    if _hold_px_eff > _hold_px + 0.01:
+                        log.info(
+                            "Astrometric scatter (%s) widens the "
+                            "held-position bound: %.2f -> %.2f px.",
+                            "; ".join(_ast_terms),
+                            _hold_px,
+                            _hold_px_eff,
+                        )
+            except Exception as _ast_exc:
+                log.debug(
+                    "Astrometric bound estimate failed: %s", _ast_exc
+                )
+                _hold_px_eff = _hold_px
+        xy_hold_arr = np.zeros(len(init_params), dtype=bool)
+        detect_snr_arr = np.full(len(init_params), np.nan)
+        xy_bounds_by_source = np.full(len(init_params), xy_bounds_eff, dtype=float)
+        _detect_on = np.isfinite(_det_snr_min) and _det_snr_min > 0
+        if bool(forcePhotometry):
+            # Explicit forced photometry: hold every position regardless of
+            # what is in the window.
+            xy_hold_arr[:] = True
+            log.info(
+                "PSF fit: forcePhotometry set; holding all %d positions to "
+                "%.2f px.",
+                len(init_params),
+                _hold_px_eff,
+            )
+        elif _detect_on:
+            _data_e = np.asarray(ndimage.data, float)
+            _fit_mask_full = getattr(ndimage, "mask", None)
+            _rms_e = bkgrmsval * _gain_for_bkg
+            _ap_noise = max(
+                float(_rms_e) * np.sqrt(np.pi * aperture_radius ** 2), 1e-10
+            )
+            _win = max(1, int(np.ceil(xy_bounds_eff)))
+            _half = _win + int(np.ceil(aperture_radius)) + 1
+            _yy, _xx = np.ogrid[: _data_e.shape[0], : _data_e.shape[1]]
+            for _si in range(len(x)):
+                if not is_target_fit and np.isfinite(snr[_si]) and snr[_si] >= _det_snr_min:
+                    # Catalog S/N was measured at this (detected) position --
+                    # a clear detection needs no window check.
+                    continue
+                _cx, _cy = float(x[_si]), float(y[_si])
+                _x0 = max(0, int(np.floor(_cx)) - _half)
+                _x1 = min(_data_e.shape[1], int(np.ceil(_cx)) + _half + 1)
+                _y0 = max(0, int(np.floor(_cy)) - _half)
+                _y1 = min(_data_e.shape[0], int(np.ceil(_cy)) + _half + 1)
+                _sub = _data_e[_y0:_y1, _x0:_x1]
+                _ok = np.isfinite(_sub)
+                if _fit_mask_full is not None:
+                    _ok &= ~_fit_mask_full[_y0:_y1, _x0:_x1]
+                if _sub.size == 0 or _ok.mean() < 0.5:
+                    # Window mostly unusable: nothing can be verified, so
+                    # hold the position rather than let the fitter latch
+                    # onto a surviving noise island.
+                    xy_hold_arr[_si] = True
+                    continue
+                _d2 = (_yy[_y0:_y1, :] - _cy) ** 2 + (_xx[:, _x0:_x1] - _cx) ** 2
+                _cand = _ok & (_d2 <= _win ** 2)
+                if not np.any(_cand):
+                    xy_hold_arr[_si] = True
+                    continue
+                _bkg = float(np.median(_sub[_ok]))
+                _resid = np.where(_cand, _sub - _bkg, 0.0)
+                if is_difference_image:
+                    # Rising and fading sources both count as detections.
+                    _pk = int(np.argmax(np.abs(_resid)))
+                else:
+                    _pk = int(np.argmax(_resid))
+                _py, _px = np.unravel_index(_pk, _sub.shape)
+                _apd2 = (_yy[_y0:_y1, :] - (_y0 + _py)) ** 2 + (
+                    _xx[:, _x0:_x1] - (_x0 + _px)
+                ) ** 2
+                _ap = _ok & (_apd2 <= aperture_radius ** 2)
+                _ap_flux = float(np.sum(_sub[_ap] - _bkg))
+                if is_difference_image:
+                    _ap_flux = abs(_ap_flux)
+                detect_snr_arr[_si] = _ap_flux / _ap_noise
+                xy_hold_arr[_si] = not (
+                    np.isfinite(detect_snr_arr[_si])
+                    and detect_snr_arr[_si] >= _det_snr_min
+                )
+        xy_bounds_by_source[xy_hold_arr] = _hold_px_eff
+        if is_target_fit and _detect_on and len(init_params) == 1:
+            try:
+                _full_snr = float(phot_cfg.get("fitting_xy_bounds_full_snr", 20.0))
+            except (TypeError, ValueError):
+                _full_snr = 20.0
+            if not np.isfinite(_full_snr) or _full_snr <= _det_snr_min:
+                _full_snr = _det_snr_min + 1.0
+            if not xy_hold_arr[0]:
+                _progress = np.clip(
+                    (detect_snr_arr[0] - _det_snr_min)
+                    / (_full_snr - _det_snr_min),
+                    0.0,
+                    1.0,
+                )
+                xy_bounds_by_source[0] = _hold_px_eff + _progress * (
+                    xy_bounds_eff - _hold_px_eff
+                )
+
+        if is_target_fit:
+            for _si in range(len(x)):
+                if xy_hold_arr[_si]:
+                    _bound_label = f"held to {_hold_px_eff:.2f} px (forced photometry)"
+                elif len(init_params) == 1:
+                    _bound_label = (
+                        f"free within {xy_bounds_by_source[_si]:.2f} px"
+                        f" (max {xy_bounds_eff:.2f} px)"
+                    )
+                else:
+                    _bound_label = f"free within {xy_bounds_eff:.2f} px"
+                log.info(
+                    "Target PSF: source %d in-window detection S/N=%s -> %s",
+                    _si,
+                    f"{detect_snr_arr[_si]:.2f}"
+                    if np.isfinite(detect_snr_arr[_si])
+                    else "n/a",
+                    _bound_label,
+                )
+        elif np.any(xy_hold_arr):
+            log.info(
+                "PSF fit: %d/%d sources below detection S/N=%.1f -> "
+                "positions held to %.2f px (forced photometry).",
+                int(np.sum(xy_hold_arr)),
+                len(init_params),
+                _det_snr_min,
+                _hold_px_eff,
+            )
+
+        _free_xy_bound = (
+            float(xy_bounds_by_source[0])
+            if is_target_fit and len(init_params) == 1
+            else None
+        )
 
         # ---- Fitter --------------------------------------------------------
         # Emcee is driven only by perform_emcee_fitting_s2n. Used only when is_target_fit is True.
@@ -2795,19 +13049,46 @@ class PSF:
         use_emcee_for_all = False
         use_emcee_tiered = False
         if is_target_fit and emcee_s2n > 0 and len(init_params) == 1:
-            target_snr = float(snr[0])
+            # Use PSF S/N (not aperture S/N) for the MCMC trigger - the aperture
+            # SNR can be much higher than the PSF S/N for faint sources because
+            # it includes more sky noise, causing MCMC to be skipped when it's
+            # actually needed.
+            target_snr = float(psf_snr[0]) if np.isfinite(psf_snr[0]) else 0.0
             use_emcee_for_all = target_snr < emcee_s2n
-            log.info(
-                "Target S/N=%.2f; %s (low-S/N threshold=%.1f).",
+            log.debug(
+                "Target PSF S/N=%.2f (aperture S/N=%.2f); %s (low-S/N threshold=%.1f).",
                 target_snr,
+                float(snr[0]) if len(snr) > 0 else float("nan"),
                 "MCMC" if use_emcee_for_all else "LSQ",
                 emcee_s2n,
             )
         elif is_target_fit and emcee_s2n > 0 and len(init_params) > 1:
+            # Multi-target fits always take the single-call branch below
+            # (photutils needs all sources together to assign group_id),
+            # and that branch re-decides MCMC via np.any(psf_snr < s2n).
+            # use_emcee_tiered here exists only to instantiate
+            # emcee_fitter so that branch has it available.
             use_emcee_tiered = True
 
-        # Fitter selection: Poisson likelihood (Fermilab) or traditional LSQ
+        # Fitter selection: Poisson likelihood (Fermilab) or traditional LSQ.
+        # The Poisson likelihood is only meaningful for non-negative
+        # count-like data; signed difference images and already
+        # background-subtracted data can contain negative pixels, which
+        # n_i*ln(n_bar) cannot represent.  Fall back to LSQ in that case.
         use_poisson_fitter = bool(phot_cfg.get("use_poisson_likelihood_fitter", False))
+        if use_poisson_fitter:
+            _nd_min = float(
+                np.nanmin(np.asarray(ndimage.data, dtype=float))
+                if np.size(ndimage.data)
+                else np.nan
+            )
+            if is_difference_image or (np.isfinite(_nd_min) and _nd_min < 0):
+                log.warning(
+                    "use_poisson_likelihood_fitter requested but the data "
+                    "contains negative pixels%s; using LSQ instead.",
+                    " (difference image)" if is_difference_image else "",
+                )
+                use_poisson_fitter = False
         if use_poisson_fitter:
             lsq_fitter = PoissonLikelihoodFitter(
                 maxiters=int(phot_cfg.get("poisson_maxiters", 20)),
@@ -2825,21 +13106,30 @@ class PSF:
                 delta = float(emcee_delta) if emcee_delta is not None else xy_bounds
                 emcee_nsteps = phot_cfg.get("emcee_nsteps", 5000)
                 emcee_fitter = MCMCFitter(
-                    nwalkers=int(phot_cfg.get("emcee_nwalkers", 20)),
+                    nwalkers=int(phot_cfg.get("emcee_nwalkers", 32)),
                     nsteps=int(emcee_nsteps) if emcee_nsteps is not None else None,
                     delta=delta,
                     burnin_frac=float(phot_cfg.get("emcee_burnin_frac", 0.3)),
                     thin=int(phot_cfg.get("emcee_thin", 10)),
                     adaptive_tau_target=int(
-                        phot_cfg.get("emcee_adaptive_tau_target", 50)
+                        phot_cfg.get("emcee_adaptive_tau_target", 100)
                     ),
                     min_autocorr_N=int(phot_cfg.get("emcee_min_autocorr_N", 100)),
                     batch_steps=int(phot_cfg.get("emcee_batch_steps", 100)),
+                    early_stop=bool(phot_cfg.get("emcee_early_stop", True)),
                     jitter_scale=float(phot_cfg.get("emcee_jitter_scale", 0.01)),
                     use_nddata_uncertainty=True,
-                    gain=float(self.input_yaml.get("gain", 1.0)),
+                    gain=float(resolve_gain_e_per_adu(None, self.input_yaml)),
                     readnoise=float(self.input_yaml.get("read_noise", 0.0)),
                     background_rms=bkgrmsval,
+                    threads=int(phot_cfg.get("emcee_threads", 1)),
+                    random_state=phot_cfg.get("emcee_random_state", 42),
+                    store_samples=bool(phot_cfg.get("emcee_store_samples", False)) or is_target_fit,
+                    # Signed residuals are only permitted when the
+                    # psf_diff_negative_flux opt-out dropped the >=0
+                    # bound; otherwise the positive-flux prior pins a
+                    # fading source's posterior at ~0.
+                    allow_negative_flux=not positive_flux_fit,
                 )
             except Exception as exc:
                 log_warning_from_exception(
@@ -2867,265 +13157,281 @@ class PSF:
 
         # In undersampled data, the effective PSF footprint in pixels is
         # small; use a more conservative grouping distance to avoid
-        # over-merging genuinely distinct neighbours.
+        # over-merging genuinely distinct neighbours.  The explicit
+        # FWHM-relative override keeps the target-pair criterion adjustable
+        # without changing the catalog-fit defaults.
         group_sep = 3.0 * fwhm if undersampled else 2.0 * fwhm
-        group_maker = SourceGrouper(min_separation=max(group_sep, 1.0))
+        try:
+            _group_sep_fwhm = phot_cfg.get("psf_group_separation_fwhm", None)
+            if _group_sep_fwhm is not None:
+                group_sep = float(_group_sep_fwhm) * fwhm
+        except (TypeError, ValueError):
+            log.warning(
+                "Invalid photometry.psf_group_separation_fwhm=%r; using %.2f px.",
+                _group_sep_fwhm,
+                group_sep,
+            )
+        group_sep = max(float(group_sep), 1.0)
+        group_maker = SourceGrouper(min_separation=group_sep)
+        target_group_ids = (
+            _connected_source_groups(x, y, group_sep)
+            if is_target_fit and len(init_params) > 1
+            else np.zeros(len(init_params), dtype=int)
+        )
+        if is_target_fit and len(init_params) > 1:
+            _n_target_groups = int(np.max(target_group_ids) + 1)
+            log.info(
+                "Target PSF grouping: %d source(s) -> %d fit group(s) "
+                "(joint separation %.2f px = %.2f FWHM).",
+                len(init_params),
+                _n_target_groups,
+                group_sep,
+                group_sep / max(float(fwhm), 1e-12),
+            )
 
-        def _fit_plane_from_annulus(
-            data2d: np.ndarray,
-            x0: float,
-            y0: float,
-            inner_r: float,
-            outer_r: float,
-        ) -> Optional[tuple[float, float, float]]:
-            """
-            Disabled: surface plane fitting (planar background via annulus-fit
-            and subtraction) has been removed; this helper always returns None.
-            """
-            # Surface plane fitting removed (cleanup): this helper is intentionally
-            # disabled so no planar surface subtraction is applied.
-            return None
-
-        def _subtract_plane_in_fit_box(
-            data2d: np.ndarray,
-            coef: tuple[float, float, float],
-            x0: float,
-            y0: float,
-            fit_shape: tuple[int, int],
-        ) -> bool:
-            """Disabled: planar surface subtraction removed."""
-            # Surface plane fitting removed (cleanup): this helper is intentionally
-            # disabled so no planar surface subtraction is applied.
-            return False
+        # Note: planar background fitting/subtraction has been removed from this
+        # fitter (we rely on photutils' annulus-based LocalBackground instead).
 
         # ---- Fit helper ----------------------------------------------------
         # Background: photutils subtracts per-source local background (annulus inner_r..outer_r)
         # from each fit-shape cutout before fitting the PSF, so the model is fit to
         # (data - local_bkg). NDData uncertainty includes background_rms in the noise model.
-        def _psf_fit(mask, inner_r, outer_r, fit_shape, fitter, use_emcee_this_tier, nd_override=None):
+        def _psf_fit(mask, inner_r, outer_r, fit_shape, fitter, use_emcee_this_tier, nd_override=None, xy_bound=None):
             if not np.any(mask):
                 return None, None
-            # For the target, keep the PSF local background estimator aligned with
+            if positive_flux_fit and not isinstance(fitter, _PositiveFluxFitter):
+                # Bound lives on the model handed to the fitter so grouped
+                # flat models (flux_0, flux_1, ...) get it too.
+                fitter = _PositiveFluxFitter(fitter)
+            # Copy the ePSF model per call to prevent cross-tier/cross-retry
+            # parameter contamination if the fitter mutates the model in-place.
+            epsf_model_for_call = epsf_model.copy()
+            if positive_flux_fit:
+                # TRFLSQ/SLSQP read bounds straight off the parameters;
+                # MCMCFitter's log_prior and the Poisson fitter's step
+                # projection read them off the model.  Grouped fits inherit
+                # the bound because astropy copies parameter descriptors
+                # (bounds included) into the compound model.
+                for _pname in epsf_model_for_call.param_names:
+                    _pl = _pname.lower()
+                    if not any(
+                        k in _pl for k in ("flux", "amplitude", "amp")
+                    ):
+                        continue
+                    _par = getattr(epsf_model_for_call, _pname)
+                    _lo, _hi = _par.bounds
+                    if _lo is None or _lo < 0.0:
+                        _par.bounds = (0.0, _hi)
+            # For the target fit, keep the PSF local background estimator aligned with
             # aperture photometry (annulus median). MMM can behave differently on
             # structured difference-image residuals and produce large AP-vs-PSF flux offsets.
-            # Using MedianBackground consistently across all tiers for robust sky estimation.
-            localbkg = LocalBackground(
-                float(inner_r), float(outer_r), bkg_estimator=MedianBackground()
-            )
-            xy_bounds_this = _effective_xy_bounds_for_shape(fit_shape)
+            # MedianBackground is used across all tiers for consistent sky estimation.
+            # Handle NaN-heavy regions (chip gaps) by shrinking annulus or falling back to global.
+            # In multi-target fits, check the annulus quality for each source and use
+            # the most conservative (smallest) annulus that works for all sources.
+            _global_bkg = None
+            if is_target_fit:
+                _n_in_mask = int(np.count_nonzero(mask))
+                # `mask` indexes init_params (valid rows only), so use the
+                # already-filtered x/y arrays -- x_all includes dropped rows
+                # and would misalign/IndexError the boolean index.
+                _xs = np.asarray(x[mask], float)
+                _ys = np.asarray(y[mask], float)
+                # Try primary annulus first
+                _inner_r, _outer_r = float(inner_r), float(outer_r)
+                _max_shrink = 3
+                _shrink_factor = 0.7
+                # Count validity the same way photutils' LocalBackground will:
+                # _make_mask unions nddata.mask with ~isfinite(data), so a
+                # finite-but-masked defect pixel still gets excluded. Checking
+                # only isfinite() would pass an annulus photutils then empties.
+                # The check runs on the data the fit will see (inverted retry
+                # overrides share the same mask).
+                _check_nd = nd_override if nd_override is not None else ndimage
+                _check_data = np.asarray(_check_nd.data, dtype=float)
+                _check_pixmask = getattr(_check_nd, "mask", None)
+                _annulus_bad = ~np.isfinite(_check_data)
+                if _check_pixmask is not None:
+                    _annulus_bad |= np.asarray(_check_pixmask, dtype=bool)
+                # Pre-allocate coordinate grids once (image shape doesn't change between attempts)
+                yy, xx = np.ogrid[:_check_data.shape[0], :_check_data.shape[1]]
+                for attempt in range(_max_shrink):
+                    _all_ok = True
+                    _worst_bad_frac = 0.0
+                    for _si in range(_n_in_mask):
+                        r2 = (xx - _xs[_si])**2 + (yy - _ys[_si])**2
+                        in_annulus = (r2 >= _inner_r**2) & (r2 < _outer_r**2)
+                        n_annulus = int(np.count_nonzero(in_annulus))
+                        n_valid = n_annulus - int(
+                            np.count_nonzero(_annulus_bad & in_annulus)
+                        )
+                        bad_frac = 1.0 - (n_valid / max(1, n_annulus))
+                        _worst_bad_frac = max(_worst_bad_frac, bad_frac)
+                        if n_valid < 10 or bad_frac >= 0.5:
+                            _all_ok = False
+                    if _all_ok:
+                        # Sufficient usable pixels for all sources - use this annulus
+                        break
+                    if attempt < _max_shrink - 1:
+                        _inner_r = max(3.0, _inner_r * _shrink_factor)
+                        _outer_r = max(_inner_r + 2.0, _outer_r * _shrink_factor)
+                        log.warning(
+                            "Target PSF: annulus (r_in=%.1f, r_out=%.1f) has "
+                            "%.1f%% masked/NaN pixels (worst of %d sources); shrinking to (r_in=%.1f, r_out=%.1f).",
+                            float(inner_r), float(outer_r), _worst_bad_frac * 100.0,
+                            _n_in_mask, _inner_r, _outer_r,
+                        )
+                    else:
+                        # Fallback to global background if all attempts
+                        # fail.  A tiny 1-2 px annulus would sit inside the
+                        # PSF core and still fail, so deliver the global
+                        # median through a constant estimator instead.
+                        _global_bkg = float(
+                            np.nanmedian(_check_data[~_annulus_bad])
+                        )
+                        if not np.isfinite(_global_bkg):
+                            _global_bkg = 0.0
+                        log.warning(
+                            "Target PSF: all annulus attempts too mask-heavy; using global background "
+                            "median (%.3g e-) as fallback.",
+                            _global_bkg,
+                        )
+                # photutils >=3.0 validates local_bkg_estimator as a
+                # LocalBackground instance, so the global-median fallback is
+                # delivered through the init_params 'local_bkg' column (added
+                # to sub_init below), which overrides the estimator.
+                localbkg = LocalBackground(
+                    _inner_r,
+                    _outer_r,
+                    bkg_estimator=MedianBackground(),
+                    n_threads=photutils_n_threads(phot_cfg),
+                )
+            else:
+                localbkg = LocalBackground(
+                    float(inner_r),
+                    float(outer_r),
+                    bkg_estimator=MedianBackground(),
+                    n_threads=photutils_n_threads(phot_cfg),
+                )
+            if xy_bound is None:
+                xy_bounds_this = _effective_xy_bounds_for_shape(fit_shape)
+            else:
+                # Held (undetected) sources get a near-zero bound so the
+                # centroid cannot chase noise peaks; still strictly
+                # positive because photutils rejects xy_bounds <= 0.
+                xy_bounds_this = max(0.01, float(xy_bound))
 
             if not iterative:
                 nd_for_fit = nd_override if nd_override is not None else ndimage
-
-                # Optional: LPI-style structured background infill for the transient PSF fit.
-                # Target-only (single source) to keep runtime bounded.
-                if (
-                    is_target_fit
-                    and int(np.count_nonzero(mask)) == 1
-                    and bool((phot_cfg or {}).get("lpi_background_for_target", False))
-                ):
-                    try:
-                        if bool(self.input_yaml.get("_lpi_target_applied_to_image", False)):
-                            raise RuntimeError("LPI already applied in main pipeline; skipping PSF-side LPI to avoid double subtraction.")
-                        from lpi_background import predict_background_under_source
-
-                        sub_init_tmp_lpi = init_params[mask].to_pandas()
-                        _x0 = float(sub_init_tmp_lpi["x"].to_numpy()[0])
-                        _y0 = float(sub_init_tmp_lpi["y"].to_numpy()[0])
-
-                        fwhm_px = float(fwhm) if np.isfinite(fwhm) else 3.0
-                        inner_lpi = (
-                            float((phot_cfg or {}).get("lpi_inner_radius_scale_fwhm", 1.5))
-                            * fwhm_px
-                        )
-                        outer_lpi = (
-                            float((phot_cfg or {}).get("lpi_outer_radius_scale_fwhm", 4.5))
-                            * fwhm_px
-                        )
-                        half_lpi = int(
-                            np.ceil(
-                                float(
-                                    (phot_cfg or {}).get(
-                                        "lpi_stamp_half_size_scale_fwhm", 6.0
-                                    )
-                                )
-                                * fwhm_px
-                            )
-                        )
-
-                        # Work on copies so other tiers/fits see original NDData.
-                        work = np.array(ndimage.data, dtype=float, copy=True)
-                        unc_arr = None
-                        try:
-                            unc_arr = np.array(
-                                ndimage.uncertainty.array, dtype=float, copy=True
-                            )
-                        except Exception:
-                            unc_arr = None
-
-                        bg_pred, bg_sig = predict_background_under_source(
-                            work,
-                            x0=_x0,
-                            y0=_y0,
-                            inner_radius_px=inner_lpi,
-                            outer_radius_px=outer_lpi,
-                            stamp_half_size_px=half_lpi,
-                            n_samples=int((phot_cfg or {}).get("lpi_n_samples", 250)),
-                            sample_window_px=int(
-                                (phot_cfg or {}).get("lpi_sample_window_px", 30)
-                            ),
-                            min_shift_px=float(
-                                (phot_cfg or {}).get("lpi_min_shift_px", outer_lpi)
-                                if (phot_cfg or {}).get("lpi_min_shift_px", None) is not None
-                                else outer_lpi
-                            ),
-                            ridge_lambda=float(
-                                (phot_cfg or {}).get("lpi_ridge_lambda", 0.01)
-                            ),
-                            rng_seed=self.input_yaml.get("rng_seed", None),
-                        )
-
-                        # Apply in-bounds stamp update.
-                        y0i = int(np.rint(_y0))
-                        x0i = int(np.rint(_x0))
-                        y1 = max(0, y0i - half_lpi)
-                        y2 = min(work.shape[0], y0i + half_lpi + 1)
-                        x1 = max(0, x0i - half_lpi)
-                        x2 = min(work.shape[1], x0i + half_lpi + 1)
-                        sy1 = half_lpi - (y0i - y1)
-                        sx1 = half_lpi - (x0i - x1)
-                        sy2 = sy1 + (y2 - y1)
-                        sx2 = sx1 + (x2 - x1)
-
-                        work[y1:y2, x1:x2] = work[y1:y2, x1:x2] - bg_pred[
-                            sy1:sy2, sx1:sx2
-                        ]
-                        if unc_arr is not None:
-                            add_sig = np.asarray(bg_sig[sy1:sy2, sx1:sx2], float)
-                            unc_arr[y1:y2, x1:x2] = np.sqrt(
-                                unc_arr[y1:y2, x1:x2] ** 2 + add_sig**2
-                            )
-
-                        nd_for_fit = _nddata_clone(ndimage, data=work)
-                        if unc_arr is not None:
-                            nd_for_fit.uncertainty = StdDevUncertainty(unc_arr)
-
-                        log.info(
-                            "Target PSF: applied LPI background infill (inner=%.1f px, outer=%.1f px, samples=%d).",
-                            float(inner_lpi),
-                            float(outer_lpi),
-                            int((phot_cfg or {}).get("lpi_n_samples", 250)),
-                        )
-                    except Exception as exc:
-                        log_warning_from_exception(
-                            log,
-                            "Target PSF: LPI background infill failed; using standard local background",
-                            exc,
-                        )
-                if False:
-                    # Work on a copy so other tiers/fits see the original image.
-                    work = np.array(ndimage.data, dtype=float, copy=True)
-                    sub_init_tmp = init_params[mask].to_pandas()
-                    n_ok = 0
-                    slopes = []
-                    # For the target fit (single source), subtract the fitted plane
-                    # over a larger local stamp around the target (comparable to the
-                    # local background region), instead of just the tiny PSF fit box.
-                    if is_target_fit and int(np.count_nonzero(mask)) == 1:
-                        _x = float(sub_init_tmp["x"].to_numpy()[0])
-                        _y = float(sub_init_tmp["y"].to_numpy()[0])
-                        coef = _fit_plane_from_annulus(work, _x, _y, inner_r, outer_r)
-                        if coef is not None:
-                            # Use a box ~2*outer_r on a side around the target to
-                            # capture the same local environment as the annulus-based
-                            # background estimate, but without touching the full frame.
-                            side = max(3, int(2.0 * float(outer_r)))
-                            side = _odd(side)
-                            if _subtract_plane_in_fit_box(
-                                work, coef, _x, _y, (side, side)
-                            ):
-                                n_ok = 1
-                                slopes.append((coef[1], coef[2]))
-                                log.info(
-                                    "Planar background subtraction applied in a local stamp for target fit "
-                                    "(inner=%.1f px, outer=%.1f px, box=%dx%d). "
-                                    "Slopes: bx=%.3g, by=%.3g ADU/pix.",
-                                    float(inner_r),
-                                    float(outer_r),
-                                    side,
-                                    side,
-                                    float(coef[1]),
-                                    float(coef[2]),
-                                )
-                    else:
-                        for _x, _y in zip(
-                            sub_init_tmp["x"].to_numpy(), sub_init_tmp["y"].to_numpy()
-                        ):
-                            coef = _fit_plane_from_annulus(
-                                work, float(_x), float(_y), inner_r, outer_r
-                            )
-                            if coef is None:
-                                continue
-                            if _subtract_plane_in_fit_box(
-                                work, coef, float(_x), float(_y), fit_shape
-                            ):
-                                n_ok += 1
-                                slopes.append((coef[1], coef[2]))
-                    nd_for_fit = _nddata_clone(ndimage, data=work)
-                    if n_ok > 0:
-                        bx_med = (
-                            float(np.nanmedian([s[0] for s in slopes]))
-                            if slopes
-                            else 0.0
-                        )
-                        by_med = (
-                            float(np.nanmedian([s[1] for s in slopes]))
-                            if slopes
-                            else 0.0
-                        )
-                        log.info(
-                            "Planar background subtraction applied to %d/%d sources (inner=%.1f px, outer=%.1f px). "
-                            "Median slopes: bx=%.3g, by=%.3g ADU/pix.",
-                            n_ok,
-                            int(np.count_nonzero(mask)),
-                            float(inner_r),
-                            float(outer_r),
-                            bx_med,
-                            by_med,
-                        )
+                # Add SourceGrouper for consistent handling of overlapping sources
+                # Improves both accuracy and performance in crowded fields
                 psfphot = PSFPhotometry(
-                    psf_model=epsf_model_copy,
+                    psf_model=epsf_model_for_call,
                     fitter=fitter,
                     fitter_maxiters=1000,
                     fit_shape=fit_shape,
                     aperture_radius=aperture_radius,
-                    localbkg_estimator=localbkg,
+                    **{_LOCALBKG_KWARG: localbkg},
+                    grouper=group_maker,
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
+                    n_threads=psf_photometry_threads(phot_cfg),
                 )
                 sub_init = init_params[mask]
-                res = psfphot(nd_for_fit, init_params=sub_init)
+                if _global_bkg is not None:
+                    # A 'local_bkg' column overrides the estimator, giving the
+                    # annulus-failed sources the global-median background.
+                    # photutils requires the column to carry the data unit.
+                    sub_init["local_bkg"] = np.full(
+                        len(sub_init), _global_bkg, dtype=float
+                    ) * getattr(nd_for_fit, "unit", u.electron)
+
+                # Filter out sources that fall on completely masked regions
+                # to avoid ValueError from photutils PSFPhotometry.  The
+                # effective mask unions nddata.mask with non-finite pixels --
+                # photutils masks those too via _make_mask, so a source on an
+                # all-NaN patch is just as unfittable as a masked one.
+                _fit_mask = ~np.isfinite(nd_for_fit.data)
+                _nd_mask = getattr(nd_for_fit, "mask", None)
+                if _nd_mask is not None:
+                    _fit_mask |= np.asarray(_nd_mask, dtype=bool)
+                if len(sub_init) > 0:
+                    _half = max(int(np.ceil(max(fit_shape) / 2)), 1)
+                    _sx = np.clip(np.rint(np.asarray(sub_init["x"], dtype=float)).astype(int), 0, nd_for_fit.data.shape[1] - 1) if "x" in sub_init.colnames else None
+                    _sy = np.clip(np.rint(np.asarray(sub_init["y"], dtype=float)).astype(int), 0, nd_for_fit.data.shape[0] - 1) if "y" in sub_init.colnames else None
+                    if _sx is not None and _sy is not None:
+                        _fully_masked = np.zeros(len(sub_init), dtype=bool)
+                        for _i in range(len(sub_init)):
+                            _y0 = max(_sy[_i] - _half, 0)
+                            _y1 = min(_sy[_i] + _half + 1, nd_for_fit.data.shape[0])
+                            _x0 = max(_sx[_i] - _half, 0)
+                            _x1 = min(_sx[_i] + _half + 1, nd_for_fit.data.shape[1])
+                            _region = _fit_mask[_y0:_y1, _x0:_x1]
+                            if _region.size > 0 and np.all(_region):
+                                _fully_masked[_i] = True
+                        if np.any(_fully_masked):
+                            log.warning(
+                                "Filtering %d source(s) that fall on completely masked regions before PSF fit.",
+                                int(np.sum(_fully_masked)),
+                            )
+                            sub_init = sub_init[~_fully_masked]
+                            # Update mask to reflect removed sources so downstream
+                            # retry logic (init_params[mask]) stays aligned.
+                            _mask_indices = np.where(mask)[0]
+                            mask[_mask_indices[_fully_masked]] = False
+                if len(sub_init) == 0:
+                    return None, None
+
+                # photutils emits a generic AstropyUserWarning when any fit
+                # is flagged non-converged; we replace it below with a
+                # counted warning decoded from the flags column.
+                _per_src_before = len(
+                    (getattr(fitter, "fit_info", None) or {}).get("per_source")
+                    or []
+                )
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r".*may not have converged.*",
+                        category=AstropyUserWarning,
+                    )
+                    res = psfphot(nd_for_fit, init_params=sub_init)
             else:
                 finder = DAOStarFinder(
-                    np.nanmedian(detect_threshold(ndimage.data, nsigma=3.0))
+                    np.nanmedian(detect_threshold(ndimage.data, n_sigma=3.0))
                     * u.electron,
                     fwhm,
                 )
                 psfphot = IterativePSFPhotometry(
-                    psf_model=epsf_model_copy,
+                    psf_model=epsf_model_for_call,
                     fitter=fitter,
                     fitter_maxiters=100,
                     fit_shape=fit_shape,
                     aperture_radius=aperture_radius,
-                    localbkg_estimator=localbkg,
+                    **{_LOCALBKG_KWARG: localbkg},
                     grouper=group_maker,
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
+                    n_threads=psf_photometry_threads(phot_cfg),
                     finder=finder,
-                    maxiters=3,
+                    maxiters=10,
                 )
                 sub_init = init_params[mask]
-                res = psfphot(ndimage, init_params=sub_init)
+                if _global_bkg is not None:
+                    sub_init["local_bkg"] = np.full(
+                        len(sub_init), _global_bkg, dtype=float
+                    ) * getattr(ndimage, "unit", u.electron)
+                _per_src_before = len(
+                    (getattr(fitter, "fit_info", None) or {}).get("per_source")
+                    or []
+                )
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r".*may not have converged.*",
+                        category=AstropyUserWarning,
+                    )
+                    res = psfphot(ndimage, init_params=sub_init)
 
                 # Match back to input positions via KD-tree.
                 sub_init = sub_init.to_pandas()
@@ -3141,7 +13447,16 @@ class PSF:
             sub_init = (
                 sub_init.to_pandas() if hasattr(sub_init, "to_pandas") else sub_init
             )
-            res = res.to_pandas() if hasattr(res, "to_pandas") else res
+            if hasattr(res, "to_pandas"):
+                # Filter out multidimensional columns (e.g. qfit, cfit) that
+                # cannot be converted to a pandas DataFrame.
+                _keep_cols = [
+                    name for name in res.colnames
+                    if len(res[name].shape) <= 1
+                ]
+                res = res[_keep_cols].to_pandas()
+            else:
+                res = res
 
             res["idx"] = (
                 sub_init["__row"].to_numpy()
@@ -3151,9 +13466,45 @@ class PSF:
             if "flags" not in res.columns:
                 res["flags"] = 0
 
-            # LSQ robustness retry:
-            # Re-fit only pathological rows with a slightly larger fit box but
-            # tighter centroid bounds to reduce divergence/outlier solutions.
+            # Log human-readable flag descriptions using psfphot.decode_flags().
+            # Also specifically warn on NON_FINITE_LOCAL_BKG (bit 2048) which photutils
+            # handles gracefully rather than raising an error.
+            try:
+                flag_vals = np.asarray(res["flags"], int)
+                nonzero_flags = flag_vals[flag_vals != 0]
+                if len(nonzero_flags) > 0 and hasattr(psfphot, "decode_flags"):
+                    # decode_flags reads the object's own results table;
+                    # passing res["flags"] positionally landed in
+                    # return_bit_values, returned ints, and silently broke
+                    # the name join below.  Default returns flag names.
+                    # photutils >=3.1 returns a dict keyed by source id;
+                    # earlier versions returned a positional list.
+                    decoded = psfphot.decode_flags()
+                    if isinstance(decoded, dict):
+                        decoded = decoded.values()
+                    unique_issues = set()
+                    for src_issues in decoded:
+                        for issue in src_issues:
+                            unique_issues.add(issue)
+                    if unique_issues:
+                        log.debug("PSF fit flags: %s", ", ".join(sorted(unique_issues)))
+                    if any(8 & v for v in nonzero_flags):
+                        log.warning(
+                            "PSF fit: %d source(s) may not have converged "
+                            "(no_convergence flag).",
+                            int(np.sum([bool(8 & v) for v in nonzero_flags])),
+                        )
+                    if any(2048 & v for v in nonzero_flags):
+                        log.warning(
+                            "PSF fit: %d source(s) have non-finite local background "
+                            "(NON_FINITE_LOCALBKG flag); fitting proceeded without background subtraction.",
+                            int(np.sum([bool(2048 & v) for v in nonzero_flags])),
+                        )
+            except Exception:
+                pass
+
+            # LSQ retry: refit pathological rows with a slightly larger fit box
+            # and tighter centroid bounds to reduce divergence.
             if (not use_emcee_this_tier) and (not res.empty):
                 bad = (
                     ~np.isfinite(self._first_present(res, ["x_fit", "xcenter_fit", "x_0_fit"]))
@@ -3172,6 +13523,12 @@ class PSF:
                         retry_sel = np.zeros(len(sub_init), dtype=bool)
                     if np.any(retry_sel):
                         retry_init = init_params[mask][retry_sel]
+                        if _global_bkg is not None:
+                            # Keep the global-bkg override or the retry
+                            # re-measures a NaN annulus and re-flags the row.
+                            retry_init["local_bkg"] = np.full(
+                                len(retry_init), _global_bkg, dtype=float
+                            ) * getattr(nd_for_fit, "unit", u.electron)
                         fit_shape_retry = tuple(_odd(int(s) + 2) for s in fit_shape)
                         xy_bounds_retry = max(0.5, 0.7 * float(xy_bounds_this))
                         log.info(
@@ -3185,14 +13542,15 @@ class PSF:
                         )
                         try:
                             psfphot_retry = PSFPhotometry(
-                                psf_model=epsf_model_copy,
+                                psf_model=epsf_model_for_call,
                                 fitter=fitter,
                                 fitter_maxiters=1500,
                                 fit_shape=fit_shape_retry,
                                 aperture_radius=aperture_radius,
-                                localbkg_estimator=localbkg,
+                                **{_LOCALBKG_KWARG: localbkg},
                                 xy_bounds=xy_bounds_retry,
                                 progress_bar=False,
+                                n_threads=psf_photometry_threads(phot_cfg),
                             )
                             res_retry = psfphot_retry(nd_for_fit, init_params=retry_init)
                             res_retry = (
@@ -3213,16 +13571,83 @@ class PSF:
                                 )
                                 if "flags" not in res_retry.columns:
                                     res_retry["flags"] = 0
-                                # Prefer retry solutions for the retried ids.
-                                keep = ~np.isin(
-                                    np.asarray(res["idx"], int),
-                                    np.asarray(res_retry["idx"], int),
+                                # Substitute the retry solution only where it
+                                # is actually better than the original: the
+                                # retried rows were pathological, but a retry
+                                # that diverged or converged worse must not
+                                # overwrite a usable first-pass fit.  Compare
+                                # reduced_chi2 when both exist; otherwise
+                                # require the retry to be finite/flag-free.
+                                _retry_ids = np.asarray(res_retry["idx"], int)
+                                _orig_ids = np.asarray(res["idx"], int)
+                                _chi2_o = np.asarray(
+                                    res.get(
+                                        "reduced_chi2",
+                                        pd.Series(np.inf, index=res.index),
+                                    ),
+                                    dtype=float,
                                 )
-                                res = pd.concat(
-                                    [res.loc[keep], res_retry], ignore_index=True
+                                _chi2_r = np.asarray(
+                                    res_retry.get(
+                                        "reduced_chi2",
+                                        pd.Series(
+                                            np.inf, index=res_retry.index
+                                        ),
+                                    ),
+                                    dtype=float,
                                 )
+                                _flux_r = self._first_present(
+                                    res_retry, ["flux_fit", "flux"]
+                                )
+                                _flags_r = np.asarray(
+                                    res_retry["flags"], dtype=int
+                                )
+                                _accept = np.zeros(len(res_retry), dtype=bool)
+                                for _ri, _rid in enumerate(_retry_ids):
+                                    _oi = np.flatnonzero(_orig_ids == _rid)
+                                    if len(_oi) == 0:
+                                        continue
+                                    _oi = _oi[0]
+                                    _ok_fit = (
+                                        np.isfinite(_flux_r[_ri])
+                                        and _flux_r[_ri] != 0
+                                        and _flags_r[_ri] == 0
+                                    )
+                                    _c_r = (
+                                        _chi2_r[_ri]
+                                        if _ri < len(_chi2_r)
+                                        else np.inf
+                                    )
+                                    _c_o = (
+                                        _chi2_o[_oi]
+                                        if _oi < len(_chi2_o)
+                                        else np.inf
+                                    )
+                                    if not np.isfinite(_c_o):
+                                        # Original had no usable chi2 at all -
+                                        # accept any finite retry.
+                                        _accept[_ri] = np.isfinite(
+                                            _flux_r[_ri]
+                                        )
+                                    else:
+                                        _accept[_ri] = _ok_fit or (
+                                            np.isfinite(_c_r)
+                                            and _c_r <= _c_o
+                                        )
+                                if np.any(_accept):
+                                    res_retry = res_retry.iloc[
+                                        np.flatnonzero(_accept)
+                                    ]
+                                    keep = ~np.isin(
+                                        _orig_ids,
+                                        np.asarray(res_retry["idx"], int),
+                                    )
+                                    res = pd.concat(
+                                        [res.loc[keep], res_retry],
+                                        ignore_index=True,
+                                    )
                         except Exception as exc:
-                            log.info("LSQ retry skipped (non-fatal): %s", exc)
+                            log.warning("LSQ retry skipped (non-fatal): %s", exc)
 
             # Propagate MCMC per-source errors.
             if use_emcee_this_tier and isinstance(
@@ -3234,35 +13659,64 @@ class PSF:
                         res[nm] = np.nan
 
                 # MCMCFitter.fit_info is cumulative across fitter calls (e.g.
-                # different SNR tiers). The current `res` only corresponds to the
-                # most recent fitted batch, so take the last `len(res)` records.
-                if isinstance(per_src, (list, tuple)) and len(per_src) >= len(res):
+                # different SNR tiers), so only records appended since this
+                # call started may be mapped to `res` rows - slicing the last
+                # len(res) of the full history bleeds a previous tier's tail
+                # records in whenever a fit silently skipped sources.
+                _n_new = (
+                    len(per_src) - _per_src_before
+                    if isinstance(per_src, (list, tuple))
+                    else 0
+                )
+                if isinstance(per_src, (list, tuple)) and _n_new == len(res):
                     per_src_batch = per_src[-len(res) :]
                     if len(per_src_batch) == len(res):
+                        # Collect errors in arrays for vectorized column assignment
+                        _x_errs = np.full(len(res), np.nan)
+                        _y_errs = np.full(len(res), np.nan)
+                        _flux_errs = np.full(len(res), np.nan)
                         for i, rec in enumerate(per_src_batch):
                             names = list(rec.get("param_names", []))
-                            p16 = np.asarray(rec.get("p16", []), float)
-                            p50 = np.asarray(rec.get("p50", []), float)
-                            p84 = np.asarray(rec.get("p84", []), float)
-                            if p16.size == 0:
-                                continue
-                            sigma = 0.5 * ((p84 - p50) + (p50 - p16))
+                            rec_errs = rec.get("param_errs")
+                            if rec_errs is not None and len(rec_errs) > 0:
+                                sigma = np.asarray(rec_errs, float)
+                            else:
+                                # Fallback to percentile-based if param_errs missing
+                                p16 = np.asarray(rec.get("p16", []), float)
+                                p50 = np.asarray(rec.get("p50", []), float)
+                                p84 = np.asarray(rec.get("p84", []), float)
+                                if p16.size == 0:
+                                    continue
+                                sigma = 0.5 * ((p84 - p50) + (p50 - p16))
 
                             def _get_sigma(keys):
                                 for k in keys:
                                     if k in names:
-                                        return float(max(sigma[names.index(k)], 0.0))
+                                        idx = names.index(k)
+                                        val = float(sigma[idx]) if idx < len(sigma) and np.isfinite(sigma[idx]) else np.nan
+                                        return val
                                 return np.nan
 
-                            res.at[i, "x_fit_err"] = _get_sigma(
-                                ("x", "x_0", "x_mean", "xcenter")
-                            )
-                            res.at[i, "y_fit_err"] = _get_sigma(
-                                ("y", "y_0", "y_mean", "ycenter")
-                            )
-                            res.at[i, "flux_fit_err"] = _get_sigma(
-                                ("flux", "amplitude", "amp")
-                            )
+                            _x_errs[i] = _get_sigma(("x", "x_0", "x_mean", "xcenter"))
+                            _y_errs[i] = _get_sigma(("y", "y_0", "y_mean", "ycenter"))
+                            _flux_errs[i] = _get_sigma(("flux", "amplitude", "amp"))
+
+                        res["x_fit_err"] = _x_errs
+                        res["y_fit_err"] = _y_errs
+                        res["flux_fit_err"] = _flux_errs
+                elif isinstance(per_src, (list, tuple)):
+                    # A source was skipped/reordered between the fit call and
+                    # the result frame, so the record-to-row mapping is
+                    # ambiguous.  Never map errors positionally (that would
+                    # attach one source's error to another); warn instead so
+                    # the NaN errors downstream are not silent.
+                    log.warning(
+                        "MCMC error propagation: %d new per-source record(s) "
+                        "for %d source row(s); MCMC flux/centroid errors left "
+                        "NaN for the unmatched rows.",
+                        _n_new,
+                        len(res),
+                    )
 
             return res, psfphot
 
@@ -3271,9 +13725,12 @@ class PSF:
         psfphot_last = None
         # In crowded fields, push the background annulus further out from the core
         # and narrow its width so it samples background rather than neighbour PSF wings.
-        phot_cfg = self.input_yaml.get("photometry", {}) or {}
         crowded_field = bool(phot_cfg.get("crowded_field", False))
 
+        # Use configurable annulus radii (same defaults as aperture.py)
+        gap_fwhm = float(phot_cfg.get("annulus_gap_fwhm", 0.75 if not crowded_field else 0.5))
+        width_fwhm = float(phot_cfg.get("annulus_width_fwhm", 2.0 if not crowded_field else 1.5))
+        
         # Target-only: force PSF local background annulus to match the aperture
         # photometry annulus definition, so AP and PSF subtract the same sky level.
         # (Aperture.measure uses these radii and a median estimator.)
@@ -3282,106 +13739,140 @@ class PSF:
                 ap_size = float(phot_cfg.get("aperture_radius", aperture_radius))
             except Exception:
                 ap_size = float(aperture_radius)
-            if crowded_field:
-                annulusIN = float(np.ceil(ap_size + 1.0 * fwhm))
-                annulusOUT = float(np.ceil(annulusIN + 2.0 * fwhm))
-            else:
-                annulusIN = float(np.ceil(ap_size + 1.5 * fwhm))
-                annulusOUT = float(np.ceil(annulusIN + 3.0 * fwhm))
-            # Apply to all tiers.
+            annulusIN = float(np.ceil(ap_size + gap_fwhm * fwhm))
+            annulusOUT = float(np.ceil(annulusIN + width_fwhm * fwhm))
             bright_inner = annulusIN
             bright_outer = annulusOUT
             faint_inner = annulusIN
             faint_outer = annulusOUT
             vf_inner = annulusIN
             vf_outer = annulusOUT
-            log.info(
+            log.debug(
                 "Target PSF: using aperture-matched local background annulus (r_in=%.2f px, r_out=%.2f px, estimator=median).",
                 float(annulusIN),
                 float(annulusOUT),
             )
 
         elif crowded_field:
-            bright_inner = aperture_radius + 4.0 * fwhm
-            bright_outer = bright_inner + 2.0 * fwhm
-            faint_inner = aperture_radius + 3.0 * fwhm
-            faint_outer = faint_inner + 2.0 * fwhm
-            vf_inner = aperture_radius + 3.0 * fwhm
-            vf_outer = vf_inner + 2.0 * fwhm
+            bright_inner = aperture_radius + gap_fwhm * fwhm
+            bright_outer = bright_inner + width_fwhm * fwhm
+            faint_inner = aperture_radius + gap_fwhm * fwhm
+            faint_outer = faint_inner + width_fwhm * fwhm
+            vf_inner = aperture_radius + gap_fwhm * fwhm
+            vf_outer = vf_inner + width_fwhm * fwhm
         else:
-            bright_inner = aperture_radius + 6.0 * fwhm
-            bright_outer = aperture_radius + 9.0 * fwhm
-            faint_inner = aperture_radius + 5.0 * fwhm
-            faint_outer = aperture_radius + 8.0 * fwhm
-            vf_inner = aperture_radius + 5.0 * fwhm
-            vf_outer = aperture_radius + 8.0 * fwhm
+            bright_inner = aperture_radius + gap_fwhm * fwhm
+            bright_outer = bright_inner + width_fwhm * fwhm
+            faint_inner = aperture_radius + gap_fwhm * fwhm
+            faint_outer = faint_inner + width_fwhm * fwhm
+            vf_inner = aperture_radius + gap_fwhm * fwhm
+            vf_outer = vf_inner + width_fwhm * fwhm
 
-        for mask, inner_r, outer_r, fshape, label in [
-            (bright_mask, bright_inner, bright_outer, fit_shape_bright, "bright"),
-            (faint_mask, faint_inner, faint_outer, fit_shape_faint, "faint"),
-            (vfaint_mask, vf_inner, vf_outer, fit_shape_vfaint, "very faint"),
-        ]:
-            if np.any(mask):
-                use_emcee_this = use_emcee_for_tier(label)
-                tier_fitter = (
-                    emcee_fitter
-                    if use_emcee_this and emcee_fitter is not None
-                    else lsq_fitter
-                )
+        # Catalog fits: keep the local-background annulus outside the model
+        # wings.  A median annulus that still contains PSF flux absorbs wing
+        # light as sky, biasing the amplitude low -- hardest on bright stars,
+        # so it shows up as a slope != 1 zeropoint fit.  (Target fits keep
+        # the aperture-matched annulus so AP and PSF subtract the same sky.)
+        if not bool(is_target_fit) and np.isfinite(_r_ee_annulus):
+            _ann_cap = max(
+                float(bright_inner), 0.5 * (_stamp_native - 1.0)
+            )
+            _inner_floor = min(_r_ee_annulus, _ann_cap)
+            if _inner_floor > float(bright_inner):
                 log.info(
-                    "Fitting %d %s sources (%s)",
-                    int(mask.sum()),
-                    label,
-                    "MCMC" if use_emcee_this else "LSQ",
+                    "Local-bkg annulus inner radius %.1f -> %.1f px: model "
+                    "EE at the old radius fell below the %.0f%% wing "
+                    "threshold, so wing flux would leak into the sky "
+                    "estimate.",
+                    float(bright_inner),
+                    float(_inner_floor),
+                    100.0
+                    * float(phot_cfg.get("psf_localbkg_ee_min", 0.97) or 0.97),
                 )
+                bright_inner = faint_inner = vf_inner = _inner_floor
+                bright_outer = bright_inner + width_fwhm * fwhm
+                faint_outer = faint_inner + width_fwhm * fwhm
+                vf_outer = vf_inner + width_fwhm * fwhm
+
+        # ---- Dispatch per SNR tier -----------------------------------------
+        # Nearby targets must share a PSFPhotometry call so the group model
+        # subtracts every overlapping PSF.  Targets farther than group_sep
+        # receive different SourceGrouper components inside that call and are
+        # fitted independently.
+        results = []
+        psfphot_last = None
+
+        if (is_target_fit and len(init_params) > 1) or not any_emcee_used:
+            # ---- Group-aware fit ------------------------------------------
+            # A single call remains cheapest for catalog sources.  For target
+            # fits, the held/free split must not divide a connected group:
+            # the held companion still contributes flux and must be modelled
+            # with the free source.
+            all_mask = np.ones(len(init_params), dtype=bool)
+            # Decide fitter: use MCMC if any target has SNR below threshold,
+            # otherwise LSQ.  This keeps simultaneous fitting while still
+            # benefiting from MCMC for faint targets.  The criterion here
+            # (any target below s2n) intentionally differs from the
+            # single-target path (the one target's own SNR) - do not
+            # "unify" them; a bright primary with a faint companion needs
+            # MCMC for the companion's constraints.
+            _any_low_snr = np.any(psf_snr < emcee_s2n) if emcee_s2n > 0 else False
+            use_emcee_all = _any_low_snr and emcee_fitter is not None
+            tier_fitter_all = emcee_fitter if use_emcee_all else lsq_fitter
+            log.debug(
+                "[PSF photometry: %d sources] (%s, group-aware fit)",
+                len(init_params),
+                "MCMC" if use_emcee_all else "LSQ",
+            )
+            _bounds_plan = []
+            _xy_hold_for_call = xy_hold_arr.copy()
+            if is_target_fit and len(init_params) > 1:
+                _promoted_groups = []
+                for _gid in np.unique(target_group_ids):
+                    _gmask = all_mask & (target_group_ids == _gid)
+                    _gheld = xy_hold_arr[_gmask]
+                    if np.any(_gheld) and not np.all(_gheld):
+                        # photutils accepts one scalar bound per call.  A mixed
+                        # blended group gets the free bound so both PSFs are
+                        # fitted together; splitting it would let the detected
+                        # source absorb the companion's flux.
+                        _xy_hold_for_call[_gmask] = False
+                        _promoted_groups.append(int(_gid))
+                if _promoted_groups:
+                    log.warning(
+                        "Target PSF group(s) %s mix held and free sources; "
+                        "fitting each blended group jointly with free centroid "
+                        "bounds.",
+                        _promoted_groups,
+                    )
+            _bounds_plan = [
+                (all_mask & ~_xy_hold_for_call, _free_xy_bound)
+            ]
+            if np.any(all_mask & _xy_hold_for_call):
+                _bounds_plan.append(
+                    (all_mask & _xy_hold_for_call, _hold_px_eff)
+                )
+            for _sub_mask, _xb in _bounds_plan:
+                if not np.any(_sub_mask):
+                    continue
                 res, psfphot_last = _psf_fit(
-                    mask, inner_r, outer_r, fshape, tier_fitter, use_emcee_this
+                    _sub_mask, bright_inner, bright_outer,
+                    fit_shape, tier_fitter_all, use_emcee_all,
+                    xy_bound=_xb,
                 )
                 if res is not None:
                     results.append(res)
-
-        if not results:
-            return sources
-
-        combined = pd.concat(results)
-        idx_out = np.asarray(combined["idx"], int)
-
-        # Removed dead code - first extraction block was never used
-        # Values are re-extracted after inverted processing below
-
-        # Check which fits have significant negative SNR and need inverted retry
-        # For target-only fits with check_inverted enabled
-        # Only retry for SNR <= -3 (significant negative detection, not just small negative noise)
-        needs_inverted_retry = np.zeros(len(combined), dtype=bool)
-        if check_inverted and ndimage_inverted is not None and is_target_fit:
-            # Check SNR from sources using idx_out mapping
-            if "SNR" in sources.columns:
-                snr_arr = np.asarray(sources["SNR"].iloc[idx_out], float)
-                # Trigger for significant negative SNR (<= -3), small negatives (-3 < SNR < 0) are okay
-                significant_negative = np.isfinite(snr_arr) & (snr_arr <= -3)
-                needs_inverted_retry = significant_negative
-                if np.any(needs_inverted_retry):
-                    log.info(
-                        "Target PSF: %d/%d fits have SNR <= -3; retrying on inverted image.",
-                        int(np.sum(needs_inverted_retry)),
-                        len(combined)
+                else:
+                    log.warning(
+                        "Target PSF fit returned None; "
+                        "may be due to convergence issues or invalid parameters."
                     )
-            else:
-                log.warning("check_inverted enabled but SNR not in sources; cannot determine inverted retry candidates.")
-
-        # ---- Inverted image fit (fallback for negative/problematic PSF) ------
-        results_inverted = []
-        psfphot_inverted = None  # Store the psfphot object from inverted fit
-        if check_inverted and ndimage_inverted is not None and np.any(needs_inverted_retry):
-            # Get masks for sources needing retry per tier
-            retry_mask_bright = bright_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
-            retry_mask_faint = faint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
-            retry_mask_vfaint = vfaint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
-            
-            for mask, inner_r, outer_r, fshape, label in [
-                (retry_mask_bright, bright_inner, bright_outer, fit_shape_bright, "bright"),
-                (retry_mask_faint, faint_inner, faint_outer, fit_shape_faint, "faint"),
-                (retry_mask_vfaint, vf_inner, vf_outer, fit_shape_vfaint, "very faint"),
+        else:
+            # ---- Standard tier-based dispatch (single target or field stars) ----
+            for mask, inner_r, outer_r, label in [
+                (bright_mask, bright_inner, bright_outer, "bright"),
+                (faint_mask, faint_inner, faint_outer, "faint"),
+                (vfaint_mask, vf_inner, vf_outer, "very faint"),
             ]:
                 if np.any(mask):
                     use_emcee_this = use_emcee_for_tier(label)
@@ -3390,15 +13881,192 @@ class PSF:
                         if use_emcee_this and emcee_fitter is not None
                         else lsq_fitter
                     )
-                    log.info("Fitting %d %s sources on inverted image (fallback)...", int(mask.sum()), label)
-                    res_inv, psfphot_inv = _psf_fit(
-                        mask, inner_r, outer_r, fshape, tier_fitter, use_emcee_this, nd_override=ndimage_inverted
+                    log.debug(
+                        "Fitting %d %s sources (%s)",
+                        int(mask.sum()),
+                        label,
+                        "MCMC" if use_emcee_this else "LSQ",
                     )
-                    if res_inv is not None:
-                        results_inverted.append(res_inv)
-                        # Store the psfphot object from the last successful inverted fit for plotting
-                        if psfphot_inv is not None:
-                            psfphot_inverted = psfphot_inv
+                    for _sub_mask, _xb in [
+                        (mask & ~xy_hold_arr, _free_xy_bound),
+                        (mask & xy_hold_arr, _hold_px_eff),
+                    ]:
+                        if not np.any(_sub_mask):
+                            continue
+                        res, psfphot_last = _psf_fit(
+                            _sub_mask, inner_r, outer_r, fit_shape,
+                            tier_fitter, use_emcee_this, xy_bound=_xb,
+                        )
+                        if res is not None:
+                            results.append(res)
+                        elif is_target_fit and len(sources) == 1:
+                            log.warning(
+                                "Target PSF fit returned None for %s tier; "
+                                "may be due to convergence issues or invalid parameters.",
+                                label,
+                            )
+
+        if not results:
+            if is_target_fit and len(sources) == 1:
+                log.warning(
+                    "Target PSF fitting failed: no valid fit results. "
+                    "This may be due to NaN pixels, invalid flux, or convergence issues."
+                )
+            return sources
+
+        combined = pd.concat(results)
+        idx_out = np.asarray(combined["idx"], int)
+
+        # Values are re-extracted after the inverted-fit merge below.
+
+        # Check which fits have significant negative SNR and need inverted retry
+        # For target-only fits with check_inverted enabled
+        # Only retry for SNR <= -3 (significant negative detection, not just small negative noise)
+        needs_inverted_retry = np.zeros(len(combined), dtype=bool)
+        if check_inverted and ndimage_inverted is not None and is_target_fit:
+            # Primary trigger: post-fit flux_fit < 0.
+            # Note: on science images the MCMC prior hard-rejects flux < 0
+            # (log_prior returns -inf) and init_params clips flux to 1e-6, so
+            # when MCMC was used the post-fit flux_fit will never be negative
+            # even for a genuinely negative PSF.  On difference images
+            # (allow_negative_flux=True) the prior permits the sign and
+            # flux_fit carries it directly.  We therefore also check the
+            # pre-fit bootstrap flux stored in _bootstrap_flux_e.
+            flux_fit_arr = np.asarray(
+                self._first_present(combined, ["flux_fit", "flux"], unit=u.electron), float
+            )
+            flux_fit_err_arr = np.asarray(
+                self._first_present(
+                    combined,
+                    ["flux_fit_err", "flux_err", "flux_uncertainty"],
+                    unit=u.electron,
+                ),
+                float,
+            )
+            # Gate on the documented SNR <= -3: a marginal negative churn
+            # (e.g. flux_fit = -0.001 from noise) used to trigger a full
+            # second fit on the inverted image.  Rows without a usable
+            # error fall back to the raw sign check so the trigger stays
+            # functional when errors were never reported.
+            _has_ferr = np.isfinite(flux_fit_err_arr) & (flux_fit_err_arr > 0)
+            _neg_snr = np.full(len(combined), np.nan)
+            np.divide(
+                flux_fit_arr, flux_fit_err_arr, out=_neg_snr, where=_has_ferr
+            )
+            significant_negative_fit = (
+                np.isfinite(flux_fit_arr)
+                & (flux_fit_arr < 0)
+                & np.where(_has_ferr, _neg_snr <= -3.0, True)
+            )
+
+            # Bootstrap-flux fallback: build a per-row mask aligned to idx_out.
+            # _bootstrap_flux_e is indexed by idx_keep; map it to idx_out.
+            bootstrap_negative = np.zeros(len(combined), dtype=bool)
+            try:
+                # Vectorized: use searchsorted to map idx_out -> idx_keep positions
+                sort_order = np.argsort(idx_keep)
+                sorted_keep = idx_keep[sort_order]
+                positions = np.searchsorted(sorted_keep, idx_out)
+                valid = positions < len(idx_keep)
+                matched = np.zeros(len(idx_out), dtype=bool)
+                matched[valid] = sorted_keep[positions[valid]] == idx_out[valid]
+                keep_positions = np.full(len(idx_out), -1, dtype=int)
+                keep_positions[matched] = sort_order[positions[matched]]
+                has_match = matched & (keep_positions >= 0)
+                if np.any(has_match):
+                    boot_vals = _bootstrap_flux_e[keep_positions[has_match]]
+                    bootstrap_negative[has_match] = (
+                        np.isfinite(boot_vals) & (boot_vals < 0)
+                    )
+            except Exception as _exc:
+                log.debug("Bootstrap-flux inverted trigger failed: %s", _exc)
+
+            needs_inverted_retry = significant_negative_fit | bootstrap_negative
+            if np.any(bootstrap_negative) and not np.any(significant_negative_fit):
+                log.info(
+                    "Target PSF: flux_fit >= 0 (positive-flux prior), but bootstrap "
+                    "flux was negative for %d/%d fit(s) - triggering inverted retry.",
+                    int(np.sum(bootstrap_negative)),
+                    len(combined),
+                )
+            elif np.any(needs_inverted_retry):
+                log.info(
+                    "Target PSF: %d/%d fits have flux_fit < 0; retrying on inverted image.",
+                    int(np.sum(needs_inverted_retry)),
+                    len(combined)
+                )
+            else:
+                log.info("Target PSF: flux_fit >= 0 and bootstrap flux >= 0; no inverted retry needed.")
+
+        # ---- Inverted image fit (fallback for negative/problematic PSF) ------
+        results_inverted = []
+        psfphot_inverted = None  # Store the psfphot object from inverted fit
+        if check_inverted and ndimage_inverted is not None and np.any(needs_inverted_retry):
+            if is_target_fit and len(init_params) > 1:
+                # Multi-target: retry whole proximity groups when any member
+                # needs the inverted image; the positive companion still has
+                # to be modelled so the negative source is not absorbed by it.
+                retry_mask_all = np.isin(idx_keep, idx_out[needs_inverted_retry])
+                if np.any(retry_mask_all):
+                    _retry_gids = np.unique(target_group_ids[retry_mask_all])
+                    retry_mask_all = np.isin(target_group_ids, _retry_gids)
+                    _any_low_snr = np.any(psf_snr[retry_mask_all] < emcee_s2n) if emcee_s2n > 0 else False
+                    use_emcee_inv = _any_low_snr and emcee_fitter is not None
+                    tier_fitter_inv = emcee_fitter if use_emcee_inv else lsq_fitter
+                    log.debug("Fitting %d sources on inverted image (group-aware fallback)...", int(retry_mask_all.sum()))
+                    for _gid in np.unique(target_group_ids):
+                        _gm = retry_mask_all & (target_group_ids == _gid)
+                        if not np.any(_gm):
+                            continue
+                        _gheld = _xy_hold_for_call[_gm]
+                        # A blended group stays together on the inverted image;
+                        # otherwise the retried source is measured against a
+                        # residual still containing its companion.
+                        _xb = _hold_px_eff if np.all(_gheld) else _free_xy_bound
+                        res_inv, psfphot_inv = _psf_fit(
+                            _gm, bright_inner, bright_outer,
+                            fit_shape, tier_fitter_inv, use_emcee_inv,
+                            nd_override=ndimage_inverted, xy_bound=_xb,
+                        )
+                        if res_inv is not None:
+                            results_inverted.append(res_inv)
+                            if psfphot_inv is not None:
+                                psfphot_inverted = psfphot_inv
+            else:
+                # Single-target or field stars: tier-based retry
+                retry_mask_bright = bright_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
+                retry_mask_faint = faint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
+                retry_mask_vfaint = vfaint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
+
+                for mask, inner_r, outer_r, fshape, label in [
+                    (retry_mask_bright, bright_inner, bright_outer, fit_shape, "bright"),
+                    (retry_mask_faint, faint_inner, faint_outer, fit_shape, "faint"),
+                    (retry_mask_vfaint, vf_inner, vf_outer, fit_shape, "very faint"),
+                ]:
+                    if np.any(mask):
+                        use_emcee_this = use_emcee_for_tier(label)
+                        tier_fitter = (
+                            emcee_fitter
+                            if use_emcee_this and emcee_fitter is not None
+                            else lsq_fitter
+                        )
+                        log.debug("Fitting %d %s sources on inverted image (fallback)...", int(mask.sum()), label)
+                        for _sm, _xb in [
+                            (mask & ~xy_hold_arr, _free_xy_bound),
+                            (mask & xy_hold_arr, _hold_px_eff),
+                        ]:
+                            if not np.any(_sm):
+                                continue
+                            res_inv, psfphot_inv = _psf_fit(
+                                _sm, inner_r, outer_r, fshape,
+                                tier_fitter, use_emcee_this,
+                                nd_override=ndimage_inverted, xy_bound=_xb,
+                            )
+                            if res_inv is not None:
+                                results_inverted.append(res_inv)
+                                # Store the psfphot object from the last successful inverted fit for plotting
+                                if psfphot_inv is not None:
+                                    psfphot_inverted = psfphot_inv
 
         # Process inverted results and replace bad normal fits where inverted succeeded
         combined_inv = None
@@ -3423,20 +14091,19 @@ class PSF:
                     len(idx_out_inv_good),
                     len(idx_out_inv)
                 )
-                # Replace the bad normal fits with inverted results
-                # Get the rows in combined_inv that succeeded
                 inv_good_mask = np.isin(idx_out_inv, idx_out_inv_good)
                 combined_inv_good = combined_inv.iloc[inv_good_mask].copy()
-                
-                # Map from idx to position in combined
+
                 idx_to_pos = {idx: i for i, idx in enumerate(idx_out)}
                 
                 # Preserve difference-image (normal) PSF parameters before they are overwritten
                 # so outputs can report both negative/oversubtracted diff flux and inverted-image fit.
+                # np.asarray(..., dtype=...) already allocates a new array when
+                # a type conversion is needed; no extra .copy() required.
                 snap_flux_e = np.asarray(
                     self._first_present(combined, ["flux_fit", "flux"], unit=u.electron),
                     dtype=float,
-                ).copy()
+                )
                 snap_flux_err_e = np.asarray(
                     self._first_present(
                         combined,
@@ -3444,101 +14111,118 @@ class PSF:
                         unit=u.electron,
                     ),
                     dtype=float,
-                ).copy()
+                )
                 snap_x = np.asarray(
                     self._first_present(combined, ["x_fit", "xcenter_fit", "x_0_fit"]),
                     dtype=float,
-                ).copy()
+                )
                 snap_y = np.asarray(
                     self._first_present(combined, ["y_fit", "ycenter_fit", "y_0_fit"]),
                     dtype=float,
-                ).copy()
+                )
                 snap_xe = np.asarray(
                     self._first_present(
                         combined, ["x_fit_err", "x_err", "xcenter_fit_err"]
                     ),
                     dtype=float,
-                ).copy()
+                )
                 snap_ye = np.asarray(
                     self._first_present(
                         combined, ["y_fit_err", "y_err", "ycenter_fit_err"]
                     ),
                     dtype=float,
-                ).copy()
-                snap_cfit = np.asarray(self._first_present(combined, ["cfit"]), dtype=float).copy()
-                snap_qfit = np.asarray(self._first_present(combined, ["qfit"]), dtype=float).copy()
+                )
+                snap_cfit = np.asarray(self._first_present(combined, ["cfit"]), dtype=float)
+                snap_qfit = np.asarray(self._first_present(combined, ["qfit"]), dtype=float)
                 snap_chi2 = np.asarray(
                     self._first_present(combined, ["reduced_chi2", "chi2_red"]),
                     dtype=float,
-                ).copy()
-                snap_flags = np.asarray(combined.get("flags", 0), dtype=int).copy()
+                )
+                snap_flags = np.asarray(combined.get("flags", 0), dtype=int)
                 
-                # Ensure _inverted_fit column exists as boolean type
                 if "_inverted_fit" not in combined.columns:
                     combined["_inverted_fit"] = False
-                
-                # Use .loc for robust column updates instead of fragile iloc/get_loc pattern
-                for _, inv_row in combined_inv_good.iterrows():
-                    idx_val = inv_row["idx"]
-                    # Find the row in combined with matching idx
-                    mask = combined["idx"] == idx_val
-                    if np.any(mask):
-                        row_idx = combined[mask].index[0]
-                        # Mark as inverted fit
-                        combined.loc[row_idx, "_inverted_fit"] = True
-                        # Copy inverted fit values (they'll be negated later)
-                        for col in ["x_fit", "xcenter_fit", "x_0_fit"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
-                        for col in ["y_fit", "ycenter_fit", "y_0_fit"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
-                        for col in ["flux_fit", "flux"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = -1.0 * inv_row[col]  # Negative flux
-                                break
-                        for col in ["flux_fit_err", "flux_err", "flux_uncertainty"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
-                        for col in ["x_fit_err", "x_err", "xcenter_fit_err"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
-                        for col in ["y_fit_err", "y_err", "ycenter_fit_err"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
-                        if "flags" in inv_row and "flags" in combined.columns:
-                            combined.loc[row_idx, "flags"] = inv_row["flags"]
-                        for col in ["cfit", "qfit", "reduced_chi2", "chi2_red"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
+
+                # --- Vectorised update of combined with inverted-fit results ---
+                # Resolve which column name is actually present for each logical field.
+                x_col   = _first_col(combined, ["x_fit", "xcenter_fit", "x_0_fit"])
+                y_col   = _first_col(combined, ["y_fit", "ycenter_fit", "y_0_fit"])
+                fx_col  = _first_col(combined, ["flux_fit", "flux"])
+                fe_col  = _first_col(combined, ["flux_fit_err", "flux_err", "flux_uncertainty"])
+                xe_col  = _first_col(combined, ["x_fit_err", "x_err", "xcenter_fit_err"])
+                ye_col  = _first_col(combined, ["y_fit_err", "y_err", "ycenter_fit_err"])
+                gof_col = _first_col(combined, ["cfit", "qfit", "reduced_chi2", "chi2_red"])
+
+                ix_col  = _first_col(combined_inv_good, ["x_fit", "xcenter_fit", "x_0_fit"])
+                iy_col  = _first_col(combined_inv_good, ["y_fit", "ycenter_fit", "y_0_fit"])
+                ifx_col = _first_col(combined_inv_good, ["flux_fit", "flux"])
+                ife_col = _first_col(combined_inv_good, ["flux_fit_err", "flux_err", "flux_uncertainty"])
+                ixe_col = _first_col(combined_inv_good, ["x_fit_err", "x_err", "xcenter_fit_err"])
+                iye_col = _first_col(combined_inv_good, ["y_fit_err", "y_err", "ycenter_fit_err"])
+                igof_col = _first_col(combined_inv_good, ["cfit", "qfit", "reduced_chi2", "chi2_red"])
+
+                # Build a lookup: idx_val -> row label in combined
+                idx_to_label = {
+                    idx_val: combined[combined["idx"] == idx_val].index[0]
+                    for idx_val in combined_inv_good["idx"].values
+                    if np.any(combined["idx"] == idx_val)
+                }
+
+                if idx_to_label:
+                    row_labels = list(idx_to_label.values())
+                    inv_subset = combined_inv_good[
+                        combined_inv_good["idx"].isin(idx_to_label)
+                    ].copy()
+                    inv_subset.index = [
+                        idx_to_label[v] for v in inv_subset["idx"].values
+                    ]
+
+                    combined.loc[row_labels, "_inverted_fit"] = True
+                    if x_col and ix_col:
+                        combined.loc[row_labels, x_col] = inv_subset[ix_col].values
+                    if y_col and iy_col:
+                        combined.loc[row_labels, y_col] = inv_subset[iy_col].values
+                    if fx_col and ifx_col:
+                        combined.loc[row_labels, fx_col] = -1.0 * inv_subset[ifx_col].values
+                    if fe_col and ife_col:
+                        combined.loc[row_labels, fe_col] = inv_subset[ife_col].values
+                    if xe_col and ixe_col:
+                        combined.loc[row_labels, xe_col] = inv_subset[ixe_col].values
+                    if ye_col and iye_col:
+                        combined.loc[row_labels, ye_col] = inv_subset[iye_col].values
+                    if "flags" in combined_inv_good.columns and "flags" in combined.columns:
+                        combined.loc[row_labels, "flags"] = inv_subset["flags"].values
+                    # Copy ALL quality-of-fit columns individually from inverted to combined.
+                    # Using a single gof_col/igof_col only copies the first match, leaving
+                    # qfit and reduced_chi2 from the original fit -- which then causes the
+                    # error scaling below to use the wrong fit's quality metrics.
+                    for _gof_name in ("cfit", "qfit", "reduced_chi2", "chi2_red"):
+                        if _gof_name in combined.columns and _gof_name in inv_subset.columns:
+                            combined.loc[row_labels, _gof_name] = inv_subset[_gof_name].values
             else:
                 log.info("Inverted PSF fit did not improve any sources.")
 
-        # Plot inverted fit results if any succeeded and plotTarget is enabled
         if plotTarget and combined_inv is not None and len(idx_out_inv_good) > 0:
             try:
-                # Create a copy of sources with inverted fit results for plotting
                 inv_plot_sources = sources.copy()
-                # Update with inverted fit positions
-                for _, inv_row in combined_inv_good.iterrows():
-                    idx_val = inv_row["idx"]
-                    if idx_val < len(inv_plot_sources):
-                        for col in ["x_fit", "xcenter_fit", "x_0_fit"]:
-                            if col in inv_row:
-                                inv_plot_sources.at[idx_val, "x_fit"] = inv_row[col]
-                                break
-                        for col in ["y_fit", "ycenter_fit", "y_0_fit"]:
-                            if col in inv_row:
-                                inv_plot_sources.at[idx_val, "y_fit"] = inv_row[col]
-                                break
+                _ix_col = _first_col(combined_inv_good, ["x_fit", "xcenter_fit", "x_0_fit"])
+                _iy_col = _first_col(combined_inv_good, ["y_fit", "ycenter_fit", "y_0_fit"])
+                valid_inv = combined_inv_good[
+                    combined_inv_good["idx"] < len(inv_plot_sources)
+                ]
+                if "x_fit" not in inv_plot_sources.columns:
+                    inv_plot_sources["x_fit"] = np.nan
+                if "y_fit" not in inv_plot_sources.columns:
+                    inv_plot_sources["y_fit"] = np.nan
+                if _ix_col and len(valid_inv) > 0:
+                    inv_plot_sources.iloc[
+                        valid_inv["idx"].values, inv_plot_sources.columns.get_loc("x_fit")
+                    ] = valid_inv[_ix_col].values
+                if _iy_col and len(valid_inv) > 0:
+                    inv_plot_sources.iloc[
+                        valid_inv["idx"].values, inv_plot_sources.columns.get_loc("y_fit")
+                    ] = valid_inv[_iy_col].values
                 
-                # Plot with inverted image data and the fitted PSF model
                 self.plot(
                     inv_plot_sources,
                     ndimage_inverted,
@@ -3546,21 +14230,22 @@ class PSF:
                     plotTarget=True,
                     scale=scale,
                     aperture_radius=aperture_radius,
+                    is_inverted=True,  # Use percentile-based normalization for inverted image
                 )
                 # Rename the output file to indicate it's the inverted fit
                 fpath = self.input_yaml["fpath"]
                 base = os.path.splitext(os.path.basename(fpath))[0]
                 write_dir = os.path.dirname(fpath)
-                old_path = os.path.join(write_dir, f"PSF_Target_{base}.png")
-                new_path = os.path.join(write_dir, f"PSF_Target_{base}_inverted.png")
+                _ext = get_plot_ext(self.input_yaml)
+                old_path = os.path.join(write_dir, f"PSF_Target_{base}{_ext}")
+                new_path = os.path.join(write_dir, f"PSF_Target_Inverted_{base}{_ext}")
                 if os.path.exists(old_path):
                     os.rename(old_path, new_path)
-                    # log.info(f"Saved inverted PSF fit plot: {new_path}")
+                    # log.info("Saved inverted PSF fit plot: %s", new_path)
             except Exception as exc:
-                log.info(f"Inverted fit plotting failed: {exc}")
+                log.warning("Inverted fit plotting failed: %s", exc)
 
-        # Now process the final results (potentially with inverted replacements)
-        # Extract values from combined (which may have been modified with _inverted_fit flags)
+        # Extract final values from combined (after any inverted-fit replacement).
         x_fit = self._first_present(combined, ["x_fit", "xcenter_fit", "x_0_fit"])
         y_fit = self._first_present(combined, ["y_fit", "ycenter_fit", "y_0_fit"])
         x_err = self._first_present(combined, ["x_fit_err", "x_err", "xcenter_fit_err"])
@@ -3570,22 +14255,108 @@ class PSF:
             combined, ["flux_fit_err", "flux_err", "flux_uncertainty"], unit=u.electron
         )
 
-        # Check which fits came from inverted image (these should keep negative flux)
-        inverted_fit_mask = np.asarray(combined.get("_inverted_fit", False), bool)
+        # Check which fits came from inverted image (these keep negative flux).
+        # If inverted checking is disabled, always force positive-only flux output.
+        # Ensure we always have a 1D boolean mask aligned with `combined`.
+        # pandas.DataFrame.get() returns the default (scalar) when the column is missing,
+        # which becomes a 0-d numpy array (no len()) if we just np.asarray(...).
+        if "_inverted_fit" in combined.columns:
+            inverted_fit_mask = np.asarray(combined["_inverted_fit"].to_numpy(), dtype=bool)
+        else:
+            inverted_fit_mask = np.zeros(len(combined), dtype=bool)
 
-        # Enforce positive fitted fluxes: negative solutions are unphysical for
-        # a positive PSF and indicate overfitting or local background issues.
-        # Clip at a tiny floor and propagate to errors.
-        # EXCEPTION: preserve negative flux for inverted fits (fading sources)
+        # If inverted-image checking is disabled, force positive-only PSF solutions.
+        if is_target_fit and not check_inverted:
+            inverted_fit_mask[:] = False
+
+        # Enforce positive fitted fluxes: negative solutions are unphysical
+        # for a positive PSF on science images and indicate a failed or
+        # background-dominated fit.  Report them as NaN, not as a 1e-6 flux -
+        # the clipped value produced a finite but meaningless magnitude
+        # (~+15 inst mag) that looked like a real detection downstream.
+        # EXCEPTIONS: preserve negative flux for:
+        #   1. Inverted fits (fading sources detected via image inversion)
+        #   2. Difference images (FORCECON header set by SFFT/ZOGY), where
+        #      negative fluxes are physically meaningful (fading sources)
+        allow_negative = inverted_fit_mask | is_difference_image
         with np.errstate(invalid="ignore"):
-            flux_fit_clipped = np.clip(flux_fit, 1e-6, np.inf)
-            # For inverted fits, use the original negative flux; for normal fits, use clipped
-            flux_fit = np.where(inverted_fit_mask, flux_fit, flux_fit_clipped)
-            flux_err = np.where(np.isfinite(flux_err), flux_err, np.nan)
+            flux_fit = np.where(
+                allow_negative | (flux_fit > 0), flux_fit, np.nan
+            )
+            # A fitter returning err <= 0 means "no usable covariance"
+            # (bounded/degenerate fit) - report it as unmeasured, not as
+            # infinitely precise; a literal 0.0 reaches the output table
+            # and reads as infinite SNR downstream.
+            flux_err = np.where(
+                np.isfinite(flux_err) & (flux_err > 0), flux_err, np.nan
+            )
         cfit_out = self._first_present(combined, ["cfit"])
         qfit_out = self._first_present(combined, ["qfit"])
         chi2_out = self._first_present(combined, ["reduced_chi2", "chi2_red"])
         flags_out = np.asarray(combined["flags"], int)
+
+        # Scale formal flux errors by sqrt(reduced_chi2) when chi2 > 1.
+        # Formal fitter errors only capture statistical precision given the
+        # noise model; they don't account for PSF model mismatch, which
+        # dominates for undersampled images or imperfect ePSF models.
+        # Without this scaling, zeropoint MCMC sees most sources as outliers
+        # (tiny errors + real residuals = huge chi2), rejecting ~50% of
+        # PSF sources. Standard practice (IRAF/DAOPHOT). Capped at 10x.
+        _chi2 = np.asarray(chi2_out, float)
+        _chi2_scale = np.sqrt(np.maximum(_chi2, 1.0))
+        _chi2_scale = np.where(
+            np.isfinite(_chi2_scale) & (_chi2_scale > 0), _chi2_scale, 1.0
+        )
+        _chi2_scale = np.clip(_chi2_scale, 1.0, 10.0)
+        # A clamped scale hides severe model mismatch: reduced_chi2 > 100
+        # reports the same inflation as chi2 = 100.  The flagged errors
+        # should be read as lower bounds, not honest sigmas.
+        _n_clamped = int(np.count_nonzero(np.asarray(_chi2, float) > 100.0))
+        if _n_clamped:
+            logging.getLogger(__name__).warning(
+                "%d PSF fit(s) have reduced_chi2 > 100 - error inflation is "
+                "clamped at 10x, so their reported errors are lower bounds.",
+                _n_clamped,
+            )
+
+        # qfit-based error inflation for TARGET fits was REMOVED.
+        # qfit = sum(|residuals|) / flux_fit is inversely proportional to
+        # flux, so it is inherently high (5-10) for faint sources even when
+        # the fit is perfect.  Using sqrt(qfit) as a multiplicative error
+        # scale creates a magnitude-dependent bias that suppresses marginal
+        # detections: a source at raw S/N~8 gets reported as S/N~2 because
+        # the error is inflated 4x.  The reduced_chi2 scaling above already
+        # captures non-Gaussian residuals (chi2 > 1 when residuals exceed
+        # the noise model), making the qfit scaling redundant and harmful.
+        _total_scale = _chi2_scale
+
+        _n_scaled = int(np.sum(_total_scale > 1.01))
+        if _n_scaled > 0:
+            _med_scale = float(np.median(_total_scale[_total_scale > 1.01]))
+            _scale_label = "sqrt(reduced_chi2)"
+            log.info(
+                "PSF flux errors scaled by %s: %d/%d sources "
+                "(median scale=%.1fx, max=%.1fx)",
+                _scale_label,
+                _n_scaled, len(flux_err), _med_scale,
+                float(np.max(_total_scale)),
+            )
+        flux_err = flux_err * _total_scale
+        # Position errors carry the same model-mismatch term: an
+        # undersampled or imperfect ePSF inflates centroid error by the same
+        # sqrt(reduced_chi2), so scaling only flux_err would report
+        # inconsistent precision between flux and astrometry.
+        x_err = x_err * _total_scale
+        y_err = y_err * _total_scale
+
+        # Apply the same scaling to the pre-inverted snapshot errors so that
+        # flux_PSF_err_normal is consistent with flux_PSF_err.
+        if snap_flux_err_e is not None and is_target_fit:
+            _snap_chi2 = np.asarray(snap_chi2, dtype=float)
+            _snap_chi2_scale = np.sqrt(np.maximum(_snap_chi2, 1.0))
+            _snap_chi2_scale = np.where(np.isfinite(_snap_chi2_scale) & (_snap_chi2_scale > 0), _snap_chi2_scale, 1.0)
+            _snap_chi2_scale = np.clip(_snap_chi2_scale, 1.0, 10.0)
+            snap_flux_err_e = snap_flux_err_e * _snap_chi2_scale
 
         df_out = pd.DataFrame(
             {
@@ -3634,6 +14405,9 @@ class PSF:
             if col not in updated.columns:
                 updated[col] = np.nan
         updated["fwhm_psf"] = fwhm
+        # Preserve per-source fwhm from SExtractor if already present; don't overwrite with constant image FWHM
+        if "fwhm" not in updated.columns:
+            updated["fwhm"] = np.nan
 
         row_pos = df_out.index.to_numpy()
         updated.iloc[
@@ -3642,32 +14416,75 @@ class PSF:
         ] = df_out[["x_fit", "y_fit", "x_fit_err", "y_fit_err"]].to_numpy()
         # Flux in e/s (same convention as aperture) so AP and PSF mags share the same zeropoint.
         # flux_fit_e is total flux in electrons from the PSF fit; divide by exposure_time for e/s.
-        updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF"])] = (
-            df_out["flux_fit_e"].to_numpy() / exposure_time
-        )
-        updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF_err"])] = (
-            df_out["flux_err_e"].to_numpy() / exposure_time
-        )
+        if not np.isfinite(exposure_time) or exposure_time <= 0:
+            log.warning("Invalid exposure_time (%s), setting flux and errors to NaN", exposure_time)
+            updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF"])] = np.nan
+            updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF_err"])] = np.nan
+        else:
+            updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF"])] = (
+                df_out["flux_fit_e"].to_numpy() / exposure_time
+            )
+            updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF_err"])] = (
+                df_out["flux_err_e"].to_numpy() / exposure_time
+            )
 
-        # Copy difference-image PSF snapshot for rows where inverted fit replaced the primary
+        # Compute per-source PSF SNR: |flux| / flux_err (same convention as main.py)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            _fpsf = updated["flux_PSF"].to_numpy(dtype=float)
+            _fpsf_err = updated["flux_PSF_err"].to_numpy(dtype=float)
+            _snr_psf = np.abs(_fpsf) / _fpsf_err
+            _snr_psf[(_fpsf_err <= 0) | ~np.isfinite(_fpsf) | ~np.isfinite(_fpsf_err)] = np.nan
+        updated["snr_psf"] = _snr_psf
+
+        # In-window detection S/N and centroid-hold verdict per source;
+        # idx_keep maps init_params rows back to source-table positions.
+        # Useful for spotting epochs where the target was forced rather
+        # than measured.
+        updated["detect_snr_psf"] = np.nan
+        updated["xy_held_psf"] = np.nan
+        updated["xy_bounds_psf"] = np.nan
+        _det_pos = np.asarray(idx_keep, int)
+        _det_ok = (_det_pos >= 0) & (_det_pos < len(updated))
+        if np.any(_det_ok):
+            updated.iloc[
+                _det_pos[_det_ok], updated.columns.get_indexer(["detect_snr_psf"])
+            ] = detect_snr_arr[_det_ok]
+            updated.iloc[
+                _det_pos[_det_ok], updated.columns.get_indexer(["xy_held_psf"])
+            ] = xy_hold_arr[_det_ok].astype(float)
+            updated.iloc[
+                _det_pos[_det_ok], updated.columns.get_indexer(["xy_bounds_psf"])
+            ] = xy_bounds_by_source[_det_ok]
+
+        # Copy difference-image PSF snapshot for rows where inverted fit replaced the primary.
+        # idx_out values are POSITIONS (orig_idx = arange(len(sources))), so
+        # they must go through .iloc -- .at would silently address the wrong
+        # row for any caller that passes a non-RangeIndex sources table.
         if snap_flux_e is not None:
             inv_mask_final = np.asarray(combined.get("_inverted_fit", False), bool)
-            for i, si in enumerate(idx_out):
-                if not inv_mask_final[i]:
-                    continue
-                si = int(si)
-                if si not in updated.index:
-                    continue
-                updated.at[si, "flux_PSF_normal"] = snap_flux_e[i] / exposure_time
-                updated.at[si, "flux_PSF_err_normal"] = snap_flux_err_e[i] / exposure_time
-                updated.at[si, "x_fit_normal"] = snap_x[i]
-                updated.at[si, "y_fit_normal"] = snap_y[i]
-                updated.at[si, "x_fit_err_normal"] = snap_xe[i]
-                updated.at[si, "y_fit_err_normal"] = snap_ye[i]
-                updated.at[si, "cfit_normal"] = snap_cfit[i]
-                updated.at[si, "qfit_normal"] = snap_qfit[i]
-                updated.at[si, "reduced_chi2_normal"] = snap_chi2[i]
-                updated.at[si, "flags_normal"] = int(snap_flags[i])
+            _snap_i = np.flatnonzero(inv_mask_final)
+            _pos = np.asarray(idx_out, dtype=int)[_snap_i]
+            _ok = (_pos >= 0) & (_pos < len(updated))
+            _snap_i, _pos = _snap_i[_ok], _pos[_ok]
+            if len(_pos):
+                _gc = updated.columns.get_indexer
+                if np.isfinite(exposure_time) and exposure_time > 0:
+                    updated.iloc[_pos, _gc(["flux_PSF_normal"])] = (
+                        snap_flux_e[_snap_i] / exposure_time
+                    )
+                    updated.iloc[_pos, _gc(["flux_PSF_err_normal"])] = (
+                        snap_flux_err_e[_snap_i] / exposure_time
+                    )
+                updated.iloc[_pos, _gc(["x_fit_normal"])] = snap_x[_snap_i]
+                updated.iloc[_pos, _gc(["y_fit_normal"])] = snap_y[_snap_i]
+                updated.iloc[_pos, _gc(["x_fit_err_normal"])] = snap_xe[_snap_i]
+                updated.iloc[_pos, _gc(["y_fit_err_normal"])] = snap_ye[_snap_i]
+                updated.iloc[_pos, _gc(["cfit_normal"])] = snap_cfit[_snap_i]
+                updated.iloc[_pos, _gc(["qfit_normal"])] = snap_qfit[_snap_i]
+                updated.iloc[_pos, _gc(["reduced_chi2_normal"])] = snap_chi2[
+                    _snap_i
+                ]
+                updated.iloc[_pos, _gc(["flags_normal"])] = snap_flags[_snap_i]
 
         for col in ("flags", "cfit", "qfit", "reduced_chi2"):
             updated.iloc[row_pos, updated.columns.get_indexer([col])] = df_out[
@@ -3676,7 +14493,6 @@ class PSF:
         
         # Copy _inverted_fit flag from combined (marks which sources used inverted fit)
         if "_inverted_fit" in combined.columns:
-            # Ensure column exists as boolean type
             if "_inverted_fit" not in updated.columns:
                 updated["_inverted_fit"] = False
             updated.iloc[row_pos, updated.columns.get_indexer(["_inverted_fit"])] = (
@@ -3685,27 +14501,85 @@ class PSF:
 
         # Populate inverted flux columns if available
         if combined_inv is not None:
-            idx_out_inv = np.asarray(combined_inv["idx"], int)
+            # idx values are POSITIONS into `updated` (orig_idx =
+            # arange(len(sources))), not labels -- testing them against
+            # updated.index silently drops valid rows when sources carries
+            # a non-RangeIndex, and leaves the value arrays longer than the
+            # filtered idx array.  Filter the frame on position bounds so
+            # idx_out_inv and every derived column stay row-aligned.
+            combined_inv = combined_inv.copy()
+            _idx_inv = combined_inv["idx"].to_numpy(dtype=int)
+            _valid_pos = (_idx_inv >= 0) & (_idx_inv < len(updated))
+            if not np.all(_valid_pos):
+                invalid_count = len(_idx_inv) - int(np.sum(_valid_pos))
+                log.warning(
+                    "Skipping %s inverted fit results with invalid indices",
+                    invalid_count,
+                )
+                combined_inv = combined_inv.iloc[_valid_pos].copy()
+            idx_out_inv = combined_inv["idx"].to_numpy(dtype=int)
             flux_fit_inv = self._first_present(combined_inv, ["flux_fit", "flux"], unit=u.electron)
             flux_err_inv = self._first_present(
                 combined_inv, ["flux_fit_err", "flux_err", "flux_uncertainty"], unit=u.electron
             )
-            # Enforce positive fitted fluxes for inverted image
+            # A non-positive flux on the inverted image is a non-detection,
+            # not a tiny positive measurement - NaN it so the valid_inv_flux
+            # gate below drops it instead of producing an absurd finite
+            # magnitude from -1e-6/exposure.
             with np.errstate(invalid="ignore"):
-                flux_fit_inv = np.clip(flux_fit_inv, 1e-6, np.inf)
+                flux_fit_inv = np.asarray(flux_fit_inv, float)
+                flux_fit_inv[
+                    ~np.isfinite(flux_fit_inv) | (flux_fit_inv <= 0)
+                ] = np.nan
                 flux_err_inv = np.where(np.isfinite(flux_err_inv), flux_err_inv, np.nan)
+
+            # Scale inverted-fit flux errors by sqrt(reduced_chi2), matching
+            # the normal-fit error scaling above.  qfit-based
+            # scaling was removed for normal fits because qfit is inversely
+            # proportional to flux, creating a magnitude-dependent bias that
+            # suppresses marginal detections.  The same reasoning applies to
+            # inverted fits.
+            if is_target_fit:
+                _chi2_inv = np.asarray(self._first_present(combined_inv, ["reduced_chi2", "chi2_red"]), dtype=float)
+                _chi2_scale_inv = np.sqrt(np.maximum(_chi2_inv, 1.0))
+                _chi2_scale_inv = np.where(np.isfinite(_chi2_scale_inv) & (_chi2_scale_inv > 0), _chi2_scale_inv, 1.0)
+                _chi2_scale_inv = np.clip(_chi2_scale_inv, 1.0, 10.0)
+                flux_err_inv = flux_err_inv * _chi2_scale_inv
+
             # Flux in e/s (negative sign because this was measured on inverted image)
             flux_fit_inv_arr = np.asarray(flux_fit_inv, float)
             flux_err_inv_arr = np.asarray(flux_err_inv, float)
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["flux_PSF_inverted"])] = (
-                -1.0 * flux_fit_inv_arr / exposure_time
-            )
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["flux_PSF_err_inverted"])] = (
-                flux_err_inv_arr / exposure_time
-            )
+            _gc_inv = updated.columns.get_indexer
+            if not np.isfinite(exposure_time) or exposure_time <= 0:
+                updated.iloc[idx_out_inv, _gc_inv(["flux_PSF_inverted"])] = (
+                    np.nan
+                )
+                updated.iloc[
+                    idx_out_inv, _gc_inv(["flux_PSF_err_inverted"])
+                ] = np.nan
+            else:
+                updated.iloc[idx_out_inv, _gc_inv(["flux_PSF_inverted"])] = (
+                    -1.0 * flux_fit_inv_arr / exposure_time
+                )
+                updated.iloc[
+                    idx_out_inv, _gc_inv(["flux_PSF_err_inverted"])
+                ] = (flux_err_inv_arr / exposure_time)
             # Compute inverted instrumental magnitudes (negative flux = fading source)
             with np.errstate(divide="ignore", invalid="ignore"):
-                valid_inv_flux = (updated["flux_PSF_inverted"] < 0) & np.isfinite(updated["flux_PSF_inverted"])
+                _inv_flux = np.asarray(updated["flux_PSF_inverted"], dtype=float)
+                _inv_err = np.asarray(updated["flux_PSF_err_inverted"], dtype=float)
+                _inv_abs = np.abs(_inv_flux)
+                # Same SNR sanity: reject near-zero flux fits that produce absurd mags
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    _inv_snr = _inv_abs / _inv_err
+                valid_inv_flux = (
+                    (_inv_flux < 0)
+                    & np.isfinite(_inv_flux)
+                    & np.isfinite(_inv_err)
+                    & (_inv_abs > 0)
+                    & np.isfinite(_inv_snr)
+                    & (_inv_snr >= 0.01)
+                )
                 updated.loc[valid_inv_flux, "inst_inverted"] = -2.5 * np.log10(
                     np.abs(updated.loc[valid_inv_flux, "flux_PSF_inverted"])
                 )
@@ -3715,8 +14589,7 @@ class PSF:
                     / np.abs(updated.loc[valid_inv_flux, "flux_PSF_inverted"])
                 )
                 updated["inst_inverted_err"] = mag_err_inv
-            # Add other inverted PSF parameters with _inverted suffix
-            # Get inverted fit values from combined_inv
+            # Remaining inverted-fit parameters, stored with _inverted suffix.
             x_fit_inv = self._first_present(combined_inv, ["x_fit", "xcenter_fit", "x_0_fit"])
             y_fit_inv = self._first_present(combined_inv, ["y_fit", "ycenter_fit", "y_0_fit"])
             x_err_inv = self._first_present(combined_inv, ["x_fit_err", "x_err", "xcenter_fit_err"])
@@ -3725,38 +14598,95 @@ class PSF:
             qfit_inv = self._first_present(combined_inv, ["qfit"])
             chi2_inv = self._first_present(combined_inv, ["reduced_chi2", "chi2_red"])
             flags_inv = np.asarray(combined_inv.get("flags", 0), int)
-            # Create columns if they don't exist
             for col in ["x_fit_inverted", "y_fit_inverted", "x_fit_err_inverted", "y_fit_err_inverted",
                         "cfit_inverted", "qfit_inverted", "reduced_chi2_inverted", "flags_inverted", "fwhm_psf_inverted"]:
                 if col not in updated.columns:
                     updated[col] = np.nan
-            # Store inverted values
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["x_fit_inverted"])] = x_fit_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["y_fit_inverted"])] = y_fit_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["x_fit_err_inverted"])] = x_err_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["y_fit_err_inverted"])] = y_err_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["cfit_inverted"])] = cfit_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["qfit_inverted"])] = qfit_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["reduced_chi2_inverted"])] = chi2_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["flags_inverted"])] = flags_inv
-            # FWHM for inverted fit is same as normal fit (PSF shape doesn't change)
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["fwhm_psf_inverted"])] = fwhm
+            # Store inverted values -- batch all columns in a single .iloc assignment
+            _inv_cols = ["x_fit_inverted", "y_fit_inverted", "x_fit_err_inverted", "y_fit_err_inverted",
+                         "cfit_inverted", "qfit_inverted", "reduced_chi2_inverted", "flags_inverted", "fwhm_psf_inverted"]
+            _inv_vals = np.column_stack([
+                np.asarray(x_fit_inv, dtype=object),
+                np.asarray(y_fit_inv, dtype=object),
+                np.asarray(x_err_inv, dtype=object),
+                np.asarray(y_err_inv, dtype=object),
+                np.asarray(cfit_inv, dtype=object),
+                np.asarray(qfit_inv, dtype=object),
+                np.asarray(chi2_inv, dtype=object),
+                np.asarray(flags_inv, dtype=object),
+                np.full(len(x_fit_inv), fwhm, dtype=object),
+            ])
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(_inv_cols)] = _inv_vals
             log.info("Inverted PSF fit: measured %d sources with negative PSF detection.", len(idx_out_inv))
 
         with np.errstate(divide="ignore", invalid="ignore"):
             inst_col = f"inst_{image_filter}_PSF"
             inst_err_col = f"inst_{image_filter}_PSF_err"
-            # For inverted fits, use absolute flux for magnitude calculation
-            flux_for_mag = np.where(inverted_fit_mask, np.abs(updated["flux_PSF"]), updated["flux_PSF"])
-            updated[inst_col] = -2.5 * np.log10(flux_for_mag)
-            # Valid flux: positive for normal, any non-zero finite for inverted
-            valid_flux = np.isfinite(updated["flux_PSF"]) & (updated["flux_PSF"] != 0)
-            mag_err = np.full(len(updated), np.nan)
-            mag_err[valid_flux] = (2.5 / np.log(10.0)) * (
-                updated.loc[valid_flux, "flux_PSF_err"]
-                / np.abs(updated.loc[valid_flux, "flux_PSF"])
+            # For inverted fits and difference images, use absolute flux for
+            # magnitude calculation (negative flux = fading source, |flux| is
+            # the physically meaningful flux for mag computation).
+            inverted_fit_mask_updated = updated.get("_inverted_fit", pd.Series(False, index=updated.index)).to_numpy(dtype=bool)
+            allow_negative_updated = inverted_fit_mask_updated | is_difference_image
+            flux_arr = np.asarray(updated["flux_PSF"], dtype=float)
+            flux_err_arr = np.asarray(updated["flux_PSF_err"], dtype=float)
+            abs_flux = np.abs(flux_arr)
+            flux_for_mag = np.where(allow_negative_updated, abs_flux, flux_arr)
+            # Valid flux criteria:
+            #   - finite flux and flux_err
+            #   - science image (non-negative-allowed): flux must be positive
+            #     (negative = failed fit, not a real negative source)
+            #   - inverted/difference: |flux| must be positive
+            #   - SNR sanity: |flux|/flux_err >= 0.01 to reject near-zero flux fits that
+            #     produce absurd magnitudes (e.g., flux~3e-9 -> mag~21, err~3.7e8)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _snr = abs_flux / flux_err_arr
+            valid_flux = (
+                np.isfinite(flux_arr)
+                & np.isfinite(flux_err_arr)
+                & (abs_flux > 0)
+                & (
+                    (allow_negative_updated & (abs_flux > 0))
+                    | (~allow_negative_updated & (flux_arr > 0))
+                )
+                & np.isfinite(_snr)
+                & (_snr >= 0.01)
             )
+            # Compute magnitude only for valid fluxes; NaN otherwise
+            mag_arr = np.full(len(updated), np.nan, dtype=float)
+            _flux_mag_arr = np.asarray(flux_for_mag, dtype=float)
+            _ok_mag = valid_flux & (_flux_mag_arr > 0)
+            mag_arr[_ok_mag] = -2.5 * np.log10(_flux_mag_arr[_ok_mag])
+            updated[inst_col] = mag_arr
+            # Error: (2.5/ln10) * (flux_err / |flux|) - only for valid fits
+            mag_err = np.full(len(updated), np.nan, dtype=float)
+            _ok_err = valid_flux & (abs_flux > 0)
+            mag_err[_ok_err] = (2.5 / np.log(10.0)) * (flux_err_arr[_ok_err] / abs_flux[_ok_err])
             updated[inst_err_col] = mag_err
+            _rejected = ~valid_flux & np.isfinite(flux_arr) & (abs_flux > 0)
+            if np.any(_rejected):
+                # Split the cause: a negative flux means the fit inverted,
+                # while a finite positive flux failing _snr >= 0.01 means
+                # the fit produced a huge flux_err (non-convergence), so a
+                # "near-zero flux" label would misdescribe bright sources.
+                _rej_flux = flux_arr[_rejected]
+                _rej_snr = _snr[_rejected]
+                _n_neg = int((~allow_negative_updated[_rejected] & (_rej_flux <= 0)).sum())
+                _n_lowsnr = int(
+                    ((~np.isfinite(_rej_snr)) | (_rej_snr < 0.01)).sum()
+                )
+                _causes = []
+                if _n_neg:
+                    _causes.append(f"{_n_neg} negative-flux")
+                if _n_lowsnr:
+                    _causes.append(f"{_n_lowsnr} low-SNR/non-converged")
+                log.warning(
+                    "PSF instrumental magnitude set to NaN for %d source(s) "
+                    "(%s); flux=%.2e to %.2e e/s.",
+                    int(_rejected.sum()),
+                    ", ".join(_causes) or "failed fits",
+                    float(np.nanmin(abs_flux[_rejected])),
+                    float(np.nanmax(abs_flux[_rejected])),
+                )
             # Instrumental mag from difference-image PSF before invert (|F|); only filled when invert replaced fit
             inst_normal = f"inst_{image_filter}_PSF_normal"
             inst_normal_err = f"inst_{image_filter}_PSF_normal_err"
@@ -3769,7 +14699,14 @@ class PSF:
                 dtype=float, copy=False
             )
             absf = np.abs(fn)
-            ok_mag = np.isfinite(fn) & np.isfinite(absf) & (absf > 0)
+            # Same SNR sanity check as primary magnitude: reject near-zero flux fits
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _snr_n = absf / fe
+            ok_mag = (
+                np.isfinite(fn) & np.isfinite(absf) & (absf > 0)
+                & np.isfinite(fe) & (fe > 0)
+                & np.isfinite(_snr_n) & (_snr_n >= 0.01)
+            )
             with np.errstate(divide="ignore", invalid="ignore"):
                 m_n = np.full(len(updated), np.nan, dtype=float)
                 m_n[ok_mag] = -2.5 * np.log10(absf[ok_mag])
@@ -3779,7 +14716,166 @@ class PSF:
             mag_en[ok_e] = (2.5 / np.log(10.0)) * (fe[ok_e] / absf[ok_e])
             updated[inst_normal_err] = mag_en
 
-        log.info(f"Fitted {len(updated)} sources in {time.perf_counter() - t0:.2f}s")
+        # ------------------------------------------------------------------
+        # Detection probability via a matched-filter likelihood ratio.
+        # For each fitted source the sky-only model (H0) is compared
+        # against PSF + sky (H1) inside the photometry fit box.  For a
+        # linear Gaussian model the log-likelihood ratio reduces to the
+        # matched-filter SNR, z = a*sqrt(sum w p^2) with w = 1/sigma^2 --
+        # the Neyman-Pearson-optimal statistic for a source at a known
+        # position (Zackay & Ofek 2016; Mattox+ 1996 TS).  The fit
+        # position is an a-priori input (forced photometry), so no
+        # trials factor applies (cf. Vio & Andreani 2016).  z is signed
+        # by the fitted amplitude, so PSF-shaped negative residuals
+        # (oversubtraction dips) drive prob_detect toward 0 rather than
+        # reporting a high unsigned significance.  z is divided by
+        # clip(sqrt(reduced_chi2), 1, 10) -- the same chi2 error
+        # inflation applied to the flux errors above -- so residuals
+        # that do not match the PSF shape (subtraction artifacts,
+        # blends) pull prob_detect back toward 0.5 (undecided).
+        #   prob_detect = Phi(z_eff): ~0.5 at noise level, ->1 for real
+        # sources, ->0 for PSF-shaped negative dips.
+        # Inverted-fit rows are evaluated on the sign-flipped image so
+        # prob_detect consistently means "a transient is present", not
+        # "flux is positive in the science-minus-template direction".
+        updated["prob_detect"] = np.nan
+        updated["mf_snr"] = np.nan
+        updated["delta_chi2"] = np.nan
+        try:
+            _det_inv = (
+                updated["_inverted_fit"].fillna(False).astype(bool).to_numpy()
+                if "_inverted_fit" in updated.columns
+                else np.zeros(len(updated), dtype=bool)
+            )
+            _half_det = max(2, int(fit_shape[0]) // 2)
+            _pc = updated.columns.get_loc("prob_detect")
+            _zc = updated.columns.get_loc("mf_snr")
+            _dc = updated.columns.get_loc("delta_chi2")
+            for _ri in range(len(updated)):
+                _xf = float(updated["x_fit"].iloc[_ri])
+                _yf = float(updated["y_fit"].iloc[_ri])
+                if not (np.isfinite(_xf) and np.isfinite(_yf)):
+                    continue
+                _prob, _z, _dchi2 = matched_filter_detection_prob(
+                    ndimage,
+                    epsf_model,
+                    _xf,
+                    _yf,
+                    _half_det,
+                    inverted=bool(_det_inv[_ri]),
+                )
+                if np.isfinite(_prob):
+                    updated.iat[_ri, _pc] = _prob
+                    updated.iat[_ri, _zc] = _z
+                    updated.iat[_ri, _dc] = _dchi2
+        except Exception as _pd_exc:
+            log.debug("prob_detect computation failed: %s", _pd_exc)
+
+        # ------------------------------------------------------------------
+        # Empirical false-alarm probability (target fits only).
+        # The analytic sigma model ignores inter-pixel correlation from
+        # the subtraction kernel and residual systematics in the ePSF.
+        # Rather than whitening the image (the ZOGY S_corr route),
+        # measure the null distribution of prob_detect directly on this
+        # image: evaluate the same statistic at random blank sites in an
+        # annulus around the target and report the fraction reaching the
+        # target's prob_detect -- a data-driven p-value that already
+        # contains the real correlated noise and PSF mismatch.
+        updated["empirical_p_false"] = np.nan
+        updated["empirical_n_sites"] = np.nan
+        _emp_trials = int(phot_cfg.get("detection_empirical_trials", 60) or 0)
+        if is_target_fit and _emp_trials > 0:
+            try:
+                _rng_e = np.random.default_rng(
+                    int(self.input_yaml.get("rng_seed") or 12345) + 7
+                )
+                _r_in_e = (
+                    float(
+                        phot_cfg.get("detection_empirical_annulus_in_fwhm", 3.0)
+                    )
+                    * float(fwhm)
+                )
+                _r_out_e = (
+                    float(
+                        phot_cfg.get(
+                            "detection_empirical_annulus_out_fwhm", 8.0
+                        )
+                    )
+                    * float(fwhm)
+                )
+                _r_out_e = max(_r_out_e, _r_in_e + 2.0)
+                # The target fit usually runs on a small cutout that cannot
+                # hold the blank-site annulus.  When the caller supplies a
+                # wider null image (e.g. the full difference frame), sample
+                # blank sites there instead; ``null_offset`` maps the fitted
+                # cutout coordinates into that frame.
+                _ndd_e = ndimage
+                _off_x = _off_y = 0.0
+                _mask_e = None
+                _excl_xy = None
+                if null_image is not None:
+                    _ndd_e = self.create_nddata_with_fitting_weights(
+                        null_image,
+                        gain=float(
+                            resolve_gain_e_per_adu(None, self.input_yaml)
+                        ),
+                        read_noise=float(
+                            self.input_yaml.get("read_noise", 0.0)
+                        ),
+                        background_rms=null_background_rms,
+                        mask=null_mask,
+                    )
+                    if null_offset is not None:
+                        _off_x, _off_y = float(null_offset[0]), float(
+                            null_offset[1]
+                        )
+                    _mask_e = null_mask
+                    _excl_xy = null_exclude_xy
+                _excl_r = max(_r_in_e, 2.5 * float(fwhm))
+                _epc = updated.columns.get_loc("empirical_p_false")
+                _enc = updated.columns.get_loc("empirical_n_sites")
+                _min_sites = int(
+                    phot_cfg.get("detection_empirical_min_sites", 20)
+                )
+                for _ri in range(len(updated)):
+                    _xf = float(updated["x_fit"].iloc[_ri])
+                    _yf = float(updated["y_fit"].iloc[_ri])
+                    _prob_row = float(updated["prob_detect"].iloc[_ri])
+                    _z_row = float(updated["mf_snr"].iloc[_ri])
+                    if not (
+                        np.isfinite(_xf)
+                        and np.isfinite(_yf)
+                        and (np.isfinite(_z_row) or np.isfinite(_prob_row))
+                    ):
+                        continue
+                    _p_false, _nsites = empirical_false_alarm_prob(
+                        _ndd_e,
+                        epsf_model,
+                        _xf + _off_x,
+                        _yf + _off_y,
+                        _prob_row,
+                        _half_det,
+                        inverted=bool(
+                            "_inverted_fit" in updated.columns
+                            and updated["_inverted_fit"].iloc[_ri]
+                        ),
+                        n_trials=_emp_trials,
+                        r_in=_r_in_e,
+                        r_out=_r_out_e,
+                        min_sites=_min_sites,
+                        rng=_rng_e,
+                        mask=_mask_e,
+                        exclude_xy=_excl_xy,
+                        exclude_radius=_excl_r,
+                        z_row=_z_row,
+                    )
+                    if np.isfinite(_p_false):
+                        updated.iat[_ri, _epc] = _p_false
+                    updated.iat[_ri, _enc] = float(_nsites)
+            except Exception as _emp_exc:
+                log.debug("empirical FAP computation failed: %s", _emp_exc)
+
+        log.debug("Fitted %s sources in %.2fs", len(updated), time.perf_counter() - t0)
 
         if plot or plotTarget:
             try:
@@ -3792,7 +14888,7 @@ class PSF:
                     aperture_radius=aperture_radius,
                 )
             except Exception as exc:
-                log.info(f"Plotting failed: {exc}")
+                log.warning("Plotting failed: %s", exc)
 
         if plotTarget and any_emcee_used:
             try:
@@ -3824,13 +14920,20 @@ class PSF:
         plotTarget: bool = False,
         scale: float = 1.0,
         aperture_radius: float = 7.0,
+        is_inverted: bool = False,
     ) -> None:
         """
         Multi-panel diagnostic: science image, PSF residual, ePSF model.
+
+        Args:
+            is_inverted: If True, the image is an inverted PSF image (mostly zeros with
+                        positive peaks). Uses percentile-based normalization instead of
+                        sigma-clipped to better show the peaks.
         """
         fpath = self.input_yaml["fpath"]
         base = os.path.splitext(os.path.basename(fpath))[0]
         write_dir = os.path.dirname(fpath)
+        plt.ioff()
         log = logging.getLogger(__name__)
 
         try:
@@ -3847,11 +14950,11 @@ class PSF:
                 subtracted = psfphot.make_residual_image(
                     nd_for_plot.data * nd_for_plot.unit,
                     psf_shape=first_image.shape,
-                    include_localbkg=True,
+                    **{_INCLUDE_LOCALBKG_KWARG: True},
                 )
                 second_image = np.asarray(subtracted.data)
                 fitted_model = first_image - second_image
-                second_label = "Residual Flux"
+                second_label = "Residual Flux [e$^-$]"
             else:
                 second_image = fitted_model = None
                 second_label = None
@@ -3870,161 +14973,155 @@ class PSF:
                         )
                         break
 
+            # Detect multiple targets for a row-per-target plot.  Each row
+            # carries that target's science stamp, residual stamp, and the ePSF
+            # when one is supplied.
+            _n_target_rows = 1
+            _target_centers = []  # list of (x, y) per target row
+            _target_names = []    # labels per target row
+            if plotTarget and len(sources) > 1 and "x_pix" in sources.columns:
+                # Primary target is row 0; additional targets use their
+                # resolved names when available.
+                for _i in range(len(sources)):
+                    _tx = float(sources.at[sources.index[_i], "x_pix"])
+                    _ty = float(sources.at[sources.index[_i], "y_pix"])
+                    if not np.isfinite(_tx) or not np.isfinite(_ty):
+                        continue
+                    _tn = (
+                        sources.at[sources.index[_i], "_additional_target_name"]
+                        if "_additional_target_name" in sources.columns
+                        else None
+                    )
+                    if not _tn or str(_tn) == "nan":
+                        if _i == 0:
+                            _tn = self.input_yaml.get("target_name", "Main target")
+                            # Use "Main target" for generic placeholder names
+                            if _tn in (
+                                "Transient",
+                                "Center of Field",
+                                "Primary",
+                                None,
+                                "nan",
+                            ):
+                                _tn = "Main target"
+                        else:
+                            _tn = f"Sub target {_i}"
+                    _target_centers.append((_tx, _ty))
+                    _target_names.append(str(_tn))
+                _n_target_rows = len(_target_centers) if _target_centers else 1
+
+            # Compute per-target zoom bounds.  When multiple targets are
+            # present, each gets its own row zoomed around it.
+            if not _target_centers:
+                _tcx = (
+                    np.nanmean(sources["x_pix"])
+                    if "x_pix" in sources
+                    else ndimage.data.shape[1] / 2
+                )
+                _tcy = (
+                    np.nanmean(sources["y_pix"])
+                    if "y_pix" in sources
+                    else ndimage.data.shape[0] / 2
+                )
+                _target_centers = [(_tcx, _tcy)]
+                _target_names = ["Main target"]
+                _n_target_rows = 1
+
+            _target_zooms = []
+            for _tcx, _tcy in _target_centers:
+                _x0 = max(int(np.floor(_tcx - scale)), 0)
+                _x1 = min(int(np.ceil(_tcx + scale)), ndimage.data.shape[1])
+                _y0 = max(int(np.floor(_tcy - scale)), 0)
+                _y1 = min(int(np.ceil(_tcy + scale)), ndimage.data.shape[0])
+                _target_zooms.append((_x0, _x1, _y0, _y1))
+
             ncols = (
-                1 + (1 if psfphot is not None else 0) + (1 if epsf is not None else 0)
+                1
+                + int(psfphot is not None)
+                + int(epsf is not None)
             )
-            _style = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
+
+            # Equal-aspect image panels shrink inside mismatched figure
+            # cells, leaving gaps no spacing parameter can remove.  The science
+            # and residual columns use the widest target zoom so rows with a
+            # narrower field do not distort the shared grid.
+            _target_aspect = max(
+                (zx1 - zx0) / max(zy1 - zy0, 1)
+                for (zx0, zx1, zy0, zy1) in _target_zooms
             )
-            if os.path.exists(_style):
-                plt.style.use(_style)
-            golden_ratio = (5**0.5 + 1) / 2
-            width_in = 5.5 * ncols
-            aspect = 5.0 * golden_ratio / width_in
-            width_pt = width_in * 72.27
-            fig = plt.figure(figsize=set_size(width_pt, aspect=aspect))
-            gs = GridSpec(1, ncols, width_ratios=[1] * ncols, wspace=0.45)
+            _col_aspects = [_target_aspect]
+            if psfphot is not None:
+                _col_aspects.append(_target_aspect)
+            if epsf is not None:
+                _esh, _esw = np.shape(epsf.data)
+                _col_aspects.append(_esw / max(_esh, 1))
+
+            apply_autophot_mplstyle()
+            # Each cell packs the main image plus appended axes: right
+            # projection 20% + 0.15 pad, bottom projection 20% + 0.15 pad,
+            # top colorbar 5% + 0.05 pad, all fractions of the main axes.
+            ax_h = 3.4
+            _col_w_factor = 1.0 + 0.15 + 0.20
+            _row_h_factor = 1.0 + 0.15 + 0.20 + 0.05 + 0.05
+            left, right, bottom, top = 0.05, 0.98, 0.15, 0.90
+            wspace = 0.08
+            hspace = 0.35
+            fig_w = (
+                _col_w_factor
+                * ax_h
+                * sum(_col_aspects)
+                * (1 + wspace * (ncols - 1) / ncols)
+                / (right - left)
+            )
+            fig_h = (
+                _row_h_factor
+                * ax_h
+                * _n_target_rows
+                * (1 + hspace * (_n_target_rows - 1) / _n_target_rows)
+                / (top - bottom)
+            )
+            fig = plt.figure(figsize=(fig_w, fig_h))
+            gs = GridSpec(
+                _n_target_rows,
+                ncols,
+                width_ratios=_col_aspects,
+                wspace=wspace,
+                hspace=hspace,
+                left=left,
+                right=right,
+                bottom=bottom,
+                top=top,
+            )
 
             ax_list, cax_list = [], []
-            for k in range(ncols):
-                ax = fig.add_subplot(gs[0, k])
-                divider = make_axes_locatable(ax)
-                ax_R = divider.append_axes("right", size="20%", pad=0.15, sharey=ax)
-                ax_B = divider.append_axes("bottom", size="20%", pad=0.15, sharex=ax)
-                cax = divider.append_axes("top", size="5%", pad=0.05)
-                ax.tick_params(axis="x", labelbottom=False)
-                ax_R.tick_params(axis="y", labelleft=False)
-                if k > 0:
-                    ax.tick_params(axis="y", labelleft=False)
-                ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
-                ax.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
-                for _a in (ax_R, ax_B):
-                    _a.tick_params(axis="both", labelsize=8)
-                # Rotate tick labels on projection axes to avoid overlap
-                ax_B.tick_params(axis="x", labelrotation=30)
-                ax_R.tick_params(axis="x", labelrotation=30)
-                ax_list.append((ax, ax_R, ax_B))
-                cax_list.append(cax)
-
-            x_center = (
-                np.nanmean(sources["x_pix"])
-                if "x_pix" in sources
-                else ndimage.data.shape[1] / 2
-            )
-            y_center = (
-                np.nanmean(sources["y_pix"])
-                if "y_pix" in sources
-                else ndimage.data.shape[0] / 2
-            )
-
-            x0 = max(int(np.floor(x_center - scale)), 0)
-            x1 = min(int(np.ceil(x_center + scale)), ndimage.data.shape[1])
-            y0 = max(int(np.floor(y_center - scale)), 0)
-            y1 = min(int(np.ceil(y_center + scale)), ndimage.data.shape[0])
-
-            # ---- Panel 1: science image ------------------------------------
-            ax1, ax1_R, ax1_B = ax_list[0]
-            cutout1 = first_image[y0:y1, x0:x1]
-            unc_cut = uncertainty[y0:y1, x0:x1]
-
-            if plotTarget:
-                # Scale to +/- 3 sigma (robust) so faint PSF is visible despite bright contaminants
-                _, med1, std1 = sigma_clipped_stats(cutout1, sigma=3, maxiters=5)
-                std1 = max(std1, np.finfo(float).tiny)
-                vmin1 = med1 - 3 * std1
-                vmax1 = med1 + 3 * std1
-                norm1 = ImageNormalize(vmin=vmin1, vmax=vmax1, stretch=LinearStretch())
-            else:
-                norm1 = ImageNormalize(
-                    cutout1, interval=ZScaleInterval(), stretch=LinearStretch()
-                )
-            im1 = ax1.imshow(
-                first_image,
-                origin="lower",
-                cmap="viridis",
-                norm=norm1,
-                interpolation=None,
-            )
-
-            if "x_pix" in sources and "y_pix" in sources:
-                ax1.scatter(
-                    sources["x_pix"],
-                    sources["y_pix"],
-                    marker="+",
-                    c="cyan",
-                    s=get_marker_size('medium'),
-                    lw=0.5,
-                    label="Input position",
-                    zorder=10,
-                )
-                # Add dashed box showing fitting bounds region
-                phot_cfg = self.input_yaml.get("photometry", {})
-                cfg_xy_bounds_arcsec = phot_cfg.get("fitting_xy_bounds", 3.0)
-                pixel_scale = self.input_yaml.get("pixel_scale", None)
-                if cfg_xy_bounds_arcsec is not None and pixel_scale is not None:
-                    try:
-                        cfg_xy_bounds_arcsec = float(cfg_xy_bounds_arcsec)
-                        pixel_scale = float(pixel_scale)
-                        if pixel_scale > 0:
-                            fitting_radius_px = cfg_xy_bounds_arcsec / pixel_scale
-                            for _, row in sources.iterrows():
-                                x_center = row["x_pix"]
-                                y_center = row["y_pix"]
-                                ax1.add_patch(
-                                    Rectangle(
-                                        (x_center - fitting_radius_px, y_center - fitting_radius_px),
-                                        2 * fitting_radius_px,
-                                        2 * fitting_radius_px,
-                                        edgecolor="cyan",
-                                        facecolor="none",
-                                        lw=1.0,
-                                        ls="--",
-                                        alpha=0.6,
-                                        label="Fitting bounds",
-                                    )
-                                )
-                    except Exception:
-                        pass
-
-            if "x_fit" in sources and "y_fit" in sources:
-                for _, row in sources.iterrows():
-                    ax1.add_patch(
-                        Circle(
-                            (row["x_fit"], row["y_fit"]),
-                            aperture_radius,
-                            edgecolor="white",
-                            facecolor="none",
-                            lw=0.5,
-                            ls="--",
-                            alpha=0.8,
-                        )
+            for _row in range(_n_target_rows):
+                _row_axes = []
+                _row_caxes = []
+                for _col in range(ncols):
+                    ax = fig.add_subplot(gs[_row, _col])
+                    divider = make_axes_locatable(ax)
+                    ax_R = divider.append_axes("right", size="20%", pad=0.15, sharey=ax)
+                    ax_B = divider.append_axes(
+                        "bottom", size="20%", pad=0.15, sharex=ax
                     )
-                    xe, ye = row.get("x_fit_err", np.nan), row.get("y_fit_err", np.nan)
-                    if (
-                        np.isfinite(xe)
-                        and np.isfinite(ye)
-                        and xe > 0
-                        and ye > 0
-                        and xe < scale
-                        and ye < scale
-                    ):
-                        ax1.add_patch(
-                            Ellipse(
-                                (row["x_fit"], row["y_fit"]),
-                                2 * xe,
-                                2 * ye,
-                                angle=0,
-                                edgecolor="#FF0000",
-                                facecolor="none",
-                                lw=0.5,
-                                alpha=1,
-                                zorder=1,
-                            )
-                        )
+                    cax = divider.append_axes("top", size="5%", pad=0.05)
+                    ax.tick_params(axis="x", labelbottom=False)
+                    ax_R.tick_params(axis="y", labelleft=False)
+                    if _col > 0:
+                        ax.tick_params(axis="y", labelleft=False)
+                    ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+                    ax.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+                    for _a in (ax_R, ax_B):
+                        _a.tick_params(axis="both", labelsize=8)
+                    # Rotate tick labels on projection axes to avoid overlap
+                    ax_B.tick_params(axis="x", labelrotation=30)
+                    ax_R.tick_params(axis="x", labelrotation=30)
+                    _row_axes.append((ax, ax_R, ax_B))
+                    _row_caxes.append(cax)
+                ax_list.append(_row_axes)
+                cax_list.append(_row_caxes)
 
-            # ---- Projections helper ----------------------------------------
-            # Right-panel step is drawn separately with _draw_right_step so the profile
-            # is centered in the error band (step constant over same y-blocks as fill).
+            # ---- Projections helper (defined early, used by all panels) -----
             def _proj(main_ax, ax_R, ax_B, data, color="blue", draw_right=True):
                 xl, yl = main_ax.get_xlim(), main_ax.get_ylim()
                 xi0, xi1 = max(int(xl[0]), 0), min(int(xl[1]), data.shape[1])
@@ -4032,167 +15129,498 @@ class PSF:
                 cut = data[yi0:yi1, xi0:xi1]
                 ax_B.step(
                     np.arange(xi0, xi1),
-                    cut.mean(axis=0),
+                    np.nanmean(np.asarray(cut, dtype=float), axis=0),
                     color=color,
                     lw=0.5,
                     where="mid",
                 )
                 if draw_right:
-                    ax_R.step(
-                        cut.mean(axis=1),
-                        np.arange(yi0, yi1),
-                        color=color,
-                        lw=0.5,
-                        where="mid",
-                    )
+                    _hy_proj = np.nanmean(np.asarray(cut, dtype=float), axis=1)
+                    _n_proj = len(_hy_proj)
+                    if _n_proj > 0:
+                        _y_edges = np.empty(2 * _n_proj)
+                        for i in range(_n_proj):
+                            _y_edges[2 * i] = (yi0 + i - 0.5) if i > 0 else yi0
+                            _y_edges[2 * i + 1] = (yi0 + i + 0.5) if i < _n_proj - 1 else (yi1 - 1)
+                        ax_R.plot(np.repeat(_hy_proj, 2), _y_edges, color=color, lw=0.5)
                 ax_R.set_yticklabels([])
 
-            def _draw_right_step(ax_R, hy, y0, y1, color="dodgerblue"):
-                """Draw right-panel profile as a step constant over the same y-blocks as
-                fill_betweenx(..., step='mid'), so the line is centered in the error band.
-                """
-                n = len(hy)
+            def _draw_right_step(ax_R, x_vals, y0, y1, color="dodgerblue", lw=0.5, alpha=1.0):
+                n = len(x_vals)
                 if n == 0:
                     return
-                # Blocks match fill_betweenx step='mid': [(y[i-1]+y[i])/2, (y[i]+y[i+1])/2]
                 y_edges = np.empty(2 * n)
                 for i in range(n):
                     y_edges[2 * i] = (y0 + i - 0.5) if i > 0 else y0
                     y_edges[2 * i + 1] = (y0 + i + 0.5) if i < n - 1 else (y1 - 1)
-                x_step = np.repeat(hy, 2)
-                ax_R.plot(x_step, y_edges, color=color, lw=0.5)
+                x_step = np.repeat(x_vals, 2)
+                ax_R.plot(x_step, y_edges, color=color, lw=lw, alpha=alpha)
 
-            for ax, _, _ in ax_list:
-                ax.set_xlim(x0, x1)
-                ax.set_ylim(y0, y1)
+            # Target marker colors: primary=white, others=muted teal (was neon cyan)
+            _tc_colors = ["white"] + [
+                PLOT_COLORS.get('target_secondary', '#17A2B8')
+            ] * (len(_target_centers) - 1)
 
-            _proj(ax1, ax1_R, ax1_B, first_image, draw_right=False)
-
-            # Error shading on science panel: SE of mean = sqrt(sum(sigma^2))/N (not mean(sigma)).
-            hx = cutout1.mean(axis=0)
-            hy = cutout1.mean(axis=1)
-            n_rows, n_cols = unc_cut.shape[0], unc_cut.shape[1]
-            exh = np.sqrt(np.nansum(unc_cut**2, axis=0)) / max(n_rows, 1)
-            eyh = np.sqrt(np.nansum(unc_cut**2, axis=1)) / max(n_cols, 1)
-            y_vals = np.arange(y0, y1, dtype=float)
             kw_bottom = dict(
-                facecolor="dodgerblue", edgecolor="none", alpha=0.3, step="mid"
+                facecolor="dodgerblue", edgecolor="none", alpha=0.5, step="mid"
             )
-            # Right panel: fill uses step='mid' (constant in y-blocks); profile drawn as
-            # step over same y-blocks so line is centered in the band.
             kw_right = dict(
-                facecolor="dodgerblue", edgecolor="none", alpha=0.3, step="mid"
+                facecolor="dodgerblue", edgecolor="none", alpha=0.5, step="mid"
             )
-            ax1_B.fill_between(np.arange(x0, x1), hx - exh, hx + exh, **kw_bottom)
-            ax1_R.fill_betweenx(y_vals, hy - eyh, hy + eyh, **kw_right)
-            _draw_right_step(ax1_R, hy, y0, y1, color="dodgerblue")
-            # Set right-panel xlim so the error band is visible (same as panel 2).
-            _lo_r1 = np.nanmin(hy - eyh)
-            _hi_r1 = np.nanmax(hy + eyh)
-            _margin_r1 = (
-                max((_hi_r1 - _lo_r1) * 0.05, 1e-9)
-                if np.isfinite(_hi_r1 - _lo_r1)
-                else 0.1
-            )
-            ax1_R.set_xlim(_lo_r1 - _margin_r1, _hi_r1 + _margin_r1)
 
-            # ---- Panel 2: residual -----------------------------------------
-            idx = 1
-            if psfphot is not None:
-                ax2, ax2_R, ax2_B = ax_list[idx]
-                cutout2 = second_image[y0:y1, x0:x1]
+            # ---- Science panels (first column, one row per target) ---------
+            ax1 = ax1_R = ax1_B = None  # first science axes (for labels/legend)
+            _science_mask_cuts = []    # saved for matching residual rows
+            _science_unc_cuts = []
+            _science_images = []
+            _all_science_axes = []     # saved for model overlay on all targets
+            for _trow, (_tx0, _tx1, _ty0, _ty1) in enumerate(_target_zooms):
+                _ax, _ax_R, _ax_B = ax_list[_trow][0]
+                if _trow == 0:
+                    ax1, ax1_R, ax1_B = _ax, _ax_R, _ax_B
+                _all_science_axes.append((_ax, _ax_R, _ax_B))
+                _cutout = first_image[_ty0:_ty1, _tx0:_tx1]
+                _unc_cut = uncertainty[_ty0:_ty1, _tx0:_tx1]
+                _mask_cut = (
+                    np.asarray(nd_for_plot.mask[_ty0:_ty1, _tx0:_tx1], dtype=bool)
+                    if getattr(nd_for_plot, "mask", None) is not None
+                    else None
+                )
+                _science_mask_cuts.append(_mask_cut)
+                _science_unc_cuts.append(_unc_cut)
+
+                _tname = (
+                    _target_names[_trow]
+                    if _trow < len(_target_names)
+                    else f"Target {_trow}"
+                )
+                _ax.set_title(_tname, fontsize=8, pad=3)
+                _ax.set_ylabel(_tname, fontsize=8, labelpad=4)
+
                 if plotTarget:
-                    _, med2, std2 = sigma_clipped_stats(cutout2, sigma=3, maxiters=5)
-                    std2 = max(std2, np.finfo(float).tiny)
-                    vmin2 = med2 - 3 * std2
-                    vmax2 = med2 + 3 * std2
-                    norm2 = ImageNormalize(
-                        vmin=vmin2, vmax=vmax2, stretch=LinearStretch()
-                    )
+                    if is_inverted:
+                        _finite_cut = _cutout[np.isfinite(_cutout)]
+                        _vmin = float(np.nanmin(_finite_cut)) if len(_finite_cut) > 0 else 0.0
+                        _vmax = float(np.nanmax(_finite_cut)) if len(_finite_cut) > 0 else 1.0
+                    else:
+                        _, _med, _std = sigma_clipped_stats(_cutout, sigma=3, maxiters=5)
+                        _std = max(_std, np.finfo(float).tiny)
+                        _vmin = _med - 3 * _std
+                        _vmax = _med + 3 * _std
+                    _norm = ImageNormalize(vmin=_vmin, vmax=_vmax, stretch=LinearStretch())
                 else:
-                    norm2 = ImageNormalize(
-                        cutout2, interval=ZScaleInterval(), stretch=LinearStretch()
+                    _norm = ImageNormalize(
+                        _cutout, interval=ZScaleInterval(), stretch=LinearStretch()
                     )
-                im2 = ax2.imshow(
-                    second_image,
+                _cmap = plt.get_cmap("viridis").copy()
+                _cmap = _cmap.with_extremes(bad="none")
+                _im = _ax.imshow(
+                    np.ma.array(first_image, mask=~np.isfinite(first_image)),
                     origin="lower",
-                    cmap="viridis",
-                    norm=norm2,
+                    cmap=_cmap,
+                    norm=_norm,
                     interpolation=None,
                 )
-                _proj(ax2, ax2_R, ax2_B, second_image, draw_right=False)
+                overlay_mask_hatch(_ax, ~np.isfinite(first_image))
+                _science_images.append(_im)
 
-                # Error shading on residual panel (same SE of mean as science).
-                hx2 = cutout2.mean(axis=0)
-                hy2 = cutout2.mean(axis=1)
-                ax2_B.fill_between(np.arange(x0, x1), hx2 - exh, hx2 + exh, **kw_bottom)
-                ax2_R.fill_betweenx(y_vals, hy2 - eyh, hy2 + eyh, **kw_right)
-                _draw_right_step(ax2_R, hy2, y0, y1, color="dodgerblue")
+                # Mark all input positions
+                if "x_pix" in sources and "y_pix" in sources:
+                    fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                    r = fwhm / 2.0
+                    from matplotlib.collections import PatchCollection as _PC
+                    _xy = sources[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                    _circles = [Circle((x, y), r) for x, y in _xy]
+                    if _circles:
+                        pc = _PC(_circles, edgecolors=PLOT_COLORS.get('epsf_aperture', '#CC79A7'), facecolors="none",
+                                  linewidths=1.2, alpha=0.9, zorder=10,
+                                  label="Input position")
+                        _ax.add_collection(pc)
+                    # Fitting bounds boxes
+                    phot_cfg = self.input_yaml.get("photometry", {})
+                    cfg_xy_bounds_arcsec = phot_cfg.get("fitting_xy_bounds", 3.0)
+                    pixel_scale = self.input_yaml.get("pixel_scale", None)
+                    try:
+                        if "xy_bounds_psf" in sources.columns:
+                            _bounds_px = sources["xy_bounds_psf"].to_numpy(dtype=float)
+                        else:
+                            _bounds_px = np.full(len(_xy), np.nan, dtype=float)
+                            if (
+                                cfg_xy_bounds_arcsec is not None
+                                and pixel_scale is not None
+                            ):
+                                pixel_scale = float(pixel_scale)
+                                if pixel_scale > 0:
+                                    _bounds_px[:] = (
+                                        float(cfg_xy_bounds_arcsec) / pixel_scale
+                                    )
+                        _rects = [
+                            Rectangle(
+                                (x - r_bound, y - r_bound),
+                                2 * r_bound,
+                                2 * r_bound,
+                            )
+                            for (x, y), r_bound in zip(_xy, _bounds_px)
+                            if np.isfinite(r_bound) and r_bound > 0
+                        ]
+                        if _rects:
+                            rc = _PC(
+                                _rects,
+                                edgecolors=PLOT_COLORS.get(
+                                    'reference', '#0072B2'
+                                ),
+                                facecolors="none",
+                                linewidths=1.0,
+                                linestyles="--",
+                                alpha=0.6,
+                                label="Fitting bounds",
+                            )
+                            _ax.add_collection(rc)
+                    except Exception:
+                        pass
 
-                # Zoom bottom and right panels onto the fit profile (scale to data range).
-                _lo_b = np.nanmin(hx2 - exh)
-                _hi_b = np.nanmax(hx2 + exh)
-                _margin_b = (
-                    max((_hi_b - _lo_b) * 0.05, 1e-9)
-                    if np.isfinite(_hi_b - _lo_b)
-                    else 0.1
-                )
-                ax2_B.set_ylim(_lo_b - _margin_b, _hi_b + _margin_b)
-                _lo_r = np.nanmin(hy2 - eyh)
-                _hi_r = np.nanmax(hy2 + eyh)
+                # Mark fitted positions
+                if "x_fit" in sources and "y_fit" in sources:
+                    fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                    r = fwhm / 2.0
+                    xf = sources["x_fit"].values
+                    yf = sources["y_fit"].values
+                    _ax.plot(
+                        np.column_stack([xf - r, xf + r]).T,
+                        np.column_stack([yf, yf]).T,
+                        color=PLOT_COLORS.get('target', '#E31B23'), lw=1.2, alpha=0.9, zorder=11,
+                    )
+                    _ax.plot(
+                        np.column_stack([xf, xf]).T,
+                        np.column_stack([yf - r, yf + r]).T,
+                        color=PLOT_COLORS.get('target', '#E31B23'), lw=1.2, alpha=0.9, zorder=11,
+                        label="Fitted position" if _trow == 0 else None,
+                    )
+                    _ap_circles = [Circle((x, y), aperture_radius) for x, y in zip(xf, yf)]
+                    if _ap_circles:
+                        apc = _PC(_ap_circles, edgecolors="white", facecolors="none",
+                                   linewidths=0.5, linestyles="--", alpha=0.6, zorder=9)
+                        _ax.add_collection(apc)
+                    xe_arr = sources.get("x_fit_err", pd.Series(np.nan, index=sources.index)).values
+                    ye_arr = sources.get("y_fit_err", pd.Series(np.nan, index=sources.index)).values
+                    _ellipses = []
+                    for x, y, xe, ye in zip(xf, yf, xe_arr, ye_arr):
+                        if (
+                            np.isfinite(xe) and np.isfinite(ye)
+                            and xe > 0 and ye > 0
+                            and xe < scale and ye < scale
+                        ):
+                            _ellipses.append(Ellipse((x, y), 2 * xe, 2 * ye, angle=0))
+                    if _ellipses:
+                        ec = _PC(_ellipses, edgecolors="#D94F4F", facecolors="none",
+                                  linewidths=0.5, alpha=0.6, zorder=9)
+                        _ax.add_collection(ec)
+
+                # Mark other target centers with colored crosshairs + labels
+                for _oi, (_ocx, _ocy) in enumerate(_target_centers):
+                    if _oi == _trow:
+                        continue
+                    if (_tx0 <= _ocx < _tx1 and _ty0 <= _ocy < _ty1):
+                        _r = fwhm / 2.0 if "fwhm" in locals() else 1.5
+                        _ax.plot(
+                            [_ocx - _r, _ocx + _r], [_ocy, _ocy],
+                            color=_tc_colors[_oi], lw=1.0, alpha=0.8, zorder=10,
+                        )
+                        _ax.plot(
+                            [_ocx, _ocx], [_ocy - _r, _ocy + _r],
+                            color=_tc_colors[_oi], lw=1.0, alpha=0.8, zorder=10,
+                        )
+                        _oname = _target_names[_oi] if _oi < len(_target_names) else f"T{_oi}"
+                        _ax.annotate(
+                            _oname, (_ocx, _ocy + _r + 2),
+                            color=_tc_colors[_oi], fontsize=6, ha="center", zorder=11,
+                        )
+
+                _ax.set_xlim(_tx0, _tx1)
+                _ax.set_ylim(_ty0, _ty1)
+
+                # Projections and error shading for this science panel
+                _proj(_ax, _ax_R, _ax_B, first_image, draw_right=False)
+                _finite = np.isfinite(_cutout)
+                if _mask_cut is not None:
+                    _finite &= ~_mask_cut
+                _hx = np.nanmean(_cutout, axis=0)
+                _hy = np.nanmean(_cutout, axis=1)
+                _unc2 = np.nan_to_num(
+                    np.asarray(_unc_cut, dtype=float),
+                    nan=0.0, posinf=0.0, neginf=0.0,
+                ) ** 2
+                _unc2 = np.where(_finite, _unc2, 0.0)
+                _nc = np.sum(_finite, axis=0).astype(float)
+                _nr = np.sum(_finite, axis=1).astype(float)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    _exh = np.sqrt(np.sum(_unc2, axis=0)) / np.where(_nc > 0, _nc, np.nan)
+                    _eyh = np.sqrt(np.sum(_unc2, axis=1)) / np.where(_nr > 0, _nr, np.nan)
+                _yv = np.arange(_ty0, _ty1, dtype=float)
+                _ax_B.fill_between(np.arange(_tx0, _tx1), _hx - _exh, _hx + _exh, **kw_bottom)
+                _ax_B.step(np.arange(_tx0, _tx1), _hx - _exh, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
+                _ax_B.step(np.arange(_tx0, _tx1), _hx + _exh, color="dodgerblue", lw=0.3, alpha=0.7, where="mid")
+                _ax_R.fill_betweenx(_yv, _hy - _eyh, _hy + _eyh, **kw_right)
+                _draw_right_step(_ax_R, _hy - _eyh, _ty0, _ty1, color="dodgerblue", lw=0.3, alpha=0.7)
+                _draw_right_step(_ax_R, _hy + _eyh, _ty0, _ty1, color="dodgerblue", lw=0.3, alpha=0.7)
+                _draw_right_step(_ax_R, _hy, _ty0, _ty1, color="dodgerblue")
+                _lo_r = np.nanmin(_hy - _eyh)
+                _hi_r = np.nanmax(_hy + _eyh)
                 _margin_r = (
                     max((_hi_r - _lo_r) * 0.05, 1e-9)
                     if np.isfinite(_hi_r - _lo_r)
                     else 0.1
                 )
-                ax2_R.set_xlim(_lo_r - _margin_r, _hi_r + _margin_r)
+                _ax_R.set_xlim(_lo_r - _margin_r, _hi_r + _margin_r)
 
-                _proj(ax1, ax1_R, ax1_B, fitted_model, color="#FF0000")
-                idx += 1
+            # ---- Residual panels (second column, one row per target) -------
+            _residual_images = []
+            if psfphot is not None:
+                for _trow, (x0, x1, y0, y1) in enumerate(_target_zooms):
+                    ax2, ax2_R, ax2_B = ax_list[_trow][1]
+                    _rname = (
+                        _target_names[_trow]
+                        if _trow < len(_target_names)
+                        else f"Target {_trow}"
+                    )
+                    ax2.set_title(f"Residual - {_rname}", fontsize=8, pad=3)
+                    cutout2 = second_image[y0:y1, x0:x1]
+                    if plotTarget:
+                        _, med2, std2 = sigma_clipped_stats(
+                            cutout2, sigma=3, maxiters=5
+                        )
+                        std2 = max(std2, np.finfo(float).tiny)
+                        norm2 = ImageNormalize(
+                            vmin=med2 - 3 * std2,
+                            vmax=med2 + 3 * std2,
+                            stretch=LinearStretch(),
+                        )
+                    else:
+                        norm2 = ImageNormalize(
+                            cutout2,
+                            interval=ZScaleInterval(),
+                            stretch=LinearStretch(),
+                        )
+                    cmap_vir = plt.get_cmap("viridis").copy()
+                    cmap_vir = cmap_vir.with_extremes(bad="none")
+                    im2 = ax2.imshow(
+                        np.ma.array(second_image, mask=~np.isfinite(second_image)),
+                        origin="lower",
+                        cmap=cmap_vir,
+                        norm=norm2,
+                        interpolation=None,
+                    )
+                    _residual_images.append(im2)
+                    overlay_mask_hatch(ax2, ~np.isfinite(second_image))
+                    ax2.set_xlim(x0, x1)
+                    ax2.set_ylim(y0, y1)
+                    _proj(ax2, ax2_R, ax2_B, second_image, draw_right=False)
 
-            # ---- Panel 3: ePSF ---------------------------------------------
+                    y_vals = np.arange(y0, y1, dtype=float)
+                    finite2 = np.isfinite(cutout2)
+                    _mask_cut = _science_mask_cuts[_trow]
+                    if _mask_cut is not None:
+                        finite2 &= ~_mask_cut
+                    hx2 = np.nanmean(cutout2, axis=0)
+                    hy2 = np.nanmean(cutout2, axis=1)
+                    # Recompute SE-of-mean using this row's uncertainty map;
+                    # residual NaN patterns can differ from the science cutout.
+                    unc2_2 = np.where(
+                        finite2,
+                        np.nan_to_num(
+                            np.asarray(_science_unc_cuts[_trow], dtype=float),
+                            nan=0.0, posinf=0.0, neginf=0.0,
+                        ) ** 2,
+                        0.0,
+                    )
+                    n_col2 = np.sum(finite2, axis=0).astype(float)
+                    n_row2 = np.sum(finite2, axis=1).astype(float)
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        exh2 = np.sqrt(np.sum(unc2_2, axis=0)) / np.where(
+                            n_col2 > 0, n_col2, np.nan
+                        )
+                        eyh2 = np.sqrt(np.sum(unc2_2, axis=1)) / np.where(
+                            n_row2 > 0, n_row2, np.nan
+                        )
+                    ax2_B.fill_between(
+                        np.arange(x0, x1),
+                        hx2 - exh2,
+                        hx2 + exh2,
+                        **kw_bottom,
+                    )
+                    ax2_B.step(
+                        np.arange(x0, x1), hx2 - exh2,
+                        color="dodgerblue", lw=0.3, alpha=0.7, where="mid",
+                    )
+                    ax2_B.step(
+                        np.arange(x0, x1), hx2 + exh2,
+                        color="dodgerblue", lw=0.3, alpha=0.7, where="mid",
+                    )
+                    ax2_R.fill_betweenx(
+                        y_vals, hy2 - eyh2, hy2 + eyh2, **kw_right
+                    )
+                    _draw_right_step(
+                        ax2_R, hy2 - eyh2, y0, y1,
+                        color="dodgerblue", lw=0.3, alpha=0.7,
+                    )
+                    _draw_right_step(
+                        ax2_R, hy2 + eyh2, y0, y1,
+                        color="dodgerblue", lw=0.3, alpha=0.7,
+                    )
+                    _draw_right_step(
+                        ax2_R, hy2, y0, y1,
+                        color=PLOT_COLORS.get('psf', '#00AA00'),
+                    )
+
+                    _lo_b = np.nanmin(hx2 - exh2)
+                    _hi_b = np.nanmax(hx2 + exh2)
+                    _margin_b = (
+                        max((_hi_b - _lo_b) * 0.05, 1e-9)
+                        if np.isfinite(_hi_b - _lo_b)
+                        else 0.1
+                    )
+                    ax2_B.set_ylim(_lo_b - _margin_b, _hi_b + _margin_b)
+                    _lo_r = np.nanmin(hy2 - eyh2)
+                    _hi_r = np.nanmax(hy2 + eyh2)
+                    _margin_r = (
+                        max((_hi_r - _lo_r) * 0.05, 1e-9)
+                        if np.isfinite(_hi_r - _lo_r)
+                        else 0.1
+                    )
+                    ax2_R.set_xlim(_lo_r - _margin_r, _hi_r + _margin_r)
+
+                # Overlay the fitted PSF model on every science profile.  _proj
+                # reads each row's xlim/ylim and extracts the matching stamp.
+                for _sci_ax, _sci_ax_R, _sci_ax_B in _all_science_axes:
+                    _proj(
+                        _sci_ax,
+                        _sci_ax_R,
+                        _sci_ax_B,
+                        fitted_model,
+                        color="#D94F4F",
+                    )
+
+            # ---- ePSF panels (last column, repeated on each target row) ----
+            _epsf_images = []
             if epsf is not None:
-                ax3, ax3_R, ax3_B = ax_list[idx]
-                norm3 = ImageNormalize(
-                    epsf.data, interval=ZScaleInterval(), stretch=LinearStretch()
-                )
-                im3 = ax3.imshow(
-                    epsf.data,
-                    origin="lower",
-                    cmap="viridis",
-                    norm=norm3,
-                    interpolation=None,
-                )
-                ax3.set_title(
-                    f"Oversampled ePSF (x{epsf.oversampling})", fontsize=7, pad=2
-                )
+                _epsf_col = 1 + int(psfphot is not None)
+                for _trow in range(_n_target_rows):
+                    ax3, ax3_R, ax3_B = ax_list[_trow][_epsf_col]
+                    norm3 = ImageNormalize(
+                        epsf.data,
+                        interval=ZScaleInterval(),
+                        stretch=LinearStretch(),
+                    )
+                    cmap_vir = plt.get_cmap("viridis").copy()
+                    cmap_vir = cmap_vir.with_extremes(bad="none")
+                    im3 = ax3.imshow(
+                        np.ma.array(epsf.data, mask=~np.isfinite(epsf.data)),
+                        origin="lower",
+                        cmap=cmap_vir,
+                        norm=norm3,
+                        interpolation=None,
+                    )
+                    _epsf_images.append(im3)
+                    overlay_mask_hatch(ax3, ~np.isfinite(epsf.data))
+                    ax3.set_title(
+                        f"Oversampled ePSF (x{epsf.oversampling})",
+                        fontsize=7,
+                        pad=2,
+                    )
 
             # ---- Colorbars -------------------------------------------------
-            cbar1 = fig.colorbar(im1, cax=cax_list[0], orientation="horizontal")
-            cbar1.set_label("Science Flux")
-            cax_list[0].xaxis.set_ticks_position("top")
-            cax_list[0].xaxis.set_label_position("top")
+            # Every row gets its own colorbar so each target keeps the limits
+            # used by its science and residual stamps.
+            for _trow, _im1 in enumerate(_science_images):
+                _cbar = fig.colorbar(
+                    _im1,
+                    cax=cax_list[_trow][0],
+                    orientation="horizontal",
+                )
+                _cbar.set_label(
+                    "Inverted Science Flux [e$^-$]"
+                    if is_inverted
+                    else "Science Flux [e$^-$]"
+                )
+                cax_list[_trow][0].xaxis.set_ticks_position("top")
+                cax_list[_trow][0].xaxis.set_label_position("top")
 
             if psfphot is not None:
-                cbar2 = fig.colorbar(im2, cax=cax_list[1], orientation="horizontal")
-                cbar2.set_label(second_label)
-                cax_list[1].xaxis.set_ticks_position("top")
-                cax_list[1].xaxis.set_label_position("top")
+                for _trow, _im2 in enumerate(_residual_images):
+                    _residual_cax = cax_list[_trow][1]
+                    cbar2 = fig.colorbar(
+                        _im2, cax=_residual_cax, orientation="horizontal"
+                    )
+                    cbar2.set_label(
+                        "Inverted Residual Flux [e$^-$]"
+                        if is_inverted
+                        else second_label
+                    )
+                    _residual_cax.xaxis.set_ticks_position("top")
+                    _residual_cax.xaxis.set_label_position("top")
 
             if epsf is not None:
-                cbar3 = fig.colorbar(im3, cax=cax_list[-1], orientation="horizontal")
-                cbar3.set_label("Normalised PSF")
-                cax_list[-1].xaxis.set_ticks_position("top")
-                cax_list[-1].xaxis.set_label_position("top")
+                _epsf_col = 1 + int(psfphot is not None)
+                for _trow, _im3 in enumerate(_epsf_images):
+                    _epsf_cax = cax_list[_trow][_epsf_col]
+                    cbar3 = fig.colorbar(
+                        _im3, cax=_epsf_cax, orientation="horizontal"
+                    )
+                    cbar3.set_label("Normalised PSF")
+                    _epsf_cax.xaxis.set_ticks_position("top")
+                    _epsf_cax.xaxis.set_label_position("top")
 
-            for _ax, _ax_R, _ax_B in ax_list:
-                _ax_B.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
-                _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
-            ax1.legend(loc="upper left")
+            for _row_axes in ax_list:
+                for _ax, _ax_R, _ax_B in _row_axes:
+                    _ax_B.yaxis.set_major_locator(
+                        MaxNLocator(nbins=5, integer=False)
+                    )
+                    _ax_R.xaxis.set_major_locator(
+                        MaxNLocator(nbins=3, integer=False)
+                    )
+                    _ax_B.set_xlabel("X position (pixels)")
+                    _ax_B.set_ylabel("Flux [e$^-$]")
+                    _ax_R.set_xlabel("Flux [e$^-$]")
+                    _ax_R.yaxis.set_label_position("right")
+            # Build legend only from handle types that matplotlib can render
+            # (PatchCollection / QuadMesh are not supported by legend and
+            # trigger a UserWarning).
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                _handles, _labels = ax1.get_legend_handles_labels()
+            if _handles:
+                from matplotlib.collections import Collection as _MplCollection
+                from matplotlib.lines import Line2D as _Line2D
+                _valid = []
+                _valid_labels = []
+                for _h, _l in zip(_handles, _labels):
+                    # Skip collections that legend cannot handle
+                    if isinstance(_h, _MplCollection) and not hasattr(_h, "get_facecolor"):
+                        continue
+                    _valid.append(_h)
+                    _valid_labels.append(_l)
+                # Add target name entries to the legend so each target is
+                # identified by its marker colour (primary=white, others=muted teal).
+                if len(_target_names) > 1:
+                    for _ti, _tname in enumerate(_target_names):
+                        _mc = _tc_colors[_ti] if _ti < len(_tc_colors) else PLOT_COLORS.get('target_secondary', '#17A2B8')
+                        _valid.append(
+                            _Line2D([0], [0], marker="x", color=_mc,
+                                    markersize=6, markeredgewidth=1.5,
+                                    linestyle="None", label=_tname)
+                        )
+                        _valid_labels.append(_tname)
+                if _valid:
+                    _n_leg = len(_valid)
+                    _leg_ncol = 3 if _n_leg >= 8 else (2 if _n_leg >= 5 else 1)
+                    ax1.legend(_valid, _valid_labels, loc="upper left",
+                               frameon=False, fontsize=8, ncol=_leg_ncol,
+                               labelcolor="white")
+            _ext = get_plot_ext(self.input_yaml)
             save_name_png = (
-                f"PSF_Target_{base}.png" if plotTarget else f"PSF_Subtractions_{base}.png"
+                f"PSF_Target_{base}{_ext}" if plotTarget else f"PSF_Residuals_{base}{_ext}"
             )
-            plt.savefig(
+            fig.savefig(
                 os.path.join(write_dir, save_name_png),
                 bbox_inches="tight",
                 dpi=150,
@@ -4201,7 +15629,7 @@ class PSF:
             plt.close(fig)
 
         except Exception as exc:
-            log.error(f"plot() failed: {exc}", exc_info=True)
+            log.error("plot() failed: %s", exc, exc_info=True)
 
     # -----------------------------------------------------------------------
     # MCMC corner plot
@@ -4232,7 +15660,11 @@ class PSF:
 
         samples_dict = fitinfo.get("samples")
         if samples_dict is None or sourceidx not in samples_dict:
-            log.warning(f"No MCMC samples for source {sourceidx}.")
+            store_samples = getattr(fitter, "store_samples", False)
+            if store_samples:
+                log.warning("No MCMC samples for source %s (store_samples=True but samples missing).", sourceidx)
+            else:
+                log.debug("No MCMC samples for source %s (store_samples=False).", sourceidx)
             return None
 
         samples_all = np.asarray(samples_dict[sourceidx], float)
@@ -4241,12 +15673,11 @@ class PSF:
             or samples_all.shape[0] < 10
             or not np.isfinite(samples_all).all()
         ):
-            log.warning(f"Invalid samples for source {sourceidx}.")
+            log.warning("Invalid samples for source %s.", sourceidx)
             return None
 
         npar_all = samples_all.shape[1]
 
-        # Recover parameter names.
         param_names_all = None
         per_src = fitinfo.get("per_source")
         if isinstance(per_src, (list, tuple)) and len(per_src) > sourceidx:
@@ -4321,8 +15752,18 @@ class PSF:
         writedir = writedir or cfg.get("write_dir", ".")
         os.makedirs(writedir, exist_ok=True)
         stem = os.path.splitext(os.path.basename(fpath))[0]
-        outpath_png = os.path.join(writedir, f"PSF_MCMC_Corner_{stem}.png")
+        outpath_png = os.path.join(
+            writedir, f"PSF_Corner_{stem}{get_plot_ext(cfg)}"
+        )
 
+        if corner is None:
+            log.warning(
+                "Optional dependency 'corner' is not installed; skipping MCMC corner plot. "
+                "Install with `conda install -c conda-forge corner` or `pip install corner`."
+            )
+            return None
+
+        apply_autophot_mplstyle()
         fig = corner.corner(
             samples,
             labels=labels,
@@ -4350,7 +15791,7 @@ class PSF:
                 if hi is not None:
                     ax1d.axvline(hi, color="0.25", lw=0.5, ls="--")
             if orig_arr is not None and np.isfinite(orig_arr[i]):
-                ax1d.axvline(orig_arr[i], color="C1", lw=0.5, ls=":")
+                ax1d.axvline(orig_arr[i], color=PLOT_COLORS.get('threshold_line', '#D9A05B'), lw=0.5, ls=":")
 
             for j in range(i):
                 ax2d = axgrid[i, j]
@@ -4366,9 +15807,9 @@ class PSF:
 
                 if orig_arr is not None:
                     if np.isfinite(orig_arr[j]):
-                        ax2d.axvline(orig_arr[j], color="C1", lw=0.5, ls=":")
+                        ax2d.axvline(orig_arr[j], color=PLOT_COLORS.get('threshold_line', '#D9A05B'), lw=0.5, ls=":")
                     if np.isfinite(orig_arr[i]):
-                        ax2d.axhline(orig_arr[i], color="C1", lw=0.5, ls=":")
+                        ax2d.axhline(orig_arr[i], color=PLOT_COLORS.get('threshold_line', '#D9A05B'), lw=0.5, ls=":")
 
         fig.suptitle("PSF MCMC posterior", y=0.98, fontsize=10)
         fig.savefig(

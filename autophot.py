@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Optimized and human-readable version of the automated photometry pipeline.
-Features:
-- Clear, descriptive comments and docstrings.
-- Progress print statements for user feedback.
-- Modular, reusable functions and classes.
-- Consistent logging and error handling.
-- British English spelling and style.
-"""
+"""High-level AutoPHOT driver: orchestrates per-image photometry runs."""
 
 # Force BLAS/OpenMP to 1 thread before any scientific imports (avoids exhausting
 # process/thread limits on HPC when using multiprocessing; OpenBLAS defaults to 128).
@@ -122,11 +114,11 @@ def list_parameters(
     with open(yml_path, "r") as f:
         lines = f.read().splitlines()
 
-    # Parse the YAML for defaults.
     parsed = yaml.safe_load("\n".join(lines)) or {}
     root = parsed.get("default_input", parsed)
 
     def _format_default(v) -> str:
+        """Format a YAML default value for human-readable display."""
         if v is None:
             return "null"
         if isinstance(v, str):
@@ -183,21 +175,19 @@ def list_parameters(
         }
         return str(path or "") in required
 
-    # Walk text lines to map key-path -> line number and extract inline docs.
     entries: list[dict] = []
     stack: list[tuple[int, str]] = []  # (indent_spaces, key)
 
-    # YAML keys in our config are simple tokens (letters/digits/_). Avoid fancy
-    # regex character classes here; we only need a robust mapping of key->line.
+    # YAML keys in this config are simple tokens ([A-Za-z0-9_]); the regex
+    # stays minimal on purpose.
     key_re = re.compile(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_]+)\s*:\s*(?P<rest>.*)$")
     for idx0, raw in enumerate(lines):
         m = key_re.match(raw)
         if not m:
             continue
-        indent = len(m.group("indent").replace("\\t", "    "))
+        indent = len(m.group("indent").replace("\t", "    "))
         key = str(m.group("key")).strip()
         rest = str(m.group("rest")).strip()
-        # Split "value # comment" while preserving the value part.
         value_part, comment_part = rest, ""
         if "#" in rest:
             value_part, comment_part = rest.split("#", 1)
@@ -217,7 +207,6 @@ def list_parameters(
                 type_hint = comment_part.strip()
                 desc = ""
 
-        # Maintain indentation stack.
         while stack and indent <= stack[-1][0]:
             stack.pop()
         stack.append((indent, key))
@@ -229,13 +218,11 @@ def list_parameters(
             # No explicit value present (comment-only line).
             continue
 
-        # Build path, stripping the top-level "default_input" if present.
         path_parts = [k for _, k in stack]
         if path_parts and path_parts[0] == "default_input":
             path_parts = path_parts[1:]
         path = ".".join(path_parts)
 
-        # Look up parsed default value by traversing the YAML object.
         cur = root
         for p in path_parts:
             if isinstance(cur, dict) and p in cur:
@@ -269,7 +256,6 @@ def list_parameters(
             }
         )
 
-    # Filter.
     if contains:
         needle = str(contains).strip().lower()
         entries = [e for e in entries if needle in e["path"].lower()]
@@ -283,7 +269,6 @@ def list_parameters(
         sec = p.split(".", 1)[0] if "." in p else "top"
         runtime_or_top = bool(e.get("set_internally")) or sec == "top"
         runtime_bucket = 0 if runtime_or_top else 1
-        # Keep runtime/top items together and first.
         sec_sort = "runtime/top" if runtime_or_top else sec
         # Within each section, list required keys first for readability.
         req_rank = 0 if bool(e.get("required")) else 1
@@ -293,7 +278,6 @@ def list_parameters(
     if max_rows is not None:
         entries = entries[: max(0, int(max_rows))]
 
-    # Print.
     fmt = str(format or "cli").strip().lower()
     if fmt in {"md", "markdown"}:
         print("AutoPhOT accepted parameters (from default_input.yml)")
@@ -313,7 +297,6 @@ def list_parameters(
             )
         return entries
 
-    # Default: CLI-style aligned output for terminal use.
     import shutil
     import textwrap
 
@@ -391,16 +374,12 @@ def list_parameters(
         if section != last_section:
             if last_section is not None:
                 print("-" * len(header))
-            # Make section headings visually obvious in plain terminals.
-            # Use asterisk "box" with blank lines around it.
+            # Section headings in the same === TITLE === style as the logs.
             section_title = str(section).replace("_", " ").upper()
-            title_line = f"*** {section_title} ***"
-            # Match the banner width to the title exactly.
-            star_line = "*" * len(title_line)
-            print("")
-            print(star_line)
-            print(title_line)
-            print(star_line)
+            if border_msg:
+                print(border_msg(section_title))
+            else:
+                print(f"=== {section_title} ===")
             print("")
             last_section = section
 
@@ -483,6 +462,7 @@ def list_parameters(
 
 # Backward/typo-friendly alias (requested): from autophot import list_paramters
 def list_paramters(**kwargs):  # noqa: N802
+    """Backward-compatible alias for :func:`list_parameters`."""
     return list_parameters(**kwargs)
 
 
@@ -505,6 +485,10 @@ def _find_unknown_config_paths(
 
     for key, value in config.items():
         path = f"{prefix}.{key}" if prefix else str(key)
+        if str(key).startswith("_"):
+            continue
+        if not prefix and key in {"variable_sources", "name_prefix", "objname"}:
+            continue
         if key not in schema:
             unknown.append(path)
             continue
@@ -516,31 +500,84 @@ def _find_unknown_config_paths(
 
     return unknown
 
-# Project-specific helpers (assumed to be in your codebase).
-#
 # These imports pull in the full scientific stack (e.g. scikit-image). Keep them
 # optional so lightweight utilities (like list_parameters) can be imported in
 # minimal environments.
 _IMPORT_ERROR_AUTOPHOT_DEPS: Exception | None = None
 try:
     from functions import (  # type: ignore
-        border_msg,
         AutophotYaml,
+        ascii_card,
+        ascii_kv,
+        border_msg,
+        cap_console_lines,
+        ConsoleLevelFilter,
+        STATUS,
+        log_status,
+        verbose_to_console_level,
+        ColoredLevelFormatter,
         concatenate_csv_files,
-        print_progress_bar,
+        log_step,
         log_exception,
+        canonical_target_name,
+        print_progress_bar,
+        resolve_verbose_level,
         sanitize_photometric_filters,
+        silence_noisy_loggers,
+        verbose_to_log_level,
     )
     from prepare import Prepare  # type: ignore
 except Exception as _exc:  # pragma: no cover
-    _IMPORT_ERROR_AUTOPHOT_DEPS = _exc
-    border_msg = None  # type: ignore
-    AutophotYaml = None  # type: ignore
-    concatenate_csv_files = None  # type: ignore
-    print_progress_bar = None  # type: ignore
-    log_exception = None  # type: ignore
-    sanitize_photometric_filters = None  # type: ignore
-    Prepare = None  # type: ignore
+    # If the normal import fails (e.g. in Spyder where sys.path may not
+    # contain the package directory), fall back to importing from the
+    # same directory as this file.
+    _fallback_dir = os.path.dirname(os.path.abspath(__file__))
+    if _fallback_dir not in sys.path:
+        sys.path.insert(0, _fallback_dir)
+    try:
+        from functions import (  # type: ignore
+            AutophotYaml,
+            ascii_card,
+            ascii_kv,
+            border_msg,
+            cap_console_lines,
+            ConsoleLevelFilter,
+            STATUS,
+            log_status,
+            verbose_to_console_level,
+            ColoredLevelFormatter,
+            concatenate_csv_files,
+            log_step,
+            log_exception,
+            canonical_target_name,
+            print_progress_bar,
+            resolve_verbose_level,
+            sanitize_photometric_filters,
+            silence_noisy_loggers,
+            verbose_to_log_level,
+        )
+        from prepare import Prepare  # type: ignore
+    except Exception as _exc2:
+        _IMPORT_ERROR_AUTOPHOT_DEPS = _exc2
+        log_step = None  # type: ignore
+        border_msg = None  # type: ignore
+        ConsoleLevelFilter = None  # type: ignore
+        cap_console_lines = None  # type: ignore
+        STATUS = 25  # type: ignore
+        log_status = None  # type: ignore
+        verbose_to_console_level = verbose_to_log_level  # type: ignore
+        ascii_card = None  # type: ignore
+        ascii_kv = None  # type: ignore
+        ColoredLevelFormatter = None  # type: ignore
+        AutophotYaml = None  # type: ignore
+        concatenate_csv_files = None  # type: ignore
+        print_progress_bar = None  # type: ignore
+        log_exception = None  # type: ignore
+        sanitize_photometric_filters = None  # type: ignore
+        silence_noisy_loggers = lambda *a, **k: None  # type: ignore
+        resolve_verbose_level = lambda v: 1  # type: ignore
+        verbose_to_log_level = lambda v: logging.INFO  # type: ignore
+        Prepare = None  # type: ignore
 
 
 # =============================================================================
@@ -559,12 +596,62 @@ def _log(message: str) -> None:
         return
     logger = logging.getLogger(__name__)
     if logger.handlers:
-        logger.info(message)
+        # Driver messages are user-facing progress; STATUS shows them in
+        # normal mode without leaking per-image INFO diagnostics.
+        logger.log(STATUS, message)
     else:
         # Fallback for environments without configured logging handlers.
-        # In QUIET_MODE we still suppress output entirely.
         if not QUIET_MODE:
-            print(message)
+            print(message, flush=True)
+
+
+def _log_always(message: str) -> None:
+    """
+    Log a message that should be visible even in QUIET_MODE (parallel mode).
+    Used for failures, final summaries, and other critical output.
+    """
+    logger = logging.getLogger(__name__)
+    if logger.handlers:
+        logger.warning(message)
+    else:
+        # flush=True: when stdout is piped (tee, batch logs) print() is
+        # block-buffered and the parallel progress counter would lag.
+        print(message, flush=True)
+
+
+def _child_gpu_env(env: dict, gpu_ordinal: int) -> dict:
+    """Pin a child process to one GPU.
+
+    When the parent already runs under a device mask (e.g. Slurm sets
+    ``CUDA_VISIBLE_DEVICES``/``ROCR_VISIBLE_DEVICES`` for ``--gres=gpu``),
+    ``gpu_ordinal`` indexes into *that* visible set; otherwise it is a
+    physical device index.  ROCR/CUDA visibility vars are set so the
+    choice applies to HIP-runtime consumers (CuPy, TF-ROCm) as well as
+    any NVIDIA-side consumers (TF-CUDA reads CUDA_VISIBLE_DEVICES).
+    """
+    parent_mask = (
+        env.get("HIP_VISIBLE_DEVICES")
+        or env.get("ROCR_VISIBLE_DEVICES")
+        or env.get("CUDA_VISIBLE_DEVICES")
+        or ""
+    ).strip()
+    if parent_mask:
+        ids = [t for t in parent_mask.split(",") if t.strip() != ""]
+        device = ids[gpu_ordinal % len(ids)] if ids else str(gpu_ordinal)
+    else:
+        device = str(gpu_ordinal)
+    for _var in (
+        "ROCR_VISIBLE_DEVICES",
+        "CUDA_VISIBLE_DEVICES",
+    ):
+        env[_var] = device
+    # HIP_VISIBLE_DEVICES indexes the *post-ROCR-filtered* set: after
+    # ROCR narrows visibility to a single device, that device is HIP
+    # index 0.  Writing the physical id would double-filter - ROCR
+    # renumbers the survivor to 0, then HIP selects an out-of-range
+    # index -> hipErrorNoDevice, silently falling back to CPU.
+    env["HIP_VISIBLE_DEVICES"] = "0"
+    return env
 
 
 def _run_main_subprocess(
@@ -573,37 +660,106 @@ def _run_main_subprocess(
     filename: str,
     input_file: str,
     is_template: bool,
+    suppress_output: bool = False,
+    gpu_ordinal: Optional[int] = None,
 ) -> Tuple[str, int]:
     """
     Run the low-level photometry pipeline (main.py) on a single FITS file.
 
     Returns (filename, return_code) so callers can detect failures.
+
+    suppress_output must be passed explicitly: ProcessPoolExecutor workers
+    do not reliably inherit module state (spawn/forkserver re-import the
+    module, resetting QUIET_MODE), so reading QUIET_MODE here would leak
+    child output to the terminal on non-fork platforms.
     """
     if not os.path.exists(input_file):
-        _log(
-            f"[ERROR] Input YAML snapshot is missing: {input_file}\n"
-            "It looks like it was deleted mid-run. Re-run the pipeline to regenerate it."
-        )
+        if not suppress_output:
+            _log(
+                f"[ERROR] Input YAML snapshot is missing: {input_file}\n"
+                "It looks like it was deleted mid-run. Re-run the pipeline to regenerate it."
+            )
         return filename, 2
     args = [python_executable, autophot_exe, "-f", filename, "-c", input_file]
     if is_template:
         args.append("-temp")
 
-    # When QUIET_MODE is enabled (multi-file, batch use), completely suppress
-    # child-process stdout/stderr so that nothing reaches the terminal. Logs
-    # can still be written to per-process files if configured inside main.py.
+    # In parallel mode the child's stdout/stderr go to DEVNULL so nothing
+    # reaches the terminal; each main.py still writes its own per-image
+    # LOG_<base>.log. The parent prints a [i/N] counter line per completion.
     from subprocess import DEVNULL
 
-    global QUIET_MODE
     kwargs = {"check": False, "text": True}
-    if bool(QUIET_MODE):
+    if suppress_output:
         kwargs.update({"stdout": DEVNULL, "stderr": DEVNULL})
+    if gpu_ordinal is not None:
+        kwargs["env"] = _child_gpu_env(os.environ.copy(), gpu_ordinal)
 
     try:
         result = subprocess.run(args, **kwargs)
         return filename, result.returncode
     except Exception:
         return filename, 1
+
+
+def _positive_scale(value):
+    """True when *value* parses to a positive pixel scale."""
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _scan_image_footprints(file_list, band_map=None, pixscale_fallback=None):
+    """
+    Build per-image descriptors for ``Catalog.find_optimized_catalog``.
+
+    Each entry carries ``path``, ``band`` (resolved by check_filters, else
+    None), ``wcs`` (astropy WCS or None), ``shape`` ((ny, nx) or None),
+    and ``pixscale`` (arcsec/pix or None) so footprint sizing still works
+    on images with no usable WCS.  Header reads are cached by get_header;
+    a missing/failed WCS leaves wcs=None so the optimizer falls back to
+    field-level counts.
+    """
+    from functions import get_header as _get_header
+    from wcs import get_wcs as _get_wcs
+    from catalog import _pixscale_arcsec
+
+    band_map = band_map or {}
+    infos = []
+    for fpath in file_list or []:
+        info = {
+            "path": fpath,
+            "band": None,
+            "wcs": None,
+            "shape": None,
+            "pixscale": pixscale_fallback,
+        }
+        try:
+            hdr = _get_header(fpath)
+            if hdr is not None:
+                info["wcs"] = _get_wcs(hdr, silent=True)
+                if info["wcs"] is None:
+                    info["pixscale"] = (
+                        _pixscale_arcsec(hdr) or pixscale_fallback
+                    )
+                nx, ny = hdr.get("NAXIS1"), hdr.get("NAXIS2")
+                if nx and ny:
+                    info["shape"] = (int(ny), int(nx))
+                    if info["wcs"] is not None:
+                        # clean() uses array_shape to size its angular
+                        # pre-filter when target coords are absent.
+                        try:
+                            info["wcs"].array_shape = info["shape"]
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        info["band"] = band_map.get(os.path.abspath(fpath)) or band_map.get(
+            fpath
+        )
+        infos.append(info)
+    return infos
 
 
 # =============================================================================
@@ -627,7 +783,7 @@ def find_variable_sources(
     """
     t0 = time.perf_counter()
 
-    # SIMBAD CONFIGURATION - TIMEOUT PROTECTION
+    # SIMBAD query config (timeout-protected)
     Simbad.reset_votable_fields()
     Simbad.add_votable_fields(
         "otype",
@@ -639,7 +795,6 @@ def find_variable_sources(
         "galdim_angle",
     )
 
-    # Store and override settings
     original_timeout = getattr(Simbad, "TIMEOUT", 10)
     original_row_limit = getattr(Simbad, "ROW_LIMIT", 1000)
 
@@ -647,14 +802,13 @@ def find_variable_sources(
     Simbad.ROW_LIMIT = 500
 
     centre_coord = SkyCoord(
-        ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="fk5", equinox="J2000"
+        ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs"
     )
     _log(
         f"Querying SIMBAD within {radius_arcmin}' of "
         f"{centre_coord.to_string('hmsdms')}."
     )
 
-    # SOURCE TYPE DEFINITIONS
     object_types = {
         "V*": "Variable Star",
         "Pu*": "Pulsating",
@@ -694,7 +848,6 @@ def find_variable_sources(
         "HII": "HII Region",
     }
 
-    # TIMED SIMBAD QUERY WITH FAILSAFE
     query_start = time.perf_counter()
     result = None
 
@@ -714,7 +867,6 @@ def find_variable_sources(
         )
         result = None
 
-    # Restore SIMBAD settings
     Simbad.TIMEOUT = original_timeout
     Simbad.ROW_LIMIT = original_row_limit
 
@@ -734,10 +886,8 @@ def find_variable_sources(
             ]
         )
 
-    # DATA PROCESSING AND CLEANUP
     df = result.to_pandas()
 
-    # Standardize coordinate columns
     ra_col = next((col for col in ["RA_d", "ra"] if col in df.columns), None)
     dec_col = next((col for col in ["DEC_d", "dec"] if col in df.columns), None)
 
@@ -780,12 +930,13 @@ def find_variable_sources(
     ra_qty = df["RA"].astype(float) * u.deg
     dec_qty = df["DEC"].astype(float) * u.deg
 
-    # source_coords = SkyCoord(ra=ra_qty, dec=dec_qty, frame="fk5", equinox="J2000")
+    # source_coords = SkyCoord(ra=ra_qty, dec=dec_qty, frame="icrs")
     # separations = centre_coord.separation(source_coords).to(u.arcmin).value
     # df["separation_arcmin"] = separations
 
     # Parse angular size (major axis in arcmin)
     def parse_size(dim):
+        """Extract the first numeric value from a dimension string (arcmin)."""
         if pd.isna(dim) or not dim:
             return np.nan
         try:
@@ -819,7 +970,31 @@ def find_variable_sources(
     elif "MAIN_ID" not in df.columns:
         df["MAIN_ID"] = ""
 
-    # result_df = df[available_cols].sort_values("separation_arcmin").reset_index(drop=True)
+    # Replace generic SIMBAD type codes (e.g. "G", "AGN", "QSO") with
+    # IAU-style coordinate designations so plot labels are meaningful.
+    _generic_types = {"G", "AGN", "QSO", "BLL", "SyG", "LIN", "GiG", "SBG",
+                      "X", "HII", "PN", "Em*", "Be*"}
+    def _iau_name(ra_deg, dec_deg):
+        """Build an IAU-style designation JHHMMSS+/-DDMMSS from coordinates."""
+        from astropy.coordinates import SkyCoord as _SC
+        import astropy.units as _u
+        _c = _SC(ra=ra_deg * _u.deg, dec=dec_deg * _u.deg, frame="icrs")
+        _ra_hms = _c.ra.hms
+        _dec_dms = _c.dec.dms
+        _sign = "+" if _dec_dms.d >= 0 else "-"
+        return (f"J{int(_ra_hms.h):02d}{int(_ra_hms.m):02d}{int(_ra_hms.s):02d}"
+                f"{_sign}{abs(int(_dec_dms.d)):02d}{int(abs(_dec_dms.m)):02d}{int(abs(_dec_dms.s)):02d}")
+
+    if "MAIN_ID" in df.columns and "RA" in df.columns and "DEC" in df.columns:
+        for idx in df.index:
+            _mid = str(df.at[idx, "MAIN_ID"]).strip()
+            if _mid in _generic_types or _mid == "" or _mid.lower() == "nan":
+                try:
+                    df.at[idx, "MAIN_ID"] = _iau_name(
+                        float(df.at[idx, "RA"]), float(df.at[idx, "DEC"])
+                    )
+                except Exception:
+                    pass
 
     result_df = df[available_cols].reset_index(drop=True)
 
@@ -910,13 +1085,7 @@ def prepare_template_directory(
                 legacy_dir.mkdir(parents=True, exist_ok=True)
                 created_dirs.append(str(legacy_dir))
 
-    _log(
-        border_msg(
-            f"Template directory prepared: {templates_root}",
-            body="-",
-            corner="+",
-        )
-    )
+    _log(log_step(f"Template directory prepared: {templates_root}"))
     _log(
         "Template folder summary: "
         f"created={len(created_dirs)} existing={len(existing_dirs)} "
@@ -945,6 +1114,343 @@ def prepare_template_directory(
         "existing": existing_dirs,
         "requested_filters": normalized_filters,
     }
+
+
+def inspect_telescope(
+    fits_dir: str,
+    wdir: Optional[str] = None,
+    recursive: bool = False,
+    dry_run: bool = False,
+    verbose: bool = False,
+    filter_key: Optional[str] = None,
+    gain_key: str = "GAIN",
+    rn_key: str = "RDNOISE",
+    sat_key: str = "SATURATE",
+    exptime_key: str = "EXPTIME",
+    mjd_key: str = "MJD-OBS",
+    date_key: str = "DATE-OBS",
+    airmass_key: str = "AIRMASS",
+) -> Optional[dict]:
+    """
+    Scan a folder of FITS images and build / update ``telescope.yml``.
+
+    For every unique (TELESCOP, INSTRUME) combination discovered, the function:
+
+    - auto-detects the filter header key (FILTER, FILTER1, ...)
+    - records every raw filter value seen (as identity mappings - edit the
+      right-hand side to the appropriate catalog band name afterwards)
+    - derives the pixel scale (arcsec/pixel) from the image WCS
+    - records which FITS header keywords are present for gain, readnoise,
+      saturate, exptime, MJD, date, and airmass
+
+    The result is written to ``<wdir>/telescope.yml`` (default: ``fits_dir``).
+    If the file already exists it is **deep-merged**: existing user values are
+    kept and only missing keys are added.
+
+    Parameters
+    ----------
+    fits_dir : str
+        Folder containing FITS images (``.fits``, ``.fts``, ``.fit``,
+        optionally gzip-compressed).
+    wdir : str, optional
+        Directory where ``telescope.yml`` is written.
+        Defaults to ``fits_dir``.
+    recursive : bool
+        Scan sub-folders as well (default False).
+    dry_run : bool
+        If True, print the generated YAML to stdout without writing anything.
+    verbose : bool
+        If True, print a per-file diagnostic line.
+    filter_key : str, optional
+        Force a specific FITS header keyword for the filter name.
+        When None (default), the first non-empty key from
+        FILTER / FILTER1 / FILTER2 / FILTERID / INSFILTE / FILTNAM1 is used.
+    gain_key : str
+        FITS header keyword for the gain (default ``GAIN``).
+    rn_key : str
+        FITS header keyword for read noise (default ``RDNOISE``).
+    sat_key : str
+        FITS header keyword for the saturation level (default ``SATURATE``).
+    exptime_key : str
+        FITS header keyword for exposure time (default ``EXPTIME``).
+    mjd_key : str
+        FITS header keyword for the Modified Julian Date (default ``MJD-OBS``).
+    date_key : str
+        FITS header keyword for the observation date (default ``DATE-OBS``).
+    airmass_key : str
+        FITS header keyword for airmass (default ``AIRMASS``).
+
+    Returns
+    -------
+    dict or None
+        The merged telescope configuration that was (or would be) written,
+        or ``None`` if no valid images were found.
+
+    Examples
+    --------
+    >>> from autophot import inspect_telescope
+    >>> inspect_telescope("/data/2024-06-01/")          # writes telescope.yml next to the images
+    >>> inspect_telescope("/data/2024-06-01/", dry_run=True)   # preview only
+    >>> inspect_telescope("/data/", recursive=True, wdir="/data/_REDUCED/")
+    """
+    import copy as _copy
+    import numpy as _np
+    import yaml as _yaml
+    from astropy.io import fits as _fits
+
+    _FITS_EXTENSIONS = (".fits", ".fit", ".fts", ".fits.gz", ".fit.gz", ".fts.gz")
+    _FILTER_CANDIDATES = ["FILTER", "FILTER1", "FILTER2", "FILTERID", "INSFILTE", "FILTNAM1"]
+    _AVOID_FILTERS = {"clear", "open", "none", "", "n/a"}
+
+    log_it = logging.getLogger(__name__)
+
+    # ---- helpers ----
+    def _find_files(d, rec):
+        """Return sorted FITS file paths in directory *d* (optionally recursive)."""
+        out = []
+        if rec:
+            for root, _, names in os.walk(d):
+                for n in names:
+                    if any(n.lower().endswith(e) for e in _FITS_EXTENSIONS):
+                        out.append(os.path.join(root, n))
+        else:
+            for n in os.listdir(d):
+                if any(n.lower().endswith(e) for e in _FITS_EXTENSIONS):
+                    out.append(os.path.join(d, n))
+        return sorted(out)
+
+    def _read_header(fpath):
+        """Read the first FITS header containing TELESCOP from *fpath*."""
+        with _fits.open(fpath, ignore_missing_end=True, memmap=False) as hdul:
+            hdul.verify("silentfix+ignore")
+            for hdu in hdul:
+                if any(k.upper() == "TELESCOP" for k in hdu.header.keys()):
+                    return hdu.header.copy()
+            return hdul[0].header.copy()
+
+    def _pixel_scale(header):
+        """Return pixel scale in arcsec/pixel from the WCS in *header*."""
+        try:
+            from astropy.wcs import WCS, utils as wcsutils
+            with _np.errstate(all="ignore"):
+                wcs_obj = WCS(header, naxis=2)
+                scales = wcsutils.proj_plane_pixel_scales(wcs_obj)
+                if scales is not None and len(scales) > 0:
+                    ps = float(scales[0]) * 3600.0
+                    if _np.isfinite(ps) and 0 < ps <= 20:
+                        return round(ps, 4)
+        except Exception:
+            pass
+        return None
+
+    def _hval(header, key, default=None):
+        """Safely read *key* from *header*, returning *default* on failure."""
+        try:
+            if key and key in header:
+                return header[key]
+        except Exception:
+            pass
+        return default
+
+    def _read_filter(header, forced_key):
+        """Find the filter value and keyword from *header* using candidate keys."""
+        candidates = ([forced_key] + _FILTER_CANDIDATES) if forced_key else _FILTER_CANDIDATES
+        for key in candidates:
+            val = _hval(header, key)
+            if val is not None and str(val).strip().lower() not in _AVOID_FILTERS:
+                return str(val).strip(), key
+        return None, None
+
+    def _deep_merge(base, override):
+        """Recursively merge *override* into *base* (in-place)."""
+        for k, v in override.items():
+            if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+                _deep_merge(base[k], v)
+            else:
+                base[k] = v
+        return base
+
+    def _load_yml(path):
+        """Load a YAML file, returning an empty dict if the file is missing."""
+        if os.path.isfile(path):
+            with open(path) as f:
+                return _yaml.safe_load(f) or {}
+        return {}
+
+    def _write_yml(path, data):
+        """Write *data* to a YAML file, creating parent directories as needed."""
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w") as f:
+            _yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    # ---- main logic ----
+    fits_dir = os.path.abspath(str(fits_dir))
+    if not os.path.isdir(fits_dir):
+        raise ValueError(f"fits_dir does not exist: {fits_dir!r}")
+
+    wdir_path = os.path.abspath(str(wdir)) if wdir else fits_dir
+    yml_path = os.path.join(wdir_path, "telescope.yml")
+
+    files = _find_files(fits_dir, recursive)
+    if not files:
+        log_it.warning("inspect_telescope: no FITS files found in %s", fits_dir)
+        return None
+
+    log_it.info("inspect_telescope: scanning %d file(s) in %s", len(files), fits_dir)
+
+    seen: dict = {}
+    skipped = 0
+
+    for fpath in files:
+        try:
+            header = _read_header(fpath)
+        except Exception as exc:
+            log_it.debug("Cannot read %s: %s", fpath, exc)
+            skipped += 1
+            continue
+
+        tele = _hval(header, "TELESCOP")
+        inst = _hval(header, "INSTRUME")
+        if not tele or not inst:
+            if verbose:
+                log_it.info("  SKIP (no TELESCOP/INSTRUME): %s", os.path.basename(fpath))
+            skipped += 1
+            continue
+
+        tele, inst = str(tele).strip(), str(inst).strip()
+        fval, fhdr_key = _read_filter(header, filter_key)
+        ps = _pixel_scale(header)
+
+        if (tele, inst) not in seen:
+            seen[(tele, inst)] = {
+                "filters": {}, "filter_header_key": None, "pixel_scales": [],
+                "gain_keys": set(), "rn_keys": set(), "sat_keys": set(),
+                "exptime_keys": set(), "mjd_keys": set(), "date_keys": set(),
+                "airmass_keys": set(), "gain_val": None, "rn_val": None,
+            }
+        rec = seen[(tele, inst)]
+
+        if fval:
+            rec["filters"][fval] = rec["filters"].get(fval, 0) + 1
+        if fhdr_key and rec["filter_header_key"] is None:
+            rec["filter_header_key"] = fhdr_key
+        if ps is not None:
+            rec["pixel_scales"].append(ps)
+
+        for attr, kw in [
+            ("gain_keys", gain_key), ("rn_keys", rn_key), ("sat_keys", sat_key),
+            ("exptime_keys", exptime_key), ("mjd_keys", mjd_key),
+            ("date_keys", date_key), ("airmass_keys", airmass_key),
+        ]:
+            if kw and kw in header:
+                rec[attr].add(kw)
+
+        if rec["gain_val"] is None:
+            try:
+                rec["gain_val"] = float(_hval(header, gain_key, _np.nan))
+            except (TypeError, ValueError):
+                pass
+        if rec["rn_val"] is None:
+            try:
+                rec["rn_val"] = float(_hval(header, rn_key, _np.nan))
+            except (TypeError, ValueError):
+                pass
+
+        if verbose:
+            log_it.info(
+                "  %-40s  TELESCOP=%-20s INSTRUME=%-15s FILTER=%-8s ps=%s",
+                os.path.basename(fpath), tele, inst,
+                fval or "?", f'{ps:.3f}"' if ps else "N/A",
+            )
+
+    if skipped:
+        log_it.info("inspect_telescope: skipped %d file(s).", skipped)
+
+    if not seen:
+        log_it.warning("inspect_telescope: no valid telescope/instrument entries found.")
+        return None
+
+    existing = _load_yml(yml_path)
+    new_data: dict = _copy.deepcopy(existing)
+
+    for (tele, inst), rec in seen.items():
+        filter_hdr = rec["filter_header_key"] or "FILTER"
+        ps_list = rec["pixel_scales"]
+        ps_med = float(_np.median(ps_list)) if ps_list else None
+
+        def _best_key(found_set, default):
+            return next(iter(found_set), default)
+
+        inst_block: dict = {
+            "filter_key_0": filter_hdr,
+            "mjd": _best_key(rec["mjd_keys"], mjd_key),
+            "date": _best_key(rec["date_keys"], date_key),
+            "gain": _best_key(rec["gain_keys"], gain_key),
+            "saturate": _best_key(rec["sat_keys"], sat_key),
+            "readnoise": _best_key(rec["rn_keys"], rn_key),
+            "airmass": _best_key(rec["airmass_keys"], airmass_key),
+            "exptime": _best_key(rec["exptime_keys"], exptime_key),
+        }
+        if ps_med is not None:
+            inst_block["pixel_scale"] = round(ps_med, 4)
+        for fv in sorted(rec["filters"]):
+            if fv not in inst_block:
+                inst_block[fv] = fv  # placeholder; edit RHS to catalog band name
+
+        tele_block = new_data.setdefault(tele, {})
+        ib = tele_block.setdefault("INSTRUME", {})
+        existing_inst = ib.get(inst, {})
+        if not isinstance(existing_inst, dict):
+            existing_inst = {}
+        for k, v in inst_block.items():
+            if k not in existing_inst:
+                existing_inst[k] = v
+        ib[inst] = existing_inst
+
+        log_it.info(
+            "inspect_telescope: %-20s / %-15s  filters=[%s]  pixel_scale=%s",
+            tele, inst,
+            ", ".join(sorted(rec["filters"])) or "(none)",
+            f'{ps_med:.4f}"' if ps_med else "N/A",
+        )
+
+    if dry_run:
+        print("\n# ---- telescope.yml (dry-run, not written) ----")
+        print(_yaml.dump(new_data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+        print("# -----------------------------------------------")
+        return new_data
+
+    _write_yml(yml_path, new_data)
+    log_it.info("inspect_telescope: telescope.yml written to %s", yml_path)
+    if existing:
+        log_it.info("inspect_telescope: existing entries preserved; new keys merged in.")
+    return new_data
+
+
+def _run_transient_color_correction(default_input, output_loc, reduced_loc, log):
+    """Optional post-step: color-correct the transient light curve.
+
+    Applies each image's zeropoint color term using the transient's own
+    paired color-index observations (same telescope + instrument within
+    postprocessing.color_correction_dt days), writing
+    *_colorcorrected.csv next to the light curve.  Failures are logged
+    and never fatal.
+    """
+    try:
+        pp_cfg = default_input.get("postprocessing", {}) or {}
+        if not pp_cfg.get("transient_color_correction", False):
+            return
+        dt = float(pp_cfg.get("color_correction_dt", 1.0))
+        max_err = float(pp_cfg.get("color_correction_max_err", 0.5))
+        from color_correction import correct_lightcurve
+
+        out = correct_lightcurve(
+            output_loc, reduced_dir=reduced_loc, dt=dt, max_err=max_err
+        )
+        if out:
+            log(f"Color-corrected light curve: {out}")
+    except Exception as exc:
+        log(f"[WARNING] Transient color correction skipped: {exc}")
 
 
 def __getattr__(name: str):
@@ -1030,28 +1536,45 @@ class AutomatedPhotometry:
         # Common preprocessing defaults used by main.py
         default_input["preprocessing"].setdefault("trim_image", 0)
 
-        _log(
-            border_msg(
-                f"Default input loaded from: {default_input_path}", body="-", corner="+"
-            )
-        )
+        _log(border_msg("Configuration"))
         _log(f"Configuration loaded in {time.perf_counter() - t0:.3f} seconds.")
         return default_input
 
     @staticmethod
-    def run_photometry(default_input: dict, do_photometry: bool = True) -> str:
+    def run_photometry(
+        default_input: dict,
+        do_photometry: bool = True,
+        debug: int = 0,
+    ) -> str:
         """
         Executes the photometry pipeline based on the provided configuration.
 
         Args:
             default_input (dict): Configuration dictionary for the pipeline.
             do_photometry (bool): If True, runs reductions before concatenation.
+            debug (int): If > 0, only process that many science images (templates
+                are always processed). If 0, process all science images.
 
         Returns:
             str: Path to the aggregated light curve CSV.
         """
+        global QUIET_MODE
+        # Start clean: a previous call that raised mid-run would otherwise
+        # leave QUIET_MODE stuck on and silence this call's logging.
+        QUIET_MODE = False
+
+        # Batch driver context: no plot may pop a GUI window, here or in
+        # the per-image subprocesses (children inherit the env flag).
+        from plotting_utils import force_headless_plots
+
+        force_headless_plots()
+
+        # Deep-copy the input configuration to prevent modifications from
+        # persisting across multiple calls to run_photometry()
+        default_input = copy.deepcopy(default_input)
+        
         t0 = time.perf_counter()
-        gc.collect()  # Clean up memory early
+        gc.collect()
 
         # Determine how many CPU workers to use for *image-level* parallelism.
         # Priority: explicit config key, then environment override, then 1.
@@ -1067,23 +1590,23 @@ class AutomatedPhotometry:
             n_cpu = 1
         if n_cpu < 1:
             n_cpu = 1
-        # SFFT subprocess uses libgomp/OpenMP and can leak semaphores; avoid nested
-        # parallelism (ProcessPoolExecutor + SFFT) and HPC thread limits by forcing 1 worker
-        # unless the user explicitly set AUTOPHOT_NCPU.
-        tsub = default_input.get("template_subtraction") or {}
-        if (
-            env_ncpu is None
-            and tsub.get("do_subtraction")
-            and (tsub.get("method") or "").strip().lower() == "sfft"
-        ):
-            if n_cpu > 1:
-                logging.getLogger(__name__).info(
-                    "SFFT template subtraction enabled: forcing nCPU=1 to avoid thread/semaphore issues."
-                )
-            n_cpu = 1
+        # How many GPUs to spread image-level workers across (round-robin).
+        # Priority: env AUTOPHOT_NGPU, then config key nGPU, else 1.
+        # nGPU=0 disables pinning (children inherit the ambient device mask).
+        env_ngpu = os.environ.get("AUTOPHOT_NGPU")
+        cfg_ngpu = default_input.get("nGPU")
+        try:
+            n_gpu = (
+                int(env_ngpu)
+                if env_ngpu is not None
+                else int(cfg_ngpu) if cfg_ngpu is not None else 1
+            )
+        except (TypeError, ValueError):
+            n_gpu = 1
+        if n_gpu < 0:
+            n_gpu = 0
         parallel_files = n_cpu > 1
 
-        global QUIET_MODE
         if parallel_files:
             # Suppress this orchestrator's chatter in multi-file mode; the per-image
             # main.py processes still handle their own detailed logging.
@@ -1101,11 +1624,43 @@ class AutomatedPhotometry:
                 except Exception:
                     continue
 
+            # Warn on CPU oversubscription: image-level workers multiply
+            # any within-image parallelism (aperture / limiting-magnitude
+            # worker loops are per subprocess).
+            _phot_cfg = default_input.get("photometry") or {}
+            _lim_cfg = default_input.get("limiting_magnitude") or {}
+            _per_image_jobs = max(
+                int(_phot_cfg.get("aperture_n_jobs", 1) or 1),
+                int(_lim_cfg.get("n_jobs", 1) or 1),
+            )
+            _total_slots = n_cpu * _per_image_jobs
+            _cpu_count = os.cpu_count() or 1
+            if _total_slots > _cpu_count:
+                _log_always(
+                    f"[WARNING] nCPU={n_cpu} with per-image jobs={_per_image_jobs} "
+                    f"requests {_total_slots} workers on {_cpu_count} CPUs. "
+                    "Oversubscription can slow runs or exhaust process/thread "
+                    "limits - lower nCPU or the per-image n_jobs settings."
+                )
+
         # Normalise paths and close open figures
         fits_dir = default_input.get("fits_dir") or ""
         if isinstance(fits_dir, str) and fits_dir.endswith("/"):
             fits_dir = fits_dir[:-1]
             default_input["fits_dir"] = fits_dir
+
+        # Clear module-level caches to ensure independence between image runs
+        # This prevents state contamination when processing multiple images
+        try:
+            from limits import _flux_for_mag_cached
+            _flux_for_mag_cached.cache_clear()
+        except Exception:
+            pass
+        try:
+            from background import _disk_structuring_element
+            _disk_structuring_element.cache_clear()
+        except Exception:
+            pass
 
         plt.close("all")
 
@@ -1120,7 +1675,28 @@ class AutomatedPhotometry:
             "y",
             "on",
         }
-        if strict_validation:
+        try:
+            from functions import check_input_config, format_config_errors
+        except Exception:
+            check_input_config = format_config_errors = None
+        if check_input_config is not None:
+            _report = check_input_config(default_input)
+            for _dep_key, _dep_new in _report["deprecated"]:
+                _log_always(
+                    f"[WARNING] Deprecated config key {_dep_key}: "
+                    f"rename to {_dep_new} (still honoured)."
+                )
+            for _rm_key in _report.get("removed", []):
+                _log_always(
+                    f"[WARNING] Removed config key {_rm_key}: "
+                    f"no longer used; safe to delete from input.yaml."
+                )
+            _errs = format_config_errors(_report, source="driver configuration")
+            if _errs:
+                if strict_validation:
+                    raise KeyError(_errs)
+                _log_always(f"[WARNING] {_errs}")
+        elif strict_validation:
             schema = _get_default_input_schema()
             unknown_paths = _find_unknown_config_paths(default_input, schema)
             if unknown_paths:
@@ -1229,119 +1805,125 @@ class AutomatedPhotometry:
 
             default_input["catalog"] = catalog_cfg
 
-            if os.path.exists(curve_catalog_csv):
-                _log(
-                    f"Using existing Gaia curve-map catalog: {curve_catalog_csv} "
-                    "(skipping rebuild)."
-                )
-            else:
-                target_ra = default_input.get("target_ra", None)
-                target_dec = default_input.get("target_dec", None)
-                if target_ra is None or target_dec is None:
-                    # If coordinates are not set explicitly, try TNS lookup
-                    # using target_name before failing curve-map catalog build.
-                    # Create a temporary Prepare instance for TNS lookup
-                    try:
-                        temp_prepare = Prepare(default_input=default_input)
-                        tns_coords = temp_prepare.check_tns()
-                        default_input.update(
-                            {
-                                "target_ra": tns_coords["radeg"],
-                                "target_dec": tns_coords["decdeg"],
-                                "name_prefix": tns_coords.get("name_prefix"),
-                                "objname": tns_coords.get("objname"),
-                            }
-                        )
-                        target_ra = default_input.get("target_ra", None)
-                        target_dec = default_input.get("target_dec", None)
-                        _log(
-                            "Resolved target coordinates from TNS for gaia_custom build: "
-                            f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}"
-                        )
-                    except Exception as e:
-                        _log(f"TNS lookup failed: {e}")
-                        pass
-                if target_ra is None or target_dec is None:
-                    raise ValueError(
-                        "catalog.use_catalog requests 'gaia_custom', but target_ra/target_dec are missing. "
-                        "Please set both coordinates in degrees, or provide target_name "
-                        "with working TNS credentials."
+            target_ra = default_input.get("target_ra", None)
+            target_dec = default_input.get("target_dec", None)
+            if target_ra is None or target_dec is None:
+                # If coordinates are not set explicitly, try TNS lookup
+                # using target_name before failing curve-map catalog build.
+                # Create a temporary Prepare instance for TNS lookup
+                try:
+                    temp_prepare = Prepare(default_input=default_input)
+                    tns_coords = temp_prepare.check_tns()
+                    default_input.update(
+                        {
+                            "target_ra": tns_coords["radeg"],
+                            "target_dec": tns_coords["decdeg"],
+                            "name_prefix": tns_coords.get("name_prefix"),
+                            "objname": tns_coords.get("objname"),
+                        }
                     )
+                    target_ra = default_input.get("target_ra", None)
+                    target_dec = default_input.get("target_dec", None)
+                    _log(
+                        "Resolved target coordinates from TNS for gaia_custom build: "
+                        f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}"
+                    )
+                except Exception as e:
+                    _log(f"TNS lookup failed: {e}")
+                    pass
+            if target_ra is None or target_dec is None:
+                raise ValueError(
+                    "catalog.use_catalog requests 'gaia_custom', but target_ra/target_dec are missing. "
+                    "Please set both coordinates in degrees, or provide target_name "
+                    "with working TNS credentials or a SIMBAD-resolvable name."
+                )
 
-                radius_deg = float(
-                    catalog_cfg.get(
-                        "gaia_xp_radius_deg",
-                        catalog_cfg.get("catalog_radius", 0.25),
-                    )
+            radius_deg = float(
+                catalog_cfg.get(
+                    "gaia_xp_radius_deg",
+                    catalog_cfg.get("catalog_radius", 0.25),
                 )
-                max_sources = int(
-                    catalog_cfg.get(
-                        "gaia_curve_map_max_sources",
-                        catalog_cfg.get("gaia_xp_max_sources", 100),
-                    )
+            )
+            max_sources = int(
+                catalog_cfg.get(
+                    "gaia_curve_map_max_sources",
+                    catalog_cfg.get("gaia_xp_max_sources", 100),
                 )
-                curve_order = str(
-                    catalog_cfg.get(
-                        "gaia_curve_map_order_by",
-                        catalog_cfg.get("gaia_xp_order_by", "distance"),
-                    )
-                ).strip().lower()
-                svo_curve_map = catalog_cfg.get("curve_map_svo", None)
+            )
+            curve_order = str(
+                catalog_cfg.get(
+                    "gaia_curve_map_order_by",
+                    catalog_cfg.get("gaia_xp_order_by", "distance"),
+                )
+            ).strip().lower()
+            svo_curve_map = catalog_cfg.get("curve_map_svo", None)
 
-                _log(border_msg("Building Gaia curve-map custom catalog (gaia_custom)"))
-                _log(
-                    f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}, "
-                    f"radius={radius_deg:.4f} deg, max_sources={max_sources}, "
-                    f"order_by={curve_order}, bands={sorted(required_bands) if required_bands else 'curve_map keys'}"
-                )
-                from autophot_gaia_curves import build_custom_catalog
+            _log(log_step("Gaia custom catalog (gaia_custom) curve map"))
+            _log(
+                f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}, "
+                f"radius={radius_deg:.4f} deg, max_sources={max_sources}, "
+                f"order_by={curve_order}, bands={sorted(required_bands) if required_bands else 'curve_map keys'}"
+            )
+            from autophot_gaia_curves import build_custom_catalog
 
-                build_custom_catalog(
-                    ra_deg=float(target_ra),
-                    dec_deg=float(target_dec),
-                    radius_deg=radius_deg,
-                    max_sources=max_sources,
-                    curves={str(k): str(v) for k, v in curve_map.items()},
-                    out_csv=curve_catalog_csv,
-                    svo_filters=(
-                        {str(k): str(v) for k, v in svo_curve_map.items()}
-                        if isinstance(svo_curve_map, dict) and len(svo_curve_map) > 0
-                        else None
-                    ),
-                    gaia_query_pause_before_sec=float(
-                        catalog_cfg.get("gaia_archive_query_pause_before_sec", 1.0)
-                    ),
-                    gaia_query_pause_after_sec=float(
-                        catalog_cfg.get("gaia_archive_query_pause_after_sec", 1.0)
-                    ),
-                    gaia_xp_batch_size=int(catalog_cfg.get("gaia_xp_batch_size", 200)),
-                    gaia_xp_batch_pause_sec=float(
-                        catalog_cfg.get("gaia_xp_batch_pause_sec", 1.0)
-                    ),
-                    gaia_archive_max_retries=int(
-                        catalog_cfg.get("gaia_archive_max_retries", 3)
-                    ),
-                    gaia_archive_retry_base_delay_sec=float(
-                        catalog_cfg.get("gaia_archive_retry_base_delay_sec", 2.0)
-                    ),
-                    gaia_xp_order_by=curve_order,
-                    gaia_xp_show_progress=bool(
-                        catalog_cfg.get("gaia_xp_show_progress", True)
-                    ),
-                    gaia_nearest_prefetch_factor=int(
-                        catalog_cfg.get("gaia_nearest_prefetch_factor", 50)
-                    ),
-                    gaia_nearest_prefetch_min=int(
-                        catalog_cfg.get("gaia_nearest_prefetch_min", 500)
-                    ),
-                    gaia_nearest_prefetch_max=int(
-                        catalog_cfg.get("gaia_nearest_prefetch_max", 10000)
-                    ),
-                )
-                logging.getLogger(__name__).debug(
-                    "Gaia curve-map catalog written: %s",
-                    curve_catalog_csv,
-                )
+            # The builder decides whether the on-disk catalog can be reused;
+            # a cached file with fewer rows than gaia_xp_min_sources or a
+            # narrower query cone is rebuilt automatically.
+            build_custom_catalog(
+                ra_deg=float(target_ra),
+                dec_deg=float(target_dec),
+                radius_deg=radius_deg,
+                max_sources=max_sources,
+                curves={str(k): str(v) for k, v in curve_map.items()},
+                out_csv=curve_catalog_csv,
+                svo_filters=(
+                    {str(k): str(v) for k, v in svo_curve_map.items()}
+                    if isinstance(svo_curve_map, dict) and len(svo_curve_map) > 0
+                    else None
+                ),
+                gaia_query_pause_before_sec=float(
+                    catalog_cfg.get("gaia_archive_query_pause_before_sec", 0.25)
+                ),
+                gaia_query_pause_after_sec=float(
+                    catalog_cfg.get("gaia_archive_query_pause_after_sec", 0.25)
+                ),
+                gaia_xp_batch_size=int(catalog_cfg.get("gaia_xp_batch_size", 200)),
+                gaia_xp_batch_pause_sec=float(
+                    catalog_cfg.get("gaia_xp_batch_pause_sec", 0.5)
+                ),
+                gaia_archive_max_retries=int(
+                    catalog_cfg.get("gaia_archive_max_retries", 3)
+                ),
+                gaia_archive_retry_base_delay_sec=float(
+                    catalog_cfg.get("gaia_archive_retry_base_delay_sec", 2.0)
+                ),
+                gaia_xp_order_by=curve_order,
+                gaia_xp_show_progress=bool(
+                    catalog_cfg.get("gaia_xp_show_progress", False)
+                ),
+                gaia_nearest_prefetch_factor=int(
+                    catalog_cfg.get("gaia_nearest_prefetch_factor", 50)
+                ),
+                gaia_nearest_prefetch_min=int(
+                    catalog_cfg.get("gaia_nearest_prefetch_min", 200)
+                ),
+                gaia_nearest_prefetch_max=int(
+                    catalog_cfg.get("gaia_nearest_prefetch_max", 10000)
+                ),
+                gaia_xp_min_sources=int(
+                    catalog_cfg.get("gaia_xp_min_sources", 25)
+                ),
+                gaia_xp_max_radius_deg=float(
+                    catalog_cfg.get("gaia_xp_max_radius_deg", 1.0)
+                ),
+                gaia_xp_grow_factor=float(
+                    catalog_cfg.get("gaia_xp_grow_factor", 1.5)
+                ),
+            )
+            logging.getLogger(__name__).debug(
+                "Gaia curve-map catalog written: %s",
+                curve_catalog_csv,
+            )
 
         # Initialise preparation helper
         prepare_db = Prepare(default_input=default_input)
@@ -1444,7 +2026,8 @@ class AutomatedPhotometry:
         python_executable = sys.executable
 
         if do_photometry:
-            _log(border_msg("Performing photometry with AutoPhOT"))
+            _log(border_msg("AutoPhOT Photometry Run") if border_msg else log_step("AutoPhOT photometry run"))
+            _log("Report any issues at: https://github.com/Astro-Sean/autophot/issues")
 
             # List of available filters (excluding error columns)
             filt_list = [
@@ -1452,11 +2035,11 @@ class AutomatedPhotometry:
                 for f in available_filters
                 if "_err" not in f and f not in ["RA", "DEC"]
             ]
-            _log(f"Available filters: {filt_list}")
+            _log(f"Available filters: {', '.join(sorted(filt_list))}")
 
             # Optional: Enrich target metadata from TNS
             try:
-                _log(border_msg("Checking TNS for transient information"))
+                _log(border_msg("TNS check") if border_msg else log_step("TNS check"))
                 tns_coords = prepare_db.check_tns()
                 default_input.update(
                     {
@@ -1479,9 +2062,55 @@ class AutomatedPhotometry:
                     )
                 else:
                     _log(
-                        "[WARNING] TNS lookup skipped; no TNS access or target_name, "
+                        "[ERROR] Cannot proceed: no TNS access, no target_name, "
                         "and no fallback RA/Dec provided in the configuration."
                     )
+                    print(
+                        "\n"
+                        + (
+                            ascii_card(
+                                "ERROR: cannot proceed without target coordinates",
+                                [
+                                    "You must provide one of:",
+                                    "  1. target_name + TNS API credentials (in wcs: TNS_BOT_ID, etc.)",
+                                    "  2. target_ra and target_dec coordinates manually",
+                                    "  3. target_name with RA/Dec fallback (if TNS fails)",
+                                    "",
+                                    "Add to your input:",
+                                    "   autophot_input['target_ra'] = <RA in degrees>",
+                                    "   autophot_input['target_dec'] = <Dec in degrees>",
+                                ],
+                            )
+                            if ascii_card
+                            else "ERROR: Cannot proceed without target coordinates."
+                        )
+                        + "\n"
+                    )
+                    sys.exit("Stopped: No target coordinates provided.")
+
+            # ------------------------------------------------------------------
+            # Additional targets: resolve names/coords and de-duplicate against
+            # the primary target.  The resolved list is stored in the input
+            # dict so per-image subprocesses (main.py) can use it directly.
+            # ------------------------------------------------------------------
+            try:
+                from additional_targets import resolve_additional_targets
+                _additional = resolve_additional_targets(
+                    default_input, prepare_db=prepare_db
+                )
+                default_input["_additional_targets_resolved"] = _additional
+                if _additional:
+                    _log(
+                        log_step(
+                            f"Additional targets ({len(_additional)}): "
+                            + ", ".join(t["name"] for t in _additional)
+                        )
+                    )
+                else:
+                    default_input["_additional_targets_resolved"] = []
+            except Exception as _at_exc:
+                _log(f"[WARNING] Additional-target resolution failed: {_at_exc}")
+                default_input["_additional_targets_resolved"] = []
 
             # Clean and validate input files
             file_list = prepare_db.clean()
@@ -1490,15 +2119,21 @@ class AutomatedPhotometry:
 
                 if len(file_list) == 0:
                     _log(
-                        border_msg(
-                            "No images left after validation.", body="!", corner="!"
-                        )
+                        log_step("No images left after validation; skipping photometry")
                     )
                     do_photometry = False
                 else:
-                    file_list, required_filters = prepare_db.check_filters(
-                        flist=file_list, available_filters=available_filters
-                    )
+                    if default_input.get("validate_fits_headers", False):
+                        file_list = prepare_db.validate_fits_headers(flist=file_list)
+                        if len(file_list) == 0:
+                            _log(
+                                log_step("No images left after header validation; skipping photometry")
+                            )
+                            do_photometry = False
+                    if do_photometry:
+                        file_list, required_filters = prepare_db.check_filters(
+                            flist=file_list, available_filters=available_filters
+                        )
             else:
                 required_filters = available_filters
 
@@ -1522,13 +2157,13 @@ class AutomatedPhotometry:
                     if download_kind is True:
                         download_kind = "panstarrs"
 
-                    logger.info(
-                        "Downloading templates for science image filters: %s",
-                        ", ".join(sorted(required_filters)) if required_filters else "None"
+                    filters_str = ", ".join(sorted(required_filters)) if required_filters else "None"
+                    _log(
+                        f"Downloading templates for science image filters: {filters_str}"
                     )
 
                     if download_kind == "panstarrs":
-                        _log(border_msg("Downloading template images from Pan-STARRS"))
+                        _log(log_step("Download templates: Pan-STARRS"))
                         from templates import download_panstarrs_template
 
                         for f in required_filters:
@@ -1540,7 +2175,7 @@ class AutomatedPhotometry:
                                 band=f,
                             )
                     elif download_kind == "sdss":
-                        _log(border_msg("Downloading template images from SDSS"))
+                        _log(log_step("Download templates: SDSS"))
                         from templates import download_sdss_template
 
                         for f in required_filters:
@@ -1552,7 +2187,9 @@ class AutomatedPhotometry:
                                 f=f,
                             )
                     elif download_kind == "legacy":
-                        _log(border_msg("Downloading template images from Legacy Surveys"))
+                        _log(
+                            log_step("Download templates: Legacy Surveys")
+                        )
                         from templates import download_legacy_template
 
                         for f in required_filters:
@@ -1564,7 +2201,7 @@ class AutomatedPhotometry:
                                 band=f,
                             )
                     elif download_kind == "2mass":
-                        _log(border_msg("Downloading template images from 2MASS"))
+                        _log(log_step("Download templates: 2MASS"))
                         from templates import download_2mass_template
 
                         for f in required_filters:
@@ -1593,6 +2230,10 @@ class AutomatedPhotometry:
                     template_file_list = prepare_db.check_files(
                         flist=template_file_list, template_files=True
                     )
+                    if default_input.get("validate_fits_headers", False):
+                        template_file_list = prepare_db.validate_fits_headers(
+                            flist=template_file_list, template_files=True
+                        )
                     template_file_list, _ = prepare_db.check_filters(
                         flist=template_file_list, available_filters=available_filters
                     )
@@ -1638,9 +2279,936 @@ class AutomatedPhotometry:
                 new_output_dir = os.path.join(os.path.dirname(work_dir), work_loc)
                 Path(new_output_dir).mkdir(parents=True, exist_ok=True)
 
-                # At this point, main.py will handle catalog building/downloading.
-                # If a catalog CSV already exists in the expected location, its
-                # own logic will re-use that file without further network access.
+                # Resolve wdir to an absolute path so the catalog cache
+                # directory is stable across the os.chdir() that main.py does
+                # per-image.  Without this, wdir='.' resolves to different
+                # directories before/after chdir, causing cache misses and
+                # redundant Gaia archive downloads.
+                _raw_wdir = backup_yaml.get("wdir", ".")
+                backup_yaml["wdir"] = os.path.abspath(_raw_wdir)
+
+                # Normalize target_name to match what main.py does, so the
+                # catalog cache directory is consistent between pre-fetch and
+                # per-image processing.  Without this, the pre-fetch saves the
+                # cached catalog under e.g. "sn2026yos/" but main.py looks for
+                # it under "2026yos/", causing a cache miss and redundant Gaia
+                # archive downloads.
+                backup_yaml["target_name"] = canonical_target_name(
+                    backup_yaml
+                )
+
+                # Pre-download reference catalog(s) once, before the per-image loop.
+                # main.py will find the cached CSV and skip re-downloading.
+                _log(border_msg("Reference Photometric Catalog") if border_msg else log_step("Reference photometric catalog (pre-download)"))
+                try:
+                    from catalog import (
+                        Catalog as _Catalog,
+                        AUTO_OPTIMIZE_CATALOGS as _AUTO_CATALOGS,
+                        AUTO_OPTIMIZE_EXCLUDED as _AUTO_EXCLUDED,
+                        plot_optimized_catalog_coverage as _plot_coverage,
+                        _footprints_from_image_infos as _mk_footprints,
+                        _footprint_region,
+                        _fmt_region,
+                    )
+                    from functions import parse_supported_filter_group_key
+                    _cat = _Catalog(input_yaml=backup_yaml)
+                    _use_cat = backup_yaml.get("catalog", {}).get("use_catalog")
+
+                    def _fmt_use_catalog(m):
+                        """Compact band->catalog string, e.g.
+                        'g,r -> skymapper; B -> apass'."""
+                        if not isinstance(m, dict):
+                            return str(m)
+                        _rev = {}
+                        for _b, _c in m.items():
+                            if _c is None:
+                                continue
+                            _rev.setdefault(str(_c).strip(), []).append(str(_b))
+                        return "; ".join(
+                            f"{','.join(sorted(_bs))} -> {_c}"
+                            for _c, _bs in sorted(_rev.items())
+                        )
+
+                    _available_catalogs = [
+                        "gaia", "pan_starrs", "sdss", "apass",
+                        "2mass", "legacy", "refcat", "skymapper",
+                    ]
+                    _target_coords = SkyCoord(
+                        backup_yaml["target_ra"],
+                        backup_yaml["target_dec"],
+                        unit=(u.deg, u.deg), frame="icrs",
+                    )
+
+                    # Configured pixel scale (arcsec/pix) - lets footprint
+                    # sizing work on images whose headers carry no WCS.
+                    _cfg_scale = backup_yaml.get("pixel_scale") or (
+                        backup_yaml.get("wcs") or {}
+                    ).get("pixel_scale_arcsec") or (
+                        backup_yaml.get("wcs") or {}
+                    ).get("pixel_scale")
+
+                    # Image footprint descriptors - filled by the optimizer
+                    # scan, or lazily before the pre-fetch so the catalog
+                    # cone can be sized to cover the detectors.
+                    _image_infos = None
+
+                    # "auto": scan every image footprint, download all
+                    # feasible catalogs once, and keep the best backend
+                    # per band as a use_catalog mapping.  The resolved
+                    # mapping is cached next to the catalog CSVs so a
+                    # restarted run skips the scan entirely; delete the
+                    # file to force a fresh optimization.
+                    _auto_mode = (
+                        isinstance(_use_cat, str)
+                        and _use_cat.strip().lower() == "auto"
+                    )
+                    _opt = None
+                    _opt_cache = None
+                    # Per-catalog query regions from the optimizer scan
+                    # (fresh or recovered from the yml cache).  Reusing
+                    # them keeps the pre-fetch hitting the scan's cache
+                    # files instead of re-querying over a different box.
+                    _scan_regions = {}
+                    if _auto_mode:
+                        _opt_cache = os.path.join(
+                            backup_yaml["wdir"],
+                            "catalog_queries",
+                            f"{backup_yaml.get('target_name', 'target')}"
+                            "_optimized_catalog.yml",
+                        )
+                        _use_cat = None
+                        if os.path.exists(_opt_cache):
+                            try:
+                                with open(_opt_cache) as _fh:
+                                    _cached = yaml.safe_load(_fh) or {}
+                                _cached_map = _cached.get("use_catalog")
+                                if isinstance(_cached_map, dict) and _cached_map:
+                                    _need = {
+                                        str(b) for b in required_filters
+                                    }
+                                    _have = {
+                                        str(k) for k in _cached_map
+                                    }
+                                    if _need <= _have or "default" in _cached_map:
+                                        _use_cat = _cached_map
+                                        if isinstance(
+                                            _cached.get("regions"), dict
+                                        ):
+                                            _scan_regions = _cached[
+                                                "regions"
+                                            ]
+                                        _log(
+                                            "  use_catalog=auto: reusing "
+                                            "cached selection "
+                                            f"{_fmt_use_catalog(_cached_map)}"
+                                        )
+                                        _log(
+                                            f"    cache: {_opt_cache} "
+                                            f"({_cached.get('n_images', '?')} "
+                                            "images; delete to re-scan)"
+                                        )
+                                    else:
+                                        _log(
+                                            f"  Cached auto selection "
+                                            f"misses band(s) "
+                                            f"{sorted(_need - _have)}; "
+                                            f"re-optimizing."
+                                        )
+                            except Exception as _ce:
+                                _log(
+                                    f"  [WARNING] Could not read auto "
+                                    f"catalog cache ({_ce}); "
+                                    f"re-optimizing."
+                                )
+                        if _use_cat is None:
+                            try:
+                                _image_infos = _scan_image_footprints(
+                                    file_list,
+                                    getattr(prepare_db, "file_filter_map", {}),
+                                    pixscale_fallback=_cfg_scale,
+                                )
+                                _log(
+                                    "  use_catalog=auto: scanning "
+                                    f"{len(_image_infos)} image footprint(s) "
+                                    "to pick the best catalog per band"
+                                )
+                                _opt = _cat.find_optimized_catalog(
+                                    target_coords=_target_coords,
+                                    images=_image_infos,
+                                    bands=required_filters,
+                                    target_name=backup_yaml.get(
+                                        "target_name", "target"
+                                    ),
+                                    outdir=new_output_dir,
+                                )
+                                _use_cat = _opt.get("use_catalog") or "gaia"
+                                if isinstance(_opt.get("regions"), dict):
+                                    _scan_regions = _opt["regions"]
+                                # Winners, report and plot paths are already
+                                # logged by find_optimized_catalog - only the
+                                # resolved mapping and a compact skip summary
+                                # belong here.
+                                _log(
+                                    "  Auto-selected catalog(s): "
+                                    f"{_fmt_use_catalog(_use_cat)}"
+                                )
+                                if _opt.get("skipped"):
+                                    _log(
+                                        "  Skipped: "
+                                        + "; ".join(
+                                            f"{k} ({str(v).splitlines()[0]})"
+                                            for k, v in _opt["skipped"].items()
+                                        )
+                                    )
+                                if isinstance(_use_cat, dict):
+                                    try:
+                                        Path(
+                                            os.path.dirname(_opt_cache)
+                                        ).mkdir(parents=True, exist_ok=True)
+                                        with open(_opt_cache, "w") as _fh:
+                                            yaml.safe_dump(
+                                                {
+                                                    "use_catalog": {
+                                                        str(k): str(v)
+                                                        for k, v in _use_cat.items()
+                                                    },
+                                                    "bands": [
+                                                        str(b)
+                                                        for b in required_filters
+                                                    ],
+                                                    "n_images": len(
+                                                        _image_infos
+                                                    ),
+                                                    "target_ra": float(
+                                                        backup_yaml["target_ra"]
+                                                    ),
+                                                    "target_dec": float(
+                                                        backup_yaml["target_dec"]
+                                                    ),
+                                                    # Persist the query
+                                                    # regions the scan
+                                                    # used so restarted
+                                                    # runs hit the same
+                                                    # CSV cache keys.
+                                                    "regions": {
+                                                        str(k): v
+                                                        for k, v in (
+                                                            _scan_regions
+                                                            or {}
+                                                        ).items()
+                                                    },
+                                                },
+                                                _fh,
+                                                sort_keys=True,
+                                            )
+                                        _log(
+                                            "  Cached auto selection: "
+                                            f"{_opt_cache} "
+                                            "(delete to force re-scan)"
+                                        )
+                                    except Exception as _we:
+                                        _log(
+                                            f"  [WARNING] Could not cache "
+                                            f"optimized catalog selection "
+                                            f"({_we})"
+                                        )
+                            except Exception as _oe:
+                                _log(
+                                    f"  [WARNING] Catalog optimization failed "
+                                    f"({_oe}); falling back to 'gaia'."
+                                )
+                                _use_cat = "gaia"
+                        backup_yaml.setdefault("catalog", {})[
+                            "use_catalog"
+                        ] = _use_cat
+
+                    if isinstance(_use_cat, dict):
+                        _unique_cats = sorted(set(
+                            v for v in _use_cat.values()
+                            if v is not None and str(v).strip() != ""
+                        ))
+                    elif _use_cat is not None and str(_use_cat).strip() != "":
+                        _unique_cats = [str(_use_cat).strip()]
+                    else:
+                        _unique_cats = []
+
+                    if not _unique_cats:
+                        _log(
+                            ascii_card(
+                                "No photometric catalog selected",
+                                [
+                                    f"Target: RA={backup_yaml['target_ra']:.6f} deg, "
+                                    f"Dec={backup_yaml['target_dec']:.6f} deg",
+                                    "",
+                                    "A reference catalog is required for photometric calibration.",
+                                    "Set 'catalog.use_catalog' in your YAML to one of:",
+                                ]
+                                + [f"  - {_alt}" for _alt in _available_catalogs],
+                            )
+                            if ascii_card
+                            else "No photometric catalog selected."
+                        )
+                        _log("")
+                        sys.exit(0)
+                    # Auto-select GaiaXPy photometric systems based on required filters.
+                    # SDSS_Std covers u,g,r,i,z; JKC_Std covers U,B,V,R,I.
+                    # Only request the systems needed to avoid unnecessary archive queries.
+                    # Only run this when a Gaia-based catalog is selected - refcat, sdss,
+                    # pan_starrs, 2mass, legacy, skymapper don't use Gaia XP spectra.
+                    _gaia_catalogs = {"gaia", "apass"}
+                    # Case-sensitive matching: SDSS bands are lowercase, JKC are uppercase.
+                    # Computed unconditionally so a fallback onto a Gaia-backed
+                    # catalog during pre-fetch can re-enable the XP systems.
+                    _req_set = {str(f).strip() for f in required_filters}
+                    _auto_phot_systems = []
+                    if _req_set & {"u", "g", "r", "i", "z"}:
+                        _auto_phot_systems.append("SDSS_Std")
+                    if _req_set & {"U", "B", "V", "R", "I"}:
+                        _auto_phot_systems.append("JKC_Std")
+                    _needs_gaia_xp = any(
+                        str(c).lower() in _gaia_catalogs for c in _unique_cats
+                    )
+                    if _needs_gaia_xp:
+                        if _auto_phot_systems:
+                            backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = _auto_phot_systems
+                            _log(
+                                "  GaiaXPy photometric systems: "
+                                f"{', '.join(_auto_phot_systems)} "
+                                f"(filters: {', '.join(sorted(_req_set))})"
+                            )
+                    else:
+                        # Non-Gaia catalog: disable GaiaXPy to avoid unnecessary archive queries.
+                        backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = []
+                        _log(
+                            "  Skipping GaiaXPy: no selected catalog "
+                            "needs Gaia XP spectra"
+                        )
+
+                    # Per-band query regions: every band's images get a
+                    # region centred on the footprint bounding box (not the
+                    # target, so offset pointings do not inflate it) and
+                    # bounded by catalog.region_* config.  Each catalog is
+                    # then queried over the union of the bands it serves -
+                    # in auto mode the optimizer already did this, so its
+                    # regions are reused to keep the CSV cache keys
+                    # identical to the scan's.
+                    if _image_infos is None:
+                        try:
+                            _image_infos = _scan_image_footprints(
+                                file_list,
+                                getattr(prepare_db, "file_filter_map", {}),
+                                pixscale_fallback=_cfg_scale,
+                            )
+                        except Exception:
+                            _image_infos = []
+                    _cat_bounds = backup_yaml.get("catalog", {}) or {}
+
+                    def _cfg_region(key, default):
+                        try:
+                            v = float(_cat_bounds.get(key, default))
+                        except (TypeError, ValueError):
+                            return float(default)
+                        return v if np.isfinite(v) else float(default)
+
+                    _rb = dict(
+                        margin=_cfg_region("region_margin", 1.1),
+                        min_arcmin=_cfg_region("region_min_arcmin", 2.0),
+                        max_arcmin=_cfg_region("region_max_arcmin", 60.0),
+                        default_arcmin=10.0,
+                    )
+                    _bands_req = [str(b) for b in required_filters]
+                    _band_regions = {
+                        b: _footprint_region(
+                            _image_infos, [b], _target_coords, **_rb
+                        )
+                        for b in _bands_req
+                    }
+                    for _b, _br in _band_regions.items():
+                        _log(
+                            f"  {_b}-band coverage region: "
+                            f"{_fmt_region(_br)}"
+                        )
+                    _global_region = _footprint_region(
+                        _image_infos, None, _target_coords, **_rb
+                    )
+                    _prefetch_radius = _global_region["radius_arcmin"]
+
+                    _regions_by_cat = {}
+
+                    def _region_for_catalog(cname):
+                        """Union region over the bands mapped to `cname`
+                        (empty mapping -> all required bands)."""
+                        key = _cat._normalize_catalog_name(str(cname))
+                        if key not in _regions_by_cat:
+                            _bs = []
+                            if isinstance(_use_cat, dict):
+                                for _k, _v in _use_cat.items():
+                                    if (
+                                        str(_v).strip().lower() != key
+                                        or _v is None
+                                    ):
+                                        continue
+                                    _kl = str(_k).strip().lower()
+                                    if _kl in {"default", "*", "all"}:
+                                        continue
+                                    _exp = parse_supported_filter_group_key(
+                                        str(_k)
+                                    )
+                                    _bs.extend(
+                                        _exp if _exp else [str(_k)]
+                                    )
+                            _regions_by_cat[key] = _footprint_region(
+                                _image_infos,
+                                _bs or _bands_req,
+                                _target_coords,
+                                **_rb,
+                            )
+                        return _regions_by_cat[key]
+
+                    def _resolve_query_region(cname):
+                        """Scan region when available (identical cache
+                        keys), else the assigned-bands union."""
+                        key = _cat._normalize_catalog_name(str(cname))
+                        reg = (
+                            _scan_regions.get(key)
+                            if isinstance(_scan_regions, dict)
+                            else None
+                        )
+                        if not isinstance(reg, dict):
+                            reg = _region_for_catalog(cname)
+                        return reg
+
+                    # Only persist when a footprint was actually measured:
+                    # leaving the keys unset lets main.py re-size the cone
+                    # per image after its WCS solve.
+                    _measured = any(
+                        (i.get("shape") is not None)
+                        and (
+                            i.get("wcs") is not None
+                            or _positive_scale(i.get("pixscale"))
+                        )
+                        for i in _image_infos
+                    )
+                    if _measured:
+                        _cat_section = backup_yaml.setdefault("catalog", {})
+                        _cat_section[
+                            "catalog_query_radius_arcmin"
+                        ] = _prefetch_radius
+                        _cat_section["catalog_query_regions"] = {
+                            "default": _global_region,
+                            **{
+                                _cat._normalize_catalog_name(str(c)):
+                                _resolve_query_region(c)
+                                for c in _unique_cats
+                            },
+                        }
+                        _log(
+                            f"  Catalog query region: {_fmt_region(_global_region)}"
+                        )
+                    else:
+                        _log(
+                            "  Catalog query radius: 10.0 arcmin default "
+                            "(no WCS or pixel scale available)"
+                        )
+
+                    # Fallback ranking for auto-resolved mappings: the
+                    # optimizer report when the scan ran this session, else
+                    # the coverage CSV the earlier scan left in the output
+                    # directory.
+                    _opt_report = (
+                        _opt.get("report") if isinstance(_opt, dict) else None
+                    )
+                    _cov_csv = os.path.join(
+                        new_output_dir,
+                        f"{backup_yaml.get('target_name', 'target')}"
+                        "_optimized_catalog_coverage.csv",
+                    )
+                    if _opt_report is None and _auto_mode:
+                        if os.path.exists(_cov_csv):
+                            try:
+                                _opt_report = pd.read_csv(_cov_csv)
+                            except Exception:
+                                _opt_report = None
+
+                    # Coverage map + scoreboard: fresh scans render the
+                    # figure inside find_optimized_catalog; cached runs
+                    # rebuild it from the persisted report (if present)
+                    # and the local catalog CSV cache (offline) so every
+                    # auto run leaves the figure behind - map-only when no
+                    # report survived.
+                    if _auto_mode:
+                        _cov_png = os.path.join(
+                            new_output_dir,
+                            f"{backup_yaml.get('target_name', 'target')}"
+                            "_optimized_catalog_coverage.png",
+                        )
+                        if not os.path.exists(_cov_png):
+                            try:
+                                if _opt_report is not None and len(
+                                    _opt_report
+                                ):
+                                    _rep_cats = sorted(
+                                        _opt_report["catalog"]
+                                        .astype(str)
+                                        .unique()
+                                    )
+                                    _rep_bands = {
+                                        str(_c): sorted(
+                                            _opt_report.loc[
+                                                _opt_report["catalog"]
+                                                .astype(str)
+                                                == str(_c),
+                                                "band",
+                                            ]
+                                            .astype(str)
+                                            .unique()
+                                        )
+                                        for _c in _rep_cats
+                                    }
+                                else:
+                                    # No report: rebuild for the full auto
+                                    # candidate pool (plus any selected
+                                    # catalog outside it) so every catalog
+                                    # with detections reaches the map, not
+                                    # just the winners.  Downloads hit the
+                                    # scan's CSV cache.
+                                    _cat_cfg = (
+                                        backup_yaml.get("catalog", {}) or {}
+                                    )
+                                    _cand = list(_AUTO_CATALOGS)
+                                    if _cat_cfg.get(
+                                        "MASTcasjobs_wsid"
+                                    ) and _cat_cfg.get("MASTcasjobs_pwd"):
+                                        _cand.append("refcat")
+                                    if _cat_cfg.get("catalog_custom_fpath"):
+                                        _cand.append("custom")
+                                    _pool = {
+                                        _cat._normalize_catalog_name(str(c))
+                                        for c in _cand
+                                        if str(c) not in _AUTO_EXCLUDED
+                                    }
+                                    if isinstance(_use_cat, dict):
+                                        _pool |= {
+                                            _cat._normalize_catalog_name(
+                                                str(c)
+                                            )
+                                            for c in _use_cat.values()
+                                            if c is not None
+                                            and str(c).strip()
+                                        }
+                                    elif _use_cat:
+                                        _pool.add(
+                                            _cat._normalize_catalog_name(
+                                                str(_use_cat)
+                                            )
+                                        )
+                                    _rep_cats = sorted(_pool)
+                                    _sup = _cat._catalog_supported_bands(
+                                        _rep_cats
+                                    )[0]
+                                    _rep_bands = {
+                                        _c: sorted(
+                                            _sup.get(_c, set())
+                                        )
+                                        for _c in _rep_cats
+                                    }
+                                _rep_regions = {
+                                    str(_c): _resolve_query_region(_c)
+                                    for _c in _rep_cats
+                                }
+                                (
+                                    _rebuilt_sources,
+                                    _rebuilt_all,
+                                    _rebuilt_report,
+                                ) = _cat._optimizer_plot_sources(
+                                    _rep_cats,
+                                    band_set=sorted(
+                                        str(b)
+                                        for b in required_filters
+                                    ),
+                                    image_infos=_image_infos or [],
+                                    target_coords=_target_coords,
+                                    radius=_prefetch_radius,
+                                    regions=_rep_regions,
+                                    return_report=True,
+                                )
+                                if _opt_report is None or not len(
+                                    _opt_report
+                                ):
+                                    # The coverage CSV did not survive
+                                    # (or the scan ran on another output
+                                    # dir) - the offline rebuild supplies
+                                    # the same counts so the scoreboard
+                                    # row is not lost on cached runs.
+                                    _opt_report = _rebuilt_report
+                                    try:
+                                        _opt_report.to_csv(
+                                            _cov_csv, index=False
+                                        )
+                                    except Exception:
+                                        pass
+                                _plot_coverage(
+                                    {
+                                        "footprints": _mk_footprints(
+                                            _image_infos
+                                        ),
+                                        "sources": _rebuilt_sources,
+                                        "winners": (
+                                            {
+                                                str(b): str(c)
+                                                for b, c in _use_cat.items()
+                                                if str(b).strip().lower()
+                                                not in {"default", "*", "all"}
+                                            }
+                                            if isinstance(_use_cat, dict)
+                                            else {}
+                                        ),
+                                        "band_set": sorted(
+                                            str(b)
+                                            for b in required_filters
+                                        ),
+                                        "evaluated": list(_rep_cats),
+                                        "band_regions": _band_regions,
+                                        "regions": _rep_regions,
+                                        "catalog_sources": _rebuilt_all,
+                                        "catalog_bands": _rep_bands,
+                                        "skipped": {},
+                                    },
+                                    target_coords=_target_coords,
+                                    target_name=backup_yaml.get(
+                                        "target_name", "target"
+                                    ),
+                                    wdir=backup_yaml["wdir"],
+                                    outpath=_cov_png,
+                                    report=_opt_report,
+                                    skipped=(
+                                        _opt.get("skipped")
+                                        if isinstance(_opt, dict)
+                                        else None
+                                    ),
+                                )
+                            except Exception as _cpe:
+                                _log(
+                                    "  [WARNING] Could not rebuild catalog "
+                                    f"coverage plot: {_cpe}"
+                                )
+
+                    _prefetch_failed = {}
+
+                    def _prefetch_one(_name):
+                        if backup_yaml.get("catalog", {}).get("build_catalog", False):
+                            _log(f"  Pre-building catalog: {_name}")
+                            _cat.build_complete_catalog(
+                                target_coords=_target_coords,
+                                catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
+                                max_separation=5,
+                                radius=_prefetch_radius,
+                                regions=backup_yaml.get("catalog", {}).get(
+                                    "catalog_query_regions"
+                                ),
+                            )
+                            return
+                        _resolved = _cat._require_catalog_selected(_name)
+                        _pf_bands = (
+                            sorted(
+                                str(b)
+                                for b, c in _use_cat.items()
+                                if str(c).strip().lower()
+                                == str(_resolved).strip().lower()
+                                and str(b).strip().lower()
+                                not in {"default", "*", "all"}
+                            )
+                            if isinstance(_use_cat, dict)
+                            else []
+                        )
+                        _pf_region = _resolve_query_region(_resolved)
+                        _log(
+                            f"  Pre-fetching catalog: {_resolved}"
+                            + (
+                                f" (bands: {', '.join(_pf_bands)})"
+                                if _pf_bands
+                                else ""
+                            )
+                            + f" [{_fmt_region(_pf_region)}]"
+                        )
+                        # A fallback onto a Gaia-backed catalog needs the XP
+                        # systems re-enabled (they are disabled above whenever
+                        # no Gaia-backed winner was selected).
+                        if str(_resolved).strip().lower() in _gaia_catalogs:
+                            _xp = backup_yaml.setdefault("catalog", {}).get(
+                                "gaia_xp_photometric_systems"
+                            )
+                            if not _xp and _auto_phot_systems:
+                                backup_yaml["catalog"][
+                                    "gaia_xp_photometric_systems"
+                                ] = _auto_phot_systems
+                                _log(
+                                    "  Re-enabled GaiaXPy systems "
+                                    f"{_auto_phot_systems} for fallback "
+                                    f"catalog '{_resolved}'."
+                                )
+                        _cat.download(
+                            target_coords=_target_coords,
+                            target_name=backup_yaml.get("target_name", "target"),
+                            catalogName=_resolved,
+                            catalog_custom_fpath=backup_yaml.get("catalog", {}).get(
+                                "catalog_custom_fpath", None
+                            ),
+                            radius=_pf_region.get(
+                                "radius_arcmin", _prefetch_radius
+                            ),
+                            region=_pf_region,
+                        )
+
+                    def _auto_candidates(band):
+                        """Best-first fallback backends for `band` (None = any)."""
+                        _ordered = []
+
+                        def _push(c):
+                            c = str(c).strip().lower()
+                            if (
+                                c
+                                and c not in _ordered
+                                and c not in _prefetch_failed
+                            ):
+                                _ordered.append(c)
+
+                        if _opt_report is not None and len(_opt_report):
+                            _sub = _opt_report
+                            if band is not None:
+                                _sub = _sub[_sub["band"] == str(band)]
+                            if not _sub.empty:
+                                _rank = (
+                                    _sub.groupby("catalog")["n_usable"]
+                                    .agg(["min", "mean"])
+                                    .sort_values(
+                                        ["min", "mean"], ascending=False
+                                    )
+                                )
+                                for _c in _rank.index:
+                                    _push(_c)
+                        for _c in _AUTO_CATALOGS:
+                            if _c not in _AUTO_EXCLUDED:
+                                _push(_c)
+                        # Gaia is already in the scan list; the explicit
+                        # push keeps it as a valid last resort even if it
+                        # is re-excluded from the bulk scan later.
+                        _push("gaia")
+                        return _ordered
+
+                    for _cat_name in list(_unique_cats):
+                        try:
+                            _prefetch_one(_cat_name)
+                        except Exception as _ce:
+                            _prefetch_failed[
+                                str(_cat_name).strip().lower()
+                            ] = _ce
+                            if (
+                                not _auto_mode
+                                and isinstance(_ce, RuntimeError)
+                                and "0 sources" in str(_ce)
+                            ):
+                                _alternatives = [
+                                    c for c in _available_catalogs
+                                    if c not in [n.lower() for n in _unique_cats]
+                                ]
+                                _log(
+                                    ascii_card(
+                                        f"Catalog '{_cat_name}' returned 0 sources",
+                                        [
+                                            f"Target: RA={backup_yaml['target_ra']:.6f} deg, "
+                                            f"Dec={backup_yaml['target_dec']:.6f} deg",
+                                            "",
+                                            "This usually means the catalog does not cover this",
+                                            "region of sky, or the query service is unavailable.",
+                                            "",
+                                            "Try one of these alternative catalogs instead:",
+                                        ]
+                                        + [f"  - {_alt}" for _alt in _alternatives]
+                                        + [
+                                            "",
+                                            "Set 'catalog.use_catalog' in your YAML to one of the",
+                                            "alternatives above, then re-run.",
+                                        ],
+                                    )
+                                    if ascii_card
+                                    else f"Catalog '{_cat_name}' returned 0 sources."
+                                )
+                                _log("")
+                                sys.exit(0)
+                            _log(f"  [WARNING] Pre-fetch of '{_cat_name}' failed: {_ce}")
+
+                    # Auto-resolved mappings demote a failed winner to the
+                    # best still-working candidate per band rather than
+                    # stopping the run.  A "0 sources" failure means the
+                    # survey genuinely does not cover the field, so the
+                    # demotion is persisted to the optimizer cache; anything
+                    # else is treated as transient and falls back for this
+                    # run only.
+                    if (
+                        _auto_mode
+                        and _prefetch_failed
+                        and not backup_yaml.get("catalog", {}).get(
+                            "build_catalog", False
+                        )
+                    ):
+                        while True:
+                            if isinstance(_use_cat, dict):
+                                _failed_keys = [
+                                    k
+                                    for k, v in _use_cat.items()
+                                    if str(v).strip().lower()
+                                    in _prefetch_failed
+                                ]
+                            elif (
+                                _use_cat is not None
+                                and str(_use_cat).strip().lower()
+                                in _prefetch_failed
+                            ):
+                                _failed_keys = [None]
+                            else:
+                                _failed_keys = []
+                            _acted = False
+                            for _k in _failed_keys:
+                                _band = (
+                                    str(_k)
+                                    if _k is not None
+                                    and str(_k).strip().lower()
+                                    not in {"default", "*", "all"}
+                                    else None
+                                )
+                                _nxt = next(
+                                    iter(_auto_candidates(_band)), None
+                                )
+                                if _nxt is None:
+                                    continue
+                                _acted = True
+                                _was = (
+                                    _use_cat[_k] if _k is not None else _use_cat
+                                )
+                                _log(
+                                    f"  Catalog '{_was}' failed; trying "
+                                    f"'{_nxt}'"
+                                    + (f" for {_band}-band" if _band else "")
+                                )
+                                try:
+                                    _prefetch_one(_nxt)
+                                except Exception as _ce2:
+                                    _prefetch_failed[
+                                        str(_nxt).strip().lower()
+                                    ] = _ce2
+                                    _log(
+                                        "  [WARNING] Fallback catalog "
+                                        f"'{_nxt}' also failed: "
+                                        f"{str(_ce2).splitlines()[0]}"
+                                    )
+                                else:
+                                    if _k is not None:
+                                        _use_cat[_k] = _nxt
+                                    else:
+                                        _use_cat = _nxt
+                            if not _acted:
+                                break
+
+                        _unresolved = (
+                            [
+                                k
+                                for k, v in _use_cat.items()
+                                if str(v).strip().lower() in _prefetch_failed
+                            ]
+                            if isinstance(_use_cat, dict)
+                            else (
+                                [None]
+                                if _use_cat is not None
+                                and str(_use_cat).strip().lower()
+                                in _prefetch_failed
+                                else []
+                            )
+                        )
+                        if _unresolved:
+                            _log(
+                                ascii_card(
+                                    "No working photometric catalog found",
+                                    [
+                                        f"Target: RA={backup_yaml['target_ra']:.6f} deg, "
+                                        f"Dec={backup_yaml['target_dec']:.6f} deg",
+                                        "",
+                                        "'auto' tried every candidate catalog and all",
+                                        "queries failed:",
+                                    ]
+                                    + [
+                                        "  - "
+                                        + str(_c)
+                                        + ": "
+                                        + str(_prefetch_failed[_c]).splitlines()[0]
+                                        for _c in sorted(_prefetch_failed)
+                                    ]
+                                    + [
+                                        "",
+                                        "Check the failing services and re-run, or set",
+                                        "'catalog.use_catalog' to a working backend.",
+                                    ],
+                                )
+                                if ascii_card
+                                else "No working photometric catalog found."
+                            )
+                            _log("")
+                            sys.exit(0)
+
+                        # Commit the remapped selection for this run.
+                        backup_yaml.setdefault("catalog", {})[
+                            "use_catalog"
+                        ] = _use_cat
+                        if isinstance(_use_cat, dict):
+                            _unique_cats = sorted(
+                                {
+                                    str(v).strip()
+                                    for v in _use_cat.values()
+                                    if v is not None and str(v).strip()
+                                }
+                            )
+                        elif _use_cat is not None and str(_use_cat).strip():
+                            _unique_cats = [str(_use_cat).strip()]
+                        else:
+                            _unique_cats = []
+
+                        # A genuine 0-source (no coverage) failure demotes the
+                        # catalog in the optimizer cache so restarts skip it.
+                        _demoted = any(
+                            isinstance(e, RuntimeError)
+                            and "0 sources" in str(e)
+                            for e in _prefetch_failed.values()
+                        )
+                        if (
+                            _demoted
+                            and isinstance(_use_cat, dict)
+                            and _opt_cache
+                            and os.path.exists(_opt_cache)
+                        ):
+                            try:
+                                with open(_opt_cache) as _fh:
+                                    _cached = yaml.safe_load(_fh) or {}
+                                _cached["use_catalog"] = {
+                                    str(k): str(v)
+                                    for k, v in _use_cat.items()
+                                }
+                                with open(_opt_cache, "w") as _fh:
+                                    yaml.safe_dump(
+                                        _cached, _fh, sort_keys=True
+                                    )
+                                _log(
+                                    "  Demoted failed catalog(s) in cached "
+                                    f"selection: {_opt_cache}"
+                                )
+                            except Exception as _we:
+                                _log(
+                                    "  [WARNING] Could not update cached "
+                                    f"catalog selection ({_we})"
+                                )
+                except Exception as _pe:
+                    _log(f"[WARNING] Catalog pre-download step failed: {_pe}")
+                    _log("         main.py will retry per-image (cached CSV may still exist).")
+                _log("")
 
                 # SIMBAD variable sources near target for context
 
@@ -1650,7 +3218,7 @@ class AutomatedPhotometry:
                             ra_deg=default_input["target_ra"],
                             dec_deg=default_input["target_dec"],
                         )
-                        variable_sources = [r.to_dict() for _, r in vars_df.iterrows()]
+                        variable_sources = vars_df.to_dict("records")
 
                         backup_yaml["variable_sources"] = variable_sources
                     except Exception as e:
@@ -1666,8 +3234,13 @@ class AutomatedPhotometry:
 
                 # Reduce templates first
                 if template_file_list:
+                    _log("")
                     if parallel_files and len(template_file_list) > 1:
                         # Parallelise template reductions when multiple workers requested.
+                        _log_always(
+                            f"Running {len(template_file_list)} template files with nCPU={n_cpu} (parallel)."
+                        )
+                        failed_templates = []
                         with ProcessPoolExecutor(max_workers=n_cpu) as executor:
                             futures = {
                                 executor.submit(
@@ -1677,38 +3250,72 @@ class AutomatedPhotometry:
                                     template,
                                     input_file,
                                     True,
+                                    suppress_output=True,
+                                    gpu_ordinal=(
+                                        (i % n_gpu) if n_gpu > 0 else None
+                                    ),
                                 ): template
-                                for template in template_file_list
+                                for i, template in enumerate(
+                                    template_file_list
+                                )
                             }
                             total_t = len(futures)
                             done_t = 0
+                            # Completions are consumed only here in the parent,
+                            # so the counter needs no locking.
                             for fut in as_completed(futures):
-                                fname, rc = fut.result()
+                                try:
+                                    fname, rc = fut.result()
+                                except Exception as exc:
+                                    fname, rc = futures[fut], 1
+                                    _log_always(
+                                        f"[WORKER ERROR] {fname}: {exc}"
+                                    )
                                 done_t += 1
                                 if rc != 0:
-                                    # Minimal reporting; main.py already logged details.
-                                    _log(
+                                    failed_templates.append(fname)
+                                    _log_always(
                                         f"[{done_t}/{total_t}] [TEMPLATE FAIL] {fname} (exit code {rc})"
                                     )
                                 else:
-                                    _log(f"[{done_t}/{total_t}] [TEMPLATE OK]   {fname}")
+                                    _log_always(
+                                        f"[{done_t}/{total_t}] [TEMPLATE OK]   {fname}"
+                                    )
+                        if failed_templates:
+                            _log_always(
+                                f"[WARNING] {len(failed_templates)}/{total_t} "
+                                "template files failed - see per-image logs."
+                            )
                         gc.collect()
                     else:
-                        _log(border_msg("Reducing and calibrating template files"))
+                        _log(border_msg("Reduce/calibrate template files"))
+                        failed_templates = []
                         for template in print_progress_bar(
                             template_file_list, title="Template files calibrated"
                         ):
-                            _run_main_subprocess(
+                            fname, rc = _run_main_subprocess(
                                 python_executable,
                                 autophot_exe,
                                 template,
                                 input_file,
                                 True,
                             )
+                            if rc != 0:
+                                failed_templates.append(fname)
+                                _log_always(
+                                    f"[TEMPLATE FAIL] {fname} (exit code {rc})"
+                                )
                             gc.collect()
+                        if failed_templates:
+                            _log_always(
+                                f"[WARNING] {len(failed_templates)}/"
+                                f"{len(template_file_list)} template files "
+                                "failed - see per-image logs."
+                            )
 
                 # Reduce science frames
-                _log(border_msg("Reducing and calibrating science files"))
+                _log("")
+                _log(border_msg("Reduce/calibrate science files"))
 
                 counter = 0
                 if file_list:
@@ -1716,11 +3323,19 @@ class AutomatedPhotometry:
                         ::-1
                     ]  # Sort newest first if filenames encode time
 
+                    if debug and debug > 0:
+                        _log(
+                            f"DEBUG mode: limiting to {debug} science image(s) "
+                            f"(of {len(file_list)} available)."
+                        )
+                        file_list = file_list[:debug]
+
                     if parallel_files and len(file_list) > 1:
                         # Parallel image-level execution: each worker runs main.py on one file.
-                        _log(
+                        _log_always(
                             f"Running {len(file_list)} science files with nCPU={n_cpu} (parallel)."
                         )
+                        failed_files = []
                         with ProcessPoolExecutor(max_workers=n_cpu) as executor:
                             futures = {
                                 executor.submit(
@@ -1730,28 +3345,77 @@ class AutomatedPhotometry:
                                     str(file),
                                     input_file,
                                     False,
+                                    suppress_output=True,
+                                    gpu_ordinal=(
+                                        (i % n_gpu) if n_gpu > 0 else None
+                                    ),
                                 ): str(file)
-                                for file in file_list
+                                for i, file in enumerate(file_list)
                             }
                             total = len(futures)
+                            # as_completed delivers results only to this parent
+                            # loop, so the counter is race-free by construction.
                             for fut in as_completed(futures):
-                                fname, rc = fut.result()
+                                try:
+                                    fname, rc = fut.result()
+                                except Exception as exc:
+                                    fname, rc = futures[fut], 1
+                                    _log_always(f"[WORKER ERROR] {fname}: {exc}")
                                 counter += 1
                                 if rc == 0:
-                                    _log(f"[{counter}/{total}] [OK]    {fname}")
+                                    _log_always(f"[{counter}/{total}] [OK]    {fname}")
                                 else:
-                                    _log(f"[{counter}/{total}] [FAIL]  {fname} (exit code {rc})")
+                                    failed_files.append(fname)
+                                    _log_always(f"[{counter}/{total}] [FAIL]  {fname} (exit code {rc})")
                                     if rc == 2 and (not os.path.exists(input_file)):
-                                        _log(
+                                        _log_always(
                                             "[ERROR] Input YAML snapshot disappeared during processing. "
                                             "Stopping early; re-run required."
                                         )
                                         break
+                        if failed_files:
+                            _log_always(
+                                f"[WARNING] {len(failed_files)}/{total} science files failed: "
+                                + ", ".join(os.path.basename(f) for f in failed_files)
+                                + " - see per-image LOG_<base>.log files."
+                            )
+                        _done_msg = (
+                            f"Done: {total - len(failed_files)}/{total} images OK"
+                            + (f", {len(failed_files)} failed" if failed_files else "")
+                        )
+                        _log_always(
+                            border_msg(_done_msg) if border_msg else _done_msg
+                        )
                         gc.collect()
                     else:
-                        for file in print_progress_bar(
-                            file_list, title="Science files calibrated\n"
-                        ):
+                        # Only show progress bar for multiple files. tqdm is an
+                        # optional nicety - fall back to plain iteration and
+                        # the [i/N] log lines if it is not installed.
+                        file_iter = file_list
+                        _using_tqdm = False
+                        if len(file_list) > 1:
+                            try:
+                                from tqdm import tqdm
+                            except ImportError:
+                                pass
+                            else:
+                                file_iter = tqdm(
+                                    file_list,
+                                    desc="Processing",
+                                    unit="file",
+                                    total=len(file_list),
+                                )
+                                _using_tqdm = True
+                        for file in file_iter:
+                            # tqdm redraws its bar on the cursor's current
+                            # line; the child process inherits stdout, so a
+                            # newline here keeps its first output off the
+                            # bar line.  flush=True commits it before the
+                            # child writes - a buffered print() lands late
+                            # when stdout is piped, gluing "Started:" to the
+                            # bar.
+                            if _using_tqdm:
+                                print(flush=True)
                             try:
                                 fname, rc = _run_main_subprocess(
                                     python_executable,
@@ -1768,7 +3432,13 @@ class AutomatedPhotometry:
                                     break
                                 gc.collect()
                                 counter += 1
-                                _log(f"[{counter}/{len(file_list)}] [OK]    {str(file)}")
+                                if rc == 0:
+                                    _log(f"[{counter}/{len(file_list)}] [OK]    {str(file)}")
+                                else:
+                                    _log(
+                                        f"[{counter}/{len(file_list)}] [FAIL]  {str(file)} "
+                                        f"(exit code {rc})"
+                                    )
                             except Exception as e:
                                 import traceback
 
@@ -1776,47 +3446,126 @@ class AutomatedPhotometry:
                                 _log(
                                     f"[{counter + 1}/{len(file_list)}] [ERROR] Problem with file: {file}: {e} | {tb}"
                                 )
+                            # Two blank lines between the [OK]/[ERROR] line
+                            # and the bar redraw - the next iteration's
+                            # "\r" rewrite consumes the line the cursor is
+                            # on, so only printed newlines stay visible.
+                            if _using_tqdm:
+                                print(flush=True)
+                                print(flush=True)
+                        if len(file_list) > 1:
+                            _done_msg = f"Done: {counter}/{len(file_list)} images processed"
+                            _log(border_msg(_done_msg) if border_msg else _done_msg)
 
             # Concatenate per-image outputs into one light curve CSV
             reduced_loc = f"{default_input['fits_dir']}_{default_input['outdir_name']}"
-            _log(border_msg(f"Collecting reduced photometry in {reduced_loc}"))
-            output_loc = os.path.join(reduced_loc, "lightcurve_output.csv")
+            _log_always(border_msg(f"Collect photometry: {reduced_loc}"))
+            output_loc = os.path.join(reduced_loc, "LightCurve_Output.csv")
             concatenate_csv_files(
                 folder_path=reduced_loc,
                 output_filename=output_loc,
-                loc_file="OUTPUT_*.csv",
+                loc_file="Output_*.csv",
             )
-            _log(
+
+            _run_transient_color_correction(default_input, output_loc, reduced_loc, _log)
+
+            # Concatenate additional-target per-image CSVs into per-target
+            # lightcurve files.  Each additional target's per-image CSV is
+            # named AdditionalTarget_{safe_name}_{base}.csv.
+            # All additional-target outputs go into a sub_targets/ subfolder.
+            _additional_lc_paths = []
+            _at_resolved = default_input.get("_additional_targets_resolved") or []
+            if _at_resolved:
+                from additional_targets import sanitize_target_name_for_filename as _stfn
+                _sub_targets_dir = os.path.join(reduced_loc, "sub_targets")
+                os.makedirs(_sub_targets_dir, exist_ok=True)
+                for _at in _at_resolved:
+                    _at_safe = _stfn(str(_at.get("name", "AdditionalTarget")))
+                    _at_pattern = f"AdditionalTarget_{_at_safe}_*.csv"
+                    _at_lc_path = os.path.join(
+                        _sub_targets_dir, f"LightCurve_Output_{_at_safe}.csv"
+                    )
+                    concatenate_csv_files(
+                        folder_path=reduced_loc,
+                        output_filename=_at_lc_path,
+                        loc_file=_at_pattern,
+                    )
+                    _additional_lc_paths.append(_at_lc_path)
+                    _log(f"Additional-target light curve: {_at_lc_path}")
+            default_input["_additional_targets_lightcurve_paths"] = _additional_lc_paths
+
+            _log_always(
                 f"Photometry pipeline completed in {time.perf_counter() - t0:.3f} seconds."
             )
             output_photometry = output_loc
         else:
             # do_photometry=False: recover existing files and create output table
-            _log(border_msg("Recovering existing photometry (skip reductions)"))
+            _log(border_msg("Recover photometry (skip reductions)"))
 
             # Set up output directory path (same logic as when do_photometry=True)
             work_dir = default_input.get("fits_dir") or ""
             out_dir_name = "_" + str(default_input.get("outdir_name", "REDUCED"))
             reduced_loc = f"{work_dir}{out_dir_name}"
 
+            # Resolve additional targets so their lightcurves can be recovered
+            # even when skipping reductions.
+            if not default_input.get("_additional_targets_resolved"):
+                try:
+                    from additional_targets import resolve_additional_targets
+                    _additional = resolve_additional_targets(
+                        default_input, prepare_db=None
+                    )
+                    default_input["_additional_targets_resolved"] = _additional
+                except Exception as _at_exc:
+                    _log(f"[WARNING] Additional-target resolution failed in recovery mode: {_at_exc}")
+                    default_input["_additional_targets_resolved"] = []
+
             # Concatenate existing per-image outputs into one light curve CSV
-            _log(border_msg(f"Collecting reduced photometry in {reduced_loc}"))
-            output_photometry = os.path.join(reduced_loc, "lightcurve_output.csv")
+            _log(border_msg(f"Collect photometry: {reduced_loc}"))
+            output_photometry = os.path.join(reduced_loc, "LightCurve_Output.csv")
 
             if os.path.exists(reduced_loc):
                 concatenate_csv_files(
                     folder_path=reduced_loc,
                     output_filename=output_photometry,
-                    loc_file="OUTPUT_*.csv",
+                    loc_file="Output_*.csv",
                 )
-                _log(f"Output light curve: {output_photometry}")
+                _log_always(f"Output light curve: {output_photometry}")
+                _run_transient_color_correction(
+                    default_input, output_photometry, reduced_loc, _log
+                )
+
+                # Recover additional-target lightcurves too
+                _at_resolved = default_input.get("_additional_targets_resolved") or []
+                if _at_resolved:
+                    from additional_targets import sanitize_target_name_for_filename as _stfn
+                    _sub_targets_dir = os.path.join(reduced_loc, "sub_targets")
+                    os.makedirs(_sub_targets_dir, exist_ok=True)
+                    _additional_lc_paths = []
+                    for _at in _at_resolved:
+                        _at_safe = _stfn(str(_at.get("name", "AdditionalTarget")))
+                        _at_pattern = f"AdditionalTarget_{_at_safe}_*.csv"
+                        _at_lc_path = os.path.join(
+                            _sub_targets_dir, f"LightCurve_Output_{_at_safe}.csv"
+                        )
+                        concatenate_csv_files(
+                            folder_path=reduced_loc,
+                            output_filename=_at_lc_path,
+                            loc_file=_at_pattern,
+                        )
+                        _additional_lc_paths.append(_at_lc_path)
+                        _log(f"Additional-target light curve: {_at_lc_path}")
+                    default_input["_additional_targets_lightcurve_paths"] = _additional_lc_paths
             else:
-                _log(f"[WARNING] Reduced directory not found: {reduced_loc}")
+                _log_always(f"[WARNING] Reduced directory not found: {reduced_loc}")
                 output_photometry = ""
 
-            _log(
+            _log_always(
                 f"Recovery completed in {time.perf_counter() - t0:.3f} seconds."
             )
+
+        # Reset global QUIET_MODE to prevent state persisting across multiple calls
+        QUIET_MODE = False
 
         return output_photometry
 
@@ -1835,26 +3584,52 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = AutomatedPhotometry()
     config = ap.load()
 
-    # Global verbosity control (0=warnings/errors, 1=info, 2=debug).
-    try:
-        vlevel = int(config.get("global_verbose_level", 1))
-    except Exception:
-        vlevel = 1
-    if vlevel <= 0:
-        log_level = logging.WARNING
-    elif vlevel == 1:
-        log_level = logging.INFO
-    else:
-        log_level = logging.DEBUG
+    # CLI verbosity flags override the YAML setting: -v/--verbose -> 2,
+    # -q/--quiet -> 0, --verbose-level LEVEL -> explicit 0/1/2 or name.
+    _cli_verbose = None
+    if any(a in ("-v", "--verbose") for a in argv):
+        _cli_verbose = 2
+    elif any(a in ("-q", "--quiet") for a in argv):
+        _cli_verbose = 0
+    elif "--verbose-level" in argv:
+        _vi = argv.index("--verbose-level")
+        if _vi + 1 < len(argv):
+            _cli_verbose = argv[_vi + 1]
+    if _cli_verbose is not None:
+        config["global_verbose_level"] = _cli_verbose
 
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    do_run = len(argv) > 0 and str(argv[0]).lower() == "run"
+    # Global verbosity control (0=quiet, 1=normal, 2=verbose, 3=debug).
+    vlevel = resolve_verbose_level(config.get("global_verbose_level", 1))
+    config["global_verbose_level"] = vlevel
+    console_level = verbose_to_console_level(vlevel)
+
+    _handler = logging.StreamHandler()
+    _handler.setLevel(logging.DEBUG)
+    if ConsoleLevelFilter is not None:
+        _handler.addFilter(ConsoleLevelFilter(console_level))
+    else:
+        _handler.setLevel(console_level)
+    if ColoredLevelFormatter is not None:
+        _handler.setFormatter(ColoredLevelFormatter(use_color=True))
+    else:
+        _handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+        if cap_console_lines is not None:
+            cap_console_lines([_handler])
+    logging.basicConfig(level=logging.DEBUG, handlers=[_handler])
+    silence_noisy_loggers()
+
+    driver_start = time.time()
+    _log("Started: %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(driver_start)))
+
+    do_run = any(str(a).lower() == "run" for a in argv)
     output = ap.run_photometry(config, do_photometry=do_run)
     _log(f"Output light curve: {output}")
+    driver_end = time.time()
+    _log(
+        "Finished: %s  (%.1f s)"
+        % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(driver_end)),
+           driver_end - driver_start)
+    )
     return 0
 
 

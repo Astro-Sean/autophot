@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+"""
+Alignment verification utilities for SCAMP/SWarp-processed image pairs.
+"""
+
+import logging
+import os
+import numpy as np
+from astropy.io import fits
+from astropy.wcs import WCS
+from astropy.stats import sigma_clipped_stats
+from scipy.spatial import cKDTree
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+from functions import ascii_kv
+
+logger = logging.getLogger(__name__)
+
+
+class AlignmentVerifier:
+    """Alignment verification for SCAMP/SWarp processed images.
+
+    Verifies WCS consistency, pixel-grid alignment, coordinate transformation
+    accuracy, and resampling quality between science and reference images
+    after astrometric alignment.
+    """
+
+    def __init__(self, verbose_level: int = 1, plot_format: str = "png"):
+        """Initialise the verifier.
+
+        Parameters
+        ----------
+        verbose_level : int
+            Logging verbosity (0 = quiet, 1 = info, 2 = debug).
+        plot_format : str
+            Diagnostic plot file format: 'png' (default) or 'svg'.
+        """
+        self.verbose_level = verbose_level
+        self.plot_format = plot_format
+        self.logger = logging.getLogger(__name__)
+
+    def verify_precise_alignment(
+        self,
+        sci_image_path: str,
+        ref_image_path: str,
+        tolerance_pixels: float = 0.5,
+        output_dir: str = None,
+    ) -> dict:
+        """Perform comprehensive alignment verification between two images.
+
+        Parameters
+        ----------
+        sci_image_path : str
+            Path to the aligned science image.
+        ref_image_path : str
+            Path to the aligned reference image.
+        tolerance_pixels : float
+            Acceptable alignment tolerance in pixels (default 0.5).
+        output_dir : str, optional
+            Directory to save diagnostic plots.  If ``None``, no plots
+            are generated.
+
+        Returns
+        -------
+        dict
+            Alignment verification results with keys for WCS consistency,
+            pixel alignment, coordinate accuracy, resampling quality, and
+            an overall alignment score.
+        """
+        
+        results = {
+            'precise_alignment': False,
+            'alignment_quality': 'unknown',
+            'wcs_consistency': {},
+            'pixel_alignment': {},
+            'source_matching': {},
+            'resampling_quality': {},
+            'diagnostics': {}
+        }
+        
+        try:
+            # Load images and WCS
+            with fits.open(sci_image_path) as sci_hdul, fits.open(ref_image_path) as ref_hdul:
+                sci_data = sci_hdul[0].data
+                ref_data = ref_hdul[0].data
+                sci_header = sci_hdul[0].header
+                ref_header = ref_hdul[0].header
+                
+                sci_wcs = WCS(sci_header)
+                ref_wcs = WCS(ref_header)
+                
+                # 1. Verify WCS consistency
+                wcs_results = self._verify_wcs_consistency(sci_wcs, ref_wcs, sci_header, ref_header)
+                results['wcs_consistency'] = wcs_results
+                
+                # 2. Verify pixel grid alignment
+                pixel_results = self._verify_pixel_grid_alignment(sci_data, ref_data, sci_header, ref_header)
+                results['pixel_alignment'] = pixel_results
+                
+                # 3. Verify coordinate transformation accuracy
+                coord_results = self._verify_coordinate_accuracy(sci_wcs, ref_wcs, sci_data.shape)
+                results['coordinate_accuracy'] = coord_results
+                
+                # 4. Verify resampling quality
+                resamp_results = self._verify_resampling_quality(sci_data, ref_data)
+                results['resampling_quality'] = resamp_results
+                
+                # 5. Overall alignment assessment
+                alignment_score = self._calculate_alignment_score(results)
+                results['alignment_score'] = alignment_score
+                results['precise_alignment'] = alignment_score > 0.8
+                results['alignment_quality'] = self._get_quality_label(alignment_score)
+                
+                # 6. Generate diagnostic plots
+                if output_dir:
+                    _base = os.path.splitext(os.path.basename(sci_image_path))[0]
+                    self._generate_diagnostics(sci_data, ref_data, sci_wcs, ref_wcs, 
+                                             results, output_dir, _base)
+                    results['diagnostics']['plots_generated'] = True
+                
+                self._log_verification_results(results)
+                
+        except Exception as e:
+            self.logger.error("Alignment verification failed: %s", e)
+            results['error'] = str(e)
+            
+        return results
+    
+    def _verify_wcs_consistency(self, sci_wcs: WCS, ref_wcs: WCS, sci_header, ref_header) -> dict:
+        """Check that key WCS parameters match between science and reference."""
+        
+        results = {
+            'consistent': True,
+            'differences': {},
+            'issues': []
+        }
+        
+        wcs_params = ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2', 'CTYPE1', 'CTYPE2',
+                     'CDELT1', 'CDELT2', 'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2']
+        
+        for param in wcs_params:
+            sci_val = sci_header.get(param, None)
+            ref_val = ref_header.get(param, None)
+            
+            if sci_val is not None and ref_val is not None:
+                try:
+                    diff = abs(float(sci_val) - float(ref_val))
+                except (TypeError, ValueError):
+                    # One malformed card should not abort the whole check.
+                    continue
+                if param.startswith('CRVAL'):  # World coordinates - small tolerance
+                    tolerance = 1e-6  # degrees
+                    if diff > tolerance:
+                        results['consistent'] = False
+                        results['issues'].append(f"{param} differs by {diff:.8f} deg")
+                    results['differences'][param] = diff
+
+                elif param.startswith('CRPIX'):  # Pixel coordinates - very small tolerance
+                    tolerance = 0.01  # pixels
+                    if diff > tolerance:
+                        results['consistent'] = False
+                        results['issues'].append(f"{param} differs by {diff:.3f} px")
+                    results['differences'][param] = diff
+
+                elif param.startswith('CDELT'):  # Pixel scale - small tolerance
+                    tolerance = 1e-6  # degrees/pixel
+                    if diff > tolerance:
+                        results['consistent'] = False
+                        results['issues'].append(f"{param} differs by {diff:.8f} deg/px")
+                    results['differences'][param] = diff
+
+                elif param.startswith('CD'):  # CD matrix - rotation/scale/orientation
+                    tolerance = 1e-5  # direction-cosine element
+                    if diff > tolerance:
+                        results['consistent'] = False
+                        results['issues'].append(f"{param} differs by {diff:.8f}")
+                    results['differences'][param] = diff
+        
+        sci_ctype1 = str(sci_header.get('CTYPE1', '')).upper()
+        ref_ctype1 = str(ref_header.get('CTYPE1', '')).upper()
+        if sci_ctype1 != ref_ctype1:
+            results['consistent'] = False
+            results['issues'].append(f"CTYPE1 mismatch: {sci_ctype1} vs {ref_ctype1}")
+        
+        return results
+    
+    def _verify_pixel_grid_alignment(self, sci_data, ref_data, sci_header, ref_header) -> dict:
+        """Check that image shapes and NAXIS keywords match."""
+        
+        results = {
+            'consistent': True,
+            'shape_match': sci_data.shape == ref_data.shape,
+            'issues': []
+        }
+        
+        if not results['shape_match']:
+            results['consistent'] = False
+            results['issues'].append(f"Shape mismatch: sci {sci_data.shape} vs ref {ref_data.shape}")
+        
+        sci_naxis1 = sci_header.get('NAXIS1', sci_data.shape[1])
+        sci_naxis2 = sci_header.get('NAXIS2', sci_data.shape[0])
+        ref_naxis1 = ref_header.get('NAXIS1', ref_data.shape[1])
+        ref_naxis2 = ref_header.get('NAXIS2', ref_data.shape[0])
+        
+        if sci_naxis1 != ref_naxis1 or sci_naxis2 != ref_naxis2:
+            results['consistent'] = False
+            results['issues'].append(f"NAXIS mismatch: sci ({sci_naxis1},{sci_naxis2}) vs ref ({ref_naxis1},{ref_naxis2})")
+        
+        return results
+    
+    def _verify_coordinate_accuracy(self, sci_wcs: WCS, ref_wcs: WCS, image_shape) -> dict:
+        """Measure round-trip pixel->world->pixel offsets across a 10x10 grid."""
+        
+        results = {
+            'max_offset_pixels': 0,
+            'mean_offset_pixels': 0,
+            'consistent': True,
+            'test_points': []
+        }
+        
+        ny, nx = image_shape
+
+        test_points = []
+        for y in np.linspace(0, ny-1, 10):
+            for x in np.linspace(0, nx-1, 10):
+                test_points.append((x, y))
+        
+        offsets = []
+        
+        for x, y in test_points:
+            try:
+                # Scalar pixel -> world for each frame (ra, dec).
+                sci_world = sci_wcs.all_pix2world(x, y, 0)
+                ref_world = ref_wcs.all_pix2world(x, y, 0)
+
+                # Map the science-frame world position back through the
+                # *reference* WCS, so the residual measures inter-WCS
+                # disagreement rather than round-trip error.
+                sci_back_to_ref = ref_wcs.all_world2pix(
+                    float(sci_world[0]), float(sci_world[1]), 0
+                )
+
+                offset_x = abs(float(sci_back_to_ref[0]) - float(x))
+                offset_y = abs(float(sci_back_to_ref[1]) - float(y))
+                offset_total = float(np.hypot(offset_x, offset_y))
+
+                offsets.append(offset_total)
+                results['test_points'].append({
+                    'position': (x, y),
+                    'offset_pixels': offset_total
+                })
+                
+            except Exception as e:
+                self.logger.warning("Coordinate test failed at (%s,%s): %s", x, y, e)
+                results['consistent'] = False
+        
+        if offsets:
+            results['max_offset_pixels'] = max(offsets)
+            results['mean_offset_pixels'] = np.mean(offsets)
+            results['std_offset_pixels'] = np.std(offsets)
+
+            # Consider alignment precise if max offset < 0.5 pixels.
+            # When pixel scales differ (pre-resampling), the round-trip
+            # naturally produces offsets proportional to the scale ratio.
+            # Use a scale-relative threshold in that case.
+            try:
+                from astropy.wcs.utils import proj_plane_pixel_scales
+                _sci_scales = proj_plane_pixel_scales(sci_wcs)
+                _ref_scales = proj_plane_pixel_scales(ref_wcs)
+                _scale_ratio = max(
+                    abs(float(_sci_scales[0]) / float(_ref_scales[0])),
+                    abs(float(_ref_scales[0]) / float(_sci_scales[0])),
+                )
+            except Exception:
+                _scale_ratio = 1.0
+            _threshold = 0.5 * max(1.0, _scale_ratio - 1.0) if _scale_ratio > 1.01 else 0.5
+            if results['max_offset_pixels'] > _threshold:
+                results['consistent'] = False
+        
+        return results
+    
+    def _verify_resampling_quality(self, sci_data, ref_data) -> dict:
+        """Assess resampling quality via NaN fraction and outlier statistics."""
+        
+        results = {
+            'quality_score': 0,
+            'issues': [],
+            'statistics': {}
+        }
+        
+        sci_mean, sci_median, sci_std = sigma_clipped_stats(sci_data)
+        ref_mean, ref_median, ref_std = sigma_clipped_stats(ref_data)
+        
+        results['statistics'] = {
+            'science': {'mean': sci_mean, 'median': sci_median, 'std': sci_std},
+            'reference': {'mean': ref_mean, 'median': ref_median, 'std': ref_std}
+        }
+        
+        # Resampling artifacts: NaN patches mark pixels with no coverage.
+        sci_nan_frac = np.isnan(sci_data).sum() / sci_data.size
+        ref_nan_frac = np.isnan(ref_data).sum() / ref_data.size
+        
+        if sci_nan_frac > 0.01 or ref_nan_frac > 0.01:
+            results['issues'].append(f"High NaN fraction: sci {sci_nan_frac:.3f}, ref {ref_nan_frac:.3f}")
+        
+        # Large outliers can indicate resampling spikes.
+        sci_extreme_frac = (np.abs(sci_data - sci_median) > 5 * sci_std).sum() / sci_data.size
+        ref_extreme_frac = (np.abs(ref_data - ref_median) > 5 * ref_std).sum() / ref_data.size
+        
+        if sci_extreme_frac > 0.001 or ref_extreme_frac > 0.001:
+            results['issues'].append(f"High extreme value fraction: sci {sci_extreme_frac:.4f}, ref {ref_extreme_frac:.4f}")
+        
+        # Penalties are capped so no single artifact type dominates the score.
+        quality_score = 1.0
+        quality_score -= min(sci_nan_frac * 10, 0.3)
+        quality_score -= min(ref_nan_frac * 10, 0.3)
+        quality_score -= min(sci_extreme_frac * 50, 0.2)
+        quality_score -= min(ref_extreme_frac * 50, 0.2)
+        
+        results['quality_score'] = max(0, quality_score)
+        
+        return results
+    
+    def _calculate_alignment_score(self, results: dict) -> float:
+        """Compute a weighted alignment score (0-1) from all sub-checks."""
+        
+        score = 1.0
+        
+        # WCS consistency (30% weight)
+        if results['wcs_consistency']['consistent']:
+            score -= 0.0
+        else:
+            score -= 0.3 * len(results['wcs_consistency']['issues']) / 5.0
+        
+        # Pixel alignment (25% weight)
+        if not results['pixel_alignment']['consistent']:
+            score -= 0.25
+        
+        # Coordinate accuracy (30% weight). A WCS that cannot even be
+        # evaluated across the grid (consistent=False) is a hard failure:
+        # apply the full penalty and also expose it as an issue so callers
+        # that inspect only the issues list still see the problem.
+        if 'coordinate_accuracy' in results:
+            coord = results['coordinate_accuracy']
+            coord_max_offset = coord.get('max_offset_pixels', 0)
+            score -= min(coord_max_offset * 0.6, 0.3)  # 0.5 px offset = 0.3 penalty
+            if not coord.get('consistent', True) and coord_max_offset <= 0.5:
+                score -= 0.3
+                issues = results.setdefault('coordinate_accuracy', {}).setdefault('issues', [])
+                if "WCS coordinate grid did not evaluate consistently" not in issues:
+                    issues.append("WCS coordinate grid did not evaluate consistently")
+        
+        # Resampling quality (15% weight)
+        if 'resampling_quality' in results:
+            resamp_score = results['resampling_quality'].get('quality_score', 1.0)
+            score -= (1.0 - resamp_score) * 0.15
+        
+        return max(0, score)
+    
+    def _get_quality_label(self, score: float) -> str:
+        """Map a numeric score to a quality label string."""
+        if score >= 0.9:
+            return "excellent"
+        elif score >= 0.8:
+            return "good"
+        elif score >= 0.7:
+            return "acceptable"
+        elif score >= 0.6:
+            return "poor"
+        else:
+            return "failed"
+    
+    def _generate_diagnostics(self, sci_data, ref_data, sci_wcs, ref_wcs, results, output_dir, base="frame"):
+        """Save diagnostic plots (image trio + coordinate offset map) to *output_dir*."""
+        
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            from plotting_utils import apply_autophot_mplstyle, get_plot_ext
+            apply_autophot_mplstyle()
+        except Exception:
+            pass
+
+        # 1. Difference image
+        diff_data = sci_data - ref_data
+
+        _cmap = plt.get_cmap('gray').copy()
+        _cmap = _cmap.with_extremes(bad="none")
+
+        # Equal-aspect image panels shrink inside cells that do not match
+        # the data aspect, so size the figure from the image shape. The
+        # vertical colorbars steal ~20% of each cell's width (default
+        # fraction + pad), which cbar_overhead adds back.
+        img_h, img_w = sci_data.shape
+        aspect = img_w / img_h
+        ax_h = 3.2
+        cbar_overhead = 1.25
+        left, right, bottom, top = 0.07, 0.98, 0.09, 0.94
+        wspace, hspace = 0.05, 0.30
+        fig_w = 2 * ax_h * aspect * cbar_overhead * (1 + wspace / 2) / (right - left)
+        fig_h = 2 * ax_h * (1 + hspace / 2) / (top - bottom)
+        fig, axes = plt.subplots(2, 2, figsize=(fig_w, fig_h))
+        fig.subplots_adjust(
+            left=left, right=right, top=top, bottom=bottom,
+            wspace=wspace, hspace=hspace,
+        )
+        ax_sci, ax_ref = axes[0]
+        ax_diff, ax_off = axes[1]
+
+        from plotting_utils import overlay_mask_hatch
+        im = ax_sci.imshow(sci_data, cmap=_cmap, origin='lower')
+        overlay_mask_hatch(ax_sci, ~np.isfinite(np.asarray(sci_data)))
+        ax_sci.set_title('Science Image')
+        fig.colorbar(im, ax=ax_sci)
+
+        im = ax_ref.imshow(ref_data, cmap=_cmap, origin='lower')
+        overlay_mask_hatch(ax_ref, ~np.isfinite(np.asarray(ref_data)))
+        ax_ref.set_title('Reference Image')
+        fig.colorbar(im, ax=ax_ref)
+        # Panels in a row share the same y extent; repeat labels add clutter.
+        ax_ref.tick_params(axis='y', labelleft=False)
+
+        # NaN edges from resampling would otherwise poison the percentile
+        # and leave a blank panel.
+        _diff_p99 = np.nanpercentile(np.abs(diff_data), 99)
+        if not np.isfinite(_diff_p99) or _diff_p99 <= 0:
+            _diff_p99 = 1.0
+        im = ax_diff.imshow(
+            diff_data, cmap=_cmap, origin='lower',
+            vmin=-_diff_p99,
+            vmax=_diff_p99,
+        )
+        overlay_mask_hatch(ax_diff, ~np.isfinite(np.asarray(diff_data)))
+        ax_diff.set_title('Difference (Science - Reference)')
+        fig.colorbar(im, ax=ax_diff)
+
+        # 2. Coordinate offset map
+        points = (results.get('coordinate_accuracy') or {}).get('test_points') or []
+        if points:
+            xs = [p['position'][0] for p in points]
+            ys = [p['position'][1] for p in points]
+            offsets = [p['offset_pixels'] for p in points]
+
+            scatter = ax_off.scatter(xs, ys, c=offsets, cmap='viridis', s=20)
+            fig.colorbar(scatter, ax=ax_off, label='Offset (pixels)')
+            ax_off.set_title('Coordinate Offset Map')
+            ax_off.set_xlabel('X (pixels)')
+            ax_off.set_ylabel('Y (pixels)')
+        else:
+            ax_off.set_visible(False)
+
+        fig.savefig(
+            output_dir / f'Alignment_Verification_{base}{get_plot_ext({"plot_format": self.plot_format})}',
+            dpi=150, bbox_inches='tight', facecolor='white',
+        )
+        plt.close(fig)
+        
+        self.logger.info("Alignment verification plots saved to %s", output_dir)
+    
+    def _log_verification_results(self, results: dict):
+        """Log a human-readable summary of all verification sub-checks."""
+        pairs = [
+            (
+                "Overall quality",
+                f"{results['alignment_quality']} "
+                f"(score {results.get('alignment_score', 0):.3f})",
+            ),
+            ("Precise alignment", results['precise_alignment']),
+        ]
+        issues = []
+
+        if 'wcs_consistency' in results:
+            wcs = results['wcs_consistency']
+            pairs.append(
+                ("WCS consistency", 'PASS' if wcs['consistent'] else 'FAIL')
+            )
+            issues.extend(wcs['issues'] or [])
+
+        if 'pixel_alignment' in results:
+            pix = results['pixel_alignment']
+            pairs.append(
+                ("Pixel grid", 'PASS' if pix['consistent'] else 'FAIL')
+            )
+            if not pix['consistent']:
+                issues.extend(pix['issues'] or [])
+
+        if 'coordinate_accuracy' in results:
+            coord = results['coordinate_accuracy']
+            pairs.append(
+                (
+                    "Coordinate accuracy",
+                    f"max offset {coord.get('max_offset_pixels', 0):.3f} px",
+                )
+            )
+
+        if 'resampling_quality' in results:
+            resamp = results['resampling_quality']
+            pairs.append(
+                ("Resampling quality", f"{resamp.get('quality_score', 0):.3f}")
+            )
+            issues.extend(resamp['issues'] or [])
+
+        self.logger.info(ascii_kv("Alignment verification", pairs))
+        for issue in issues:
+            self.logger.warning("  %s", issue)
