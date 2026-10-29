@@ -236,8 +236,29 @@ def _heuristic_filter_mapping(raw_filter: str) -> str:
         ip -> i
         zp -> z
         Sloan_g -> g
+        I -> I
+        i_bess -> I
     """
     f = str(raw_filter).strip().lower().replace(" ", "").replace("-", "_")
+
+    # A bare uppercase UBVRI/JHK letter is read literally: 'I' is
+    # Johnson-Cousins, not Sloan i. Headers that mean Sloan despite an
+    # uppercase token belong in telescope.yml, not this fallback.
+    raw_s = str(raw_filter).strip()
+    if raw_s in {"U", "B", "V", "R", "I", "J", "H", "K"}:
+        return raw_s
+
+    # Bessell / Cousins / Johnson keyworded filters are the UBVRI family.
+    if any(tag in f for tag in ("bess", "cousins", "johnson", "jkc", "high", "special")):
+        for part in f.split("_"):
+            if len(part) == 1 and part.upper() in {"U", "B", "V", "R", "I"}:
+                return part.upper()
+            if (
+                len(part) == 2
+                and part[1] == "p"
+                and part[0].upper() in {"U", "B", "V", "R", "I"}
+            ):
+                return part[0].upper()
 
     # Standard survey-style suffixes (ZTF, Pan-STARRS style)
     if f in {"gp", "rp", "ip", "zp", "up", "wp"}:
@@ -251,6 +272,10 @@ def _heuristic_filter_mapping(raw_filter: str) -> str:
         # Check for trailing p (e.g., gp -> g)
         if len(first_part) == 2 and first_part[1] == "p" and first_part[0] in "ugrizyw":
             return first_part[0]
+        # Survey-prefixed names (ztf_i, ps1_r): band is the last part.
+        last_part = f.split("_")[-1]
+        if last_part in {"u", "g", "r", "i", "z", "y", "w", "b", "v", "j", "h", "k"}:
+            return last_part
 
     # Check for trailing p (e.g., gp -> g)
     if len(f) == 2 and f[1] == "p" and f[0] in "ugrizyw":
@@ -2300,7 +2325,10 @@ def run_photometry():
                         "pixel_scale",
                     }
                     m = mapping.get(imageFilter)
-                    if m is None:
+                    # Single-letter bands skip the normalized match: 'i'
+                    # normalizes to 'I' but they are different systems,
+                    # so a single-char token needs an exact key.
+                    if m is None and len(str(imageFilter).strip()) != 1:
                         _if_norm = _norm_filter_token(imageFilter)
                         for k, v in mapping.items():
                             if (
@@ -2392,7 +2420,10 @@ def run_photometry():
                         "pixel_scale",
                     }
                     imageFilter = mapping.get(raw_filter)
-                    if imageFilter is None:
+                    # Single-letter bands skip the normalized match: 'i'
+                    # normalizes to 'I' but they are different systems,
+                    # so a single-char token needs an exact key.
+                    if imageFilter is None and len(raw_filter) != 1:
                         _rf_norm = _norm_filter_token(raw_filter)
                         for k, v in mapping.items():
                             if (

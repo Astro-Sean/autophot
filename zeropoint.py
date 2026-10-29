@@ -2893,7 +2893,14 @@ class Zeropoint:
             ]
             missing = [c for c in required if c not in catalog.columns]
             if missing:
-                raise KeyError(f"Missing columns: {missing}")
+                _cat_sel = (self.input_yaml.get("catalog") or {}).get(
+                    "use_catalog"
+                )
+                raise KeyError(
+                    f"Missing columns: {missing} - catalog '{_cat_sel}' does "
+                    f"not provide the '{use_filter}' band needed for "
+                    f"calibration"
+                )
 
             # PSF photometry may not be available (e.g. too few isolated
             # sources for ePSF build).  Add NaN placeholder columns so the
@@ -5579,7 +5586,14 @@ class Zeropoint:
             ]
             missing = [c for c in required if c not in clean.columns]
             if missing:
-                raise KeyError(f"Missing columns: {missing}")
+                _cat_sel = (self.input_yaml.get("catalog") or {}).get(
+                    "use_catalog"
+                )
+                raise KeyError(
+                    f"Missing columns: {missing} - catalog '{_cat_sel}' does "
+                    f"not provide the '{use_filter}' band needed for "
+                    f"calibration"
+                )
 
             flux_ap = np.asarray(clean["flux_AP"], float)
             flux_err = np.asarray(clean["flux_AP_err"], float)

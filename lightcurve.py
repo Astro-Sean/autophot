@@ -205,6 +205,17 @@ def _normalize_photometry_columns(df):
     return df
 
 
+def _band_key(s) -> str:
+    """Grouping key for a band token.
+
+    Case is significant for single-letter band names: 'i' (Sloan) and
+    'I' (Johnson-Cousins) are different photometric systems and must
+    never merge. Multi-character labels stay case-insensitive.
+    """
+    t = str(s).strip()
+    return t if len(t) == 1 else t.lower()
+
+
 def filter_value_matches_band(band_char: str, raw_filter) -> bool:
     """
     True if a photometry-table ``filter`` cell corresponds to band ``band_char``.
@@ -214,16 +225,16 @@ def filter_value_matches_band(band_char: str, raw_filter) -> bool:
     """
     if raw_filter is None or pd.isna(raw_filter):
         return False
-    bc = str(band_char).strip().lower()
+    bc = _band_key(band_char)
     if not bc:
         return False
     rs = str(raw_filter).strip()
-    if rs.lower() == bc:
+    if _band_key(rs) == bc:
         return True
     try:
         from main import _heuristic_filter_mapping
 
-        canon = str(_heuristic_filter_mapping(rs)).strip().lower()
+        canon = _band_key(_heuristic_filter_mapping(rs))
         return canon == bc
     except Exception:
         return False
@@ -236,13 +247,13 @@ def _filter_series_matches_band(band_char: str, fser: pd.Series) -> pd.Series:
     1-5) instead of calling _heuristic_filter_mapping per row (hundreds+).
     Returns a boolean Series aligned to *fser*.
     """
-    bc = str(band_char).strip().lower()
+    bc = _band_key(band_char)
     if not bc:
         return pd.Series(False, index=fser.index)
 
     # Fast path: direct string match (no import needed)
-    rs_lower = fser.astype(str).str.strip().str.lower()
-    direct_match = rs_lower == bc
+    rs_key = fser.astype(str).str.strip().map(_band_key)
+    direct_match = rs_key == bc
 
     # Slow path: canonical form only for rows that missed the direct match.
     # Pre-compute per unique value to minimize _heuristic_filter_mapping calls.
@@ -259,7 +270,7 @@ def _filter_series_matches_band(band_char: str, fser: pd.Series) -> pd.Series:
     canon_map = {}
     for uv in unique_vals:
         try:
-            canon_map[uv] = str(_heuristic_filter_mapping(str(uv).strip())).strip().lower()
+            canon_map[uv] = _band_key(_heuristic_filter_mapping(str(uv).strip()))
         except Exception:
             canon_map[uv] = ""
 
@@ -301,7 +312,7 @@ def canonical_bands_from_filter_series(fser: pd.Series):
             c = str(_heuristic_filter_mapping(raw)).strip()
         except Exception:
             c = raw
-        ck = str(c).lower()
+        ck = _band_key(c)
         if ck not in seen:
             seen.add(ck)
             canon_list.append(c)
@@ -332,9 +343,9 @@ def canonical_band_label_map_from_filter_series(fser: pd.Series) -> dict[str, st
         try:
             from main import _heuristic_filter_mapping
 
-            return str(_heuristic_filter_mapping(s)).strip().lower()
+            return _band_key(_heuristic_filter_mapping(s))
         except Exception:
-            return str(s).strip().lower()
+            return _band_key(s)
 
     tmp = pd.DataFrame({"raw": raw})
     tmp["canon"] = tmp["raw"].map(_canon)
@@ -347,7 +358,7 @@ def canonical_band_label_map_from_filter_series(fser: pd.Series) -> dict[str, st
         top_n = int(counts.iloc[0])
         top_vals = set(counts[counts == top_n].index.tolist())
         chosen = next((v for v in g["raw"].tolist() if v in top_vals), g["raw"].iloc[0])
-        out[str(canon).strip().lower()] = str(chosen).strip()
+        out[str(canon).strip()] = str(chosen).strip()
     return out
 
 
@@ -860,7 +871,7 @@ def plot_lightcurve(
     def _color_for_band(band_label: str) -> str:
         if band_label in base_cols:
             return base_cols[band_label]
-        bl = str(band_label).strip().lower()
+        bl = _band_key(band_label)
         if bl in base_cols:
             return base_cols[bl]
         if bl not in _unknown_color_map:
@@ -1890,7 +1901,7 @@ def generate_photometry_table(
             filter_value = fcol_filtered.mode()[0] if len(fcol_filtered.mode()) > 0 else str(band)
             band_label = str(filter_value).strip()
         else:
-            band_label = label_map.get(str(band).strip().lower(), band)
+            band_label = label_map.get(_band_key(band), band)
 
         logger = logging.getLogger(__name__)
         logger.info(
@@ -2034,7 +2045,7 @@ def generate_photometry_table(
                     filter_value_inv = fcol_inv.mode()[0] if len(fcol_inv.mode()) > 0 else str(band)
                     band_label = str(filter_value_inv).strip()
                 else:
-                    band_label = label_map.get(str(band).strip().lower(), band)
+                    band_label = label_map.get(_band_key(band), band)
 
                 if is_apparent:
                     mag_value = inv_detects[inv_mag_col]
@@ -2099,7 +2110,7 @@ def generate_photometry_table(
                 filter_value_nd = fcol_nd.mode()[0] if len(fcol_nd.mode()) > 0 else str(band)
                 band_label = str(filter_value_nd).strip()
             else:
-                band_label = label_map.get(str(band).strip().lower(), band)
+                band_label = label_map.get(_band_key(band), band)
 
             nd_row_data = {
                 'Filter': band_label,
@@ -3312,23 +3323,28 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
                     row_stem = os.path.splitext(os.path.basename(fn.strip()))[0]
 
             date_token = date if len(date) == 8 else None
-            band_token = str(band).lower()
+            band_token = _band_key(band)
 
             def _score_candidate(path):
-                base = os.path.basename(path).lower()
+                base = os.path.basename(path)
+                base_l = base.lower()
                 score = 0
                 if row_stem:
                     rs = row_stem.lower()
-                    if rs in base:
+                    if rs in base_l:
                         score += 4
-                if date_token and date_token in base:
+                if date_token and date_token in base_l:
                     score += 2
-                if band_token and (
-                    f"_{band_token}_" in base
-                    or base.startswith(f"{band_token}_")
-                    or f"{band_token}band_" in base
-                ):
-                    score += 1
+                if band_token:
+                    # Single-letter bands match case-sensitively: I-band
+                    # files must not be confused with i-band files.
+                    hay = base if len(band_token) == 1 else base_l
+                    if (
+                        f"_{band_token}_" in hay
+                        or hay.startswith(f"{band_token}_")
+                        or f"{band_token}band_" in hay
+                    ):
+                        score += 1
                 return score
 
             scored = sorted(((_score_candidate(f), f) for f in files), key=lambda t: (t[0], t[1]), reverse=True)

@@ -22,6 +22,7 @@ from functions import (
     border_msg,
     cap_console_lines,
     concatenate_csv_files,
+    normalize_photometric_filter_name,
     print_progress_bar,
     sanitize_photometric_filters,
 )
@@ -237,44 +238,29 @@ class FitsInfo:
 
         Returns a standard band name (as present in self.available_filters) or None.
         """
-        t = self._norm_filter_token(token)
+        t = str(token).strip()
         if not t:
             return None
 
-        # Common survey-style suffixes (ZTF: gp/rp/ip; also generic *_p).
-        if t in {"gp", "rp", "ip", "zp", "up", "wp"}:
-            base = t[0]
-            return base if base in self.available_filters else None
+        # Delegate to the pipeline's canonical heuristic and band
+        # normalization so telescope-key handling cannot diverge (e.g.
+        # I_BESS -> Cousins I, never Sloan i; R_SPECIAL -> R, not r).
+        try:
+            from main import _heuristic_filter_mapping
 
-        # Tokens with underscores like gp_astrodon_2018, rp_cousins, etc.
-        # Check first part for band indicators (exact case only)
-        if "_" in t:
-            first_part = t.split("_")[0]
-            # Direct band match in first part (lowercase only - standard bands)
-            if first_part in {"u", "g", "r", "i", "z", "y", "w", "b", "v", "j", "h", "k"}:
-                return first_part if first_part in self.available_filters else None
-            # Check for trailing p (e.g., gp -> g) - lowercase only
-            if len(first_part) == 2 and first_part[1] == "p" and first_part[0] in "ugrizyw":
-                return first_part[0] if first_part[0] in self.available_filters else None
-
-        # Tokens like g782/r784/i705/z623 -> leading band letter (lowercase only).
-        if len(t) >= 2 and t[0] in "ugrizy" and any(ch.isdigit() for ch in t[1:]):
-            return t[0] if t[0] in self.available_filters else None
-
-        # Things like V_HIGH, B_HIGH, I_BESS, Z_SPECIAL -> leading alpha run.
-        # NOTE: Case-sensitive matching only - UBVRI vs ugriz are different filter systems
-        m = re.match(r"^([a-zA-Z]+)", t)
-        if m:
-            lead = m.group(1)
-            # Prefer exact case-sensitive match only
-            for b in self.available_filters:
-                if b == lead:
-                    return b
-            # Single-letter UBVRI style - exact case only
-            if len(lead) == 1:
-                for b in self.available_filters:
-                    if b == lead:
-                        return b
+            cand = _heuristic_filter_mapping(t)
+        except Exception:
+            cand = t
+        cand = (
+            normalize_photometric_filter_name(
+                cand, available_filters=self.available_filters
+            )
+            or cand
+        )
+        if cand in self.available_filters:
+            return cand
+        if t in self.available_filters:
+            return t
         return None
 
     def _get_global_filter_map(self, db: dict) -> dict:
@@ -605,8 +591,28 @@ class FitsInfo:
                         entry[fval_raw] = std
                         self.logger.info("Auto-mapped filter %s -> %s", fval_raw, std)
                     else:
-                        entry[fval_raw] = fval_raw
-                        self.logger.warning("Could not auto-map filter %s, using as-is", fval_raw)
+                        # Not confidently resolvable: ask the user when a
+                        # terminal is attached. Batch/non-interactive runs
+                        # keep the raw value - input() would hang there.
+                        resolved = None
+                        if sys.stdin is not None and sys.stdin.isatty():
+                            try:
+                                resolved = self._ask_filter_mapping(fval_raw)
+                            except (EOFError, KeyboardInterrupt):
+                                resolved = None
+                        if resolved and resolved != "no_filter":
+                            entry[fval_raw] = resolved
+                            self.logger.info(
+                                "Filter %s mapped to %s by user",
+                                fval_raw,
+                                resolved,
+                            )
+                        else:
+                            entry[fval_raw] = fval_raw
+                            self.logger.warning(
+                                "Could not auto-map filter %s, using as-is",
+                                fval_raw,
+                            )
 
 
     def _try_mapping(self, db, header_value, source, mapping):
@@ -705,7 +711,8 @@ class FitsInfo:
             f"\n  Map {header_value!r} to [{default}]: "
         )
         while True:
-            ans = input(prompt).strip().lower() or default
+            # Case is significant for band names (I vs i); preserve it.
+            ans = input(prompt).strip() or default
             print(f"  Selected: {ans}")
             if ans == default:
                 try:
@@ -725,16 +732,19 @@ class FitsInfo:
                         "Could not persist keyword mapping: %s", _db_exc
                     )
                 return ans
-            for b in self.available_filters:
-                if b.lower() == ans:
-                    try:
-                        self._remember_mapping(db, header_value, b)
-                        self._save_db(db)
-                    except Exception as _db_exc:
-                        self.logger.debug(
-                            "Could not persist keyword mapping: %s", _db_exc
-                        )
-                    return b
+            # Single-letter bands are case-significant: 'I' must not be
+            # accepted as 'i'. Only fold case for multi-char answers.
+            if len(ans) != 1:
+                for b in self.available_filters:
+                    if b.lower() == ans.lower():
+                        try:
+                            self._remember_mapping(db, header_value, b)
+                            self._save_db(db)
+                        except Exception as _db_exc:
+                            self.logger.debug(
+                                "Could not persist keyword mapping: %s", _db_exc
+                            )
+                        return b
             print(f"  Invalid. Choose one of {opts_str}, or '{default}'.")
 
     @staticmethod

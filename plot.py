@@ -139,15 +139,28 @@ def _instrumental_limit_to_apparent(data, band, method):
 
     method_low = str(method).strip().lower()
     band_low = str(band).strip().lower()
-    columns = {str(column).lower(): column for column in data.columns}
+    # Exact-case columns win so 'I' does not read the 'i' zeropoint when a
+    # table carries both bands.
+    columns = {str(column): column for column in data.columns}
+    columns_l = {str(column).lower(): column for column in data.columns}
     zp_col = next(
         (
             columns[name]
             for name in (
+                f"zp_{band}_{method}",
+                f"zp_{method}",
+            )
+            if name in columns
+        ),
+        None,
+    ) or next(
+        (
+            columns_l[name]
+            for name in (
                 f"zp_{method_low}",
                 f"zp_{band_low}_{method_low}",
             )
-            if name in columns
+            if name in columns_l
         ),
         None,
     )
@@ -1755,7 +1768,9 @@ class Plot:
         def _color_for_band(band_label: str) -> str:
             if band_label in palette:
                 return palette[band_label]
-            bl = str(band_label).strip().lower()
+            _bl_s = str(band_label).strip()
+            # Single-letter bands are case-significant (i vs I).
+            bl = _bl_s if len(_bl_s) == 1 else _bl_s.lower()
             if bl in palette:
                 return palette[bl]
             if bl not in _unknown_color_map:
