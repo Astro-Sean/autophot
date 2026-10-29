@@ -519,7 +519,7 @@ default_input:
       # WARNING: with [] the result has no SdssStd/JkcStd bands, so the "gaia" catalog cannot calibrate
       # standard filters; use another catalog then.
     include_IR_sequence_data: False # bool --- If True, augment catalog with IR sequence data (when available).
-    allow_filter_transformations: False # bool --- If True, synthesize catalog magnitudes in bands the survey does not measure natively using published transformations (Lupton 2005 and Jester+2005 for sdss; Tonry+2012 for panstarrs; LS DR10 PS1 color terms plus Toptun+2024 fallback for legacy). Lets e.g. Johnson-Cousins BVRI images be calibrated against ugriz/grizy/grz catalogs. Propagated errors include the published fit scatter.
+    allow_filter_transformations: False # bool --- If True, synthesize catalog magnitudes in bands the survey does not measure natively using published transformations (Lupton 2005 and Jester+2005 for sdss; Tonry+2012 for panstarrs; LS DR10 PS1 color terms plus Toptun+2024 fallback for legacy). Lets e.g. Johnson-Cousins BVRI images be calibrated against ugriz/grizy/grz catalogs. Propagated errors include the published fit scatter. Even when False, a missing image-filter band is still synthesized as a last resort so the zeropoint can be computed; a warning is logged in that case.
     MASTcasjobs_wsid: null # str|null --- Optional MAST CasJobs workspace ID for refcat/casjobs-backed catalog queries.
     MASTcasjobs_pwd: null # str|null --- Optional MAST CasJobs password/token for refcat/casjobs-backed catalog queries.
 

@@ -996,8 +996,13 @@ def normalize_photometric_filter_name(filter_name, available_filters=None):
         available_set = set(str(f).strip() for f in available_filters)
         if token in available_set:
             return token
-        # Case-insensitive match returns the catalog's own casing.
-        if token.lower() in {f.lower() for f in available_set}:
+        # Case-insensitive match returns the catalog's own casing, but
+        # never for a standard band letter: case encodes the photometric
+        # system, so 'I' (Johnson-Cousins) must not collapse onto 'i'
+        # (Sloan) and vice versa.
+        if token not in _ALL_BAND_CHARS and token.lower() in {
+            f.lower() for f in available_set
+        }:
             for f in available_set:
                 if f.lower() == token.lower():
                     return f

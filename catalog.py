@@ -3741,6 +3741,9 @@ class Catalog:
                     logger.debug("Auto-copied custom filter %s from catalog", col)
 
             # The current image filter must always be populated.
+            _ft_name = catalogName
+            if isinstance(_ft_name, dict):
+                _ft_name = self._resolve_catalog_for_filter(_ft_name)
             for col in [image_filter, f"{image_filter}_err"]:
                 if col in outputCatalog.columns:
                     logger.debug("Column %s already present in output catalog", col)
@@ -3756,13 +3759,7 @@ class Catalog:
                     _missing_band = col[:-4] if col.endswith("_err") else col
                     _can_synth = (
                         not col.endswith("_err")
-                        and transformations_enabled(self.input_yaml)
-                        and _missing_band
-                        in transformable_bands(
-                            catalogName
-                            if not isinstance(catalogName, dict)
-                            else self._resolve_catalog_for_filter(catalogName)
-                        )
+                        and _missing_band in transformable_bands(_ft_name)
                     )
                     if _can_synth:
                         logger.info(
@@ -3799,12 +3796,21 @@ class Catalog:
             # --- Published band transformations ---------------------------
             # Optionally synthesize bands the survey does not carry (e.g.
             # Johnson-Cousins BVRI for SDSS/PS1/LEGACY) so the image filter
-            # and its color-term bands can still be populated.
-            if transformations_enabled(self.input_yaml):
+            # and its color-term bands can still be populated.  When the flag
+            # is off but the image band itself is absent and transformable,
+            # still synthesize it - a transformed zeropoint beats none.
+            _ft_enabled = transformations_enabled(self.input_yaml)
+            _img_col = outputCatalog.get(image_filter)
+            _band_missing = _img_col is None or not np.isfinite(
+                pd.to_numeric(_img_col, errors="coerce").to_numpy(dtype=float)
+            ).any()
+            _ft_rescue = (
+                not _ft_enabled
+                and _band_missing
+                and image_filter in transformable_bands(_ft_name)
+            )
+            if _ft_enabled or _ft_rescue:
                 try:
-                    _ft_name = catalogName
-                    if isinstance(_ft_name, dict):
-                        _ft_name = self._resolve_catalog_for_filter(_ft_name)
                     _ft_report = apply_filter_transformations(
                         outputCatalog, _ft_name
                     )
@@ -3815,10 +3821,32 @@ class Catalog:
                             _fn,
                             _fl,
                         )
+                    if _ft_rescue:
+                        if image_filter in _ft_report:
+                            logger.warning(
+                                "Catalog '%s' does not measure %s; the "
+                                "zeropoint uses %s magnitudes synthesized by "
+                                "filter transformations (published r.m.s. "
+                                "propagated as error floor). Set catalog."
+                                "allow_filter_transformations to enable this "
+                                "generally, or use a catalog with native %s.",
+                                _ft_name,
+                                image_filter,
+                                image_filter,
+                                image_filter,
+                            )
+                        else:
+                            logger.warning(
+                                "Catalog '%s' does not measure %s and filter "
+                                "transformations could not synthesize it "
+                                "(no usable input bands); the zeropoint "
+                                "will fail unless another catalog is used.",
+                                _ft_name,
+                                image_filter,
+                            )
                 except Exception as exc:
                     logger.warning(
-                        "allow_filter_transformations is set but the "
-                        "transformation failed: %s",
+                        "Filter transformation failed: %s",
                         exc,
                     )
 
@@ -5707,8 +5735,13 @@ class Catalog:
                 col for col in required_columns if col not in catalog.columns
             ]
             if missing_columns:
+                _cat_sel = (self.input_yaml.get("catalog") or {}).get(
+                    "use_catalog"
+                )
                 raise KeyError(
-                    f"Missing required columns in catalog: {missing_columns}"
+                    f"Missing required columns in catalog: {missing_columns} "
+                    f"- catalog '{_cat_sel}' does not provide the "
+                    f"'{use_filter}' band needed for calibration"
                 )
 
             # NOTE: sky sigma-clipping and threshold filtering are already done

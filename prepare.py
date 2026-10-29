@@ -699,25 +699,26 @@ class Prepare:
             else:
                 available_filters = list(catalog_input.keys())
 
-        if (self.input_yaml.get("catalog") or {}).get(
-            "allow_filter_transformations", False
-        ):
-            # Bands a catalog can synthesize (e.g. BVRI for sdss) count as
-            # servable too, so images in those bands are not dropped here.
-            from filter_transformations import transformable_bands
+        # Bands a catalog can synthesize via published transformations
+        # (e.g. BVRI for sdss/panstarrs/legacy) count as servable even when
+        # allow_filter_transformations is off: the catalog stage falls back
+        # to synthesizing a missing image band so the zeropoint can be
+        # computed. allow_filter_transformations only controls proactive
+        # synthesis and auto-catalog selection.
+        from filter_transformations import transformable_bands
 
-            if isinstance(selected_catalog, dict):
-                _ft_cats = {
-                    str(v).strip()
-                    for v in selected_catalog.values()
-                    if v is not None and str(v).strip()
-                }
-            else:
-                _ft_cats = {str(selected_catalog_resolved).strip()}
-            for _c in _ft_cats:
-                for _b in transformable_bands(_c):
-                    if _b not in available_filters:
-                        available_filters.append(_b)
+        if isinstance(selected_catalog, dict):
+            _ft_cats = {
+                str(v).strip()
+                for v in selected_catalog.values()
+                if v is not None and str(v).strip()
+            }
+        else:
+            _ft_cats = {str(selected_catalog_resolved).strip()}
+        for _c in _ft_cats:
+            for _b in transformable_bands(_c):
+                if _b not in available_filters:
+                    available_filters.append(_b)
 
         if self.input_yaml["catalog"].get("include_IR_sequence_data", False):
             available_filters += ["J", "H", "K"]
@@ -1366,16 +1367,26 @@ class Prepare:
                     )
                 else:
                     fits_filter = headinfo.get(header_key, "no_filter")
-                    # telescope.yml keys are matched case-insensitively;
-                    # unmatched values keep the raw header string.
+                    # telescope.yml may carry keys that differ only by case
+                    # but map to different bands (e.g. 'I' -> Cousins I vs
+                    # 'i' -> Sloan i), so try an exact match before the
+                    # case-insensitive one; unmatched values keep the raw
+                    # header string.
                     fits_filter_str = str(fits_filter)
                     filter_name = fits_filter_str
                     for key, value in mapping.items():
                         if key.startswith("filter_key_"):
                             continue  # metadata keys, not filter values
-                        if str(key).lower() == fits_filter_str.lower():
+                        if str(key) == fits_filter_str:
                             filter_name = str(value)
                             break
+                    else:
+                        for key, value in mapping.items():
+                            if key.startswith("filter_key_"):
+                                continue  # metadata keys, not filter values
+                            if str(key).lower() == fits_filter_str.lower():
+                                filter_name = str(value)
+                                break
             else:
                 # No telescope.yml entry: try common header names directly.
                 candidate_keys = ["FILTER", "FILTER1", "FILTER2"]
