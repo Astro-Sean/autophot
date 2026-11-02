@@ -55,6 +55,25 @@ QUIET_MODE = False
 _DEFAULT_INPUT_SCHEMA_CACHE: Optional[dict] = None
 
 
+def _to_yaml_native(obj):
+    """Recursively convert numpy/pandas values to builtins for yaml.safe_dump.
+
+    main.py reads the snapshot with safe_load, which rejects the python/object
+    tags that yaml.dump emits for numpy scalars.
+    """
+    if isinstance(obj, dict):
+        return {_to_yaml_native(k): _to_yaml_native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_yaml_native(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return [_to_yaml_native(v) for v in obj.tolist()]
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if obj is pd.NA or obj is pd.NaT:
+        return None
+    return obj
+
+
 def _get_default_input_schema() -> dict:
     """
     Load and cache the default configuration schema from `databases/default_input.yml`.
@@ -3422,7 +3441,9 @@ class AutomatedPhotometry:
                 # Write input snapshot
                 input_file = os.path.join(new_output_dir, "input.yaml")
                 with open(input_file, "w") as fh:
-                    yaml.dump(backup_yaml, fh, default_flow_style=False)
+                    yaml.safe_dump(
+                        _to_yaml_native(backup_yaml), fh, default_flow_style=False
+                    )
 
                 # Reduce templates first
                 if template_file_list:
