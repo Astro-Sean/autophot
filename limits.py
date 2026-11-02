@@ -366,10 +366,13 @@ def _analytic_psf_for_injection(fwhm: float, oversampling: int | None = None):
 
     Used when no empirical ePSF model is available (ePSF build failure or too
     few PSF stars): the injection still needs a PSF-shaped stamp even when the
-    recovery method is aperture-only.  Mirrors the ePSF init-kernel
-    construction in ``psf.py`` (same Moffat beta and grid conventions,
-    including the square pixel-response convolution) so the model is a
-    drop-in replacement wherever an ePSF is expected.
+    recovery method is aperture-only.  The input FWHM is an effective width
+    (it already includes the detector pixel response), so the continuous
+    Moffat is point-sampled on the oversampled grid; convolving with the
+    pixel response again would make injected sources systematically wider
+    than real ones.  Same Moffat beta and grid conventions as the analytic
+    stamps in ``psf.py``, so the model is a drop-in replacement wherever an
+    ePSF is expected.
 
     Parameters
     ----------
@@ -378,9 +381,7 @@ def _analytic_psf_for_injection(fwhm: float, oversampling: int | None = None):
                   undersampled data (FWHM < 2.5 px), 2 for marginally
                   sampled (FWHM < 4 px), else 1.
     """
-    from astropy.convolution import Moffat2DKernel
     from photutils.psf import ImagePSF
-    from psf import MoffatPRF
 
     fwhm = float(fwhm)
     if not np.isfinite(fwhm) or fwhm <= 0:
@@ -390,49 +391,22 @@ def _analytic_psf_for_injection(fwhm: float, oversampling: int | None = None):
     else:
         osamp = max(1, int(oversampling))
     beta = 4.765
-    gamma = (osamp * fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0))
+    # gamma in native pixels; grid offsets convert via / osamp.
+    gamma = float(fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0))
     size_native = int(np.ceil(10.0 * fwhm)) | 1  # odd, >= ~10*FWHM footprint
     size_native = max(size_native, 15)
-    if MoffatPRF is not None:
-        # Same pixel-integrated path as psf._analytic_moffat_psf: the
-        # PRF evaluates the analytic integral over each detector-pixel
-        # square, replacing the sampled-kernel boxcar below.
-        n = osamp * size_native
-        ctr = (n - 1) / 2.0
-        yy, xx = np.indices((n, n))
-        model = MoffatPRF(
-            flux=1.0,
-            x_0=ctr / osamp,
-            y_0=ctr / osamp,
-            alpha=max(float(gamma) / osamp, 1e-6),
-            beta=beta,
-        )
-        kernel_data = model(xx / osamp, yy / osamp)
-        total = float(np.nansum(kernel_data))
-        if np.isfinite(total) and total > 0:
-            kernel_data = kernel_data / total
-        kernel_data = kernel_data * float(osamp) ** 2
-        return ImagePSF(
-            data=kernel_data, x_0=ctr, y_0=ctr, oversampling=osamp
-        )
-    kernel = Moffat2DKernel(
-        gamma=max(float(gamma), 1e-6),
-        alpha=beta,
-        x_size=osamp * size_native,
-        y_size=osamp * size_native,
-    )
-    # Convolve the continuous Moffat with the square pixel response so the
-    # stamp is an effective PSF -- matching both detector data and the ePSF
-    # grid convention (injected sources rendered from a continuous model
-    # would be systematically narrower than real sources).
-    from psf import pixel_integrate_oversampled
-
-    kernel_data = pixel_integrate_oversampled(kernel.array, osamp)
+    n = osamp * size_native
+    ctr = (n - 1) / 2.0
+    yy, xx = np.indices((n, n))
+    rr = np.hypot((xx - ctr) / osamp, (yy - ctr) / osamp)
+    kernel_data = (1.0 + (rr / max(float(gamma), 1e-6)) ** 2) ** (-beta)
+    total = float(np.nansum(kernel_data))
+    if np.isfinite(total) and total > 0:
+        kernel_data = kernel_data / total
     # photutils ePSF convention: data sums to prod(oversampling) so that
     # ``evaluate(flux=F)`` renders a source of total flux F.  A unit-sum
     # array would inject stars osamp^2 too faint.
     kernel_data = kernel_data * float(osamp) ** 2
-    ctr = (osamp * size_native - 1) / 2.0
     return ImagePSF(
         data=kernel_data, x_0=ctr, y_0=ctr, oversampling=osamp
     )
