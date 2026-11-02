@@ -2357,8 +2357,8 @@ class Catalog:
                 n_gal = n_before - len(table)
                 if n_gal > 0:
                     logger.info(
-                        "Legacy Survey: removed %d extended sources (type != PSF); %d point sources remain.",
-                        n_gal, len(table),
+                        "Legacy Survey: kept %d of %d point sources (dropped extended).",
+                        len(table), n_before,
                     )
             table = table.drop(columns=["type"], errors="ignore")
 
@@ -2593,6 +2593,7 @@ class Catalog:
             DataFrame containing the catalog data, or None if an error occurs.
         """
         logger.log(STATUS, log_step("Catalog: sequence sources in field"))
+        _t0_download = time.time()
 
         try:
             catalogName = self._require_catalog_selected(catalogName)
@@ -3342,8 +3343,8 @@ class Catalog:
                         n_gal = n_before - len(selectedCatalog)
                         if n_gal > 0:
                             logger.info(
-                                "Pan-STARRS: removed %d extended sources (|PSF-Kron| >= 0.1 mag); %d point sources remain.",
-                                n_gal, len(selectedCatalog),
+                                "Pan-STARRS: kept %d of %d point sources (dropped extended).",
+                                len(selectedCatalog), n_before,
                             )
                         # Kron columns were only needed for the star cut.
                         selectedCatalog = selectedCatalog.drop(
@@ -3514,6 +3515,12 @@ class Catalog:
         except Exception as _cov_exc:
             logger.debug("Field-coverage check skipped: %s", _cov_exc)
 
+        logger.info(
+            "Catalog stage done: %d %s rows in %.1fs",
+            len(selectedCatalog),
+            catalogName.upper(),
+            time.time() - _t0_download,
+        )
         return selectedCatalog
 
     # =============================================================================
