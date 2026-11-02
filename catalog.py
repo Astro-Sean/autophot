@@ -2763,6 +2763,11 @@ class Catalog:
                     .to_pandas()
                     .fillna(np.nan)
                 )
+                logger.info(
+                    "Loaded %d cached %s rows",
+                    len(selectedCatalog),
+                    catalogName.upper(),
+                )
                 # Caches written before the detection-quality cuts lack the
                 # flag columns they need; treat them as stale and re-download.
                 _quality_cols = {
@@ -2812,6 +2817,13 @@ class Catalog:
             else:
                 selectedCatalog = []
                 from astroquery.mast import Catalogs
+
+                logger.info(
+                    "No cached catalog; querying %s (r=%.1f arcmin) - remote "
+                    "catalog services can take a minute or more.",
+                    catalogName.upper(),
+                    float(q_radius_arcmin),
+                )
 
                 if catalogName == "tic":
                     logger.info(
@@ -3458,6 +3470,10 @@ class Catalog:
         # actually queried - the box for box-capable backends, the
         # circumscribed cone otherwise - and warned once per field so
         # one-sided coverage does not silently reach the zeropoint fit.
+        logger.info(
+            "Checking %s catalog field coverage...",
+            catalogName.upper(),
+        )
         try:
             _cov_ra, _cov_dec = _catalog_radec(selectedCatalog)
             if _cov_ra is not None:
