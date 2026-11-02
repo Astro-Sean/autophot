@@ -6632,16 +6632,6 @@ class Templates:
             if np.isfinite(_px) and np.isfinite(_py):
                 ignore_xy.append((_px, _py))
 
-        def _hits_ignore(footprint: np.ndarray) -> bool:
-            if not ignore_xy:
-                return False
-            ny_, nx_ = footprint.shape
-            for _px, _py in ignore_xy:
-                _ix, _iy = int(round(_px)), int(round(_py))
-                if 0 <= _ix < nx_ and 0 <= _iy < ny_ and footprint[_iy, _ix]:
-                    return True
-            return False
-
         # Be strict about the input type for photutils.
         data = np.asarray(data)
         if data.ndim != 2:
@@ -6847,15 +6837,32 @@ class Templates:
 
             is_negative = tbl["max_value"] < 0
 
+            # Labels whose footprint covers an ignore position: the label at
+            # each ignored pixel IS the covering source's label, so one lookup
+            # per ignored point replaces a full-image footprint scan per source.
+            if ignore_xy:
+                _ig_labels = {
+                    int(seg.data[int(round(_py)), int(round(_px))])
+                    for _px, _py in ignore_xy
+                    if 0 <= int(round(_px)) < seg.data.shape[1]
+                    and 0 <= int(round(_py)) < seg.data.shape[0]
+                }
+                _ig_labels.discard(0)
+            else:
+                _ig_labels = set()
+
             # Mask negative-peak sources (likely artefacts) directly from their
             # segmentation footprints BEFORE removing them from tbl.
             # Skip footprints containing an ignore position (the target):
             # masked pixels are blanked in the difference image.
-            for bad_src in tbl[is_negative].itertuples(index=False):
-                seg_pixels = seg.data == bad_src.label
-                if _hits_ignore(seg_pixels):
+            _neg_tbl = tbl[is_negative]
+            _neg_labels = _neg_tbl["label"].to_numpy()
+            _neg_mask_labels = _neg_labels[~np.isin(_neg_labels, list(_ig_labels))]
+            if _neg_mask_labels.size:
+                mask[np.isin(seg.data, _neg_mask_labels)] = 1
+            for bad_src in _neg_tbl.itertuples(index=False):
+                if bad_src.label in _ig_labels:
                     continue
-                mask[seg_pixels] = 1
                 cx = (bad_src.bbox_xmin + bad_src.bbox_xmax) / 2
                 cy = (bad_src.bbox_ymin + bad_src.bbox_ymax) / 2
                 masked_centres.append((float(cx), float(cy)))
@@ -6865,11 +6872,13 @@ class Templates:
             # create_source_mask=False so point sources remain available
             # for kernel fitting and flux calibration.
             if create_source_mask:
+                _all_labels = tbl["label"].to_numpy()
+                _all_mask_labels = _all_labels[~np.isin(_all_labels, list(_ig_labels))]
+                if _all_mask_labels.size:
+                    mask[np.isin(seg.data, _all_mask_labels)] = 1
                 for src in tbl.itertuples(index=False):
-                    seg_pixels = seg.data == src.label
-                    if _hits_ignore(seg_pixels):
+                    if src.label in _ig_labels:
                         continue
-                    mask[seg_pixels] = 1
                     cx = (src.bbox_xmin + src.bbox_xmax) / 2
                     cy = (src.bbox_ymin + src.bbox_ymax) / 2
                     masked_centres.append((float(cx), float(cy)))
@@ -6893,6 +6902,7 @@ class Templates:
             if mask_bright_catalog_overlaps and bright_sources is not None and len(bright_sources) > 0:
                 bright_xy = list(zip(bright_sources["x_pix"].values,
                                      bright_sources["y_pix"].values))
+                _ovl_rows = []
                 for src in tbl.itertuples(index=False):
                     cx = (src.bbox_xmin + src.bbox_xmax) / 2
                     cy = (src.bbox_ymin + src.bbox_ymax) / 2
@@ -6902,9 +6912,11 @@ class Templates:
                         for bxy in bright_xy
                     )
                     if overlaps:
-                        seg_pixels = seg.data == src.label
-                        mask[seg_pixels] = 1
-                        masked_centres.append((cx, cy))
+                        _ovl_rows.append((src.label, cx, cy))
+                if _ovl_rows:
+                    _ovl_labels = np.array([r[0] for r in _ovl_rows])
+                    mask[np.isin(seg.data, _ovl_labels)] = 1
+                    masked_centres.extend((cx, cy) for _, cx, cy in _ovl_rows)
 
             # NOTE: Do NOT mask remaining unsaturated sources - they are needed
             # for flux calibration and kernel fitting. Only saturated/negative
