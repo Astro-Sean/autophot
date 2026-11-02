@@ -6924,6 +6924,10 @@ def run_photometry():
                     f"Zeropoint ({_zp_sys})" if _zp_sys else "Zeropoint",
                     ["Method", "ZP", "err", "scat", "N", "slope", "reliable"],
                     _zp_rows,
+                    # Reliability flags are long free text; 90 is the
+                    # console wrap budget, so the column wraps whole
+                    # words instead of hitting the formatter mid-word.
+                    width=90,
                 )
             )
 
