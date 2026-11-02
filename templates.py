@@ -5366,31 +5366,45 @@ def fill_masked_regions_in_fits(
 # Download PanSTARRS Template
 # =============================================================================
 
+# PS1 stack pixel scale and cutout limits.  The fitscut service caps each
+# cutout dimension at 6000 px (~25 arcmin at 0.25"/px) and the 3pi stacks
+# only cover Dec > ~-30 deg.
+PS1_CUTOUT_PIXSCALE = 0.25  # arcsec/pixel
+PS1_CUTOUT_MAX_PIX = 6000
+PS1_COVERAGE_MIN_DEC = -30.0  # deg
+
 
 def download_panstarrs_template(
     ra: float,
     dec: float,
-    size: int,
+    size: float,
     template_folder: str,
     band: str = "r",
+    height: Optional[float] = None,
 ) -> Optional[str]:
     """
     Download a Pan-STARRS stacked image cutout for a single band.
 
     Uses the PS1 image-cutout service at STScI.  The pixel scale is fixed
     at 0.25 arcsec/pixel, so *size* (given in arcminutes) is converted
-    accordingly.
+    accordingly.  fitscut accepts rectangular ``size=ncolumns,nrows``
+    requests, so a non-None *height* requests a cutout *size* (RA
+    direction) by *height* (Dec direction) arcmin instead of a square.
+    Each dimension is clamped to the service's 6000 px limit.
 
     Parameters
     ----------
     ra, dec : float
-        Target coordinates in decimal degrees (J2000).
-    size : int
-        Cutout side length in arcminutes.
+        Cutout centre in decimal degrees (J2000).
+    size : float
+        Cutout side length (arcmin), or the RA-direction width when
+        *height* is set.
     template_folder : str
         Root directory under which band-specific sub-folders are created.
     band : str
         One of 'g', 'r', 'i', 'z', 'y', 'w'.
+    height : float or None
+        Optional Dec-direction cutout height in arcminutes.
 
     Returns
     -------
@@ -5405,13 +5419,49 @@ def download_panstarrs_template(
         return None
 
     # Convert arcmin to PS1 pixels (0.25 arcsec/pixel)
-    size_px = int(size * 60 / 0.25)
+    size_px = int(round(float(size) * 60.0 / PS1_CUTOUT_PIXSCALE))
+    height_px = (
+        int(round(float(height) * 60.0 / PS1_CUTOUT_PIXSCALE))
+        if height is not None
+        else size_px
+    )
+    if size_px > PS1_CUTOUT_MAX_PIX or height_px > PS1_CUTOUT_MAX_PIX:
+        logger.warning(
+            "Requested %s-band cutout %dx%d px exceeds the PS1 service "
+            "limit (%d px per side, ~%.0f arcmin); clamping. Part of the "
+            "science FOV will not be covered.",
+            band,
+            size_px,
+            height_px,
+            PS1_CUTOUT_MAX_PIX,
+            PS1_CUTOUT_MAX_PIX * PS1_CUTOUT_PIXSCALE / 60.0,
+        )
+        size_px = min(size_px, PS1_CUTOUT_MAX_PIX)
+        height_px = min(height_px, PS1_CUTOUT_MAX_PIX)
+
+    # fitscut takes size=ncolumns,nrows for rectangular cutouts; keep the
+    # single-value form for squares to match the documented interface.
+    cutout_size = (
+        f"{size_px},{height_px}" if height_px != size_px else str(size_px)
+    )
+
+    half_h_deg = 0.5 * height_px * PS1_CUTOUT_PIXSCALE / 3600.0
+    if dec - half_h_deg < PS1_COVERAGE_MIN_DEC:
+        logger.warning(
+            "%s-band template region extends below Dec=%.0f deg, outside "
+            "the PS1 3pi stack footprint; southern pixels will be blank.",
+            band,
+            PS1_COVERAGE_MIN_DEC,
+        )
+
     logger.info("Searching for %s-band image from PanSTARRS", band)
 
     try:
-        # Step 1: query the filename service
+        # Step 1: query the filename service.  It returns only the best
+        # skycell for the position, so pass the largest dimension to keep
+        # the requested cutout centred on it.
         svc = "https://ps1images.stsci.edu/cgi-bin/ps1filenames.py"
-        url = f"{svc}?ra={ra}&dec={dec}&size={size_px}&format=fits&sep=,&filters={band}"
+        url = f"{svc}?ra={ra}&dec={dec}&size={max(size_px, height_px)}&format=fits&sep=,&filters={band}"
 
         with requests.Session() as session:
             resp = session.get(url, timeout=30)
@@ -5431,7 +5481,7 @@ def download_panstarrs_template(
         #       renaming the outer parameter to `band`.
         cutout_base = (
             f"https://ps1images.stsci.edu/cgi-bin/fitscut.cgi"
-            f"?ra={ra}&dec={dec}&size={size_px}&format=fits&filters={band}"
+            f"?ra={ra}&dec={dec}&size={cutout_size}&format=fits&filters={band}"
         )
         # Sort by filter priority (relevant when multiple filters match)
         filter_order = [band.find(x) for x in df["filter"]]
@@ -5457,6 +5507,7 @@ def download_panstarrs_template(
         with fits.open(urls[0], ignore_missing_end=True, lazy_load_hdus=True) as hdu:
             hdu.verify("silentfix+ignore")
             src_header = hdu[0].header
+            data = hdu[0].data
 
             new_header = fits.PrimaryHDU().header
             new_header.update(
@@ -5475,7 +5526,25 @@ def download_panstarrs_template(
 
             # Create the subfolder only when we have data ready to write
             sub_folder.mkdir(parents=True, exist_ok=True)
-            write_fits(str(template_fpath), hdu[0].data, new_header)
+            write_fits(str(template_fpath), data, new_header)
+
+            # fitscut zero-fills pixels that fall off the selected
+            # skycell; flag heavy blanking so a border-straddling field
+            # does not silently degrade subtraction coverage.
+            try:
+                blank_frac = float(
+                    np.mean(~np.isfinite(data) | (data == 0))
+                )
+            except Exception:
+                blank_frac = 0.0
+            if blank_frac > 0.10:
+                logger.warning(
+                    "%s-band template has %.0f%% blank/off-skycell pixels "
+                    "- the field crosses a PS1 skycell edge and "
+                    "subtraction coverage will be reduced.",
+                    band,
+                    100.0 * blank_frac,
+                )
 
     except Exception:
         logger.exception("Error downloading PanSTARRS template")

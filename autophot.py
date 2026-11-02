@@ -2162,15 +2162,109 @@ class AutomatedPhotometry:
                         f"Downloading templates for science image filters: {filters_str}"
                     )
 
+                    # Centre/size each band's cutout on the union of that
+                    # band's image footprints rather than the target, so
+                    # offset or dithered pointings stay covered.  The
+                    # region geometry is the same footprint bounding box
+                    # used for catalog queries; with no measurable
+                    # footprint it falls back to a target-centred
+                    # templates_size square (previous behaviour).
+                    _tpl_regions = {}
+                    try:
+                        from catalog import _footprint_region, _fmt_region
+
+                        _tpl_scale = (
+                            default_input.get("pixel_scale")
+                            or (default_input.get("wcs") or {}).get(
+                                "pixel_scale_arcsec"
+                            )
+                            or (default_input.get("wcs") or {}).get(
+                                "pixel_scale"
+                            )
+                        )
+                        _tpl_infos = _scan_image_footprints(
+                            file_list,
+                            getattr(prepare_db, "file_filter_map", {}),
+                            pixscale_fallback=_tpl_scale,
+                        )
+                        _tpl_coords = SkyCoord(
+                            default_input["target_ra"],
+                            default_input["target_dec"],
+                            unit=(u.deg, u.deg),
+                            frame="icrs",
+                        )
+                        # _footprint_region bounds a cone; scale so the
+                        # box side lands in [templates_size,
+                        # templates_max_arcmin].
+                        _tpl_margin = float(
+                            ts_cfg.get("templates_margin", 1.1) or 1.1
+                        )
+                        _tpl_min_r = float(size_default) / np.sqrt(2.0)
+                        _tpl_max_r = (
+                            float(ts_cfg.get("templates_max_arcmin", 60.0))
+                            / np.sqrt(2.0)
+                        )
+                        for _bf in required_filters:
+                            _tpl_regions[str(_bf)] = _footprint_region(
+                                _tpl_infos,
+                                [str(_bf)],
+                                _tpl_coords,
+                                margin=_tpl_margin,
+                                min_arcmin=_tpl_min_r,
+                                max_arcmin=_tpl_max_r,
+                                default_arcmin=max(
+                                    float(size_default) / 2.0, _tpl_min_r
+                                ),
+                            )
+                    except Exception as _tpl_exc:
+                        _log(
+                            "[WARNING] Footprint-based template sizing "
+                            f"failed ({_tpl_exc}); using target-centred "
+                            "templates_size."
+                        )
+                        _tpl_regions = {}
+
+                    def _tpl_geometry(band):
+                        """(ra, dec, width', height') for band's cutout."""
+                        reg = _tpl_regions.get(str(band))
+                        if (
+                            isinstance(reg, dict)
+                            and reg.get("width_deg")
+                            and reg.get("height_deg")
+                        ):
+                            return (
+                                float(reg["ra"]),
+                                float(reg["dec"]),
+                                60.0 * float(reg["width_deg"]),
+                                60.0 * float(reg["height_deg"]),
+                            )
+                        return (
+                            float(default_input["target_ra"]),
+                            float(default_input["target_dec"]),
+                            float(size_default),
+                            float(size_default),
+                        )
+
+                    for _bf in required_filters:
+                        _r = _tpl_regions.get(str(_bf))
+                        if isinstance(_r, dict):
+                            _clamped = " [clamped]" if _r.get("clamped") else ""
+                            _log(
+                                f"  {_bf}-band template region: "
+                                f"{_fmt_region(_r)}{_clamped}"
+                            )
+
                     if download_kind == "panstarrs":
                         _log(log_step("Download templates: Pan-STARRS"))
                         from templates import download_panstarrs_template
 
                         for f in required_filters:
+                            _tra, _tdec, _tw, _th = _tpl_geometry(f)
                             download_panstarrs_template(
-                                ra=default_input["target_ra"],
-                                dec=default_input["target_dec"],
-                                size=size_default,
+                                ra=_tra,
+                                dec=_tdec,
+                                size=_tw,
+                                height=_th,
                                 template_folder=template_folder,
                                 band=f,
                             )
@@ -2179,10 +2273,11 @@ class AutomatedPhotometry:
                         from templates import download_sdss_template
 
                         for f in required_filters:
+                            _tra, _tdec, _tw, _th = _tpl_geometry(f)
                             download_sdss_template(
-                                ra=default_input["target_ra"],
-                                dec=default_input["target_dec"],
-                                size=size_default,
+                                ra=_tra,
+                                dec=_tdec,
+                                size=max(_tw, _th),
                                 template_folder=template_folder,
                                 f=f,
                             )
@@ -2193,10 +2288,11 @@ class AutomatedPhotometry:
                         from templates import download_legacy_template
 
                         for f in required_filters:
+                            _tra, _tdec, _tw, _th = _tpl_geometry(f)
                             download_legacy_template(
-                                ra=default_input["target_ra"],
-                                dec=default_input["target_dec"],
-                                size=size_default,
+                                ra=_tra,
+                                dec=_tdec,
+                                size=max(_tw, _th),
                                 template_folder=template_folder,
                                 band=f,
                             )
@@ -2205,10 +2301,11 @@ class AutomatedPhotometry:
                         from templates import download_2mass_template
 
                         for f in required_filters:
+                            _tra, _tdec, _tw, _th = _tpl_geometry(f)
                             download_2mass_template(
-                                ra=default_input["target_ra"],
-                                dec=default_input["target_dec"],
-                                size=ts_cfg.get("templates_size", 10),
+                                ra=_tra,
+                                dec=_tdec,
+                                size=min(max(_tw, _th), 15.0),
                                 template_folder=template_folder,
                                 band=f,
                             )
