@@ -4438,16 +4438,14 @@ class PoissonLikelihoodFitter:
             # Always restore original parameters, even if exception occurs
             model.parameters = params
         
-        gradient = np.zeros(n_params)
-        for i in range(n_params):
-            gradient[i] = np.sum(dlnL_dnbar * dmodel_dparams[i])
-        
-        # Gauss-Newton Hessian: first term only, per Fermilab document.
-        hessian = np.zeros((n_params, n_params))
-        for i in range(n_params):
-            for j in range(n_params):
-                hessian[i, j] = np.sum(d2lnL_dnbar2 * dmodel_dparams[i] * dmodel_dparams[j])
-        
+        # Stack the per-parameter derivative images once, then take the
+        # gradient and Gauss-Newton Hessian (first term only, per Fermilab
+        # document) as single contractions instead of O(n_params^2) scalar
+        # np.sum calls per Newton iteration.
+        _dmat = np.asarray(dmodel_dparams, dtype=float).reshape(n_params, -1)
+        gradient = _dmat @ np.asarray(dlnL_dnbar, dtype=float).ravel()
+        hessian = (_dmat * np.asarray(d2lnL_dnbar2, dtype=float).ravel()) @ _dmat.T
+
         return gradient, hessian
     
     def _solve_linear_system(self, gradient, hessian):
@@ -8246,10 +8244,9 @@ class PSF:
                     undersampled_fwhm_threshold,
                 )
 
-            img = np.array(self.image, float)
-            # Preserve NaNs (chip gaps) instead of replacing with median
-            if mask is not None and mask.shape == img.shape:
-                img[mask.astype(bool)] = np.nan
+            # Only the image shape is needed below; a float copy plus a
+            # NaN fill of the full frame would be discarded unread.
+            image_shape = np.shape(self.image)
 
             # Use a PSF-shape-aware centroiding choice: for clearly
             # undersampled data, a 2-D Gaussian centroid is generally more
@@ -8627,7 +8624,7 @@ class PSF:
             df_uniform = _select_uniform(
                 df,
                 num_keep=min(numSources, len(df)),
-                image_shape=img.shape,
+                image_shape=image_shape,
                 xcol=xcol,
                 ycol=ycol,
                 snrcol=snrcol,
@@ -13248,22 +13245,33 @@ class PSF:
                 # The check runs on the data the fit will see (inverted retry
                 # overrides share the same mask).
                 _check_nd = nd_override if nd_override is not None else ndimage
-                _check_data = np.asarray(_check_nd.data, dtype=float)
+                _check_data = np.asarray(_check_nd.data)
                 _check_pixmask = getattr(_check_nd, "mask", None)
                 _annulus_bad = ~np.isfinite(_check_data)
                 if _check_pixmask is not None:
                     _annulus_bad |= np.asarray(_check_pixmask, dtype=bool)
-                # Pre-allocate coordinate grids once (image shape doesn't change between attempts)
-                yy, xx = np.ogrid[:_check_data.shape[0], :_check_data.shape[1]]
+                _cny, _cnx = _check_data.shape
                 for attempt in range(_max_shrink):
                     _all_ok = True
                     _worst_bad_frac = 0.0
                     for _si in range(_n_in_mask):
-                        r2 = (xx - _xs[_si])**2 + (yy - _ys[_si])**2
+                        # Test the annulus on a bbox around the source: pixels
+                        # beyond _outer_r cannot be in the annulus, so scanning
+                        # the full frame here only burns temporaries.
+                        _r_out = int(np.ceil(_outer_r)) + 1
+                        _scx, _scy = _xs[_si], _ys[_si]
+                        _sx0 = max(0, int(np.floor(_scx)) - _r_out)
+                        _sx1 = min(_cnx, int(np.floor(_scx)) + _r_out + 1)
+                        _sy0 = max(0, int(np.floor(_scy)) - _r_out)
+                        _sy1 = min(_cny, int(np.floor(_scy)) + _r_out + 1)
+                        _yy_s, _xx_s = np.ogrid[_sy0:_sy1, _sx0:_sx1]
+                        r2 = (_xx_s - _scx) ** 2 + (_yy_s - _scy) ** 2
                         in_annulus = (r2 >= _inner_r**2) & (r2 < _outer_r**2)
                         n_annulus = int(np.count_nonzero(in_annulus))
                         n_valid = n_annulus - int(
-                            np.count_nonzero(_annulus_bad & in_annulus)
+                            np.count_nonzero(
+                                _annulus_bad[_sy0:_sy1, _sx0:_sx1] & in_annulus
+                            )
                         )
                         bad_frac = 1.0 - (n_valid / max(1, n_annulus))
                         _worst_bad_frac = max(_worst_bad_frac, bad_frac)
