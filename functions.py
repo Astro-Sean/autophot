@@ -1753,6 +1753,17 @@ def ascii_table(title: str, headers, rows, width: int = 70) -> str:
     for r in rows:
         for i in range(min(ncols, len(r))):
             col_w[i] = max(col_w[i], len(r[i]))
+    # A free-text cell (e.g. a reliability flag) can be far wider than
+    # the log line budget; emitted raw it gets hard-wrapped mid-rule by
+    # the console formatter.  Shrink the widest columns until the body
+    # fits `width` (never below a header) and wrap cell text onto
+    # aligned continuation lines instead.
+    budget = width - (4 + 2 * ncols)
+    while sum(col_w) > budget:
+        wide = [k for k in range(ncols) if col_w[k] > len(headers[k])]
+        if not wide:
+            break
+        col_w[max(wide, key=lambda k: col_w[k])] -= 1
     body_w = 4 + sum(col_w) + 2 * ncols  # leading indent + columns + gaps
     rule_w = min(max(width, body_w), max(width, 40))
     lines = []
@@ -1766,9 +1777,24 @@ def ascii_table(title: str, headers, rows, width: int = 70) -> str:
     lines.append("   " + "  ".join("-" * col_w[i] for i in range(ncols)))
     for r in rows:
         cells = [r[i] if i < len(r) else "" for i in range(ncols)]
-        lines.append(
-            "   " + "  ".join(c.ljust(col_w[i]) for i, c in enumerate(cells)).rstrip()
-        )
+        wrapped = [
+            textwrap.wrap(
+                c,
+                width=max(col_w[i], 1),
+                break_long_words=True,
+                break_on_hyphens=False,
+            )
+            or [""]
+            for i, c in enumerate(cells)
+        ]
+        for k in range(max(len(w) for w in wrapped)):
+            lines.append(
+                "   "
+                + "  ".join(
+                    (w[k] if k < len(w) else "").ljust(col_w[i])
+                    for i, w in enumerate(wrapped)
+                ).rstrip()
+            )
     lines.append("-" * rule_w)
     return "\n" + "\n".join(lines)
 
