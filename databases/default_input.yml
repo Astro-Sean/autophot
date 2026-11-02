@@ -225,14 +225,14 @@ default_input:
     psf_build_from_aligned: True # bool --- If True, build PSF from the aligned image (same as target photometry); if False, build from original pre-alignment image to avoid resampling degradation.
     psf_empirical_min_stars: 6 # int --- Minimum PSF-pool size for an empirical ePSF attempt on well-sampled images. Below this the pool goes directly to the analytic composite-Moffat fit: a 1x understaffed ePSF on a handful of stars is a noisy stack, while the joint analytic fit is constrained by every pixel of every cutout. Undersampled images (fwhm <= undersampled_fwhm_threshold) ignore this floor - a smooth analytic profile cannot represent pixel-phase structure, so the ePSF attempt is always made there and the analytic model is only the fallback.
     psf_build_min_stars: 2 # int --- Absolute floor on the PSF-pool size for an empirical ePSF attempt (relevant mainly when undersampled or when psf_empirical_min_stars is lowered). Below it the build is skipped for the analytic fallback.
-    psf_analytic_fallback: True # bool --- When no empirical ePSF is available (pool below psf_build_min_stars or the build failed), fit a composite-Moffat analytic PSF to the surviving pool cutouts and use it for PSF photometry, flagged "analytic-moffat" in the output psf_model column. A flagged analytic model recovers PSF-fit positions/fluxes and the AP-vs-PSF zeropoint cross-check on sparse fields; False restores strict aperture-only behavior.
+    psf_analytic_fallback: True # bool --- When no empirical ePSF is available (pool below psf_build_min_stars or the build failed), fit a composite-Moffat analytic PSF to the surviving pool cutouts and use it for PSF photometry, flagged "analytic-composite" (fitted) or "analytic-canonical" (no usable fit; profile built from the image FWHM alone) in the output psf_model column. A flagged analytic model recovers PSF-fit positions/fluxes and the AP-vs-PSF zeropoint cross-check on sparse fields. Skipped when the image FWHM is not finite. False restores strict aperture-only behavior.
     psf_adaptive_iterations: True # bool --- Enable adaptive EPSFBuilder iteration strategy (start with fewer iterations, increase only if not converged).
     psf_maxiters_initial: 5 # int --- Initial EPSFBuilder max iterations when adaptive_iterations is True (lower = faster, but may need retry). Undersampled builds use at least min(psf_maxiters_max, 10) so the first pass can reach the relaxed center-accuracy convergence point (~7-9 iterations on thin-sampled fields) without a rebuild.
     psf_maxiters_max: 10 # int --- Maximum EPSFBuilder iterations for retry when adaptive_iterations is True and initial run didn't converge.
     psf_epsf_fitter_maxiters: 50 # int --- Cap on inner LM iterations of each per-star centre/flux fit inside EPSFBuilder (photutils >=3.0 fitter_maxiters; default there is 100). Well-posed star fits converge in ~10; the cap only bounds stars that cannot converge and will be excluded after 3 build iterations anyway.
     psf_center_accuracy_undersampled: 0.05 # float --- EPSFBuilder center_accuracy (px) used on undersampled images. The default 1e-3 px is unreachable at ~n_stars/oversample^2 samples per gridpoint (star centers jitter ~0.03-0.1 px/iter), so builds never converge and each extra iteration stacks noise-drawn residuals -- observed to walk the ePSF core ~10-30% narrow on undersampled SN2022mop fields. ~0.05 px (~3% of FWHM) stops the iteration once centers settle; well-sampled builds keep the photutils default.
     psf_fit_boxsize_max_scale_fwhm: 4.5 # float --- Undersampled only: cap on the ePSF-build fit box in FWHM units. fit_shape only bounds the per-star flux+shift fit each iteration (the residual stack always uses the full cutout), so an oversized box makes the fit sky-noise dominated -- centers wander, the build never converges, and the ePSF can collapse (observed: 7xFWHM box on a 1.8 px PSF produced a 1.5 px ePSF). ~4.5xFWHM keeps the affine fit on the high-S/N core.
-    psf_use_analytic_init: True # bool --- Seed the iterative ePSF build with the fitted composite-Moffat analytic model. The delivered photometry PSF is always empirical - built from the image's own stars; the analytic model only seeds the iteration and serves as the residual-accuracy diagnostic. A good seed speeds convergence, but a wrong one can pull the empirical solution toward the analytic shape; set False for a from-scratch photutils build (the clean A/B test for seed bias).
+    psf_use_analytic_init: True # bool --- Seed the iterative ePSF build with the fitted composite-Moffat analytic model. The analytic model seeds the iteration and serves as the residual-accuracy diagnostic; when the empirical build is degraded or understaffed the fitted analytic composite can be delivered instead (psf_model "analytic-composite"). A good seed speeds convergence, but a wrong one can pull the empirical solution toward the analytic shape; set False for a from-scratch photutils build (the clean A/B test for seed bias).
     psf_analytic_components: 3 # int --- Number of Moffat components the analytic PSF model targets, used as the ePSF seed and residual diagnostic. One component cannot capture both the PSF core and its extended wings; ~3 components (core, mid, halo) fit most seeing profiles. All star cutouts are fitted simultaneously: the component shapes are shared while each star varies only in position and amplitude. The target count is tried first (capped at stars-1) and smaller counts are used only when a fit fails or a component collapses to noise level; when no usable stars exist a canonical width spacing is used instead. Range 1-4.
     psf_analytic_component_offsets: True # bool --- Allow each analytic-PSF component a small shared centre offset (bounded by psf_analytic_offset_max_fwhm x FWHM). Offsets let a sum of symmetric Moffats represent PSF asymmetries - coma, lopsided wings, trailing - that a concentric stack cannot produce. Both variants are fitted and BIC decides; False forces concentric components.
     psf_analytic_center_free_px: 1.5 # float --- Per-star position freedom in the joint analytic fit (px). Star cutouts are centred on measured centroids that carry ~0.1-1 px error; letting each star shift within this bound stops centroid error smearing the stacked profile.
@@ -331,7 +331,7 @@ default_input:
     optimum_radius_max_sources: 250 # int --- Cap on sources fed to the optimum-radius CoG search (the result is a sigma-clipped median, so extra stars add runtime not information). When the pool exceeds this, keep the highest-SNR stars per grid cell so the median still samples the whole field.
 
   wcs:
-    solver: astrometry # str --- WCS solver backend (e.g. astrometry, scamp).
+    solver: astrometry # str --- WCS solver backend (astrometry or scamp). scamp requires projection_type: TPV; under SIP it is ignored and solve-field runs alone.
     profile: default # str --- Named WCS-solver profile/tuning preset.
     crowded_auto: True # bool --- Auto-switch to crowded-field WCS settings when heuristics trigger.
     crowded_auto_n_sources_min: 1500 # int --- Crowded-field trigger: minimum detected sources.
@@ -341,12 +341,11 @@ default_input:
     redo_wcs: True # bool --- If True, solve/refresh WCS even if a WCS exists in the header.
     projection_type: SIP # str --- WCS projection/distortion mode: TPV (solve-field seed + SCAMP refinement) or SIP (solve-field only).
     allow_fallback_to_existing_on_solve_fail: False # bool --- If False, require a fresh solve when redo_wcs=True (no silent fallback to original header WCS).
-    apply_solved_to_fits: False # bool --- If True, write solved WCS back into the FITS header on disk. Default False to avoid overwriting the telescope WCS with a poor solve-field solution on sparse fields.
     solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
     solve_field_tweak_order: 4 # int --- solve-field SIP tweak order to use (single-value mode; ignored if solve_field_tweak_orders is set).
     solve_field_tweak_orders: [4, 2, 1, 0] # list[int] --- Fallback sequence: try order 4 SIP, then order 2, order 1, and finally order 0 (linear TAN) if too few stars are matched.
     solve_field_nsigma: 5 # int --- Sigma threshold for source detection in solve-field. Lower (e.g. 3) for sparse fields.
-    prefer_scamp_tpv_after_solve: True # bool --- After solve-field succeeds, prefer SCAMP WCS (TPV/PV distortion) when available.
+    prefer_scamp_tpv_after_solve: True # bool --- projection_type=TPV only: after solve-field succeeds, refine with SCAMP (TPV/PV distortion). False keeps the solve-field TAN-SIP WCS and skips SCAMP; unused under projection_type: SIP (no SCAMP ever runs).
     # If True, preserve input non-linear distortion keywords (PV/SIP) when
     # merging solve-field WCS. Set False to fully replace distortion terms.
     # For fit_wcs_from_points-based refinement (below), this is ignored and
@@ -368,8 +367,20 @@ default_input:
     # mis-solve if its pixel scale or sky position disagrees too strongly
     # with the expected scale / requested position.
     solved_scale_tolerance: 2.0 # float --- Allowed ratio solved_scale / expected_scale. Reject the solve if outside [1/tol, tol]. Set to 0 to disable scale validation.
-    solved_position_tolerance_arcsec: null # float|null --- Max allowed offset (arcsec) of the solved CRVAL from the requested (target_ra, target_dec). null uses wcs.search_radius. Set to 0 to disable position validation.
+    solved_position_tolerance_arcsec: null # float|null --- Max allowed offset (arcsec) of the solved CRVAL from the position hint actually used (header WCS or target_ra/target_dec). null uses wcs.search_radius. Set to 0 to disable position validation.
     solve_field_downsample_max: 8 # int --- If solve-field fails at the configured downsample, retry with progressively coarser downsampling (x2) up to this value to rescue large images.
+
+    # --- Sparse-field solve shortcuts ---
+    # On starved fields (few or zero detected sources) solve-field wastes a
+    # full cpulimit per attempt on extraction that finds nothing.  Feeding
+    # detected positions as a FITS xylist skips solver-side extraction, and
+    # bounding the downsample ladder avoids retries on unusably small frames.
+    solve_field_use_xylist: True # bool --- Feed detected positions to solve-field as a FITS xylist before image-based attempts; skips solver-side source extraction on sparse fields.
+    solve_field_xylist_min_sources: 8 # int --- Minimum detected sources needed to try the xylist input path.
+    solve_field_sparse_detect_sigma: 2.5 # float --- Relaxed DAO-style detection threshold (sigma) used to build the xylist when the detection stage found fewer than solve_field_xylist_min_sources.
+    solve_field_sparse_nsigma: 3 # int --- --nsigma passed to solve-field when n_detected_sources is 0 (maximally sparse field).
+    solve_field_downsample_min_pixels: 256 # int --- Never retry at a downsample that leaves the smaller image axis below this many pixels.
+    solve_field_fine_downsample_small_image: 1024 # int --- Images whose larger axis is <= this also try finer downsamples (1 up to the configured level) before coarser retries.
 
     # --- Linear WCS refinement from matched stars ---
     # Robust least-squares refit of the solved WCS linear terms (center,
@@ -427,6 +438,34 @@ default_input:
     code_tolerance: 0.01 # float --- Tolerance for WCS solution acceptance (backend-dependent).
     objs: 1200 # int|null --- Optional target number of objects to use in solve-field.
 
+    # --- Input-WCS verification (skip solve-field) ---
+    # Opt-in shortcut: when redo_wcs is False and the header already
+    # carries a usable WCS, detected sources are cross-matched to Gaia
+    # through that WCS and solve-field is skipped entirely when the
+    # residuals stay within the tolerances below.  redo_wcs=True always
+    # solves regardless of this setting.
+    verify_input_wcs: False # bool --- If True and redo_wcs is False, verify the header WCS by cross-matching detected sources to Gaia; skip solve-field when it verifies.
+    verify_max_median_arcsec: 0.5 # float --- Maximum median detected-vs-Gaia residual (arcsec) for the input WCS to pass verification.
+    verify_max_p95_arcsec: 1.5 # float --- Maximum 95th-percentile detected-vs-Gaia residual (arcsec) for the input WCS to pass verification.
+    verify_min_matches: 8 # int --- Minimum matched source pairs for verification; fewer matches is inconclusive and the solve proceeds.
+    verify_match_radius_arcsec: 2.0 # float --- Cross-match radius (arcsec) between detected sources and Gaia stars projected through the input WCS.
+    verify_gmag_limit: 19.0 # float --- Gaia G-magnitude limit for the verification cone query.
+
+    # --- Solve position hint ---
+    # When the header carries a usable WCS its reference position is
+    # normally closer to the true field than the configured target, so it
+    # is used as the solve-field --ra/--dec hint first.  The second center
+    # gets one extra hinted pass when it lies outside 0.25*search_radius
+    # of the first; blind solving is unchanged.
+    prefer_header_position_hint: True # bool --- If True and the header WCS parses, use its reference position as the solve-field position hint before target_ra/target_dec.
+
+    # --- Wide scale search bounds ---
+    # Used when the pixel-scale hint is absent or dropped after a failed
+    # constrained attempt.  Raise wide_scale_high_arcsec for coarse
+    # cameras above 5"/pix (e.g. ASAS-SN ~7.8"/pix).
+    wide_scale_low_arcsec: 0.1 # float --- Lower bound (arcsec/pix) of the wide solve-field scale search.
+    wide_scale_high_arcsec: 5.0 # float --- Upper bound (arcsec/pix) of the wide solve-field scale search.
+
     sextractor_detect_thresh: 1.5 # float --- SExtractor DETECT_THRESH for WCS source detection.
     sextractor_detect_minarea: 5 # int --- SExtractor DETECT_MINAREA for WCS source detection.
     sextractor_detect_maxarea: 0 # int --- SExtractor DETECT_MAXAREA for WCS source detection (0 disables max-area cut).
@@ -453,6 +492,9 @@ default_input:
       search_radius: 0.5 # float --- Search radius (degrees) for crowded-field solving.
 
     crpix_offset: 0.0 # float --- Pixel offset applied to CRPIX when writing WCS (instrument-specific workaround).
+    crpix_fits_convention: False # bool --- Legacy toggle: when True and crpix_offset is unset (null), applies a +0.5 px CRPIX offset for solvers using a different pixel convention. Kept for backward compatibility with old configs; prefer setting crpix_offset directly.
+    allow_crpix_offset_with_preserved_distortion: False # bool --- Allow crpix_offset when the input distortion model is preserved. Offsets are skipped in that mode because the preserved PV/SIP terms are tied to the original reference pixel; True forces the offset anyway.
+    fit_wcs_from_points_sip_degree: null # int|null --- Retained for compatibility: a positive value keeps the solve-field .match/.corr/.axy artifacts on disk (used by the matched-points diagnostics and linear refit); null/0 removes them. The full SIP refit it once selected is no longer available under astropy >= 8.
     cpulimit: 45 # int --- CPU time limit (seconds) for solve attempts.
 
     TNS_BOT_ID: null # str|null --- Optional TNS bot ID (if querying TNS).
