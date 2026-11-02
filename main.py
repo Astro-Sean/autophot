@@ -329,7 +329,9 @@ def _stamp_radial_fwhm(img, x, y, img_fwhm):
     broader than the PSF, i.e. extended, so it reports ``5 * img_fwhm``
     instead of NaN.
     """
-    arr = np.asarray(img, dtype=float)
+    # View, not float64 copy: only isfinite/nan-reductions on cutouts follow,
+    # so any float dtype works and copying the full frame per call is wasted.
+    arr = np.asarray(img)
     if arr.ndim != 2:
         return float("nan")
     ny, nx = arr.shape
@@ -7829,18 +7831,24 @@ def run_photometry():
                 template_sources["y_centroid"] = np.nan
                 image_sources["x_centroid"] = np.nan
                 image_sources["y_centroid"] = np.nan
+                # One full-image isfinite scan per image; _bounded_centroid
+                # would otherwise recompute it for every source attempt.
+                _t_nanmask = ~np.isfinite(template_image)
+                _s_nanmask = ~np.isfinite(image)
                 for idx, row in image_sources.iterrows():
                     center_x, center_y = row["x_pix"], row["y_pix"]
                     box = max(
                         int(np.ceil(ImageFWHM)) * 2 + 1, 7
                     )  # Ensure box size is odd and large enough
                     x_t, y_t = _bounded_centroid(
-                        template_image, center_x, center_y, box, _wander_max
+                        template_image, center_x, center_y, box, _wander_max,
+                        nonfinite_mask=_t_nanmask,
                     )
                     template_sources.at[idx, "x_centroid"] = x_t
                     template_sources.at[idx, "y_centroid"] = y_t
                     x_s, y_s = _bounded_centroid(
-                        image, center_x, center_y, box, _wander_max
+                        image, center_x, center_y, box, _wander_max,
+                        nonfinite_mask=_s_nanmask,
                     )
                     image_sources.at[idx, "x_centroid"] = x_s
                     image_sources.at[idx, "y_centroid"] = y_s
@@ -10625,14 +10633,29 @@ def run_photometry():
                                 # into the centroid, causing cKDTree to raise
                                 # "data must be finite".
                                 _img_arr_finite = np.where(_finite, _img_arr, 0.0)
+                                # One-pass labeled stats: bincount for sizes,
+                                # center_of_mass/maximum with index= for the
+                                # rest.  Labeled pixels came from _bright_mask,
+                                # which excludes non-finite values, so the
+                                # labeled maximum sees no NaNs.
+                                from scipy.ndimage import maximum as _ndi_max
+
+                                _lbl_counts = np.bincount(_labels_bs.ravel())
+                                _idx_bs = np.flatnonzero(_lbl_counts[1:] >= 2) + 1
                                 _bright_centers = []
-                                for _i_bs in range(1, _n_bright + 1):
-                                    _mask_bs = _labels_bs == _i_bs
-                                    if np.sum(_mask_bs) < 2:
-                                        continue
-                                    _cy_bs, _cx_bs = _com(_mask_bs * _img_arr_finite)
-                                    _peak_bs = float(np.max(_img_arr[_mask_bs]))
-                                    _bright_centers.append((_cx_bs, _cy_bs, _peak_bs))
+                                if _idx_bs.size:
+                                    _coms = _com(
+                                        _img_arr_finite, _labels_bs, index=_idx_bs
+                                    )
+                                    _peaks = _ndi_max(
+                                        _img_arr, _labels_bs, index=_idx_bs
+                                    )
+                                    for (_cy_bs, _cx_bs), _peak_bs in zip(
+                                        _coms, _peaks
+                                    ):
+                                        _bright_centers.append(
+                                            (_cx_bs, _cy_bs, float(_peak_bs))
+                                        )
 
                                 if _bright_centers:
                                     _bs_radius = _bs_radius_fwhm * ImageFWHM
@@ -14907,7 +14930,10 @@ def run_photometry():
                         if is_diff_image:
                             # Copy at float32 precision then mask in place - avoids creating a
                             # temporary float64 intermediate that np.where().astype() would produce.
-                            image_for_limits = np.asarray(image, dtype=np.float32)
+                            # np.array(copy=True) is required: asarray returns the same
+                            # buffer when image is already float32, and the NaN fill
+                            # below would then corrupt the shared science image.
+                            image_for_limits = np.array(image, dtype=np.float32, copy=True)
                             image_for_limits[hardware_defects_mask] = np.nan
                             logging.info(
                                 "Limiting magnitude: using hardware_defects_mask (no source masking) for difference image."
@@ -14922,7 +14948,7 @@ def run_photometry():
                             # (NaN, zeros, saturation, bleed, satellite trails).
                             # The injection site filters already reject bright sources
                             # via _filter_pixel_statistics.
-                            image_for_limits = np.asarray(image, dtype=np.float32)
+                            image_for_limits = np.array(image, dtype=np.float32, copy=True)
                             image_for_limits[hardware_defects_mask] = np.nan
                             _src_frac = (
                                 float(np.mean(defects_mask & ~hardware_defects_mask))
