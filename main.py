@@ -80,6 +80,7 @@ import warnings
 from collections import OrderedDict
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
+from typing import Optional
 
 import astropy.wcs as WCS
 # Third-Party Libraries
@@ -706,6 +707,20 @@ def _header_numeric_value(cfg_value, header):
         return None
 
 
+def _analytic_fallback_fwhm(value) -> Optional[float]:
+    """Finite, positive FWHM for the analytic fallback, else None.
+
+    ``ImageFWHM`` can reach the fallback as NaN or non-numeric (a failed
+    FWHM measurement on a sparse field); the caller must then skip the
+    model rather than let ``max(1.0, nan)`` silently build a 1-px PSF.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) and v > 0 else None
+
+
 def _analytic_star_cutouts(image, sources, cutout_n, mask=None):
     """Extract NaN-padded star cutouts for the joint analytic-PSF fit.
 
@@ -813,9 +828,21 @@ def _write_analytic_psf_stamp(
     beta = max(1.1, float(phot_cfg.get("psf_init_moffat_beta", 4.765)))
     fwhm_px = max(1.0, float(fwhm_px))
     cutout_n = int(2 * np.ceil(6.0 * fwhm_px) + 1)
+    try:
+        _stamp_gain = float(resolve_gain_e_per_adu(None, input_yaml))
+    except Exception:
+        _stamp_gain = 1.0
+    if not np.isfinite(_stamp_gain) or _stamp_gain <= 0:
+        _stamp_gain = 1.0
     if stamp is None:
         stamp, _comps = _analytic_psf_stamp(
-            fwhm_px, 1, cutout_n, beta, stars=stars, phot_cfg=phot_cfg
+            fwhm_px,
+            1,
+            cutout_n,
+            beta,
+            stars=stars,
+            phot_cfg=phot_cfg,
+            gain=_stamp_gain,
         )
     data = np.asarray(stamp.data, dtype=float)
     hdr = fits.Header()
@@ -3551,10 +3578,9 @@ def run_photometry():
         # =============================================================================
         #         Attempts WCS redo if requested.
         # =============================================================================
-        # When apply_solved_to_fits is False, run the solver (e.g. for scale) but do NOT
-        # write the solved WCS into the science FITS. Keeps original WCS for alignment/
-        # subtraction (often better when input is in tmp and output in tmp_reduced).
-        apply_solved_to_fits = input_yaml["wcs"].get("apply_solved_to_fits", True)
+        # An adopted WCS solution is always written back to the FITS file -
+        # redo_wcs (or a missing WCS) means the on-disk astrometry is
+        # untrusted, so keeping it would leave disk and memory inconsistent.
         wcs_updated = False
         while input_yaml["wcs"].get("redo_wcs", False):
             allow_fallback_on_fail = bool(
@@ -3569,6 +3595,9 @@ def run_photometry():
                         n_detected_sources=(
                             len(FWHMSources) if FWHMSources is not None else None
                         ),
+                        # x_pix/y_pix detections feed the optional
+                        # verify-input-WCS skip gate (wcs.verify_input_wcs).
+                        detected_xy=FWHMSources,
                     )
                 except Exception as solve_exc:
                     # A crashing solver must not kill a frame that already
@@ -3601,33 +3630,29 @@ def run_photometry():
                         "WCS solve failed and fallback to existing WCS is disabled."
                     )
             else:
-                log_status("Plate solve successful")
-                if apply_solved_to_fits:
-                    header = updated_header
-                    safe_fits_write(fpath, image, header)
-                    invalidate_wcs_cache()  # WCS keywords changed after plate solve
-                    wcs_updated = True
-                else:
-                    # Use solved WCS only to update pixel_scale in YAML; leave FITS header unchanged for better subtraction
-                    try:
-                        _solved_wcs = get_wcs(updated_header)
-                        _xy = proj_plane_pixel_scales(_solved_wcs)
-                        input_yaml["pixel_scale"] = float(_xy[0] * 3600)
-                        logging.info(
-                            "apply_solved_to_fits=False: keeping original WCS in FITS; updated pixel_scale in config only"
-                        )
-                    except Exception as e:
-                        logging.warning(
-                            "Failed to update pixel_scale from solved WCS: %s", e
-                        )
+                _new_solve = bool(
+                    getattr(imageWCS_obj, "solved_new_wcs", False)
+                )
+                log_status(
+                    "Plate solve successful"
+                    if _new_solve
+                    else "Plate solve kept existing WCS"
+                )
+                header = updated_header
+                safe_fits_write(fpath, image, header)
+                invalidate_wcs_cache()  # WCS keywords changed after plate solve
                 break
+        # A freshly adopted solution counts as updated.
+        wcs_updated = wcs_updated or bool(
+            getattr(imageWCS_obj, "solved_new_wcs", False)
+        )
         # Use current header (solved or original) for rest of pipeline
         imageWCS = get_wcs(header)
         if imageWCS is None and updated_header is not None:
             # Try the solved header object if present.
             try:
                 imageWCS = get_wcs(updated_header)
-                if imageWCS is not None and apply_solved_to_fits:
+                if imageWCS is not None:
                     header = updated_header
                     safe_fits_write(fpath, image, header)
                     invalidate_wcs_cache()  # WCS keywords changed after recovery
@@ -4147,30 +4172,6 @@ def run_photometry():
                         except Exception as exc:
                             logging.warning("Alignment offset plot failed: %s", exc)
 
-                        try:
-                            _wcs_apply = input_yaml.get("wcs", {}).get(
-                                "apply_solved_to_fits", True
-                            )
-                            _am = str(
-                                input_yaml.get("template_subtraction", {}).get(
-                                    "alignment_method", ""
-                                )
-                            ).lower()
-                            if not _wcs_apply and _am == "reproject":
-                                logging.warning(
-                                    "alignment_method=reproject but\n"
-                                    "    wcs.apply_solved_to_fits is False:\n"
-                                    "    reprojection uses the WCS **on disk**,\n"
-                                    "    which may differ from a newer plate\n"
-                                    "    solution computed in memory. Expect\n"
-                                    "    residual source misalignment / dipoles.\n"
-                                    "    Fix: set apply_solved_to_fits: True, or\n"
-                                    "    use alignment_method 'astroalign' /\n"
-                                    "    'swarp'."
-                                )
-                        except Exception as e:
-                            logging.warning("Template alignment check failed: %s", e)
-
                         # BUG 107: Measure template FWHM if header value is stale.
                         # Pre-built templates (e.g., gp_template.fits) often have
                         # FWHM=3.0 (the config default) in their header, not the
@@ -4450,6 +4451,10 @@ def run_photometry():
         # the image is resampled and the WCS changes, so we must recalculate.
         if "RA" in unCatalogSources.columns and "DEC" in unCatalogSources.columns:
             try:
+                logging.info(
+                    "Projecting %d catalog positions to pixels via image WCS...",
+                    len(unCatalogSources),
+                )
                 coords = SkyCoord(
                     ra=unCatalogSources["RA"].values * u.deg,
                     dec=unCatalogSources["DEC"].values * u.deg,
@@ -6172,7 +6177,8 @@ def run_photometry():
         # "gridded-epsf-NxM" (empirical, from image sources; suffixed
         # "-understaffed" when the pool was below the normal floor),
         # "analytic-composite"/"analytic-moffat" (composite Moffat
-        # fitted to the sparse pool),
+        # fitted to the sparse pool) / "analytic-canonical" (no usable
+        # fit; profile built from the image FWHM alone),
         # or "none" (aperture-only). Written to the Output CSV so model
         # provenance is never silent in the data products.
         psf_model_kind = "none"
@@ -6415,98 +6421,131 @@ def run_photometry():
                 _an_beta = max(
                     1.1, float(phot_cfg.get("psf_init_moffat_beta", 4.765))
                 )
-                _an_fwhm = max(1.0, float(ImageFWHM))
-                _an_cutout = int(2 * np.ceil(6.0 * _an_fwhm) + 1)
-                _an_stars = _analytic_star_cutouts(
-                    image,
-                    psf_source_pool,
-                    _an_cutout,
-                    mask=hardware_defects_mask,
-                )
-                epsf_model, _ = _analytic_psf_stamp(
-                    _an_fwhm,
-                    1,
-                    _an_cutout,
-                    _an_beta,
-                    stars=_an_stars if _an_stars else None,
-                    phot_cfg=phot_cfg,
-                )
-                if epsf_model is not None and _an_stars:
-                    # One or two stars cannot constrain the wing slope: the
-                    # fit can land on the beta bound and return a model far
-                    # off the measured image FWHM, which then biases the
-                    # fitted fluxes.  The wide discard band is the right
-                    # gate here - a sparse-field Moffat fit reads ~10-15%
-                    # narrower than the empirical FWHM without being
-                    # degenerate; outside it the canonical composite at
-                    # the measured FWHM is the honest model.
-                    from psf import measure_epsf_fwhm_native
-
-                    _an_meas = measure_epsf_fwhm_native(
-                        np.asarray(epsf_model.data, dtype=float), 1
-                    )
-                    _an_lo = float(
-                        phot_cfg.get("psf_epsf_fwhm_discard_min_frac", 0.6)
-                    ) * _an_fwhm
-                    _an_hi = float(
-                        phot_cfg.get("psf_epsf_fwhm_discard_max_frac", 2.0)
-                    ) * _an_fwhm
-                    if not (_an_lo <= _an_meas <= _an_hi):
-                        logging.warning(
-                            "Analytic PSF fit landed at FWHM=%.2f px "
-                            "(image FWHM=%.2f px) on %d stars; using the "
-                            "canonical composite at the measured FWHM.",
-                            _an_meas,
-                            _an_fwhm,
-                            len(_an_stars),
-                        )
-                        epsf_model, _ = _analytic_psf_stamp(
-                            _an_fwhm,
-                            1,
-                            _an_cutout,
-                            _an_beta,
-                            stars=None,
-                        )
-                if epsf_model is not None:
-                    _an_n = 0 if _an_stars is None else len(_an_stars)
-                    psf_model_kind = getattr(
-                        epsf_model, "_autophot_kind", "analytic-moffat"
-                    )
-                    PSFSources = None
-                    do_aperture_ONLY = False
+                _an_fwhm = _analytic_fallback_fwhm(ImageFWHM)
+                if _an_fwhm is None:
                     logging.warning(
-                        "PSF model: analytic composite-Moffat fitted on %d "
-                        "pool stars (FWHM=%.2f px); empirical ePSF "
-                        "unavailable - PSF photometry is low-confidence.",
-                        _an_n,
-                        _an_fwhm,
+                        "Analytic PSF fallback skipped: image FWHM is not "
+                        "finite (%s); continuing aperture-only.",
+                        ImageFWHM,
                     )
-                    # Composite-model diagnostic: per-star cutouts and
-                    # residuals plus the component breakdown - the main
-                    # visual check on what the analytic fit actually did.
+                else:
+                    _an_fwhm = max(1.0, _an_fwhm)
                     try:
-                        from plotting_utils import get_plot_ext
-                        from psf import plot_analytic_psf
+                        _an_gain = float(
+                            resolve_gain_e_per_adu(None, input_yaml)
+                        )
+                    except Exception:
+                        _an_gain = 1.0
+                    if not np.isfinite(_an_gain) or _an_gain <= 0:
+                        _an_gain = 1.0
+                    _an_cutout = int(2 * np.ceil(6.0 * _an_fwhm) + 1)
+                    _an_stars = _analytic_star_cutouts(
+                        image,
+                        psf_source_pool,
+                        _an_cutout,
+                        mask=hardware_defects_mask,
+                    )
+                    epsf_model, _ = _analytic_psf_stamp(
+                        _an_fwhm,
+                        1,
+                        _an_cutout,
+                        _an_beta,
+                        stars=_an_stars if _an_stars else None,
+                        phot_cfg=phot_cfg,
+                        gain=_an_gain,
+                    )
+                    if epsf_model is not None and _an_stars:
+                        # One or two stars cannot constrain the wing slope: the
+                        # fit can land on the beta bound and return a model far
+                        # off the measured image FWHM, which then biases the
+                        # fitted fluxes.  The wide discard band is the right
+                        # gate here - a sparse-field Moffat fit reads ~10-15%
+                        # narrower than the empirical FWHM without being
+                        # degenerate; outside it the canonical composite at
+                        # the measured FWHM is the honest model.
+                        from psf import measure_epsf_fwhm_native
 
-                        _an_png = os.path.join(
-                            write_dir,
-                            f"PSF_Analytic_{os.path.splitext(base_filename)[0]}"
-                            f"{get_plot_ext(input_yaml)}",
+                        _an_meas = measure_epsf_fwhm_native(
+                            np.asarray(epsf_model.data, dtype=float), 1
                         )
-                        plot_analytic_psf(
-                            epsf_model,
-                            stars=_an_stars,
-                            fwhm_native=_an_fwhm,
-                            snr_min=float(
-                                phot_cfg.get("psf_analytic_min_snr", 5.0)
-                            ),
-                            save_path=_an_png,
+                        _an_lo = float(
+                            phot_cfg.get("psf_epsf_fwhm_discard_min_frac", 0.6)
+                        ) * _an_fwhm
+                        _an_hi = float(
+                            phot_cfg.get("psf_epsf_fwhm_discard_max_frac", 2.0)
+                        ) * _an_fwhm
+                        if not (_an_lo <= _an_meas <= _an_hi):
+                            logging.warning(
+                                "Analytic PSF fit landed at FWHM=%.2f px "
+                                "(image FWHM=%.2f px) on %d stars; using the "
+                                "canonical composite at the measured FWHM.",
+                                _an_meas,
+                                _an_fwhm,
+                                len(_an_stars),
+                            )
+                            epsf_model, _ = _analytic_psf_stamp(
+                                _an_fwhm,
+                                1,
+                                _an_cutout,
+                                _an_beta,
+                                stars=None,
+                                phot_cfg=phot_cfg,
+                                ellipticity=getattr(
+                                    epsf_model, "_autophot_ellipticity", None
+                                ),
+                                gain=_an_gain,
+                            )
+                    if epsf_model is not None:
+                        _an_n = 0 if _an_stars is None else len(_an_stars)
+                        psf_model_kind = getattr(
+                            epsf_model, "_autophot_kind", "analytic-moffat"
                         )
-                    except Exception as _an_plot_err:
-                        logging.warning(
-                            "Analytic PSF diagnostic plot failed: %s",
-                            _an_plot_err,
-                        )
+                        PSFSources = None
+                        do_aperture_ONLY = False
+                        if getattr(epsf_model, "_autophot_fitted", False):
+                            logging.warning(
+                                "PSF model: analytic composite-Moffat fitted "
+                                "on %d pool stars (FWHM=%.2f px); empirical "
+                                "ePSF unavailable - PSF photometry is "
+                                "low-confidence.",
+                                _an_n,
+                                _an_fwhm,
+                            )
+                        else:
+                            logging.warning(
+                                "PSF model: canonical composite-Moffat at "
+                                "the image FWHM=%.2f px (%d pool cutouts, "
+                                "no usable fit); empirical ePSF unavailable "
+                                "- PSF photometry is low-confidence.",
+                                _an_fwhm,
+                                _an_n,
+                            )
+                        # Composite-model diagnostic: per-star cutouts and
+                        # residuals plus the component breakdown - the main
+                        # visual check on what the analytic fit actually did.
+                        try:
+                            from plotting_utils import get_plot_ext
+                            from psf import plot_analytic_psf
+
+                            _an_png = os.path.join(
+                                write_dir,
+                                f"PSF_Analytic_{os.path.splitext(base_filename)[0]}"
+                                f"{get_plot_ext(input_yaml)}",
+                            )
+                            plot_analytic_psf(
+                                epsf_model,
+                                stars=_an_stars,
+                                fwhm_native=_an_fwhm,
+                                snr_min=float(
+                                    phot_cfg.get("psf_analytic_min_snr", 5.0)
+                                ),
+                                save_path=_an_png,
+                            )
+                        except Exception as _an_plot_err:
+                            logging.warning(
+                                "Analytic PSF diagnostic plot failed: %s",
+                                _an_plot_err,
+                            )
             except Exception as _an_err:
                 epsf_model = None
                 log_exception(
