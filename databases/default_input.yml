@@ -328,6 +328,7 @@ default_input:
     optimum_radius_outer_std_max: 0.05 # float --- Maximum allowed standard deviation of normalized CoG flux in outer tail.
     optimum_radius_outer_slope_abs_max: 0.03 # float --- Maximum allowed absolute mean slope of normalized CoG in outer tail.
     optimum_radius_undersampled_tail_relax: 2.5 # float --- On undersampled images (FWHM <= undersampled_fwhm_threshold), multiply the outer-tail std/slope tolerances by this factor and add 0.5*(factor-1) to the tail-excess limit; the normalised CoG is derived from few-pixel radii so outer-tail statistics are intrinsically noisier.
+    optimum_radius_max_sources: 250 # int --- Cap on sources fed to the optimum-radius CoG search (the result is a sigma-clipped median, so extra stars add runtime not information). When the pool exceeds this, keep the highest-SNR stars per grid cell so the median still samples the whole field.
 
   wcs:
     solver: astrometry # str --- WCS solver backend (e.g. astrometry, scamp).
