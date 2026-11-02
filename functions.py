@@ -2837,6 +2837,12 @@ def get_image_and_header(fpath):
                 base = os.path.basename(fpath)
                 raise Exception(f"Warning: {base} is not a 2D array (found {getattr(image, 'shape', 'no shape')} data).")
 
+            # Normalize big-endian FITS payloads to native byte order once:
+            # every downstream ufunc on a '>f4'/'>f8' array otherwise pays a
+            # byteswap copy per operation.
+            if image.dtype.byteorder == ">":
+                image = image.astype(image.dtype.newbyteorder("="))
+
             # Use the header from the same HDU as the image data so WCS
             # keywords stay paired with the pixels they describe; merge
             # TELESCOP metadata in from another HDU if needed.
@@ -4431,7 +4437,7 @@ def _keep_floor_cut(current_mask, bad_mask, metric, min_keep):
     return new_mask, int(len(drop)), n_flagged
 
 
-def _bounded_centroid(img, x, y, box, wander_max):
+def _bounded_centroid(img, x, y, box, wander_max, nonfinite_mask=None):
     """Centroid at (x, y), accepted only within wander_max px of the seed.
 
     A centroid landing far from its seed is a centroiding failure (the fit
@@ -4440,7 +4446,13 @@ def _bounded_centroid(img, x, y, box, wander_max):
     failed fit, so the caller keeps the source at its seed position instead
     of trusting a corrupted one.  Returns (nan, nan) when neither centroid
     function produces a bounded result.
+
+    ``nonfinite_mask`` is ``~np.isfinite(img)`` precomputed by the caller;
+    when None it is computed here.  Passing it avoids one full-image scan
+    per call when centroiding many sources on the same image.
     """
+    if nonfinite_mask is None:
+        nonfinite_mask = ~np.isfinite(img)
     for func in (centroid_2dg, centroid_com):
         try:
             x_c, y_c = centroid_sources(
@@ -4449,7 +4461,7 @@ def _bounded_centroid(img, x, y, box, wander_max):
                 [y],
                 box_size=box,
                 centroid_func=func,
-                mask=~np.isfinite(img),
+                mask=nonfinite_mask,
             )
             x_f, y_f = float(x_c[0]), float(y_c[0])
             if (
