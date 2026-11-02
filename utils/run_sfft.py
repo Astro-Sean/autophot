@@ -830,13 +830,20 @@ def run_sfft() -> Optional[int]:
     FITS_DIFF = args.diff or os.path.join(out_dir, f"diff_{os.path.basename(FITS_SCI)}")
 
     # --- Load Headers (Once) ---
-    # Use float64 throughout: SFFT internals operate in float64 and mixing float32
-    # would cause a silent precision downgrade when data is written back to FITS.
+    # Keep the on-disk float dtype (promoting integer data to float32) rather
+    # than forcing float64: these copies feed statistics, the NaN sync below,
+    # and the temp FITS write - all safe at source precision - while float64
+    # would double this wrapper's share of peak memory and also double the
+    # size of the synced FITS that SFFT then loads.
     def get_fits_info(fits_path: str) -> Tuple[fits.Header, np.ndarray]:
-        """Load header and float64 data from a FITS file."""
+        """Load header and image data from a FITS file."""
         with fits.open(fits_path, memmap=False) as hdul:
             header = hdul[0].header.copy()
-            data = np.array(hdul[0].data, dtype=np.float64)
+            data = np.asarray(hdul[0].data)
+            if data.dtype.kind == "f":
+                data = np.array(data)
+            else:
+                data = data.astype(np.float32)
             return header, data
 
     hdr_sci, data_sci = get_fits_info(FITS_SCI)
@@ -890,12 +897,13 @@ def run_sfft() -> Optional[int]:
     _temp_paths_created = []
     try:
         if np.any(combined_invalid_mask):
-            data_sci_sync = data_sci.copy()
-            data_ref_sync = data_ref.copy()
-            data_sci_sync[combined_invalid_mask] = np.nan
-            data_ref_sync[combined_invalid_mask] = np.nan
-            safe_fits_write(_temp_sci_path, data_sci_sync, hdr_sci, overwrite=True)
-            safe_fits_write(_temp_ref_path, data_ref_sync, hdr_ref, overwrite=True)
+            # Fill in place on our private copies: the pixels being forced to
+            # NaN are exactly the ones SFFT must not see, and reusing the same
+            # arrays avoids a second pair of full-frame copies.
+            data_sci[combined_invalid_mask] = np.nan
+            data_ref[combined_invalid_mask] = np.nan
+            safe_fits_write(_temp_sci_path, data_sci, hdr_sci, overwrite=True)
+            safe_fits_write(_temp_ref_path, data_ref, hdr_ref, overwrite=True)
             _temp_paths_created = [_temp_sci_path, _temp_ref_path]
             FITS_SCI = _temp_sci_path
             FITS_REF = _temp_ref_path
@@ -1547,6 +1555,12 @@ def run_sfft() -> Optional[int]:
             f"({int(np.count_nonzero(combined_invalid_mask))}) + source-mask-only "
             f"({n_src_only})."
         )
+
+    # Release the full-frame working buffers before the SFFT call: SFFT's own
+    # FFT/convolution phase is the memory peak of this script, and these arrays
+    # are needed again only for the post-run variance estimate, which reloads
+    # the files actually fed to SFFT from disk.
+    del data_sci, data_ref, invalid_sci, invalid_ref, combined_invalid_mask
 
     # Images ARE background-subtracted before reaching SFFT: the pipeline
     # subtracts a sigma-clipped median from both science and template
@@ -2391,12 +2405,15 @@ def run_sfft() -> Optional[int]:
                 _sci_var = None
                 _ref_var = None
                 try:
-                    _sci_vals = data_sci[
-                        np.isfinite(data_sci) & (data_sci != 0.0)
-                    ].ravel()
-                    _ref_vals = data_ref[
-                        np.isfinite(data_ref) & (data_ref != 0.0)
-                    ].ravel()
+                    # Reload the FITS actually fed to SFFT (the NaN-synced temp
+                    # files when they exist): the in-memory copies were freed
+                    # before the SFFT call to keep its peak memory down.
+                    with fits.open(FITS_SCI, memmap=True) as _hd:
+                        _d = _hd[0].data
+                        _sci_vals = _d[np.isfinite(_d) & (_d != 0.0)].ravel()
+                    with fits.open(FITS_REF, memmap=True) as _hd:
+                        _d = _hd[0].data
+                        _ref_vals = _d[np.isfinite(_d) & (_d != 0.0)].ravel()
                     if len(_sci_vals) > 1000 and len(_ref_vals) > 1000:
                         _q25s, _q75s = np.percentile(_sci_vals, [25.0, 75.0])
                         _q25r, _q75r = np.percentile(_ref_vals, [25.0, 75.0])
@@ -2418,8 +2435,8 @@ def run_sfft() -> Optional[int]:
                             _L = 2 * _kerhw + 1
                             # SFFT transposes images on load (fits.getdata().T),
                             # so its internal N0 = nx (columns), N1 = ny (rows).
-                            # data_sci.shape = (ny, nx), so swap for FromArray.
-                            _ny_img, _nx_img = data_sci.shape
+                            # image shape is (ny, nx), so swap for FromArray.
+                            _ny_img, _nx_img = ny, nx
                             _DK = int(diff_hdr.get("KERORDER", diff_hdr.get("KERPOLY", 0)))
                             _Fpq_raw = diff_hdr.get("BGORDER", diff_hdr.get("BGPOLY", 0))
                             _Fpq = int((_Fpq_raw + 1) * (_Fpq_raw + 2) // 2)
