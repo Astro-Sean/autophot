@@ -2214,6 +2214,42 @@ class AutomatedPhotometry:
                     if download_kind is True:
                         download_kind = "panstarrs"
 
+                    # Guard against the common mistake: user-supplied
+                    # templates in templates/ plus a download request.
+                    # Pipeline downloads always land as
+                    # <band>_template/<survey>_<band>_band_template.fits;
+                    # any other FITS here is user data, and silently
+                    # mixing in downloaded templates is the wrong call.
+                    _dl_pat = re.compile(
+                        r"^(?:panstarrs|sdss|legacy|2mass)_"
+                        r"[a-z0-9.+-]+_band_template\.fits$",
+                        re.IGNORECASE,
+                    )
+                    if os.path.isdir(template_folder):
+                        _user_tpl = []
+                        for _ext in (".fits", ".fit", ".fz", ".fits.gz"):
+                            for _f in Path(template_folder).rglob(f"*{_ext}"):
+                                if not _dl_pat.match(_f.name):
+                                    _user_tpl.append(str(_f))
+                        if _user_tpl:
+                            _user_tpl = sorted(set(_user_tpl))
+                            raise RuntimeError(
+                                "template_subtraction.download_templates is "
+                                f"set ({download_kind}) but user-supplied "
+                                f"templates already exist in {template_folder}:"
+                                "\n    "
+                                + "\n    ".join(_user_tpl[:10])
+                                + (
+                                    f"\n    ... ({len(_user_tpl) - 10} more)"
+                                    if len(_user_tpl) > 10
+                                    else ""
+                                )
+                                + "\nResolve the conflict: set "
+                                "download_templates: False to use the "
+                                "supplied templates, or remove them to "
+                                "download fresh ones."
+                            )
+
                     filters_str = ", ".join(sorted(required_filters)) if required_filters else "None"
                     _log(
                         f"Downloading templates for science image filters: {filters_str}"
