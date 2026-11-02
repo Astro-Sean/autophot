@@ -2865,10 +2865,14 @@ def run_photometry():
 
         if do_trim:
             try:
-                pixel_scale = float(input_yaml.get("pixel_scale", 1.0))  # arcsec/pixel
+                pixel_scale = float(input_yaml.get("pixel_scale", 0.0))  # arcsec/pixel
             except (ValueError, TypeError):
-                pixel_scale = 1.0
+                pixel_scale = 0.0
             if not np.isfinite(pixel_scale) or pixel_scale <= 0:
+                # A guessed plate scale would silently crop the wrong size.
+                logging.warning(
+                    "trim_image: pixel_scale unavailable; assuming 1.0 arcsec/pixel"
+                )
                 pixel_scale = 1.0
 
             image_width_arcmin = image.shape[1] * pixel_scale / 60.0
@@ -2924,10 +2928,11 @@ def run_photometry():
                     )  # Convert arcmin to pixels
 
                     # Create pixel-based cutout using nan_crop to preserve WCS
+                    # (nan_crop promotes non-float dtypes itself).
                     from functions import nan_crop
 
                     image, header = nan_crop(
-                        image.astype(float),
+                        image,
                         header,
                         center_x,
                         center_y,
@@ -2943,7 +2948,7 @@ def run_photometry():
                     from functions import nan_crop
 
                     image, header = nan_crop(
-                        image.astype(float),
+                        image,
                         header,
                         target_x_px,
                         target_y_px,
@@ -2960,7 +2965,8 @@ def run_photometry():
                 center_x = (image.shape[1] - 1) / 2.0
                 center_y = (image.shape[0] - 1) / 2.0
                 logging.info(
-                    "Attempting NaN boundary trimming after 5 arcmin cutout: center=(%.1f, %.1f)",
+                    "Attempting NaN boundary trimming after %.1f arcmin cutout: center=(%.1f, %.1f)",
+                    trim_image,
                     center_x,
                     center_y,
                 )
@@ -2979,7 +2985,7 @@ def run_photometry():
                 )
                 if trim_info["trimmed"]:
                     logging.info(
-                        f"Trimmed NaN boundaries after 5 arcmin cutout: {trim_info['original_shape']} -> {trim_info['trimmed_shape']}"
+                        f"Trimmed NaN boundaries after {trim_image} arcmin cutout: {trim_info['original_shape']} -> {trim_info['trimmed_shape']}"
                     )
                     safe_fits_write(fpath, image, header)
                 else:
@@ -3990,7 +3996,12 @@ def run_photometry():
         x = input_yaml["target_x_pix"]
         y = input_yaml["target_y_pix"]
         in_bounds = (0 <= x < nx) and (0 <= y < ny)
-        target_label = str(input_yaml.get("target_name", "Transient"))
+        target_label = str(
+            input_yaml.get(
+                "target_name_display",
+                input_yaml.get("target_name", "Transient"),
+            )
+        )
         x_center = 0.5 * (nx - 1)
         y_center = 0.5 * (ny - 1)
         dx_center = float(x - x_center)
@@ -4453,12 +4464,21 @@ def run_photometry():
             except Exception as e:
                 logging.warning("Failed to recatalog pixel coordinates: %s", e)
 
+        logging.info(
+            "Cleaning %s catalog (%d rows): quality cuts, cross-match, field limits...",
+            str(selected_catalog_name).upper(),
+            len(unCatalogSources),
+        )
         CatalogSources = Calibrate_Catalog.clean(
             selectedCatalog=unCatalogSources,
             image_wcs=imageWCS,
             catalogName=selected_catalog_name,
             get_local_sources=False,
             border=border,
+        )
+        logging.info(
+            "Catalog cleaning done: %d sequence sources retained.",
+            len(CatalogSources) if CatalogSources is not None else 0,
         )
         # Deduplicate immediately after cleaning to prevent duplicates from propagating
         if CatalogSources is not None and len(CatalogSources) > 0:
@@ -5047,9 +5067,44 @@ def run_photometry():
             optimum_radius = optimum_radius_crowded if crowded_field else 1.7
         elif input_yaml["photometry"].get("find_optimum_radius", True):
             try:
+                # The optimum radius is a sigma-clipped median over the pool:
+                # hundreds of extra stars add runtime, not information.  Keep
+                # the highest-SNR stars per grid cell so the median still
+                # samples the whole field (a flat top-SNR cut would bias it
+                # toward the brightest region).
+                _opt_pool = IsolatedSources
+                _opt_max = int(
+                    input_yaml["photometry"].get("optimum_radius_max_sources", 250)
+                    or 250
+                )
+                if len(_opt_pool) > _opt_max:
+                    _keep = np.arange(len(_opt_pool))
+                    if "SNR" in _opt_pool.columns:
+                        _ncell = max(2, int(np.ceil(np.sqrt(_opt_max / 4))))
+                        _xb = pd.cut(_opt_pool["x_pix"], _ncell, labels=False)
+                        _yb = pd.cut(_opt_pool["y_pix"], _ncell, labels=False)
+                        _per_cell = max(
+                            1, int(np.ceil(_opt_max / (_ncell * _ncell)))
+                        )
+                        _keep = (
+                            _opt_pool.assign(_c=_xb * _ncell + _yb)
+                            .sort_values("SNR", ascending=False)
+                            .groupby("_c", sort=False)
+                            .head(_per_cell)
+                            .index.values
+                        )
+                    else:
+                        _keep = _keep[:_opt_max]
+                    _opt_pool = _opt_pool.loc[_keep]
+                    logging.info(
+                        "Optimum-radius pool: %d -> %d sources (grid cap %d).",
+                        len(IsolatedSources),
+                        len(_opt_pool),
+                        _opt_max,
+                    )
                 IsolatedSources, optimum_radius, scale = (
                     aperture_photometry.measure_optimum_radius(
-                        sources=IsolatedSources,
+                        sources=_opt_pool,
                         plot=True,
                         background_rms=background_rms,
                         n_jobs=input_yaml.get("n_jobs", 1),
