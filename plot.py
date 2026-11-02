@@ -2333,7 +2333,8 @@ class Plot:
             _right = 0.78 if _sc_obj is not None else (0.86 if _has_twin else 0.95)
             fig.subplots_adjust(left=0.12, right=_right, top=0.92, bottom=0.12)
 
-            fig.savefig(save_path, dpi=150, facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
+            fig.savefig(save_path, dpi=150, bbox_inches="tight",
+                        facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
 
             logger.debug("Saved WCS vs PSF offset plot: %s", save_path)
@@ -2780,7 +2781,8 @@ class Plot:
                 _right = 0.88 if _has_twin else 0.95
             fig.subplots_adjust(left=0.10, right=_right, top=0.93, bottom=0.12)
 
-            fig.savefig(save_path, dpi=150, facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
+            fig.savefig(save_path, dpi=150, bbox_inches="tight",
+                        facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
 
             logger.debug("Saved alignment offset plot: %s", save_path)
