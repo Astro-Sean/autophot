@@ -111,7 +111,7 @@ None of these are needed for a basic run, but each unlocks part of the pipeline:
 - **SFFT**: `pip install sfft==1.7.3` - [repo](https://github.com/thomasvrussell/sfft) - [Hu et al. 2022, ApJ 936, 157](https://ui.adsabs.harvard.edu/abs/2022ApJ...936..157H/abstract)
 - **HOTPANTS**: needs cfitsio; `git clone https://github.com/Astro-Sean/hotpants && cd hotpants && make` - [repo](https://github.com/Astro-Sean/hotpants) (fork of acbecker/hotpants with the build fixed for macOS and modern GCC/Clang) - [Becker 2015, ascl:1504.004](https://ui.adsabs.harvard.edu/abs/2015ascl.soft04004B/abstract); method from [Alard & Lupton 1998, ApJ 503, 325](https://ui.adsabs.harvard.edu/abs/1998ApJ...503..325A/abstract)
 - **ZOGY**: nothing to install, it is built in (self-contained numpy implementation) - based on [pmvreeswijk/ZOGY](https://github.com/pmvreeswijk/ZOGY) - [Zackay, Ofek & Gal-Yam 2016, ApJ 830, 27](https://ui.adsabs.harvard.edu/abs/2016ApJ...830...27Z/abstract)
-- **MaxiMask**: CNN defect mask that catches contaminants the heuristic masks miss - worthwhile in crowded fields. Inference is slow on CPU (order a minute per frame) but can run on GPU (`maximask_allow_gpu`). `pip install maximask-and-maxitrack tensorflow`, enable with `use_maximask: True` - [repo](https://github.com/mpaillassa/MaxiMask) - [Paillassa, Bertin & Bouy 2020, A&A 634, A49](https://ui.adsabs.harvard.edu/abs/2020A%26A...634A..49P/abstract)
+- **MaxiMask**: CNN defect mask that catches contaminants the heuristic masks miss; worthwhile in crowded fields. Inference is slow on CPU (order a minute per frame) but can run on GPU (`maximask_allow_gpu`). `pip install maximask-and-maxitrack tensorflow`, enable with `use_maximask: True` - [repo](https://github.com/mpaillassa/MaxiMask) - [Paillassa, Bertin & Bouy 2020, A&A 634, A49](https://ui.adsabs.harvard.edu/abs/2020A%26A...634A..49P/abstract)
 
 <h2 align="center">Alignment</h2>
 
@@ -143,9 +143,9 @@ Shared options under `template_subtraction`:
 - `kernel_order`: SFFT kernel polynomial degree, or `"auto"` (default).
 - `inpaint_template_cores`: fill saturated template cores before subtraction.
 
-Sources on masked pixels are dropped before the kernel fit, and variable sources and the target itself are excluded from scale and PSF estimation. Residual dipoles at bright static cores are caught by `residual_artifact_mask` (on by default): they are masked only when a subpixel misregistration model explains the paired positive/negative lobes, and protected positions - the target plus any variable or additional targets - are never masked. Every alignment attempt is recorded in an `Alignment_<base>.json` manifest next to the science image.
+Sources on masked pixels are dropped before the kernel fit, and variable sources and the target itself are excluded from scale and PSF estimation. Residual dipoles at bright static cores are caught by `residual_artifact_mask` (on by default): they are masked only when a subpixel misregistration model explains the paired positive/negative lobes, and protected positions (the target plus any variable or additional targets) are never masked. Every alignment attempt is recorded in an `Alignment_<base>.json` manifest next to the science image.
 
-Set `do_subtraction: True`, then place one template FITS per filter in `fits_dir/templates/<filter>_template/` - `prepare_template_directory()` builds the layout for you, and `download_panstarrs_template()`, `download_sdss_template()`, `download_legacy_template()`, and `download_2mass_template()` in `templates.py` can fetch them for you.
+Set `do_subtraction: True`, then place one template FITS per filter in `fits_dir/templates/<filter>_template/`: `prepare_template_directory()` builds the layout for you, and `download_panstarrs_template()`, `download_sdss_template()`, `download_legacy_template()`, and `download_2mass_template()` in `templates.py` can fetch them for you.
 
 <h2 align="center">Photometry</h2>
 
@@ -197,7 +197,7 @@ With `use_catalog: auto`, the pipeline scans every image footprint once before p
 
 <h2 align="center">Limiting magnitudes</h2>
 
-Measured by injecting artificial sources and checking recovery, at one or more S/N thresholds. Defaults write `Limit_3p0S2N` and `Limit_5p0S2N` columns; thresholds and injection strategy live under `limiting_magnitude`.
+Limiting magnitudes are measured by injecting artificial sources and checking recovery, at one or more S/N thresholds. Defaults write `Limit_3p0S2N` and `Limit_5p0S2N` columns; thresholds and injection strategy live under `limiting_magnitude`.
 
 <h2 align="center">Post-processing</h2>
 
