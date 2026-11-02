@@ -762,6 +762,44 @@ def _scan_image_footprints(file_list, band_map=None, pixscale_fallback=None):
     return infos
 
 
+def _trim_clamped_region(region, trim_arcmin, target_coords, margin, max_arcmin):
+    """Clamp a footprint query region to the preprocessing.trim_image box.
+
+    When science frames are centre-trimmed before processing, sky outside
+    the target-centred trim square can never be used: regions sized from
+    the full pre-trim footprint fetch unusable catalog rows and template
+    pixels.  Returns a trim-box region when it is smaller than ``region``,
+    otherwise ``region`` unchanged.
+    """
+    try:
+        trim_arcmin = float(trim_arcmin or 0)
+    except (TypeError, ValueError):
+        trim_arcmin = 0.0
+    if trim_arcmin <= 0 or target_coords is None:
+        return region
+    circumscribed = 0.5 * trim_arcmin * np.sqrt(2.0) * float(margin or 1.0)
+    if max_arcmin:
+        circumscribed = min(circumscribed, float(max_arcmin))
+    try:
+        reg_r = (
+            float(region.get("radius_arcmin"))
+            if isinstance(region, dict)
+            else np.inf
+        )
+    except (TypeError, ValueError):
+        reg_r = np.inf
+    if np.isfinite(reg_r) and reg_r <= circumscribed:
+        return region
+    side_deg = (trim_arcmin * float(margin or 1.0)) / 60.0
+    return {
+        "ra": float(target_coords.ra.degree),
+        "dec": float(target_coords.dec.degree),
+        "width_deg": side_deg,
+        "height_deg": side_deg,
+        "radius_arcmin": circumscribed,
+    }
+
+
 # =============================================================================
 # =============================================================================
 # #
@@ -2216,6 +2254,24 @@ class AutomatedPhotometry:
                                     float(size_default) / 2.0, _tpl_min_r
                                 ),
                             )
+                        # A centre-trimmed science frame shrinks the usable
+                        # field to the trim box: clamp the template cutouts
+                        # so no sky is fetched the trimmed frame cannot cover.
+                        _trim_arcmin = (
+                            (default_input.get("preprocessing") or {}).get(
+                                "trim_image", 0
+                            )
+                            or 0
+                        )
+                        if _trim_arcmin:
+                            for _bf in required_filters:
+                                _tpl_regions[str(_bf)] = _trim_clamped_region(
+                                    _tpl_regions.get(str(_bf)),
+                                    _trim_arcmin,
+                                    _tpl_coords,
+                                    _tpl_margin,
+                                    _tpl_max_r,
+                                )
                     except Exception as _tpl_exc:
                         _log(
                             "[WARNING] Footprint-based template sizing "
@@ -2728,6 +2784,33 @@ class AutomatedPhotometry:
                     _global_region = _footprint_region(
                         _image_infos, None, _target_coords, **_rb
                     )
+                    # A centre-trimmed science frame shrinks the usable
+                    # field to the trim box: clamp the query regions so
+                    # prefetch/scans do not fetch the full pre-trim field.
+                    _trim_arcmin = (
+                        (backup_yaml.get("preprocessing") or {}).get(
+                            "trim_image", 0
+                        )
+                        or 0
+                    )
+                    if _trim_arcmin:
+                        _global_region = _trim_clamped_region(
+                            _global_region,
+                            _trim_arcmin,
+                            _target_coords,
+                            _rb["margin"],
+                            _rb["max_arcmin"],
+                        )
+                        _band_regions = {
+                            b: _trim_clamped_region(
+                                r,
+                                _trim_arcmin,
+                                _target_coords,
+                                _rb["margin"],
+                                _rb["max_arcmin"],
+                            )
+                            for b, r in _band_regions.items()
+                        }
                     _prefetch_radius = _global_region["radius_arcmin"]
 
                     _regions_by_cat = {}
@@ -2774,6 +2857,18 @@ class AutomatedPhotometry:
                         if not isinstance(reg, dict):
                             reg = _region_for_catalog(cname)
                         return reg
+
+                    if _trim_arcmin:
+                        _unclamped_rqr = _resolve_query_region
+
+                        def _resolve_query_region(cname):
+                            return _trim_clamped_region(
+                                _unclamped_rqr(cname),
+                                _trim_arcmin,
+                                _target_coords,
+                                _rb["margin"],
+                                _rb["max_arcmin"],
+                            )
 
                     # Only persist when a footprint was actually measured:
                     # leaving the keys unset lets main.py re-size the cone
