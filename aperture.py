@@ -772,6 +772,28 @@ def _measure_worker(args):
         return {"idx": i, "fail_reason": str(exc)}
 
 
+def _cog_cutout(image, error, mask, x_pix, y_pix, outer_r):
+    """Return per-source cutouts of image/error/mask around (x_pix, y_pix).
+
+    photutils' ProfileBase._compute_mask runs several full-frame passes
+    per call (isfinite on data and error, mask ORs, np.any); passing the
+    full image to a per-source CurveOfGrowth makes that scan the dominant
+    cost. Apertures only read pixels within ``outer_r`` of the centre, so
+    a cutout clipped at the array edges gives identical profiles.
+    """
+    half = int(np.ceil(outer_r)) + 2
+    iy, ix = int(np.floor(y_pix)), int(np.floor(x_pix))
+    y0 = max(0, iy - half)
+    y1 = min(image.shape[0], iy + half + 1)
+    x0 = max(0, ix - half)
+    x1 = min(image.shape[1], ix + half + 1)
+    sub_image = image[y0:y1, x0:x1]
+    sub_error = error[y0:y1, x0:x1] if error is not None else None
+    sub_mask = mask[y0:y1, x0:x1] if mask is not None else None
+    xycen = np.array([x_pix - x0, y_pix - y0])
+    return sub_image, sub_error, sub_mask, xycen
+
+
 def _cog_profile_worker(args):
     """
     Compute a normalised Curve-of-Growth profile for one source.
@@ -787,9 +809,11 @@ def _cog_profile_worker(args):
     """
     idx, x_pix, y_pix, fwhm, radii, image, error = args
     try:
-        xycen = np.array([x_pix, y_pix])
+        sub_image, sub_error, _, xycen = _cog_cutout(
+            image, error, None, x_pix, y_pix, float(radii[-1])
+        )
         cog = CurveOfGrowth(
-            image, xycen, radii, error=error, mask=None, method="subpixel"
+            sub_image, xycen, radii, error=sub_error, mask=None, method="subpixel"
         )
         cog.normalize()
         return {"idx": idx, "radii": cog.radii, "profile": cog.profile}
@@ -830,9 +854,18 @@ def _optimum_radius_worker(args):
     )
 
     try:
-        xycen = np.array([x_pix, y_pix])
+        # The environment annulus reaches 4*FWHM; take the cutout large
+        # enough to cover both it and the outermost CoG radius.
+        sub_image, sub_error, sub_mask, xycen = _cog_cutout(
+            image,
+            error,
+            mask,
+            x_pix,
+            y_pix,
+            max(float(radii[-1]), 4.0 * fwhm),
+        )
         cog = CurveOfGrowth(
-            image, xycen, radii, error=error, mask=mask, method="subpixel"
+            sub_image, xycen, radii, error=sub_error, mask=sub_mask, method="subpixel"
         )
         # Normalize by the median of the outermost ~0.5 FWHM of profile
         # bins rather than the profile maximum (photutils' normalize()):
@@ -943,7 +976,7 @@ def _optimum_radius_worker(args):
             if outer_r > inner_r + fwhm * 0.5:
                 annulus = CircularAnnulus(xycen, inner_r, outer_r)
                 amask = annulus.to_mask(method="center")
-                apix = amask.get_values(image)
+                apix = amask.get_values(sub_image)
                 apix = apix[np.isfinite(apix)]
                 if len(apix) >= 10:
                     local_env_std = float(biweight_scale(apix))
@@ -2463,7 +2496,11 @@ class Aperture:
         )
 
         # ---- Parallel CoG analysis -----------------------------------------
-        if n_sources < NSOURCES:
+        # With n_jobs=1, run serially in-process: Pool(1) still pays the
+        # fork plus a one-time pickle of the full image/error/mask through
+        # the initializer, and with the cutout-based worker the serial loop
+        # is cheap enough that IPC overhead dominates.
+        if n_jobs == 1 or n_sources < NSOURCES:
             args_list = [
                 (
                     idx,
@@ -3222,9 +3259,21 @@ class Aperture:
         n_out_of_range = 0
         for _, row in selected.iterrows():
             try:
-                xycen = np.array([row["x_pix"], row["y_pix"]])
+                sub_image, sub_error, sub_mask, xycen = _cog_cutout(
+                    image,
+                    error,
+                    mask,
+                    row["x_pix"],
+                    row["y_pix"],
+                    float(radii[-1]),
+                )
                 cog = CurveOfGrowth(
-                    image, xycen, radii, error=error, mask=mask, method="subpixel"
+                    sub_image,
+                    xycen,
+                    radii,
+                    error=sub_error,
+                    mask=sub_mask,
+                    method="subpixel",
                 )
                 cog.normalize()
                 # np.interp silently clamps to the profile endpoints when
