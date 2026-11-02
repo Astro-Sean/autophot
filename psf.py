@@ -2745,7 +2745,34 @@ def convolve_gridded_epsf_with_kernel(epsf_model, kernels):
         NDData(np.stack(conv_cells, axis=0), meta=meta),
         fill_value=meta["fill_value"],
     )
+    _warm_gridded_spline_cache(model)
     return model, np.stack(native_in, axis=0), np.stack(native_out, axis=0)
+
+
+def _warm_gridded_spline_cache(model):
+    """Pre-fill a `~photutils.psf.GriddedPSFModel` per-plane spline cache.
+
+    photutils builds one RectBivariateSpline per ePSF plane lazily on
+    first evaluation.  PSF photometry deep-copies the model per source
+    and a copy inherits only planes already filled on the shared model,
+    so without warming every fitted source rebuilds its bounding planes
+    on its own copy while the shared cache is never touched.  One
+    evaluate() per fiducial fills every plane once.  Failure is
+    non-fatal: the model is correct either way, just slower.
+    """
+    try:
+        for _fx, _fy in np.asarray(model.grid_xypos, dtype=float):
+            model.evaluate(
+                float(_fx),
+                float(_fy),
+                flux=1.0,
+                x_0=float(_fx),
+                y_0=float(_fy),
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "Gridded ePSF spline warm-up skipped: %s", exc
+        )
 
 
 def epsf_at_position(epsf_model, x, y):
@@ -2764,7 +2791,7 @@ def epsf_at_position(epsf_model, x, y):
     osamp = np.atleast_1d(epsf_model.oversampling)
     k_y = max(1, int(osamp[0]))
     k_x = max(1, int(osamp[-1]))
-    # GriddedPSFModel.origin is (x, y, grid-axis) - the stamp centre.
+    # GriddedPSFModel.origin is the stamp centre in (x, y) array coords.
     ox = float(np.atleast_1d(epsf_model.origin)[0])
     oy = float(np.atleast_1d(epsf_model.origin)[1])
     # evaluate() maps detector offsets to stamp indices via origin, so
@@ -11253,19 +11280,44 @@ class PSF:
                         phot_cfg.get("psf_grid_cell_negfrac_max", 0.10)
                     )
                     _neg_bad = _cell_negfrac > _negfrac_max
+                    # GriddedPSFModel rejects any cube holding non-finite
+                    # values, but the NaN-tolerant gate stats above would
+                    # let a stamp with stray wing NaNs through and kill the
+                    # whole grid at assembly.  Over the fraction limit the
+                    # cell is demoted; under it the strays are zeroed at
+                    # stack time.
+                    _cell_nonfin = float(
+                        1.0 - np.mean(np.isfinite(_cell_data))
+                    )
+                    _nonfin_max = float(
+                        phot_cfg.get("psf_grid_cell_nonfinite_max", 0.10)
+                    )
+                    _nonfin_bad = _cell_nonfin > _nonfin_max
                     if (
                         not np.isfinite(_cell_peak)
                         or _cell_peak <= 0
                         or not np.isfinite(_cell_sum)
                         or _cell_sum <= 0
                         or _neg_bad
+                        or _nonfin_bad
                     ):
-                        _why = (
-                            f"{100.0 * _cell_negfrac:.0f}% negative pixels "
-                            f"vs {100.0 * _negfrac_max:.0f}% allowed"
-                            if _neg_bad
-                            else f"peak {_cell_peak:.3g}, sum {_cell_sum:.3g}"
-                        )
+                        if _nonfin_bad:
+                            _why = (
+                                f"{100.0 * _cell_nonfin:.0f}% non-finite "
+                                f"pixels vs {100.0 * _nonfin_max:.0f}% "
+                                "allowed"
+                            )
+                        elif _neg_bad:
+                            _why = (
+                                f"{100.0 * _cell_negfrac:.0f}% negative "
+                                f"pixels vs {100.0 * _negfrac_max:.0f}% "
+                                "allowed"
+                            )
+                        else:
+                            _why = (
+                                f"peak {_cell_peak:.3g}, "
+                                f"sum {_cell_sum:.3g}"
+                            )
                         log.warning(
                             "Spatially-varying PSF: cell (x%d, y%d) ePSF "
                             "degenerate (%s); treating as unpopulated.",
@@ -11488,11 +11540,28 @@ class PSF:
             "oversampling": canon_sig[1],
             "fill_value": 0.0,
         }
+        # GriddedPSFModel rejects any cube holding non-finite values, and
+        # the per-cell gates tolerate a small fraction of stray wing
+        # NaN/inf pixels - zero them (same convention as clean_epsf_stamp)
+        # so a marginal stamp cannot veto the whole grid.
+        grid_cube = np.stack(
+            [
+                np.nan_to_num(
+                    np.asarray(m.data, float),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+                for m in epsf_list
+            ]
+        )
         gridded = GriddedPSFModel(
-            NDData(np.stack([np.asarray(m.data, float) for m in epsf_list]),
-                   meta=meta),
+            NDData(grid_cube, meta=meta),
             fill_value=0.0,
         )
+        # Pre-fill the per-plane spline cache so the per-source model
+        # copies made during PSF photometry do not each rebuild them.
+        _warm_gridded_spline_cache(gridded)
         self.psf_model_kind = f"gridded-epsf-{nx_c}x{ny_c}"
         self.psf_grid_xypos = xypos
         log.info(
