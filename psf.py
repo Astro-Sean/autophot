@@ -81,7 +81,6 @@ from astropy.utils.exceptions import AstropyUserWarning
 from astropy.stats import SigmaClip, mad_std, sigma_clipped_stats
 from astropy.table import QTable, Table
 from astropy.visualization import ImageNormalize, LinearStretch, ZScaleInterval
-from astropy.convolution import Moffat2DKernel
 from astropy.modeling.fitting import TRFLSQFitter, SLSQPLSQFitter
 
 # ---------------------------------------------------------------------------
@@ -105,14 +104,6 @@ from photutils.psf import (
     ImagePSF,
     GriddedPSFModel,
 )
-
-try:
-    # photutils >=3.1 carries the pixel-integrated analytic PRF
-    # models; earlier releases do not, so the boxcar-integrated
-    # kernel path below remains as the fallback.
-    from photutils.psf import MoffatPRF
-except ImportError:
-    MoffatPRF = None
 
 from photutils.detection import DAOStarFinder
 from photutils.segmentation import detect_threshold
@@ -1242,15 +1233,13 @@ def _epsf_usable(model) -> bool:
 
 
 def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
-    """Pixel-integrated Moffat ImagePSF at the given FWHM.
+    """Point-sampled Moffat ImagePSF at the given effective FWHM.
 
-    astropy's Moffat2DKernel calls the power-law index "alpha"; in
-    astronomy it is conventionally the Moffat beta index.  The continuous
-    Moffat is convolved with the square pixel response so the model is an
-    effective PSF, matching both the ePSF fixed point and what PSF
-    photometry needs on pixel-integrated data.  Without this the model is
-    systematically narrower than the true effective PSF on undersampled
-    data.  The stamp is rescaled to the photutils flux convention
+    The input FWHM is an effective width - it already includes the
+    detector pixel response - so the continuous Moffat is evaluated at
+    the grid positions only.  Convolving with the square pixel response
+    again would double-count the integration and widen the stamp past
+    the data.  The stamp is rescaled to the photutils flux convention
     sum == prod(oversampling); otherwise fitted fluxes come out osamp^2
     too faint (~3 mag at osamp=4).
     """
@@ -1270,38 +1259,14 @@ def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
     if n_stamp % 2 == 0:
         n_stamp += 1
     ctr = (n_stamp - 1) / 2.0
-    if MoffatPRF is not None:
-        # photutils >=3.1.dev integrates the analytic Moffat over the
-        # detector pixel with Gauss-Legendre quadrature - exact where the
-        # boxcar path below is a sampled-kernel approximation (a few x
-        # 1e-4 on the peak at osamp=4).  The stamp is evaluated in
-        # native-pixel units so each grid value is the flux through the
-        # detector-pixel square centred there - the ePSF convention.
-        alpha_native = float(fwhm) / (
-            2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0)
-        )
-        yy, xx = np.indices((n_stamp, n_stamp))
-        model = MoffatPRF(
-            flux=1.0,
-            x_0=ctr / osamp,
-            y_0=ctr / osamp,
-            alpha=max(alpha_native, 1e-6),
-            beta=float(beta),
-        )
-        data = model(xx / osamp, yy / osamp)
-        total = float(np.nansum(data))
-        if np.isfinite(total) and total > 0:
-            data = data / total
-        data = data * float(osamp) ** 2
-        return ImagePSF(data=data, x_0=ctr, y_0=ctr, oversampling=osamp)
-    gamma = (osamp * fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0))
-    kernel = Moffat2DKernel(
-        gamma=max(float(gamma), 1e-6),
-        alpha=float(beta),
-        x_size=n_stamp,
-        y_size=n_stamp,
-    )
-    data = pixel_integrate_oversampled(kernel.array, osamp)
+    # gamma in native pixels; grid offsets convert via / osamp.
+    gamma = float(fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0))
+    yy, xx = np.indices((n_stamp, n_stamp))
+    rr = np.hypot((xx - ctr) / osamp, (yy - ctr) / osamp)
+    data = (1.0 + (rr / max(float(gamma), 1e-6)) ** 2) ** (-beta)
+    total = float(np.nansum(data))
+    if np.isfinite(total) and total > 0:
+        data = data / total
     data = data * float(osamp) ** 2
     return ImagePSF(data=data, x_0=ctr, y_0=ctr, oversampling=osamp)
 
@@ -1553,6 +1518,7 @@ def _fit_moffat_composite_full(
     component_offsets=True,
     offset_max_fwhm=0.5,
     snr_min=5.0,
+    gain=1.0,
 ):
     """Joint composite-Moffat fit over every usable star cutout.
 
@@ -1580,6 +1546,14 @@ def _fit_moffat_composite_full(
     filtered the same way; ``(None, [])`` on failure.
     """
     from scipy.optimize import least_squares
+
+    # Cutout data are ADU: Var(counts_ADU) = counts_ADU / gain, so the
+    # Poisson term below needs a real e-/ADU scale.  A missing or junk
+    # gain must not kill the noise model - 1.0 is the pessimistic
+    # electron-per-ADU default used elsewhere in the pipeline.
+    gain = float(gain)
+    if not np.isfinite(gain) or gain <= 0:
+        gain = 1.0
 
     infos = []
     for s in stars:
@@ -1651,14 +1625,17 @@ def _fit_moffat_composite_full(
 
     def _model_sigma(m, info):
         # Per-pixel noise in flux-normalised units: sky sigma plus the
-        # source Poisson term (Var(v) = counts/flux^2 = v/flux, taken
-        # on the model so the weight itself is noise-free).
+        # source Poisson term.  The cutout is in ADU, so
+        # Var(v) = v_ADU / (gain * flux^2) = v / (gain * flux), taken
+        # on the model so the weight itself is noise-free.
         _sky = info.get("sigma_norm", np.nan)
         if not np.isfinite(_sky) or _sky <= 0:
             _sky = 1.4826 * float(np.nanmedian(np.abs(info["v"])))
         if not np.isfinite(_sky) or _sky <= 0:
             _sky = 1e-3
-        return np.sqrt(_sky**2 + np.maximum(m, 0.0) / info["flux"])
+        return np.sqrt(
+            _sky**2 + np.maximum(m, 0.0) / (info["flux"] * gain)
+        )
 
     def _resid(p, k, step):
         comps = [
@@ -1867,6 +1844,7 @@ def _fit_moffat_composite(
     component_offsets=True,
     offset_max_fwhm=0.5,
     snr_min=5.0,
+    gain=1.0,
 ):
     """Fit a sum of Moffats to the stacked PSF-star cutouts.
 
@@ -1893,6 +1871,7 @@ def _fit_moffat_composite(
         component_offsets=component_offsets,
         offset_max_fwhm=offset_max_fwhm,
         snr_min=snr_min,
+        gain=gain,
     )
     return comps
 
@@ -1924,12 +1903,17 @@ def _default_moffat_composite(fwhm, beta):
 def _composite_moffat_psf(components, oversampling, cutout_n, ellipticity=None):
     """ImagePSF stamp from a sum-of-Moffats profile.
 
-    Same conventions as ``_analytic_moffat_psf``: the continuous profile
-    is evaluated on the oversampled grid, pixel-integrated, and rescaled
-    to ``sum == prod(oversampling)``.  Component ``gamma`` values are in
-    native pixels, so radii are converted from grid units before
-    evaluation.  The stamp carries ``_autophot_kind`` for the
-    PSFBUILD/psf_model provenance record.
+    The components already describe the *effective* PSF: the composite
+    fit evaluates the continuous profile at pixel centres against
+    pixel-integrated star cutouts, and the canonical profile is built
+    from the measured image FWHM, which is likewise an effective width.
+    The stamp is therefore point-sampled on the oversampled grid -
+    convolving with the pixel response again would double-count the
+    integration and widen the model past the data.  Component ``gamma``
+    values are in native pixels, so radii are converted from grid units
+    before evaluation.  Rescaled to ``sum == prod(oversampling)`` per
+    the photutils flux convention.  The stamp carries
+    ``_autophot_kind`` for the PSFBUILD/psf_model provenance record.
     """
     osamp = max(1, int(oversampling))
     # EPSFBuilder requires the ePSF grid to span each star cutout, plus one
@@ -1940,52 +1924,13 @@ def _composite_moffat_psf(components, oversampling, cutout_n, ellipticity=None):
         n += 1
     ctr = (n - 1) / 2.0
     yy, xx = np.indices((n, n))
-    data = None
-    used_prf = False
-    if ellipticity is None and MoffatPRF is not None:
-        # A circular sum-of-Moffats is a sum of MoffatPRFs, each giving
-        # the exact analytic integral over a detector pixel
-        # (Gauss-Legendre quadrature) - including at osamp=1, where the
-        # boxcar path below samples the continuous profile without
-        # integrating.  Centre offsets become per-component x_0/y_0;
-        # comps carry peak amplitude, so flux = amp*pi*gamma^2/(beta-1).
-        parts = []
-        for c in components:
-            a, g, b = float(c[0]), max(float(c[1]), 1e-6), float(c[2])
-            if not (np.isfinite(a) and np.isfinite(b) and a > 0 and b > 1.0):
-                parts = None
-                break
-            ox, oy = (
-                (float(c[3]), float(c[4])) if len(c) > 4 else (0.0, 0.0)
-            )
-            parts.append(
-                MoffatPRF(
-                    flux=a * np.pi * g**2 / (b - 1.0),
-                    x_0=ctr / osamp + ox,
-                    y_0=ctr / osamp + oy,
-                    alpha=g,
-                    beta=b,
-                )
-            )
-        if parts:
-            data = np.zeros((n, n), dtype=float)
-            for mdl in parts:
-                data = data + np.asarray(
-                    mdl(xx / osamp, yy / osamp), dtype=float
-                )
-            used_prf = True
-    if data is None:
-        # The fitted gammas are intrinsic (de-elongated) radii, so the stamp
-        # is evaluated on the same elliptical metric to restore the true
-        # 2-D shape - a trailed/defocused PSF stays elongated.  Component
-        # centre offsets (grid units) represent the asymmetry the fit found.
-        data = _moffat_comps_image(
-            (xx - ctr) / osamp, (yy - ctr) / osamp, components, ellipticity
-        )
-        data = pixel_integrate_oversampled(data, osamp)
-    # pixel_integrate_oversampled only normalises when it convolves; at
-    # osamp==1 it returns the raw profile, so normalise unconditionally
-    # before the photutils flux-convention rescale.
+    # The fitted gammas are intrinsic (de-elongated) radii, so the stamp
+    # is evaluated on the same elliptical metric to restore the true
+    # 2-D shape - a trailed/defocused PSF stays elongated.  Component
+    # centre offsets (native pixels) represent the asymmetry the fit found.
+    data = _moffat_comps_image(
+        (xx - ctr) / osamp, (yy - ctr) / osamp, components, ellipticity
+    )
     total = float(np.nansum(data))
     if np.isfinite(total) and total > 0:
         data = data / total
@@ -1995,7 +1940,7 @@ def _composite_moffat_psf(components, oversampling, cutout_n, ellipticity=None):
         "analytic-composite" if len(components) > 1 else "analytic-moffat"
     )
     stamp._autophot_ellipticity = ellipticity
-    stamp._autophot_integration = "moffatprf" if used_prf else "boxcar"
+    stamp._autophot_integration = "effective"
     # Kept on the stamp so the analytic diagnostic plot can draw the
     # per-component lines; _autophot_fitted is set True by callers that
     # fitted (rather than canonical) components.
@@ -2016,28 +1961,34 @@ def _analytic_psf_stamp(
     stars=None,
     max_components=3,
     phot_cfg=None,
+    ellipticity=None,
+    gain=1.0,
 ):
     """Analytic PSF model and its fitted components.
 
     With ``stars`` a multi-Moffat composite is fitted to the cutouts
     (joint fit: shared shape, per-star position and amplitude free);
-    without them the fixed canonical composite is used.  Returns
-    ``(stamp, components)``; ``components`` is the canonical fallback
-    when the fit fails.
+    without them the fixed canonical composite is used.  ``ellipticity``
+    is the caller's ``(q, theta)`` fallback - a measured ensemble value
+    wins when stars are present, and the caller's value applies when no
+    measurement exists.  ``gain`` (e-/ADU) sets the Poisson term of the
+    fit noise model.  Returns ``(stamp, components)``; ``components``
+    is the canonical fallback when the fit fails.
     """
     cfg = phot_cfg or {}
     comps = None
     sfits = None
-    ellipticity = None
     fitted = False
     if stars is not None and len(stars) > 0:
         try:
-            ellipticity = _ensemble_ellipticity(stars, fwhm)
+            ell = _ensemble_ellipticity(stars, fwhm)
         except Exception as _exc:
             logger.debug(
                 "Ensemble ellipticity failed in stamp seed: %s", _exc
             )
-            ellipticity = None
+            ell = None
+        if ell is not None:
+            ellipticity = ell
         try:
             comps, sfits = _fit_moffat_composite_full(
                 stars,
@@ -2054,6 +2005,7 @@ def _analytic_psf_stamp(
                     cfg.get("psf_analytic_offset_max_fwhm", 0.5)
                 ),
                 snr_min=float(cfg.get("psf_analytic_min_snr", 5.0)),
+                gain=gain,
             )
             fitted = comps is not None
         except Exception as _exc:
@@ -2077,6 +2029,39 @@ def _analytic_psf_stamp(
         )
         fitted = False
         sfits = None
+    if not fitted:
+        # The canonical composite is built from the measured image FWHM,
+        # so the delivered stamp must measure that width under the same
+        # estimator the caller checks.  The raw composite reads a few
+        # percent wide (wing flux lifts the half-max radius, and the
+        # sampled-profile estimator carries its own bias at small FWHM),
+        # so the component widths are scaled once - the profile FWHM is
+        # linear in a common gamma scale.
+        _meas = measure_epsf_fwhm_native(
+            np.asarray(stamp.data, dtype=float),
+            int(np.atleast_1d(stamp.oversampling)[0]),
+        )
+        if (
+            np.isfinite(_meas)
+            and _meas > 0
+            and np.isfinite(fwhm)
+            and fwhm > 0
+        ):
+            _s = float(fwhm) / _meas
+            if abs(_s - 1.0) > 1e-3:
+                comps_stamp = [
+                    (c[0], float(c[1]) * _s) + tuple(c[2:]) for c in comps
+                ]
+                stamp = _composite_moffat_psf(
+                    comps_stamp,
+                    oversampling,
+                    cutout_n,
+                    ellipticity=ellipticity,
+                )
+        # _composite_moffat_psf labels by component count; an unfitted
+        # stamp is the canonical profile whatever it contains, and the
+        # kind string is the psf_model provenance column.
+        stamp._autophot_kind = "analytic-canonical"
     stamp._autophot_fitted = fitted
     stamp._autophot_star_fits = sfits
     return stamp, comps
@@ -9761,6 +9746,9 @@ class PSF:
                         snr_min=float(
                             phot_cfg.get("psf_analytic_min_snr", 5.0)
                         ),
+                        # `gain` was resolved for this build above and
+                        # is already validated finite > 0.
+                        gain=float(gain),
                     )
                 )
             except Exception as _af_exc:
