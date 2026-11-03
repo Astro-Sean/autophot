@@ -497,6 +497,8 @@ default_input:
     allow_crpix_offset_with_preserved_distortion: False # bool --- Allow crpix_offset when the input distortion model is preserved. Offsets are skipped in that mode because the preserved PV/SIP terms are tied to the original reference pixel; True forces the offset anyway.
     fit_wcs_from_points_sip_degree: null # int|null --- Retained for compatibility: a positive value keeps the solve-field .match/.corr/.axy artifacts on disk (used by the matched-points diagnostics and linear refit); null/0 removes them. The full SIP refit it once selected is no longer available under astropy >= 8.
     cpulimit: 45 # int --- CPU time limit (seconds) for solve attempts.
+    late_cpulimit: 120 # int --- CPU time limit (seconds) for the later solve retries (wide scale bounds, no-SExtractor pass); they sweep more index tiles than the hinted tries.
+    blind_cpulimit: 300 # int --- CPU time limit (seconds) for the position-free blind solve; a sky-wide search needs minutes, the hinted cap gives it no chance.
 
     TNS_BOT_ID: null # str|null --- Optional TNS bot ID (if querying TNS).
     TNS_BOT_NAME: null # str|null --- Optional TNS bot name (if querying TNS).
