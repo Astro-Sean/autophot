@@ -122,6 +122,10 @@ def _wcs_cfg_bool(cfg: dict, key: str, default: bool = False) -> bool:
     return int(v)
 
 
+class AstrometryIndexError(RuntimeError):
+    """solve-field reports no usable index files (empty/missing data dir)."""
+
+
 @contextmanager
 def silence_astropy_wcs_info():
     """
@@ -1933,7 +1937,27 @@ class WCSSolver:
                 if timed_out:
                     logger.warning("solve-field exceeded timeout (%s s)", timeout_sec)
             self.clean_log(logpath)
+            # An unreadable or empty index directory means every remaining
+            # attempt fails identically; stop the solve rather than burn
+            # the rest of the cpulimit budget on guaranteed failures.
+            try:
+                with open(logpath, errors="replace") as _chk:
+                    _sf_log = _chk.read()
+            except OSError:
+                _sf_log = ""
+            if (
+                "failed to open index directory" in _sf_log
+                or "must list at least one index" in _sf_log
+            ):
+                raise AstrometryIndexError(
+                    "astrometry.net index files are missing or unreadable "
+                    f"(see {logpath}); solve-field cannot run. Restore the "
+                    "index files (scripts/download_astrometry_indexes.py) "
+                    "or fix add_path in astrometry.cfg."
+                )
             return os.path.isfile(wcs_file)
+        except AstrometryIndexError:
+            raise
         except Exception as e:
             log_warning_from_exception(logger, "solve-field run failed", e)
             return False
@@ -2931,6 +2955,15 @@ class WCSSolver:
             if cpulimit is not None
             else _wcs_cfg_float(wcs_cfg, "cpulimit", 45.0)
         )
+        # Later retries get a bigger budget: a hinted solve answers fast or
+        # not at all, while wide-scale and blind sweeps need real CPU time
+        # before they can be called a genuine failure.
+        late_timeout_sec = max(
+            timeout_sec, _wcs_cfg_float(wcs_cfg, "late_cpulimit", 120.0)
+        )
+        blind_timeout_sec = max(
+            timeout_sec, _wcs_cfg_float(wcs_cfg, "blind_cpulimit", 300.0)
+        )
         downsample = (
             int(downsample)
             if downsample is not None
@@ -3368,15 +3401,36 @@ class WCSSolver:
                 else:
                     logger.warning("Could not verify WCS - proceeding to blind solve")
 
+            def _with_solve_cpulimit(args_list, budget_sec):
+                # common_args bakes in the hinted-attempt cpulimit; late
+                # strategies swap in their own budget instead of rebuilding
+                # the whole arg list.
+                out = list(args_list)
+                try:
+                    _i = out.index("--cpulimit")
+                    out[_i + 1] = str(int(budget_sec))
+                except ValueError:
+                    out += ["--cpulimit", str(int(budget_sec))]
+                return out
+
             def _attempt_solve_with_args(
                 scale_args_use: list,
                 label: str,
                 pos_hint=None,
                 input_path: str = None,
                 allow_sextractor: bool = True,
+                timeout_override: float | None = None,
             ) -> None:
                 nonlocal _solved_pos_hint
                 _solved_pos_hint = pos_hint
+                # Late strategies carry a bigger CPU budget; a distinct
+                # name keeps timeout_sec a closure read - assigning it here
+                # would make it function-local and break the hinted path.
+                _attempt_timeout = (
+                    float(timeout_override)
+                    if timeout_override is not None
+                    else timeout_sec
+                )
                 # An xylist input replaces the image path (the last common
                 # arg); the solver then skips extraction entirely.
                 _base_args = common_args
@@ -3402,6 +3456,7 @@ class WCSSolver:
                         + ["--tweak-order", str(tweak_order), "--no-verify"]
                         + scale_args_use
                     )
+                    args = _with_solve_cpulimit(args, _attempt_timeout)
                     if _use_sex_here:
                         # XWIN_IMAGE/YWIN_IMAGE = weighted centroid, more accurate than X_IMAGE/Y_IMAGE
                         args += [
@@ -3419,7 +3474,7 @@ class WCSSolver:
                             "--sort-ascending",
                         ]
                     if self._run_solve_field(
-                        args, wcs_file, timeout_sec, astrometry_log_fpath
+                        args, wcs_file, _attempt_timeout, astrometry_log_fpath
                     ):
                         logger.log(
                             STATUS,
@@ -3449,6 +3504,9 @@ class WCSSolver:
                                             + ["--tweak-order", str(_lower), "--no-verify"]
                                             + scale_args_use
                                         )
+                                        _lower_args = _with_solve_cpulimit(
+                                            _lower_args, _attempt_timeout
+                                        )
                                         if _use_sex_here:
                                             _lower_args += [
                                                 "--use-source-extractor",
@@ -3471,7 +3529,7 @@ class WCSSolver:
                                         )
                                         if self._run_solve_field(
                                             _lower_args, wcs_file,
-                                            timeout_sec, astrometry_log_fpath
+                                            _attempt_timeout, astrometry_log_fpath
                                         ):
                                             try:
                                                 with fits.open(wcs_file) as _lh:
@@ -3516,7 +3574,7 @@ class WCSSolver:
                                             tweak_order,
                                         )
                                         self._run_solve_field(
-                                            args, wcs_file, timeout_sec,
+                                            args, wcs_file, _attempt_timeout,
                                             astrometry_log_fpath
                                         )
                                     # Still zero SIP: retry once with lower
@@ -3546,7 +3604,7 @@ class WCSSolver:
                                                 )
                                                 if self._run_solve_field(
                                                     _nsigma_args, wcs_file,
-                                                    timeout_sec, astrometry_log_fpath
+                                                    _attempt_timeout, astrometry_log_fpath
                                                 ):
                                                     try:
                                                         with fits.open(wcs_file) as _nh:
@@ -3694,7 +3752,7 @@ class WCSSolver:
                                             )
                                             if self._run_solve_field(
                                                 _lower_args, wcs_file,
-                                                timeout_sec, astrometry_log_fpath
+                                                _attempt_timeout, astrometry_log_fpath
                                             ):
                                                 try:
                                                     with fits.open(wcs_file) as _lh:
@@ -3766,7 +3824,7 @@ class WCSSolver:
                                                 tweak_order,
                                             )
                                             self._run_solve_field(
-                                                args, wcs_file, timeout_sec,
+                                                args, wcs_file, _attempt_timeout,
                                                 astrometry_log_fpath
                                             )
                                     else:
@@ -3861,6 +3919,11 @@ class WCSSolver:
                             label=_label,
                             pos_hint=_hint,
                             allow_sextractor=not starved,
+                            # No pixel scale means the first pass is already
+                            # the wide search, so it gets the late budget.
+                            timeout_override=None
+                            if (pixel_scale and pixel_scale > 0)
+                            else late_timeout_sec,
                         )
                         if os.path.isfile(wcs_file):
                             return True
@@ -3889,6 +3952,7 @@ class WCSSolver:
                                 label="wide scale (dropped pixel-scale hint)",
                                 pos_hint=_hint,
                                 allow_sextractor=not starved,
+                                timeout_override=late_timeout_sec,
                             )
                             if os.path.isfile(wcs_file):
                                 return True
@@ -3929,10 +3993,13 @@ class WCSSolver:
                                 ]
                                 + _sa
                             )
+                            args_no_sex = _with_solve_cpulimit(
+                                args_no_sex, late_timeout_sec
+                            )
                             if self._run_solve_field(
                                 args_no_sex,
                                 wcs_file,
-                                timeout_sec,
+                                late_timeout_sec,
                                 astrometry_log_fpath,
                             ):
                                 logger.log(
@@ -3971,6 +4038,9 @@ class WCSSolver:
                                 ]
                                 + _soa
                             )
+                            args_blind = _with_solve_cpulimit(
+                                args_blind, blind_timeout_sec
+                            )
                             if use_sextractor and sextractor_cmd:
                                 args_blind += [
                                     "--use-source-extractor",
@@ -3989,7 +4059,7 @@ class WCSSolver:
                             if self._run_solve_field(
                                 args_blind,
                                 wcs_file,
-                                timeout_sec,
+                                blind_timeout_sec,
                                 astrometry_log_fpath,
                             ):
                                 logger.log(
@@ -4041,6 +4111,9 @@ class WCSSolver:
                         pos_hint=_hint,
                         input_path=xyls_input,
                         allow_sextractor=False,
+                        timeout_override=None
+                        if (pixel_scale and pixel_scale > 0)
+                        else late_timeout_sec,
                     )
                     if os.path.isfile(wcs_file):
                         return True
@@ -4061,6 +4134,7 @@ class WCSSolver:
                             pos_hint=_hint,
                             input_path=xyls_input,
                             allow_sextractor=False,
+                            timeout_override=late_timeout_sec,
                         )
                         if os.path.isfile(wcs_file):
                             return True
