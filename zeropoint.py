@@ -734,6 +734,15 @@ class Zeropoint:
         """
         logger.info(log_step("Zeropoint: clean sequence stars"))
 
+        # An absent catalog is a valid state (empty query result or all
+        # rows dropped upstream) - pass it through rather than crash on
+        # sources.columns below.
+        if sources is None or len(sources) == 0:
+            logger.warning(
+                "No catalog sources to clean; returning the input unchanged."
+            )
+            return sources
+
         try:
             # Resolve magnitude limits from config when not supplied explicitly.
             zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
@@ -2884,6 +2893,19 @@ class Zeropoint:
 
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
+
+            # An absent catalog is a valid state (empty query result or
+            # all rows dropped upstream): report the empty fallback ZP
+            # (flagged unreliable) instead of crashing on catalog.columns.
+            if catalog is None or len(catalog) == 0:
+                logger.warning(
+                    "No catalog sources for zeropoint fit; returning "
+                    "empty fallback (flagged unreliable)."
+                )
+                return catalog, self._fallback_zeropoint(
+                    catalog if catalog is not None else pd.DataFrame(),
+                    use_filter,
+                )
 
             required = [
                 "flux_AP",
