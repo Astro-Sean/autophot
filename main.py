@@ -2536,7 +2536,31 @@ def run_photometry():
                         header.get("CTYPE1", "N/A"),
                         header.get("CTYPE2", "N/A"),
                     )
+                    # astropy rejected the header WCS, but some products
+                    # (e.g. pswarp) still carry valid CD/CDELT cards - the
+                    # raw matrix still beats the telescope.yml value, so
+                    # try it before falling back.
                     pixel_scale_candidate = np.nan
+                    try:
+                        if all(
+                            k in header
+                            for k in ("CD1_1", "CD1_2", "CD2_1", "CD2_2")
+                        ):
+                            _det = abs(
+                                float(header["CD1_1"]) * float(header["CD2_2"])
+                                - float(header["CD1_2"]) * float(header["CD2_1"])
+                            )
+                            if _det > 0:
+                                pixel_scale_candidate = _det**0.5 * 3600.0
+                        if (
+                            not np.isfinite(pixel_scale_candidate)
+                            and "CDELT1" in header
+                        ):
+                            pixel_scale_candidate = (
+                                abs(float(header["CDELT1"])) * 3600.0
+                            )
+                    except (TypeError, ValueError):
+                        pixel_scale_candidate = np.nan
                 else:
                     xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
                     if xy_pixel_scales is not None and len(xy_pixel_scales) > 0:
@@ -4498,8 +4522,33 @@ def run_photometry():
                 )
         if CatalogSources is None or len(CatalogSources) == 0:
             logging.warning(
-                "No catalog sources available after cleaning; skipping catalog-based calibration for this image."
+                "Catalog '%s' yielded no usable sources for band %s: every "
+                "row was dropped during cleaning (often an all-NaN band "
+                "column in a stale cache, or a band the catalog does not "
+                "cover). Skipping catalog-based calibration for this image.",
+                str(selected_catalog_name).upper(),
+                imageFilter,
             )
+            if not input_yaml.get(
+                "validate_fits_headers_non_interactive", False
+            ):
+                try:
+                    _resp = (
+                        input(
+                            f"No catalog sources for band {imageFilter} "
+                            f"from '{selected_catalog_name}'. Continue "
+                            "without catalog calibration? [Y/n]: "
+                        )
+                        .strip()
+                        .lower()
+                    )
+                except (EOFError, OSError):
+                    _resp = ""
+                if _resp in ("n", "no"):
+                    raise RuntimeError(
+                        f"Aborted: catalog '{selected_catalog_name}' has no "
+                        f"usable {imageFilter} sources."
+                    )
             CatalogSources = None
         else:
             if ("x_pix" not in CatalogSources.columns) or (
@@ -7109,16 +7158,27 @@ def run_photometry():
                 )
 
             # Use the FITS filename stem for consistent naming.
-            CatalogSources.to_csv(
-                os.path.join(cur_dir, f"ImageCalib_Template_{input_yaml['base']}.csv"),
-                index=False,
-                float_format="%.6f",
-            )
-            IsolatedSources.to_csv(
-                os.path.join(cur_dir, f"PSFSources_Template_{input_yaml['base']}.csv"),
-                index=False,
-                float_format="%.6f",
-            )
+            # Both frames can be absent when the catalog query produced no
+            # calibrators - skip the writes rather than abort the whole
+            # template calibration.
+            if CatalogSources is not None:
+                CatalogSources.to_csv(
+                    os.path.join(
+                        cur_dir,
+                        f"ImageCalib_Template_{input_yaml['base']}.csv",
+                    ),
+                    index=False,
+                    float_format="%.6f",
+                )
+            if IsolatedSources is not None:
+                IsolatedSources.to_csv(
+                    os.path.join(
+                        cur_dir,
+                        f"PSFSources_Template_{input_yaml['base']}.csv",
+                    ),
+                    index=False,
+                    float_format="%.6f",
+                )
 
             safe_fits_write(os.path.join(cur_dir, newBasename), image, header)
             logging.info("\n\nEnd of %s template calibration\n\n", imageFilter)
