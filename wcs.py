@@ -17,6 +17,7 @@ import warnings
 import subprocess
 import numpy as np
 import tempfile
+import time
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -1967,6 +1968,22 @@ class WCSSolver:
         logpath: str,
     ) -> bool:
         """Run solve-field with given args; return True if wcs_file was created."""
+        # Shared cascade budget: each attempt clamps to the time remaining
+        # and the retries stop once it is spent, so an unsolvable field
+        # gives up in bounded time instead of burning every per-attempt
+        # cpulimit.  None means uncapped (budget disabled or unset).
+        deadline = getattr(self, "_solve_deadline", None)
+        if deadline is not None:
+            remaining = float(deadline) - time.monotonic()
+            if remaining <= 0:
+                if not getattr(self, "_solve_budget_warned", False):
+                    logger.warning(
+                        "solve-field total time budget exhausted; "
+                        "skipping remaining solve attempts"
+                    )
+                    self._solve_budget_warned = True
+                return False
+            timeout_sec = min(float(timeout_sec), remaining)
         try:
             logf = open(logpath, "a", encoding="utf-8")
             logf.write(" ".join(map(str, args)) + "\n")
@@ -3031,6 +3048,26 @@ class WCSSolver:
         blind_timeout_sec = max(
             timeout_sec, _wcs_cfg_float(wcs_cfg, "blind_cpulimit", 300.0)
         )
+        # Shared wall-clock budget for every solve-field attempt in this
+        # call (all retries, tweak orders, and downsample levels).  Without
+        # it a field that fails everywhere burns each per-attempt cpulimit
+        # in sequence - tens of minutes to hours.  null or <=0 disables.
+        try:
+            _total_budget_sec = float(
+                wcs_cfg.get("solve_field_total_budget", 1800.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring invalid wcs.solve_field_total_budget=%r.",
+                wcs_cfg.get("solve_field_total_budget"),
+            )
+            _total_budget_sec = 0.0
+        self._solve_deadline = (
+            time.monotonic() + _total_budget_sec
+            if _total_budget_sec > 0
+            else None
+        )
+        self._solve_budget_warned = False
         downsample = (
             int(downsample)
             if downsample is not None
@@ -4045,44 +4082,46 @@ class WCSSolver:
                             _sep_to_next,
                         )
                         _hi += 1
-                    # Step 3: retry without SExtractor.
+                    # Step 3: retry without SExtractor.  A single tweak
+                    # order is enough: match acceptance is decided before
+                    # the SIP refinement, so a field with no verified match
+                    # runs the same index sweep at every order and the
+                    # ladder only multiplies the cpulimit burn.
                     if not os.path.isfile(wcs_file):
                         logger.warning("Retrying without SExtractor")
-                        for tweak_order in tweak_orders:
-                            if os.path.isfile(wcs_file):
-                                return True
-                            logger.info(
-                                "Attempting WCS solve without SExtractor "
-                                "(tweak order %s)", tweak_order
+                        tweak_order = tweak_orders[0]
+                        logger.info(
+                            "Attempting WCS solve without SExtractor "
+                            "(tweak order %s)", tweak_order
+                        )
+                        args_no_sex = (
+                            common_args
+                            + [
+                                "--tweak-order",
+                                str(tweak_order),
+                                "--no-verify",
+                            ]
+                            + _sa
+                        )
+                        args_no_sex = _with_solve_cpulimit(
+                            args_no_sex, late_timeout_sec
+                        )
+                        if self._run_solve_field(
+                            args_no_sex,
+                            wcs_file,
+                            late_timeout_sec,
+                            astrometry_log_fpath,
+                        ):
+                            logger.log(
+                                STATUS,
+                                "WCS solved without SExtractor "
+                                "(tweak order %s)", tweak_order,
                             )
-                            args_no_sex = (
-                                common_args
-                                + [
-                                    "--tweak-order",
-                                    str(tweak_order),
-                                    "--no-verify",
-                                ]
-                                + _sa
-                            )
-                            args_no_sex = _with_solve_cpulimit(
-                                args_no_sex, late_timeout_sec
-                            )
-                            if self._run_solve_field(
-                                args_no_sex,
-                                wcs_file,
-                                late_timeout_sec,
-                                astrometry_log_fpath,
-                            ):
-                                logger.log(
-                                    STATUS,
-                                    "WCS solved without SExtractor "
-                                    "(tweak order %s)", tweak_order,
-                                )
-                                return True
-                            logger.warning(
-                                "No solution without SExtractor "
-                                "(tweak order %s)", tweak_order
-                            )
+                            return True
+                        logger.warning(
+                            "No solution without SExtractor "
+                            "(tweak order %s)", tweak_order
+                        )
                     # Step 4: blind solve (no position constraint).  Only
                     # run when a position cone was tried above; with no
                     # hint the first pass already used scale-only args, so
@@ -4094,55 +4133,57 @@ class WCSSolver:
                         logger.warning(
                             "Retrying with blind solve (no position constraint)."
                         )
-                        for tweak_order in tweak_orders:
-                            if os.path.isfile(wcs_file):
-                                return True
-                            logger.info(
-                                "Blind solve with tweak order %s", tweak_order
+                        # Same single-order rationale as the no-SExtractor
+                        # pass: a failed blind match is identical at every
+                        # tweak order, so only the configured first order
+                        # is worth the blind cpulimit.
+                        tweak_order = tweak_orders[0]
+                        logger.info(
+                            "Blind solve with tweak order %s", tweak_order
+                        )
+                        args_blind = (
+                            common_args
+                            + [
+                                "--tweak-order",
+                                str(tweak_order),
+                                "--no-verify",
+                            ]
+                            + _soa
+                        )
+                        args_blind = _with_solve_cpulimit(
+                            args_blind, blind_timeout_sec
+                        )
+                        if use_sextractor and sextractor_cmd:
+                            args_blind += [
+                                "--use-source-extractor",
+                                "--source-extractor-path",
+                                sextractor_cmd,
+                                "--source-extractor-config",
+                                str(config_file),
+                                "--x-column",
+                                "XWIN_IMAGE",
+                                "--y-column",
+                                "YWIN_IMAGE",
+                                "--sort-column",
+                                "MAG_AUTO",
+                                "--sort-ascending",
+                            ]
+                        if self._run_solve_field(
+                            args_blind,
+                            wcs_file,
+                            blind_timeout_sec,
+                            astrometry_log_fpath,
+                        ):
+                            logger.log(
+                                STATUS,
+                                "WCS solved with blind solve "
+                                "(tweak order %s)", tweak_order,
                             )
-                            args_blind = (
-                                common_args
-                                + [
-                                    "--tweak-order",
-                                    str(tweak_order),
-                                    "--no-verify",
-                                ]
-                                + _soa
-                            )
-                            args_blind = _with_solve_cpulimit(
-                                args_blind, blind_timeout_sec
-                            )
-                            if use_sextractor and sextractor_cmd:
-                                args_blind += [
-                                    "--use-source-extractor",
-                                    "--source-extractor-path",
-                                    sextractor_cmd,
-                                    "--source-extractor-config",
-                                    str(config_file),
-                                    "--x-column",
-                                    "XWIN_IMAGE",
-                                    "--y-column",
-                                    "YWIN_IMAGE",
-                                    "--sort-column",
-                                    "MAG_AUTO",
-                                    "--sort-ascending",
-                                ]
-                            if self._run_solve_field(
-                                args_blind,
-                                wcs_file,
-                                blind_timeout_sec,
-                                astrometry_log_fpath,
-                            ):
-                                logger.log(
-                                    STATUS,
-                                    "WCS solved with blind solve "
-                                    "(tweak order %s)", tweak_order,
-                                )
-                                return True
-                            logger.warning(
-                                "No solution with blind solve "
-                                "(tweak order %s)", tweak_order
-                            )
+                            return True
+                        logger.warning(
+                            "No solution with blind solve "
+                            "(tweak order %s)", tweak_order
+                        )
                     return False
                 finally:
                     common_args = _saved_common_args
@@ -4254,6 +4295,10 @@ class WCSSolver:
                     _solved = True
                     break
 
+            # The attempt cascade is over; release the shared budget so a
+            # later reuse of this instance starts fresh.
+            self._solve_deadline = None
+            self._solve_budget_warned = False
 
             # --- If WCS still not solved, try SCAMP as fallback (e.g. crowded or IR fields) ---
             if not os.path.isfile(wcs_file):
