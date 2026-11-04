@@ -149,7 +149,9 @@ from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        pix_dist, quadrature_add,
                        resolve_verbose_level, safe_fits_write,
                        silence_noisy_loggers, strict_config_enabled,
-                       verbose_to_console_level, write_output_csv)
+                       verbose_to_console_level, write_output_csv,
+                       FILTER_HEADER_CANDIDATES, NON_FILTER_VALUES,
+                       find_filter_header_key)
 from fwhm import Find_FWHM
 from limits import BETA_APERTURE_SIGMA_N, Limits, _analytic_psf_for_injection
 from plot import Plot
@@ -225,7 +227,25 @@ def _norm_filter_token(s: str) -> str:
     Strips whitespace, uppercases, and converts spaces/hyphens to underscores
     so that e.g. header 'ZTF r' matches mapping key 'ZTF_r'.
     """
-    return re.sub(r"[\s\-]+", "_", str(s).strip()).upper()
+    return re.sub(r"[\s\-_#]+", "", str(s).strip()).upper()
+
+
+# Band tokens accepted as resolved filters. Compared lowercased, so a
+# deliberate 'Y' (PS1) or 'R' (Cousins) mapping is left untouched.
+_KNOWN_BAND_TOKENS = {
+    "u",
+    "g",
+    "r",
+    "i",
+    "z",
+    "y",
+    "w",
+    "b",
+    "v",
+    "j",
+    "h",
+    "k",
+}
 
 
 def _heuristic_filter_mapping(raw_filter: str) -> str:
@@ -317,6 +337,61 @@ def _ranked_keep_mask(df, values, valid, keep_n, keep_largest):
     else:
         keep_idx = finite.nsmallest(keep_n).index
     return df.index.isin(keep_idx) | np.asarray(~valid)
+
+
+def _select_matching_priors(df, max_sources, min_sep_px):
+    """Cap a matching-source list to bright, isolated rows.
+
+    Greedy brightest-first selection: a candidate is kept only when no
+    already-kept source sits within ``min_sep_px`` (one cKDTree ball
+    query over precomputed neighbour lists), so the subset spreads
+    across the field the way kernel fitting prefers.  When isolation
+    alone cannot fill the budget, the rest goes to the next-brightest
+    candidates regardless of separation.  With no usable flux column the
+    ordering falls back to isolation alone (largest nearest-neighbour
+    gap first).  Returns rows in their original order.
+    """
+    n = len(df)
+    if max_sources <= 0 or n <= max_sources:
+        return df
+    xcol = "x_coord" if "x_coord" in df.columns else "x_pix"
+    ycol = "y_coord" if "y_coord" in df.columns else "y_pix"
+    xy = df[[xcol, ycol]].to_numpy(dtype=float)
+    tree = cKDTree(xy)
+    nbrs = tree.query_ball_point(xy, r=float(min_sep_px))
+
+    bright = None
+    for col in (
+        "flux_AP", "FLUX_AUTO", "flux", "peak_flux",
+        "snr", "SNR_WIN", "mu_max",
+    ):
+        if col in df.columns:
+            v = pd.to_numeric(df[col], errors="coerce").to_numpy(float)
+            if np.isfinite(v).any():
+                bright = np.where(np.isfinite(v), v, -np.inf)
+                break
+    if bright is not None:
+        order = np.argsort(-bright, kind="stable")
+    else:
+        iso = tree.query(xy, k=min(2, n))[0][:, -1] if n > 1 else np.ones(n)
+        order = np.argsort(-iso, kind="stable")
+
+    kept = np.zeros(n, dtype=bool)
+    keep = []
+    for i in order:
+        if len(keep) >= max_sources:
+            break
+        if not any(kept[j] for j in nbrs[i]):
+            keep.append(i)
+            kept[i] = True
+    for i in order:
+        if len(keep) >= max_sources:
+            break
+        if not kept[i]:
+            keep.append(i)
+            kept[i] = True
+    keep.sort()
+    return df.iloc[keep].reset_index(drop=True)
 
 
 def _stamp_radial_fwhm(img, x, y, img_fwhm):
@@ -1744,7 +1819,22 @@ def run_photometry():
             # under new_output_dir (it would be unused and left empty).
             cur_dir = os.path.dirname(science_file)
         else:
-            cur_dir = os.path.join(new_output_dir, base)
+            # Mirror the input layout under the output root so nested science
+            # directories produce nested output directories:
+            #   fits_dir/<dataset>/science/x.fits
+            #     -> <fits_dir>_REDUCED/<dataset>_APT/science_APT/<base>/
+            root = os.path.dirname(science_file)
+            sub_dirs = root.replace(wdir, "").split("/")
+            sub_dirs = [
+                i.replace("_APT", "").replace(" ", "_") for i in sub_dirs
+            ]
+            cur_dir = new_output_dir
+            for i in range(len(sub_dirs)):
+                if i:  # Skip the empty leading element from the leading "/".
+                    subdir_path = os.path.join(cur_dir, sub_dirs[i] + "_APT")
+                    Path(subdir_path).mkdir(parents=True, exist_ok=True)
+                    cur_dir = subdir_path
+            cur_dir = os.path.join(cur_dir, base)
             Path(cur_dir).mkdir(parents=True, exist_ok=True)
         # Standardized per-image outputs (must include the FITS filename stem).
         # In template-preparation mode, the completion marker is the generated
@@ -1793,23 +1883,9 @@ def run_photometry():
             )
             return None
 
-        #  Set Current Directory Based on Template Flag
-        # In template-preparation mode, cur_dir was already set to the science
-        # file's original directory above.  In normal mode, build the nested
-        # per-image output directory under new_output_dir.
+        # cur_dir already points at the per-image output directory for both
+        # modes; only the restart cleanup remains here.
         if not prepare_template:
-            root = os.path.dirname(science_file)
-            sub_dirs = root.replace(wdir, "").split("/")
-            sub_dirs = [i.replace("_APT", "").replace(" ", "_") for i in sub_dirs]
-            cur_dir = new_output_dir
-            for i in range(len(sub_dirs)):
-                if i:  # Skip the empty leading element from the leading "/".
-                    subdir_path = os.path.join(cur_dir, sub_dirs[i] + "_APT")
-                    Path(subdir_path).mkdir(parents=True, exist_ok=True)
-                    cur_dir = subdir_path
-            cur_dir = os.path.join(cur_dir, input_yaml["base"])
-            Path(cur_dir).mkdir(parents=True, exist_ok=True)
-
             # When restart=True, clear any existing content in the per-image
             # output directory.  Filenames can be shortened/truncated between
             # runs, so old outputs with different names would otherwise
@@ -2341,11 +2417,11 @@ def run_photometry():
         # Filter and Pixel Scale
         # =============================================================================
         #  Find Correct Filter Key
-        avoid_keys = [""]
+        avoid_keys = NON_FILTER_VALUES
 
         if is_template:
             # For templates, trust the FILTER keyword (or common variants) directly.
-            for fk in ("FILTER", "FILTER1", "FILTER2"):
+            for fk in FILTER_HEADER_CANDIDATES:
                 if fk in header and str(header[fk]).strip().lower() not in avoid_keys:
                     input_yaml["filter_key"] = fk
                     raw_filter = str(header[fk]).strip()
@@ -2393,13 +2469,6 @@ def run_photometry():
                 )
         else:
             # Science images: resolve filter via telescope.yml filter_key_* mappings.
-            open_filter = False
-            found_correct_key = False
-            filter_keys = [
-                i
-                for i in list(telescope_data[telescope][instrument_key][instrument])
-                if i.startswith("filter_key_")
-            ]
             _inst = telescope_data[telescope][instrument_key][instrument]
             _filter_meta = {
                 "Name",
@@ -2413,111 +2482,77 @@ def run_photometry():
                 "exptime",
                 "pixel_scale",
             }
-            for filter_header_key in filter_keys:
-                header_key_candidate = _inst[filter_header_key]
-                if header_key_candidate not in header:
-                    continue
-                header_val = str(header[header_key_candidate]).strip()
-                if header_val.lower() in avoid_keys:
-                    open_filter = True
-                    continue
-                # If the header value is a known filter mapping (exact or
-                # separator-normalized, e.g. 'ZTF r' == 'ZTF_r'), we found our key
-                if header_val in _inst:
-                    found_correct_key = True
-                    break
-                _hv_norm = _norm_filter_token(header_val)
-                if any(
-                    k not in _filter_meta
-                    and isinstance(v, str)
-                    and _norm_filter_token(k) == _hv_norm
-                    for k, v in _inst.items()
-                ):
-                    found_correct_key = True
-                    break
-
-            if not found_correct_key and open_filter:
-                raise Exception("Cannot find correct filter keyword")
+            filter_keys = sorted(
+                (i for i in _inst if str(i).startswith("filter_key_")),
+                key=lambda i: (
+                    int(str(i).rsplit("_", 1)[1])
+                    if str(i).rsplit("_", 1)[1].isdigit()
+                    else 0
+                ),
+            )
+            # First usable filter keyword wins: the instrument's configured
+            # filter_key_* entries are tried before the canonical list, so
+            # instruments whose band lives in ESO/NOT-style keywords resolve
+            # even when FILTER is absent.
+            header_key_candidate = find_filter_header_key(
+                header, extra_keys=[_inst[fk] for fk in filter_keys]
+            )
+            if header_key_candidate is None:
+                raise Exception("Cannot determine image filter from header.")
 
             #  Get Image Filter
-            if found_correct_key:
-                input_yaml["filter_key"] = telescope_data[telescope][instrument_key][
-                    instrument
-                ][filter_header_key]
-                raw_filter = str(header[input_yaml["filter_key"]]).strip()
-                # Use telescope.yml mapping if available; otherwise use heuristics
-                imageFilter = None
-                if (
-                    telescope in telescope_data
-                    and instrument_key in telescope_data.get(telescope, {})
-                ):
-                    mapping = telescope_data[telescope][instrument_key].get(
-                        instrument, {}
-                    )
-                    _meta = {
-                        "Name",
-                        "filter_key_0",
-                        "mjd",
-                        "date",
-                        "gain",
-                        "saturate",
-                        "readnoise",
-                        "airmass",
-                        "exptime",
-                        "pixel_scale",
-                    }
-                    imageFilter = mapping.get(raw_filter)
-                    # Single-letter bands skip the normalized match: 'i'
-                    # normalizes to 'I' but they are different systems,
-                    # so a single-char token needs an exact key.
-                    if imageFilter is None and len(raw_filter) != 1:
-                        _rf_norm = _norm_filter_token(raw_filter)
-                        for k, v in mapping.items():
-                            if (
-                                k not in _meta
-                                and isinstance(v, str)
-                                and _norm_filter_token(k) == _rf_norm
-                            ):
-                                imageFilter = v
-                                break
+            input_yaml["filter_key"] = header_key_candidate
+            raw_filter = str(header[header_key_candidate]).strip()
+            # Use telescope.yml mapping if available; otherwise use heuristics
+            imageFilter = None
+            if (
+                telescope in telescope_data
+                and instrument_key in telescope_data.get(telescope, {})
+            ):
+                mapping = telescope_data[telescope][instrument_key].get(
+                    instrument, {}
+                )
+                imageFilter = mapping.get(raw_filter)
+                # Single-letter bands skip the normalized match: 'i'
+                # normalizes to 'I' but they are different systems,
+                # so a single-char token needs an exact key.
+                if imageFilter is None and len(raw_filter) != 1:
+                    _rf_norm = _norm_filter_token(raw_filter)
+                    for k, v in mapping.items():
+                        if (
+                            k not in _filter_meta
+                            and isinstance(v, str)
+                            and _norm_filter_token(k) == _rf_norm
+                        ):
+                            imageFilter = v
+                            break
 
-                # Telescope-blind: if no mapping found, use heuristic to derive filter
-                if imageFilter is None:
-                    imageFilter = _heuristic_filter_mapping(raw_filter)
-                    if imageFilter != raw_filter:
-                        logging.info(
-                            f"Filter '{raw_filter}' mapped to '{imageFilter}' via heuristic (no telescope.yml entry)"
-                        )
-                    elif str(imageFilter).strip().lower() not in {
-                        "u",
-                        "g",
-                        "r",
-                        "i",
-                        "z",
-                        "y",
-                        "w",
-                        "b",
-                        "v",
-                        "j",
-                        "h",
-                        "k",
-                    }:
-                        logging.warning(
-                            f"Filter '{raw_filter}' not recognised by telescope.yml or heuristics; "
-                            "passing it through unmapped (catalog calibration may not match a band)."
-                        )
-            else:
-                # Fallback: no mapping found; use a common header key directly when present
-                for fk in ("FILTER", "FILTER1", "FILTER2"):
-                    if (
-                        fk in header
-                        and str(header[fk]).strip().lower() not in avoid_keys
-                    ):
-                        input_yaml["filter_key"] = fk
-                        imageFilter = str(header[fk]).strip()
-                        break
-                else:
-                    raise Exception("Cannot determine image filter from header.")
+            # Telescope-blind: if no mapping found, use heuristic to derive filter
+            if imageFilter is None:
+                imageFilter = _heuristic_filter_mapping(raw_filter)
+                if imageFilter != raw_filter:
+                    logging.info(
+                        f"Filter '{raw_filter}' mapped to '{imageFilter}' via heuristic (no telescope.yml entry)"
+                    )
+            elif str(imageFilter).strip().lower() not in _KNOWN_BAND_TOKENS:
+                # A configured mapping can still resolve to a non-band token
+                # (identity entries like 'g_sdss: g_sdss' written by older
+                # scans). Give the heuristic a pass so the worker resolves it
+                # the same way check_filters did.
+                mapped_heuristic = _heuristic_filter_mapping(str(imageFilter))
+                if str(mapped_heuristic).strip().lower() != str(
+                    imageFilter
+                ).strip().lower():
+                    logging.info(
+                        f"Filter '{raw_filter}' maps to '{imageFilter}' in telescope.yml; "
+                        f"resolved to '{mapped_heuristic}'"
+                    )
+                    imageFilter = mapped_heuristic
+            if str(imageFilter).strip().lower() not in _KNOWN_BAND_TOKENS:
+                logging.warning(
+                    f"Filter '{raw_filter}' not recognised by telescope.yml or heuristics; "
+                    "passing it through unmapped (catalog calibration may not match a band)."
+                )
 
         # =============================================================================
         # Pixel Scale
@@ -7620,6 +7655,39 @@ def run_photometry():
                     int((~_finite_coords).sum()),
                 )
                 MatchingSources = MatchingSources[_finite_coords].reset_index(drop=True)
+
+            # Rank and cap matching priors BEFORE fclusterdata below: its
+            # condensed distance matrix is O(N^2) in the source count, and
+            # every surviving row pays per-source aperture photometry and
+            # centroiding on both images.  use_for_matching detections have
+            # no NMAX cap, so a deep/crowded field can hand the pipeline
+            # tens of thousands of candidates where a few hundred bright,
+            # isolated, spread-out sources suffice for the kernel fit.
+            try:
+                _match_max = int(
+                    (input_yaml.get("template_subtraction", {}) or {}).get(
+                        "match_max_sources", 2000
+                    )
+                    or 0
+                )
+            except (TypeError, ValueError):
+                _match_max = 2000
+            if _match_max > 0 and len(MatchingSources) > _match_max:
+                _fwhm_safe = (
+                    float(ImageFWHM) if np.isfinite(ImageFWHM) else 5.0
+                )
+                _n_pool = len(MatchingSources)
+                MatchingSources = _select_matching_priors(
+                    MatchingSources,
+                    _match_max,
+                    min_sep_px=max(2.0 * _fwhm_safe, 5.0),
+                )
+                logging.info(
+                    "Matching: prioritised %d bright/isolated sources "
+                    "from %d candidates for the subtraction fit.",
+                    len(MatchingSources),
+                    _n_pool,
+                )
 
             coords = MatchingSources[["x_coord", "y_coord"]].values
 
