@@ -83,6 +83,7 @@ docs/
 
 # Agent session notes
 agents.md
+.devin/
 *.egg-info/
 
 # Test suite (local validation only)
