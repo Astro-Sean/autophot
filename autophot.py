@@ -1079,6 +1079,10 @@ def prepare_template_directory(
     """
     Create the expected template folder structure under ``<fits_dir>/templates``.
 
+    For nested datasets, call once per dataset directory (e.g. with
+    ``fits_dir/dataset1``) so each dataset gets its own ``templates``
+    folder.
+
     Parameters
     ----------
     fits_dir : str
@@ -2225,30 +2229,39 @@ class AutomatedPhotometry:
                         r"[a-z0-9.+-]+_band_template\.fits$",
                         re.IGNORECASE,
                     )
-                    if os.path.isdir(template_folder):
-                        _user_tpl = []
+                    from prepare import template_roots_under
+
+                    # Every `templates` dir below fits_dir: nested
+                    # per-dataset folders (<dataset>/templates) count as
+                    # user-supplied templates, same as the flat layout.
+                    _user_tpl = []
+                    for _troot in template_roots_under(
+                        default_input["fits_dir"]
+                    ):
                         for _ext in (".fits", ".fit", ".fz", ".fits.gz"):
-                            for _f in Path(template_folder).rglob(f"*{_ext}"):
+                            for _f in Path(_troot).rglob(f"*{_ext}"):
                                 if not _dl_pat.match(_f.name):
                                     _user_tpl.append(str(_f))
-                        if _user_tpl:
-                            _user_tpl = sorted(set(_user_tpl))
-                            raise RuntimeError(
-                                "template_subtraction.download_templates is "
-                                f"set ({download_kind}) but user-supplied "
-                                f"templates already exist in {template_folder}:"
-                                "\n    "
-                                + "\n    ".join(_user_tpl[:10])
-                                + (
-                                    f"\n    ... ({len(_user_tpl) - 10} more)"
-                                    if len(_user_tpl) > 10
-                                    else ""
-                                )
-                                + "\nResolve the conflict: set "
-                                "download_templates: False to use the "
-                                "supplied templates, or remove them to "
-                                "download fresh ones."
+                    if _user_tpl:
+                        _user_tpl = sorted(set(_user_tpl))
+                        raise RuntimeError(
+                            "template_subtraction.download_templates is "
+                            f"set ({download_kind}) but user-supplied "
+                            "templates already exist in the templates "
+                            "directories under "
+                            f"{default_input['fits_dir']}:"
+                            "\n    "
+                            + "\n    ".join(_user_tpl[:10])
+                            + (
+                                f"\n    ... ({len(_user_tpl) - 10} more)"
+                                if len(_user_tpl) > 10
+                                else ""
                             )
+                            + "\nResolve the conflict: set "
+                            "download_templates: False to use the "
+                            "supplied templates, or remove them to "
+                            "download fresh ones."
+                        )
 
                     filters_str = ", ".join(sorted(required_filters)) if required_filters else "None"
                     _log(
@@ -2454,17 +2467,30 @@ class AutomatedPhotometry:
                         combined_checked = prepare_db.check_files(
                             flist=combined, template_files=True
                         )
-                        template_folder_norm = os.path.normpath(template_folder)
+                        # Any file under a `templates` dir is a template,
+                        # wherever that dir sits below fits_dir.  Roots
+                        # are re-scanned here rather than reusing the
+                        # download-guard list, which may predate newly
+                        # downloaded template folders.
+                        from prepare import template_roots_under
+
+                        _tpl_prefixes = tuple(
+                            os.path.normpath(r) + os.sep
+                            for r in template_roots_under(
+                                default_input["fits_dir"]
+                            )
+                        )
                         file_list = [
                             f
                             for f in combined_checked
-                            if os.path.normpath(f).startswith(template_folder_norm)
-                            is False
+                            if not os.path.normpath(f).startswith(
+                                _tpl_prefixes
+                            )
                         ]
                         template_file_list = [
                             f
                             for f in combined_checked
-                            if os.path.normpath(f).startswith(template_folder_norm)
+                            if os.path.normpath(f).startswith(_tpl_prefixes)
                         ]
 
                 # Prepare output directory and save input snapshot
