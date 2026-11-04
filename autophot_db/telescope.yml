@@ -37,6 +37,7 @@ ESO-VISTA:
       Name: ESO-VISTA+VIRCAM
       pixel_scale: 0.4
       filter_key_0: FILTER
+      filter_key_1: ESO INS FILT1 NAME
       gain: GAIN
       readnoise: not_given_by_user
       saturate: not_given_by_user
@@ -128,6 +129,8 @@ ESO-NTT:
       Name: ESO-NTT+EFOSC
       pixel_scale: 0.2405439293736248
       filter_key_0: FILTER
+      filter_key_1: ESO INS FILT1 NAME
+      filter_key_2: ESO INS FILT2 NAME
       gain: GAIN
       readnoise: RDNOISE
       saturate: SATURATE
@@ -139,10 +142,16 @@ ESO-NTT:
       r784: r
       z623: z
       i705: i
+      'g#782': g
+      'r#784': r
+      'z#623': z
+      'i#705': i
     SOFI:
       Name: ESO-NTT+SOFI
       pixel_scale: 0.292
       filter_key_0: FILTER
+      filter_key_1: ESO INS FILT1 NAME
+      filter_key_2: ESO INS FILT2 NAME
       gain: GAIN
       readnoise: RDNOISE
       saturate: SATURATE
@@ -239,6 +248,8 @@ VLT:
       Name: VLT+FORS2
       pixel_scale: 0.2520615175080228
       filter_key_0: FILTER
+      filter_key_1: ESO INS FILT1 NAME
+      filter_key_2: ESO INS FILT2 NAME
       gain: GAIN
       readnoise: RDNOISE
       saturate: SATURATE
@@ -488,6 +499,7 @@ ESO-VST:
       Name: ESO-VST+OMEGACAM
       pixel_scale: 0.4
       filter_key_0: FILTER
+      filter_key_1: ESO INS FILT1 NAME
       gain: GAINCOR
       readnoise: not_given_by_user
       saturate: not_given_by_user
@@ -533,25 +545,6 @@ PS1:
       y: Y
       filter_key_1: FPA.FILTERID
       g.00000: g
-      filter_key_2: FPA.FILTERID
-      filter_key_3: FPA.FILTERID
-      filter_key_4: FPA.FILTERID
-      filter_key_5: FPA.FILTERID
-      filter_key_6: FPA.FILTERID
-      filter_key_7: FPA.FILTERID
-      filter_key_8: FPA.FILTERID
-      filter_key_9: FPA.FILTERID
-      filter_key_10: FPA.FILTERID
-      filter_key_11: FPA.FILTERID
-      filter_key_12: FPA.FILTERID
-      filter_key_13: FPA.FILTERID
-      filter_key_14: FPA.FILTERID
-      filter_key_15: FPA.FILTERID
-      filter_key_16: FPA.FILTERID
-      filter_key_17: FPA.FILTERID
-      filter_key_18: FPA.FILTERID
-      filter_key_19: FPA.FILTERID
-      filter_key_20: FPA.FILTERID
 Pan-STARRS1:
   INSTRUME:
     GPC1:
@@ -618,17 +611,7 @@ VISTA:
       Name: VISTA+VIRCAM
       pixel_scale: 0.34128213154421105
       filter_key_0: FILTER
-      filter_key_1: SIMPLE
-      'True': 'True'
-      filter_key_2: SIMPLE
-      filter_key_3: SIMPLE
-      filter_key_4: SIMPLE
-      filter_key_5: SIMPLE
-      filter_key_6: SIMPLE
-      filter_key_7: SIMPLE
-      filter_key_8: SIMPLE
-      filter_key_9: SIMPLE
-      filter_key_10: SIMPLE
+      filter_key_1: ESO INS FILT1 NAME
 Unknown_reference:
   INSTRUME:
     Unknown_instrument:
@@ -745,6 +728,27 @@ NOT:
       Name: NOT+ALFOSC
       pixel_scale: 0.2139
       filter_key_0: FILTER
+      filter_key_1: ALFLTNM
+      filter_key_2: FAFLTNM
+      filter_key_3: FBFLTNM
+      g_sdss: g
+      r_sdss: r
+      i_sdss: i
+      z_sdss: z
+      date: DATE-OBS
+      mjd: MJD-OBS
+      exptime: EXPTIME
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: AIRMASS
+    ALFOSC_FASU:
+      Name: NOT+ALFOSC_FASU
+      pixel_scale: 0.2139
+      filter_key_0: FILTER
+      filter_key_1: ALFLTNM
+      filter_key_2: FAFLTNM
+      filter_key_3: FBFLTNM
       g_sdss: g
       r_sdss: r
       i_sdss: i
