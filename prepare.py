@@ -102,6 +102,23 @@ def _dedupe_identical_files(file_list):
     return kept, dropped
 
 
+def template_roots_under(fits_dir: str) -> List[str]:
+    """
+    Return every directory named ``templates`` below *fits_dir*.
+
+    Nested dataset folders (``fits_dir/<dataset>/templates``) are
+    supported alongside the flat ``fits_dir/templates`` layout, which is
+    included automatically when present.  Descent into a ``templates``
+    dir is pruned - only the root paths matter, not their contents.
+    """
+    roots = []
+    for root, dirs, _files in os.walk(os.fspath(fits_dir)):
+        if os.path.basename(os.path.normpath(root)) == "templates":
+            roots.append(root)
+            dirs[:] = []
+    return sorted(roots)
+
+
 class Prepare:
     """
     Prepares and validates input data for the AutoPHOT pipeline.
@@ -177,11 +194,14 @@ class Prepare:
         work_loc = f"{base_dir}{new_dir}"
         work_root = os.path.join(os.path.dirname(fits_dir), work_loc)
         pathlib.Path(work_root).mkdir(parents=True, exist_ok=True)
-        # Skip pipeline products (subtractions, templates, WCS/PSF/catalog outputs).
+        # Skip pipeline products (subtractions, templates, WCS/PSF/catalog
+        # outputs) and .weight sidecar maps - they are variance companions,
+        # never science inputs.
         forbidden_substrings = [
             "subtraction",
             "template",
             ".wcs",
+            ".weight",
             "PSF_model",
             "footprint",
             "sources_",
@@ -207,10 +227,13 @@ class Prepare:
         # config; the .get default keeps older configs working.
         ts_cfg = self.input_yaml.get("template_subtraction") or {}
         prepare_templates = bool(ts_cfg.get("prepare_templates", False))
-        search_root = (
-            os.path.join(self.input_yaml["fits_dir"], "templates")
+        # Template-prep scans every `templates` dir under fits_dir so nested
+        # per-dataset folders (<dataset>/templates) are covered as well as the
+        # flat fits_dir/templates layout.
+        search_roots = (
+            template_roots_under(self.input_yaml["fits_dir"])
             if prepare_templates
-            else self.input_yaml["fits_dir"]
+            else [self.input_yaml["fits_dir"]]
         )
         # The templates/ root path itself contains the "template" token, which
         # would otherwise veto every candidate file when deliberately
@@ -221,53 +244,54 @@ class Prepare:
                 s for s in forbidden_substrings if s != "template"
             ]
 
-        for root, _, files in os.walk(search_root):
-            for filename in files:
-                if _is_valid_file(filename, root):
-                    filepath = os.path.join(root, filename)
-                    total_candidates += 1
-                    # IMPORTANT: mirror main.py's directory logic so restart
-                    # checks agree and files with an existing Output_{base}.csv
-                    # are not re-run.
-                    base = (
-                        os.path.splitext(filename)[0]
-                        .replace(" ", "_")
-                        .replace(".", "_")
-                        .replace("_APT", "")
-                        .replace("_ERROR", "")
-                    )
-
-                    if prepare_templates:
-                        # Template mode: outputs live directly under work_root/base
-                        cur_dir = os.path.join(work_root, base)
-                    else:
-                        # Science mode: reproduce the nested subdirectory layout
-                        wdir = self.input_yaml["fits_dir"]
-                        root_dir = os.path.dirname(filepath)
-                        rel = root_dir.replace(wdir, "")
-                        sub_dirs = [
-                            part.replace("_APT", "").replace(" ", "_")
-                            for part in rel.split("/")
-                            if part
-                        ]
-                        cur_dir = work_root
-                        for sub in sub_dirs:
-                            cur_dir = os.path.join(cur_dir, f"{sub}_APT")
-                        cur_dir = os.path.join(cur_dir, base)
-
-                    if prepare_templates:
-                        # Template preparation doesn't always write a per-image output
-                        # CSV; use the generated template catalog as the completion
-                        # marker.
-                        output_csv_path = os.path.join(
-                            cur_dir, f"ImageCalib_Template_{base}.csv"
-                        )
-                    else:
-                        output_csv_path = os.path.join(
-                            cur_dir, f"Output_{base}.csv"
+        for search_root in search_roots:
+            for root, _, files in os.walk(search_root):
+                for filename in files:
+                    if _is_valid_file(filename, root):
+                        filepath = os.path.join(root, filename)
+                        total_candidates += 1
+                        # IMPORTANT: mirror main.py's directory logic so restart
+                        # checks agree and files with an existing Output_{base}.csv
+                        # are not re-run.
+                        base = (
+                            os.path.splitext(filename)[0]
+                            .replace(" ", "_")
+                            .replace(".", "_")
+                            .replace("_APT", "")
+                            .replace("_ERROR", "")
                         )
 
-                    valid_files.append((filepath, output_csv_path))
+                        if prepare_templates:
+                            # Template mode: outputs live under work_root/base
+                            cur_dir = os.path.join(work_root, base)
+                        else:
+                            # Science mode: reproduce the nested subdirectory layout
+                            wdir = self.input_yaml["fits_dir"]
+                            root_dir = os.path.dirname(filepath)
+                            rel = root_dir.replace(wdir, "")
+                            sub_dirs = [
+                                part.replace("_APT", "").replace(" ", "_")
+                                for part in rel.split("/")
+                                if part
+                            ]
+                            cur_dir = work_root
+                            for sub in sub_dirs:
+                                cur_dir = os.path.join(cur_dir, f"{sub}_APT")
+                            cur_dir = os.path.join(cur_dir, base)
+
+                        if prepare_templates:
+                            # Template preparation doesn't always write a
+                            # per-image output CSV; use the generated
+                            # template catalog as the completion marker.
+                            output_csv_path = os.path.join(
+                                cur_dir, f"ImageCalib_Template_{base}.csv"
+                            )
+                        else:
+                            output_csv_path = os.path.join(
+                                cur_dir, f"Output_{base}.csv"
+                            )
+
+                        valid_files.append((filepath, output_csv_path))
 
         # Drop byte-identical inputs before the restart check: a copy under a
         # different name must not be processed just because its own output
@@ -1540,7 +1564,8 @@ class Prepare:
     # --- Find Templates ---
     def find_templates(self, required_filters: Optional[List[str]] = None) -> List[str]:
         """
-        Searches for and validates template files in the specified directory.
+        Searches for and validates template files under every ``templates``
+        directory below ``fits_dir`` (flat and nested per-dataset layouts).
 
         Args:
             required_filters (Optional[List[str]]): List of required filter names. If None, uses default filters.
@@ -1554,8 +1579,15 @@ class Prepare:
         if self.input_yaml["fits_dir"].endswith("/"):
             self.input_yaml["fits_dir"] = self.input_yaml["fits_dir"][:-1]
 
+        # Nested datasets keep per-dataset template folders
+        # (<dataset>/templates); the flat fits_dir/templates layout is
+        # included automatically when present.
         template_dir = os.path.join(self.input_yaml["fits_dir"], "templates")
-        self.logger.info("Looking for templates in directory: %s", template_dir)
+        template_roots = template_roots_under(self.input_yaml["fits_dir"])
+        self.logger.info(
+            "Looking for templates in: %s",
+            ", ".join(template_roots) if template_roots else template_dir,
+        )
         template_status = {}
 
         if not required_filters:
@@ -1601,7 +1633,7 @@ class Prepare:
                 len(dropped_required),
             )
 
-        if not os.path.isdir(template_dir):
+        if not template_roots:
             self.logger.warning(
                 "No template folder found at expected location; skipping templates. Expected position: %s",
                 template_dir,
@@ -1618,71 +1650,110 @@ class Prepare:
             if canonical_filter in {"u", "g", "r", "i", "z"}:
                 dir_candidates.append(f"{canonical_filter}p_template")
 
-            existing_dirs = [
-                os.path.join(template_dir, d) for d in dir_candidates if os.path.isdir(os.path.join(template_dir, d))
-            ]
-            template_status[canonical_filter] = {}
+            template_status[canonical_filter] = {
+                "expected_dirs": [
+                    os.path.join(root, d)
+                    for root in template_roots
+                    for d in dir_candidates
+                ],
+                "fpaths": [],
+            }
 
-            if len(existing_dirs) == 0:
-                template_status[canonical_filter]["status"] = "directory does not exist"
-                template_status[canonical_filter]["fpath"] = None
-                template_status[canonical_filter]["expected_dirs"] = [
-                    os.path.join(template_dir, d) for d in dir_candidates
+            for template_root in template_roots:
+                existing_dirs = [
+                    os.path.join(template_root, d)
+                    for d in dir_candidates
+                    if os.path.isdir(os.path.join(template_root, d))
                 ]
-                continue
+                if len(existing_dirs) == 0:
+                    continue
 
-            expected_template_dir = existing_dirs[0]
-            template_status[canonical_filter]["expected_dirs"] = [
-                os.path.join(template_dir, d) for d in dir_candidates
-            ]
-            template_status[canonical_filter]["dir_used"] = expected_template_dir
-            if os.path.basename(expected_template_dir).endswith("p_template"):
-                self.logger.info(
-                    "[%s template] Using legacy folder naming: %s",
-                    canonical_filter,
-                    os.path.basename(expected_template_dir),
+                # One band dir per templates root: prefer modern over legacy.
+                expected_template_dir = existing_dirs[0]
+                template_status[canonical_filter].setdefault(
+                    "dirs_used", []
+                ).append(expected_template_dir)
+                if os.path.basename(expected_template_dir).endswith("p_template"):
+                    self.logger.info(
+                        "[%s template] Using legacy folder naming: %s",
+                        canonical_filter,
+                        os.path.basename(expected_template_dir),
+                    )
+
+                template_files = glob.glob(
+                    os.path.join(expected_template_dir, "*.fits")
+                )
+                psf_model_files = glob.glob(
+                    os.path.join(expected_template_dir, "PSF_model_*")
+                )
+                # .weight sidecars are noise-map companions of the template
+                # image, not candidate templates (same rule as get_template).
+                template_files = [
+                    f
+                    for f in set(template_files) - set(psf_model_files)
+                    if ".weight" not in os.path.basename(f).lower()
+                ]
+                original_files = glob.glob(
+                    os.path.join(expected_template_dir, "*.fits.original")
                 )
 
-            template_files = glob.glob(os.path.join(expected_template_dir, "*.fits"))
-            psf_model_files = glob.glob(
-                os.path.join(expected_template_dir, "PSF_model_*")
-            )
-            template_files = list(set(template_files) - set(psf_model_files))
-            original_files = glob.glob(
-                os.path.join(expected_template_dir, "*.fits.original")
-            )
+                if len(original_files) == 1:
+                    shutil.copyfile(
+                        original_files[0],
+                        original_files[0].replace(".original", ""),
+                    )
+                    template_status[canonical_filter]["fpaths"].append(
+                        original_files[0].replace(".original", "")
+                    )
+                elif len(template_files) == 0:
+                    incorrect_setup = True
+                elif len(template_files) > 1:
+                    self.logger.warning(
+                        "Multiple (%d) template files found for %s-band "
+                        "in %s; choosing the largest.",
+                        len(template_files),
+                        canonical_filter,
+                        expected_template_dir,
+                    )
+                    incorrect_setup = True
+                    template_file_sizes = {
+                        f: os.path.getsize(f) for f in template_files
+                    }
+                    best_guess = max(
+                        template_file_sizes,
+                        key=template_file_sizes.get,
+                    )
+                    template_status[canonical_filter]["fpaths"].append(best_guess)
+                else:
+                    template_status[canonical_filter]["fpaths"].append(
+                        template_files[0]
+                    )
 
-            if len(original_files) == 1:
-                template_status[canonical_filter]["status"] = "found"
-                shutil.copyfile(
-                    original_files[0], original_files[0].replace(".original", "")
+            fpaths = template_status[canonical_filter]["fpaths"]
+            if len(fpaths) == 0:
+                template_status[canonical_filter]["status"] = (
+                    "not found"
+                    if template_status[canonical_filter].get("dirs_used")
+                    else "directory does not exist"
                 )
-                template_status[canonical_filter]["fpath"] = original_files[0].replace(
-                    ".original", ""
-                )
-            elif len(template_files) == 0:
-                template_status[canonical_filter]["status"] = "not found"
-                template_status[canonical_filter]["fpath"] = None
-                incorrect_setup = True
-            elif len(template_files) > 1:
-                self.logger.warning(
-                    "Multiple (%d) template files found for %s-band; choosing the largest.",
-                    len(template_files),
-                    canonical_filter,
-                )
-                incorrect_setup = True
-                template_file_sizes = {f: os.path.getsize(f) for f in template_files}
-                best_guess = max(template_file_sizes, key=template_file_sizes.get)
-                template_status[canonical_filter]["status"] = "multiple found"
-                template_status[canonical_filter]["fpath"] = best_guess
             else:
                 template_status[canonical_filter]["status"] = "found"
-                template_status[canonical_filter]["fpath"] = template_files[0]
+                if len(fpaths) > 1:
+                    # Same band in several templates roots is by design for
+                    # nested datasets; get_template picks per science image.
+                    self.logger.info(
+                        "[%s template] Found in %d template folders.",
+                        canonical_filter,
+                        len(fpaths),
+                    )
 
         for key, info in template_status.items():
             status = info.get("status")
             if status == "found":
-                self.logger.info("[%s template] Using file: %s", key, info.get("fpath"))
+                for fpath in info.get("fpaths", []):
+                    self.logger.info(
+                        "[%s template] Using file: %s", key, fpath
+                    )
             elif status in ("not found", "directory does not exist"):
                 expected_dirs = info.get("expected_dirs") or [
                     os.path.join(template_dir, f"{key}_template")
@@ -1691,12 +1762,6 @@ class Prepare:
                     "[%s template] Missing; expected directory one of: %s",
                     key,
                     ", ".join(expected_dirs),
-                )
-            elif status == "multiple found":
-                self.logger.warning(
-                    "[%s template] Multiple candidates; using best guess: %s",
-                    key,
-                    info.get("fpath"),
                 )
 
         if incorrect_setup:
@@ -1715,8 +1780,8 @@ class Prepare:
                 )
 
         template_list = [
-            template_status[f]["fpath"]
-            for f in template_status
-            if template_status[f].get("fpath") is not None
+            fpath
+            for info in template_status.values()
+            for fpath in info.get("fpaths", [])
         ]
         return template_list
