@@ -4736,6 +4736,144 @@ def _fscal_phot_needs_repair(
     return abs(phot - ap) / ap > frac
 
 
+def _sfft_sched_cpu_count() -> int:
+    """CPUs usable by this process (affinity-aware)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
+def _host_mem_available_gb() -> Optional[float]:
+    """Free host RAM in GB, or None when it cannot be read."""
+    try:
+        with open("/proc/meminfo", "r") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return float(line.split()[1]) / (1024.0 ** 2)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _sfft_memory_budget_gb(cfg: Any) -> float:
+    """Peak-RAM budget (GB) for a single SFFT subprocess.
+
+    ``sfft_max_memory_gb`` > 0 gives an explicit budget; 0/auto resolves
+    to 80% of MemAvailable (capped 24 GB) so the dense SFFT allocations
+    can never push the host into swap.  Undetectable host RAM falls
+    back to a conservative 6 GB.
+    """
+    try:
+        val = float(cfg.get("sfft_max_memory_gb", 0) or 0)
+    except (TypeError, ValueError):
+        val = 0.0
+    if val > 0:
+        return val
+    avail = _host_mem_available_gb()
+    if avail is None or avail <= 0:
+        return 6.0
+    return max(2.0, min(0.8 * avail, 24.0))
+
+
+def _sfft_num_threads(input_yaml: Any, cfg: Any) -> int:
+    """CPU threads for the SFFT subprocess internals.
+
+    ``sfft_num_threads`` > 0 is explicit; 0/auto gives min(4, cpus) when
+    the pipeline runs images serially (nCPU<=1) and 1 when several
+    image workers may already run SFFT subprocesses in parallel.
+    """
+    try:
+        n = int(cfg.get("sfft_num_threads", 0) or 0)
+    except (TypeError, ValueError):
+        n = 0
+    n_cpu = _sfft_sched_cpu_count()
+    if n <= 0:
+        try:
+            n_workers = int((input_yaml or {}).get("nCPU", 1) or 1)
+        except (TypeError, ValueError):
+            n_workers = 1
+        n = 1 if n_workers > 1 else min(4, n_cpu)
+    return max(1, min(n, n_cpu, 16))
+
+
+def _sfft_peak_mem_gb(
+    npix: float,
+    ker_hw: int,
+    ker_order: int,
+    bg_order: int,
+    const_phot: bool,
+) -> Tuple[float, int]:
+    """Peak-RAM estimate (GB, NEQ) for one SFFT subtraction.
+
+    Mirrors the dominant allocations in sfft.sfftcore.SFFTSubtract.ESS:
+    the NEQ x NEQ float64 least-squares matrix (a second copy exists
+    alongside it under ConstPhotRatio), the (1+Fij+Fpq) complex128
+    Fourier stack held across both passes, the largest Hadamard 3D
+    workspace, the (L0+L1) complex128 kernel-component planes used to
+    apply the solved kernel, and a dozen image-sized buffers held by
+    the prep/masked-image path.  Kept in agreement with the copy in
+    utils/run_sfft.py, which re-checks the same budget in-process.
+    """
+    hw = max(int(ker_hw), 1)
+    fab = (2 * hw + 1) ** 2
+    fij = (int(ker_order) + 1) * (int(ker_order) + 2) // 2
+    fpq = (int(bg_order) + 1) * (int(bg_order) + 2) // 2
+    neq = fij * fab + fpq
+    gb = 1.0e9
+    # LHMAT plus the Fortran-order copy LAPACK factorises in place; under
+    # ConstPhotRatio a second NEQ-sized LHMAT_FSfree matrix coexists.
+    lsmat = neq * neq * 8.0 * (3.0 if const_phot else 2.0) / gb
+    fft_stack = (1 + fij + fpq) * npix * 16.0 / gb
+    had = max(fij * fij, fij * fpq, fpq * fpq) * npix * 24.0 / gb
+    kab = 2.0 * (2 * hw + 1) * npix * 16.0 / gb
+    images = 12.0 * npix * 8.0 / gb
+    solve = lsmat + fft_stack + had + images
+    subtract = kab + fft_stack + 3.0 * npix * 16.0 / gb + images
+    return max(solve, subtract), neq
+
+
+def _sfft_fit_memory(
+    npix: float,
+    ker_hw: int,
+    ker_order: int,
+    bg_order: int,
+    const_phot: bool,
+    max_mem_gb: float,
+    hw_floor: int,
+) -> Tuple[int, int, float, int]:
+    """Shrink (ker_order, ker_hw) until the SFFT estimate fits the budget.
+
+    Kernel order drops first (it multiplies every kernel pixel in NEQ),
+    then the largest half-width in [hw_floor, ker_hw] that fits is found
+    by bisection.  Returns the possibly reduced parameters plus the final
+    estimate and NEQ.
+    """
+
+    def _est(hw: int, ko: int) -> Tuple[float, int]:
+        return _sfft_peak_mem_gb(npix, hw, ko, bg_order, const_phot)
+
+    est, neq = _est(ker_hw, ker_order)
+    while est > max_mem_gb and ker_order > 0:
+        ker_order -= 1
+        est, neq = _est(ker_hw, ker_order)
+    if est > max_mem_gb:
+        lo, hi = max(int(hw_floor), 1), int(ker_hw)
+        best = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            e_mid, _ = _est(mid, ker_order)
+            if e_mid <= max_mem_gb:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if best is not None:
+            ker_hw = best
+            est, neq = _est(ker_hw, ker_order)
+    return int(ker_hw), int(ker_order), float(est), int(neq)
+
+
 def _sfft_retry_kernel_hw(
     n_matched: int,
     fwhm_conv: float,
@@ -13436,19 +13574,26 @@ class Templates:
             # null/None defaults to 0 (constant kernel, minimal RAM).
             _raw_kernel = ts_cfg.get("kernel_order", 0)
             _is_auto = isinstance(_raw_kernel, str) and _raw_kernel.strip().lower() == "auto"
-            # null/None -> 0 (constant).  Only "auto" string triggers auto-select.
-            # Numeric strings like "0", "1", "2" are valid user overrides.
+            # Only the literal string "auto" triggers auto-select.  An
+            # explicit integer (including 0), a missing key, null, or an
+            # unparseable value all resolve to the user's requested order
+            # (0 when no valid integer was given) and are never escalated.
             if _is_auto:
                 user_kernel = None
             elif isinstance(_raw_kernel, str):
                 try:
                     user_kernel = int(_raw_kernel.strip())
                 except ValueError:
-                    user_kernel = None
+                    logger.warning(
+                        "Unrecognised kernel_order=%r - using 0 "
+                        "(valid values: 0, 1, 2, 3, \"auto\").",
+                        _raw_kernel,
+                    )
+                    user_kernel = 0
             elif _raw_kernel is not None:
                 user_kernel = _raw_kernel
             else:
-                user_kernel = None
+                user_kernel = 0
             n_matched = len(matching_sources) if matching_sources else 0
 
             # n_eff was computed earlier for kernel floor adaptation (BUG 120).
@@ -13458,9 +13603,16 @@ class Templates:
             _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 3) or 3)
             _sfft_self_match = n_matched < _min_prior
 
-            if user_kernel is not None and user_kernel >= 0:
-                # User override: keep it, but warn when under-constrained.
-                kernel_order = min(int(user_kernel), 3)
+            if user_kernel is not None:
+                # User override: honour it exactly - kernel_order is never
+                # escalated for an explicit value.  kernel_order: 0 forces
+                # a constant kernel even for a large PSF mismatch; use
+                # kernel_order: "auto" to let the pipeline add spatial
+                # freedom when the data support it.
+                try:
+                    kernel_order = max(0, min(int(user_kernel), 3))
+                except (TypeError, ValueError):
+                    kernel_order = 0
                 min_src_for_order = {0: 5, 1: 20, 2: 50, 3: 80}
                 needed = min_src_for_order.get(kernel_order, 0)
                 if n_eff < needed:
@@ -13474,31 +13626,6 @@ class Templates:
                         "(~7 GB for order 2, ~20 GB for order 3 with typical "
                         "kernel sizes). Ensure sufficient memory is available.",
                         kernel_order,
-                    )
-                # Auto-boost: when user sets kernel_order=0 but the PSF
-                # difference is large, a constant kernel cannot model the
-                # spatially-varying kernel shape.  Boost to 1 with a warning.
-                # This prevents dipole residuals and flux scaling mismatches
-                # that occur when a constant kernel is used for a large PSF
-                # difference (e.g., FWHM_sci=13 vs FWHM_ref=5).
-                _rel_diff_check = abs(science_fwhm - template_fwhm) / max(
-                    (science_fwhm + template_fwhm) / 2, 0.1
-                )
-                if (
-                    kernel_order == 0
-                    and _rel_diff_check > 0.4
-                    and n_eff >= 30
-                ):
-                    kernel_order = 1
-                    logger.warning(
-                        "Auto-boosting kernel_order from 0 to 1:\n"
-                        "    large PSF rel_diff=%.2f (FWHM_sci=%.1f,\n"
-                        "    FWHM_ref=%.1f) with %d matched sources requires\n"
-                        "    a spatially-varying kernel. A constant kernel\n"
-                        "    (order 0) causes flux scaling mismatches and\n"
-                        "    dipole residuals. Set kernel_order: \"auto\" in\n"
-                        "    YAML to suppress this boost.",
-                        _rel_diff_check, science_fwhm, template_fwhm, n_eff,
                     )
             else:
                 # The polynomial order controls how the kernel varies SPATIALLY
@@ -16459,6 +16586,13 @@ class Templates:
         ts_sub = (self.input_yaml or {}).get("template_subtraction") or {}
         current_excluded: list = list(masked_sources or [])
         current_matching_sources: list = list(matching_sources or [])
+        # An explicit kernel_order is authoritative: the discrepancy retry
+        # may only raise the spatial order when the user asked for "auto".
+        _raw_ko_forced = ts_sub.get("kernel_order", 0)
+        _kernel_order_forced = not (
+            isinstance(_raw_ko_forced, str)
+            and _raw_ko_forced.strip().lower() == "auto"
+        )
         # Track the log of the currently-adopted run so flux-scaling metadata
         # reflects the diff that is actually on disk.
         _active_log_holder: list = [None]
@@ -16516,9 +16650,47 @@ class Templates:
             if np.isfinite(template_saturate)
             else _saturate_fallback
         )
+        _sfft_budget_gb = _sfft_memory_budget_gb(ts_sub)
+        _sfft_threads = _sfft_num_threads(self.input_yaml, ts_sub)
+        _sfft_mem_policy = str(
+            ts_sub.get("sfft_memory_policy", "shrink") or "shrink"
+        ).strip().lower()
+        if _sfft_mem_policy not in ("shrink", "fallback", "ignore"):
+            logger.warning(
+                "Unrecognised sfft_memory_policy=%r - using 'shrink' "
+                "(valid: shrink, fallback, ignore).",
+                ts_sub.get("sfft_memory_policy"),
+            )
+            _sfft_mem_policy = "shrink"
+        try:
+            sfft_timeout = float(ts_sub.get("sfft_timeout", 600))
+        except (TypeError, ValueError):
+            sfft_timeout = 600.0
+        # Wall-clock budget for the whole retry cascade.  Up to ~7
+        # subprocess passes (flags/ConstPhotRatio/kernel-size/self-match/
+        # post-anomaly/discrepancy) each bounded only by sfft_timeout
+        # could hold this stage silent for well over an hour -- that is
+        # the "hang" users report.  Optional retries are skipped once
+        # the deadline passes.
+        try:
+            _sfft_total_timeout = float(
+                ts_sub.get("sfft_total_timeout", 0) or 0
+            )
+        except (TypeError, ValueError):
+            _sfft_total_timeout = 0.0
+        if _sfft_total_timeout <= 0:
+            _sfft_total_timeout = 4.0 * sfft_timeout
+        _sfft_deadline = time.monotonic() + _sfft_total_timeout
+
+        def _sfft_time_left() -> float:
+            return _sfft_deadline - time.monotonic()
+
+        def _sfft_retry_budget() -> float:
+            """Per-run timeout left in the cascade; <=0 means spent."""
+            return min(sfft_timeout, max(_sfft_time_left(), 0.0))
+
         try:
             script = Path(__file__).parent / "utils" / "run_sfft.py"
-            ts_sub = self.input_yaml.get("template_subtraction") or {}
             # Allow user to control whether variable sources are passed to SFFT
             pass_masked_sources = _as_bool(
                 ts_sub.get("sfft_pass_masked_sources", False), False
@@ -16833,6 +17005,166 @@ class Templates:
                     kernel_half_width,
                 )
 
+            # --- Memory preflight ---
+            # SFFT allocates an NEQ x NEQ float64 least-squares matrix
+            # (twice under ConstPhotRatio) and (2*hw+1) complex128 image
+            # planes when applying the solved kernel.  Both grow fast
+            # with the kernel half-width and can push the host into
+            # swap/OOM well before sfft_timeout fires -- the reported
+            # "hang" at this stage.  Predict the peak here, degrade the
+            # spatial order and then the half-width to fit the budget,
+            # and skip straight to HOTPANTS when even the smallest
+            # physically-meaningful kernel cannot fit.  run_sfft.py
+            # re-checks the same budget in-process (it may resolve a
+            # different effective hw when auto-sizing).
+            try:
+                _shdr = fits.getheader(str(scienceFpath))
+                _npix = float(_shdr.get("NAXIS1", 0)) * float(
+                    _shdr.get("NAXIS2", 0)
+                )
+            except Exception:
+                _npix = 0.0
+            if _npix > 0:
+                _fb_g = max(float(science_fwhm), float(template_fwhm))
+                _fn_g = min(float(science_fwhm), float(template_fwhm))
+                _fc_g = float(np.sqrt(max(_fb_g ** 2 - _fn_g ** 2, 0.0)))
+                _sig_fwhm = 2.3548200450309493
+                _hw_max_g = int(ts_sub.get("sfft_kernel_hw_max", 50) or 50)
+                if _sfft_pass_kernel_hw > 0:
+                    _eff_hw = int(_sfft_pass_kernel_hw)
+                else:
+                    _mult_g = float(
+                        ts_sub.get("kernel_hw_fwhm_multiplier", 2.5) or 2.5
+                    )
+                    if not np.isfinite(_mult_g) or _mult_g <= 0:
+                        _mult_g = 2.5
+                    _mult_g = max(1.0, min(_mult_g, 5.0))
+                    if _fb_g < 2.0:
+                        _mult_g = min(_mult_g * 1.5, 4.0)
+                    _eff_hw = int(
+                        min(
+                            max(
+                                KER_HW_MIN,
+                                int(np.ceil(_mult_g * _fb_g)),
+                                int(np.ceil(3.0 * _fc_g / _sig_fwhm)),
+                            ),
+                            _hw_max_g,
+                        )
+                    )
+                _hw_floor_g = max(
+                    KER_HW_MIN, int(np.ceil(3.0 * _fc_g / _sig_fwhm))
+                )
+
+                def _safe_int(v, d=0):
+                    try:
+                        return int(v)
+                    except (TypeError, ValueError):
+                        return d
+
+                _ko_g = _safe_int(kernel_order)
+                _bo_g = _safe_int(bg_order)
+                _est_gb, _neq = _sfft_peak_mem_gb(
+                    _npix,
+                    _eff_hw,
+                    _ko_g,
+                    _bo_g,
+                    bool(const_phot_ratio),
+                )
+                _sfft_backend_g = str(
+                    ts_sub.get("sfft_backend", "numpy")
+                ).strip().lower()
+                if _sfft_backend_g in ("cupy", "gpu", "cuda"):
+                    # The allocations live on the GPU; a CUDA OOM fails
+                    # fast instead of swapping the host, so the estimate
+                    # is informational here.  run_sfft.py enforces the
+                    # budget again when it falls back to the Numpy backend.
+                    logger.info(
+                        "SFFT memory preflight (cupy): ~%.2f GB estimated "
+                        "device footprint (NEQ=%d, hw=%d, order=%d).",
+                        _est_gb,
+                        _neq,
+                        _eff_hw,
+                        _ko_g,
+                    )
+                elif _est_gb > _sfft_budget_gb:
+                    if _sfft_mem_policy == "ignore":
+                        # User accepted the memory risk: the estimate is a
+                        # conservative upper bound, and the full kernel is
+                        # what the science needs.
+                        logger.warning(
+                            "SFFT memory preflight: ~%.2f GB estimated "
+                            "peak exceeds the %.1f GB budget - running "
+                            "the full kernel anyway "
+                            "(sfft_memory_policy='ignore', hw=%d, "
+                            "order=%d, NEQ=%d).",
+                            _est_gb,
+                            _sfft_budget_gb,
+                            _eff_hw,
+                            _ko_g,
+                            _neq,
+                        )
+                    elif _sfft_mem_policy == "fallback":
+                        logger.warning(
+                            "SFFT needs ~%.2f GB for the requested kernel "
+                            "(hw=%d, order=%d) on this %d-px image but the "
+                            "budget is %.1f GB - using HOTPANTS rather "
+                            "than degrading the kernel "
+                            "(sfft_memory_policy='fallback').",
+                            _est_gb,
+                            _eff_hw,
+                            _ko_g,
+                            int(_npix),
+                            _sfft_budget_gb,
+                        )
+                        return "hotpants"
+                    else:
+                        _hw0_g, _ko0_g = _eff_hw, _ko_g
+                        _eff_hw, _ko_g, _est_gb, _neq = _sfft_fit_memory(
+                            _npix,
+                            _eff_hw,
+                            _ko_g,
+                            _bo_g,
+                            bool(const_phot_ratio),
+                            _sfft_budget_gb,
+                            _hw_floor_g,
+                        )
+                        kernel_order = _ko_g
+                        if _est_gb > _sfft_budget_gb:
+                            logger.warning(
+                                "SFFT needs ~%.1f GB at its minimum kernel "
+                                "(hw=%d, order=0) on this %d-px image but the "
+                                "budget is %.1f GB - skipping to HOTPANTS "
+                                "rather than swapping/OOMing the host.",
+                                _est_gb,
+                                _hw_floor_g,
+                                int(_npix),
+                                _sfft_budget_gb,
+                            )
+                            return "hotpants"
+                        _sfft_pass_kernel_hw = int(_eff_hw)
+                        logger.warning(
+                            "SFFT memory preflight: estimate exceeds the "
+                            "%.1f GB budget - reducing kernel hw %d -> %d, "
+                            "kernel_order %d -> %d (NEQ=%d, est %.2f GB).",
+                            _sfft_budget_gb,
+                            _hw0_g,
+                            _eff_hw,
+                            _ko0_g,
+                            int(kernel_order),
+                            _neq,
+                            _est_gb,
+                        )
+                else:
+                    logger.info(
+                        "SFFT memory preflight: ~%.2f GB estimated peak "
+                        "(budget %.1f GB, NEQ=%d, hw=%d, order=%d).",
+                        _est_gb,
+                        _sfft_budget_gb,
+                        _neq,
+                        _eff_hw,
+                        _ko_g,
+                    )
+
             def _serialize_xy_pairs(xy_list) -> str:
                 if not xy_list:
                     return "[]"
@@ -16923,6 +17255,12 @@ class Templates:
                         "-cuda_device",
                         str(ts_sub.get("sfft_cuda_device", "0")),
                     ]
+
+                # CPU threads for the subtraction internals and the
+                # subprocess RAM budget (re-checked inside run_sfft.py).
+                cmd_local += ["-num_threads", str(_sfft_threads)]
+                cmd_local += ["-max_memory_gb", f"{_sfft_budget_gb:.3f}"]
+                cmd_local += ["-memory_policy", _sfft_mem_policy]
 
                 # SFFT source-rejection controls.
                 # Default: exclude blended sources (FLAGS & 2) which bias flux scaling.
@@ -17048,7 +17386,11 @@ class Templates:
             post_anomaly_csv = scienceDir / f"SFFT_PostAnomaly_Sources_{out_base}.csv"
             matching_sources_csv = scienceDir / f"SFFT_Matching_Sources_{out_base}.csv"
             log_path = scienceDir / f"SFFT_{Path(base_name).stem}.txt"
-            # Force single process/CPU: one thread for BLAS/OpenMP and common env limits.
+            # BLAS/OpenMP threads for the subprocess.  sfft_num_threads
+            # (default: min(4, cpus) when the pipeline is serial) also feeds
+            # run_sfft.py's NUM_CPU_THREADS_4SUBTRACT for the pyFFTW/numba
+            # kernels; single-threaded BLAS made the dense NEQ solve far
+            # slower than the memory model implied.
             sfft_env = {**os.environ}
             for _k in (
                 "OMP_NUM_THREADS",
@@ -17058,7 +17400,7 @@ class Templates:
                 "VECLIB_MAXIMUM_THREADS",
                 "OPENMP_NUM_THREADS",
             ):
-                sfft_env[_k] = "1"
+                sfft_env[_k] = str(_sfft_threads)
 
             # SFFT's internal MeLOn wrapper calls `sex` (SExtractor) via PATH.
             # The esoreflex SExtractor (v2.5.0) lacks GAIN_KEY support required
@@ -17069,7 +17411,6 @@ class Templates:
                 sfft_env["PATH"] = _py_bin + os.pathsep + sfft_env.get("PATH", "")
 
             cmd = _build_sfft_cmd(current_excluded, current_matching_sources, template_work_fpath, outputFpath)
-            sfft_timeout = float(ts_sub.get("sfft_timeout", 600))
             with open(log_path, "w") as lf:
                 subprocess.run(
                     cmd, check=True, text=True, stdout=lf, stderr=lf, env=sfft_env,
@@ -17304,7 +17645,16 @@ class Templates:
                         "    sources.",
                         frac_post, post_anom_max_frac, n_post, n_ref,
                     )
-                if n_post >= post_anom_min_count:
+                if (
+                    n_post >= post_anom_min_count
+                    and _sfft_retry_budget() <= 30.0
+                ):
+                    logger.warning(
+                        "SFFT post-anomaly feedback skipped: %.0fs left in "
+                        "the total SFFT time budget.",
+                        max(_sfft_time_left(), 0.0),
+                    )
+                elif n_post >= post_anom_min_count:
 
                     # --- Improve matching sources using SFFT-vetted results ---
                     # After the first SFFT pass, SFFT writes the sources it
@@ -17487,7 +17837,7 @@ class Templates:
                                     stdout=lf,
                                     stderr=lf,
                                     env=sfft_env,
-                                    timeout=sfft_timeout,
+                                    timeout=_sfft_retry_budget(),
                                 )
                             clean_subprocess_log(retry_log_path)
                             # The retry wrote a fresh diff with fresh
@@ -17515,6 +17865,13 @@ class Templates:
                             raise
                         finally:
                             _discard_sfft_backups(_bak_pa)
+                elif n_post >= post_anom_min_count:
+                    logger.warning(
+                        "SFFT wall-clock budget for the subtraction cascade "
+                        "is spent (%.0fs left) - skipping the post-anomaly "
+                        "retry; keeping the first-pass result.",
+                        max(_sfft_time_left(), 0.0),
+                    )
                 elif n_post > 0:
                     logger.info(
                         "SFFT post-anomaly feedback skipped (count=%d below min=%d).",
@@ -17712,10 +18069,37 @@ class Templates:
                 and _conv_scale > 0
                 and _discrep_pct > _discrep_retry_thresh
                 and kernel_order < 2
+                and not _kernel_order_forced
                 and _n_eff_local >= 20
+                and _sfft_retry_budget() > 30.0
             )
             if _do_discrep_retry:
                 _retry_kernel_order = min(kernel_order + 1, 2)
+                # A higher kernel order multiplies every kernel pixel into
+                # NEQ -- the retry must stay inside the same RAM budget.
+                if _npix > 0 and _sfft_mem_policy != "ignore":
+                    _hw_dr = (
+                        int(_sfft_pass_kernel_hw)
+                        if _sfft_pass_kernel_hw > 0
+                        else _eff_hw
+                    )
+                    _est_dr, _ = _sfft_peak_mem_gb(
+                        _npix,
+                        _hw_dr,
+                        _retry_kernel_order,
+                        _bo_g,
+                        bool(const_phot_ratio),
+                    )
+                    if _est_dr > _sfft_budget_gb:
+                        logger.warning(
+                            "SFFT discrepancy retry at kernel_order=%d would "
+                            "need ~%.1f GB (budget %.1f GB) - skipping.",
+                            _retry_kernel_order,
+                            _est_dr,
+                            _sfft_budget_gb,
+                        )
+                        _do_discrep_retry = False
+            if _do_discrep_retry:
                 logger.warning(
                     "SFFT flux scaling discrepancy=%.1f%% > %.1f%% threshold. "
                     "Retrying with kernel_order=%d (was %d) to improve kernel "
@@ -17742,7 +18126,7 @@ class Templates:
                             stdout=lf,
                             stderr=lf,
                             env=sfft_env,
-                            timeout=sfft_timeout,
+                            timeout=_sfft_retry_budget(),
                         )
                     clean_subprocess_log(discrep_log_path)
                     _stamp_fscal_cards(outputFpath)
@@ -17854,7 +18238,32 @@ class Templates:
                 and _discrep_pct > _const_phot_retry_thresh
                 and not const_phot_ratio  # not already enabled
                 and _n_matched_local >= 3  # need at least a few sources
+                and _sfft_retry_budget() > 30.0
             )
+            # ConstPhotRatio=True builds a second NEQ x NEQ matrix
+            # (LHMAT_FSfree) alongside the first -- roughly doubling the
+            # solve allocation, so it needs its own memory check.
+            if (
+                _do_const_phot_retry
+                and _npix > 0
+                and _sfft_mem_policy != "ignore"
+            ):
+                _hw_cp = (
+                    int(_sfft_pass_kernel_hw)
+                    if _sfft_pass_kernel_hw > 0
+                    else _eff_hw
+                )
+                _est_cp, _ = _sfft_peak_mem_gb(
+                    _npix, _hw_cp, _ko_g, _bo_g, True
+                )
+                if _est_cp > _sfft_budget_gb:
+                    logger.warning(
+                        "SFFT ConstPhotRatio retry would need ~%.1f GB "
+                        "(budget %.1f GB) - skipping.",
+                        _est_cp,
+                        _sfft_budget_gb,
+                    )
+                    _do_const_phot_retry = False
             if _do_const_phot_retry:
                 logger.warning(
                     "SFFT flux scaling discrepancy=%.1f%% > %.1f%% with\n"
@@ -17891,7 +18300,7 @@ class Templates:
                             stdout=lf,
                             stderr=lf,
                             env=sfft_env,
-                            timeout=sfft_timeout,
+                            timeout=_sfft_retry_budget(),
                         )
                     clean_subprocess_log(cpr_log_path)
                     _stamp_fscal_cards(outputFpath)
@@ -18119,6 +18528,14 @@ class Templates:
                     _nkersrc, _est_n_rt,
                 )
                 _do_ksize_retry = True
+            if _do_ksize_retry and _sfft_retry_budget() <= 30.0:
+                logger.warning(
+                    "SFFT wall-clock budget for the subtraction cascade "
+                    "is spent (%.0fs left) - skipping the kernel-size "
+                    "retry; keeping the current result.",
+                    max(_sfft_time_left(), 0.0),
+                )
+                _do_ksize_retry = False
             if _do_ksize_retry:
                 logger.warning(
                     "SFFT kernel is under-constrained (KERNOISE=%s "
@@ -18163,7 +18580,7 @@ class Templates:
                             stdout=lf,
                             stderr=lf,
                             env=sfft_env,
-                            timeout=sfft_timeout,
+                            timeout=_sfft_retry_budget(),
                         )
                     clean_subprocess_log(ks_log_path)
                     _stamp_fscal_cards(outputFpath)
@@ -18327,6 +18744,73 @@ class Templates:
                     exc,
                 )
                 return "hotpants"
+            # A timeout means the solve was too big for the wall, not that
+            # the flags were wrong: drop to order 0 and the smallest kernel
+            # the memory budget allows, then let the ConstPhotRatio fallback
+            # below retry once with those params.  Skipping the permissive-
+            # flags retry here avoids burning a second sfft_timeout on the
+            # same over-sized problem.
+            _timed_out = isinstance(exc, subprocess.TimeoutExpired)
+            _timed_out_identical = False
+            if _timed_out:
+                logger.warning(
+                    "SFFT subprocess timed out after %.0fs - reducing to "
+                    "kernel_order=0 and the smallest budget-fitting kernel "
+                    "for the remaining attempts.",
+                    float(locals().get("sfft_timeout", 600) or 600),
+                )
+                kernel_order = 0
+                if _npix > 0:
+                    # Estimate with ConstPhotRatio=True: the fallback below
+                    # flips it on, and the second LHMAT_FSfree matrix is the
+                    # worst case the retries will allocate.
+                    _hw_to, _ko_to, _est_to, _ = _sfft_fit_memory(
+                        _npix,
+                        _eff_hw,
+                        0,
+                        _bo_g,
+                        True,
+                        _sfft_budget_gb,
+                        _hw_floor_g,
+                    )
+                    if _est_to <= _sfft_budget_gb:
+                        _sfft_pass_kernel_hw = int(_hw_to)
+                        # A second launch only helps when it is a smaller
+                        # solve than the one that just timed out.
+                        _timed_out_identical = (
+                            _ko_g <= 0 and _hw_to >= _eff_hw
+                        )
+                    else:
+                        logger.warning(
+                            "SFFT cannot fit even its minimum kernel "
+                            "(hw=%d, est %.1f GB > %.1f GB budget) - "
+                            "skipping to HOTPANTS.",
+                            _hw_floor_g,
+                            _est_to,
+                            _sfft_budget_gb,
+                        )
+                        return "hotpants"
+                elif int(_sfft_pass_kernel_hw or 0) <= 0:
+                    _sfft_pass_kernel_hw = int(kernel_half_width)
+            # run_sfft.py's own memory preflight aborts when even the
+            # minimum kernel cannot fit the budget -- no flag or scaling
+            # variation can fix that, so go straight to HOTPANTS instead
+            # of spending two more subprocess launches on known refusals.
+            _mem_refused = False
+            try:
+                _lp = _active_log_holder[0] or locals().get("log_path")
+                if _lp and Path(_lp).exists():
+                    _mem_refused = "exceeds the memory budget" in Path(
+                        _lp
+                    ).read_text(errors="ignore")
+            except Exception:
+                _mem_refused = False
+            if _mem_refused:
+                logger.warning(
+                    "SFFT subprocess refused the kernel on memory grounds - "
+                    "skipping retries and falling back to HOTPANTS."
+                )
+                return "hotpants"
             # --- Fallback: retry with permissive ONLY_FLAGS if restrictive
             # flags were used.  Restrictive flags (excluding blended sources)
             # can starve SFFT of sources in dense fields.  Retry once with
@@ -18338,6 +18822,14 @@ class Templates:
                 and isinstance(_restrictive_flags, (list, tuple))
                 and set(_restrictive_flags) != set(_permissive_flags)
             )
+            if _is_restrictive and _timed_out:
+                _is_restrictive = False
+            if _is_restrictive and _sfft_retry_budget() <= 30.0:
+                logger.warning(
+                    "SFFT wall-clock budget spent - skipping the "
+                    "permissive-flags retry.",
+                )
+                _is_restrictive = False
             if _is_restrictive:
                 logger.warning(
                     "SFFT failed with restrictive only_flags=%s (%s). "
@@ -18362,7 +18854,7 @@ class Templates:
                             stdout=lf,
                             stderr=lf,
                             env=sfft_env,
-                            timeout=sfft_timeout,
+                            timeout=_sfft_retry_budget(),
                         )
                     clean_subprocess_log(fallback_log_path)
                     if callable(locals().get("_stamp_fscal_cards")):
@@ -18395,7 +18887,13 @@ class Templates:
             # the flux scaling to the photometric ratio.  This can rescue
             # subtractions in very sparse fields where HOTPANTS would also
             # struggle.
-            if not const_phot_ratio:
+            if _timed_out_identical:
+                logger.warning(
+                    "SFFT already ran its smallest budget-fitting kernel - "
+                    "a ConstPhotRatio retry would repeat the same solve and "
+                    "time out again; going straight to HOTPANTS."
+                )
+            elif not const_phot_ratio and _sfft_retry_budget() > 30.0:
                 logger.info(
                     "SFFT: retrying with ConstPhotRatio=True (was False) "
                     "to constrain flux scaling for sparse field."
@@ -18421,7 +18919,7 @@ class Templates:
                             stdout=lf,
                             stderr=lf,
                             env=sfft_env,
-                            timeout=sfft_timeout,
+                            timeout=_sfft_retry_budget(),
                         )
                     clean_subprocess_log(cpr_exc_log_path)
                     # Parse flux scaling from the retry log
