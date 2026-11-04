@@ -27,6 +27,7 @@ import shutil
 import sys
 import warnings
 from pathlib import Path
+from typing import Optional
 import pandas as pd
 import yaml
 import logging
@@ -2957,6 +2958,135 @@ def get_image(fpath):
         raise Exception(f"Warning: {base} is not a 2D array.")
 
     return image
+
+
+def _celestial_wcs(header):
+    """Return a usable WCS for *header*, or None when it carries none."""
+    try:
+        w = WCS(header)
+        return w if w.has_celestial else None
+    except Exception:
+        return None
+
+
+def external_weight_to_rms(
+    weight_path,
+    ref_sigma: np.ndarray,
+    target_header,
+) -> Optional[np.ndarray]:
+    """
+    Fold a companion weight/noise map into a measured RMS map.
+
+    Delivered reductions often ship a SWarp-style ``<base>.weight.fits``
+    (inverse-variance-like; high = deeper) next to each image, while
+    every AutoPhOT noise consumer (SExtractor ``MAP_RMS``, HOTPANTS
+    ``-ini``/``-tni``) expects a sigma map.  Maps written by this
+    pipeline carry ``MAPTYPE = 'RMS'`` and are already sigma maps.
+
+    The external map supplies the spatial noise structure; the measured
+    ``ref_sigma`` supplies the absolute scale, since a delivered weight
+    is relative depth rather than a calibrated variance.  RMS-typed
+    maps are re-anchored the same way: their shape is trusted, their
+    absolute calibration is not.  Each map kind
+    is resampled in its natural space: weight maps interpolate the
+    weight itself (the SWarp coverage convention, tapering at edges),
+    while RMS maps interpolate variance (``m^2``) so a coverage boundary
+    keeps the noisier side - the safe bias for significance maps.
+    Weight-type maps apply ``rel = 1/sqrt(w/median(w))``; RMS-type maps
+    apply ``rel = sqrt(v/median(v))``, which reduces to ``m/median(m)``
+    on the native grid.  Pixels outside the delivered footprint
+    (weight <= 0 or non-finite) become NaN, matching the masked-RMS
+    convention used elsewhere.
+
+    Returns the combined map on ``ref_sigma``'s grid, or None when the
+    companion is unusable - the caller then keeps ``ref_sigma``.
+    """
+    if not weight_path or not os.path.isfile(str(weight_path)):
+        return None
+    try:
+        w_img = get_image(str(weight_path)).astype(np.float64)
+        w_hdr = get_header(str(weight_path))
+    except Exception as e:
+        logging.warning(
+            "External weight map %s unreadable (%s); keeping measured RMS.",
+            weight_path,
+            e,
+        )
+        return None
+
+    is_rms_map = str(w_hdr.get("MAPTYPE", "")).strip().upper() == "RMS"
+    if is_rms_map:
+        # Convert sigma to variance on the SOURCE grid so reprojection
+        # interpolates variances rather than sigmas.  Non-positive sigma
+        # means unusable coverage -> NaN, which reproject then bleeds a
+        # pixel or two inward (safer than inventing a finite noise).
+        _ok = np.isfinite(w_img) & (w_img > 0)
+        w_img = np.where(_ok, np.square(w_img), np.nan)
+
+    src_wcs = _celestial_wcs(w_hdr)
+    dst_wcs = _celestial_wcs(target_header)
+    need_reproject = w_img.shape != ref_sigma.shape
+    if not need_reproject and src_wcs is not None and dst_wcs is not None:
+        # Same shape does not imply same grid (e.g. same-size reprojection).
+        ny, nx = ref_sigma.shape
+        for px, py in (
+            (0.0, 0.0),
+            (nx - 1.0, ny - 1.0),
+            (nx / 2.0, ny / 2.0),
+        ):
+            ra, dec = src_wcs.all_pix2world(px, py, 0)
+            xb, yb = dst_wcs.all_world2pix(ra, dec, 0)
+            if not (
+                np.isfinite(xb)
+                and np.isfinite(yb)
+                and np.hypot(xb - px, yb - py) <= 0.5
+            ):
+                need_reproject = True
+                break
+
+    if need_reproject:
+        if src_wcs is None or dst_wcs is None:
+            logging.warning(
+                "External weight map %s is on a different grid and lacks "
+                "usable WCS; keeping measured RMS.",
+                weight_path,
+            )
+            return None
+        try:
+            from reproject import reproject_interp
+
+            w_img, _ = reproject_interp(
+                (w_img, src_wcs),
+                dst_wcs,
+                shape_out=ref_sigma.shape,
+                order="bilinear",
+            )
+        except Exception as e:
+            logging.warning(
+                "External weight map %s reprojection failed (%s); "
+                "keeping measured RMS.",
+                weight_path,
+                e,
+            )
+            return None
+
+    valid = np.isfinite(w_img) & (w_img > 0)
+    if not np.any(valid):
+        logging.warning(
+            "External weight map %s has no usable pixels; keeping measured RMS.",
+            weight_path,
+        )
+        return None
+
+    med = float(np.median(w_img[valid]))
+    if not np.isfinite(med) or med <= 0:
+        return None
+    rel = np.full(w_img.shape, np.nan)
+    if is_rms_map:
+        rel[valid] = np.sqrt(w_img[valid] / med)
+    else:
+        rel[valid] = 1.0 / np.sqrt(w_img[valid] / med)
+    return (np.asarray(ref_sigma, dtype=np.float64) * rel).astype(np.float32)
 
 
 def read_output_csv(file_path, **kwargs):
