@@ -1360,6 +1360,63 @@ def _coerce_detected_xy(detected_xy):
         return None
 
 
+def _coerce_detected_flux(detected_xy, n_expected):
+    """
+    Brightness proxy for detected positions, (N,) float array or None.
+
+    solve-field consumes an xylist in file order and builds quads from the
+    first rows, so the list must be written brightest-first or sparse fields
+    feed it unusable subsets.  ``_coerce_detected_xy`` drops every column but
+    x/y; this recovers a ranking column (snr is preferred because it reflects
+    reliability as well as brightness) and applies the same finite-row filter
+    so the values stay row-aligned with the coerced positions.  Returns None
+    when no usable column exists.
+    """
+    cols = getattr(detected_xy, "columns", None)
+    if cols is None:
+        return None
+    try:
+        n_expected = int(n_expected)
+    except (TypeError, ValueError):
+        return None
+    if n_expected <= 0:
+        return None
+    lower = {str(c).strip().lower(): c for c in cols}
+    xy_arr = None
+    for x_name, y_name in (
+        ("x_pix", "y_pix"),
+        ("x", "y"),
+        ("xwin_image", "ywin_image"),
+        ("x_image", "y_image"),
+    ):
+        if x_name in lower and y_name in lower:
+            try:
+                xy_arr = np.column_stack(
+                    [
+                        np.asarray(detected_xy[lower[x_name]], dtype=float),
+                        np.asarray(detected_xy[lower[y_name]], dtype=float),
+                    ]
+                )
+            except Exception:
+                xy_arr = None
+            break
+    if xy_arr is None or xy_arr.shape[0] == 0:
+        return None
+    row_ok = np.isfinite(xy_arr).all(axis=1)
+    if int(row_ok.sum()) != n_expected:
+        return None
+    for name in ("snr", "peak_flux", "flux_ap", "flux_auto", "flux"):
+        if name not in lower:
+            continue
+        try:
+            vals = np.asarray(detected_xy[lower[name]], dtype=float).ravel()
+        except Exception:
+            continue
+        if vals.size == row_ok.size and np.isfinite(vals[row_ok]).any():
+            return vals[row_ok]
+    return None
+
+
 def _solve_nsigma_for_count(n_det, cfg_val, sparse_nsigma):
     """
     Solve-field --nsigma given a known detection count.
@@ -1455,14 +1512,24 @@ def _write_solve_xylist(xy, flux, path, width=None, height=None):
         if xy.ndim != 2 or xy.shape[1] < 2 or xy.shape[0] == 0:
             return None
         n_src = xy.shape[0]
+        f_col = np.ones(n_src, dtype=float)
+        sortable = False
+        if flux is not None:
+            _f = np.asarray(flux, dtype=float).ravel()
+            if _f.size == n_src and np.isfinite(_f).any():
+                f_col = _f
+                sortable = True
+        # solve-field builds quads from the first rows of the list, so rows
+        # must be brightest-first.  A scan-order (e.g. SExtractor) list on a
+        # sparse field starves every object window of a usable quad.
+        if sortable:
+            order = np.argsort(
+                np.where(np.isfinite(f_col), f_col, -np.inf)
+            )[::-1]
+            xy = xy[order]
+            f_col = f_col[order]
         x_col = xy[:, 0] + 1.0
         y_col = xy[:, 1] + 1.0
-        if flux is None:
-            f_col = np.ones(n_src, dtype=float)
-        else:
-            f_col = np.asarray(flux, dtype=float).ravel()
-            if f_col.size != n_src:
-                f_col = np.ones(n_src, dtype=float)
         f_col = np.where(np.isfinite(f_col), f_col, 1.0)
         cols = fits.ColDefs(
             [
@@ -3339,7 +3406,11 @@ class WCSSolver:
                 wcs_cfg, "solve_field_xylist_min_sources", 8
             )
             _xyls_xy = _solve_xy
-            _xyls_flux = None
+            _xyls_flux = (
+                _coerce_detected_flux(detected_xy, len(_xyls_xy))
+                if _xyls_xy is not None
+                else None
+            )
             if _xyls_xy is not None and len(_xyls_xy) < _min_xyls_src:
                 _xyls_xy = None
             _relaxed_det_empty = False
