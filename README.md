@@ -93,6 +93,72 @@ A few things worth knowing up front:
 - `config["nCPU"] = 4` (or `AUTOPHOT_NCPU=4`, which takes precedence) processes images in parallel, each with its own log. Worker settings like `photometry.aperture_n_jobs` multiply `nCPU`, so keep the product at or below your core count. `nGPU` / `AUTOPHOT_NGPU` pins workers to GPUs round-robin.
 - `python batch_main.py -f im1.fits im2.fits -c config.yml --jobs 4` runs a file list without a driver script.
 
+<h2 align="center">Folder layout</h2>
+
+`fits_dir` is scanned recursively. Every FITS file under it is a science candidate unless its path contains a pipeline-product token (`template`, `subtraction`, `.wcs`, `.weight`, `PSF_model`, `footprint`, `sources_`). Folder names are free; a flat directory works as well as a nested one.
+
+Flat layout:
+
+```text
+photometry/
+  SN2024A_2024-01-01_g.fits
+  SN2024A_2024-01-02_g.fits
+  SN2024A_2024-01-01_r.fits
+```
+
+Nested layout, e.g. one folder per instrument:
+
+```text
+photometry/
+  LBT_MODS/
+    science/
+      SN2024A_LBT_MODS_2024-01-01_g.fits
+      SN2024A_LBT_MODS_2024-01-02_g.fits
+  LCO/
+    science/
+      SN2024A_LCO_2024-01-03_g.fits
+```
+
+Outputs go to a `<fits_dir>_<outdir_name>` sibling (default `photometry_REDUCED`) that mirrors the input nesting, appending `_APT` per level:
+
+```text
+photometry_REDUCED/
+  LBT_MODS_APT/
+    science_APT/
+      SN2024A_LBT_MODS_2024-01-01_g/
+      SN2024A_LBT_MODS_2024-01-02_g/
+  LCO_APT/
+    science_APT/
+      SN2024A_LCO_2024-01-03_g/
+```
+
+Templates live in a `templates/` folder with one `<band>_template/` subdir per filter, each holding a single template FITS. A `.weight` FITS next to it is used as a noise map, and Pan-STARRS-style `gp_template` names are accepted for the ugriz bands:
+
+```text
+photometry/
+  science/
+    SN2024A_2024-01-01_g.fits
+  templates/
+    g_template/
+      panstarrs_g.fits
+      panstarrs_g.weight.fits
+    r_template/
+      panstarrs_r.fits
+```
+
+For nested datasets, the `templates/` folder nearest to the science image wins (walking up toward `fits_dir`), so different datasets can subtract different reference frames in one run:
+
+```text
+photometry/
+  LBT_MODS/
+    science/ ...
+    templates/g_template/lbt_g.fits   # serves LBT_MODS images
+  LCO/
+    science/ ...
+  templates/
+    g_template/ps1_g.fits             # fallback for everything else
+```
+
 <h2 align="center">Command-line tools</h2>
 
 | Command | Purpose |
@@ -145,9 +211,7 @@ Shared options under `template_subtraction`:
 
 Sources on masked pixels are dropped before the kernel fit, and variable sources and the target itself are excluded from scale and PSF estimation. Residual dipoles at bright static cores are caught by `residual_artifact_mask` (on by default): they are masked only when a subpixel misregistration model explains the paired positive/negative lobes, and protected positions (the target plus any variable or additional targets) are never masked. Every alignment attempt is recorded in an `Alignment_<base>.json` manifest next to the science image.
 
-Set `do_subtraction: True`, then place one template FITS per filter in `fits_dir/templates/<filter>_template/`: `prepare_template_directory()` builds the layout for you, and `download_panstarrs_template()`, `download_sdss_template()`, `download_legacy_template()`, and `download_2mass_template()` in `templates.py` can fetch them for you.
-
-Nested datasets work too: for a science image under `fits_dir/<dataset>/...`, the pipeline uses the `templates/` folder found nearest to the image walking up to `fits_dir` (so `fits_dir/<dataset>/templates` overrides `fits_dir/templates` for that dataset only). This lets different image sets subtract different reference frames in one run.
+Set `do_subtraction: True`, then place one template FITS per filter in `fits_dir/templates/<filter>_template/` (see Folder layout above for the full tree, including per-dataset `templates/` folders): `prepare_template_directory()` builds the layout for you, and `download_panstarrs_template()`, `download_sdss_template()`, `download_legacy_template()`, and `download_2mass_template()` in `templates.py` can fetch them for you.
 
 <h2 align="center">Photometry</h2>
 
