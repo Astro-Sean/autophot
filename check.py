@@ -25,6 +25,10 @@ from functions import (
     normalize_photometric_filter_name,
     print_progress_bar,
     sanitize_photometric_filters,
+    FILTER_HEADER_CANDIDATES,
+    NON_FILTER_VALUES,
+    filter_value_usable,
+    find_filter_header_key,
 )
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -57,7 +61,7 @@ OPTIONAL_KEYWORDS = {
     "Date": {"label": "date", "units": "Date of observations in ISO standard"},
     "EXPTIME": {"label": "exptime", "units": "seconds"},
 }
-AVOID_FILTERS = {"open", "clear"}
+AVOID_FILTERS = NON_FILTER_VALUES
 
 # Logical keyword (same names as OPTIONAL_KEYWORDS / ask_for_keyword) -> list of
 # FITS key names in priority order. First key present in the header (case-insensitive)
@@ -75,7 +79,7 @@ KEYWORD_ALIASES = {
     "TELESCOP": ["TELESCOP"],
     # Instrument is always carried in INSTRUME; no aliases.
     "INSTRUME": ["INSTRUME"],
-    "FILTER": ["FILTERS", "FLTRNAM", "FILNAM1", "FILTNAM1", "FILTER1", "FILTER"],
+    "FILTER": list(FILTER_HEADER_CANDIDATES),
     "Date": ["DATE-OBS", "DATEOBS", "UTC-OBS", "OBS-DATE", "DATE", "UTSTART"],
     "EXPTIME": ["EXPOSURE", "TEXP", "EXPTIME", "EXPTIME0"],
     "GAIN": ["GAIN", "EGAIN", "READGAIN", "GAIN0"],
@@ -229,7 +233,7 @@ class FitsInfo:
     def _norm_filter_token(token: str) -> str:
         """Normalize a FITS filter token for consistent matching."""
         t = str(token).strip()
-        t = t.replace(" ", "").replace("-", "_")
+        t = t.replace(" ", "").replace("-", "_").replace("#", "")
         return t.lower()
 
     def _resolve_standard_band(self, token: str) -> Optional[str]:
@@ -542,25 +546,15 @@ class FitsInfo:
     @staticmethod
     def _filter_value_usable(value) -> bool:
         """A filter keyword is only useful if it carries a real value."""
-        v = str(value).strip().lower().replace(" ", "")
-        return bool(v) and v not in AVOID_FILTERS
+        return filter_value_usable(value)
 
     def _detect_filter_key(self, header):
         """Best-guess filter keyword actually present in ``header``.
 
-        Tries known alias names first, then any key containing
-        'filter'.  Returns None when nothing plausible exists.
+        Tries canonical candidate names first, then any plausible 'filt'
+        keyword.  Returns None when nothing usable exists.
         """
-        if not header:
-            return None
-        for alias in KEYWORD_ALIASES.get("FILTER", []):
-            k = _header_key_ci(header, alias)
-            if k is not None and self._filter_value_usable(header[k]):
-                return k
-        for key in header:
-            if "filter" in key.lower() and self._filter_value_usable(header[key]):
-                return str(key)
-        return None
+        return find_filter_header_key(header)
 
     def _extract_filters(self, db, headers_cache, correct_files):
         """Phase 3: Extract and map filter keywords from all valid files."""
@@ -580,6 +574,8 @@ class FitsInfo:
                 self.logger.info("Auto-created entry for %s+%s.", tele, inst)
             entry = db[tele]["INSTRUME"][inst]
             fkey = self._find_filter_key(header, entry)
+            if fkey not in header:
+                continue
             fval_raw = str(header[fkey]).strip().replace(" ", "")
             fval_lower = fval_raw.lower()
             if fval_lower and fval_lower not in AVOID_FILTERS and fval_raw not in entry:
@@ -778,41 +774,26 @@ class FitsInfo:
         """
         Select best filter keyword from header.
 
-        Priority: existing filter_key_N -> auto-search for 'filter' in key name
-        -> fallback to any short non-empty value -> 'FILTER' default.
-        Skips 'open'/'clear' filters. Dynamically registers new filter_key_N entries.
-        Duplicate filter_key_N values (written by earlier scans) are collapsed.
+        Priority: existing filter_key_N entries -> canonical filter keywords
+        -> any plausible 'filt' keyword.  Skips 'open'/'clear'/'free' values
+        and wheel-state keys (e.g. '*_ID', '*_POS').  Newly discovered keys
+        are registered as filter_key_N; nothing else is ever invented.
         """
         self._dedupe_filter_keys(entry)
-        # filter_key_N entries map to FITS header keywords; compare those stored
+        # filter_key_N entries name FITS header keywords; compare those stored
         # names (not the entry keys) against the header so existing keys are reused.
         fkeys = ["FILTER"] + [
             entry[k] for k in self._sorted_filter_key_names(entry)
         ]
-        for fk in fkeys:
-            if fk in header and self._filter_value_usable(header[fk]):
-                return fk
-
-        # Auto-search: look for keywords containing "filter"
-        for key in header:
-            if "filter" in key.lower() and key not in fkeys:
-                if self._filter_value_usable(header[key]):
-                    new_fk = f"filter_key_{self._next_filter_key_num(entry)}"
-                    entry[new_fk] = key
-                    self.logger.info("Auto-selected filter key: %s -> %s", key, new_fk)
-                    return key
-
-        # Fallback: first short non-empty value
-        for key in header:
-            fval = str(header[key]).strip().lower().replace(" ", "")
-            if fval and fval not in AVOID_FILTERS and len(fval) <= 10:
-                new_fk = f"filter_key_{self._next_filter_key_num(entry)}"
-                entry[new_fk] = key
-                self.logger.info("Fallback auto-selected filter key: %s -> %s", key, new_fk)
-                return key
-
-        self.logger.warning("No suitable filter key found, using 'FILTER' as default")
-        return "FILTER"
+        key = find_filter_header_key(header, extra_keys=fkeys)
+        if key is None:
+            self.logger.warning("No suitable filter key found, using 'FILTER' as default")
+            return "FILTER"
+        if key not in fkeys:
+            new_fk = f"filter_key_{self._next_filter_key_num(entry)}"
+            entry[new_fk] = key
+            self.logger.info("Auto-selected filter key: %s -> %s", key, new_fk)
+        return key
 
     def _prompt_keyword(self, prompt, default, sample_header):
         """Ask for a keyword name / numeric value until a usable answer.
