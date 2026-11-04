@@ -33,6 +33,9 @@ from functions import (
     parse_supported_filter_group_key,
     invalid_use_catalog_keys,
     SUPPORTED_PHOTOMETRIC_FILTERS,
+    FILTER_HEADER_CANDIDATES,
+    NON_FILTER_VALUES,
+    find_filter_header_key,
     log_step,
     log_warning_from_exception,
     ascii_table,
@@ -389,7 +392,7 @@ class Prepare:
         Returns:
             List of file paths that passed validation.
         """
-        FILTER_ALIASES = ["FILTER", "FILTERS", "FLTRNAM", "FILNAM1", "FILTNAM1", "FILTER1", "FILTER2", "FILTERID", "INSFILTE"]
+        FILTER_ALIASES = list(FILTER_HEADER_CANDIDATES)
         IMPORTANT_KEYS = {
             "EXPTIME": ["EXPTIME", "EXPOSURE", "TEXP", "EXPTIME0", "TEXPTIME", "INTTIME", "EXPTIM"],
             "GAIN": ["GAIN", "EGAIN", "CONADU", "CELL.GAIN", "DET.GAIN"],
@@ -1245,6 +1248,7 @@ class Prepare:
         """
         filter_unavailable: List[str] = []
         filter_available: List[str] = []
+        no_filter_files: List[str] = []
         out_flist: List[str] = []
         files_removed = 0
         filters_removed = 0
@@ -1284,7 +1288,7 @@ class Prepare:
 
         tele_key = "TELESCOP"
         inst_key = "INSTRUME"
-        avoid_keys = ["clear", "open"]
+        avoid_keys = NON_FILTER_VALUES
 
         # Images must carry TELESCOP and INSTRUME to be mapped.
         tele_autophot_input = load_telescope_config(self.input_yaml["wdir"])
@@ -1328,8 +1332,8 @@ class Prepare:
                 continue
 
             headinfo = get_header(name)
-            tele = headinfo.get(tele_key)
-            inst = headinfo.get(inst_key)
+            tele = str(headinfo.get(tele_key) or "").strip()
+            inst = str(headinfo.get(inst_key) or "").strip()
 
             mapping = None
             block_key = None
@@ -1369,22 +1373,23 @@ class Prepare:
             filter_name = "no_filter"
 
             if mapping is not None:
-                # Resolve via the telescope.yml filter_key_* entries.
-                filter_keys = [k for k in mapping if k.startswith("filter_key_")]
-                header_key = None
-                for filter_header_key in filter_keys:
-                    candidate = mapping[filter_header_key]
-                    if candidate not in headinfo:
-                        continue
-                    value = str(headinfo[candidate]).lower()
-                    if value in avoid_keys:
-                        continue
-                    header_key = candidate
-                    break
-
+                # Resolve via the telescope.yml filter_key_* entries first,
+                # then the canonical keyword list when none of the configured
+                # keys hold a usable value in this header.
+                filter_keys = sorted(
+                    (k for k in mapping if str(k).startswith("filter_key_")),
+                    key=lambda k: (
+                        int(k.rsplit("_", 1)[1])
+                        if k.rsplit("_", 1)[1].isdigit()
+                        else 0
+                    ),
+                )
+                header_key = find_filter_header_key(
+                    headinfo, extra_keys=[mapping[fk] for fk in filter_keys]
+                )
                 if header_key is None:
                     self.logger.warning(
-                        "No valid filter header found for '%s' with telescope '%s' / instrument '%s'; falling back to raw FILTER header.",
+                        "No usable filter keyword for '%s' with telescope '%s' / instrument '%s'; file kept as 'no_filter'.",
                         name,
                         tele,
                         inst,
@@ -1412,13 +1417,11 @@ class Prepare:
                                 filter_name = str(value)
                                 break
             else:
-                # No telescope.yml entry: try common header names directly.
-                candidate_keys = ["FILTER", "FILTER1", "FILTER2"]
-                for key in candidate_keys:
-                    if key in headinfo and str(headinfo[key]).lower() not in avoid_keys:
-                        fits_filter = headinfo[key]
-                        filter_name = str(fits_filter)
-                        break
+                # No telescope.yml entry: try the canonical keyword list.
+                header_key = find_filter_header_key(headinfo)
+                if header_key is not None:
+                    fits_filter = headinfo[header_key]
+                    filter_name = str(fits_filter)
 
             # Templates may lack FILTER/TELESCOP entirely; infer the band from
             # the directory name (e.g. gp_template -> g, K_template -> K).
@@ -1457,10 +1460,30 @@ class Prepare:
             normalized_filter = None
             if filter_name != "no_filter":
                 normalized_filter = normalize_photometric_filter_name(
-                    filter_name, 
+                    filter_name,
                     available_filters=available_filters
                 )
-            
+                if normalized_filter is None:
+                    # Raw values like 'r#784' are not catalog keys; the
+                    # telescope-blind heuristic covers band+digits forms.
+                    try:
+                        from main import _heuristic_filter_mapping
+
+                        _heur = _heuristic_filter_mapping(filter_name)
+                    except Exception:
+                        _heur = filter_name
+                    if _heur != filter_name:
+                        normalized_filter = normalize_photometric_filter_name(
+                            _heur, available_filters=available_filters
+                        )
+                        if normalized_filter is not None:
+                            self.logger.debug(
+                                "Filter %s -> %s via heuristic for %s",
+                                filter_name,
+                                normalized_filter,
+                                os.path.basename(name),
+                            )
+
             if (
                 normalized_filter is None
                 and filter_name != "no_filter"
@@ -1490,11 +1513,14 @@ class Prepare:
             ):
                 # select_filter compares against the raw header value, not the
                 # normalized band.
-                if str(fits_filter) not in self.input_yaml["do_filter"]:
+                if str(fits_filter) not in (self.input_yaml.get("do_filter") or []):
                     files_removed += 1
                     filters_removed += 1
                     filter_unavailable.append(filter_name)
                     continue
+
+            if filter_name == "no_filter":
+                no_filter_files.append(os.path.basename(name))
 
             if selected_filters and selected_filters[0] is not None:
                 if filter_name not in selected_filters:
@@ -1552,6 +1578,19 @@ class Prepare:
             self.logger.info(
                 "  %d file(s) removed: filter not in selected_filters.",
                 filters_not_selected,
+            )
+        if no_filter_files:
+            shown = no_filter_files[:8]
+            more = (
+                f", +{len(no_filter_files) - 8} more"
+                if len(no_filter_files) > 8
+                else ""
+            )
+            self.logger.info(
+                "  %d file(s) had no usable filter keyword (telescope.yml filter_key_* and common FILTER keywords all absent or open/clear/free): %s%s",
+                len(no_filter_files),
+                ", ".join(shown),
+                more,
             )
         self.logger.info(
             "  Retained: %d file(s) with filters: %s",
