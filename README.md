@@ -147,6 +147,8 @@ Sources on masked pixels are dropped before the kernel fit, and variable sources
 
 Set `do_subtraction: True`, then place one template FITS per filter in `fits_dir/templates/<filter>_template/`: `prepare_template_directory()` builds the layout for you, and `download_panstarrs_template()`, `download_sdss_template()`, `download_legacy_template()`, and `download_2mass_template()` in `templates.py` can fetch them for you.
 
+Nested datasets work too: for a science image under `fits_dir/<dataset>/...`, the pipeline uses the `templates/` folder found nearest to the image walking up to `fits_dir` (so `fits_dir/<dataset>/templates` overrides `fits_dir/templates` for that dataset only). This lets different image sets subtract different reference frames in one run.
+
 <h2 align="center">Photometry</h2>
 
 The PSF is an empirical ePSF built with photutils; `photometry.oversample_psf: True` switches on adaptive oversampling for undersampled images. PSF stars are cut on saturation, elongation, isolation, FWHM consistency, and concentration, plus an FFT check for close companions.
