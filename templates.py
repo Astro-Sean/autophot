@@ -193,7 +193,7 @@ try:
 except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
-from functions import clean_subprocess_log, log_warning_from_exception, safe_fits_write, cap_console_lines, photutils_n_threads, STATUS, _sfft_post_anomaly_retry_viable
+from functions import clean_subprocess_log, log_result, log_warning_from_exception, safe_fits_write, cap_console_lines, photutils_n_threads, stat_block, STATUS, _sfft_post_anomaly_retry_viable
 try:
     from functions import invalidate_fits_cache
 except ImportError:
@@ -3032,29 +3032,20 @@ def compute_alignment_rms(
             except Exception:
                 _weighted = None
 
+        _rms_rows = [
+            f"med={median_offset:.3f} px",
+            f"dx={_med_dx:.3f}, dy={_med_dy:.3f}",
+            f"rms={rms:.3f} px p90={p90:.3f} px "
+            f"n={len(d_clipped)} (of {len(d_mut)}, {len(d_mut) - len(d_clipped)} clipped)",
+            f"max={max_sep:.2f} px",
+        ]
         if _weighted is not None:
-            logger.log(
-                STATUS,
-                "Alignment RMS:\tmed=%.3f px\n"
-                "                  dx=%.3f, dy=%.3f\n"
-                "                  rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped)\n"
-                "                  max=%.2f px\n"
-                "                  chi2/dof=%.2f wrms_norm=%.2f (n=%d weighted)",
-                median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
-                len(d_mut) - len(d_clipped), max_sep,
-                _weighted["chi2_dof"], _weighted["wrms_norm"],
-                _weighted["n_weighted"],
+            _rms_rows.append(
+                f"chi2/dof={_weighted['chi2_dof']:.2f} "
+                f"wrms_norm={_weighted['wrms_norm']:.2f} "
+                f"(n={_weighted['n_weighted']} weighted)"
             )
-        else:
-            logger.log(
-                STATUS,
-                "Alignment RMS:\tmed=%.3f px\n"
-                "                  dx=%.3f, dy=%.3f\n"
-                "                  rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped)\n"
-                "                  max=%.2f px",
-                median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
-                len(d_mut) - len(d_clipped), max_sep,
-            )
+        logger.log(STATUS, stat_block("Alignment RMS:", *_rms_rows))
 
         # Per-quadrant alignment quality.
         # Split the matched sources into 2x2 spatial quadrants and compute
@@ -3189,11 +3180,12 @@ def _compute_per_quadrant_rms(
 
     if np.isfinite(_max_rms) and _max_rms > 0:
         logger.info(
-            "Per-quadrant alignment RMS: Q1=%.3f Q2=%.3f\n"
-            "                            Q3=%.3f Q4=%.3f px (max=%s=%.3f px)",
-            _result["q1_rms"], _result["q2_rms"],
-            _result["q3_rms"], _result["q4_rms"],
-            _max_quad, _max_rms,
+            stat_block(
+                "Per-quadrant alignment RMS:",
+                f"Q1={_result['q1_rms']:.3f} Q2={_result['q2_rms']:.3f}",
+                f"Q3={_result['q3_rms']:.3f} Q4={_result['q4_rms']:.3f} px "
+                f"(max={_max_quad}={_max_rms:.3f} px)",
+            )
         )
 
     return _result
@@ -7745,7 +7737,7 @@ class Templates:
                     )
                     return _fail("swarp", f"quality={_squality}")
                 method_used = res.get("alignment_method", "scamp_swarp")
-                logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
+                log_result("Alignment succeeded (method: %s).", method_used)
                 # Store alignment RMS in the aligned reference header for
                 # downstream SFFT kernel sizing and photometry provenance.
                 try:
@@ -7884,7 +7876,7 @@ class Templates:
                     )
                     return _fail("astroalign", f"quality={_aquality}")
                 method_used = res.get("alignment_method", "astroalign")
-                logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
+                log_result("Alignment succeeded (method: %s).", method_used)
                 # Store alignment RMS in the aligned reference header for
                 # downstream SFFT kernel sizing and photometry provenance.
                 try:
@@ -7978,7 +7970,7 @@ class Templates:
                 # Only the template is resampled; the science WCS is
                 # unchanged, so target coordinates need no update.
                 method_used = result.method_used or "reproject"
-                logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
+                log_result("Alignment succeeded (method: %s).", method_used)
                 return result._replace(
                     science_path=scienceFpath,
                     quality=_quality,
@@ -9546,7 +9538,7 @@ class Templates:
                         logger.debug("Match sources plot skipped: %s", _plot_err)
 
                     method_used = "spalipy"
-                    logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
+                    log_result("Alignment succeeded (method: %s).", method_used)
                     # Science image unchanged - no target coordinate update needed
                     return AlignmentResult(
                         scienceFpath, new_templateFpath, method_used,
@@ -9884,7 +9876,7 @@ class Templates:
                         pass
 
                     method_used = "tweakwcs"
-                    logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
+                    log_result("Alignment succeeded (method: %s).", method_used)
                     return AlignmentResult(
                         scienceFpath, new_templateFpath, method_used, _tmed,
                         rms_px=_trms, p90_px=_tp90,
@@ -10117,7 +10109,7 @@ class Templates:
                         pass
 
                     method_used = "chi2_shift"
-                    logger.log(STATUS, "Alignment succeeded (method: %s).", method_used)
+                    log_result("Alignment succeeded (method: %s).", method_used)
                     return AlignmentResult(
                         scienceFpath, new_templateFpath, method_used, _cmed,
                         rms_px=_crms, p90_px=_cp90,
