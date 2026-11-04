@@ -865,7 +865,7 @@ class ImageDistortionCorrector:
     # ----------------------------- SExtractor + PSFEx -----------------------------
     def _guess_map_weight_path(self, fits_image: str) -> Optional[str]:
         """
-        Best-effort MAP_WEIGHT companion for SExtractor alignment.
+        Best-effort noise-map companion for SExtractor alignment.
 
         The photometry pipeline commonly writes ``<stem>.weight<ext>`` next to the
         science image. If present, it lets SExtractor down-weight the NaN /
@@ -1028,7 +1028,7 @@ class ImageDistortionCorrector:
                 }
             )
 
-            # Optional MAP_WEIGHT (0/1 or continuous) down-weights masked mosaic pixels.
+            # Optional noise/weight map: down-weights masked mosaic pixels.
             wpath = str(weight_path) if weight_path else ""
             if wpath and os.path.isfile(wpath):
                 # A weight on a different grid (e.g. left over from a
@@ -1052,7 +1052,25 @@ class ImageDistortionCorrector:
                 except Exception:
                     pass
             if wpath and os.path.isfile(wpath):
-                final_config["WEIGHT_TYPE"] = "MAP_WEIGHT"
+                # Two conventions reach this code: pipeline weight files are
+                # per-pixel RMS sigma maps (marked MAPTYPE='RMS'; unmarked
+                # pipeline products are RMS too), while a genuine external
+                # SWarp delivery would be an inverse-variance weight.
+                # Declaring MAP_WEIGHT on an RMS map inverts the noise field
+                # (deep pixels read as low-noise), so only an explicit
+                # WEIGHT marker keeps the old interpretation.
+                _wtype = "MAP_RMS"
+                try:
+                    _mt = (
+                        str(fits.getheader(wpath).get("MAPTYPE", ""))
+                        .strip()
+                        .upper()
+                    )
+                    if _mt == "WEIGHT":
+                        _wtype = "MAP_WEIGHT"
+                except Exception:
+                    pass
+                final_config["WEIGHT_TYPE"] = _wtype
                 final_config["WEIGHT_IMAGE"] = wpath
 
             if config:
