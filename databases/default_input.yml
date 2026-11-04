@@ -499,6 +499,7 @@ default_input:
     cpulimit: 45 # int --- CPU time limit (seconds) for solve attempts.
     late_cpulimit: 120 # int --- CPU time limit (seconds) for the later solve retries (wide scale bounds, no-SExtractor pass); they sweep more index tiles than the hinted tries.
     blind_cpulimit: 300 # int --- CPU time limit (seconds) for the position-free blind solve; a sky-wide search needs minutes, the hinted cap gives it no chance.
+    solve_field_total_budget: 1800 # float|null --- Wall-clock budget (seconds) shared by the whole solve-field cascade (all retries, tweak orders, downsample levels); attempts are skipped once it is spent and SCAMP/header fallbacks still run. null or <=0 disables the cap.
 
     TNS_BOT_ID: null # str|null --- Optional TNS bot ID (if querying TNS).
     TNS_BOT_NAME: null # str|null --- Optional TNS bot name (if querying TNS).
