@@ -138,9 +138,10 @@ from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        _sfft_difference_gain, _sfft_match_bad_mask,
                        _sfft_photometric_flux_correction, ascii_kv,
                        ascii_table, beta_aperture, beta_psf, border_msg,
-                       check_input_config, compact_status,
+                       biweight_sky_sigma, check_input_config, compact_status,
                        convert_to_mjd_astropy, dict_to_string_with_hashtag,
-                       flux_upper_limit, format_config_errors, get_header,
+                       external_weight_to_rms, flux_upper_limit,
+                       format_config_errors, get_header,
                        get_image, get_image_and_header, get_instrument_config,
                        load_telescope_config, log_exception, log_status,
                        log_step, log_warning_from_exception, metrics_table,
@@ -1711,6 +1712,13 @@ def run_photometry():
         reduced_dir_name = fits_basename + output_dir_suffix
         new_output_dir = os.path.join(os.path.dirname(wdir), reduced_dir_name)
 
+        # Keep the original science location: get_template resolves
+        # per-dataset <dataset>/templates folders from it, while fpath is
+        # later repointed at the staged copy inside the output tree.
+        input_yaml["science_dir"] = os.path.dirname(
+            os.path.abspath(science_file)
+        )
+
         # In template-preparation mode, outputs go to the science file's
         # original directory, so we must NOT create new_output_dir (it would
         # be left empty).  Only create it for normal photometry runs.
@@ -1933,6 +1941,16 @@ def run_photometry():
                 " ", "_"
             )
             shutil.copyfile(science_file, fpath)
+
+        # A delivered '<base>.weight<ext>' next to the input file is a
+        # reduction-pipeline depth map (SWarp inverse-variance
+        # convention); record it so it can be folded into the RMS weight
+        # map written for this image below.
+        _sb, _se = os.path.splitext(science_file)
+        _ext_w = f"{_sb}.weight{_se}"
+        input_yaml["science_extweight"] = (
+            _ext_w if os.path.isfile(_ext_w) else None
+        )
 
         fpath, was_shortened = shorten_filename_if_needed(fpath)
 
@@ -3896,6 +3914,20 @@ def run_photometry():
                     hardware_defects_mask.shape,
                 )
 
+        # Fold a delivered per-pixel depth map (a SWarp-style
+        # '<base>.weight.fits' companion of the input image) into the
+        # measured sky RMS so every downstream error model - aperture and
+        # PSF photometry, limiting magnitudes, the ePSF error array, and
+        # the weight map written below - shares one noise field.  The
+        # delivered map supplies spatial structure only; the measured RMS
+        # keeps the absolute scale (external_weight_to_rms is median-
+        # normalised and returns None when no usable companion exists).
+        _folded = external_weight_to_rms(
+            input_yaml.get("science_extweight"), background_rms, header
+        )
+        if _folded is not None:
+            background_rms = _folded
+
         # Cache background results for potential reuse after template subtraction
         fpath_before_subtraction = fpath
         # These arrays can be full-frame (many MB). Keep a single shared copy
@@ -3912,7 +3944,12 @@ def run_photometry():
         # Weight-map filename convention: '.weight' inserted before the suffix.
         base, ext = os.path.splitext(fpath)
         weight_fpath = f"{base}.weight{ext}"
-        safe_fits_write(weight_fpath, background_rms, header)
+        weight_header = header.copy()
+        weight_header["MAPTYPE"] = (
+            "RMS",
+            "RMS sigma map (ADU)",
+        )
+        safe_fits_write(weight_fpath, background_rms, weight_header)
         # Stage-closing summary for the masked background pass.
         log_status(
             "Background (masked): sky=%.3e ADU | RMS=%.3e ADU | masked=%.1f%%",
@@ -4177,6 +4214,59 @@ def run_photometry():
                         fpath = _aligned_sci_path
                         templateFpath = _aligned_tpl_path
                         template_available = True
+
+                        # The template weight map was staged pre-alignment and
+                        # is still on the template's native grid; resample it
+                        # to the aligned grid and convert the delivered
+                        # inverse-variance weight to an RMS map scaled by the
+                        # aligned template's own noise.  Failure leaves
+                        # template_weight_path unchanged - _validate_noise_map
+                        # then drops any mismatched map as before.
+                        if (
+                            template_weight_path is not None
+                            and os.path.isfile(template_weight_path)
+                        ):
+                            try:
+                                _atpl_img, _atpl_hdr = get_image_and_header(
+                                    templateFpath
+                                )
+                                # Biweight, not MAD: SWarp coadds are often
+                                # quantized by compression and MAD staircases
+                                # to a biased scale on them.
+                                _tpl_sigma = float(biweight_sky_sigma(_atpl_img))
+                                _tw = None
+                                if np.isfinite(_tpl_sigma) and _tpl_sigma > 0:
+                                    _tw = external_weight_to_rms(
+                                        template_weight_path,
+                                        np.full(
+                                            _atpl_img.shape,
+                                            _tpl_sigma,
+                                            dtype=np.float32,
+                                        ),
+                                        _atpl_hdr,
+                                    )
+                                if _tw is not None:
+                                    _tb, _te = os.path.splitext(templateFpath)
+                                    _tw_path = f"{_tb}.weight{_te}"
+                                    _tw_hdr = _atpl_hdr.copy()
+                                    _tw_hdr["MAPTYPE"] = (
+                                        "RMS",
+                                        "RMS sigma map (ADU)",
+                                    )
+                                    safe_fits_write(_tw_path, _tw, _tw_hdr)
+                                    template_weight_path = _tw_path
+                                    logging.info(
+                                        "Template weight map resampled to "
+                                        "aligned grid: %s",
+                                        os.path.basename(_tw_path),
+                                    )
+                            except Exception as _wt_e:
+                                logging.warning(
+                                    "Template weight map could not be "
+                                    "resampled to the aligned grid: %s",
+                                    _wt_e,
+                                )
+
                         if getattr(align_result, "quality", "pass") != "pass":
                             logging.warning(
                                 "Template alignment quality=%s (%s); "
@@ -4355,10 +4445,25 @@ def run_photometry():
                         hardware_defects_mask | cosmic_rays_defect_mask
                     )
 
+            # The image may have been resampled since the first pass;
+            # refold the delivered weight map onto the current grid
+            # (external_weight_to_rms reprojects it as needed).  The
+            # cached path above already holds the folded map.
+            _folded = external_weight_to_rms(
+                input_yaml.get("science_extweight"), background_rms, header
+            )
+            if _folded is not None:
+                background_rms = _folded
+
         # Weight-map filename convention: '.weight' inserted before the suffix.
         base, ext = os.path.splitext(fpath)
         weight_fpath = f"{base}.weight{ext}"
-        safe_fits_write(weight_fpath, background_rms, header)
+        weight_header = header.copy()
+        weight_header["MAPTYPE"] = (
+            "RMS",
+            "RMS sigma map (ADU)",
+        )
+        safe_fits_write(weight_fpath, background_rms, weight_header)
         # Stage-closing summary for the calibration stage.
         log_status(
             "Calibration: sky=%.3e ADU | RMS=%.3e ADU | weight=%s",
@@ -6280,6 +6385,19 @@ def run_photometry():
                     galaxies=variable_sources,
                     mask_simbad_galaxies=True,
                 )
+                # Same delivered-weight fold as the main pass: this RMS
+                # feeds the ePSF error model on the original-resolution
+                # grid, which is the delivered weight's native grid.
+                _orig_rms = np.asarray(
+                    result_orig["background_rms"], dtype=np.float32
+                )
+                _folded = external_weight_to_rms(
+                    input_yaml.get("science_extweight"),
+                    _orig_rms,
+                    header_orig,
+                )
+                if _folded is not None:
+                    result_orig["background_rms"] = _folded
                 # Map the PSF source pool from current image pixels -> sky -> original image pixels.
                 # Do not mix IsolatedSources and psf_source_pool here because they can differ
                 # in length after optimum-radius filtering.
