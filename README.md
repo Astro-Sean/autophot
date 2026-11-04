@@ -79,12 +79,14 @@ from autophot import AutomatedPhotometry
 
 config = AutomatedPhotometry.load()
 config["fits_dir"] = "/path/to/your/images"
-config["target_name"] = "SN2024A"
+config["target_name"] = "SN2026abc"
 config["target_ra"] = 123.456789
 config["target_dec"] = -12.345678
 
 output_file = AutomatedPhotometry.run_photometry(default_input=config)
 ```
+
+The [`examples/run_autophot.ipynb`](examples/run_autophot.ipynb) notebook builds the same configuration step by step, with one cell per section covering the paths, target, catalog, photometry, subtraction, and plotting options.
 
 A few things worth knowing up front:
 
@@ -101,62 +103,62 @@ Flat layout:
 
 ```text
 photometry/
-  SN2024A_2024-01-01_g.fits
-  SN2024A_2024-01-02_g.fits
-  SN2024A_2024-01-01_r.fits
+  SN2026abc_2026-01-01_g.fits
+  SN2026abc_2026-01-02_g.fits
+  SN2026abc_2026-01-01_r.fits
 ```
 
-Nested layout, e.g. one folder per instrument:
+Nested layout, e.g. one folder per dataset:
 
 ```text
 photometry/
-  LBT_MODS/
+  dataset1/
     science/
-      SN2024A_LBT_MODS_2024-01-01_g.fits
-      SN2024A_LBT_MODS_2024-01-02_g.fits
-  LCO/
+      SN2026abc_dataset1_2026-01-01_g.fits
+      SN2026abc_dataset1_2026-01-02_g.fits
+  dataset2/
     science/
-      SN2024A_LCO_2024-01-03_g.fits
+      SN2026abc_dataset2_2026-01-03_g.fits
 ```
 
 Outputs go to a `<fits_dir>_<outdir_name>` sibling (default `photometry_REDUCED`) that mirrors the input nesting, appending `_APT` per level:
 
 ```text
 photometry_REDUCED/
-  LBT_MODS_APT/
+  dataset1_APT/
     science_APT/
-      SN2024A_LBT_MODS_2024-01-01_g/
-      SN2024A_LBT_MODS_2024-01-02_g/
-  LCO_APT/
+      SN2026abc_dataset1_2026-01-01_g/
+      SN2026abc_dataset1_2026-01-02_g/
+  dataset2_APT/
     science_APT/
-      SN2024A_LCO_2024-01-03_g/
+      SN2026abc_dataset2_2026-01-03_g/
 ```
 
-Templates live in a `templates/` folder with one `<band>_template/` subdir per filter, each holding a single template FITS. A `.weight` FITS next to it is used as a noise map, and Pan-STARRS-style `gp_template` names are accepted for the ugriz bands:
+Templates live in a `templates/` folder with one `<band>_template/` subdir per filter, each holding a single template FITS. A `.weight` FITS next to it is used as a noise map, and `gp_template`-style names are accepted for the ugriz bands:
 
 ```text
 photometry/
   science/
-    SN2024A_2024-01-01_g.fits
+    SN2026abc_2026-01-01_g.fits
   templates/
     g_template/
-      panstarrs_g.fits
-      panstarrs_g.weight.fits
+      template_g.fits
+      template_g.weight.fits
     r_template/
-      panstarrs_r.fits
+      template_r.fits
 ```
 
 For nested datasets, the `templates/` folder nearest to the science image wins (walking up toward `fits_dir`), so different datasets can subtract different reference frames in one run:
 
 ```text
 photometry/
-  LBT_MODS/
+  dataset1/
     science/ ...
-    templates/g_template/lbt_g.fits   # serves LBT_MODS images
-  LCO/
+    templates/g_template/ref1_g.fits   # serves dataset1 images
+  dataset2/
     science/ ...
   templates/
-    g_template/ps1_g.fits             # fallback for everything else
+    g_template/ref_g.fits              # fallback for everything else
 ```
 
 <h2 align="center">Command-line tools</h2>
@@ -260,6 +262,34 @@ catalog:
 Mapping keys take single bands (`u`), families (`UBVRI`, `JHK`), mixes (`uRI`), or lists (`u, RI`). Case matters: `r` is SDSS r, `R` is Johnson-Cousins R. Bad keys fall back to `default` with a warning.
 
 With `use_catalog: auto`, the pipeline scans every image footprint once before processing, downloads each feasible catalog, and keeps the one with the most usable calibrators per band. The resolved mapping is cached under `<wdir>/catalog_queries/` so restarts skip the rescan; Gaia stays available as a fallback but is excluded from the bulk scan to protect the archive servers. If a selected catalog fails at query time, the run demotes it to the best still-working candidate for that band instead of stopping (a genuine 0-source answer is also demoted in the cache; transient query failures fall back for that run only). For non-standard filters, supply curve files via `gaia_custom` and `catalog.transmission_curve_map`.
+
+### Gaia with custom filters (`gaia_custom`)
+
+For a band no survey catalog covers, AutoPhOT can build its own calibrator list: it takes Gaia DR3 XP spectra around the target, convolves each one with your filter's throughput curve, and writes synthetic AB magnitudes as a `custom` catalog (`GAIA_CurveMap_Catalog.csv` under `<fits_dir>_REDUCED/`, reused on restarts). You only need to supply the throughput curves:
+
+```yaml
+catalog:
+  use_catalog:
+    myband: gaia_custom      # custom filter
+    default: gaia
+  transmission_curve_map:
+    myband: /path/to/curves/myband.dat
+```
+
+Curve files are plain text with two columns per line: wavelength (Angstrom or nm, detected automatically) and throughput (any positive scale). `#` comments and commas are fine. Instead of local files, `curve_map_svo` fetches passbands from the SVO Filter Profile Service by ID:
+
+```yaml
+catalog:
+  curve_map_svo:
+    r: SDSS/SDSS.r
+```
+
+Any band listed under `gaia_custom` in the `use_catalog` mapping must have a curve (or SVO entry). Catalog size and selection are tuned by `gaia_curve_map_max_sources` and `gaia_curve_map_order_by` (`distance` prefers the nearest stars, `brightness` the brightest). The same builder is available standalone as `autophot-gaia-curves` if you want to inspect the CSV it produces:
+
+```bash
+autophot-gaia-curves --ra 123.456 --dec -12.34 \
+  --curve myband=/path/to/curves/myband.dat --out-csv calib.csv
+```
 
 <h2 align="center">Limiting magnitudes</h2>
 
