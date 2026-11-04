@@ -164,6 +164,25 @@ def _cache_evict(cache):
         cache.pop(next(iter(cache)))
 
 
+def _message_kind(msg: str) -> str:
+    """Classify a normalized log message for console spacing rules.
+
+    ``banner`` - ruled section header (``==== X ====`` or ``---- X ----``)
+    ``step``   - bracketed one-line marker (``[X]``)
+    ``msg``    - everything else
+    """
+    first = msg.lstrip().split("\n")[0] if msg else ""
+    if first[:1] in ("-", "+", "="):
+        return "banner"
+    if (
+        first.startswith("[")
+        and first.rstrip().endswith("]")
+        and "\n" not in msg.strip()
+    ):
+        return "step"
+    return "msg"
+
+
 class PlainFormatter(logging.Formatter):
     """
     Plain text formatter for log files - strips ANSI escape codes.
@@ -179,11 +198,21 @@ class PlainFormatter(logging.Formatter):
     def __init__(self, *args, max_width: int = 150, **kwargs):
         super().__init__(*args, **kwargs)
         self._max_width = int(max_width)
+        self._last_kind = None     # last emitted message kind ("banner" | "step" | "msg")
 
     def format(self, record: logging.LogRecord) -> str:
         msg = super().format(record)
         msg = self.ANSI_ESCAPE.sub('', msg)
         msg = normalize_log_message(msg, width=self._max_width)
+        kind = _message_kind(record.getMessage())
+        # Stage-result lines close a section: blank line before them unless
+        # a ruled header just opened it.
+        result_lead = (
+            kind != "banner"
+            and getattr(record, "result", False)
+            and self._last_kind not in (None, "banner", "step")
+        )
+        self._last_kind = kind
         # Indent continuation lines so border banners and other multi-line
         # output align under the first line's timestamp/level prefix.
         if '\n' in msg:
@@ -194,6 +223,8 @@ class PlainFormatter(logging.Formatter):
             prefix_len = len(prefix)
             lines = [lines[0]] + [' ' * prefix_len + ln for ln in lines[1:]]
             msg = '\n'.join(lines)
+        if result_lead:
+            msg = "\n" + msg
         return msg
 
 
@@ -239,19 +270,6 @@ class ColoredLevelFormatter(logging.Formatter):
         self._last_kind = None     # "banner" | "step" | "msg"
 
     @staticmethod
-    def _kind(msg: str) -> str:
-        first = msg.lstrip().split("\n")[0] if msg else ""
-        if first[:1] in ("-", "+", "="):
-            return "banner"
-        if (
-            first.startswith("[")
-            and first.rstrip().endswith("]")
-            and "\n" not in msg.strip()
-        ):
-            return "step"
-        return "msg"
-
-    @staticmethod
     def _align_continuation(msg: str, col: int) -> str:
         """Indent continuation lines of a multi-line message to column *col*."""
         if "\n" not in msg:
@@ -263,13 +281,20 @@ class ColoredLevelFormatter(logging.Formatter):
     def _format_info(self, record: logging.LogRecord, msg_clean: str) -> str:
         self._msg_count += 1
         first_ever = self._msg_count == 1
-        kind = self._kind(msg_clean)
+        kind = _message_kind(msg_clean)
 
         if kind == "banner":
             self._in_section = True
             lead = "" if first_ever else "\n"
         elif kind == "step" and self._last_kind != "banner":
             # Sub-step markers get a blank line unless a banner just opened.
+            lead = "" if first_ever else "\n"
+        elif (
+            getattr(record, "result", False)
+            and self._last_kind not in ("banner", "step")
+        ):
+            # Stage-result lines get a blank line unless a ruled header
+            # just opened the section (content hugs its header).
             lead = "" if first_ever else "\n"
         else:
             lead = ""
@@ -705,6 +730,25 @@ def log_status(msg: str, *args, ui: bool = False, **kwargs) -> None:
     if ui:
         extra = {**extra, "ui": True}
     logging.getLogger(__name__).log(STATUS, msg, *args, extra=extra, **kwargs)
+
+
+def log_result(msg: str, *args, **kwargs) -> None:
+    """Log a stage-conclusion line at STATUS level.
+
+    Marks the record ``result=True`` so the console and log-file formatters
+    emit a blank line before it, matching the stage layout::
+
+        ==== Stage ====
+        stats ...
+
+        Conclusion.
+
+    The blank is suppressed when the previous line was a section banner or
+    step marker, so single-line stages stay tight under their header.
+    """
+    extra = kwargs.pop("extra", None) or {}
+    kwargs["extra"] = {**extra, "result": True}
+    log_status(msg, *args, **kwargs)
 
 
 class ConsoleLevelFilter(logging.Filter):
@@ -1895,6 +1939,39 @@ def ascii_card(title: str, lines, width: int = 70) -> str:
     out.extend(f"  {l[: width - 4]}" if l.strip() else "" for l in body)
     out.append("=" * width)
     return "\n" + "\n".join(out)
+
+
+def stat_block(label: str, *lines: str) -> str:
+    """
+    Labeled stats block: the first value follows ``Label:`` and continuation
+    lines align under the value column::
+
+        Label:    first
+                  second
+                  third
+
+    ``lines`` are pre-formatted strings; blank entries are dropped.
+    """
+    label = str(label).rstrip()
+    rows = [str(ln) for ln in lines if str(ln).strip()]
+    if not rows:
+        return label
+    pad = " " * (len(label) + 4)
+    return "\n".join([f"{label}    {rows[0]}"] + [pad + r for r in rows[1:]])
+
+
+def stat_pairs(pairs) -> str:
+    """
+    ``Label:``/value pairs, one per line, values sharing one column::
+
+        Image FWHM:    3.42 px
+        Image seeing:  1.37 arcsec
+    """
+    rows = [(str(k).rstrip(), str(v)) for k, v in pairs if str(v).strip()]
+    if not rows:
+        return ""
+    width = max(len(k) for k, _ in rows)
+    return "\n".join(f"{k.ljust(width)}  {v}" for k, v in rows)
 
 
 def metrics_table(metrics: dict[str, tuple], title: str | None = None, width: int = 70) -> str:
