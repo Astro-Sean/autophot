@@ -140,7 +140,7 @@ Gate thresholds live under `template_subtraction` (`alignment_max_offset_px`, `a
 Shared options under `template_subtraction`:
 
 - `forceconv`: `REF` (default), `SCI`, or `AUTO`. REF convolves the reference to the science PSF, so the science ePSF applies directly to the difference image. For ZOGY the matching kernel is probed in both directions first; a direction that would deconvolve (a kernel with strong negative sidelobes) is vetoed, flipped to the cleaner direction, or replaced by canonical ZOGY. The direction actually used is written to the `CONVD` header card.
-- `kernel_order`: SFFT kernel polynomial degree, or `"auto"` (default).
+- `kernel_order`: SFFT kernel polynomial degree (default `0`, constant), or `"auto"` to let the pipeline add spatial terms only with evidence (PSF mismatch, last-resort alignment).
 - `inpaint_template_cores`: fill saturated template cores before subtraction.
 
 Sources on masked pixels are dropped before the kernel fit, and variable sources and the target itself are excluded from scale and PSF estimation. Residual dipoles at bright static cores are caught by `residual_artifact_mask` (on by default): they are masked only when a subpixel misregistration model explains the paired positive/negative lobes, and protected positions (the target plus any variable or additional targets) are never masked. Every alignment attempt is recorded in an `Alignment_<base>.json` manifest next to the science image.
