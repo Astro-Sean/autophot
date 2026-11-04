@@ -834,6 +834,85 @@ NON_PHOTOMETRIC_FILTER_KEYS = {
     "DEC_err",
 }
 
+# FITS header keywords that can carry the photometric band, in priority
+# order.  Includes ESO HIERARCH names (astropy strips the 'HIERARCH' prefix)
+# and NOT/ALFOSC filter-wheel names.  Single source of truth so check.py,
+# prepare.py, main.py and autophot.py do not diverge on which keywords count.
+FILTER_HEADER_CANDIDATES = (
+    "FILTER",
+    "FILTER1",
+    "FILTER2",
+    "FILTERS",
+    "FLTRNAM",
+    "FILNAM1",
+    "FILTNAM1",
+    "FILTERID",
+    "INSFILTE",
+    "INSFIL1",
+    "INSFLNAM",
+    "ESO INS FILT1 NAME",
+    "ESO INS FILT2 NAME",
+    "ALFLTNM",
+    "FAFLTNM",
+    "FBFLTNM",
+)
+
+# Header values meaning "no science filter in the beam" - never a band.
+# 'free' is what ESO writes for an empty filter-wheel slot.
+NON_FILTER_VALUES = frozenset(
+    {"clear", "open", "free", "blocked", "none", "n/a", "na", ""}
+)
+
+# 'filt'-containing keywords that describe wheel state, not the band name
+# (e.g. ALFLTID=1005 is an ID, 'ESO INS FILT1 POS' a position).
+_FILTER_META_KEY_SUFFIXES = frozenset(
+    {"ID", "POS", "STP", "STEP", "ORI", "ALG", "STAT", "NO", "NDX", "TYPE", "MODE"}
+)
+
+
+def filter_value_usable(value) -> bool:
+    """True when a header value can carry a photometric band."""
+    v = str(value).strip().lower().replace(" ", "")
+    return bool(v) and v not in NON_FILTER_VALUES
+
+
+def find_filter_header_key(header, extra_keys=()):
+    """Return the header keyword holding the filter value, or None.
+
+    Tries ``extra_keys`` first (e.g. telescope.yml ``filter_key_*`` entries),
+    then FILTER_HEADER_CANDIDATES (case-insensitive), then any key containing
+    'filt' that is not a wheel-state keyword - name-like keys ('*NAME',
+    '*NM') first.  Only keys passing ``filter_value_usable`` are considered.
+    """
+    if not header:
+        return None
+    keys = [str(k) for k in header.keys()]
+
+    def _present(name):
+        for k in keys:
+            if k.upper() == name.upper():
+                return k
+        return None
+
+    for cand in list(extra_keys) + list(FILTER_HEADER_CANDIDATES):
+        k = _present(cand)
+        if k is not None and filter_value_usable(header[k]):
+            return k
+
+    filt_keys = []
+    for k in keys:
+        ku = k.upper()
+        if (
+            "filt" in k.lower()
+            and not ku.endswith(tuple(_FILTER_META_KEY_SUFFIXES))
+            and filter_value_usable(header[k])
+        ):
+            filt_keys.append(k)
+    filt_keys.sort(
+        key=lambda k: ("name" not in k.lower() and "nm" not in k.lower(), k)
+    )
+    return filt_keys[0] if filt_keys else None
+
 
 def get_supported_filter_groups() -> dict:
     """Return accepted filter-group keys for per-filter mapping."""
