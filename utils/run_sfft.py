@@ -284,6 +284,124 @@ def _adopt_prior_free_retry(
     return False
 
 
+def _host_mem_available_gb() -> Optional[float]:
+    """Free host RAM in GB, or None when it cannot be read."""
+    try:
+        with open("/proc/meminfo", "r") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return float(line.split()[1]) / (1024.0 ** 2)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _resolve_max_mem_gb(raw: object) -> float:
+    """SFFT RAM budget in GB. 0/invalid means auto: 80% of MemAvailable,
+    capped at 24 GB (6 GB when host RAM cannot be read)."""
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        val = 0.0
+    if val > 0:
+        return val
+    avail = _host_mem_available_gb()
+    if avail is None or avail <= 0:
+        return 6.0
+    return max(2.0, min(0.8 * avail, 24.0))
+
+
+def _sfft_peak_mem_gb(
+    npix: float,
+    ker_hw: int,
+    ker_order: int,
+    bg_order: int,
+    const_phot: bool,
+) -> Tuple[float, int]:
+    """Peak-RAM estimate (GB, NEQ) for one SFFT subtraction.
+
+    Mirrors the dominant allocations in sfft.sfftcore.SFFTSubtract.ESS:
+    the NEQ x NEQ float64 least-squares matrix (a second copy exists
+    alongside it under ConstPhotRatio), the (1+Fij+Fpq) complex128
+    Fourier stack held across both passes, the largest Hadamard 3D
+    workspace, the (L0+L1) complex128 kernel-component planes used to
+    apply the solved kernel, and a dozen image-sized buffers held by
+    the prep/masked-image path.
+    """
+    hw = max(int(ker_hw), 1)
+    fab = (2 * hw + 1) ** 2
+    fij = (int(ker_order) + 1) * (int(ker_order) + 2) // 2
+    fpq = (int(bg_order) + 1) * (int(bg_order) + 2) // 2
+    neq = fij * fab + fpq
+    gb = 1.0e9
+    # LHMAT plus the Fortran-order copy LAPACK factorises in place; under
+    # ConstPhotRatio a second NEQ-sized LHMAT_FSfree matrix coexists.
+    lsmat = neq * neq * 8.0 * (3.0 if const_phot else 2.0) / gb
+    fft_stack = (1 + fij + fpq) * npix * 16.0 / gb
+    had = max(fij * fij, fij * fpq, fpq * fpq) * npix * 24.0 / gb
+    kab = 2.0 * (2 * hw + 1) * npix * 16.0 / gb
+    images = 12.0 * npix * 8.0 / gb
+    solve = lsmat + fft_stack + had + images
+    subtract = kab + fft_stack + 3.0 * npix * 16.0 / gb + images
+    return max(solve, subtract), neq
+
+
+def _sfft_fit_memory(
+    npix: float,
+    ker_hw: int,
+    ker_order: int,
+    bg_order: int,
+    const_phot: bool,
+    max_mem_gb: float,
+    hw_floor: int,
+) -> Tuple[int, int, float, int]:
+    """Shrink (ker_order, ker_hw) until the SFFT estimate fits the budget.
+
+    Kernel order drops first (it multiplies every kernel pixel in NEQ),
+    then the largest half-width in [hw_floor, ker_hw] that fits is found
+    by bisection.  Returns the possibly reduced parameters plus the final
+    estimate and NEQ.
+    """
+
+    def _est(hw: int, ko: int) -> Tuple[float, int]:
+        return _sfft_peak_mem_gb(npix, hw, ko, bg_order, const_phot)
+
+    est, neq = _est(ker_hw, ker_order)
+    while est > max_mem_gb and ker_order > 0:
+        ker_order -= 1
+        est, neq = _est(ker_hw, ker_order)
+    if est > max_mem_gb:
+        lo, hi = max(int(hw_floor), 1), int(ker_hw)
+        best = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            e_mid, _ = _est(mid, ker_order)
+            if e_mid <= max_mem_gb:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if best is not None:
+            ker_hw = best
+            est, neq = _est(ker_hw, ker_order)
+    return int(ker_hw), int(ker_order), float(est), int(neq)
+
+
+def _sfft_n_threads(raw: object) -> int:
+    """CPU threads for SFFT subtraction. 0 means auto (min(4, cpus))."""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        n = 0
+    try:
+        n_cpu = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n_cpu = os.cpu_count() or 1
+    if n <= 0:
+        n = min(4, n_cpu)
+    return max(1, min(n, n_cpu, 16))
+
+
 def _flag_mask_from_columns(
     df: pd.DataFrame, include_tokens: Tuple[str, ...], exclude_tokens: Tuple[str, ...] = ()
 ) -> np.ndarray:
@@ -744,6 +862,38 @@ def run_sfft() -> Optional[int]:
         type=str,
         default="0",
         help="CUDA device index used when -backend cupy (default 0).",
+    )
+    parser.add_argument(
+        "-num_threads",
+        type=int,
+        default=0,
+        help=(
+            "CPU threads for SFFT subtraction internals (pyFFTW plans and "
+            "numba kernels in the Numpy backend). 0 = auto (min(4, cpus))."
+        ),
+    )
+    parser.add_argument(
+        "-max_memory_gb",
+        type=float,
+        default=0.0,
+        help=(
+            "Peak-RAM budget (GB) for the SFFT linear-solve/subtraction "
+            "allocations. 0 = auto (80%% of MemAvailable, capped 24 GB). "
+            "Behaviour when the estimate exceeds it is set by "
+            "-memory_policy."
+        ),
+    )
+    parser.add_argument(
+        "-memory_policy",
+        type=str,
+        default="shrink",
+        choices=("shrink", "fallback", "ignore"),
+        help=(
+            "Over-budget policy: 'shrink' reduces kernel order then "
+            "half-width to fit (default); 'fallback' refuses so the "
+            "caller falls back without degrading the kernel; 'ignore' "
+            "logs the estimate and runs the full kernel anyway."
+        ),
     )
     args = parser.parse_args()
 
@@ -1336,9 +1486,12 @@ def run_sfft() -> Optional[int]:
     )
     log_info(f"SFFT compute backend: {BACKEND_4SUBTRACT}{_dev_note}")
 
-    # Use 1 thread for SFFT internals to avoid libgomp/process limits when run
-    # as a subprocess or on HPC (avoids "Thread creation failed" and semaphore leaks).
-    NUM_CPU_THREADS_4SUBTRACT = 1
+    # Threads for SFFT internals (pyFFTW plans + numba kernels in the Numpy
+    # backend).  0/auto -> min(4, cpus); the caller passes the pipeline's
+    # resolved value via -num_threads.  BLAS threads are set through the
+    # process environment by the caller (sfft_env) because they must be in
+    # place before numpy loads its backend libraries.
+    NUM_CPU_THREADS_4SUBTRACT = _sfft_n_threads(getattr(args, "num_threads", 0))
 
     # ForceConv: which image to convolve.
     # REF  => DIFF = SCI - conv(REF): transients keep the science PSF.
@@ -1475,6 +1628,103 @@ def run_sfft() -> Optional[int]:
         f"EVREJ_SAFE_MAGDEV={EVREJ_SAFE_MAGDEV:.3f} "
         f"PAC_RATIO_THRESH={PAC_RATIO_THRESH:.3f}"
     )
+
+    # --- Memory preflight ---
+    # SFFT allocates an NEQ x NEQ float64 least-squares matrix (twice under
+    # ConstPhotRatio) and (2*hw+1) complex128 image planes when applying the
+    # solved kernel.  Both grow fast with kernel half-width and can push the
+    # host into swap/OOM well before any timeout fires.  Shrink the spatial
+    # kernel order, then the half-width down to its PSF-difference floor;
+    # abort so the caller can fall back when even the floor cannot fit.
+    _npix = float(ny) * float(nx)
+    _max_mem_gb = _resolve_max_mem_gb(getattr(args, "max_memory_gb", 0.0))
+    _fwhm_broad_g = max(float(template_fwhm), float(science_fwhm))
+    _fwhm_narrow_g = min(float(template_fwhm), float(science_fwhm))
+    _fwhm_conv_g = float(
+        np.sqrt(max(_fwhm_broad_g ** 2 - _fwhm_narrow_g ** 2, 0.0))
+    )
+    _hw_floor = max(
+        int(KER_HW_LIMIT_MIN),
+        int(np.ceil(3.0 * _fwhm_conv_g / 2.3548200450309493)),
+    )
+    _est_gb, _neq = _sfft_peak_mem_gb(
+        _npix,
+        kernel_half_width,
+        kernel_poly_order,
+        bg_poly_order,
+        bool(constant_phot_ratio),
+    )
+    if BACKEND_4SUBTRACT != "Numpy":
+        # The allocations live on the GPU under Cupy; a CUDA OOM fails fast
+        # rather than swapping the host, so the estimate is informational.
+        log_info(
+            f"SFFT memory preflight: ~{_est_gb:.2f} GB estimated device "
+            f"footprint (NEQ={_neq}, hw={kernel_half_width}, "
+            f"order={kernel_poly_order})."
+        )
+    elif _est_gb > _max_mem_gb:
+        _mem_policy = str(
+            getattr(args, "memory_policy", "shrink") or "shrink"
+        ).strip().lower()
+        if _mem_policy == "ignore":
+            # User accepted the memory risk: the estimate is a
+            # conservative upper bound, and the full kernel is what the
+            # science needs.
+            log_warning(
+                f"SFFT memory preflight: ~{_est_gb:.2f} GB estimated "
+                f"peak exceeds the {_max_mem_gb:.2f} GB budget - running "
+                f"the full kernel anyway (memory_policy='ignore', "
+                f"hw={kernel_half_width}, order={kernel_poly_order}, "
+                f"NEQ={_neq})."
+            )
+        elif _mem_policy == "fallback":
+            raise RuntimeError(
+                f"SFFT estimated peak {_est_gb:.2f} GB exceeds the memory "
+                f"budget {_max_mem_gb:.2f} GB at the requested kernel "
+                f"(hw={kernel_half_width}, order={kernel_poly_order}, "
+                f"image={int(_npix)} px, NEQ={_neq}).  Refusing to run "
+                "rather than degrading the kernel "
+                "(memory_policy='fallback'): use a better-matched "
+                "template or the HOTPANTS/ZOGY fallback."
+            )
+        else:
+            _hw0, _ko0 = int(kernel_half_width), int(kernel_poly_order)
+            (
+                kernel_half_width,
+                kernel_poly_order,
+                _est_gb,
+                _neq,
+            ) = _sfft_fit_memory(
+                _npix,
+                kernel_half_width,
+                kernel_poly_order,
+                bg_poly_order,
+                bool(constant_phot_ratio),
+                _max_mem_gb,
+                _hw_floor,
+            )
+            if _est_gb > _max_mem_gb:
+                raise RuntimeError(
+                    f"SFFT estimated peak {_est_gb:.2f} GB exceeds the "
+                    f"memory budget {_max_mem_gb:.2f} GB even at the "
+                    f"minimum kernel (hw={_hw_floor}, order=0, "
+                    f"image={int(_npix)} px, NEQ={_neq}).  Refusing to "
+                    "run: use a better-matched template or the "
+                    "HOTPANTS/ZOGY fallback."
+                )
+            log_warning(
+                f"SFFT memory preflight: estimate {_est_gb:.2f} GB of a "
+                f"{_max_mem_gb:.2f} GB budget forced kernel hw {_hw0} -> "
+                f"{kernel_half_width}, kernel_poly_order {_ko0} -> "
+                f"{kernel_poly_order} (NEQ={_neq})."
+            )
+            boundary = min(boundary, kernel_half_width)
+    else:
+        log_info(
+            f"SFFT memory preflight: ~{_est_gb:.2f} GB estimated peak "
+            f"(budget {_max_mem_gb:.2f} GB, NEQ={_neq}, "
+            f"hw={kernel_half_width}, order={kernel_poly_order})."
+        )
 
     # KerHWRatio: ratio between FWHM and kernel half-width when GKerHW is None.
     # SFFT source (EasySparsePacket.ESP): KerHW = int(clip(KerHWRatio * Max(FWHM_REF, FWHM_SCI), limit[0], limit[1])).
