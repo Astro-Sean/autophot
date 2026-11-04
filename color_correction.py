@@ -430,8 +430,13 @@ def main(argv=None):
         if os.path.exists(lc_path):
             df = pd.read_csv(lc_path, comment="#")
         else:
+            # Per-image outputs may sit several levels deep when the input
+            # used nested dataset directories (one _APT dir per level).
             outs = sorted(
-                glob.glob(os.path.join(reduced_dir, "*", "Output_*.csv"))
+                glob.glob(
+                    os.path.join(reduced_dir, "**", "Output_*.csv"),
+                    recursive=True,
+                )
             )
             if not outs:
                 logger.error("No Output_*.csv under %s", reduced_dir)
