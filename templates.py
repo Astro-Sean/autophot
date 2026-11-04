@@ -5093,6 +5093,60 @@ def _validate_noise_map(
     return path
 
 
+def _supplied_noise_map(
+    path: Optional[str],
+    scalar_noise: float,
+    label: str,
+) -> Optional[np.ndarray]:
+    """
+    Load a validated RMS/sigma map and re-anchor it to a scalar noise level.
+
+    The map supplies per-pixel noise structure; the caller's measured
+    scalar supplies the absolute scale, so a flat map reduces exactly to
+    the scalar-noise path.  Delivered maps mark unusable pixels NaN or
+    non-positive; those positions fall back to the scalar value because
+    the corresponding image pixels are already dead (zero-filled or NaN)
+    and only need a finite variance for the ZOGY FFTs.
+
+    ``path`` must already have passed ``_validate_noise_map`` for the
+    target grid.  Returns None when the map is missing, unreadable, or
+    has no usable pixels.
+    """
+    if not path or not np.isfinite(scalar_noise) or scalar_noise <= 0:
+        return None
+    try:
+        data = np.asarray(fits.getdata(str(path)), dtype=np.float64)
+    except Exception as e:
+        logger.warning(
+            "%s supplied noise map unreadable (%s): %s; ignoring.",
+            label,
+            path,
+            e,
+        )
+        return None
+    good = np.isfinite(data) & (data > 0)
+    if not good.any():
+        logger.warning(
+            "%s supplied noise map has no positive finite pixels; ignoring.",
+            label,
+        )
+        return None
+    med = float(np.median(data[good]))
+    if not np.isfinite(med) or med <= 0:
+        return None
+    out = np.where(good, data / med * scalar_noise, scalar_noise)
+    n_fill = int((~good).sum())
+    logger.info(
+        "%s: using supplied noise map %s (anchored to sigma=%.4g; "
+        "%d unusable pixels filled with scalar).",
+        label,
+        os.path.basename(str(path)),
+        scalar_noise,
+        n_fill,
+    )
+    return out
+
+
 def _wcs_on_common_grid(
     wcs_a,
     wcs_b,
@@ -6934,13 +6988,55 @@ class Templates:
     # Template discovery
     # -----------------------------------------------------------------
 
+    def _template_roots(self) -> List[Path]:
+        """
+        ``templates`` directories that may serve the current science image.
+
+        Starting at the science image's original directory
+        (``input_yaml['science_dir']``) and walking up toward ``fits_dir``,
+        every ancestor containing a ``templates`` dir contributes a
+        candidate root, nearest first - so ``<dataset>/templates`` serves
+        that dataset's images.  ``<fits_dir>/templates`` is always the
+        final fallback, which preserves the flat layout's behaviour.
+        """
+        try:
+            fits_root = Path(
+                str(self.input_yaml.get("fits_dir") or "")
+            ).resolve()
+        except Exception:
+            fits_root = Path("")
+
+        roots: List[Path] = []
+        science_dir = self.input_yaml.get("science_dir")
+        if science_dir:
+            try:
+                cur = Path(str(science_dir)).resolve()
+            except Exception:
+                cur = None
+            if cur is not None and (
+                cur == fits_root or fits_root in cur.parents
+            ):
+                while True:
+                    cand = cur / "templates"
+                    if cand.is_dir() and cand not in roots:
+                        roots.append(cand)
+                    if cur == fits_root:
+                        break
+                    cur = cur.parent
+
+        default_root = fits_root / "templates"
+        if default_root not in roots:
+            roots.append(default_root)
+        return roots
+
     def get_template(self) -> Optional[str]:
         """
         Locate a pre-downloaded template FITS file for the current filter.
 
-        Searches under ``<fits_dir>/templates/<filter>_template/`` for
-        files ending in .fits / .fts / .fit that contain "_template" in
-        their name (excluding PSF models and weight maps).
+        Searches each ``templates`` root on the science image's ancestry
+        (nearest first, see :meth:`_template_roots`) under
+        ``<filter>_template/`` for files ending in .fits / .fts / .fit,
+        excluding PSF models and weight maps.
 
         Returns
         -------
@@ -6953,7 +7049,6 @@ class Templates:
             return None
 
         logger.info(log_step(f"Template for filter {use_filter}"))
-        fits_root = Path(self.input_yaml.get("fits_dir", None) or "") / "templates"
         use_filter = str(use_filter).strip()
 
         # Prefer <f>_template; also accept the legacy <f>p_template folder
@@ -6963,7 +7058,12 @@ class Templates:
             dir_labels.append(f"{use_filter}p_template")
 
 
-        candidate_dirs = [fits_root / d for d in dir_labels]
+        # Nearest templates root wins; each root tries the modern dir
+        # label before the legacy <f>p_template variant.
+        template_roots = self._template_roots()
+        candidate_dirs = [
+            root / d for root in template_roots for d in dir_labels
+        ]
         logger.debug(
             "Expected %s-band template folder(s): %s",
             use_filter,
@@ -12175,11 +12275,14 @@ class Templates:
             coordinates).  When None, the HOTPANTS adapter builds one from
             ``matching_sources`` with the target excluded.
         scienceNoise, templateNoise : str or None
-            Optional external noise-map FITS files.  They must live on the
-            same pixel grid as the image actually fed to the backend; the
-            template weight map is not resampled by ``align()``, so a
-            mismatched map is dropped with a warning rather than
-            misapplied.  Used by HOTPANTS (``-ini``/``-tni``).
+            Optional external noise-map (background sigma, ADU) FITS files.
+            They must live on the same pixel grid as the image actually fed
+            to the backend; the template weight map is resampled to the
+            aligned template grid by the caller.  A mismatched map is
+            dropped with a warning rather than misapplied.  ZOGY folds them
+            into its per-pixel variance (source Poisson is added
+            separately); HOTPANTS uses them via ``-ini``/``-tni``.  SFFT
+            does not consume external noise maps.
         science_psf, template_psf : str or None
             Explicit PSF-stamp paths that take precedence over the
             ``PSF_model_*`` file discovery (e.g. ZOGY-specific analytic
@@ -12282,6 +12385,26 @@ class Templates:
                     _grid_tol,
                 )
                 return None, None, None, None
+
+            # Noise maps must live on the same pixel grid as the images
+            # actually fed to a backend.  The science map was built from
+            # the aligned science image; the template weight map (when
+            # present) was resampled to the aligned template grid by the
+            # caller.  Validate once here so every backend (ZOGY and
+            # HOTPANTS) sees the same verdict: a mismatched map is dropped
+            # rather than silently misapplied.
+            sci_noise_v = _validate_noise_map(
+                scienceNoise,
+                scienceImage.shape,
+                "science",
+                ref_wcs=_sci_wcs_v,
+            )
+            tpl_noise_v = _validate_noise_map(
+                templateNoise,
+                templateImage.shape,
+                "template",
+                ref_wcs=_tpl_wcs_v,
+            )
 
             def _ensure_prepared_template_path() -> str:
                 nonlocal prepared_template_fpath, template_work_fpath
@@ -13551,6 +13674,8 @@ class Templates:
                     target_xy=target_location,
                     science_gain=science_gain,
                     template_gain=template_gain,
+                    science_noise=sci_noise_v,
+                    template_noise=tpl_noise_v,
                 )
                 if _res == "done":
                     backend_used = "zogy"
@@ -13744,25 +13869,6 @@ class Templates:
                 )
                 save_to_fits(sci_mask_hp.astype(int), mask_sci_loc)
                 save_to_fits(tpl_mask_hp.astype(int), mask_tpl_loc)
-
-                # Noise maps must live on the same pixel grid as the images
-                # actually fed to HOTPANTS.  The science map was built from
-                # the aligned science image; the template weight map (when
-                # present) was never resampled by align(), so a grid mismatch
-                # is detected here and the map is dropped rather than
-                # silently misapplied.
-                sci_noise_v = _validate_noise_map(
-                    scienceNoise,
-                    scienceImage.shape,
-                    "science",
-                    ref_wcs=_sci_wcs_v,
-                )
-                tpl_noise_v = _validate_noise_map(
-                    templateNoise,
-                    templateImage.shape,
-                    "template",
-                    ref_wcs=_tpl_wcs_v,
-                )
 
                 success = self._subtract_hotpants(
                     scienceFpath,
@@ -14083,6 +14189,8 @@ class Templates:
         target_xy=None,
         science_gain=None,
         template_gain=None,
+        science_noise=None,
+        template_noise=None,
     ) -> str:
         """Attempt ZOGY subtraction; return next method to try on failure."""
         logger.info("Starting ZOGY subtraction...")
@@ -14707,17 +14815,24 @@ class Templates:
                     )
 
             # -----------------------------------------------------------------
-            # Per-pixel noise maps (optional): compute local background RMS
-            # maps to capture spatially varying noise (e.g. near chip gaps,
-            # bright galaxy backgrounds).  When disabled or too slow, fall
-            # back to scalar noise (original behaviour).
+            # Per-pixel noise maps.  Supplied maps - the pipeline's folded
+            # background-RMS product, already validated on this grid - take
+            # precedence over the internal estimate; they are the same maps
+            # aperture/PSF photometry and HOTPANTS consume.  ZOGY adds
+            # source Poisson separately via source_var, so maps must stay
+            # background-only.  The opt-in internal local-biweight estimate
+            # only fills sides with no supplied map; it captures spatially
+            # varying noise (e.g. near chip gaps, bright galaxy backgrounds)
+            # when nothing better was delivered.
             # -----------------------------------------------------------------
-            _sn_map = None
-            _sr_map = None
+            _sn_map = _supplied_noise_map(science_noise, _sn, "science")
+            _sr_map = _supplied_noise_map(template_noise, _sr, "template")
+            _sn_supplied = _sn_map is not None
+            _sr_supplied = _sr_map is not None
             _use_noise_maps = _as_bool(
                 ts_cfg.get("zogy_per_pixel_noise", False), False
             )
-            if _use_noise_maps:
+            if _use_noise_maps and (_sn_map is None or _sr_map is None):
                 try:
                     def _local_noise_map(data, scalar_noise, box_size=64):
                         """Estimate per-pixel noise via local biweight scale
@@ -14770,8 +14885,12 @@ class Templates:
                             ts_cfg.get("zogy_noise_map_box_size"),
                         )
                         _noise_box = 64
-                    _sn_map = _local_noise_map(science_data, _sn, _noise_box)
-                    _sr_map = _local_noise_map(reference_data, _sr, _noise_box)
+                    if _sn_map is None:
+                        _sn_map = _local_noise_map(science_data, _sn, _noise_box)
+                    if _sr_map is None:
+                        _sr_map = _local_noise_map(
+                            reference_data, _sr, _noise_box
+                        )
                     logger.info(
                         "ZOGY: computed per-pixel noise maps (box=%d px, "
                         "sci range=[%.4g, %.4g], ref range=[%.4g, %.4g]).",
@@ -14784,8 +14903,10 @@ class Templates:
                         "ZOGY: per-pixel noise map computation failed (%s); "
                         "using scalar noise.", _e,
                     )
-                    _sn_map = None
-                    _sr_map = None
+                    if not _sn_supplied:
+                        _sn_map = None
+                    if not _sr_supplied:
+                        _sr_map = None
 
             # -----------------------------------------------------------------
             # PSF normalization: ensure PSFs sum to 1 before padding.
