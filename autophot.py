@@ -1260,8 +1260,8 @@ def inspect_telescope(
     from astropy.io import fits as _fits
 
     _FITS_EXTENSIONS = (".fits", ".fit", ".fts", ".fits.gz", ".fit.gz", ".fts.gz")
-    _FILTER_CANDIDATES = ["FILTER", "FILTER1", "FILTER2", "FILTERID", "INSFILTE", "FILTNAM1"]
-    _AVOID_FILTERS = {"clear", "open", "none", "", "n/a"}
+    from functions import FILTER_HEADER_CANDIDATES as _FILTER_CANDIDATES
+    from functions import NON_FILTER_VALUES as _AVOID_FILTERS
 
     log_it = logging.getLogger(__name__)
 
@@ -3605,6 +3605,41 @@ class AutomatedPhotometry:
                         )
                         file_list = file_list[:debug]
 
+                    # Nested datasets: file_list is a flat recursive scan
+                    # across every subfolder, so a single counter hides
+                    # where one folder ends and the next begins.  Track a
+                    # per-folder position alongside the overall count.
+                    _fits_root = os.path.abspath(
+                        str(default_input["fits_dir"])
+                    )
+
+                    def _folder_of(fpath) -> str:
+                        return os.path.relpath(
+                            os.path.abspath(
+                                os.path.dirname(str(fpath))
+                            ),
+                            _fits_root,
+                        )
+
+                    _folder_totals: dict = {}
+                    for _f in file_list:
+                        _fr = _folder_of(_f)
+                        _folder_totals[_fr] = _folder_totals.get(_fr, 0) + 1
+                    _folder_seen: dict = {}
+                    _multi_folder = len(_folder_totals) > 1
+
+                    def _progress_str(fpath, count=None) -> str:
+                        """[i/N] tag, plus 'folder: i/n' for nested layouts."""
+                        _fr = _folder_of(fpath)
+                        _c = counter if count is None else count
+                        if not _multi_folder:
+                            return f"[{_c}/{len(file_list)}]"
+                        return (
+                            f"[{_c}/{len(file_list)} | "
+                            f"{_fr}: {_folder_seen.get(_fr, 0)}/"
+                            f"{_folder_totals[_fr]}]"
+                        )
+
                     if parallel_files and len(file_list) > 1:
                         # Parallel image-level execution: each worker runs main.py on one file.
                         _log_always(
@@ -3637,11 +3672,19 @@ class AutomatedPhotometry:
                                     fname, rc = futures[fut], 1
                                     _log_always(f"[WORKER ERROR] {fname}: {exc}")
                                 counter += 1
+                                _fkey = _folder_of(fname)
+                                _folder_seen[_fkey] = (
+                                    _folder_seen.get(_fkey, 0) + 1
+                                )
                                 if rc == 0:
-                                    _log_always(f"[{counter}/{total}] [OK]    {fname}")
+                                    _log_always(
+                                        f"{_progress_str(fname)} [OK]    {fname}"
+                                    )
                                 else:
                                     failed_files.append(fname)
-                                    _log_always(f"[{counter}/{total}] [FAIL]  {fname} (exit code {rc})")
+                                    _log_always(
+                                        f"{_progress_str(fname)} [FAIL]  {fname} (exit code {rc})"
+                                    )
                                     if rc == 2 and (not os.path.exists(input_file)):
                                         _log_always(
                                             "[ERROR] Input YAML snapshot disappeared during processing. "
@@ -3682,6 +3725,8 @@ class AutomatedPhotometry:
                                 )
                                 _using_tqdm = True
                         for file in file_iter:
+                            _fkey = _folder_of(file)
+                            _folder_seen[_fkey] = _folder_seen.get(_fkey, 0) + 1
                             # tqdm redraws its bar on the cursor's current
                             # line; the child process inherits stdout, so a
                             # newline here keeps its first output off the
@@ -3690,6 +3735,12 @@ class AutomatedPhotometry:
                             # when stdout is piped, gluing "Started:" to the
                             # bar.
                             if _using_tqdm:
+                                if _multi_folder:
+                                    file_iter.set_postfix_str(
+                                        f"{_fkey} "
+                                        f"{_folder_seen[_fkey]}/"
+                                        f"{_folder_totals[_fkey]}"
+                                    )
                                 print(flush=True)
                             try:
                                 fname, rc = _run_main_subprocess(
@@ -3708,10 +3759,10 @@ class AutomatedPhotometry:
                                 gc.collect()
                                 counter += 1
                                 if rc == 0:
-                                    _log(f"[{counter}/{len(file_list)}] [OK]    {str(file)}")
+                                    _log(f"{_progress_str(file)} [OK]    {str(file)}")
                                 else:
                                     _log(
-                                        f"[{counter}/{len(file_list)}] [FAIL]  {str(file)} "
+                                        f"{_progress_str(file)} [FAIL]  {str(file)} "
                                         f"(exit code {rc})"
                                     )
                             except Exception as e:
@@ -3719,7 +3770,7 @@ class AutomatedPhotometry:
 
                                 tb = traceback.format_exc(limit=1)
                                 _log(
-                                    f"[{counter + 1}/{len(file_list)}] [ERROR] Problem with file: {file}: {e} | {tb}"
+                                    f"{_progress_str(file, counter + 1)} [ERROR] Problem with file: {file}: {e} | {tb}"
                                 )
                             # Two blank lines between the [OK]/[ERROR] line
                             # and the bar redraw - the next iteration's
