@@ -143,12 +143,14 @@ from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        external_weight_to_rms, flux_upper_limit,
                        format_config_errors, get_header,
                        get_image, get_image_and_header, get_instrument_config,
-                       load_telescope_config, log_exception, log_status,
-                       log_step, log_warning_from_exception, metrics_table,
+                       load_telescope_config, log_exception, log_result,
+                       log_status, log_step, log_warning_from_exception,
+                       metrics_table,
                        canonical_target_name, display_target_name, odd,
                        pix_dist, quadrature_add,
                        resolve_verbose_level, safe_fits_write,
-                       silence_noisy_loggers, strict_config_enabled,
+                       silence_noisy_loggers, stat_block, stat_pairs,
+                       strict_config_enabled,
                        verbose_to_console_level, write_output_csv,
                        FILTER_HEADER_CANDIDATES, NON_FILTER_VALUES,
                        find_filter_header_key)
@@ -3197,7 +3199,7 @@ def run_photometry():
                 logging.warning("Could not check target pixel value: %s", check_exc)
 
         # Stage-closing summary: what the preprocessing pass produced.
-        log_status(
+        log_result(
             "Preprocessing: done | %dx%d px | trim=%.1f arcmin | NaN-edge-trim=%s",
             image.shape[1],
             image.shape[0],
@@ -3217,7 +3219,7 @@ def run_photometry():
             try:
                 _dc_wcs = get_wcs(header)
                 if _dc_wcs is None or not getattr(_dc_wcs, "has_celestial", False):
-                    log_status(
+                    log_result(
                         "Distortion correction: skipped | no usable header WCS "
                         "(SCAMP needs a WCS seed)"
                     )
@@ -3241,7 +3243,7 @@ def run_photometry():
                             _dc_data = np.asarray(_dc_hdul[0].data, dtype=np.float64)
                             _dc_wcs_new = get_wcs(_dc_hdul[0].header)
                         if _dc_wcs_new is None:
-                            log_status(
+                            log_result(
                                 "Distortion correction: skipped | corrected "
                                 "image has no usable WCS (keeping original)"
                             )
@@ -3263,13 +3265,13 @@ def run_photometry():
                                 )
                                 input_yaml["target_x_pix"] = float(_dtx)
                                 input_yaml["target_y_pix"] = float(_dty)
-                            log_status(
+                            log_result(
                                 "Distortion correction: applied | %s "
                                 "resampled onto undistorted grid",
                                 base_filename,
                             )
                     else:
-                        log_status(
+                        log_result(
                             "Distortion correction: skipped | SCAMP/SWarp "
                             "unavailable or failed (keeping original image)"
                         )
@@ -3367,7 +3369,7 @@ def run_photometry():
             float(ImageFWHM) * pixel_scale if np.isfinite(ImageFWHM) else float("nan")
         )
         logging.info("Preliminary FWHM: %.1f pixels", ImageFWHM)
-        log_status("Image seeing: %.2f arcseconds", _seeing_arcsec)
+        log_result("Image seeing: %.2f arcseconds", _seeing_arcsec)
 
         # Save the initially measured FWHM for the post-alignment inflation
         # check.  input_yaml["fwhm"] may still hold the config default (e.g.,
@@ -3391,7 +3393,7 @@ def run_photometry():
             float(ImageFWHM) if np.isfinite(ImageFWHM) else 3.0, input_yaml
         )
         input_yaml["sampling_regime"] = _sampling_regime
-        log_status(
+        log_result(
             "Undersampled mode: %s | Sampling regime: %s (FWHM=%.2f px, threshold=%.2f px)",
             input_yaml["undersampled_mode"],
             _sampling_regime,
@@ -3616,13 +3618,13 @@ def run_photometry():
             # keyword and cleaned data survive a pipeline crash before the
             # next FITS write (which is after the second background pass).
             safe_fits_write(fpath, image, header)
-            log_status(
+            log_result(
                 "Cosmic rays: cleaned | %d px masked (%.2f%%)",
                 int(cosmic_rays_mask.sum()),
                 100.0 * cosmic_rays_mask.sum() / cosmic_rays_mask.size,
             )
         elif input_yaml["cosmic_rays"].get("remove_cmrays", False):
-            log_status("Cosmic rays: skipped (already cleaned)")
+            log_result("Cosmic rays: skipped (already cleaned)")
 
         # =============================================================================
         #          Check for Existing WCS
@@ -3710,7 +3712,7 @@ def run_photometry():
                 _new_solve = bool(
                     getattr(imageWCS_obj, "solved_new_wcs", False)
                 )
-                log_status(
+                log_result(
                     "Plate solve successful"
                     if _new_solve
                     else "Plate solve kept existing WCS"
@@ -3781,7 +3783,7 @@ def run_photometry():
         _wcs_state = (
             "solved" if wcs_updated else ("existing" if existingWCS else "none")
         )
-        log_status("WCS: %s | scale=%.3f arcsec/px", _wcs_state, pixel_scale)
+        log_result("WCS: %s | scale=%.3f arcsec/px", _wcs_state, pixel_scale)
 
         # =============================================================================
         # WCS Refinement (optional: enable via wcs.refine_after_solve if needed)
@@ -3986,7 +3988,7 @@ def run_photometry():
         )
         safe_fits_write(weight_fpath, background_rms, weight_header)
         # Stage-closing summary for the masked background pass.
-        log_status(
+        log_result(
             "Background (masked): sky=%.3e ADU | RMS=%.3e ADU | masked=%.1f%%",
             float(np.nanmedian(background_surface)),
             float(np.nanmedian(background_rms)),
@@ -4500,7 +4502,7 @@ def run_photometry():
         )
         safe_fits_write(weight_fpath, background_rms, weight_header)
         # Stage-closing summary for the calibration stage.
-        log_status(
+        log_result(
             "Calibration: sky=%.3e ADU | RMS=%.3e ADU | weight=%s",
             float(np.nanmedian(background_surface)),
             float(np.nanmedian(background_rms)),
@@ -4525,7 +4527,7 @@ def run_photometry():
             else str(selected_catalog_name or "")
         )
         _ref_magsys = catalog_magsys(_ref_cat_label, input_yaml.get("imageFilter"))
-        log_status("Using %s catalog (%s)", _ref_cat_label, _ref_magsys)
+        log_result("Using %s catalog (%s)", _ref_cat_label, _ref_magsys)
 
         # The catalog cone must cover the detector footprint, not just a
         # fixed patch around the target - corner regions need calibrators
@@ -4922,8 +4924,14 @@ def run_photometry():
             if np.isfinite(ImageFWHM)
             else float("nan")
         )
-        log_status("Image FWHM: %.2f px", float(ImageFWHM))
-        log_status("Image seeing: %.2f arcseconds", _seeing_arcsec)
+        log_result(
+            stat_pairs(
+                [
+                    ("Image FWHM:", f"{float(ImageFWHM):.2f} px"),
+                    ("Image seeing:", f"{_seeing_arcsec:.2f} arcseconds"),
+                ]
+            )
+        )
         area_sq_arcmin = (
             (ny * nx) * (pixel_scale_arcsec / 60.0) ** 2 if pixel_scale_arcsec else 0.0
         )
@@ -5232,7 +5240,7 @@ def run_photometry():
         )
         IsolatedSources = IsolatedSources[mask]
         # STATUS-level so the section shows a result at normal verbosity.
-        log_status(
+        log_result(
             "Aperture photometry: %d isolated stars measured "
             "(aperture radius %.1f px)",
             len(IsolatedSources),
@@ -5367,7 +5375,7 @@ def run_photometry():
             int(np.ceil(optimum_radius * ImageFWHM))
         )
         aperture_radius = float(input_yaml["photometry"]["aperture_radius"])
-        log_status(
+        log_result(
             "Aperture radius: %.2f [pixels] (optimum_radius=%.2f FWHM%s)",
             aperture_radius,
             optimum_radius,
@@ -5419,7 +5427,7 @@ def run_photometry():
                         float(ap_corr_err) if np.isfinite(ap_corr_err) else 0.0
                     )
                     input_yaml["aperture_correction_radius"] = float(aperture_radius)
-                    log_status(
+                    log_result(
                         "Aperture correction (AP to total): %.3f +/- %.3f mag "
                         "at %.1f px (embedded in ZP_AP; stored for AP/PSF "
                         "scale bridging)",
@@ -5428,9 +5436,9 @@ def run_photometry():
                         aperture_radius,
                     )
                 else:
-                    log_status("Aperture correction not reliable; leaving as 0.0 mag.")
+                    log_result("Aperture correction not reliable; leaving as 0.0 mag.")
             else:
-                log_status(
+                log_result(
                     "Too few isolated sources (%s) for aperture correction; "
                     "skipping and leaving correction at 0.0 mag.",
                     "none" if IsolatedSources is None else len(IsolatedSources),
@@ -5475,7 +5483,7 @@ def run_photometry():
             CatalogSources = Calibrate_Catalog.downsample_sources_by_position(
                 CatalogSources
             )
-            log_status(
+            log_result(
                 "Catalog sources: %d of %d kept after cleaning",
                 len(CatalogSources),
                 n_catalog_total,
@@ -6766,7 +6774,7 @@ def run_photometry():
                 or len(psf_source_pool) < psf_build_gate_stars
             )
         ):
-            log_status(
+            log_result(
                 "PSF model: none (pool has %d sources; need >= %d for an "
                 "empirical build%s)",
                 0 if psf_source_pool is None else len(psf_source_pool),
@@ -6793,7 +6801,7 @@ def run_photometry():
                     f"PSF sources roundness: {mean_roundness:.2f} +/- {std_roundness:.2f}"
                 )
             if not epsf_model:
-                log_status("PSF photometry: skipped (no PSF model available)")
+                log_result("PSF photometry: skipped (no PSF model available)")
                 do_aperture_ONLY = True
                 PSFSources = None
             else:
@@ -6829,7 +6837,7 @@ def run_photometry():
                         )
                     else:
                         _n_psf_fit = 0
-                    log_status(
+                    log_result(
                         "PSF photometry: %d of %d catalog sources fitted",
                         _n_psf_fit,
                         0 if CatalogSources is None else len(CatalogSources),
@@ -8235,17 +8243,15 @@ def run_photometry():
                     median_offset = float(np.nanmedian(distance))
                     std_offset = float(np.nanstd(distance))
                     logging.info(
-                        "Centroid alignment: mean=%.3f, median=%.3f, std=%.3f px\n"
-                        "                    systematic offset=(%.3f, %.3f) px (%.3f total)\n"
-                        "                    residual mean=%.3f px (tolerance=%.1f px)",
-                        mean_offset,
-                        median_offset,
-                        std_offset,
-                        med_dx,
-                        med_dy,
-                        systematic_offset,
-                        float(np.nanmean(residual_distance)),
-                        POSITION_TOLERANCE,
+                        stat_block(
+                            "Centroid alignment:",
+                            f"mean={mean_offset:.3f}, median={median_offset:.3f}, "
+                            f"std={std_offset:.3f} px",
+                            f"systematic offset=({med_dx:.3f}, {med_dy:.3f}) px "
+                            f"({systematic_offset:.3f} total)",
+                            f"residual mean={float(np.nanmean(residual_distance)):.3f} "
+                            f"px (tolerance={POSITION_TOLERANCE:.1f} px)",
+                        )
                     )
 
                 # If alignment is poor and we reject everything, adaptively relax
@@ -11194,7 +11200,7 @@ def run_photometry():
                                 _convd_rep = _convd_hdr
                         except Exception:
                             pass
-                        log_status(
+                        log_result(
                             "Subtraction: OK | %s (forceconv=%s, kernel=%s) | "
                             "matched=%d | diff med=%.2f std=%.2f ADU | "
                             "masked=%.1f%%",
@@ -15834,7 +15840,7 @@ def run_photometry():
 
             # --- Log detection decision with all metrics ---
             _det_status = "DETECTION" if is_det else "non-detection"
-            log_status(
+            log_result(
                 "Detection decision: %s | SNR=%.2f (threshold=%.1f) | "
                 "prob_detect=%s | FAP=%s | flux_psf=%.4f flux_ap=%.4f | "
                 "chi2=%s | inverted=%s",
