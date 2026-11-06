@@ -1160,7 +1160,8 @@ def prepare_template_directory(
             "Do you want to continue? [y/N]: "
         )
         try:
-            answer = input(prompt).strip().lower()
+            print(prompt, file=sys.stderr, end="", flush=True)
+            answer = input().strip().lower()
         except EOFError:
             answer = "y"
         if answer not in {"y", "yes"}:
