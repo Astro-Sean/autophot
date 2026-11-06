@@ -409,7 +409,7 @@ class AlignmentVerifier:
         ax_sci, ax_ref = axes[0]
         ax_diff, ax_off = axes[1]
 
-        from plotting_utils import overlay_mask_hatch
+        from plotting_utils import get_plot_color, overlay_mask_hatch
         im = ax_sci.imshow(sci_data, cmap=_cmap, origin='lower')
         overlay_mask_hatch(ax_sci, ~np.isfinite(np.asarray(sci_data)))
         ax_sci.set_title('Science Image')
@@ -453,7 +453,7 @@ class AlignmentVerifier:
 
         fig.savefig(
             output_dir / f'Alignment_Verification_{base}{get_plot_ext({"plot_format": self.plot_format})}',
-            dpi=150, bbox_inches='tight', facecolor='white',
+            dpi=150, bbox_inches='tight', facecolor=get_plot_color("figure_facecolor"),
         )
         plt.close(fig)
         
