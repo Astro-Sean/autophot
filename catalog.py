@@ -479,6 +479,8 @@ def _draw_score_panel(
         ax.set_visible(False)
         return
 
+    from plotting_utils import get_plot_color
+
     xs = np.arange(len(stats))
     ax.bar(
         xs,
@@ -499,7 +501,7 @@ def _draw_score_panel(
             x, n, f"{int(n)}",
             ha="center", va="bottom", fontsize=7, zorder=5,
         )
-    ax.axhline(min_sources, color="tab:red", lw=1.0, ls="--", zorder=2)
+    ax.axhline(min_sources, color=get_plot_color("threshold_line"), lw=1.0, ls="--", zorder=2)
     ax.text(
         0.99,
         min_sources,
@@ -508,7 +510,7 @@ def _draw_score_panel(
         ha="right",
         va="bottom",
         fontsize=7,
-        color="tab:red",
+        color=get_plot_color("threshold_line"),
     )
 
     labels = []
@@ -521,7 +523,7 @@ def _draw_score_panel(
     ax.set_xticklabels(labels, fontsize=7)
     for tick, (_, row) in zip(ax.get_xticklabels(), stats.iterrows()):
         if np.isfinite(row["cov"]) and row["cov"] < coverage_min:
-            tick.set_color("tab:red")
+            tick.set_color(get_plot_color("fwhm_rejected"))
 
     title = f"{band}-band"
     if winner:
@@ -920,7 +922,14 @@ def plot_optimized_catalog_coverage(
         parents=True, exist_ok=True
     )
     try:
-        fig.savefig(outpath, dpi=150, bbox_inches="tight")
+        from plotting_utils import get_plot_color
+
+        fig.savefig(
+            outpath,
+            dpi=150,
+            bbox_inches="tight",
+            facecolor=get_plot_color("figure_facecolor"),
+        )
     finally:
         plt.close(fig)
     logger.info("Optimized catalog coverage plot: %s", outpath)
@@ -2112,6 +2121,7 @@ class Catalog:
             query_gaia_xp_cone_growing,
             sort_gaia_table_nearest_to_target,
         )
+        from autophot_gaia_curves.builder import _format_gaia_source_id
 
         logger = logging.getLogger(__name__)
         cat_cfg = self.input_yaml.get("catalog", {}) or {}
@@ -2181,7 +2191,13 @@ class Catalog:
             if results.empty:
                 return pd.DataFrame()
 
-            source_ids = results["source_id"].astype(str).tolist()
+            # source_id is a 64-bit integer; if pandas stored it as float64 a
+            # plain str() would print "1.23e+18" and silently break the join.
+            source_ids = [
+                s
+                for s in results["source_id"].map(_format_gaia_source_id)
+                if s
+            ]
             # Resolve requested GaiaXPy photometric systems.
             # photometric_systems=None keeps prior behaviour (both systems);
             # an empty list skips GaiaXPy and returns base DR3 photometry
@@ -2251,9 +2267,13 @@ class Catalog:
                         ),
                     )
                 results = results.copy()
-                results["source_id"] = results["source_id"].astype(str)
+                results["source_id"] = results["source_id"].map(
+                    _format_gaia_source_id
+                )
                 photometry = photometry.copy()
-                photometry["source_id"] = photometry["source_id"].astype(str)
+                photometry["source_id"] = photometry["source_id"].map(
+                    _format_gaia_source_id
+                )
                 merged = pd.merge(
                     results, photometry, on="source_id", how="inner"
                 )
@@ -6803,7 +6823,7 @@ class Catalog:
             side_length = int(np.ceil(np.sqrt(num_stars)))
             ncols = side_length
             nrows = ceil(num_stars / ncols)
-            from plotting_utils import apply_autophot_mplstyle, get_plot_ext
+            from plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext
             apply_autophot_mplstyle()
             plt.ioff()
             fpath = self.input_yaml["fpath"]
@@ -6873,7 +6893,7 @@ class Catalog:
             ax_right.step(
                 radii,
                 median_profile,
-                color="#D94F4F",
+                color=get_plot_color("target"),
                 linewidth=0.5,
                 label="Median\nRadial\nProfile",
             )
@@ -6888,7 +6908,12 @@ class Catalog:
             output_path = os.path.join(
                 write_dir, f"Zeropoint_Sources_{base}{get_plot_ext(self.input_yaml)}"
             )
-            fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor="white")
+            fig.savefig(
+                output_path,
+                bbox_inches="tight",
+                dpi=150,
+                facecolor=get_plot_color("figure_facecolor"),
+            )
             plt.close(fig)
 
         logger.info("Returning %s well-behaved sources", len(cleaned_catalog))
