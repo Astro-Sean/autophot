@@ -120,7 +120,6 @@ def _wcs_cfg_bool(cfg: dict, key: str, default: bool = False) -> bool:
     if isinstance(v, bool):
         return v
     return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
-    return int(v)
 
 
 class AstrometryIndexError(RuntimeError):
@@ -1585,6 +1584,44 @@ def _downsample_levels_for(nx, ny, downsample, ds_max, min_pixels, small_image):
     return levels
 
 
+def _solve_artifact_glob(dirname, tmp_tag, image_base, pattern):
+    """
+    Paths matching *pattern* that belong to this solve invocation.
+
+    Solve temp names embed ``{image_base}_{pid}``; a bare directory glob on
+    the extension would also remove artifacts a concurrent solve in the
+    same directory is still using.  The solver names the augmented xylist
+    after the input stem, so ``.axy`` must additionally match the image
+    base (``{image_base}.axy`` for image input; the ``{tmp_tag}.axy`` name
+    produced for xylist input is already covered by the tag).
+    """
+    hits = glob.glob(os.path.join(dirname, f"*{tmp_tag}*{pattern}"))
+    if pattern == ".axy":
+        hits += glob.glob(os.path.join(dirname, f"{image_base}{pattern}"))
+    return hits
+
+
+def _set_flag_value(args, flag, value):
+    """
+    Return args with the ``flag value`` pair replaced by ``flag str(value)``.
+
+    Only the element pair owned by *flag* is dropped.  Filtering on the
+    value string instead removes any unrelated argument that happens to
+    equal it (``--downsample 3`` dies alongside ``--nsigma 3``), leaving a
+    dangling flag that consumes the next argument.
+    """
+    out = []
+    i = 0
+    while i < len(args):
+        if args[i] == flag and i + 1 < len(args):
+            i += 2
+            continue
+        out.append(args[i])
+        i += 1
+    out += [flag, str(value)]
+    return out
+
+
 def _should_verify_input_wcs(
     redo_requested: bool,
     verify_flag: bool,
@@ -2002,7 +2039,11 @@ class WCSSolver:
                 logf.write(f"# ASTROMETRY_DATA={_data_dir}\n\n")
             kwargs["env"] = _env
 
-            pro = subprocess.Popen(args, **kwargs)
+            try:
+                pro = subprocess.Popen(args, **kwargs)
+            except Exception:
+                logf.close()
+                raise
             timed_out = False
             try:
                 pro.wait(timeout=timeout_sec)
@@ -2020,6 +2061,13 @@ class WCSSolver:
                 pro.wait()
                 if timed_out:
                     logger.warning("solve-field exceeded timeout (%s s)", timeout_sec)
+                    # SIGKILL mid-write can leave a truncated WCS file that
+                    # isfile() would otherwise accept as a solved result.
+                    if os.path.isfile(wcs_file):
+                        try:
+                            os.remove(wcs_file)
+                        except OSError:
+                            pass
             self.clean_log(logpath)
             # An unreadable or empty index directory means every remaining
             # attempt fails identically; stop the solve rather than burn
@@ -3270,7 +3318,6 @@ class WCSSolver:
                 os.remove(astrometry_log_fpath)
             # Per-invocation temp names (see wcs_file above): avoid collisions
             # between concurrent solves sharing an image directory.
-            new_fits_temp = os.path.join(dirname, f"astrometry_{_tmp_tag}_newfits.fits")
             scamp_temp = os.path.join(dirname, f"astrometry_{_tmp_tag}_scamp")
             corr_temp = os.path.join(dirname, f"astrometry_{_tmp_tag}.corr")
             rdl_temp = os.path.join(dirname, f"astrometry_{_tmp_tag}.rdls")
@@ -3283,8 +3330,6 @@ class WCSSolver:
                 "--overwrite",
                 "--downsample",
                 str(downsample),
-                "--new-fits",
-                new_fits_temp,
                 "--wcs",
                 str(wcs_file),
                 # --scamp output is never consumed by the pipeline and its
@@ -3300,7 +3345,7 @@ class WCSSolver:
                 solved_temp,
                 "--no-plots",
                 "--cpulimit",
-                str(int(timeout_sec)),
+                str(max(1, int(timeout_sec))),
                 str(self.fpath),
             ]
             # Optional: request more detected objects for solve-field
@@ -3353,6 +3398,10 @@ class WCSSolver:
                 solve_nsigma_val = _reduced_nsigma
             solve_nsigma = str(solve_nsigma_val)
             
+            # fits2fits rewrites the input image to sanitize it on every
+            # invocation; skip it when the input is known-standard FITS.
+            if _wcs_cfg_bool(wcs_cfg, "solve_field_no_fits2fits", False):
+                common_args.insert(-1, "--no-fits2fits")
             common_args.insert(-1, "--nsigma")
             common_args.insert(-1, solve_nsigma)
             if use_crpix_center:
@@ -3516,9 +3565,9 @@ class WCSSolver:
                 out = list(args_list)
                 try:
                     _i = out.index("--cpulimit")
-                    out[_i + 1] = str(int(budget_sec))
+                    out[_i + 1] = str(max(1, int(budget_sec)))
                 except ValueError:
-                    out += ["--cpulimit", str(int(budget_sec))]
+                    out += ["--cpulimit", str(max(1, int(budget_sec)))]
                 return out
 
             def _attempt_solve_with_args(
@@ -3604,6 +3653,15 @@ class WCSSolver:
                                         "Retrying with lower tweak orders.",
                                         tweak_order,
                                     )
+                                    # Keep the working solve aside: when every
+                                    # lower order fails the file can be put back
+                                    # by rename instead of another solve-field
+                                    # run that only reproduces what we had.
+                                    _wcs_backup = wcs_file + ".orig"
+                                    try:
+                                        shutil.copy2(wcs_file, _wcs_backup)
+                                    except OSError:
+                                        _wcs_backup = None
                                     for _lower in range(tweak_order - 1, -1, -1):
                                         if os.path.isfile(wcs_file):
                                             os.remove(wcs_file)
@@ -3676,15 +3734,30 @@ class WCSSolver:
                                     # No lower order produced non-zero SIP:
                                     # restore the original solve (order 0 = TAN)
                                     if not os.path.isfile(wcs_file):
-                                        logger.warning(
-                                            "Could not solve with any lower tweak order; "
-                                            "retrying original order %d",
-                                            tweak_order,
-                                        )
-                                        self._run_solve_field(
-                                            args, wcs_file, _attempt_timeout,
-                                            astrometry_log_fpath
-                                        )
+                                        if _wcs_backup and os.path.isfile(
+                                            _wcs_backup
+                                        ):
+                                            logger.warning(
+                                                "Could not solve with any lower tweak "
+                                                "order; restoring the order-%d solve.",
+                                                tweak_order,
+                                            )
+                                            shutil.move(_wcs_backup, wcs_file)
+                                        else:
+                                            logger.warning(
+                                                "Could not solve with any lower tweak "
+                                                "order; retrying original order %d.",
+                                                tweak_order,
+                                            )
+                                            self._run_solve_field(
+                                                args, wcs_file, _attempt_timeout,
+                                                astrometry_log_fpath
+                                            )
+                                    if _wcs_backup and os.path.isfile(_wcs_backup):
+                                        try:
+                                            os.remove(_wcs_backup)
+                                        except OSError:
+                                            pass
                                     # Still zero SIP: retry once with lower
                                     # nsigma to detect more sources
                                     if os.path.isfile(wcs_file):
@@ -3702,13 +3775,8 @@ class WCSSolver:
                                                 )
                                                 if os.path.isfile(wcs_file):
                                                     os.remove(wcs_file)
-                                                _nsigma_args = [
-                                                    a for a in args
-                                                    if a not in ("--nsigma", _orig_nsigma)
-                                                ]
-                                                _nsigma_args = (
-                                                    _nsigma_args
-                                                    + ["--nsigma", _lower_nsigma]
+                                                _nsigma_args = _set_flag_value(
+                                                    args, "--nsigma", _lower_nsigma
                                                 )
                                                 if self._run_solve_field(
                                                     _nsigma_args, wcs_file,
@@ -3833,6 +3901,15 @@ class WCSSolver:
                                             "lower orders.",
                                             _max_sip_px, _sip_thresh_px, tweak_order,
                                         )
+                                        # Same backup-and-rename restore as the
+                                        # zero-SIP descent above: re-solving the
+                                        # original order just to get the file
+                                        # back burns a full cpulimit.
+                                        _wcs_backup = wcs_file + ".orig"
+                                        try:
+                                            shutil.copy2(wcs_file, _wcs_backup)
+                                        except OSError:
+                                            _wcs_backup = None
                                         for _lower in range(tweak_order - 1, -1, -1):
                                             if os.path.isfile(wcs_file):
                                                 os.remove(wcs_file)
@@ -3840,6 +3917,9 @@ class WCSSolver:
                                                 _base_args
                                                 + ["--tweak-order", str(_lower), "--no-verify"]
                                                 + scale_args_use
+                                            )
+                                            _lower_args = _with_solve_cpulimit(
+                                                _lower_args, _attempt_timeout
                                             )
                                             if _use_sex_here:
                                                 _lower_args += [
@@ -3925,16 +4005,34 @@ class WCSSolver:
                                                 )
                                         # If all lower orders failed, restore original
                                         if not os.path.isfile(wcs_file):
-                                            logger.warning(
-                                                "Could not solve with lower tweak orders "
-                                                "after SIP overfitting; retrying original "
-                                                "order %d",
-                                                tweak_order,
-                                            )
-                                            self._run_solve_field(
-                                                args, wcs_file, _attempt_timeout,
-                                                astrometry_log_fpath
-                                            )
+                                            if _wcs_backup and os.path.isfile(
+                                                _wcs_backup
+                                            ):
+                                                logger.warning(
+                                                    "Could not solve with lower tweak "
+                                                    "orders after SIP overfitting; "
+                                                    "restoring the order-%d solve.",
+                                                    tweak_order,
+                                                )
+                                                shutil.move(_wcs_backup, wcs_file)
+                                            else:
+                                                logger.warning(
+                                                    "Could not solve with lower tweak "
+                                                    "orders after SIP overfitting; "
+                                                    "retrying original order %d",
+                                                    tweak_order,
+                                                )
+                                                self._run_solve_field(
+                                                    args, wcs_file, _attempt_timeout,
+                                                    astrometry_log_fpath
+                                                )
+                                        if _wcs_backup and os.path.isfile(
+                                            _wcs_backup
+                                        ):
+                                            try:
+                                                os.remove(_wcs_backup)
+                                            except OSError:
+                                                pass
                                     else:
                                         logger.info(
                                             "SIP magnitude OK: max corner correction "
@@ -4153,7 +4251,10 @@ class WCSSolver:
                         args_blind = _with_solve_cpulimit(
                             args_blind, blind_timeout_sec
                         )
-                        if use_sextractor and sextractor_cmd:
+                        # A confirmed-starved field only produces a
+                        # zero-source SExtractor catalog; skip the wasted
+                        # extraction here as in the hinted passes.
+                        if use_sextractor and sextractor_cmd and not starved:
                             args_blind += [
                                 "--use-source-extractor",
                                 "--source-extractor-path",
@@ -4330,13 +4431,13 @@ class WCSSolver:
                     logger.warning(
                         "Could not solve a new WCS; falling back to original header WCS."
                     )
-                    for f in [new_fits_temp, scamp_temp, xyls_temp, os.path.join(dirname, "none")]:
+                    for f in [scamp_temp, xyls_temp, os.path.join(dirname, "none")]:
                         if os.path.isfile(f):
                             os.remove(f)
                     return self.header
                 except Exception:
                     pass
-                for f in [new_fits_temp, scamp_temp, xyls_temp, os.path.join(dirname, "none")]:
+                for f in [scamp_temp, xyls_temp, os.path.join(dirname, "none")]:
                     if os.path.isfile(f):
                         os.remove(f)
                 logger.warning("\tCould not solve WCS - returning NaN")
@@ -4354,7 +4455,15 @@ class WCSSolver:
                 with fits.open(wcs_file) as _vh:
                     _solved_hdr = _vh[0].header
                 _solved_wcs = get_wcs(_solved_hdr)
-                if _solved_wcs is not None:
+                if _solved_wcs is None:
+                    # An unparseable solve would be adopted, then rejected at
+                    # merge anyway; fail it here so the rejection is explicit.
+                    _solved_scale_ok = False
+                    logger.warning(
+                        "Solved WCS file has no usable WCS keywords; "
+                        "rejecting the solve."
+                    )
+                else:
                     _scale = pixel_area_scale_arcsec(
                         _solved_wcs,
                         (
@@ -4443,9 +4552,9 @@ class WCSSolver:
                         "Solved WCS rejected; falling back to original header WCS."
                     )
                     for f in [
-                        new_fits_temp,
                         scamp_temp,
                         xyls_temp,
+                        wcs_file,
                         os.path.join(dirname, "none"),
                     ]:
                         if os.path.isfile(f):
@@ -4454,9 +4563,9 @@ class WCSSolver:
                 except Exception:
                     pass
                 for f in [
-                    new_fits_temp,
                     scamp_temp,
                     xyls_temp,
+                    wcs_file,
                     os.path.join(dirname, "none"),
                 ]:
                     if os.path.isfile(f):
@@ -4478,13 +4587,16 @@ class WCSSolver:
             keep_match_for_compare = bool(compare_input_vs_solved)
             keep_match_and_axy = keep_match_and_axy or keep_match_for_compare
 
-            patterns_to_remove = [".rdls", ".solved", ".xyls"]
+            patterns_to_remove = [".rdls", ".solved", ".xyls", ".orig"]
             if not keep_match_and_axy:
                 patterns_to_remove += [".axy", ".match", ".corr"]
             for pattern in patterns_to_remove:
-                for f in glob.glob(os.path.join(dirname, f"*{pattern}")):
-                    os.remove(f)
-            for f in [new_fits_temp, scamp_temp, xyls_temp, os.path.join(dirname, "none")]:
+                for f in _solve_artifact_glob(dirname, _tmp_tag, base, pattern):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+            for f in [scamp_temp, xyls_temp, os.path.join(dirname, "none")]:
                 if os.path.isfile(f):
                     os.remove(f)
 
@@ -4767,13 +4879,13 @@ class WCSSolver:
                         self.header["NAXIS2"] = self.image.shape[0]
                         safe_fits_write(self.fpath, self.image, self.header, output_verify="ignore")
                         # Cleanup solve artifacts even when keeping input WCS.
-                        for pattern in [".rdls", ".solved", ".xyls", ".axy", ".match", ".corr"]:
-                            for f in glob.glob(os.path.join(dirname, f"*{pattern}")):
+                        for pattern in [".rdls", ".solved", ".xyls", ".orig", ".axy", ".match", ".corr"]:
+                            for f in _solve_artifact_glob(dirname, _tmp_tag, base, pattern):
                                 try:
                                     os.remove(f)
                                 except OSError:
                                     pass
-                        for f in [new_fits_temp, scamp_temp, os.path.join(dirname, "none"), wcs_file]:
+                        for f in [scamp_temp, wcs_file, os.path.join(dirname, "none")]:
                             if f and os.path.isfile(f):
                                 try:
                                     os.remove(f)
@@ -5037,7 +5149,7 @@ class WCSSolver:
                 # and header updates are complete.
                 if keep_match_for_compare:
                     for pattern in [".axy", ".match", ".corr"]:
-                        for f in glob.glob(os.path.join(dirname, f"*{pattern}")):
+                        for f in _solve_artifact_glob(dirname, _tmp_tag, base, pattern):
                             try:
                                 os.remove(f)
                             except OSError:
@@ -5047,7 +5159,6 @@ class WCSSolver:
                 return self.header
             except Exception as e:
                 for f in [
-                    new_fits_temp,
                     scamp_temp,
                     wcs_file,
                     os.path.join(dirname, "none"),
