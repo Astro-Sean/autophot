@@ -1799,3 +1799,202 @@ class TestDefectDominanceDiagnostics:
         msgs = [r.getMessage() for r in caplog.records if r.name == "psf"]
         assert any("FFT threshold relaxed" in m for m in msgs)
         assert not any("skipping FFT outlier rejection" in m for m in msgs)
+
+
+def _isolated_clean_pool(positions, snr, fwhm_img=4.0):
+    """Stellar-morphology rows at given positions with a shared S/N."""
+    n = len(positions)
+    return pd.DataFrame(
+        {
+            "x_pix": [c[0] for c in positions],
+            "y_pix": [c[1] for c in positions],
+            "fwhm": np.full(n, fwhm_img),
+            "flux_radius": np.full(n, 0.6 * fwhm_img),
+            "peak_flux": np.full(n, 2e3),
+            "flux_AP": np.full(n, 4e4),
+            "a": np.full(n, 0.42 * fwhm_img),
+            "b": np.full(n, 0.42 * fwhm_img),
+            "ELONGATION": np.full(n, 1.1),
+            "flags": np.zeros(n),
+            "SNR": np.asarray(snr, dtype=float),
+        }
+    )
+
+
+class TestIsolationNeighbourSNR:
+    """The isolation cut counts only catalog rows with enough S/N to
+    contaminate a cutout.  Sub-threshold rows are detection noise whose
+    pixels the cutout-level contamination checks already mask; counting
+    them vetoes good stars next to noise blobs.  Self-duplicates of the
+    candidate inside ~2 px are discounted, not neighbours."""
+
+    _GRID = [
+        (30.0, 30.0),
+        (65.0, 30.0),
+        (100.0, 30.0),
+        (30.0, 65.0),
+        (65.0, 65.0),
+        (100.0, 65.0),
+        (30.0, 100.0),
+        (65.0, 100.0),
+        (100.0, 100.0),
+    ]
+
+    def _catalog(self, extra_rows):
+        # The merged pool's own entries sit at identical coordinates;
+        # they must be self-discounted, not counted as neighbours.
+        rows = [(x, y, 50.0) for x, y in self._GRID]
+        rows += extra_rows
+        return pd.DataFrame(
+            {
+                "x_pix": [r[0] for r in rows],
+                "y_pix": [r[1] for r in rows],
+                "SNR": [r[2] for r in rows],
+            }
+        )
+
+    def _run(self, tmp_path, extra_rows):
+        pytest.importorskip("photutils")
+        rng = np.random.default_rng(1)
+        img = rng.normal(100.0, 5.0, (150, 150))
+        df = _isolated_clean_pool(self._GRID, 30.0)
+        yaml_ = _build_yaml(
+            tmp_path,
+            {"last_raw_sex_catalog": self._catalog(extra_rows)},
+        )
+        p = PSF(yaml_, img)
+        _, out = p.build(psfSources=df, plot=False)
+        return out
+
+    def test_low_snr_neighbour_does_not_veto(self, tmp_path):
+        # SNR 2 blob 8 px from candidate 0 (iso_r = 3x4 = 12 px).
+        out = self._run(tmp_path, [(38.0, 30.0, 2.0)])
+        assert out is not None
+        assert len(out) == len(self._GRID)
+
+    def test_real_neighbour_still_vetoes(self, tmp_path):
+        out = self._run(tmp_path, [(38.0, 30.0, 50.0)])
+        assert out is not None
+        kept = set(zip(out["x_pix"], out["y_pix"]))
+        assert (30.0, 30.0) not in kept
+        assert len(out) == len(self._GRID) - 1
+
+    def test_neighbour_snr_floor_configurable(self, tmp_path):
+        pytest.importorskip("photutils")
+        rng = np.random.default_rng(1)
+        img = rng.normal(100.0, 5.0, (150, 150))
+        df = _isolated_clean_pool(self._GRID, 30.0)
+        yaml_ = _build_yaml(
+            tmp_path,
+            {
+                "last_raw_sex_catalog": self._catalog([(38.0, 30.0, 5.0)]),
+                "psf_isolation_neighbour_snr_min": 4.0,
+            },
+        )
+        p = PSF(yaml_, img)
+        _, out = p.build(psfSources=df, plot=False)
+        kept = set(zip(out["x_pix"], out["y_pix"]))
+        assert (30.0, 30.0) not in kept
+
+
+class TestSNRHardFloorRescue:
+    """On a starved field the hard S/N floor rescues the best
+    sub-floor candidates down to psf_snr_rescue_min so the empirical
+    build keeps enough samples; rescued stars still face cutout-level
+    vetting downstream."""
+
+    _GOOD = [
+        (30.0, 30.0),
+        (65.0, 30.0),
+        (100.0, 30.0),
+        (30.0, 65.0),
+        (65.0, 65.0),
+    ]
+    _SUB = [
+        (100.0, 65.0),
+        (30.0, 100.0),
+        (65.0, 100.0),
+        (100.0, 100.0),
+    ]
+
+    def _pool(self):
+        pos = self._GOOD + self._SUB
+        snr = [30.0] * len(self._GOOD) + [7.0] * len(self._SUB)
+        return _isolated_clean_pool(pos, snr)
+
+    def test_rescue_keeps_best_subfloor(self, tmp_path):
+        pytest.importorskip("photutils")
+        rng = np.random.default_rng(1)
+        img = rng.normal(100.0, 5.0, (150, 150))
+        p = PSF(_build_yaml(tmp_path), img)
+        _, out = p.build(psfSources=self._pool(), plot=False)
+        assert out is not None
+        # Hard floor leaves 5 < min_candidates (8): rescue restores 3
+        # of the 4 sub-floor rows.
+        assert len(out) == 8
+        assert int((out["SNR"] < 10.0).sum()) == 3
+
+    def test_rescue_disabled_drops_to_floor_survivors(self, tmp_path):
+        pytest.importorskip("photutils")
+        rng = np.random.default_rng(1)
+        img = rng.normal(100.0, 5.0, (150, 150))
+        p = PSF(
+            _build_yaml(tmp_path, {"psf_snr_rescue_min": 0.0}), img
+        )
+        _, out = p.build(psfSources=self._pool(), plot=False)
+        assert out is not None
+        assert len(out) == 5
+
+    def test_rescue_floor_excludes_faint_rejects(self, tmp_path):
+        pytest.importorskip("photutils")
+        rng = np.random.default_rng(1)
+        img = rng.normal(100.0, 5.0, (150, 150))
+        pos = self._GOOD + self._SUB
+        snr = [30.0] * len(self._GOOD) + [7.0, 7.0, 7.0, 3.0]
+        df = _isolated_clean_pool(pos, snr)
+        p = PSF(_build_yaml(tmp_path), img)
+        _, out = p.build(psfSources=df, plot=False)
+        assert out is not None
+        assert len(out) == 8
+        # The SNR 3 row is below psf_snr_rescue_min and never rescued.
+        assert float(out["SNR"].min()) >= 5.0
+
+
+class TestThinEnsembleKeepsEmpirical:
+    """A thin but WORKING ePSF stays the delivered model: star count
+    below psf_empirical_min_stars alone cannot condemn a build that
+    passed every quality gate.  The analytic composite is only
+    delivered when the thin model failed a gate or demonstrably loses
+    to the analytic fit on its own stars."""
+
+    def _star_image(self, rng):
+        img = rng.normal(100.0, 5.0, (190, 190))
+        yy, xx = np.mgrid[0:190, 0:190]
+        stars = [
+            (55.0, 55.0),
+            (55.0, 135.0),
+            (135.0, 55.0),
+            (135.0, 135.0),
+            (95.0, 95.0),
+        ]
+        sig = 4.0 / 2.3548
+        for cx, cy in stars:
+            img += 4e3 * np.exp(
+                -((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sig * sig)
+            )
+        df = _isolated_clean_pool(stars, 60.0)
+        return img, df
+
+    def test_thin_pool_delivers_epsf_not_analytic(self, tmp_path):
+        pytest.importorskip("photutils")
+        rng = np.random.default_rng(3)
+        img, df = self._star_image(rng)
+        p = PSF(_build_yaml(tmp_path), img)
+        model, _ = p.build(psfSources=df, plot=False)
+        assert model is not None
+        # 5 stars < psf_empirical_min_stars (6): the working thin model
+        # is kept (flagged understaffed), not swapped for the analytic
+        # composite.
+        assert p.psf_model_kind == "epsf"
+        assert p.psf_ensemble_understaffed
+        assert p.n_epsf_stars is not None and p.n_epsf_stars >= 4
