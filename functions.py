@@ -342,8 +342,15 @@ class ColoredLevelFormatter(logging.Formatter):
         if not self._use_color:
             return base
 
+        # Console handlers write to stderr (StreamHandler default), so the
+        # tty check must target stderr - checking stdout misses redirects
+        # like `autophot 2>err.log`, leaking ANSI codes into the file.
         try:
-            use_color = sys.stdout.isatty()
+            use_color = (
+                sys.stderr.isatty()
+                and "NO_COLOR" not in os.environ
+                and os.environ.get("TERM") != "dumb"
+            )
         except Exception:
             use_color = False
         if not use_color:
@@ -677,7 +684,7 @@ def configure_console_logging(
     formatter: logging.Formatter | None = None,
 ) -> logging.Handler:
     """
-    Create a StreamHandler for stdout with optional ANSI color formatting.
+    Create a StreamHandler for stderr with optional ANSI color formatting.
     Caller is responsible for attaching the handler to the root logger.
     """
 
@@ -1860,19 +1867,38 @@ def ascii_kv(title: str, pairs, width: int = 70, framed: bool = False) -> str:
 
 def ascii_table(title: str, headers, rows, width: int = 70) -> str:
     """
-    Column table framed in '-' rules:
+    Column table framed in '-' rules; numeric columns right-align:
 
         --------------------------- Title ----------------------------
-           Method     ZP      err      N
-           ------  -------  ------  ----
-           AP      24.547   0.003   159
+           Method      ZP    err    N
+           ------  ------  -----  ---
+           AP      24.547  0.003  159
         -----------------------------------------------------------------
     """
+    def _is_numeric_cell(c: str) -> bool:
+        c = c.strip()
+        if not c or c == "-":
+            # Empty/missing cells keep the column's alignment.
+            return True
+        if "+/-" in c:
+            parts = [p.strip() for p in c.split("+/-")]
+            return len(parts) == 2 and all(_is_numeric_cell(p) for p in parts)
+        try:
+            float(c)
+            return True
+        except ValueError:
+            return False
+
     headers = [str(h) for h in headers]
     rows = [[str(c) for c in r] for r in rows]
     if not headers or not rows:
         return ""
     ncols = len(headers)
+    # Numbers right-align so magnitudes/errors compare by digit column.
+    num_col = [
+        all(_is_numeric_cell(r[i]) for r in rows if i < len(r))
+        for i in range(ncols)
+    ]
     col_w = [len(h) for h in headers]
     for r in rows:
         for i in range(min(ncols, len(r))):
@@ -1896,7 +1922,11 @@ def ascii_table(title: str, headers, rows, width: int = 70) -> str:
     else:
         lines.append("-" * rule_w)
     lines.append(
-        "   " + "  ".join(h.ljust(col_w[i]) for i, h in enumerate(headers)).rstrip()
+        "   "
+        + "  ".join(
+            h.rjust(col_w[i]) if num_col[i] else h.ljust(col_w[i])
+            for i, h in enumerate(headers)
+        ).rstrip()
     )
     lines.append("   " + "  ".join("-" * col_w[i] for i in range(ncols)))
     for r in rows:
@@ -1915,7 +1945,11 @@ def ascii_table(title: str, headers, rows, width: int = 70) -> str:
             lines.append(
                 "   "
                 + "  ".join(
-                    (w[k] if k < len(w) else "").ljust(col_w[i])
+                    (
+                        (w[k] if k < len(w) else "").rjust(col_w[i])
+                        if num_col[i]
+                        else (w[k] if k < len(w) else "").ljust(col_w[i])
+                    )
                     for i, w in enumerate(wrapped)
                 ).rstrip()
             )
