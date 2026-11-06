@@ -5656,7 +5656,7 @@ class Limits:
         save_path = os.path.join(
             write_dir, f"Injection_Recovery_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
         )
-        fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+        fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
 
         logger.debug("Saved injection recovery plot to %s", save_path)
@@ -5784,7 +5784,7 @@ class Limits:
         save_loc_png = os.path.join(
             write_dir, f"Completeness_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
         )
-        fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
+        fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
         logger.debug("Combined completeness plot saved: %s", save_loc_png)
 
