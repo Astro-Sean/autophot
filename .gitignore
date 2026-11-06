@@ -86,6 +86,10 @@ agents.md
 # Generated test artifacts (test code itself is versioned)
 tests/MaxiMask/output/
 
+# Regenerated figure outputs (the README PNG stays tracked)
+figures/*.pdf
+figures/*.json
+
 # Local debug/cluster scripts (not production)
 debug_*.py
 run_autophot_VIPER.py
