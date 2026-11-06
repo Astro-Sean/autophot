@@ -249,20 +249,20 @@ def main(argv: Iterable[str] | None = None) -> int:
             try:
                 _, rc = future.result()
             except Exception as exc:
-                print(f"Error: {fpath}: {exc}", flush=True)
+                print(f"[FAIL]  {fpath} ({exc})", file=sys.stderr, flush=True)
                 failures.append(fpath)
                 continue
 
             if rc == 0:
-                print(f"OK: {fpath}", flush=True)
+                print(f"[OK]    {fpath}", flush=True)
             else:
-                print(f"[FAIL]  {fpath} (exit code {rc})", flush=True)
+                print(f"[FAIL]  {fpath} (exit code {rc})", file=sys.stderr, flush=True)
                 failures.append(fpath)
 
     if failures:
-        print("The following files failed:")
+        print("The following files failed:", file=sys.stderr)
         for f in failures:
-            print(f"  {f}")
+            print(f"  {f}", file=sys.stderr)
         return 1
 
     print("All files processed successfully.")
