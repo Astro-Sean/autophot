@@ -1469,6 +1469,203 @@ class Zeropoint:
         tilt_sigma = float(tilt / sig_tilt) if sig_tilt > 0 else np.inf
         return float(tilt), tilt_sigma
 
+    @staticmethod
+    def _spatial_zp_design(xn, yn, order):
+        """Polynomial design matrix for the spatial ZP surface.
+
+        Order 1 gives a plane (a*x + b*y + c); order 2 adds the three
+        quadratic terms.  Positions must already be normalised so the
+        columns stay well conditioned.
+        """
+        cols = [np.ones_like(xn), xn, yn]
+        if order >= 2:
+            cols += [xn * xn, xn * yn, yn * yn]
+        return np.vstack(cols).T
+
+    @staticmethod
+    def _fit_spatial_zp_surface(resid, x, y, err=None, order=1, sigma_clip=4.0):
+        """Robust weighted polynomial fit of ZP residuals vs position.
+
+        Models ``delta_mag - ZP`` as a low-order polynomial of the
+        detector position - the smooth field-dependent offset
+        (vignetting, flat-field residuals, mis-registration) that the
+        block-bootstrap and gradient diagnostics only flag.  Coordinates
+        are recentred and scaled to [-1, 1] for conditioning; the stored
+        normalisation lets ``eval_spatial_zp_surface`` reproduce the
+        surface anywhere on the frame.
+
+        The fit is weighted least squares on the surviving points with
+        iterative MAD clipping so a handful of discrepant calibrators
+        cannot pull the surface.  ``f_stat`` compares the weighted chi2
+        improvement per added coefficient against the residual chi2 -
+        the gate that keeps the surface off noise-level wiggles.
+
+        Parameters
+        ----------
+        resid : ndarray
+            Inlier residuals (delta_mag - ZP).
+        x, y : ndarray
+            Calibrator pixel positions.
+        err : ndarray or None
+            Per-point residual errors (weights = 1/err^2).
+        order : int
+            1 = plane, 2 = full quadratic.
+        sigma_clip : float
+            Clip width on fit residuals per iteration.
+
+        Returns
+        -------
+        dict or None
+            Surface model (coeffs, normalisation, covariance, metrics)
+            or None when the geometry/sample cannot support a fit.
+        """
+        r = np.asarray(resid, float)
+        xp = np.asarray(x, float)
+        yp = np.asarray(y, float)
+        ok = np.isfinite(r) & np.isfinite(xp) & np.isfinite(yp)
+        if err is not None:
+            e = np.asarray(err, float)
+            ok &= np.isfinite(e) & (e > 0)
+        else:
+            e = np.ones_like(r)
+        r, xp, yp, e = r[ok], xp[ok], yp[ok], e[ok]
+        n = r.size
+        order = 2 if int(order) >= 2 else 1
+        ncoeff = 6 if order == 2 else 3
+        if n < max(2 * ncoeff, 4):
+            return None
+        dx = float(np.ptp(xp))
+        dy = float(np.ptp(yp))
+        if dx <= 0 or dy <= 0:
+            return None
+        x0, y0 = float(np.median(xp)), float(np.median(yp))
+        xs, ys = 0.5 * dx, 0.5 * dy
+        xn = (xp - x0) / xs
+        yn = (yp - y0) / ys
+        A = Zeropoint._spatial_zp_design(xn, yn, order)
+        e = np.clip(e, 1e-3, None)
+        w = 1.0 / e**2
+
+        keep = np.ones(n, dtype=bool)
+        coef = None
+        for _ in range(5):
+            k = int(keep.sum())
+            if k < ncoeff + 1:
+                return None
+            Aw = A[keep] * np.sqrt(w[keep])[:, None]
+            rw = r[keep] * np.sqrt(w[keep])
+            try:
+                coef, _, _, _ = np.linalg.lstsq(Aw, rw, rcond=None)
+            except np.linalg.LinAlgError:
+                return None
+            fit_r = r - A @ coef
+            sc = 1.4826 * float(
+                np.median(np.abs(fit_r[keep] - np.median(fit_r[keep])))
+            )
+            if not np.isfinite(sc) or sc <= 0:
+                break
+            new_keep = np.abs(fit_r) <= sigma_clip * sc
+            if np.array_equal(new_keep, keep):
+                break
+            keep = new_keep
+        if coef is None or int(keep.sum()) < ncoeff + 1:
+            return None
+
+        # Refit once more on the final keep set so coef and the
+        # covariance describe the same surviving points.
+        Aw = A[keep] * np.sqrt(w[keep])[:, None]
+        rw = r[keep] * np.sqrt(w[keep])
+        coef, _, _, _ = np.linalg.lstsq(Aw, rw, rcond=None)
+        s = A @ coef
+        fit_r = r - s
+
+        chi2_after = float(np.sum(w[keep] * fit_r[keep] ** 2))
+        dof = max(1, int(keep.sum()) - ncoeff)
+        # Under-dispersed formal errors would deflate the positional
+        # covariance, so the scale is floored at chi2/dof = 1.
+        sigma2 = max(chi2_after / dof, 1.0)
+        try:
+            cov = np.linalg.inv(Aw.T @ Aw) * sigma2
+        except np.linalg.LinAlgError:
+            cov = np.full((ncoeff, ncoeff), np.nan)
+
+        chi2_before = float(np.sum(w[keep] * r[keep] ** 2))
+        wsum = float(np.sum(w[keep]))
+        rms_before = float(np.sqrt(chi2_before / wsum))
+        rms_after = float(np.sqrt(chi2_after / wsum))
+        improvement = (
+            1.0 - rms_after / rms_before if rms_before > 0 else 0.0
+        )
+        p_new = ncoeff - 1
+        f_stat = np.nan
+        if chi2_after > 0 and chi2_before > chi2_after:
+            f_stat = float(
+                ((chi2_before - chi2_after) / p_new)
+                / (chi2_after / dof)
+            )
+        elif chi2_after <= 0 and chi2_before > 0:
+            f_stat = np.inf
+
+        return {
+            "applied": True,
+            "order": int(order),
+            "ncoeff": int(ncoeff),
+            "coeffs": [float(c) for c in coef],
+            "cov": np.asarray(cov, dtype=float).tolist(),
+            "x0": x0,
+            "xs": xs,
+            "y0": y0,
+            "ys": ys,
+            "x_min": float(np.min(xp[keep])),
+            "x_max": float(np.max(xp[keep])),
+            "y_min": float(np.min(yp[keep])),
+            "y_max": float(np.max(yp[keep])),
+            "n_used": int(keep.sum()),
+            "rms_before": rms_before,
+            "rms_after": rms_after,
+            "improvement_frac": float(improvement),
+            "f_stat": f_stat,
+            "max_abs_corr": float(np.max(np.abs(s[keep]))),
+        }
+
+    @staticmethod
+    def eval_spatial_zp_surface(surface, x, y):
+        """Evaluate a stored spatial ZP surface at pixel position (x, y).
+
+        Returns
+        -------
+        (correction, error, inside_hull) : (float, float, bool)
+            ``correction`` is s(x, y) in magnitudes - add it to the
+            field-mean ZP to get the ZP valid at this position.
+            ``error`` propagates the surface-fit covariance to this
+            point.  ``inside_hull`` is False when the position lies
+            outside the calibrator footprint the surface was fitted on
+            (the value is then an extrapolation).
+        """
+        if not surface or not surface.get("applied"):
+            return 0.0, 0.0, False
+        try:
+            xn = (float(x) - surface["x0"]) / surface["xs"]
+            yn = (float(y) - surface["y0"]) / surface["ys"]
+        except (KeyError, TypeError, ZeroDivisionError):
+            return 0.0, 0.0, False
+        u = Zeropoint._spatial_zp_design(
+            np.asarray([xn]), np.asarray([yn]), int(surface["order"])
+        )[0]
+        coef = np.asarray(surface["coeffs"], dtype=float)
+        val = float(u @ coef)
+        cov = np.asarray(surface.get("cov"), dtype=float)
+        if cov.shape == (coef.size, coef.size) and np.isfinite(cov).all():
+            var = float(u @ cov @ u)
+            err = float(np.sqrt(max(var, 0.0)))
+        else:
+            err = np.nan
+        inside = bool(
+            surface["x_min"] - 1e-6 <= x <= surface["x_max"] + 1e-6
+            and surface["y_min"] - 1e-6 <= y <= surface["y_max"] + 1e-6
+        )
+        return val, err, inside
+
     def _odr_slope1_fit(
         self,
         x,
@@ -3123,6 +3320,126 @@ class Zeropoint:
                         "finite sources as inliers."
                     )
                     inlier_short = np.ones(n_sources, dtype=bool)
+
+                # Spatial ZP surface: model the residual pattern
+                # s(x, y) the single ZP cannot (vignetting, flat-field
+                # residuals, mis-registration).  When the fit clears its
+                # gates it is subtracted from every calibrator delta
+                # here, so the error machinery below - scatter floors,
+                # bootstrap, block-bootstrap, gradient check - runs on
+                # the corrected locus and no longer double-counts the
+                # correlation the surface absorbed.  The reported
+                # zeropoint stays the field mean; the stored surface is
+                # evaluated at the target position in main.py and its
+                # positional covariance enters the magnitude error.
+                _zs_cfg = zp_cfg.get("spatial_zp_surface", {}) or {}
+                _zp_surface = None
+                if (
+                    bool(_zs_cfg.get("enabled", False))
+                    and _calibrator_xy is not None
+                    and np.isfinite(ZP)
+                ):
+                    _zso = 2 if int(_zs_cfg.get("order", 1)) >= 2 else 1
+                    _zs_min = int(_zs_cfg.get("min_inliers", 12))
+                    _zs_clip = float(_zs_cfg.get("sigma_clip", 4.0))
+                    _zs_impr = float(
+                        _zs_cfg.get("min_improvement_frac", 0.10)
+                    )
+                    _zs_fmin = float(_zs_cfg.get("min_f_stat", 4.0))
+                    _zs_cmax = float(
+                        _zs_cfg.get("max_correction_mag", 0.3)
+                    )
+                    _pos_in = np.flatnonzero(vmask)[inlier_short]
+                    _surf_err = np.sqrt(
+                        np.asarray(delta_mag_err) ** 2
+                        + np.asarray(color_corr_err) ** 2
+                    )
+                    _zs = self._fit_spatial_zp_surface(
+                        np.asarray(delta_mag)[inlier_short] - ZP,
+                        _calibrator_xy[0][_pos_in],
+                        _calibrator_xy[1][_pos_in],
+                        err=_surf_err[inlier_short],
+                        order=_zso,
+                        sigma_clip=_zs_clip,
+                    )
+                    _zs_ok = (
+                        _zs is not None
+                        and _zs["n_used"]
+                        >= max(_zs_min, 3 * _zs["ncoeff"])
+                        and _zs["improvement_frac"] >= _zs_impr
+                        and (
+                            not np.isfinite(_zs["f_stat"])
+                            or _zs["f_stat"] >= _zs_fmin
+                        )
+                        and _zs["max_abs_corr"] <= _zs_cmax
+                    )
+                    if _zs is None:
+                        logger.debug(
+                            "[%s] spatial ZP surface: fit not possible "
+                            "(too few usable inliers or degenerate "
+                            "geometry).",
+                            flux_type,
+                        )
+                    elif not _zs_ok:
+                        logger.info(
+                            "[%s] spatial ZP surface rejected: n_used=%d "
+                            "improvement=%.1f%% F=%.1f max_corr=%.3f mag",
+                            flux_type,
+                            _zs["n_used"],
+                            100.0 * _zs["improvement_frac"],
+                            _zs["f_stat"],
+                            _zs["max_abs_corr"],
+                        )
+                        _zp_surface = dict(_zs)
+                        _zp_surface["applied"] = False
+                    else:
+                        _zp_surface = _zs
+                        # Subtract s(x, y) from every calibrator delta
+                        # (positions missing -> no correction for that
+                        # row) and recompute the field-mean ZP on the
+                        # corrected inlier locus.
+                        _cx = np.asarray(_calibrator_xy[0], float)
+                        _cy = np.asarray(_calibrator_xy[1], float)
+                        _fin_pos = np.isfinite(_cx) & np.isfinite(_cy)
+                        _s_all = np.zeros(len(clean_catalog), dtype=float)
+                        if np.any(_fin_pos):
+                            _xn = (_cx[_fin_pos] - _zs["x0"]) / _zs["xs"]
+                            _yn = (_cy[_fin_pos] - _zs["y0"]) / _zs["ys"]
+                            _s_all[_fin_pos] = (
+                                self._spatial_zp_design(
+                                    _xn, _yn, _zs["order"]
+                                )
+                                @ np.asarray(_zs["coeffs"])
+                            )
+                        # delta_mag indexes the vmask subset of
+                        # clean_catalog, so evaluate the surface on the
+                        # same subset of positions.
+                        _s_sub = _s_all[np.flatnonzero(vmask)]
+                        delta_mag = np.asarray(delta_mag) - _s_sub
+                        _w_zs = 1.0 / np.clip(
+                            _surf_err[inlier_short] ** 2, 1e-12, None
+                        )
+                        ZP = float(
+                            np.average(
+                                delta_mag[inlier_short], weights=_w_zs
+                            )
+                        )
+                        logger.info(
+                            "[%s] spatial ZP surface applied "
+                            "(order=%d, n=%d): RMS %.4f -> %.4f mag, "
+                            "max |s|=%.3f mag, ZP=%.4f",
+                            flux_type,
+                            _zs["order"],
+                            _zs["n_used"],
+                            _zs["rms_before"],
+                            _zs["rms_after"],
+                            _zs["max_abs_corr"],
+                            ZP,
+                        )
+                fit_params[flux_type]["zp_surface"] = _zp_surface
+                fit_params[flux_type]["zp_surface_applied"] = bool(
+                    _zp_surface and _zp_surface.get("applied")
+                )
 
                 # Small-sample error floor: for N < 5 calibrators, formal ODR/MCMC
                 # errors can be misleadingly small because they don't capture
