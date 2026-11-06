@@ -138,7 +138,7 @@ from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        _sfft_difference_gain, _sfft_match_bad_mask,
                        _sfft_photometric_flux_correction, ascii_kv,
                        ascii_table, beta_aperture, beta_psf, border_msg,
-                       biweight_sky_sigma, check_input_config, compact_status,
+                       biweight_sky_sigma, check_input_config,
                        convert_to_mjd_astropy, dict_to_string_with_hashtag,
                        external_weight_to_rms, flux_upper_limit,
                        format_config_errors, get_header,
@@ -1454,7 +1454,7 @@ def run_photometry():
         """
         yml_path = Path(__file__).resolve().parent / "databases" / "default_input.yml"
         if not yml_path.exists():
-            print(f"[ERROR] Default YAML not found at: {yml_path}")
+            print(f"[ERROR] Default YAML not found at: {yml_path}", file=sys.stderr)
             return
 
         lines = yml_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -1495,7 +1495,7 @@ def run_photometry():
             out.append((path, expl))
 
         if not out:
-            print(f"[WARN] No keys parsed from: {yml_path}")
+            print(f"[WARN] No keys parsed from: {yml_path}", file=sys.stderr)
             return
 
         key_w = max(len(k) for k, _ in out)
@@ -4675,15 +4675,15 @@ def run_photometry():
                 "validate_fits_headers_non_interactive", False
             ):
                 try:
-                    _resp = (
-                        input(
-                            f"No catalog sources for band {imageFilter} "
-                            f"from '{selected_catalog_name}'. Continue "
-                            "without catalog calibration? [Y/n]: "
-                        )
-                        .strip()
-                        .lower()
+                    print(
+                        f"No catalog sources for band {imageFilter} "
+                        f"from '{selected_catalog_name}'. Continue "
+                        "without catalog calibration? [Y/n]: ",
+                        file=sys.stderr,
+                        end="",
+                        flush=True,
                     )
+                    _resp = input().strip().lower()
                 except (EOFError, OSError):
                     _resp = ""
                 if _resp in ("n", "no"):
@@ -4928,7 +4928,7 @@ def run_photometry():
             stat_pairs(
                 [
                     ("Image FWHM:", f"{float(ImageFWHM):.2f} px"),
-                    ("Image seeing:", f"{_seeing_arcsec:.2f} arcseconds"),
+                    ("Image seeing:", f"{_seeing_arcsec:.2f} arcsec"),
                 ]
             )
         )
@@ -5754,10 +5754,10 @@ def run_photometry():
                         ),
                     )
                 if np.isfinite(_fwhm_lo) and np.isfinite(_fwhm_hi):
-                    _ax.axhline(_fwhm_lo, color="grey", ls=":", lw=0.8)
+                    _ax.axhline(_fwhm_lo, color=get_plot_color("error_bar"), ls=":", lw=0.8)
                     _ax.axhline(
                         _fwhm_hi,
-                        color="grey",
+                        color=get_plot_color("error_bar"),
                         ls=":",
                         lw=0.8,
                         label=f"$\\pm{_fwhm_sigma:.0f}\\sigma$ reject "
@@ -5791,7 +5791,7 @@ def run_photometry():
                     f"FWHM_vs_InstMag_{os.path.splitext(os.path.basename(fpath))[0]}{get_plot_ext(input_yaml)}",
                 )
                 _fig.savefig(
-                    _plot_path, dpi=150, bbox_inches="tight", facecolor="white"
+                    _plot_path, dpi=150, bbox_inches="tight", facecolor=get_plot_color("figure_facecolor")
                 )
                 plt.close(_fig)
                 logging.info(
@@ -7108,11 +7108,12 @@ def run_photometry():
             if not _zpd or "zeropoint" not in _zpd:
                 continue
             _slope = _zpd.get("free_slope", np.nan)
+            _zp_val = _fmt3(_zpd.get("zeropoint"))
+            _zp_err = _fmt3(_zpd.get("zeropoint_error"))
             _zp_rows.append(
                 [
                     _m,
-                    _fmt3(_zpd.get("zeropoint")),
-                    _fmt3(_zpd.get("zeropoint_error")),
+                    _zp_val if _zp_err == "-" else f"{_zp_val} +/- {_zp_err}",
                     _fmt3(_zpd.get("zeropoint_scatter")),
                     str(int(_zpd.get("n_sources", 0) or 0)),
                     (
@@ -7132,7 +7133,7 @@ def run_photometry():
             log_status(
                 ascii_table(
                     f"Zeropoint ({_zp_sys})" if _zp_sys else "Zeropoint",
-                    ["Method", "ZP", "err", "scat", "N", "slope", "reliable"],
+                    ["Method", "ZP +/- err", "Scatter", "N cal", "Slope", "Reliable"],
                     _zp_rows,
                     # Reliability flags are long free text; 90 is the
                     # console wrap budget, so the column wraps whole
@@ -12112,7 +12113,8 @@ def run_photometry():
 
                                         from plotting_utils import (
                                             apply_autophot_mplstyle,
-                                            get_plot_ext, overlay_mask_hatch,
+                                            get_plot_color, get_plot_ext,
+                                            overlay_mask_hatch,
                                             safe_tight_layout)
 
                                         apply_autophot_mplstyle()
@@ -12195,7 +12197,7 @@ def run_photometry():
                                             _plot_path,
                                             dpi=150,
                                             bbox_inches="tight",
-                                            facecolor="white",
+                                            facecolor=get_plot_color("figure_facecolor"),
                                         )
                                         plt.close(_fig)
                                         logging.info(
@@ -12316,8 +12318,10 @@ def run_photometry():
                                         ZScaleInterval
 
                                     from plotting_utils import (
-                                        apply_autophot_mplstyle, get_plot_ext,
-                                        overlay_mask_hatch, safe_tight_layout)
+                                        apply_autophot_mplstyle,
+                                        get_plot_color, get_plot_ext,
+                                        overlay_mask_hatch,
+                                        safe_tight_layout)
 
                                     apply_autophot_mplstyle()
                                     _zs = ZScaleInterval()
@@ -12397,7 +12401,7 @@ def run_photometry():
                                         _plot_path,
                                         dpi=150,
                                         bbox_inches="tight",
-                                        facecolor="white",
+                                        facecolor=get_plot_color("figure_facecolor"),
                                     )
                                     plt.close(_fig)
                                     logging.info(
@@ -12714,7 +12718,8 @@ def run_photometry():
                             from astropy.visualization import ZScaleInterval
 
                             from plotting_utils import (
-                                apply_autophot_mplstyle, get_plot_ext,
+                                apply_autophot_mplstyle,
+                                get_plot_color, get_plot_ext,
                                 overlay_mask_hatch, safe_tight_layout)
 
                             apply_autophot_mplstyle()
@@ -12792,7 +12797,7 @@ def run_photometry():
                                 _plot_path_re,
                                 dpi=150,
                                 bbox_inches="tight",
-                                facecolor="white",
+                                facecolor=get_plot_color("figure_facecolor"),
                             )
                             plt.close(_fig_r)
                             logging.info(
@@ -14205,7 +14210,7 @@ def run_photometry():
         _targ_diag = []
 
         snr_ap = float(TargetPosition["SNR"].iloc[0])
-        _targ_diag.append(("SNR (aperture)", f"{snr_ap:.1f}"))
+        _targ_diag.append(("S/N (aperture)", f"{snr_ap:.1f}"))
 
         # If inverted fit was used, also log the inverted SNR for aperture
         if (
@@ -17091,17 +17096,17 @@ def run_photometry():
             ("Filter", str(input_yaml.get("imageFilter") or "-")),
             (
                 "Detection",
-                "DETECTION" if output.get("is_detection") else "non-detection",
+                "detection" if output.get("is_detection") else "non-detection",
             ),
-            ("SNR", _fnum(output.get("snr"), 2)),
-            ("mag_psf", _pm(output.get("mag_psf"), output.get("mag_psf_err"))),
-            ("mag_ap", _pm(output.get("mag_ap"), output.get("mag_ap_err"))),
+            ("S/N", _fnum(output.get("snr"), 2)),
+            ("PSF mag", _pm(output.get("mag_psf"), output.get("mag_psf_err"))),
+            ("AP mag", _pm(output.get("mag_ap"), output.get("mag_ap_err"))),
             ("ZP (PSF)", _pm(output.get("zp_psf"), output.get("zp_psf_err"))),
             ("ZP (AP)", _pm(output.get("zp_ap"), output.get("zp_ap_err"))),
-            ("flux_psf", _fnum(output.get("flux_psf"))),
-            ("flux_ap", _fnum(output.get("flux_ap"))),
-            ("reduced chi2", _fnum(output.get("reduced_chi2"), 2)),
-            ("lim. mag", _fnum(output.get("limiting_mag"))),
+            ("PSF flux", _fnum(output.get("flux_psf"))),
+            ("AP flux", _fnum(output.get("flux_ap"))),
+            ("Reduced chi2", _fnum(output.get("reduced_chi2"), 2)),
+            ("Limiting mag", _fnum(output.get("limiting_mag"))),
             ("PSF model", str(output.get("psf_model") or "none")),
             ("Image FWHM", f"{_fnum(output.get('image_fwhm'), 2)} px"),
         ]
