@@ -619,6 +619,7 @@ class ImageDistortionCorrector:
 
             from plotting_utils import (
                 apply_autophot_mplstyle,
+                get_plot_color,
                 overlay_mask_hatch,
                 safe_tight_layout,
             )
@@ -641,6 +642,10 @@ class ImageDistortionCorrector:
             overlay_mask_hatch(ax, ~np.isfinite(np.asarray(data)))
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
+            from matplotlib.collections import PatchCollection
+
+            _src_color = get_plot_color("target")
+            _src_circles = []
             for i, row in enumerate(catalog[:max_sources]):
                 if (
                     "XWIN_IMAGE" in row.colnames
@@ -651,27 +656,29 @@ class ImageDistortionCorrector:
                     fwhm = row["FWHM_IMAGE"]
                     # SExtractor pixel coords are 1-based; matplotlib wants 0-based
                     x_0based, y_0based = x - 1, y - 1
-                    circle = Circle(
-                        (x_0based, y_0based),
-                        fwhm,
-                        facecolor="none",
-                        edgecolor="#D94F4F",
-                        linewidth=0.5,
-                        alpha=0.7,
-                    )
-                    ax.add_patch(circle)
+                    _src_circles.append(Circle((x_0based, y_0based), fwhm))
                     ax.text(
                         x_0based,
                         y_0based - fwhm - 2,
                         str(i),
-                        color="#D94F4F",
+                        color=_src_color,
                         fontsize=8,
                         ha="center",
                         va="top",
                     )
+            if _src_circles:
+                ax.add_collection(
+                    PatchCollection(
+                        _src_circles,
+                        facecolor="none",
+                        edgecolor=_src_color,
+                        linewidth=0.5,
+                        alpha=0.7,
+                    )
+                )
 
             safe_tight_layout()
-            plt.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
+            fig.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor=get_plot_color("figure_facecolor"))
             plt.close(fig)
 
         except Exception as e:
@@ -3129,12 +3136,9 @@ class ImageDistortionCorrector:
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
                     output_plot_path=output_dir / f"Matched_Sources_{Path(sci_image_copy).stem}{get_plot_ext(self.input_yaml)}",
-                    label_color="#D94F4F",
                     label_fontsize=7,
                     circle_radius_sci=fwhm_sci_pix,
                     circle_radius_ref=fwhm_ref_pix,
-                    matched_circle_color="#D94F4F",
-                    unmatched_circle_color="blue",
                     scamp_matched_sources=_scamp_sources,
                 )
             except Exception as e:
@@ -6566,7 +6570,6 @@ class ImageDistortionCorrector:
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
                     output_plot_path=science_aligned_dir / f"Matched_Sources_{Path(sci_image_copy).stem}{get_plot_ext(self.input_yaml)}",
-                    label_color="#D94F4F",
                     label_fontsize=10,
                     circle_radius_sci=fwhm_sci_pix,
                     circle_radius_ref=fwhm_ref_pix,
@@ -8142,7 +8145,7 @@ class ImageDistortionCorrector:
         sci_cat_path: str,
         ref_cat_path: str,
         output_plot_path: str = "Matched_Sources_Side_By_Side.png",
-        label_color: str = "#D94F4F",
+        label_color: Optional[str] = None,
         label_fontsize: int = 8,
         figsize: Optional[tuple] = None,
         cmap: str = "gray",
@@ -8152,8 +8155,8 @@ class ImageDistortionCorrector:
         line_width: float = 0.5,
         circle_radius_sci: float = 5.0,
         circle_radius_ref: float = 5.0,
-        matched_circle_color: str = "#D94F4F",
-        unmatched_circle_color: str = "blue",
+        matched_circle_color: Optional[str] = None,
+        unmatched_circle_color: Optional[str] = None,
         circle_alpha: float = 0.7,
         circle_edge_color: str = "none",
         circle_color: str = "none",
@@ -8192,6 +8195,16 @@ class ImageDistortionCorrector:
 
             from plotting_utils import apply_autophot_mplstyle, get_plot_color
             apply_autophot_mplstyle()
+
+            # Palette defaults keep matched/unmatched semantics consistent
+            # with plot.py (blue kept, red excluded); explicit kwargs still
+            # override for external callers.
+            if label_color is None:
+                label_color = get_plot_color('match_label')
+            if matched_circle_color is None:
+                matched_circle_color = get_plot_color('matched')
+            if unmatched_circle_color is None:
+                unmatched_circle_color = get_plot_color('unmatched')
 
             # Equal-aspect panels shrink inside cells that do not match the
             # data aspect, so size the figure from the image shapes and give
@@ -8498,6 +8511,9 @@ class ImageDistortionCorrector:
                     img_h, img_w = image_shape
                     cross_size = 3 * rebin_scale
 
+                    from matplotlib.collections import LineCollection
+
+                    _cross_segs = []
                     for row in all_valid_sources[max_sources:]:
                         x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
                         # Scale coordinates if image was rebinned, then convert to 0-based
@@ -8508,43 +8524,68 @@ class ImageDistortionCorrector:
                         if not (0 <= x_0based < img_w and 0 <= y_0based < img_h):
                             continue
 
-                        ax.plot([x_0based - cross_size, x_0based + cross_size],
-                               [y_0based, y_0based], 'r-', linewidth=0.5, alpha=0.6, zorder=3)
-                        ax.plot([x_0based, x_0based],
-                               [y_0based - cross_size, y_0based + cross_size],
-                               'r-', linewidth=0.5, alpha=0.6, zorder=3)
+                        _cross_segs.append(
+                            ((x_0based - cross_size, y_0based), (x_0based + cross_size, y_0based))
+                        )
+                        _cross_segs.append(
+                            ((x_0based, y_0based - cross_size), (x_0based, y_0based + cross_size))
+                        )
+                    if _cross_segs:
+                        ax.add_collection(
+                            LineCollection(
+                                _cross_segs,
+                                colors=get_plot_color('unmatched'),
+                                linewidths=0.5,
+                                alpha=0.6,
+                                zorder=3,
+                            )
+                        )
 
                 return remaining_sources
 
             # Overlay the sources SCAMP actually used (green squares) on both panels
             if scamp_matched_sources is not None:
+                from matplotlib.collections import PatchCollection
                 from matplotlib.patches import Rectangle as MplRect
+                _scamp_color = get_plot_color('scamp_matched')
                 _sq_size = max(circle_radius_sci, circle_radius_ref) * rebin_scale
                 _sq_half = _sq_size / 2.0
-                for sx, sy in zip(
-                    scamp_matched_sources.get("sci_x", []),
-                    scamp_matched_sources.get("sci_y", []),
-                ):
-                    if np.isfinite(sx) and np.isfinite(sy):
-                        ax1.add_patch(MplRect(
-                            (sx * rebin_scale - _sq_half, sy * rebin_scale - _sq_half),
-                            _sq_size, _sq_size,
-                            edgecolor="#009E73", facecolor="none",
-                            linewidth=1.0, linestyle="-", zorder=6,
-                        ))
-                for rx, ry in zip(
-                    scamp_matched_sources.get("ref_x", []),
-                    scamp_matched_sources.get("ref_y", []),
-                ):
-                    if np.isfinite(rx) and np.isfinite(ry):
-                        ax2.add_patch(MplRect(
-                            (rx * rebin_scale - _sq_half, ry * rebin_scale - _sq_half),
-                            _sq_size, _sq_size,
-                            edgecolor="#009E73", facecolor="none",
-                            linewidth=1.0, linestyle="-", zorder=6,
-                        ))
+                _sci_rects = [
+                    MplRect(
+                        (sx * rebin_scale - _sq_half, sy * rebin_scale - _sq_half),
+                        _sq_size, _sq_size,
+                    )
+                    for sx, sy in zip(
+                        scamp_matched_sources.get("sci_x", []),
+                        scamp_matched_sources.get("sci_y", []),
+                    )
+                    if np.isfinite(sx) and np.isfinite(sy)
+                ]
+                if _sci_rects:
+                    ax1.add_collection(PatchCollection(
+                        _sci_rects,
+                        edgecolor=_scamp_color, facecolor="none",
+                        linewidth=1.0, linestyle="-", zorder=6,
+                    ))
+                _ref_rects = [
+                    MplRect(
+                        (rx * rebin_scale - _sq_half, ry * rebin_scale - _sq_half),
+                        _sq_size, _sq_size,
+                    )
+                    for rx, ry in zip(
+                        scamp_matched_sources.get("ref_x", []),
+                        scamp_matched_sources.get("ref_y", []),
+                    )
+                    if np.isfinite(rx) and np.isfinite(ry)
+                ]
+                if _ref_rects:
+                    ax2.add_collection(PatchCollection(
+                        _ref_rects,
+                        edgecolor=_scamp_color, facecolor="none",
+                        linewidth=1.0, linestyle="-", zorder=6,
+                    ))
                 from matplotlib.lines import Line2D as _L2
-                _scamp_handle = _L2([0], [0], marker="s", color="#009E73",
+                _scamp_handle = _L2([0], [0], marker="s", color=_scamp_color,
                                    markerfacecolor="none", markersize=6,
                                    linestyle="None", label="SCAMP matched")
                 handles, labels = ax1.get_legend_handles_labels()
@@ -8600,7 +8641,7 @@ class ImageDistortionCorrector:
             if (sci_remaining or 0) > 0 or (ref_remaining or 0) > 0:
                 handles.append(
                     Line2D([0], [0], marker="+", linestyle="None", markersize=6,
-                           color="r", label="Additional sources")
+                           color=get_plot_color('unmatched'), label="Additional sources")
                 )
             if handles:
                 fig.legend(
@@ -8609,7 +8650,7 @@ class ImageDistortionCorrector:
                     fontsize=8, frameon=False,
                 )
 
-            plt.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
+            fig.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor=get_plot_color("figure_facecolor"))
             plt.close(fig)
             gc.collect()
         except Exception as e:
