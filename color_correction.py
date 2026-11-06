@@ -381,9 +381,8 @@ def _print_summary(df):
             rows.append(
                 [
                     m.upper(),
-                    filt,
+                    f"{filt} ({sub[f'cc_index_{m}'].iloc[0]})",
                     str(len(sub)),
-                    f"{sub[f'cc_index_{m}'].iloc[0]}",
                     f"{np.nanmedian(corr):+.4f}",
                     f"{np.nanmedian(sub[f'cc_dt_{m}']):.3f}",
                     f"{np.nanmedian(sub[f'cc_color_{m}']):+.3f}",
@@ -395,7 +394,7 @@ def _print_summary(df):
     print(
         ascii_table(
             "Transient color correction",
-            ["method", "filter", "n", "index", "med corr", "med dt(d)", "med color"],
+            ["Method", "Filter (index)", "N", "Med corr", "Med dt [d]", "Med color"],
             rows,
         )
     )
