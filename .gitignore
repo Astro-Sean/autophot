@@ -89,6 +89,7 @@ tests/MaxiMask/output/
 # Regenerated figure outputs (the README PNG stays tracked)
 figures/*.pdf
 figures/*.json
+!figures/citations_over_time.png
 
 # Local debug/cluster scripts (not production)
 debug_*.py
