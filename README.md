@@ -21,8 +21,6 @@ AutoPhOT is a photometry pipeline for transients and variable sources, built on 
 
 It has been used in <!-- citation-count -->83<!-- /citation-count --> papers so far (updated: <!-- citation-date -->06-11-2026<!-- /citation-date -->) - [see them on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc).
 
-![Papers citing AutoPhOT per year](figures/citations_over_time.png)
-
 > [!NOTE]
 > AutoPhOT is developed and maintained by one person only. If you hit a problem, please open an issue on GitHub and I will get to it as soon as I can.
 
@@ -349,3 +347,5 @@ archivePrefix = {arXiv},
       adsnote = {Provided by the SAO/NASA Astrophysics Data System}
 }
 ```
+
+![Cumulative count of papers citing AutoPhOT](figures/citations_over_time.png)
