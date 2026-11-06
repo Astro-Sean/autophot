@@ -700,15 +700,18 @@ conda create -y -n "${TEST_ENV_NAME}" --override-channels -c conda-forge "python
 # back to PATH resolution, which can silently run a bare system python
 # (e.g. ~/.local/bin/python -> /usr/bin/python3, no numpy) and make the
 # install test fail on the repo file instead of the real package.
-TEST_ENV_PREFIX="$(conda env list --json 2>/dev/null | python - "${TEST_ENV_NAME}" <<'PY'
+TEST_ENV_PREFIX="$(conda env list --json 2>/dev/null | python -c '
 import json, os, sys
 name = sys.argv[1]
-for p in json.load(sys.stdin).get("envs", []):
+try:
+    envs = json.load(sys.stdin).get("envs", [])
+except Exception:
+    envs = []
+for p in envs:
     if os.path.basename(p.rstrip("/")) == name:
         print(p)
         break
-PY
-)"
+' "${TEST_ENV_NAME}")"
 [[ -x "${TEST_ENV_PREFIX}/bin/python" ]] || \
   die "Test env has no python binary at ${TEST_ENV_PREFIX}/bin/python"
 
