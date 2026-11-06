@@ -25,8 +25,9 @@ import glob
 import shutil
 from functions import set_size, get_distance_modulus, border_msg
 from plotting_utils import (
-    get_marker_size,
     apply_autophot_mplstyle,
+    get_marker_size,
+    get_plot_color,
     interactive_display_allowed,
 )
 from astropy.time import Time
@@ -1788,7 +1789,7 @@ def plot_lightcurve(
     outname = f'{_plot_tag}.{format}'
     outpath = os.path.join(save_path, outname)
     save_kw = dict(dpi=dpi) if format.lower() != "pdf" else {}
-    plt.savefig(outpath, **save_kw, bbox_inches="tight", facecolor="white")
+    fig.savefig(outpath, **save_kw, bbox_inches="tight", facecolor=get_plot_color("figure_facecolor"))
 
     if show :
         import matplotlib
@@ -3125,7 +3126,7 @@ def plot_variability_check(
         _tag = f"{_tag}_{_safe_tn}"
     outpath = os.path.join(save_path, f"{_tag}.{format}")
     save_kw = dict(dpi=dpi) if format.lower() != "pdf" else {}
-    fig.savefig(outpath, **save_kw, bbox_inches="tight", facecolor="white")
+    fig.savefig(outpath, **save_kw, bbox_inches="tight", facecolor=get_plot_color("figure_facecolor"))
     log.info("plot_variability_check: saved '%s'", outpath)
 
     if show :
