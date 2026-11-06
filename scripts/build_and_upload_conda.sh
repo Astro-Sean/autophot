@@ -450,6 +450,11 @@ log "libmamba solver confirmed available."
 "${_solver_probe[@]}" "${SCRIPT_DIR}/update_readme_citations.py" || \
   log "WARNING: README citation-count update skipped."
 
+# Regenerate the citation growth figure alongside the count.  Also
+# warn-only: it needs matplotlib, which the build env may not have.
+"${_solver_probe[@]}" "${SCRIPT_DIR}/plot_citation_growth.py" || \
+  log "WARNING: citation figure update skipped."
+
 # Clear stale repodata cache if the TTL is too short (default 1 second
 # forces re-downloading 400+ MB repodata on every conda command).
 _REPODATA_TTL="$(run_in_env python -c "import conda.base.context as c; print(c.context.local_repodata_ttl)" 2>/dev/null || echo "0")"
@@ -796,7 +801,7 @@ remove_stale_autophot_code
 # must not fail a build that already uploaded successfully.
 # -----------------------------------------------------------------------------
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git add README.md pyproject.toml conda/recipe/meta.yaml requirements.txt
+  git add README.md figures/citations_over_time.png pyproject.toml conda/recipe/meta.yaml requirements.txt
   if git diff --cached --quiet; then
     log "No staged changes; nothing to commit."
   else
