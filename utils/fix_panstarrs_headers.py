@@ -241,9 +241,9 @@ def main(root, recursive=False):
                 from functions import safe_fits_write
                 safe_fits_write(str(tmp_path), primary_data, combined, output_verify="ignore")
             tmp_path.replace(f)
-            print(f"  OK: {f.name}.")
+            print(f"  [OK]    {f.name}")
         except Exception as e:
-            print(f"  Failed: {f.name} ({e})")
+            print(f"  [FAIL]  {f.name} ({e})", file=sys.stderr)
 
 
 if __name__ == "__main__":
