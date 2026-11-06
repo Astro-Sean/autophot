@@ -51,24 +51,81 @@ _QUIET_GAIA_LOGGERS = (
     "astropy.io.votable",
 )
 
+# Anonymous GaiaXPy load_data requests are capped at 50 source IDs per
+# call; a larger chunk returns HTTP 500 "Maximum number of Source Ids
+# reached".  Logged-in accounts get a higher cap, but these calls are
+# always anonymous.
+_GAIAXPY_MAX_SOURCE_IDS_PER_CALL = 50
 
-class _FilterGaiaStderrSpam:
-    """Drop lines Gaia / GaiaXPy print to stderr (not always via logging)."""
+# astroquery / GaiaXPy status chatter written via plain print().  Lines
+# starting with these prefixes are dropped while a Gaia call runs.
+_GAIA_PRINT_DROP_PREFIXES = (
+    "running query",
+    "launched uws job",
+    "query finished",
+    "retrieving tables",
+    "parsing tables",
+    "reading",
+)
 
-    __slots__ = ("_real",)
+# Self-contained multi-line banners; the whole write is dropped when any
+# fragment appears (they arrive as one print call).
+_GAIA_PRINT_DROP_SUBSTRINGS = (
+    "archive release",
+    "cosmos.esa.int/web/gaia",
+    "gaia helpdesk",
+    "in case of questions or feedback",
+    "archive is unstable",
+    "workaround solutions",
+)
+
+# UWS error dumps arrive as one multi-line print; collapse them to their
+# informative header instead of flooding the console with the job XML.
+_GAIA_PRINT_DUMP_MARKERS = (
+    "cannot process request",
+    "uwsjobowner",
+    "reqid:",
+)
+
+
+def _gaia_dump_digest(text: str) -> str:
+    """One-line digest of a TAP/UWS error dump."""
+    keep = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return " | ".join(keep[:2])[:300]
+
+
+class _FilterGaiaPrintSpam:
+    """Drop or compact Gaia/astroquery print() noise on a stream.
+
+    astroquery's TapConn reports status and error bodies with plain
+    ``print()`` rather than logging, so they bypass logger-level filters
+    and hit whichever stream print targets.
+    """
+
+    __slots__ = ("_real", "_swallow_eol")
 
     def __init__(self, real: Any) -> None:
         self._real = real
+        self._swallow_eol = False
 
     def write(self, s: str) -> int:
         if not s:
             return 0
+        # print() issues the trailing newline as a second write; after a
+        # dropped line it would otherwise leak a blank line.
+        if self._swallow_eol:
+            if not s.strip():
+                return len(s)
+            self._swallow_eol = False
         low = s.lower()
-        if "archive is unstable" in low or "workaround solutions" in low:
-            return len(s)
-        # GaiaXPy / TAP often print e.g. "Running query..." to stderr.
         lead = low.lstrip("\r\n\t ")
-        if lead.startswith("running query"):
+        if any(lead.startswith(p) for p in _GAIA_PRINT_DROP_PREFIXES):
+            self._swallow_eol = True
+            return len(s)
+        if any(m in low for m in _GAIA_PRINT_DUMP_MARKERS):
+            return self._real.write(_gaia_dump_digest(s) + "\n")
+        if any(p in low for p in _GAIA_PRINT_DROP_SUBSTRINGS):
+            self._swallow_eol = True
             return len(s)
         return self._real.write(s)
 
@@ -80,6 +137,10 @@ class _FilterGaiaStderrSpam:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
+
+
+class _FilterGaiaStderrSpam(_FilterGaiaPrintSpam):
+    """Same noise dropped on stderr."""
 
 
 @contextlib.contextmanager
@@ -102,7 +163,9 @@ def quiet_gaia_tap_info_logs(enable: bool = True) -> Iterator[None]:
     import sys
 
     saved_err: Any = sys.stderr
+    saved_out: Any = sys.stdout
     sys.stderr = _FilterGaiaStderrSpam(saved_err)
+    sys.stdout = _FilterGaiaPrintSpam(saved_out)
 
     saved: List[tuple[logging.Logger, int]] = []
     for name in _QUIET_GAIA_LOGGERS:
@@ -114,6 +177,7 @@ def quiet_gaia_tap_info_logs(enable: bool = True) -> Iterator[None]:
         yield
     finally:
         sys.stderr = saved_err
+        sys.stdout = saved_out
         for lg, lvl in saved:
             lg.setLevel(lvl)
 
@@ -132,6 +196,16 @@ def _is_permanent_http_error(exc: BaseException) -> bool:
         return False
     status = int(status)
     return 400 <= status < 500 and status not in (408, 429)
+
+
+def _exc_digest(exc: BaseException, limit: int = 200) -> str:
+    """First informative line(s) of an exception, for one-line log output."""
+    text = str(exc)
+    if "\n" in text:
+        text = _gaia_dump_digest(text)
+    else:
+        text = text.strip()
+    return text[:limit]
 
 
 def retry_with_backoff(
@@ -161,7 +235,7 @@ def retry_with_backoff(
                     attempt + 1,
                     attempts,
                     delay,
-                    exc,
+                    _exc_digest(exc),
                 )
             _sleep_sec(delay)
     assert last_exc is not None
@@ -204,6 +278,30 @@ def _chunk_list(items: List[str], batch_size: int) -> List[List[str]]:
     if batch_size <= 0:
         return [items]
     return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+
+
+def _gaiaxpy_chunk_size(
+    batch_size: int,
+    n_ids: int,
+    logger: Optional[logging.Logger],
+) -> int:
+    """Effective sources-per-GaiaXPy-call, capped at the archive limit.
+
+    ``batch_size <= 0`` means a single call; both cases still clamp to
+    the archive's 50-ID request cap whenever the list is larger.
+    """
+    eff = batch_size if batch_size > 0 else max(n_ids, 1)
+    if eff > _GAIAXPY_MAX_SOURCE_IDS_PER_CALL:
+        if logger is not None:
+            logger.info(
+                "GaiaXPy archive requests allow at most %d source IDs "
+                "per call; reducing batch_size from %s to %d.",
+                _GAIAXPY_MAX_SOURCE_IDS_PER_CALL,
+                batch_size if batch_size > 0 else "all",
+                _GAIAXPY_MAX_SOURCE_IDS_PER_CALL,
+            )
+        eff = _GAIAXPY_MAX_SOURCE_IDS_PER_CALL
+    return eff
 
 
 def _table_and_sampling_from_calibrate_output(obj: Any) -> Tuple[Any, Optional[np.ndarray]]:
@@ -293,7 +391,10 @@ def calibrate_source_ids_batched(
     if not source_ids:
         return pd.DataFrame(), None
 
-    chunks = _chunk_list(list(source_ids), batch_size)
+    chunks = _chunk_list(
+        list(source_ids),
+        _gaiaxpy_chunk_size(batch_size, len(source_ids), logger),
+    )
     frames: List[pd.DataFrame] = []
     sampling_ref: Optional[np.ndarray] = None
     to_iterate = _chunk_progress(
@@ -360,7 +461,10 @@ def generate_source_ids_batched(
     if not source_ids:
         return pd.DataFrame()
 
-    chunks = _chunk_list(list(source_ids), batch_size)
+    chunks = _chunk_list(
+        list(source_ids),
+        _gaiaxpy_chunk_size(batch_size, len(source_ids), logger),
+    )
     frames: List[pd.DataFrame] = []
     to_iterate = _chunk_progress(
         chunks,
