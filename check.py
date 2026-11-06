@@ -328,9 +328,11 @@ class FitsInfo:
             lines.append("  > ")
             prompt = "\n".join(lines)
 
-            raw = input(prompt)
+            # Prompt and echo go to stderr so piped stdout stays clean.
+            print(prompt, file=sys.stderr, end="", flush=True)
+            raw = input()
             ans = raw.strip() or default_str
-            print(f"  Selected: {ans}")
+            print(f"  Selected: {ans}", file=sys.stderr)
 
             if isinstance(ans, str) and ans == ignore_word:
                 return ignore_word
@@ -341,17 +343,26 @@ class FitsInfo:
                 if expect_answer_type is str:
                     ans = str(ans)
                     if options and ans not in options:
-                        print(f"  Invalid. Choose one of: {', '.join(options)}")
+                        print(
+                            f"  Invalid. Choose one of: {', '.join(options)}",
+                            file=sys.stderr,
+                        )
                         continue
                     return ans
                 return expect_answer_type(float(ans))
             except (ValueError, TypeError):
                 if expect_answer_type == str:
                     if options and ans not in options:
-                        print(f"  Invalid. Choose one of: {', '.join(options)}")
+                        print(
+                            f"  Invalid. Choose one of: {', '.join(options)}",
+                            file=sys.stderr,
+                        )
                         continue
                     return ans
-                print("  Invalid format. Enter one of the options.")
+                print(
+                    "  Invalid format. Enter one of the options.",
+                    file=sys.stderr,
+                )
 
     def find_similar_keywords(self, keywords, search_term, cutoff=0.6):
         """
@@ -708,8 +719,9 @@ class FitsInfo:
         )
         while True:
             # Case is significant for band names (I vs i); preserve it.
-            ans = input(prompt).strip() or default
-            print(f"  Selected: {ans}")
+            print(prompt, file=sys.stderr, end="", flush=True)
+            ans = input().strip() or default
+            print(f"  Selected: {ans}", file=sys.stderr)
             if ans == default:
                 try:
                     self._remember_mapping(db, header_value, default)
@@ -741,7 +753,10 @@ class FitsInfo:
                                 "Could not persist keyword mapping: %s", _db_exc
                             )
                         return b
-            print(f"  Invalid. Choose one of {opts_str}, or '{default}'.")
+            print(
+                f"  Invalid. Choose one of {opts_str}, or '{default}'.",
+                file=sys.stderr,
+            )
 
     @staticmethod
     def _next_filter_key_num(entry):
@@ -834,7 +849,8 @@ class FitsInfo:
             hint = f"  Similar keys: {', '.join(similar[:5])}" if similar else ""
             print(
                 f"  Keyword '{ans}' not found in this header.{hint}\n"
-                "  Re-enter, repeat to keep anyway, or 'skip'."
+                "  Re-enter, repeat to keep anyway, or 'skip'.",
+                file=sys.stderr,
             )
 
     @staticmethod
