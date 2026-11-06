@@ -715,3 +715,155 @@ class TestGaiaXPyKwargs:
             show_progress=False,
         )
         assert calls and calls[0].get("save_file") is False
+
+
+class TestGaiaXPyRequestCap:
+    """Anonymous GaiaXPy archive requests allow at most 50 source IDs
+    per call; larger batches are split internally."""
+
+    def test_chunk_size_clamps_to_archive_limit(self):
+        from autophot_gaia_curves.gaia_archive import _gaiaxpy_chunk_size
+
+        assert _gaiaxpy_chunk_size(200, 66, None) == 50
+        assert _gaiaxpy_chunk_size(0, 66, None) == 50
+        assert _gaiaxpy_chunk_size(30, 66, None) == 30
+        assert _gaiaxpy_chunk_size(200, 10, None) == 50
+
+    def test_calibrate_splits_overfifty_chunks(self, monkeypatch):
+        gaiaxpy = pytest.importorskip("gaiaxpy")
+
+        chunks = []
+
+        def fake_calibrate(chunk, **kwargs):
+            chunks.append(list(chunk))
+            return (
+                pd.DataFrame({"source_id": chunk}),
+                np.array([1.0, 2.0, 3.0]),
+            )
+
+        monkeypatch.setattr(gaiaxpy, "calibrate", fake_calibrate)
+        ids = [str(i) for i in range(66)]
+        gaia_archive.calibrate_source_ids_batched(
+            ids,
+            batch_size=200,
+            inter_batch_pause_sec=0.0,
+            show_progress=False,
+        )
+        assert [len(c) for c in chunks] == [50, 16]
+
+    def test_generate_splits_overfifty_chunks(self, monkeypatch):
+        gaiaxpy = pytest.importorskip("gaiaxpy")
+
+        chunks = []
+
+        def fake_generate(chunk, **kwargs):
+            chunks.append(list(chunk))
+            return pd.DataFrame({"source_id": chunk})
+
+        monkeypatch.setattr(gaiaxpy, "generate", fake_generate)
+        ids = [str(i) for i in range(66)]
+        gaia_archive.generate_source_ids_batched(
+            ids,
+            ["sys"],
+            batch_size=200,
+            inter_batch_pause_sec=0.0,
+            show_progress=False,
+        )
+        assert [len(c) for c in chunks] == [50, 16]
+
+
+class TestGaiaPrintFilter:
+    """The quiet-TAP context drops astroquery/GaiaXPy print chatter and
+    collapses UWS error dumps to one line."""
+
+    def _filtered(self, text):
+        import io
+
+        buf = io.StringIO()
+        filt = gaia_archive._FilterGaiaPrintSpam(buf)
+        filt.write(text)
+        return buf.getvalue()
+
+    def test_status_lines_dropped(self):
+        for line in (
+            "Running query...",
+            "Reading...",
+            "Launched uws job: 'anonymous'",
+            "Query finished.",
+            "Retrieving tables...",
+        ):
+            assert self._filtered(line) == ""
+
+    def test_release_banner_dropped(self):
+        banner = (
+            "The current archive release 3.15 contains two breaking "
+            "changes. Please see https://www.cosmos.esa.int/web/gaia/"
+            "news#GACSrelease315 for details."
+        )
+        assert self._filtered(banner) == ""
+
+    def test_uws_dump_collapsed_to_digest(self):
+        dump = (
+            "500 Error 500:\n"
+            "Maximum number of Source Ids reached (max: 50, found: 66)\n"
+            "\n"
+            "Cannot process request: 'https://gea...' "
+            "(req: Reqid: anonymous-7fe..., retrieval type: XP_CONTINUOUS)\n"
+            " UwsJobOwner{id='anonymous', name='null'}"
+        )
+        out = self._filtered(dump)
+        assert "UwsJobOwner" not in out
+        assert "Cannot process request" not in out
+        assert "Maximum number of Source Ids" in out
+
+    def test_normal_output_passthrough(self):
+        assert self._filtered("Loaded curve g: 392.0-563.0 nm\n") == (
+            "Loaded curve g: 392.0-563.0 nm\n"
+        )
+
+    def test_quiet_context_suppresses_print_noise(self, capsys):
+        with gaia_archive.quiet_gaia_tap_info_logs(True):
+            print("Running query...")
+            print("real line")
+        out = capsys.readouterr().out
+        assert "Running query" not in out
+        assert "real line" in out
+
+
+class TestExcDigest:
+    def test_multiline_body_collapses(self):
+        body = (
+            "Error 500:\nMaximum number of Source Ids reached "
+            "(max: 50, found: 66)\n\nCannot process request: 'x'\n"
+            " UwsJobOwner{id='anonymous'}"
+        )
+        d = gaia_archive._exc_digest(body)
+        assert "\n" not in d
+        assert "Maximum number of Source Ids" in d
+
+    def test_single_line_passthrough(self):
+        assert gaia_archive._exc_digest(ValueError("boom")) == "boom"
+
+    def test_retry_log_uses_digest(self, caplog):
+        import logging
+
+        calls = []
+
+        def fail():
+            calls.append(1)
+            raise ValueError("line one\nline two\nline three")
+
+        logger = logging.getLogger("test_gaia_retry")
+        with pytest.raises(ValueError):
+            with caplog.at_level(logging.WARNING, logger="test_gaia_retry"):
+                gaia_archive.retry_with_backoff(
+                    fail,
+                    max_retries=2,
+                    base_delay_sec=0.0,
+                    logger=logger,
+                    op_name="test op",
+                )
+        assert len(calls) == 2
+        msg = caplog.records[0].getMessage()
+        assert "line three" not in msg
+        assert "line one" in msg
