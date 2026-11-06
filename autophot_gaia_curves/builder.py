@@ -19,6 +19,61 @@ from autophot_gaia_curves.gaia_archive import (
     sort_gaia_table_nearest_to_target,
 )
 
+# Column-name conventions seen in GaiaXPy calibrate() output across versions.
+_SPECTRUM_WAVE_KEYS = ("wavelength", "wavelength_nm", "wl", "lambda")
+_SPECTRUM_FLUX_KEYS = (
+    "flux",
+    "flux_w_m2_nm",
+    "flux_density",
+    "flambda",
+    "calibrated_flux",
+    "xp_flux",
+    "sampled_flux",
+    "xp_sampled_flux",
+    "mean_spectrum",
+    "xp_mean_spectrum",
+)
+_SPECTRUM_ERR_KEYS = (
+    "flux_error",
+    "flux_uncertainty",
+    "sigma_flux",
+    "calibrated_flux_error",
+    "flux_err",
+)
+_SPECTRUM_NONFLUX_NAMES = {
+    "source_id",
+    "ra",
+    "dec",
+    "designation",
+    "flux_error",
+    "flux_uncertainty",
+    "correlation",
+}
+
+_C_LIGHT_M_S = 299792458.0
+_F_NU_AB_ZERO = 3631e-26
+
+
+def _flux_col_score(name: str) -> int:
+    n = name.lower()
+    if "error" in n or "uncert" in n or "corr" in n:
+        return 200
+    if n == "flux":
+        return 0
+    if "flux" in n:
+        return 2
+    return 10
+
+
+def _as_1d_float_array(v: Any) -> Optional[np.ndarray]:
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    try:
+        a = np.asarray(v, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    return a if a.ndim == 1 else None
+
 
 def _format_gaia_source_id(val: Any) -> str:
     """
@@ -151,29 +206,15 @@ class GaiaCurveCatalogBuilder:
         GaiaXPy often provides a global wavelength grid as the second return value
         of ``calibrate()``; per-row data then only contains flux (and errors).
         """
-        wave_keys = ("wavelength", "wavelength_nm", "wl", "lambda")
-        flux_keys = (
-            "flux",
-            "flux_w_m2_nm",
-            "flux_density",
-            "flambda",
-            "calibrated_flux",
-            "xp_flux",
-            "sampled_flux",
-            "xp_sampled_flux",
-            "mean_spectrum",
-            "xp_mean_spectrum",
-        )
-
         wave = None
         flux = None
-        for k in wave_keys:
+        for k in _SPECTRUM_WAVE_KEYS:
             if k in row and row[k] is not None:
                 wave = np.asarray(row[k], dtype=float)
                 break
         if wave is None and wavelength_nm is not None:
             wave = np.asarray(wavelength_nm, dtype=float)
-        for k in flux_keys:
+        for k in _SPECTRUM_FLUX_KEYS:
             if k in row and row[k] is not None:
                 flux = np.asarray(row[k], dtype=float)
                 break
@@ -182,19 +223,14 @@ class GaiaCurveCatalogBuilder:
         # matches the calibrated wavelength grid length (skip obvious non-flux).
         if flux is None and wavelength_nm is not None:
             nexp = int(np.asarray(wavelength_nm).shape[0])
-            skip = {
-                "source_id",
-                "ra",
-                "dec",
-                "designation",
-                "flux_error",
-                "flux_uncertainty",
-                "correlation",
-            }
             matched: List[Tuple[str, np.ndarray]] = []
             for k in row.index:
                 kl = str(k).lower()
-                if k in skip or kl.endswith("_error") or kl.endswith("_uncertainty"):
+                if (
+                    k in _SPECTRUM_NONFLUX_NAMES
+                    or kl.endswith("_error")
+                    or kl.endswith("_uncertainty")
+                ):
                     continue
                 v = row[k]
                 if v is None or (isinstance(v, float) and np.isnan(v)):
@@ -205,16 +241,6 @@ class GaiaCurveCatalogBuilder:
                     continue
                 if a.ndim == 1 and a.shape[0] == nexp and np.any(np.isfinite(a)):
                     matched.append((str(k), a))
-
-            def _flux_col_score(name: str) -> int:
-                n = name.lower()
-                if "error" in n or "uncert" in n or "corr" in n:
-                    return 200
-                if n == "flux":
-                    return 0
-                if "flux" in n:
-                    return 2
-                return 10
 
             if matched:
                 matched.sort(key=lambda kv: (_flux_col_score(kv[0]), kv[0]))
@@ -232,14 +258,7 @@ class GaiaCurveCatalogBuilder:
             )
 
         err: Optional[np.ndarray] = None
-        err_keys = (
-            "flux_error",
-            "flux_uncertainty",
-            "sigma_flux",
-            "calibrated_flux_error",
-            "flux_err",
-        )
-        for ek in err_keys:
+        for ek in _SPECTRUM_ERR_KEYS:
             if ek in row and row[ek] is not None:
                 try:
                     e = np.asarray(row[ek], dtype=float)
@@ -295,8 +314,7 @@ class GaiaCurveCatalogBuilder:
         c = np.zeros(n, dtype=float)
         c[0] = 0.5 * (x[1] - x[0])
         c[-1] = 0.5 * (x[-1] - x[-2])
-        for j in range(1, n - 1):
-            c[j] = 0.5 * (x[j + 1] - x[j - 1])
+        c[1:-1] = 0.5 * (x[2:] - x[:-2])
         return c
 
     @staticmethod
@@ -341,8 +359,7 @@ class GaiaCurveCatalogBuilder:
 
         fl_m = fl_nm * 1e9
         wl_m = wl_nm * 1e-9
-        c_light = 299792458.0
-        f_nu = fl_m * (wl_m**2) / c_light
+        f_nu = fl_m * (wl_m**2) / _C_LIGHT_M_S
 
         if hasattr(np, "trapezoid"):
             _trapz = np.trapezoid  # NumPy >= 2.0
@@ -357,13 +374,12 @@ class GaiaCurveCatalogBuilder:
         if f_nu_band <= 0 or not np.isfinite(f_nu_band):
             return np.nan, np.nan
 
-        f_nu_ab0 = 3631e-26
-        mag = -2.5 * np.log10(f_nu_band / f_nu_ab0)
+        mag = -2.5 * np.log10(f_nu_band / _F_NU_AB_ZERO)
 
         mag_err = np.nan
         if flux_err_w_m2_nm is not None:
             sig_fl = flux_err_w_m2_nm[valid]
-            sig_fn = sig_fl * 1e9 * (wl_m**2) / c_light
+            sig_fn = sig_fl * 1e9 * (wl_m**2) / _C_LIGHT_M_S
             coeffs = GaiaCurveCatalogBuilder._trapezoid_integration_coeffs(wl_nm)
             var_num = float(np.sum((coeffs * tv * sig_fn) ** 2))
             sig_num = math.sqrt(var_num) if var_num > 0.0 else 0.0
@@ -394,6 +410,295 @@ class GaiaCurveCatalogBuilder:
             curve_throughput,
         )
         return m
+
+    @staticmethod
+    def _spectrum_column_names(
+        df: pd.DataFrame, n_exp: int
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        Pick (wavelength, flux, flux_error) columns once for a whole table.
+
+        Mirrors :meth:`extract_spectrum_columns` using the first row as the
+        format probe: GaiaXPy tables are column-uniform, so rescanning per
+        row only repeats the same decision ``n_rows`` times. ``n_exp`` is the
+        shared wavelength-grid length used by the length-match heuristics.
+        """
+        if df.empty:
+            return None, None, None
+        cols = list(df.columns)
+        first = df.iloc[0]
+
+        def _present(k: str) -> bool:
+            return k in cols and first[k] is not None
+
+        wave_col = next((k for k in _SPECTRUM_WAVE_KEYS if _present(k)), None)
+        flux_col = next((k for k in _SPECTRUM_FLUX_KEYS if _present(k)), None)
+        if flux_col is None and n_exp:
+            matched: List[str] = []
+            for c in cols:
+                kl = str(c).lower()
+                if (
+                    c in _SPECTRUM_NONFLUX_NAMES
+                    or kl.endswith("_error")
+                    or kl.endswith("_uncertainty")
+                ):
+                    continue
+                a = _as_1d_float_array(first[c])
+                if (
+                    a is not None
+                    and a.shape[0] == n_exp
+                    and np.any(np.isfinite(a))
+                ):
+                    matched.append(str(c))
+            if matched:
+                matched.sort(key=lambda nm: (_flux_col_score(nm), nm))
+                flux_col = matched[0]
+
+        err_col = None
+        for k in _SPECTRUM_ERR_KEYS:
+            if not _present(k):
+                continue
+            e = _as_1d_float_array(first[k])
+            if e is not None and e.shape[0] == n_exp:
+                err_col = k
+                break
+        if err_col is None and n_exp:
+            for c in cols:
+                kl = str(c).lower()
+                if "corr" in kl:
+                    continue
+                if "error" not in kl and "uncert" not in kl and "sigma" not in kl:
+                    continue
+                e = _as_1d_float_array(first[c])
+                if e is not None and e.shape[0] == n_exp:
+                    err_col = c
+                    break
+        return wave_col, flux_col, err_col
+
+    def _spectra_matrix(
+        self,
+        spectra_df: pd.DataFrame,
+        xp_sampling_nm: Optional[np.ndarray],
+    ) -> Optional[
+        Tuple[List[str], np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray]
+    ]:
+        """
+        Stack all per-row spectra onto one (n_rows, n_wl) grid.
+
+        Returns ``(source_ids, wave_nm, flux, flux_err, row_ok)`` where
+        ``flux_err`` is None when the table has no error column and
+        ``row_ok`` flags rows that filled the matrix. Returns None when no
+        shared grid exists at all (missing flux column, per-row wavelength
+        grids that disagree with each other or with ``xp_sampling_nm``);
+        rows with malformed cells keep the original per-row path through
+        ``row_ok``.
+        """
+        if (
+            spectra_df is None
+            or spectra_df.empty
+            or "source_id" not in spectra_df.columns
+        ):
+            return None
+
+        wave_col_guess = next(
+            (
+                k
+                for k in _SPECTRUM_WAVE_KEYS
+                if k in spectra_df.columns and spectra_df[k].iloc[0] is not None
+            ),
+            None,
+        )
+        w0: Optional[np.ndarray] = None
+        if wave_col_guess is not None:
+            w0 = _as_1d_float_array(spectra_df[wave_col_guess].iloc[0])
+            if w0 is None:
+                return None
+            for v in spectra_df[wave_col_guess].tolist():
+                wv = _as_1d_float_array(v)
+                if (
+                    wv is None
+                    or wv.shape != w0.shape
+                    or not np.allclose(
+                        wv, w0, rtol=0.0, atol=1e-6, equal_nan=True
+                    )
+                ):
+                    return None
+        grid: Optional[np.ndarray] = None
+        if xp_sampling_nm is not None:
+            g = np.asarray(xp_sampling_nm, dtype=float)
+            if g.ndim == 1 and g.size >= 2:
+                grid = g
+        if w0 is not None and grid is not None:
+            if w0.shape != grid.shape or not np.allclose(
+                w0, grid, rtol=0.0, atol=1e-6, equal_nan=True
+            ):
+                return None
+        wave_nm = w0 if w0 is not None else grid
+        if wave_nm is None or wave_nm.ndim != 1 or wave_nm.size < 2:
+            return None
+        m = int(wave_nm.shape[0])
+
+        _, flux_col, err_col = self._spectrum_column_names(spectra_df, m)
+        if flux_col is None:
+            return None
+
+        n = len(spectra_df)
+        row_ok = np.ones(n, dtype=bool)
+        flux_mat = np.full((n, m), np.nan, dtype=float)
+        for i, v in enumerate(spectra_df[flux_col].tolist()):
+            a = _as_1d_float_array(v)
+            if a is not None and a.shape[0] == m:
+                flux_mat[i] = a
+            else:
+                row_ok[i] = False
+        err_mat: Optional[np.ndarray] = None
+        if err_col is not None:
+            err_mat = np.full((n, m), np.nan, dtype=float)
+            for i, v in enumerate(spectra_df[err_col].tolist()):
+                if not row_ok[i]:
+                    continue
+                e = _as_1d_float_array(v)
+                if e is not None and e.shape[0] == m:
+                    err_mat[i] = e
+                else:
+                    row_ok[i] = False
+
+        # Rows with <2 valid samples fail extract_spectrum_columns anyway;
+        # route them through the per-row path so they are skipped, not kept
+        # with all-NaN magnitudes.
+        min_valid = np.isfinite(wave_nm)[None, :] & np.isfinite(flux_mat)
+        if err_mat is not None:
+            min_valid &= np.isfinite(err_mat) & (err_mat >= 0.0)
+        row_ok &= min_valid.sum(axis=1) >= 2
+
+        sids = [
+            _format_gaia_source_id(v)
+            for v in spectra_df["source_id"].tolist()
+        ]
+        return sids, wave_nm, flux_mat, err_mat, row_ok
+
+    @staticmethod
+    def _band_integration_weights(
+        wavelength_nm: np.ndarray,
+        curve_wavelength_nm: np.ndarray,
+        curve_throughput: np.ndarray,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, float]]:
+        """
+        Precompute the shared-grid part of :meth:`ab_mag_and_err_from_curve`.
+
+        Returns ``(idx, weight, denom)`` where ``dot(weight, f_lambda[idx])``
+        is the throughput-weighted f_nu numerator, ``dot(weight**2, sig**2)``
+        its uncorrelated-error variance, and ``denom`` the throughput
+        denominator. ``weight`` folds in the trapezoid coefficients, the
+        f_lambda -> f_nu factor and the throughput, so a whole batch of
+        spectra needs one matrix product per band instead of a fresh
+        ``np.interp`` + ``np.trapezoid`` per source. Returns None when fewer
+        than 2 grid points carry throughput (all mags are then NaN anyway).
+        """
+        wave = np.asarray(wavelength_nm, dtype=float)
+        t = np.interp(
+            wave,
+            np.asarray(curve_wavelength_nm, dtype=float),
+            np.asarray(curve_throughput, dtype=float),
+            left=0.0,
+            right=0.0,
+        )
+        sel = np.isfinite(wave) & np.isfinite(t) & (t > 1e-15)
+        idx = np.flatnonzero(sel)
+        if idx.size < 2:
+            return None
+        wl = wave[idx]
+        tv = t[idx]
+        coeffs = GaiaCurveCatalogBuilder._trapezoid_integration_coeffs(wl)
+        k = 1e9 * ((wl * 1e-9) ** 2) * tv / _C_LIGHT_M_S
+        w = coeffs * k
+        den = float(np.dot(coeffs, tv))
+        return idx, w, den
+
+    @staticmethod
+    def _ab_mags_from_matrix(
+        wavelength_nm: np.ndarray,
+        flux_mat: np.ndarray,
+        err_mat: Optional[np.ndarray],
+        row_ok: np.ndarray,
+        curve_wavelength_nm: np.ndarray,
+        curve_throughput: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Vectorized equivalent of per-row :meth:`ab_mag_and_err_from_curve`
+        for spectra stacked on a shared wavelength grid.
+
+        Rows whose samples inside the band are all valid integrate with one
+        matrix product; rows carrying NaN fluxes or bad error samples inside
+        the band fall back to the reference per-row path so results stay
+        identical. Rows with ``row_ok`` False are left as NaN (the caller
+        re-extracts them per row).
+        """
+        n = int(flux_mat.shape[0])
+        mags = np.full(n, np.nan, dtype=float)
+        errs = np.full(n, np.nan, dtype=float)
+        pre = GaiaCurveCatalogBuilder._band_integration_weights(
+            wavelength_nm, curve_wavelength_nm, curve_throughput
+        )
+        if pre is None:
+            return mags, errs
+        idx, w, den = pre
+        if not np.isfinite(den) or den <= 0:
+            return mags, errs
+        usable = np.asarray(row_ok, dtype=bool)
+        flux_sel = flux_mat[:, idx]
+        clean = np.isfinite(flux_sel).all(axis=1) & usable
+        err_sel: Optional[np.ndarray] = None
+        if err_mat is not None:
+            err_sel = err_mat[:, idx]
+            clean &= np.isfinite(err_sel).all(axis=1) & (err_sel >= 0).all(axis=1)
+        if np.any(clean):
+            f_band = (flux_sel[clean] @ w) / den
+            pos = np.isfinite(f_band) & (f_band > 0)
+            mag_c = np.full(f_band.shape[0], np.nan, dtype=float)
+            mag_c[pos] = -2.5 * np.log10(f_band[pos] / _F_NU_AB_ZERO)
+            err_c = np.full(f_band.shape[0], np.nan, dtype=float)
+            if err_sel is not None:
+                sig = np.sqrt((err_sel[clean] ** 2) @ (w * w)) / den
+                good = pos & np.isfinite(sig) & (sig >= 0)
+                err_c[good] = (2.5 / math.log(10.0)) * (
+                    sig[good] / f_band[good]
+                )
+            mags[clean] = mag_c
+            errs[clean] = err_c
+        for i in np.flatnonzero(usable & ~clean):
+            err_i = err_mat[i] if err_mat is not None else None
+            m_i, e_i = GaiaCurveCatalogBuilder.ab_mag_and_err_from_curve(
+                wavelength_nm,
+                flux_mat[i],
+                err_i,
+                curve_wavelength_nm,
+                curve_throughput,
+            )
+            mags[i] = m_i
+            errs[i] = e_i
+        return mags, errs
+
+    def _fill_band_mags(
+        self,
+        rec: dict,
+        wavelength_nm: np.ndarray,
+        flux_w_m2_nm: np.ndarray,
+        flux_err_w_m2_nm: Optional[np.ndarray],
+        loaded_curves: Dict[str, Tuple[np.ndarray, np.ndarray]],
+    ) -> None:
+        """Per-row band integration: reference path for one spectrum."""
+        for band, (cw, ct) in loaded_curves.items():
+            mag, mag_err = self.ab_mag_and_err_from_curve(
+                wavelength_nm,
+                flux_w_m2_nm,
+                flux_err_w_m2_nm,
+                cw,
+                ct,
+            )
+            rec[band] = mag
+            # Default 0.01 mag when GaiaXPy errors missing or non-finite.
+            rec[f"{band}_err"] = 0.01 if not math.isfinite(mag_err) else mag_err
 
     @staticmethod
     def _meta_path(out_path: Path) -> Path:
@@ -636,6 +941,7 @@ class GaiaCurveCatalogBuilder:
             max_retries=gaia_archive_max_retries,
             retry_base_delay_sec=gaia_archive_retry_base_delay_sec,
             logger=self.logger,
+            show_progress=gaia_xp_show_progress,
         )
         if xp_sampling_nm is not None:
             self.logger.info(
@@ -654,19 +960,6 @@ class GaiaCurveCatalogBuilder:
             raise KeyError("GaiaXPy calibrate output missing source_id column.")
 
         rows: List[dict] = []
-        row_iter = spectra_df.iterrows()
-        if gaia_xp_show_progress and len(spectra_df) > 0:
-            try:
-                from tqdm.auto import tqdm
-
-                row_iter = tqdm(
-                    row_iter,
-                    total=len(spectra_df),
-                    desc="Band-integrate spectra",
-                    unit="src",
-                )
-            except ImportError:
-                pass
         # Index the ADQL rows once so the per-source join is O(1) instead of
         # a full-frame scan for every calibrated spectrum.
         gaia_by_sid = gaia.drop_duplicates("_sid_key", keep="first").set_index(
@@ -674,8 +967,42 @@ class GaiaCurveCatalogBuilder:
         )
         join_miss_logged = 0
         extract_fail_logged = 0
-        for _, row in row_iter:
-            sid = _format_gaia_source_id(row["source_id"])
+
+        # Stack all spectra onto the shared grid once; each band then needs a
+        # single matrix product instead of an interp + trapz per source.
+        mat = self._spectra_matrix(spectra_df, xp_sampling_nm)
+        band_results: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None
+        row_ok = np.zeros(len(spectra_df), dtype=bool)
+        if mat is not None:
+            sids, grid_nm, flux_mat, err_mat, row_ok = mat
+            band_results = {
+                band: self._ab_mags_from_matrix(
+                    grid_nm, flux_mat, err_mat, row_ok, cw, ct
+                )
+                for band, (cw, ct) in loaded_curves.items()
+            }
+        else:
+            sids = [
+                _format_gaia_source_id(v)
+                for v in spectra_df["source_id"].tolist()
+            ]
+
+        n_rows_tbl = len(sids)
+        idx_iter = range(n_rows_tbl)
+        if gaia_xp_show_progress and n_rows_tbl > 0:
+            try:
+                from tqdm.auto import tqdm
+
+                idx_iter = tqdm(
+                    idx_iter,
+                    total=n_rows_tbl,
+                    desc="Band-integrate spectra",
+                    unit="src",
+                )
+            except ImportError:
+                pass
+        for i in idx_iter:
+            sid = sids[i]
             if not sid:
                 continue
             try:
@@ -688,37 +1015,39 @@ class GaiaCurveCatalogBuilder:
                     )
                     join_miss_logged += 1
                 continue
-            try:
-                wavelength_nm, flux_w_m2_nm, flux_err_w_m2_nm = (
-                    self.extract_spectrum_columns(
-                        row, wavelength_nm=xp_sampling_nm
-                    )
-                )
-            except Exception as exc:
-                if extract_fail_logged < 5:
-                    self.logger.warning(
-                        "Skipping source %s during spectrum extract: %s",
-                        sid,
-                        exc,
-                    )
-                    extract_fail_logged += 1
-                else:
-                    self.logger.debug("Skipping source %s: %s", sid, exc)
-                continue
 
             rec = {"name": sid, "ra": float(base["ra"]), "dec": float(base["dec"])}
-            for band, (cw, ct) in loaded_curves.items():
-                mag, mag_err = self.ab_mag_and_err_from_curve(
+            if band_results is not None and row_ok[i]:
+                for band in loaded_curves:
+                    mag_arr, err_arr = band_results[band]
+                    e = float(err_arr[i])
+                    rec[band] = float(mag_arr[i])
+                    rec[f"{band}_err"] = 0.01 if not math.isfinite(e) else e
+            else:
+                # Rows that could not stack keep the per-row column scan.
+                try:
+                    wavelength_nm, flux_w_m2_nm, flux_err_w_m2_nm = (
+                        self.extract_spectrum_columns(
+                            spectra_df.iloc[i], wavelength_nm=xp_sampling_nm
+                        )
+                    )
+                except Exception as exc:
+                    if extract_fail_logged < 5:
+                        self.logger.warning(
+                            "Skipping source %s during spectrum extract: %s",
+                            sid,
+                            exc,
+                        )
+                        extract_fail_logged += 1
+                    else:
+                        self.logger.debug("Skipping source %s: %s", sid, exc)
+                    continue
+                self._fill_band_mags(
+                    rec,
                     wavelength_nm,
                     flux_w_m2_nm,
                     flux_err_w_m2_nm,
-                    cw,
-                    ct,
-                )
-                rec[band] = mag
-                # Default 0.01 mag when GaiaXPy errors missing or non-finite.
-                rec[f"{band}_err"] = (
-                    0.01 if not math.isfinite(mag_err) else mag_err
+                    loaded_curves,
                 )
             rows.append(rec)
 
