@@ -363,6 +363,7 @@ default_input:
     # If True, pass astrometry.net --crpix-center (CRPIX at image center). Omitting it often matches
     # telescope/subarray headers better and can improve photometry vs a forced-center solved WCS.
     solve_field_crpix_center: False # bool --- If True, pass astrometry.net `--crpix-center` (forces CRPIX at image center).
+    solve_field_no_fits2fits: False # bool --- If True, pass astrometry.net `--no-fits2fits` (skip the per-attempt input-image sanitization rewrite; safe for standard single-HDU FITS inputs).
     refine_after_solve: False # bool --- If True, run an additional WCS refinement pass after a successful solve.
 
     # --- Solved-WCS sanity validation ---
@@ -763,6 +764,7 @@ default_input:
 
   template_subtraction:
     do_subtraction: False # bool --- Enable template subtraction step.
+    get_simbad_sources: True # bool --- Query SIMBAD for variable/extended sources near the target and store them in input.yaml as variable_sources (used for galaxy masking, other-transient photometry, and plot context). The query is timeout-bounded and degrades gracefully; set False to skip it entirely (e.g. offline runs or SIMBAD outages).
     alignment_method: spalipy # str --- Science-template registration method. Options: spalipy=spline-warp with RA/DEC source pre-matching [recommended, most reliable], swarp=SCAMP+SWarp [best subpixel], reproject=WCS-only, astroalign=source matching, tweakwcs=STScI WCS tweaking+reproject [requires: pip install tweakwcs], chi2_shift=cross-correlation for extended-source fields [requires: pip install image-registration]. Each method falls back through the remaining source-based methods and finally to chi2_shift (translation-only) if they fail.
     alignment_use_extended_sources: True # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs. Extended sources provide valuable alignment anchors in sparse fields.
     alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
