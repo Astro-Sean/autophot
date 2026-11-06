@@ -419,4 +419,8 @@ if __name__ == "__main__":
         for dis in result['strategy']['disadvantages']:
             print(f"  {dis}")
     else:
-        print("Usage: python wcs_only_alignment_analysis.py <science_image> <reference_image>")
+        print(
+            "Usage: python wcs_only_alignment_analysis.py <science_image> <reference_image>",
+            file=sys.stderr,
+        )
+        sys.exit(2)
