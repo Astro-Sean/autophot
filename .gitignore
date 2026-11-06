@@ -92,6 +92,7 @@ figures/*.json
 !figures/citations_over_time.png
 
 # Local debug/cluster scripts (not production)
+scripts/
 debug_*.py
 run_autophot_VIPER.py
 
