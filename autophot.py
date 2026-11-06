@@ -840,22 +840,38 @@ def find_variable_sources(
     """
     t0 = time.perf_counter()
 
-    # SIMBAD query config (timeout-protected)
-    Simbad.reset_votable_fields()
-    Simbad.add_votable_fields(
-        "otype",
-        "ra",
-        "dec",
-        "main_id",
-        "galdim_majaxis",
-        "galdim_minaxis",
-        "galdim_angle",
-    )
+    if Simbad is None or SkyCoord is None or u is None:
+        _log("astroquery/astropy unavailable - skipping SIMBAD variable-source query.")
+        return pd.DataFrame()
 
-    original_timeout = getattr(Simbad, "TIMEOUT", 10)
+    # astroquery >= 0.4.8's TAP-based Simbad has no working TIMEOUT knob;
+    # patching the shared requests session bounds connect+read for every
+    # call below, including the metadata fetches votable-field setup makes.
+    try:
+        from functions import patch_simbad_session_timeout
+        patch_simbad_session_timeout()
+    except Exception as exc:
+        _log(f"SIMBAD timeout patch could not be applied ({exc}); queries may stall.")
+
+    # SIMBAD query config.  add_votable_fields issues a TAP metadata query
+    # of its own in new astroquery, so keep it in a separate guard: field
+    # setup failing must not mask a query that might still succeed, and a
+    # hung server must not stall the run before the try below is reached.
+    try:
+        Simbad.reset_votable_fields()
+        Simbad.add_votable_fields(
+            "otype",
+            "ra",
+            "dec",
+            "main_id",
+            "galdim_majaxis",
+            "galdim_minaxis",
+            "galdim_angle",
+        )
+    except Exception as exc:
+        _log(f"SIMBAD votable-field setup failed ({exc}); using default columns.")
+
     original_row_limit = getattr(Simbad, "ROW_LIMIT", 1000)
-
-    Simbad.TIMEOUT = 30
     Simbad.ROW_LIMIT = 500
 
     centre_coord = SkyCoord(
@@ -924,7 +940,6 @@ def find_variable_sources(
         )
         result = None
 
-    Simbad.TIMEOUT = original_timeout
     Simbad.ROW_LIMIT = original_row_limit
 
     if result is None or len(result) == 0:
@@ -3496,7 +3511,13 @@ class AutomatedPhotometry:
 
                         backup_yaml["variable_sources"] = variable_sources
                     except Exception as e:
-                        _log(f"[WARNING] SIMBAD variable-source enrichment skipped:")
+                        _log(
+                            "[WARNING] SIMBAD variable-source enrichment "
+                            f"skipped: {e}"
+                        )
+                        # Snapshot still records that the stage ran and
+                        # produced nothing, so main.py sees the key.
+                        backup_yaml["variable_sources"] = []
 
                 else:
                     backup_yaml["variable_sources"] = {}
