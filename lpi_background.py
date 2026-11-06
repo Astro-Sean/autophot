@@ -160,6 +160,10 @@ def save_lpi_diagnostic_plot(
     """
     import matplotlib.pyplot as plt
 
+    from plotting_utils import apply_autophot_mplstyle, get_plot_color
+
+    apply_autophot_mplstyle()
+
     half = int(stamp_half_size_px)
     stamp0 = _extract_stamp_reflect(image, x0, y0, half=half)
     corrected = stamp0 - bg_pred
@@ -194,7 +198,7 @@ def save_lpi_diagnostic_plot(
     cmap_vir.set_bad(color="white")
 
     im0 = ax[0].imshow(
-        stamp0, origin="lower", cmap='viridis', vmin=v0[0], vmax=v0[1]
+        stamp0, origin="lower", cmap=cmap_vir, vmin=v0[0], vmax=v0[1]
     )
     ax[0].set_title("Stamp (data)")
     fig.colorbar(im0, ax=ax[0], fraction=0.046, pad=0.03)
@@ -202,24 +206,24 @@ def save_lpi_diagnostic_plot(
     m = np.zeros_like(stamp0, dtype=float)
     m[good] = 1.0
     m[hidden] = 2.0
-    im1 = ax[1].imshow(m, origin="lower", cmap='viridis', vmin=0, vmax=2)
+    im1 = ax[1].imshow(m, origin="lower", cmap=cmap_vir, vmin=0, vmax=2)
     ax[1].set_title("Mask (good=1, hidden=2)")
     fig.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.03)
 
     im2 = ax[2].imshow(
-        bg_pred, origin="lower", cmap='viridis', vmin=vp[0], vmax=vp[1]
+        bg_pred, origin="lower", cmap=cmap_vir, vmin=vp[0], vmax=vp[1]
     )
     ax[2].set_title("Predicted background (hidden)")
     fig.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.03)
 
     im3 = ax[3].imshow(
-        corrected, origin="lower", cmap='viridis', vmin=v1[0], vmax=v1[1]
+        corrected, origin="lower", cmap=cmap_vir, vmin=v1[0], vmax=v1[1]
     )
     ax[3].set_title("Corrected stamp (data - pred)")
     fig.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.03)
 
     im4 = ax[4].imshow(
-        bg_sig, origin="lower", cmap='viridis', vmin=vs[0], vmax=vs[1]
+        bg_sig, origin="lower", cmap=cmap_vir, vmin=vs[0], vmax=vs[1]
     )
     ax[4].set_title("Predicted sigma (hidden)")
     fig.colorbar(im4, ax=ax[4], fraction=0.046, pad=0.03)
@@ -244,6 +248,11 @@ def save_lpi_diagnostic_plot(
 
     if title:
         fig.suptitle(str(title), fontsize=11)
-    fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+    fig.savefig(
+        save_path,
+        dpi=150,
+        bbox_inches="tight",
+        facecolor=get_plot_color("figure_facecolor"),
+    )
     plt.close(fig)
 
