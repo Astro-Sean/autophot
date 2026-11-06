@@ -758,6 +758,30 @@ def _additional_target_sfft_ban_xy(
     return ban_xy
 
 
+def _sources_far_from_positions(xy, banned_xy, radius):
+    """Keep-mask: False only for rows within radius of a banned (x, y).
+
+    Used to ban the transient position (and known variables) from the
+    subtraction prior pool.  Rows with non-finite coordinates are kept
+    - the helper vetoes positions measurably close to a ban, it does
+    not double as a finite-coordinate filter.
+    """
+    xy = np.asarray(xy, dtype=float).reshape(-1, 2)
+    n = len(xy)
+    if n == 0:
+        return np.ones(0, dtype=bool)
+    banned = np.asarray(banned_xy, dtype=float).reshape(-1, 2)
+    banned = banned[np.isfinite(banned).all(axis=1)]
+    if len(banned) == 0:
+        return np.ones(n, dtype=bool)
+    keep = np.ones(n, dtype=bool)
+    finite = np.isfinite(xy).all(axis=1)
+    if finite.any():
+        dist, _ = cKDTree(banned).query(xy[finite], k=1)
+        keep[np.flatnonzero(finite)] = dist > float(radius)
+    return keep
+
+
 def _header_numeric_value(cfg_value, header):
     """
     Resolve a telescope.yml keyword entry to a numeric value, or None.
@@ -3559,6 +3583,7 @@ def run_photometry():
                 image=image,
                 header=header,
                 use_lacosmic=use_lacosmic,
+                cr_backend=_cr_cfg.get("cr_backend", None),
             ).remove(
                 bkg=background_surface,
                 bkg_rms=background_rms,
@@ -8491,6 +8516,75 @@ def run_photometry():
                                     f"but too few would remain; keeping all."
                                 )
 
+                # --- Target ban ---
+                # A matched pair at the configured target position is
+                # transient-plus-host flux.  Whichever path later admits
+                # it - flux-consistency inliers, the SNR fallback, the
+                # NaN-flux add-back, the sparse passthrough, or the ZOGY
+                # LSQ stamp list built from image_sources - it biases
+                # the kernel fit and the flux scale, so the pair is
+                # dropped from BOTH catalogs here.  No keep-floor: a bad
+                # prior is worse than a missing one.  The sparse-prior
+                # supplement and the SFFT XY_PriorBan list ban the same
+                # position independently downstream.
+                try:
+                    _ban_tx = float(input_yaml.get("target_x_pix"))
+                    _ban_ty = float(input_yaml.get("target_y_pix"))
+                except (TypeError, ValueError):
+                    _ban_tx = _ban_ty = np.nan
+                if (
+                    np.isfinite(_ban_tx)
+                    and np.isfinite(_ban_ty)
+                    and float(
+                        _ts_cfg.get("sfft_target_exclusion_fwhm", 2.0)
+                    )
+                    > 0
+                ):
+                    _ban_fwhm = float(
+                        _ts_cfg.get("sfft_target_exclusion_fwhm", 2.0)
+                    )
+                    try:
+                        _ban_ft = float(template_fwhm)
+                    except (TypeError, ValueError):
+                        _ban_ft = np.nan
+                    if not np.isfinite(_ban_ft) or _ban_ft <= 0:
+                        _ban_ft = (
+                            float(ImageFWHM)
+                            if np.isfinite(ImageFWHM)
+                            else 3.0
+                        )
+                    _ban_r = max(
+                        3.0,
+                        _ban_fwhm
+                        * max(
+                            float(ImageFWHM)
+                            if np.isfinite(ImageFWHM)
+                            else 3.0,
+                            _ban_ft,
+                        ),
+                    )
+                    _ban_keep = _sources_far_from_positions(
+                        image_sources[["x_pix", "y_pix"]].to_numpy(
+                            dtype=float
+                        ),
+                        [[_ban_tx, _ban_ty]],
+                        _ban_r,
+                    )
+                    _n_ban = int((~_ban_keep).sum())
+                    if _n_ban:
+                        _ximg_mask &= _ban_keep
+                        logging.info(
+                            "Target ban: removed %d matched source(s) "
+                            "within %.1f px of the target (%.2f, %.2f) "
+                            "from the subtraction prior pool - the "
+                            "transient must not seed the kernel fit "
+                            "or flux scale.",
+                            _n_ban,
+                            _ban_r,
+                            _ban_tx,
+                            _ban_ty,
+                        )
+
                 if _ximg_mask.sum() < _n_before_ximg:
                     image_sources = image_sources[_ximg_mask].copy()
                     template_sources = template_sources[_ximg_mask].copy()
@@ -10333,7 +10427,24 @@ def run_photometry():
 
             # Prior-free SFFT retries bypass the vetted-source list, so every
             # configured transient must remain banned even when it is absent
-            # from the variable-source catalog.
+            # from the variable-source catalog.  The primary target is the
+            # transient being measured: it can appear in SFFT's own
+            # detection list but must never seed a kernel prior.
+            try:
+                _ptx = float(input_yaml.get("target_x_pix"))
+                _pty = float(input_yaml.get("target_y_pix"))
+            except (TypeError, ValueError):
+                _ptx = _pty = np.nan
+            if np.isfinite(_ptx) and np.isfinite(_pty):
+                _p_border = 1.5 * float(ImageFWHM)
+                _p_ny, _p_nx = image.shape
+                if (
+                    _p_border <= _ptx < _p_nx - _p_border
+                    and _p_border <= _pty < _p_ny - _p_border
+                ):
+                    # Same 1-based convention as the variable-source and
+                    # additional-target bans for XY_PriorBan.
+                    masked_sources.append([_ptx + 1.0, _pty + 1.0])
             _additional_mask_xy = _additional_target_sfft_ban_xy(
                 input_yaml,
                 imageWCS,
@@ -14608,6 +14719,51 @@ def run_photometry():
                     TargetPosition.at[idx, f"{inst_col}_err"],
                     image_zeropoint[method]["zeropoint_error"],
                 ]
+                # Spatial ZP surface (zeropoint.spatial_zp_surface):
+                # delta = ZP + s(x, y), so the field-mean ZP is corrected
+                # at the target's own pixel position.  The surface-fit
+                # covariance at that point joins the error budget.
+                _zp_surface = _zp_info.get("zp_surface")
+                if isinstance(_zp_surface, dict) and _zp_surface.get(
+                    "applied"
+                ):
+                    _tsx = input_yaml.get("target_x_pix")
+                    _tsy = input_yaml.get("target_y_pix")
+                    if (
+                        _tsx is not None
+                        and _tsy is not None
+                        and np.isfinite(float(_tsx))
+                        and np.isfinite(float(_tsy))
+                    ):
+                        _sv, _se, _s_in_hull = (
+                            Zeropoint.eval_spatial_zp_surface(
+                                _zp_surface, float(_tsx), float(_tsy)
+                            )
+                        )
+                        cal_mag += _sv
+                        if np.isfinite(_se) and _se > 0:
+                            errorTerms.append(_se)
+                        if _s_in_hull:
+                            logging.info(
+                                "%s: spatial ZP correction at target "
+                                "(%.1f, %.1f) = %+.4f +/- %.4f mag",
+                                method,
+                                float(_tsx),
+                                float(_tsy),
+                                _sv,
+                                _se,
+                            )
+                        else:
+                            logging.warning(
+                                "%s: target (%0.1f, %.1f) lies outside "
+                                "the spatial ZP calibrator footprint; "
+                                "applied correction %+.4f mag is an "
+                                "extrapolation.",
+                                method,
+                                float(_tsx),
+                                float(_tsy),
+                                _sv,
+                            )
                 # Rescaled diff aperture: inst_AP encloses a different PSF
                 # fraction than the science aperture ZP_AP was fitted on.
                 # The residual bridges the two so inst + ZP stays on the
