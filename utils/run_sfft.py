@@ -2811,6 +2811,15 @@ def run_sfft() -> Optional[int]:
                         f"Kernel-quality audit failed ({_kq_e}); skipping."
                     )
 
+                # Diagnostic-plot format shared by the kernel and matching
+                # plots; resolved once so a skipped kernel block cannot leave
+                # the name undefined for generate_plot().
+                _plot_fmt = str(
+                    getattr(args, "plot_format", "png") or "png"
+                ).strip().lower().lstrip(".")
+                if _plot_fmt not in ("png", "svg"):
+                    _plot_fmt = "png"
+
                 # --- Kernel PNG ---
                 # The realized matching kernel is the direct evidence for
                 # under-constrained solves (noisy wings), undersized kernels
@@ -2975,10 +2984,10 @@ def run_sfft() -> Optional[int]:
                         safe_tight_layout(_kfig)
                         _kfig.savefig(
                             os.path.join(
-                                out_dir, f"SFFT_Kernel_{out_base}.png"
+                                out_dir, f"SFFT_Kernel_{out_base}.{_plot_fmt}"
                             ),
                             bbox_inches="tight",
-                            facecolor="white",
+                            facecolor=get_plot_color("figure_facecolor"),
                         )
                         plt.close(_kfig)
                 except Exception as _kpng_e:
@@ -3271,16 +3280,10 @@ def run_sfft() -> Optional[int]:
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
                     ax.legend(loc="best", frameon=False, fontsize=8)
                     ax.set_title(f"SFFT source matching: {n_input} input -> {n_final} final sources", fontsize=10)
-                    _plot_fmt = str(getattr(args, "plot_format", "png") or "png").strip().lower().lstrip(".")
-                    if _plot_fmt not in ("png", "svg"):
-                        _plot_fmt = "png"
                     png_path = os.path.join(out_dir, f"SFFT_Matching_{out_base}.{_plot_fmt}")
-                    try:
-                        plt.savefig(
-                            png_path, bbox_inches="tight", dpi=150, facecolor="white"
-                        )
-                    except Exception:
-                        pass
+                    fig.savefig(
+                        png_path, bbox_inches="tight", dpi=150, facecolor=get_plot_color("figure_facecolor")
+                    )
                     plt.close(fig)
                 except Exception as e:
                     log_warning(f"Failed to generate diagnostic plot: {e}")
