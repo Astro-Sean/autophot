@@ -130,6 +130,46 @@ def psf_photometry_threads(cfg=None, default=1):
     return photutils_n_threads(cfg, default=default)
 
 
+def patch_simbad_session_timeout(timeout: float = 30.0) -> None:
+    """Give every SIMBAD HTTP request a socket-level timeout.
+
+    astroquery >= 0.4.8 routes Simbad through a pyvo TAP service whose
+    requests session has no default timeout, so a down or hung server
+    blocks ``query_region`` - and even ``add_votable_fields``, which
+    fetches column metadata over TAP - until the TCP layer gives up.
+    The public ``Simbad.timeout`` attribute only sets the server-side
+    execution duration for async jobs, and its setter performs a
+    capabilities fetch of its own, so it cannot bound the wait.
+
+    Wrapping the shared session's ``request`` injects a connect+read
+    timeout into every call path, including the metadata and
+    capabilities probes pyvo issues behind the scenes.  Idempotent;
+    safe to call before each Simbad use.
+    """
+    try:
+        from astroquery.simbad import Simbad
+    except Exception:
+        return
+    session = getattr(Simbad, "_session", None)
+    if session is None:
+        return
+    marker = "_autophot_simbad_timeout_s"
+    if getattr(session, marker, None) is not None:
+        return
+    try:
+        orig_request = session.request
+
+        def _request_with_timeout(method, url, *args, **kwargs):
+            if kwargs.get("timeout") is None:
+                kwargs["timeout"] = timeout
+            return orig_request(method, url, *args, **kwargs)
+
+        session.request = _request_with_timeout
+        setattr(session, marker, timeout)
+    except Exception:
+        return
+
+
 def _fits_cache_key(fpath):
     """Return a cache key tuple (path, mtime, size) or None if stat fails."""
     try:
