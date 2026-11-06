@@ -308,7 +308,12 @@ def calibrate_source_ids_batched(
 
         def _once() -> Any:
             with quiet_gaia_tap_info_logs(quiet_tap_info_logs):
-                return calibrate(chunk)
+                # save_file=False keeps GaiaXPy from writing output_spectra.*
+                # to cwd on every batch call.
+                try:
+                    return calibrate(chunk, save_file=False)
+                except TypeError:
+                    return calibrate(chunk)
 
         part = retry_with_backoff(
             _once,
@@ -372,19 +377,30 @@ def generate_source_ids_batched(
                 # GaiaXPy supports optional error correction, and (>=2.1.4) truncation.
                 # We pass these through when available; older versions may not accept
                 # `truncation` and will raise TypeError, in which case we retry without it.
+                # save_file=False keeps GaiaXPy from writing
+                # output_synthetic_photometry.* to cwd on every batch call.
                 try:
                     return generate(
                         chunk,
                         photometric_system=photometric_system,
                         error_correction=bool(error_correction),
                         truncation=bool(truncation),
+                        save_file=False,
                     )
                 except TypeError:
-                    return generate(
-                        chunk,
-                        photometric_system=photometric_system,
-                        error_correction=bool(error_correction),
-                    )
+                    try:
+                        return generate(
+                            chunk,
+                            photometric_system=photometric_system,
+                            error_correction=bool(error_correction),
+                            save_file=False,
+                        )
+                    except TypeError:
+                        return generate(
+                            chunk,
+                            photometric_system=photometric_system,
+                            error_correction=bool(error_correction),
+                        )
 
         part = retry_with_backoff(
             _once,
@@ -456,15 +472,18 @@ def sort_gaia_table_nearest_to_target(
     """Keep up to ``max_rows`` rows with smallest angular distance to the target."""
     if df.empty or max_rows <= 0:
         return df.iloc[:0].copy()
-    from astropy import units as u
-    from astropy.coordinates import SkyCoord
+    # angular_separation applies the same Vincenty formula as
+    # SkyCoord.separation for ICRS positions, without building frame objects.
+    from astropy.coordinates import angular_separation
 
-    target = SkyCoord(ra=float(ra_deg) * u.deg, dec=float(dec_deg) * u.deg)
-    c = SkyCoord(
-        ra=np.asarray(df[ra_col].values, dtype=float) * u.deg,
-        dec=np.asarray(df[dec_col].values, dtype=float) * u.deg,
+    sep_deg = np.degrees(
+        angular_separation(
+            np.radians(float(ra_deg)),
+            np.radians(float(dec_deg)),
+            np.radians(np.asarray(df[ra_col].values, dtype=float)),
+            np.radians(np.asarray(df[dec_col].values, dtype=float)),
+        )
     )
-    sep_deg = target.separation(c).deg
     out = df.copy()
     out["_autophot_sep_deg"] = sep_deg
     out = out.sort_values("_autophot_sep_deg", kind="mergesort").head(int(max_rows))
@@ -508,22 +527,29 @@ def gaia_cone_count(
     radius_deg: float,
     *,
     xp_only: bool = False,
+    require_g_mag: bool = False,
     max_retries: int = 3,
     retry_base_delay_sec: float = 2.0,
+    pause_before_sec: float = 0.25,
+    pause_after_sec: float = 0.25,
     logger: Optional[logging.Logger] = None,
 ) -> Optional[int]:
     """COUNT(*) of Gaia DR3 sources in a cone.
 
     With ``xp_only=True`` counts only sources carrying XP continuous
     spectra (the subset GaiaXPy can synthesize photometry from).
+    ``require_g_mag=True`` additionally demands ``phot_g_mean_mag IS NOT
+    NULL``, matching the WHERE clause of :func:`gaia_xp_source_query` so the
+    count equals the number of rows a data query could return.
     Returns None when the count query fails -- diagnostics must not
     break the catalog build.
     """
     xp_clause = "has_xp_continuous = 'True' AND " if xp_only else ""
+    gmag_clause = "phot_g_mean_mag IS NOT NULL AND " if require_g_mag else ""
     query = f"""
     SELECT COUNT(*) AS n
     FROM gaiadr3.gaia_source AS gs
-    WHERE {xp_clause}CONTAINS(
+    WHERE {xp_clause}{gmag_clause}CONTAINS(
             POINT('ICRS', gs.ra, gs.dec),
             CIRCLE('ICRS', {ra_deg}, {dec_deg}, {radius_deg})
           ) = 1
@@ -531,6 +557,8 @@ def gaia_cone_count(
     try:
         df = launch_gaia_adql_to_pandas(
             query,
+            pause_before_sec=pause_before_sec,
+            pause_after_sec=pause_after_sec,
             max_retries=max_retries,
             retry_base_delay_sec=retry_base_delay_sec,
             logger=logger,
@@ -569,6 +597,12 @@ def query_gaia_xp_cone_growing(
     ``max_radius_deg``. Growth is disabled when ``min_sources <= 0``,
     ``grow_factor <= 1``, or ``max_radius_deg <= radius_deg``.
 
+    After the first data fetch, trial radii are probed with cheap COUNT(*)
+    queries instead of re-downloading up to ``sql_top_n`` rows per step; the
+    full SELECT runs once more at the chosen radius. ``len(rows)`` equals
+    ``min(count, sql_top_n)`` for a cone query, so the growth decision is the
+    same as re-fetching at each radius.
+
     Returns ``(rows, used_radius_deg)``.
     """
     used_radius = float(radius_deg)
@@ -576,19 +610,17 @@ def query_gaia_xp_cone_growing(
     cap = max(cap, used_radius)
     needed = max(0, int(min_sources))
     factor = float(grow_factor)
+    top = max(1, int(sql_top_n))
 
-    df = pd.DataFrame()
-    # The loop converges because factor > 1 drives used_radius to cap.
-    for _ in range(20):
-        query = gaia_xp_source_query(
-            ra_deg,
-            dec_deg,
-            used_radius,
-            sql_top_n,
-            include_bp_rp=include_bp_rp,
-        )
-        df = launch_gaia_adql_to_pandas(
-            query,
+    def _fetch() -> pd.DataFrame:
+        return launch_gaia_adql_to_pandas(
+            gaia_xp_source_query(
+                ra_deg,
+                dec_deg,
+                used_radius,
+                top,
+                include_bp_rp=include_bp_rp,
+            ),
             pause_before_sec=pause_before_sec,
             pause_after_sec=pause_after_sec,
             max_retries=max_retries,
@@ -596,7 +628,39 @@ def query_gaia_xp_cone_growing(
             logger=logger,
             op_name=op_name,
         )
-        n_rows = len(df)
+
+    df = pd.DataFrame()
+    fetched = False
+    counts_ok = True
+    # The loop converges because factor > 1 drives used_radius to cap.
+    for it in range(20):
+        n_rows: Optional[int] = None
+        # Iteration 0 is always a real fetch (dense fields then need only one
+        # archive job); later trial radii are probed with COUNT(*) first.
+        if needed > 0 and it > 0 and counts_ok:
+            n_avail = gaia_cone_count(
+                ra_deg,
+                dec_deg,
+                used_radius,
+                xp_only=True,
+                require_g_mag=True,
+                max_retries=max_retries,
+                retry_base_delay_sec=retry_base_delay_sec,
+                pause_before_sec=pause_before_sec,
+                pause_after_sec=pause_after_sec,
+                logger=logger,
+            )
+            if n_avail is None:
+                # A failed count should not grow the query load; fall back to
+                # data fetches for the rest of the loop.
+                counts_ok = False
+            else:
+                n_rows = min(int(n_avail), top)
+                fetched = False
+        if n_rows is None:
+            df = _fetch()
+            n_rows = len(df)
+            fetched = True
         if n_rows >= needed or needed <= 0 or used_radius >= cap or factor <= 1.0:
             break
         new_radius = min(used_radius * factor, cap)
@@ -611,6 +675,9 @@ def query_gaia_xp_cone_growing(
                 cap,
             )
         used_radius = new_radius
+
+    if not fetched:
+        df = _fetch()
 
     if used_radius > float(radius_deg) and logger is not None:
         logger.info(
