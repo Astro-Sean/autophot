@@ -40,6 +40,7 @@ class RemoveCosmicRays:
         image: np.ndarray,
         header: dict,
         use_lacosmic: bool = False,
+        cr_backend: str | None = None,
     ):
         """
         Initialize the cosmic ray removal process.
@@ -50,12 +51,16 @@ class RemoveCosmicRays:
             image: Image data as a numpy array.
             header: FITS header as a dictionary.
             use_lacosmic: Flag to use L.A.Cosmic algorithm (default: False).
+            cr_backend: Backend name - 'astroscrappy', 'lacosmic', or
+                'dfcosmic'.  When None the legacy use_lacosmic flag
+                decides between astroscrappy and ccdproc lacosmic.
         """
         self.input_yaml = input_yaml
         self.fpath = fpath
         self.image = image
         self.header = header
         self.use_lacosmic = use_lacosmic
+        self.cr_backend = cr_backend
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
     # --- Mask Creation ---
@@ -580,9 +585,32 @@ class RemoveCosmicRays:
         self.logger.debug("Using PSF size: %s (FWHM: %.1f pixels)", psf_size, psf_fwhm)
 
         # --- Run cosmic ray removal ---
-        # ccdproc is only needed for the lacosmic path; keep the import lazy
-        # so the (default) astroscrappy path works without it installed.
-        _use_lacosmic = self.use_lacosmic
+        # Backend resolution: cr_backend overrides the legacy
+        # use_lacosmic flag.  ccdproc (lacosmic) and dfcosmic are
+        # optional runtime dependencies, so their imports stay lazy and
+        # the default astroscrappy path works without them installed.
+        _cr_backend = str(self.cr_backend or "").strip().lower()
+        if not _cr_backend:
+            _cr_backend = "lacosmic" if self.use_lacosmic else "astroscrappy"
+        if _cr_backend not in ("astroscrappy", "lacosmic", "dfcosmic"):
+            self.logger.warning(
+                "Unknown cosmic-ray backend %r; using astroscrappy.",
+                _cr_backend,
+            )
+            _cr_backend = "astroscrappy"
+        _use_lacosmic = _cr_backend == "lacosmic"
+        _use_dfcosmic = _cr_backend == "dfcosmic"
+        if _use_dfcosmic:
+            try:
+                from dfcosmic import lacosmic as _df_lacosmic
+            except ImportError as exc:
+                self.logger.warning(
+                    "cr_backend='dfcosmic' requested but dfcosmic is not "
+                    "installed (%s); falling back to astroscrappy.",
+                    exc,
+                )
+                _use_dfcosmic = False
+                _cr_backend = "astroscrappy"
         if _use_lacosmic:
             try:
                 # Optional runtime dependency (declared in requirements.txt /
@@ -596,8 +624,48 @@ class RemoveCosmicRays:
                     exc,
                 )
                 _use_lacosmic = False
+                _cr_backend = "astroscrappy"
         try:
-            if _use_lacosmic:
+            if _use_dfcosmic:
+                self.logger.info(
+                    "Using dfcosmic for cosmic ray removal (CPU, true "
+                    "median filter)"
+                )
+                # dfcosmic validates gain/readnoise strictly (finite,
+                # >=0; gain=0 means estimate from the image).  Sanitise
+                # bad header values rather than failing the CR step.
+                _df_gain = (
+                    float(gain)
+                    if gain is not None and np.isfinite(gain) and gain >= 0
+                    else 0.0
+                )
+                _df_rn = (
+                    float(readnoise)
+                    if readnoise is not None
+                    and np.isfinite(readnoise)
+                    and readnoise >= 0
+                    else 0.0
+                )
+                _clean32, _cr = _df_lacosmic(
+                    np.asarray(self.image, dtype=np.float32),
+                    sigclip=sigclip,
+                    sigfrac=sigfrac,
+                    objlim=objlim,
+                    gain=_df_gain,
+                    readnoise=_df_rn,
+                    niter=4,
+                    device="cpu",
+                )
+                cr_mask = np.asarray(_cr, dtype=bool)
+                clean_image = np.asarray(_clean32, dtype=np.float64)
+                # dfcosmic takes no input mask: protected pixels are
+                # un-flagged and their original values restored after
+                # the run so the exclusion semantics match the
+                # astroscrappy inmask path.
+                _prot = np.asarray(mask, dtype=bool)
+                cr_mask &= ~_prot
+                clean_image = np.where(_prot, self.image, clean_image)
+            elif _use_lacosmic:
                 self.logger.info(
                     "Using ccdproc.cosmicray_lacosmic for cosmic ray removal"
                 )
@@ -724,7 +792,13 @@ class RemoveCosmicRays:
 
             # --- Update Header ---
             method = (
-                "ccdproc.cosmicray_lacosmic" if _use_lacosmic else "astroscrappy"
+                "dfcosmic"
+                if _use_dfcosmic
+                else (
+                    "ccdproc.cosmicray_lacosmic"
+                    if _use_lacosmic
+                    else "astroscrappy"
+                )
             )
             self.header["CRAY_RMD"] = (True, "Cosmic rays removed; skip CR step on rerun")
             self.header.add_history(f"Cosmic ray removal: {n_cr_raw} pixels cleaned (dilated mask: {n_cr})")
