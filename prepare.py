@@ -519,11 +519,15 @@ class Prepare:
 
             if not self.input_yaml.get("validate_fits_headers_non_interactive", False):
                 try:
-                    response = input(
+                    print(
                         f"\n  {len(warnings_list)} file(s) have missing important header keywords.\n"
                         f"  These files may cause issues during processing.\n"
-                        f"  Continue anyway? [y/N]: "
-                    ).strip().lower()
+                        f"  Continue anyway? [y/N]: ",
+                        file=sys.stderr,
+                        end="",
+                        flush=True,
+                    )
+                    response = input().strip().lower()
                     if response not in ("y", "yes"):
                         self.logger.info("User chose to stop. Exiting.")
                         sys.exit("Stopped: FITS header validation failed (missing important keywords).")
@@ -898,7 +902,7 @@ class Prepare:
                     filt_name = filt.get("name", "") if isinstance(filt, dict) else ""
                     pairs.append(
                         (
-                            "Disc. mag",
+                            "Discovery mag",
                             f"{tns_data['discoverymag']}"
                             + (f" ({filt_name})" if filt_name else ""),
                         )
@@ -1804,15 +1808,14 @@ class Prepare:
                 )
 
         if incorrect_setup:
-            quit_answer = (
-                input(
-                    "\nTemplate directory appears incomplete or ambiguous (missing and/or multiple templates).\n"
-                    "Continue anyway and skip problematic filters? [y/N]: "
-                )
-                .strip()
-                .lower()
-                or "n"
+            print(
+                "\nTemplate directory appears incomplete or ambiguous (missing and/or multiple templates).\n"
+                "Continue anyway and skip problematic filters? [y/N]: ",
+                file=sys.stderr,
+                end="",
+                flush=True,
             )
+            quit_answer = input().strip().lower() or "n"
             if quit_answer not in ("y", "yes"):
                 raise Exception(
                     "Please check template directory and subdirectories and try again."
