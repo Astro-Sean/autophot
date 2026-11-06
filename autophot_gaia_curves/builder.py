@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 
 from autophot_gaia_curves.gaia_archive import (
+    _gaiaxpy_chunk_size,
     calibrate_source_ids_batched,
     gaia_xp_sql_top_n,
     query_gaia_xp_cone_growing,
@@ -857,12 +858,12 @@ class GaiaCurveCatalogBuilder:
             curve_nm, wl_note = self.curve_wavelength_axis_to_nm(wl_raw)
             loaded_curves[band] = (curve_nm, tr)
             self.logger.info(
-                "Loaded curve for %s from %s - %s; on XP grid -> %.1f-%.1f nm.",
+                "Loaded curve %s: %.1f-%.1f nm on XP grid (%s), %s",
                 band,
-                path,
-                wl_note,
                 float(np.nanmin(curve_nm)),
                 float(np.nanmax(curve_nm)),
+                wl_note,
+                path,
             )
 
         sql_top, sort_by_distance = gaia_xp_sql_top_n(
@@ -921,17 +922,17 @@ class GaiaCurveCatalogBuilder:
                 len(gaia) - len(source_ids),
                 len(gaia),
             )
-        eff_bs = (
-            gaia_xp_batch_size
-            if gaia_xp_batch_size > 0
-            else max(len(source_ids), 1)
+        # Report the archive-capped request size, not the configured
+        # batch size: the batched call clamps to the same limit.
+        eff_bs = _gaiaxpy_chunk_size(
+            gaia_xp_batch_size, len(source_ids), None
         )
         n_batches = max(1, (len(source_ids) + eff_bs - 1) // eff_bs) if source_ids else 0
         self.logger.info(
-            "Calibrating Gaia XP spectra for %d sources (%d batch(es), batch_size=%s, inter_batch_pause=%.2fs) ...",
+            "Calibrating Gaia XP spectra for %d sources (%d batch(es), batch_size=%d, inter_batch_pause=%.2fs) ...",
             len(source_ids),
             n_batches,
-            gaia_xp_batch_size if gaia_xp_batch_size > 0 else "all",
+            eff_bs,
             gaia_xp_batch_pause_sec,
         )
         spectra_df, xp_sampling_nm = calibrate_source_ids_batched(
