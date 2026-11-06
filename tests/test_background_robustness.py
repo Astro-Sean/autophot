@@ -636,6 +636,29 @@ class TestMaxiMaskIntegration:
         assert res["image"].shape == flat_image.shape
         assert not list(tmp_path.glob("Maximask_*"))
 
+    def test_maximask_plot_written_without_plot_flag(
+        self, flat_image, base_config, monkeypatch, tmp_path
+    ):
+        """use_maximask must emit Maximask_<base> even on plot=False passes -
+        the second/third remove() calls per epoch run without diagnostics."""
+        fake = self._fake_probs(flat_image.shape, {"SAT": np.s_[40:44, 30:60]})
+        self._patch_probs(monkeypatch, fake)
+        cfg = self._cfg(base_config, use_maximask=True, maximask_classes=["SAT"])
+        BackgroundSubtractor(cfg).remove(flat_image, plot=False)
+        assert len(list(tmp_path.glob("Maximask_*"))) == 1
+
+    def test_maximask_plot_written_on_inference_failure(
+        self, flat_image, base_config, monkeypatch, tmp_path
+    ):
+        """A failed/unavailable MaxiMask stage still leaves a figure behind,
+        annotated with the reason, so 'requested but broken' is visible."""
+        self._patch_probs(monkeypatch, None)
+        cfg = self._cfg(base_config, use_maximask=True)
+        sub = BackgroundSubtractor(cfg)
+        sub.remove(flat_image, plot=False)
+        assert len(list(tmp_path.glob("Maximask_*"))) == 1
+        assert sub._maximask_error is not None
+
     def test_inference_cached_per_image(self, flat_image, base_config, monkeypatch):
         """remove() runs twice per epoch on the same pixels; the second
         call must reuse the cached mask instead of re-running inference."""
