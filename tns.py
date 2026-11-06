@@ -11,7 +11,7 @@ import json
 import logging
 from collections import OrderedDict
 
-from functions import ascii_kv
+from functions import ascii_kv, patch_simbad_session_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ def get_coords(objname, TNS_BOT_ID=None, TNS_BOT_NAME=None, TNS_BOT_API=None):
     }
 
     try:
-        response = requests.post(url, headers=headers, data=payload)
+        response = requests.post(url, headers=headers, data=payload, timeout=30)
         response.raise_for_status()
         json_data = json.loads(format_to_json(response.text))
         data = json_data.get("data")
@@ -159,6 +159,11 @@ def get_coords_simbad(target_name):
         from astroquery.simbad import Simbad
         from astropy.coordinates import SkyCoord
         import astropy.units as u
+
+        # Bound every Simbad HTTP call (metadata fetch + query) so a down
+        # or hung server degrades to the manual-coordinate fallback
+        # instead of stalling name resolution.
+        patch_simbad_session_timeout()
 
         Simbad.reset_votable_fields()
         Simbad.add_votable_fields("ra", "dec", "otype")
