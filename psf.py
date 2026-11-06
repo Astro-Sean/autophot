@@ -5187,7 +5187,7 @@ def plot_analytic_psf(
 
         if save_path:
             fig.savefig(
-                save_path, dpi=150, bbox_inches="tight", facecolor="white"
+                save_path, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white')
             )
             plt.close(fig)
             return None
@@ -10880,7 +10880,7 @@ class PSF:
                     axis.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
 
             if save_path:
-                plt.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+                fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
                 plt.close(fig)
                 return None
 
@@ -11872,7 +11872,7 @@ class PSF:
                     facecolors="none",
                     # Magenta contrasts with all four cell colours and the
                     # grayscale background.
-                    edgecolors="#FF00FF",
+                    edgecolors=PLOT_COLORS.get('transient_marker', '#FF00FF'),
                     linewidths=1.2,
                     label="transient",
                 )
@@ -11891,7 +11891,7 @@ class PSF:
             write_dir,
             f"PSF_Grid_{base}{get_plot_ext(self.input_yaml)}",
         )
-        fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+        fig.savefig(out, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
         logging.getLogger(__name__).info(
             "Saved gridded ePSF diagnostic plot: %s", os.path.basename(out)
@@ -12128,7 +12128,7 @@ class PSF:
             psf_sources_png,
             bbox_inches="tight",
             dpi=150,
-            facecolor="white",
+            facecolor=PLOT_COLORS.get('figure_facecolor', 'white'),
         )
         plt.close(fig)
         return 1
@@ -15377,7 +15377,7 @@ class PSF:
                         ):
                             _ellipses.append(Ellipse((x, y), 2 * xe, 2 * ye, angle=0))
                     if _ellipses:
-                        ec = _PC(_ellipses, edgecolors="#D94F4F", facecolors="none",
+                        ec = _PC(_ellipses, edgecolors=PLOT_COLORS.get('target', '#E31B23'), facecolors="none",
                                   linewidths=0.5, alpha=0.6, zorder=9)
                         _ax.add_collection(ec)
 
@@ -15562,7 +15562,7 @@ class PSF:
                         _sci_ax_R,
                         _sci_ax_B,
                         fitted_model,
-                        color="#D94F4F",
+                        color=PLOT_COLORS.get('fit', '#D94F4F'),
                     )
 
             # ---- ePSF panels (last column, repeated on each target row) ----
@@ -15689,7 +15689,7 @@ class PSF:
                 os.path.join(write_dir, save_name_png),
                 bbox_inches="tight",
                 dpi=150,
-                facecolor="white",
+                facecolor=PLOT_COLORS.get('figure_facecolor', 'white'),
             )
             plt.close(fig)
 
@@ -15881,7 +15881,7 @@ class PSF:
             outpath_png,
             dpi=150,
             bbox_inches="tight",
-            facecolor="white",
+            facecolor=PLOT_COLORS.get('figure_facecolor', 'white'),
         )
         plt.close(fig)
         return outpath_png
