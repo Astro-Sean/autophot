@@ -22,7 +22,6 @@ FIG_DIR = os.path.join(REPO_ROOT, "figures")
 
 BIBCODE = "2022A&A...667A..62B"
 OPENALEX_ID = "W4308595501"
-FIRST_YEAR = 2022
 
 
 def _get_json(url, headers=None):
@@ -85,7 +84,7 @@ def fetch_citing_years():
 
 def make_figure(years, out_base):
     counts = Counter(years)
-    year_axis = list(range(FIRST_YEAR, max(counts) + 1))
+    year_axis = list(range(min(counts), max(counts) + 1))
     per_year = [counts.get(y, 0) for y in year_axis]
     cumulative = np.cumsum(per_year)
 
@@ -98,8 +97,6 @@ def make_figure(years, out_base):
         }
     )
     fig, ax = plt.subplots(figsize=(3.4, 2.3))
-    ax.bar(year_axis, per_year, color="#a6cee3", width=0.7,
-           label="per year", zorder=2)
     ax.plot(
         year_axis,
         cumulative,
@@ -107,28 +104,27 @@ def make_figure(years, out_base):
         marker="o",
         markersize=3.5,
         linewidth=1.4,
-        label="cumulative",
         zorder=3,
     )
     ax.annotate(
         str(int(cumulative[-1])),
         (year_axis[-1], cumulative[-1]),
         textcoords="offset points",
-        xytext=(2, 6),
+        xytext=(-4, 8),
+        ha="right",
         fontsize=7,
         color="#1f78b4",
     )
     ax.set_xlabel("Year")
-    ax.set_ylabel("Papers citing AutoPhOT")
+    ax.set_ylabel("Papers using AutoPhOT")
     ax.set_xticks(year_axis)
     ax.set_ylim(0, cumulative[-1] * 1.15)
     ax.spines[["top", "right"]].set_visible(False)
-    ax.legend(frameon=False, fontsize=7, loc="upper left")
     fig.tight_layout()
     fig.savefig(out_base + ".png", dpi=300)
     fig.savefig(out_base + ".pdf")
     plt.close(fig)
-    return per_year
+    return year_axis, per_year
 
 
 def main():
@@ -143,15 +139,13 @@ def main():
 
     os.makedirs(FIG_DIR, exist_ok=True)
     out_base = os.path.join(FIG_DIR, "citations_over_time")
-    per_year = make_figure(years, out_base)
+    year_axis, per_year = make_figure(years, out_base)
 
     record = {
         "source": source,
         "fetched": date.today().isoformat(),
         "total": len(years),
-        "per_year": dict(
-            zip(range(FIRST_YEAR, FIRST_YEAR + len(per_year)), per_year)
-        ),
+        "per_year": dict(zip(year_axis, per_year)),
     }
     with open(out_base + ".json", "w", encoding="utf-8") as fh:
         json.dump(record, fh, indent=2)
