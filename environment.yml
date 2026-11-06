@@ -43,3 +43,5 @@ dependencies:
     - sfft==1.7.3
     - spalipy>=3.5
     - sip_tpv==1.1
+    # Gaia XP spectra -> synthetic photometry ("gaia"/"gaia_custom" catalogs)
+    - gaiaxpy==2.1.5
