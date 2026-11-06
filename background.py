@@ -76,8 +76,9 @@ from scipy.ndimage import uniform_filter
 from functions import (STATUS, biweight_sky_sigma, biweight_stdfunc,
                        border_msg, log_step, log_warning_from_exception,
                        photutils_n_threads, set_size)
-from plotting_utils import (apply_autophot_mplstyle, get_plot_ext,
-                            mask_legend_patch, overlay_mask_hatch)
+from plotting_utils import (apply_autophot_mplstyle, get_plot_color,
+                            get_plot_ext, mask_legend_patch,
+                            overlay_mask_hatch)
 from wcs import get_wcs
 
 
@@ -2063,7 +2064,7 @@ class BackgroundSubtractor:
             f"{prefix_title}_{base}{get_plot_ext(getattr(self, 'config', None))}",
         )
 
-        fig.savefig(save_path_png, dpi=150, bbox_inches="tight", facecolor="white")
+        fig.savefig(save_path_png, dpi=150, bbox_inches="tight", facecolor=get_plot_color("figure_facecolor"))
         plt.close(fig)
 
     # =========================================================================
