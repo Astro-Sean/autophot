@@ -124,6 +124,7 @@ PLOT_COLORS = {
     # --- Source markers (overlays on images) ---
     'target':          '#E31B23',   # RPTH red - target aperture / target marker
     'target_secondary':'#005CAB',   # RPTH medium blue - non-primary targets
+    'additional_target':'#17A2B8',  # Teal - additional transient positions (distinct from red primary and blue catalog)
     'psf':             '#4E857B',   # Sage - PSF source markers
     'reference':       '#005CAB',   # RPTH medium blue - catalog / reference source markers
     'matched':         '#005CAB',   # RPTH medium blue - matched source circles (same as reference)
@@ -134,6 +135,9 @@ PLOT_COLORS = {
     'epsf_aperture':   '#D9A020',   # Deep yellow - ePSF aperture / input-position circles (distinct from blue 'reference' bounds in the same figure)
     'scamp_matched':   '#4E857B',   # Sage - SCAMP matched markers
     'matched_box':     '#00CFFF',   # Cyan - matched-source boxes in subtraction_check (high contrast on gray)
+    'match_label':     '#D94F4F',   # Soft red - per-source index labels on matched-source figures
+    'transient_marker':'#FF00FF',   # Magenta - transient star marker (contrasts with cell colors and gray images)
+    'fit':             '#D94F4F',   # Soft red - model/fit overlay lines on data stamps
 
     # --- Scatter / offset plots ---
     'scatter_primary':  '#005CAB',  # RPTH medium blue - fallback scatter when no color-coding
@@ -373,7 +377,7 @@ def get_plot_ext(input_yaml=None) -> str:
 
 def ransac_savefig(fig, path):
     """Consistent save settings for all RANSAC / calibration plots."""
-    fig.savefig(path, bbox_inches="tight", dpi=150, facecolor="white")
+    fig.savefig(path, bbox_inches="tight", dpi=150, facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
 
 
 def set_mag_axes_inverted_xy(ax):
