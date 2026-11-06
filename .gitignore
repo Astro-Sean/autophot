@@ -68,16 +68,12 @@ Thumbs.db
 # Token / secret files
 autophot_tokens.py
 
-# Local helper scripts
-scripts/
-
 # opencode config (contains API keys)
 opencode.json
 
 temp_autophot/
 
-# Documentation
-docs/
+# Documentation (design notes are versioned; manuscripts stay local)
 *.tex
 *.bib
 
@@ -86,12 +82,10 @@ agents.md
 .devin/
 *.egg-info/
 
-# Test suite (local validation only)
-tests/
-test_*.py
+# Generated test artifacts (test code itself is versioned)
+tests/MaxiMask/output/
 
-# Local helper/debug scripts (not production)
-check_telescope_entries.py
+# Local debug/cluster scripts (not production)
 debug_*.py
 run_autophot_VIPER.py
 
