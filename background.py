@@ -271,6 +271,10 @@ class BackgroundSubtractor:
         # Per-class masks from the last successful inference; None when
         # MaxiMask is off or has not run yet.
         self._maximask_class_masks = None
+        # Reason the last MaxiMask attempt could not run (missing
+        # dependency, image too small, inference failure); annotated on
+        # the diagnostic figure.  None when inference ran or has not run.
+        self._maximask_error = None
 
         apply_autophot_mplstyle()
 
@@ -1429,6 +1433,7 @@ class BackgroundSubtractor:
         """
         ny, nx = image.shape
         if ny <= 400 or nx <= 400:
+            self._maximask_error = f"image {nx}x{ny} smaller than the 400 px tile"
             self.logger.warning(
                 "use_maximask: image %dx%d too small for MaxiMask's 400 px "
                 "tiles; skipping",
@@ -1437,6 +1442,8 @@ class BackgroundSubtractor:
             )
             return None
         if not np.any(image):
+            self._maximask_error = "blank image"
+            self.logger.warning("use_maximask: image is all zeros; skipping")
             return None
 
         _cvd_prev = None
@@ -1494,6 +1501,7 @@ class BackgroundSubtractor:
             import maximask_and_maxitrack.maximask.maximask as mm_inf_mod
             from maximask_and_maxitrack import utils
         except ImportError as exc:
+            self._maximask_error = f"missing dependency: {exc}"
             self.logger.warning(
                 "use_maximask requested but %s - continuing without MaxiMask "
                 "(optional extra; install maximask-and-maxitrack and "
@@ -1564,6 +1572,7 @@ class BackgroundSubtractor:
                 thresholds,
             )
         except Exception as exc:
+            self._maximask_error = f"inference failed: {exc}"
             self.logger.warning("MaxiMask inference failed: %s", exc)
             return None
 
@@ -1605,19 +1614,26 @@ class BackgroundSubtractor:
             self.logger.info(
                 "Reusing cached MaxiMask defect mask (unchanged detector pixels)"
             )
+            self._maximask_error = getattr(self, "_mm_error", None)
             return self._mm_mask
         self._maximask_class_masks = None
+        self._maximask_error = None
         self.logger.info(
             "Using MaxiMask (Paillassa et al. 2020) to detect %s",
             ", ".join(_MAXIMASK_CLASS_NAMES.get(c, c) for c in classes),
         )
         out = self._maximask_probabilities(image, batch_size, allow_gpu)
         if out is None:
+            if self._maximask_error is None:
+                self._maximask_error = "inference unavailable"
             mask = np.zeros(image.shape, dtype=bool)
+            self._maximask_class_masks = {}
             self._mm_sig, self._mm_mask = sig, mask
+            self._mm_error = self._maximask_error
             return mask
         probs, class_abbr, thresholds = out
         self.maximask_active = True
+        self._maximask_error = None
 
         unknown = [c for c in classes if c not in class_abbr]
         if unknown:
@@ -1648,6 +1664,7 @@ class BackgroundSubtractor:
             )
         self._maximask_mask = mask
         self._mm_sig, self._mm_mask = sig, mask
+        self._mm_error = None
         self.logger.info(
             "MaxiMask defect mask: %d px (%.2f%% of the image)",
             int(np.sum(mask)),
@@ -2097,18 +2114,21 @@ class BackgroundSubtractor:
             raise ValueError(
                 f"mask shape {np.shape(mask)} != image shape {image.shape}"
             )
-        self._require_config_keys(["saturate"] + (["fpath"] if plot else []))
+        cfg_bkg = (
+            (self.config.get("background", {}) or {})
+            if isinstance(self.config, dict)
+            else {}
+        )
+        # The Maximask_<base> figure is written whenever the stage is
+        # enabled (including plot=False passes), so fpath is needed then.
+        need_fpath = plot or bool(cfg_bkg.get("use_maximask", False))
+        self._require_config_keys(["saturate"] + (["fpath"] if need_fpath else []))
 
         if galaxies is None:
             galaxies = []
 
         self.logger.info(log_step("Background: sky & RMS"))
 
-        cfg_bkg = (
-            (self.config.get("background", {}) or {})
-            if isinstance(self.config, dict)
-            else {}
-        )
         fast_mode = bool(cfg_bkg.get("fast_mode", False))
 
         # Treat near-zero values as invalid. The threshold is configurable
@@ -2352,7 +2372,14 @@ class BackgroundSubtractor:
         # candidate exclusion and downstream photometry all respect it.
         maximask_mask = np.zeros_like(image, dtype=bool)
         if cfg_bkg.get("use_maximask", False):
-            maximask_mask = self._make_maximask_mask(image)
+            try:
+                maximask_mask = self._make_maximask_mask(image)
+            except Exception as exc:
+                # An opt-in defect stage must never take the frame down;
+                # the diagnostic figure below still records the failure.
+                self._maximask_class_masks = {}
+                self._maximask_error = f"mask build failed: {exc}"
+                self.logger.warning("MaxiMask mask build failed: %s", exc)
 
         # ---- Iterative source mask ----
         # Seed with the known-bad pixels so NaN/zero/saturated regions are
@@ -2533,8 +2560,11 @@ class BackgroundSubtractor:
             self._plot_diagnostics(
                 image, bkg_surface, sub, bkg_rms, self.config["fpath"], mask
             )
-            if cfg_bkg.get("use_maximask", False):
-                self._plot_maximask_diagnostics(image, self.config["fpath"])
+        # Opt-in stage: the figure reports what MaxiMask did on every pass
+        # (detections, clean, or failure) rather than only when generic
+        # diagnostics are requested.
+        if cfg_bkg.get("use_maximask", False):
+            self._plot_maximask_diagnostics(image, self.config["fpath"])
 
         # Defects for downstream:
         # - NaN/inf (chip gaps / invalid data)
@@ -3111,12 +3141,14 @@ class BackgroundSubtractor:
 
         Single panel: the science image with each flagged class overlaid
         in its own colour, the legend listing full class names and pixel
-        counts.  A figure is also written when the stage ran but flagged
-        nothing, so an empty mask is distinguishable from MaxiMask never
-        running.
+        counts.  A figure is also written when the stage flagged nothing
+        and when it could not run (missing dependency, too-small image,
+        inference failure), so every outcome is distinguishable from
+        MaxiMask never running.
         """
         class_masks = getattr(self, "_maximask_class_masks", None)
-        if class_masks is None:
+        mm_error = getattr(self, "_maximask_error", None)
+        if class_masks is None and mm_error is None:
             return
         apply_autophot_mplstyle()
         interval = ZScaleInterval()
@@ -3141,7 +3173,7 @@ class BackgroundSubtractor:
             interpolation="none",
         )
         handles = []
-        for name, cls_mask in class_masks.items():
+        for name, cls_mask in (class_masks or {}).items():
             color = _MAXIMASK_CLASS_COLORS.get(name, "magenta")
             overlay_mask_hatch(ax, cls_mask, color=color, fill_alpha=0.35, zorder=8)
             handles.append(
@@ -3161,6 +3193,16 @@ class BackgroundSubtractor:
                 fontsize=7,
                 framealpha=0.6,
                 frameon=True,
+            )
+        elif mm_error:
+            ax.text(
+                0.02,
+                0.02,
+                f"MaxiMask unavailable: {mm_error}",
+                transform=ax.transAxes,
+                fontsize=8,
+                color="w",
+                bbox={"facecolor": "k", "alpha": 0.5, "pad": 3},
             )
         elif not class_masks:
             ax.text(
