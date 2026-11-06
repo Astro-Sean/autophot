@@ -14,8 +14,14 @@ import urllib.request
 from collections import Counter
 from datetime import date
 
-import matplotlib.pyplot as plt
-import numpy as np
+try:
+    import matplotlib.pyplot as plt
+    import numpy as np
+except ImportError:
+    # The conda build env does not carry matplotlib; skip rather than
+    # block a release over a README figure.
+    print("[citations] WARNING: matplotlib/numpy missing; figure skipped.")
+    sys.exit(0)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIG_DIR = os.path.join(REPO_ROOT, "figures")
@@ -120,7 +126,16 @@ def make_figure(years, out_base):
     ax.set_xticks(year_axis)
     ax.set_ylim(0, cumulative[-1] * 1.15)
     ax.spines[["top", "right"]].set_visible(False)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    fig.text(
+        0.99,
+        0.01,
+        f"Updated: {date.today().strftime('%d-%m-%Y')}",
+        ha="right",
+        va="bottom",
+        fontsize=5,
+        color="0.4",
+    )
     fig.savefig(out_base + ".png", dpi=300)
     fig.savefig(out_base + ".pdf")
     plt.close(fig)
@@ -131,11 +146,11 @@ def main():
     try:
         years, source = fetch_citing_years()
     except Exception as exc:
-        print(f"[citations] ERROR: lookup failed ({exc})")
-        return 1
+        print(f"[citations] WARNING: lookup failed ({exc}); figure unchanged.")
+        return 0
     if not years:
-        print(f"[citations] ERROR: {source} returned no citing papers")
-        return 1
+        print(f"[citations] WARNING: {source} returned no citing papers.")
+        return 0
 
     os.makedirs(FIG_DIR, exist_ok=True)
     out_base = os.path.join(FIG_DIR, "citations_over_time")
