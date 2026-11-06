@@ -1958,10 +1958,10 @@ class Aperture:
                     labelcolor="white",
                 )
 
-        from plotting_utils import get_plot_ext
+        from plotting_utils import get_plot_color, get_plot_ext
         save_name = f"Aperture_Target_{base}{get_plot_ext(self.input_yaml)}"
         save_name = os.path.join(write_dir, save_name)
-        fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
+        fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor=get_plot_color("figure_facecolor"))
         plt.close(fig)
         logger.info(
             "Saved multi-target aperture plot: %s (%d targets)",
@@ -2105,14 +2105,14 @@ class Aperture:
             )
             target_label = base if index == 0 else f"{base}_{index}"
             label = target_label if saveTarget else index
-            from plotting_utils import get_plot_ext
+            from plotting_utils import get_plot_color, get_plot_ext
             _ext = get_plot_ext(self.input_yaml)
             save_name = (
                 f"Aperture_Target_{target_label}{_ext}" if saveTarget
                 else f"Aperture_Source_{label}{_ext}"
             )
             save_name = os.path.join(write_dir, save_name)
-            fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
+            fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor=get_plot_color("figure_facecolor"))
             plt.close(fig)
             return
 
@@ -2280,14 +2280,14 @@ class Aperture:
 
         target_label = base if index == 0 else f"{base}_{index}"
         label = target_label if saveTarget else index
-        from plotting_utils import get_plot_ext
+        from plotting_utils import get_plot_color, get_plot_ext
         _ext = get_plot_ext(self.input_yaml)
         save_name = (
             f"Aperture_Target_{target_label}{_ext}" if saveTarget
             else f"Aperture_Source_{label}{_ext}"
         )
         save_name = os.path.join(write_dir, save_name)
-        fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
+        fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor=get_plot_color("figure_facecolor"))
         plt.close(fig)
 
     # -----------------------------------------------------------------------
@@ -3019,7 +3019,7 @@ class Aperture:
             except Exception:
                 pass
 
-            from plotting_utils import get_plot_ext, safe_tight_layout
+            from plotting_utils import get_plot_color, get_plot_ext, safe_tight_layout
             save_loc = os.path.join(
                 self.input_yaml["write_dir"],
                 f'Optimum_Aperture_{self.input_yaml["base"]}{get_plot_ext(self.input_yaml)}',
@@ -3034,9 +3034,9 @@ class Aperture:
             for idx, prof in profiles_map.items():
                 in_kept = idx in kept_set
                 if in_kept:
-                    ax1.step(radii / fwhm, prof, color="tab:blue", alpha=0.6, lw=0.8, where="mid")
+                    ax1.step(radii / fwhm, prof, color=get_plot_color("hist_primary"), alpha=0.6, lw=0.8, where="mid")
                 else:
-                    ax1.step(radii / fwhm, prof, color="grey", alpha=0.3, lw=0.5, where="mid")
+                    ax1.step(radii / fwhm, prof, color=get_plot_color("error_bar"), alpha=0.3, lw=0.5, where="mid")
 
             if fine_r is not None:
                 ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black")
@@ -3099,7 +3099,7 @@ class Aperture:
                     ax2.hist(
                         per_source,
                         bins=bins,
-                        facecolor="tab:blue",
+                        facecolor=get_plot_color("hist_primary"),
                         alpha=0.85,
                         label=f"Selected (N={n_selected})",
                         zorder=1,
@@ -3108,7 +3108,7 @@ class Aperture:
                     ax2.hist(
                         other,
                         bins=bins,
-                        facecolor="grey",
+                        facecolor=get_plot_color("error_bar"),
                         alpha=0.5,
                         label=f"Rejected (N={n_rejected})",
                         zorder=0,
@@ -3123,7 +3123,7 @@ class Aperture:
 
             safe_tight_layout(fig)
 
-            fig.savefig(save_loc, bbox_inches="tight", dpi=150, facecolor="white")
+            fig.savefig(save_loc, bbox_inches="tight", dpi=150, facecolor=get_plot_color("figure_facecolor"))
             plt.close(fig)
 
         logger.info(
@@ -3351,7 +3351,7 @@ class Aperture:
                 be = 15
             ax.hist(corrections, bins=be, alpha=0.7, color=get_plot_color('hist_primary'), edgecolor="black")
             ax.axvline(
-                correction, color="r", ls="--", label=f"Median: {correction:.3f}"
+                correction, color=get_plot_color("target"), ls="--", label=f"Median: {correction:.3f}"
             )
             ax.set_xlabel("Aperture Correction [mag]")
             ax.set_ylabel("Number of Sources")
@@ -3366,7 +3366,7 @@ class Aperture:
                 png_path,
                 bbox_inches="tight",
                 dpi=150,
-                facecolor="white",
+                facecolor=get_plot_color("figure_facecolor"),
             )
             plt.close(fig)
 
