@@ -6391,24 +6391,13 @@ def run_photometry():
         psf_build_min_stars = max(
             1, int(phot_cfg.get("psf_build_min_stars", 2))
         )
-        # Below psf_empirical_min_stars the pool goes straight to the
-        # analytic composite fit: a 1x understaffed ePSF on a handful of
-        # stars is a noisy stack where every grid cell carries the star
-        # noise, while the joint composite-Moffat fit is constrained by
-        # every pixel of every cutout.  Undersampled images are exempt -
-        # a smooth analytic profile cannot represent pixel-phase
-        # structure, so the empirical attempt is still made and the
-        # analytic fallback only fires if it fails.
-        psf_empirical_min_stars = max(
-            psf_build_min_stars,
-            int(phot_cfg.get("psf_empirical_min_stars", 6)),
-        )
-        _undersampled_img = float(ImageFWHM) <= float(
-            phot_cfg.get("undersampled_fwhm_threshold", 2.5)
-        )
-        psf_build_gate_stars = (
-            psf_build_min_stars if _undersampled_img else psf_empirical_min_stars
-        )
+        # The empirical ePSF is always attempted first, down to
+        # psf_build_min_stars: the analytic model is the last-resort
+        # deliverable for a failed build, not a substitute for small
+        # pools.  psf_empirical_min_stars still applies INSIDE the build,
+        # where it gates analytic delivery when the empirical attempt
+        # fails on a thin pool (or demonstrably loses to it).
+        psf_build_gate_stars = psf_build_min_stars
         if (
             not build_from_aligned
             and template_available
@@ -6548,9 +6537,9 @@ def run_photometry():
             and bool(phot_cfg.get("psf_analytic_fallback", True))
         ):
             logging.info(
-                "PSF pool has %d sources < empirical floor %d; skipping "
-                "the understaffed ePSF build for the analytic "
-                "composite-Moffat fit.",
+                "PSF pool has %d sources < build floor %d; no empirical "
+                "ePSF attempt is possible -- the analytic "
+                "composite-Moffat fit is the fallback.",
                 _n_pool,
                 psf_build_gate_stars,
             )
