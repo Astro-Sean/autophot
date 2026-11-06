@@ -541,6 +541,7 @@ class Find_FWHM:
             from plotting_utils import (
                 apply_autophot_mplstyle,
                 get_marker_size,
+                get_plot_color,
                 get_plot_ext,
                 overlay_mask_hatch,
             )
@@ -555,20 +556,20 @@ class Find_FWHM:
             ax.contour(
                 deblended_map.data,
                 levels=np.unique(deblended_map.data[deblended_map.data > 0]),
-                colors="#D94F4F",
+                colors=get_plot_color("segmentation"),
                 linewidths=0.5,
             )
             ax.scatter(
                 cleaned_df["x_pix"],
                 cleaned_df["y_pix"],
-                color="blue",
+                color=get_plot_color("reference"),
                 label="Isolated Sources",
                 s=get_marker_size('medium'),
             )
             ax.scatter(
                 coms[:, 0],
                 coms[:, 1],
-                    color="#00AA00",
+                    color=get_plot_color("additional_target"),
                 marker="x",
                 label="Segment COMs",
                 s=get_marker_size('medium'),
@@ -579,7 +580,7 @@ class Find_FWHM:
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]
             png_out = os.path.join(write_dir, f"Segmentation_{base}{get_plot_ext(self.input_yaml)}")
-            fig.savefig(png_out, bbox_inches="tight", dpi=150, facecolor="white")
+            fig.savefig(png_out, bbox_inches="tight", dpi=150, facecolor=get_plot_color("figure_facecolor"))
             plt.close(fig)
 
         return cleaned_df
