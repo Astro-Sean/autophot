@@ -557,7 +557,7 @@ default_input:
     # Gaia archive / GaiaXPy pacing (ESA recommends spacing heavy queries, e.g. 1 s).
     gaia_archive_query_pause_before_sec: 0.25 # float --- Sleep before each Gaia ADQL job (seconds).
     gaia_archive_query_pause_after_sec: 0.25 # float --- Sleep after each Gaia ADQL job (seconds).
-    gaia_xp_batch_size: 200 # int --- Sources per GaiaXPy calibrate/generate call; use <=0 for one call (heavy).
+    gaia_xp_batch_size: 200 # int --- Sources per GaiaXPy calibrate/generate call; use <=0 for one call (heavy). Effectively capped at 50: anonymous GaiaXPy archive requests allow at most 50 source IDs per call, so larger values are split internally.
     gaia_xp_batch_pause_sec: 0.5 # float --- Sleep between GaiaXPy batches (seconds).
     gaia_archive_max_retries: 3 # int --- Retries per ADQL batch / GaiaXPy batch on failure.
     gaia_archive_retry_base_delay_sec: 2.0 # float --- Initial backoff (seconds); doubles each retry.
@@ -607,6 +607,26 @@ default_input:
     random_state: 42 # int --- Seed for the MCMC zeropoint fit's walker initialisation and sampler draws. The same image then yields a bit-identical zeropoint and error across runs; set to null for the old non-deterministic behaviour.
     systematic_err: 0.02 # float --- Field-level zeropoint systematic (mag) folded in quadrature into the reported zeropoint_error. The fit statistical error (scatter/sqrt(N)) only sees per-source dispersion; calibration systematics that correlate across the field - reference-catalog ties, bandpass mismatch, spatially correlated flat-field residuals - do not average down with N and would otherwise be invisible. Typical single-epoch ground-based value: 0.01-0.03 mag. Set 0 to disable.
 
+    # --- Spatial ZP surface ---
+    # Models the zeropoint as ZP(x,y) = ZP_0 + s(x,y) with s a low-order
+    # polynomial in detector position (PhoPS-style field-dependent ZP).
+    # A smooth residual pattern - vignetting, flat-field residuals,
+    # mis-registration - then corrects the calibration at the target
+    # position instead of only inflating the reported error through the
+    # block-bootstrap/gradient diagnostics. The corrected ZP stays the
+    # field mean; s(x_target,y_target) is added to the target magnitude
+    # in main.py and the surface's positional covariance enters the
+    # magnitude error.  Applied per flux type (AP/PSF) on the inlier
+    # locus; the fitted model is stored in fit_params as zp_surface.
+    spatial_zp_surface:
+      enabled: False # bool --- Fit and apply a spatial ZP surface to inlier calibrator residuals. Opt-in: it changes calibrated magnitudes on fields where the residual pattern clears the gates below.
+      order: 1 # int --- Surface polynomial order: 1 = plane (tilt only), 2 = full quadratic. Order 2 needs well-distributed inliers (>=18 recommended) or it overfits noise.
+      min_inliers: 12 # int --- Minimum surviving inlier calibrators for the surface to apply (also requires >=3x the coefficient count). Below this the field-mean ZP stands alone.
+      sigma_clip: 4.0 # float --- Iterative clip width (MAD units) on the weighted surface fit - keeps a few discrepant calibrators from pulling the surface.
+      min_improvement_frac: 0.10 # float --- Minimum fractional reduction in weighted inlier RMS the surface must achieve to be applied. Below this the correction is not worth the extra degrees of freedom.
+      min_f_stat: 4.0 # float --- Minimum F-statistic for the added surface terms (weighted chi2 reduction per coefficient over residual chi2/dof). Guards against fitting noise-level wiggles; ~4 approximates a 2-sigma improvement.
+      max_correction_mag: 0.3 # float --- Maximum |s(x,y)| over the calibrator footprint (mag). Larger fits are rejected: a genuine field correction is rarely more than a few tenths of a magnitude, and a bigger surface signals a broken calibration the reliability gates should catch, not smooth over.
+
     # --- Magnitude-dependent ZP check ---
     # Bins calibrators in instrumental magnitude and measures ZP in each bin.
     # A significant ZP trend vs magnitude indicates detector non-linearity,
@@ -624,7 +644,8 @@ default_input:
 
   cosmic_rays:
     remove_cmrays: False # bool --- Enable cosmic-ray removal (astroscrappy) in preprocessing. Astroscrappy is the single CR detector: it interpolates CR pixels and its detection mask (plus cr_defect_margin_px) is unioned into the defect mask (an interpolated pixel is not real data). MaxiMask's default classes exclude CR for this reason.
-    use_lacosmic: False # bool --- Use L.A.Cosmic-style algorithm (if available/configured).
+    use_lacosmic: False # bool --- Use L.A.Cosmic-style algorithm (ccdproc.cosmicray_lacosmic). Kept for backward compatibility; cr_backend takes precedence when set.
+    cr_backend: null # str|null --- CR removal backend: 'astroscrappy' (fast Cython L.A.Cosmic variant), 'lacosmic' (ccdproc.cosmicray_lacosmic; equivalent to use_lacosmic: True), or 'dfcosmic' (Dragonfly's faithful PyTorch port of the original van Dokkum 2001 algorithm - true non-separable median filter, better CR/star-core separation). null keeps the legacy use_lacosmic flag behaviour (astroscrappy unless use_lacosmic is True). dfcosmic is an optional CPU dependency: lazy-imported only on this path; if it is not installed the run logs a warning and falls back to astroscrappy.
     cr_sigclip: 4.5 # float --- Detection threshold (sigma) for cosmic ray pixels in astroscrappy/LACosmic.
     cr_sigfrac: 0.3 # float --- Fraction of neighboring pixels required for detection (LACosmic/astroscrappy).
     cr_objlim: 10.0 # float --- Object detection limit - rejects CRs that look like real objects (higher = more aggressive CR removal, may clip star cores).
@@ -944,6 +965,7 @@ default_input:
     sfft_hard_max_elongation: 1.5 # float --- HARD maximum A/B elongation ratio for SFFT kernel sources. Sources with ELONGATION > 1.5 are rejected unless doing so would leave fewer than sfft_elongation_rescue_min sources, in which case the roundest candidates are kept. 1.0=disabled.
     sfft_elongation_rescue_min: 3 # int --- Sparse-field keep-floor for the hard elongation cut. When removing elongated sources would leave fewer than this many candidates, the roundest sources are kept so the kernel fit is not starved. Defaults to sfft_min_prior_sources when unset.
     sfft_cr_exclusion_fwhm: 1.0 # float --- Distance (in FWHM units) from hardware_defects_mask pixels (cosmic rays, trails, bad columns, saturation, MaxiMask classes when enabled, plus non-finite pixels) within which SFFT matching sources are excluded. Prevents defects from entering the SFFT kernel-fitting pool and corrupting the subtraction. Set to 0 to disable.
+    sfft_target_exclusion_fwhm: 2.0 # float --- Exclusion radius around the configured target (in FWHM units of the larger of science/template FWHM, floored at 3 px) applied to the matched-source pool before subtraction priors are built. A matched pair at the target position is transient-plus-host flux; keeping it lets the transient bias the kernel fit and flux scale via the consistency inliers, SNR fallback, NaN-flux add-back, sparse passthrough, or the ZOGY LSQ stamp list. The same position is banned from SFFT's XY_PriorBan list and the sparse-prior supplement independently. Set to 0 to disable the matched-pool ban (not recommended).
     sfft_fft_rejection: True # bool --- If True, reject SFFT kernel sources whose 2D FFT power spectrum deviates > sfft_fft_n_sigma from the median across all sources. Same technique as PSF build (psf.py detect_fft_outliers). Catches extended/blended/spike-contaminated sources that pass catalog-level cuts.
     sfft_fft_n_sigma: 4.0 # float --- FFT power-spectrum outlier threshold in sigma (MAD-based). Sources whose median per-frequency deviation exceeds this are rejected. 4.0 = strict (same as PSF build). A relaxed retry at 1.5x this value is attempted if the strict cut leaves too few sources.
     sfft_fwhm_ratio_nsigma: 0.0 # float --- Cross-image FWHM consistency: reject sources whose FWHM ratio (sci/ref) deviates more than this many sigma (MAD) from the median log-ratio. Catches sources blended in one image but isolated in the other. 0=disabled (default). Enable (e.g. 3.0) only if kernel fits are poor and blended sources are suspected.
