@@ -8,6 +8,10 @@ GROND_g_TDP7_cor_ana_5_MJD61233_28873, where 110 flagged pixels were
 inflated into 20968 masked pixels in the difference image.
 """
 
+import logging
+import sys
+import types
+
 import numpy as np
 import pytest
 from astropy.io import fits
@@ -252,6 +256,157 @@ class TestDropMaskComponentsAtPositions:
         )
         assert not out.any()
         assert dropped == [(21.0, 21.0)]
+
+
+class TestCrBackendSelection:
+    """cr_backend dispatch: dfcosmic is an optional lazy-imported
+    backend; its absence or an unknown name must fall back to
+    astroscrappy with a logged warning, never a silent mislabel."""
+
+    def test_dfcosmic_missing_falls_back_with_warning(
+        self, monkeypatch, raw_mask, caplog
+    ):
+        rng = np.random.default_rng(42)
+        image = (100.0 + rng.normal(0, 5, raw_mask.shape)).astype(
+            np.float32
+        )
+        header = fits.Header()
+        header["RDNOISE"] = 5.0
+
+        def fake_detect(*args, **kw):
+            return raw_mask.copy(), image.copy()
+
+        monkeypatch.setattr(
+            cosmic.astroscrappy, "detect_cosmics", fake_detect
+        )
+        # Simulate an absent optional dependency.
+        monkeypatch.setitem(sys.modules, "dfcosmic", None)
+        cleaner = cosmic.RemoveCosmicRays(
+            input_yaml={},
+            fpath="dummy.fits",
+            image=image,
+            header=header,
+            cr_backend="dfcosmic",
+        )
+        with caplog.at_level(logging.WARNING):
+            clean, exclusion, defect = cleaner.remove(
+                plot=False, psf_fwhm=8.0
+            )
+        assert "dfcosmic" in caplog.text.lower()
+        assert header["CRMETHOD"] == "astroscrappy"
+        np.testing.assert_array_equal(
+            defect,
+            binary_fill_holes(
+                binary_dilation(raw_mask, structure=disk(2))
+            ),
+        )
+
+    def test_dfcosmic_backend_runs_cpu_when_installed(self, monkeypatch):
+        rng = np.random.default_rng(0)
+        image = (100.0 + rng.normal(0, 5, (60, 60))).astype(np.float32)
+        fake_mask = np.zeros((60, 60), dtype=bool)
+        fake_mask[10, 10] = True
+        calls = {}
+
+        def _fake_lacosmic(img, **kw):
+            calls["img_dtype"] = np.asarray(img).dtype
+            calls["kw"] = kw
+            return np.asarray(img, np.float32).copy() - 1.0, fake_mask
+
+        monkeypatch.setitem(
+            sys.modules,
+            "dfcosmic",
+            types.SimpleNamespace(lacosmic=_fake_lacosmic),
+        )
+        header = fits.Header()
+        header["RDNOISE"] = 5.0
+        cleaner = cosmic.RemoveCosmicRays(
+            input_yaml={},
+            fpath="d.fits",
+            image=image,
+            header=header,
+            cr_backend="dfcosmic",
+        )
+        clean, exclusion, defect = cleaner.remove(
+            plot=False, psf_fwhm=4.0, gain=1.0, readnoise=5.0
+        )
+        assert calls["kw"]["device"] == "cpu"
+        assert calls["kw"]["gain"] == 1.0
+        assert calls["kw"]["readnoise"] == 5.0
+        assert header["CRMETHOD"] == "dfcosmic"
+        assert header["CRSTATUS"] == "success"
+        # Raw flag + 2 px default defect margin.
+        assert defect[10, 10]
+        assert np.count_nonzero(defect) > np.count_nonzero(fake_mask)
+
+    def test_dfcosmic_protected_pixels_unflagged_and_restored(
+        self, monkeypatch
+    ):
+        # dfcosmic takes no input mask: a flag inside the protected
+        # disk must be stripped and the original pixel value kept.
+        rng = np.random.default_rng(1)
+        image = (100.0 + rng.normal(0, 5, (60, 60))).astype(np.float32)
+        fake_mask = np.zeros((60, 60), dtype=bool)
+        fake_mask[30, 30] = True  # sits inside the protected disk
+        fake_mask[50, 50] = True  # outside, must stay flagged
+
+        def _fake_lacosmic(img, **kw):
+            out = np.asarray(img, np.float32).copy()
+            out[fake_mask] = 0.0  # "repaired" value
+            return out, fake_mask
+
+        monkeypatch.setitem(
+            sys.modules,
+            "dfcosmic",
+            types.SimpleNamespace(lacosmic=_fake_lacosmic),
+        )
+        header = fits.Header()
+        header["RDNOISE"] = 5.0
+        cleaner = cosmic.RemoveCosmicRays(
+            input_yaml={},
+            fpath="d.fits",
+            image=image,
+            header=header,
+            cr_backend="dfcosmic",
+        )
+        clean, exclusion, defect = cleaner.remove(
+            plot=False,
+            psf_fwhm=4.0,
+            gain=1.0,
+            readnoise=5.0,
+            protect_positions=[(30.0, 30.0)],
+            protect_radius_px=4.0,
+        )
+        assert not defect[30, 30]
+        assert clean[30, 30] == image[30, 30]
+        assert defect[50, 50]
+        assert clean[50, 50] != image[50, 50]
+
+    def test_unknown_backend_warns_and_uses_astroscrappy(
+        self, monkeypatch, caplog
+    ):
+        rng = np.random.default_rng(5)
+        image = (100.0 + rng.normal(0, 5, (50, 50))).astype(np.float32)
+        called = {}
+
+        def fake_detect(*args, **kw):
+            called["hit"] = True
+            return np.zeros(image.shape, bool), image.copy()
+
+        monkeypatch.setattr(
+            cosmic.astroscrappy, "detect_cosmics", fake_detect
+        )
+        cleaner = cosmic.RemoveCosmicRays(
+            input_yaml={},
+            fpath="d.fits",
+            image=image,
+            header=fits.Header(),
+            cr_backend="not_a_backend",
+        )
+        with caplog.at_level(logging.WARNING):
+            cleaner.remove(plot=False, psf_fwhm=4.0)
+        assert called.get("hit") is True
+        assert "unknown" in caplog.text.lower()
 
 
 def test_protect_radius_capped_for_runaway_fwhm(monkeypatch):
