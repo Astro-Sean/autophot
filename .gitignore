@@ -73,7 +73,8 @@ opencode.json
 
 temp_autophot/
 
-# Documentation (design notes are versioned; manuscripts stay local)
+# Documentation (design notes and manuscripts stay local)
+docs/
 *.tex
 *.bib
 
