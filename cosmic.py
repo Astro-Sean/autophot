@@ -291,6 +291,7 @@ class RemoveCosmicRays:
 
         from plotting_utils import (
             apply_autophot_mplstyle,
+            get_plot_color,
             get_plot_ext,
             mask_legend_patch,
             overlay_mask_hatch,
@@ -378,7 +379,7 @@ class RemoveCosmicRays:
 
         png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}{get_plot_ext(self.input_yaml)}")
         fig.savefig(
-            png_path, bbox_inches="tight", dpi=150, facecolor="white"
+            png_path, bbox_inches="tight", dpi=150, facecolor=get_plot_color("figure_facecolor")
         )
         plt.close(fig)
 
