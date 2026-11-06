@@ -325,6 +325,8 @@ export TNS_BOT_API="..."
 
 <h2 align="center">Citation</h2>
 
+![Cumulative count of papers citing AutoPhOT](figures/citations_over_time.png)
+
 If AutoPhOT earns a place in your paper, please cite:
 
 > Brennan, S. J., & Fraser, M. 2022, A&A, 667, A62
@@ -348,4 +350,3 @@ archivePrefix = {arXiv},
 }
 ```
 
-![Cumulative count of papers citing AutoPhOT](figures/citations_over_time.png)
