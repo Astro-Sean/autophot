@@ -265,6 +265,7 @@ class Plot:
         """
         import matplotlib.pyplot as plt
         from functions import set_size
+        from matplotlib.collections import LineCollection, PatchCollection
         from matplotlib.gridspec import GridSpec
         from mpl_toolkits.axes_grid1.inset_locator import inset_axes
         from matplotlib.patches import ConnectionPatch, Rectangle
@@ -290,12 +291,8 @@ class Plot:
             if diff_decorrelated is not None:
                 images["Decorrelated (Detection)"] = diff_decorrelated
 
-            image_dims = {}
-
             for key, img_data in images.items():
                 finite_frac = np.sum(np.isfinite(img_data)) / img_data.size * 100
-                img_h, img_w = img_data.shape
-                image_dims[key] = (img_w, img_h)  # (width, height)
                 logger.debug(
                     f"subtraction_check: {key} shape={img_data.shape}, "
                     f"finite={finite_frac:.1f}%, "
@@ -412,7 +409,7 @@ class Plot:
                             mpatches.Circle(
                                 (ax_x, ax_y),
                                 aperture_size,
-                                edgecolor="#17A2B8",
+                                edgecolor=PLOT_COLORS.get('additional_target', '#17A2B8'),
                                 facecolor="none",
                                 linestyle=":",
                                 linewidth=0.8,
@@ -443,8 +440,6 @@ class Plot:
                     )
                 else:
                     half_size = square_size / 2
-                    valid_markers_total = 0
-                    skipped_markers_total = 0
 
                     x_vals = matching_sources[x_col].values
                     y_vals = matching_sources[y_col].values
@@ -456,59 +451,52 @@ class Plot:
                         f"X=[{np.nanmin(x_vals):.1f}, {np.nanmax(x_vals):.1f}], "
                         f"Y=[{np.nanmin(y_vals):.1f}, {np.nanmax(y_vals):.1f}]"
                     )
-                    
-                    # Panel dims differ per image; look up by name.
-                    panel_names = list(images.keys())
 
+                    # Coordinates are already 0-based (converted on ingestion).
+                    # Marker positions are the same on every panel, so
+                    # evaluate finiteness once and reuse per panel.
+                    _xy = np.column_stack(
+                        [
+                            np.asarray(x_vals, dtype=float),
+                            np.asarray(y_vals, dtype=float),
+                        ]
+                    )
+                    _finite_xy = np.isfinite(_xy).all(axis=1)
+                    marker_xy = _xy[_finite_xy]
+                    skipped_markers_total = int((~_finite_xy).sum())
+                    valid_markers_total = int(_finite_xy.sum())
+
+                    # One PatchCollection per panel keeps hundreds of matched
+                    # boxes as a single artist (faster draw, smaller SVGs)
+                    # while rendering identically to per-source patches.
+                    # Draw all matched sources, even out-of-bounds, so the
+                    # full matching result stays visible.
                     for panel_idx, ax in enumerate(axes):
                         if panel_idx == 2:
                             continue
-                        panel_name = panel_names[panel_idx]
-                        panel_width, panel_height = image_dims[panel_name]
-                        valid_markers = 0
-                        skipped_markers = 0
-                        non_finite = 0
-                        
-                        for idx, (x_pix, y_pix) in enumerate(zip(
-                            matching_sources[x_col], matching_sources[y_col]
-                        )):
-                            if not (np.isfinite(x_pix) and np.isfinite(y_pix)):
-                                non_finite += 1
-                                skipped_markers += 1
-                                continue
-
-                            # Coordinates are already 0-based (converted on ingestion).
-                            x_plot = float(x_pix)
-                            y_plot = float(y_pix)
-
-                            # Draw all matched sources, even out-of-bounds, so the
-                            # full matching result stays visible.
-                            rect = patches.Rectangle(
+                        rects = [
+                            patches.Rectangle(
                                 (x_plot - half_size, y_plot - half_size),
                                 square_size,
                                 square_size,
+                            )
+                            for x_plot, y_plot in marker_xy
+                        ]
+                        ax.add_collection(
+                            PatchCollection(
+                                rects,
                                 linewidth=0.9,
                                 edgecolor=PLOT_COLORS.get('matched_box', '#00CFFF'),
                                 facecolor="none",
                                 alpha=0.9,
                             )
-                            ax.add_patch(rect)
-                            valid_markers += 1
-                        
-                        valid_markers_total += valid_markers
-                        skipped_markers_total += skipped_markers
-                        
-                        if skipped_markers > 0:
-                            logger.debug(
-                                f"subtraction_check: {panel_name} panel - plotted {valid_markers} markers, "
-                                f"skipped {skipped_markers} ({non_finite} non-finite). "
-                                f"Panel dims: {panel_width}x{panel_height}"
-                            )
-                    
+                        )
+
                     if skipped_markers_total > 0:
                         logger.debug(
-                            f"subtraction_check: Total - plotted {valid_markers_total} markers, "
-                            f"skipped {skipped_markers_total} across all panels"
+                            f"subtraction_check: plotted {valid_markers_total} markers, "
+                            f"skipped {skipped_markers_total} non-finite positions "
+                            f"across all panels"
                         )
 
             if masked_sources is not None and len(masked_sources) > 0:
@@ -584,6 +572,9 @@ class Plot:
                 cross_len = square_size / 4
                 masked_count = 0
                 if "x_pix" in masked_sources.columns and "y_pix" in masked_sources.columns:
+                    # Collect in-bounds positions once, then draw one
+                    # LineCollection per panel instead of 2N Line2D artists.
+                    _masked_xy = []
                     for x, y in zip(masked_sources["x_pix"], masked_sources["y_pix"]):
                         if not (np.isfinite(x) and np.isfinite(y)):
                             continue
@@ -595,27 +586,29 @@ class Plot:
                         if not (0 <= x_plot < img_width and 0 <= y_plot < img_height):
                             continue
 
-                        x = x_plot
-                        y = y_plot
+                        _masked_xy.append((x_plot, y_plot))
 
+                    if _masked_xy:
+                        _cross_segs = [
+                            seg
+                            for x, y in _masked_xy
+                            for seg in (
+                                ((x - cross_len, y - cross_len), (x + cross_len, y + cross_len)),
+                                ((x - cross_len, y + cross_len), (x + cross_len, y - cross_len)),
+                            )
+                        ]
                         for _panel_idx, ax in enumerate(axes):
                             if _panel_idx == 2:
                                 continue
-                            ax.plot(
-                                [x - cross_len, x + cross_len],
-                                [y - cross_len, y + cross_len],
-                                color=PLOT_COLORS.get('target', '#FF0000'),
-                                lw=0.5,
-                                zorder=2,
+                            ax.add_collection(
+                                LineCollection(
+                                    _cross_segs,
+                                    colors=PLOT_COLORS.get('target', '#FF0000'),
+                                    linewidths=0.5,
+                                    zorder=2,
+                                )
                             )
-                            ax.plot(
-                                [x - cross_len, x + cross_len],
-                                [y + cross_len, y - cross_len],
-                                color=PLOT_COLORS.get('target', '#FF0000'),
-                                lw=0.5,
-                                zorder=2,
-                            )
-                        masked_count += 1
+                        masked_count = len(_masked_xy)
                 logger.debug("Plotted %s variable sources (masked from flux calibration) as red 'x' markers", masked_count)
 
             for i, (title, img_data) in enumerate(images.items()):
@@ -705,7 +698,7 @@ class Plot:
                             mpatches.Circle(
                                 (ax_x, ax_y),
                                 aperture_size,
-                                edgecolor="#17A2B8",
+                                edgecolor=PLOT_COLORS.get('additional_target', '#17A2B8'),
                                 facecolor="none",
                                 linestyle=":",
                                 linewidth=0.6,
@@ -787,6 +780,7 @@ class Plot:
                     for ax in inset_axes_list[2:]:
                         circle = mpatches.Circle(
                             fitted_location,
+                            radius,
                             edgecolor=PLOT_COLORS.get('target', '#FF0000'),
                             facecolor="none",
                             linewidth=0.5,
@@ -1119,6 +1113,7 @@ class Plot:
                 LinearStretch,
                 ZScaleInterval,
             )
+            from matplotlib.collections import LineCollection, PatchCollection
             from matplotlib.patches import Circle, Rectangle
             from matplotlib.cm import ScalarMappable
             from matplotlib.colors import Normalize
@@ -1244,6 +1239,9 @@ class Plot:
             # are 0-based; estimate and correct a global +/-1 px shift for display.
             marker_dx = 0.0
             marker_dy = 0.0
+            _psf_marker_drawn = False
+            _ref_marker_drawn = False
+            _fwhm_marker_drawn = False
             if (
                 catalogSources is not None
                 and FWHMSources is not None
@@ -1286,8 +1284,8 @@ class Plot:
                                     marker_dx,
                                     marker_dy,
                                 )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("SourceCheck marker-alignment estimate skipped: %s", e)
 
             edge_color = PLOT_COLORS.get('target', '#FF0000')
             circle = Circle(
@@ -1305,42 +1303,58 @@ class Plot:
                 from matplotlib.patches import RegularPolygon
                 fwhm = float(self.input_yaml.get("fwhm", 5.0))
                 hex_radius = 2.0 * fwhm  # hexagon width across flats = 4*FWHM
-                for x, y in zip(psfSources["x_pix"], psfSources["y_pix"]):
-                    if not (np.isfinite(x) and np.isfinite(y)):
-                        continue
-                    hexagon = RegularPolygon(
+                # One PatchCollection keeps hundreds of markers as a single
+                # artist (faster draw, smaller SVGs) while rendering
+                # identically to per-source patches.
+                hexagons = [
+                    RegularPolygon(
                         (x, y),
                         numVertices=6,
                         radius=hex_radius,
                         orientation=np.pi/6,  # Point up
-                        edgecolor=PLOT_COLORS.get('psf', '#00AA00'),
-                        facecolor="none",
-                        linewidth=0.5,
-                        label="PSF sources" if x == psfSources["x_pix"].iloc[0] else None,
-                        zorder=1,
                     )
-                    ax1.add_patch(hexagon)
+                    for x, y in zip(psfSources["x_pix"], psfSources["y_pix"])
+                    if np.isfinite(x) and np.isfinite(y)
+                ]
+                if hexagons:
+                    ax1.add_collection(
+                        PatchCollection(
+                            hexagons,
+                            edgecolor=PLOT_COLORS.get('psf', '#00AA00'),
+                            facecolor="none",
+                            linewidth=0.5,
+                            zorder=1,
+                        )
+                    )
+                    _psf_marker_drawn = True
 
             if catalogSources is not None:
                 fwhm = float(self.input_yaml.get("fwhm", 5.0))
                 square_size = 4.0 * fwhm
+                squares = []
                 for x, y in zip(catalogSources["x_pix"], catalogSources["y_pix"]):
                     x = float(x) + marker_dx
                     y = float(y) + marker_dy
                     if not (np.isfinite(x) and np.isfinite(y)):
                         continue
-                    lower_left = (x - square_size / 2, y - square_size / 2)
-                    square = Rectangle(
-                        lower_left,
-                        square_size,
-                        square_size,
-                        edgecolor=PLOT_COLORS.get('reference', '#0072B2'),
-                        facecolor="none",
-                        label="Reference Sources",
-                        zorder=1,
-                        lw=0.5,
+                    squares.append(
+                        Rectangle(
+                            (x - square_size / 2, y - square_size / 2),
+                            square_size,
+                            square_size,
+                        )
                     )
-                    ax1.add_patch(square)
+                if squares:
+                    ax1.add_collection(
+                        PatchCollection(
+                            squares,
+                            edgecolor=PLOT_COLORS.get('reference', '#0072B2'),
+                            facecolor="none",
+                            zorder=1,
+                            linewidth=0.5,
+                        )
+                    )
+                    _ref_marker_drawn = True
 
             if FWHMSources is not None and "fwhm" in FWHMSources:
 
@@ -1355,23 +1369,33 @@ class Plot:
                     sm = ScalarMappable(norm=norm_fwhm, cmap=cmap)
                     sm.set_array([])
 
-                    for x, y, fwhm in zip(
-                        FWHMSources["x_pix"], FWHMSources["y_pix"], fwhm_values
-                    ):
-                        if np.isnan(fwhm):
-                            continue
-                        color = cmap(norm_fwhm(fwhm))
-                        circle = Circle(
+                    # Per-source radius and cmap colour differ, so keep the
+                    # styling on each patch and draw them as one collection.
+                    fwhm_circles = [
+                        Circle(
                             (x, y),
                             fwhm,
-                            edgecolor=color,
+                            edgecolor=cmap(norm_fwhm(fwhm)),
                             facecolor="none",
-                            label="FWHM Sources",
-                            zorder=2,
                             lw=0.8,
                             ls="-",
                         )
-                        ax1.add_patch(circle)
+                        for x, y, fwhm in zip(
+                            FWHMSources["x_pix"],
+                            FWHMSources["y_pix"],
+                            fwhm_values,
+                        )
+                        if not np.isnan(fwhm)
+                    ]
+                    if fwhm_circles:
+                        ax1.add_collection(
+                            PatchCollection(
+                                fwhm_circles,
+                                match_original=True,
+                                zorder=2,
+                            )
+                        )
+                        _fwhm_marker_drawn = True
 
                     cbar = fig.colorbar(sm, ax=ax1, pad=0.02, aspect=40)
                     cbar.set_label("FWHM (pixels)", fontsize=7)
@@ -1383,6 +1407,7 @@ class Plot:
 
                     cross_len = scale / 4
                     _gold = PLOT_COLORS.get('variable', '#FFD700')
+                    _cross_segs = []
 
                     for x, y, otype, name in zip(
                         variable_sources["x_pix"],
@@ -1400,19 +1425,11 @@ class Plot:
                             if np.isnan(image[iy, ix]):
                                 continue
 
-                        ax1.plot(
-                            [x - cross_len, x + cross_len],
-                            [y - cross_len, y + cross_len],
-                            color=_gold,
-                            lw=1.0,
-                            zorder=3,
+                        _cross_segs.append(
+                            ((x - cross_len, y - cross_len), (x + cross_len, y + cross_len))
                         )
-                        ax1.plot(
-                            [x - cross_len, x + cross_len],
-                            [y + cross_len, y - cross_len],
-                            color=_gold,
-                            lw=1.0,
-                            zorder=3,
+                        _cross_segs.append(
+                            ((x - cross_len, y + cross_len), (x + cross_len, y - cross_len))
                         )
 
                         # Prefer the source name, fall back to otype. NaN or
@@ -1433,6 +1450,16 @@ class Plot:
                                 color=_gold,
                                 zorder=4,
                             )
+
+                    if _cross_segs:
+                        ax1.add_collection(
+                            LineCollection(
+                                _cross_segs,
+                                colors=_gold,
+                                linewidths=1.0,
+                                zorder=3,
+                            )
+                        )
 
             # Residual vectors (catalog -> detected) show non-uniform
             # astrometric residuals across the field.
@@ -1487,7 +1514,7 @@ class Plot:
                             angles="xy",
                             scale_units="xy",
                             scale=1.0,
-                            color=PLOT_COLORS.get('positive', '#FF8C00') if PLOT_COLORS else (get_divergent_color('positive') if get_divergent_color else '#FF8C00'),
+                            color=PLOT_COLORS.get('positive', '#E31B23') if PLOT_COLORS else (get_divergent_color('positive') if get_divergent_color else '#E31B23'),
                             alpha=0.65,
                             width=0.0020,
                             zorder=5,
@@ -1532,6 +1559,38 @@ class Plot:
     
             handles, labels = ax1.get_legend_handles_labels()
             by_label = dict(zip(labels, handles))
+            # PatchCollection has no default legend handler, so supply a
+            # single proxy patch per source group to keep the same entries
+            # the per-source artists used to produce.
+            if _psf_marker_drawn and "PSF sources" not in by_label:
+                from matplotlib.patches import RegularPolygon
+                by_label["PSF sources"] = RegularPolygon(
+                    (0, 0),
+                    numVertices=6,
+                    radius=1,
+                    orientation=np.pi / 6,
+                    edgecolor=PLOT_COLORS.get('psf', '#00AA00'),
+                    facecolor="none",
+                    linewidth=0.5,
+                )
+            if _ref_marker_drawn and "Reference Sources" not in by_label:
+                by_label["Reference Sources"] = Rectangle(
+                    (0, 0),
+                    1,
+                    1,
+                    edgecolor=PLOT_COLORS.get('reference', '#0072B2'),
+                    facecolor="none",
+                    linewidth=0.5,
+                )
+            if _fwhm_marker_drawn and "FWHM Sources" not in by_label:
+                by_label["FWHM Sources"] = Circle(
+                    (0, 0),
+                    1,
+                    edgecolor=cmap(0.5),
+                    facecolor="none",
+                    lw=0.8,
+                    ls="-",
+                )
             leg = ax1.legend(
                 by_label.values(),
                 by_label.keys(),
@@ -2903,7 +2962,7 @@ class Plot:
                     ((_qx, _nx), (0.0, _qy)),
                 ):
                     ax2.add_patch(
-                        plt.Rectangle(
+                        Rectangle(
                             (_qx0, _qy0),
                             _qx1 - _qx0,
                             _qy1 - _qy0,
@@ -3136,6 +3195,7 @@ class Plot:
                 LinearStretch,
                 ZScaleInterval,
             )
+            from matplotlib.collections import PatchCollection
             from matplotlib.patches import Circle
 
             apply_autophot_mplstyle()
@@ -3225,6 +3285,8 @@ class Plot:
                 # >1 px from any matched source = unmatched.
                 return np.where(d > 1.0)[0]
 
+            _sci_unmatched = np.array([], dtype=int)
+            _tpl_unmatched = np.array([], dtype=int)
             if sci_all_xy is not None:
                 sci_all = np.asarray(sci_all_xy, float)
                 _sci_unmatched = _find_unmatched(sci_all, sci_matched_xy)
@@ -3246,18 +3308,26 @@ class Plot:
                         linewidths=0.5, zorder=3,
                     )
 
-            for (sx, sy) in sci_matched_xy:
-                ax1.add_patch(Circle(
-                    (sx, sy), _r_sci,
-                    edgecolor=PLOT_COLORS.get('matched', '#0072B2'), facecolor="none",
-                    linewidth=0.5, zorder=5,
-                ))
-            for (tx, ty) in tpl_matched_xy:
-                ax2.add_patch(Circle(
-                    (tx, ty), _r_tpl,
-                    edgecolor=PLOT_COLORS.get('matched', '#0072B2'), facecolor="none",
-                    linewidth=0.5, zorder=5,
-                ))
+            # One PatchCollection per panel keeps the matched circles as a
+            # single artist instead of N individual patches.
+            ax1.add_collection(
+                PatchCollection(
+                    [Circle((sx, sy), _r_sci) for sx, sy in sci_matched_xy],
+                    edgecolor=PLOT_COLORS.get('matched', '#0072B2'),
+                    facecolor="none",
+                    linewidth=0.5,
+                    zorder=5,
+                )
+            )
+            ax2.add_collection(
+                PatchCollection(
+                    [Circle((tx, ty), _r_tpl) for tx, ty in tpl_matched_xy],
+                    edgecolor=PLOT_COLORS.get('matched', '#0072B2'),
+                    facecolor="none",
+                    linewidth=0.5,
+                    zorder=5,
+                )
+            )
 
             _max_label = min(n_matched, 50)
             _step = max(1, n_matched // _max_label)
@@ -3376,14 +3446,10 @@ class Plot:
                         ha="center", va="bottom", zorder=11,
                     )
 
-            _n_sci_unmatched = len(_find_unmatched(
-                np.asarray(sci_all_xy, float) if sci_all_xy is not None else np.empty((0, 2)),
-                sci_matched_xy,
-            ))
-            _n_tpl_unmatched = len(_find_unmatched(
-                np.asarray(tpl_all_xy, float) if tpl_all_xy is not None else np.empty((0, 2)),
-                tpl_matched_xy,
-            ))
+            # Reuse the unmatched indices already computed above rather than
+            # rebuilding the KDTree queries a second time.
+            _n_sci_unmatched = len(_sci_unmatched)
+            _n_tpl_unmatched = len(_tpl_unmatched)
             _stats = (
                 f"Matching sources: {n_matched}\n"
                 f"Ignored in Science: {_n_sci_unmatched}\n"
