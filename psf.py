@@ -5763,7 +5763,8 @@ class PSF:
                             # must be re-applied so the contamination zeros
                             # set above are not wiped by the assignment.
                             w = np.full(star.data.shape, uniform_weight)
-                            w[star.mask] = 0.0
+                            if star.mask is not None:
+                                w[star.mask] = 0.0
                             star.weights = w
                         log.info(
                             "[robust_extract_stars] Using uniform weight %.4g (skipping per-star extraction)",
@@ -5776,7 +5777,8 @@ class PSF:
                         if len(weight_cutouts) == len(epsfstars):
                             for star, wcut in zip(epsfstars, weight_cutouts):
                                 w = wcut.data.astype(float)
-                                w[star.mask] = 0.0
+                                if star.mask is not None:
+                                    w[star.mask] = 0.0
                                 star.weights = w
                         else:
                             log.warning(
@@ -7790,28 +7792,83 @@ class PSF:
                     _ax = next((c for c in (xcol_now, "x_pix", "X_IMAGE") if c in _all_cat.columns), None)
                     _ay = next((c for c in (ycol_now, "y_pix", "Y_IMAGE") if c in _all_cat.columns), None)
                     if _ax is not None and _ay is not None:
-                        _neighbour_coords = np.column_stack([
+                        _nb_xy = np.column_stack([
                             pd.to_numeric(_all_cat[_ax], errors="coerce"),
                             pd.to_numeric(_all_cat[_ay], errors="coerce"),
                         ])
-                        _neighbour_coords = _neighbour_coords[
-                            np.isfinite(_neighbour_coords[:, 0])
-                            & np.isfinite(_neighbour_coords[:, 1])
-                        ]
+                        _nb_fin = np.isfinite(_nb_xy).all(axis=1)
+                        # Only a REAL detection can contaminate a cutout:
+                        # sub-threshold catalog rows are noise peaks whose
+                        # contribution the pixel-level contamination checks
+                        # already mask.  Restrict the neighbour set to rows
+                        # meeting the same SNR floor the supplement tree
+                        # uses, or nearly every candidate next to a noise
+                        # blob is vetoed (same convention as the supplement
+                        # isolation in main.py).
+                        _nb_snr_min = float(
+                            phot_cfg.get(
+                                "psf_isolation_neighbour_snr_min",
+                                phot_cfg.get("psf_snr_min", 10.0),
+                            )
+                        )
+                        if np.isfinite(_nb_snr_min) and _nb_snr_min > 0:
+                            _nb_snr = None
+                            for _sc in (
+                                "SNR", "snr", "signal_to_noise", "flux_snr",
+                            ):
+                                if _sc in _all_cat.columns:
+                                    _v = pd.to_numeric(
+                                        _all_cat[_sc], errors="coerce"
+                                    )
+                                    _nb_snr = (
+                                        _v
+                                        if _nb_snr is None
+                                        else _nb_snr.fillna(_v)
+                                    )
+                            if _nb_snr is not None:
+                                _nb_fin &= (
+                                    _nb_snr.to_numpy(dtype=float)
+                                    >= _nb_snr_min
+                                )
+                        _neighbour_coords = _nb_xy[_nb_fin]
                 from scipy.spatial import cKDTree
                 if _neighbour_coords is not None and len(_neighbour_coords) >= 2:
-                    # Check against ALL catalog sources (including non-candidates)
+                    # Check against ALL catalog sources (including non-candidates).
+                    # The merged pool draws entries from several lists, so the
+                    # same detection can sit in the neighbour table at a
+                    # slightly different position: entries within self_r are
+                    # the candidate's own duplicates, not contaminating
+                    # neighbours.  Two real stars inside ~2 px are an
+                    # unresolved blend handled by the pair-separation cut, so
+                    # the discount cannot hide a neighbour (same convention
+                    # as the supplement isolation in main.py).
                     neighbour_tree = cKDTree(_neighbour_coords)
+                    _cand_xy = np.column_stack([xs, ys])
                     counts = neighbour_tree.query_ball_point(
-                        np.column_stack([xs, ys]), r=iso_r, return_length=True
+                        _cand_xy, r=iso_r, return_length=True
                     )
-                    isolated = counts <= 1  # only self within iso_r
+                    _self_r = min(2.0, 0.5 * iso_r)
+                    self_counts = neighbour_tree.query_ball_point(
+                        _cand_xy, r=_self_r, return_length=True
+                    )
+                    isolated = (
+                        np.asarray(counts) - np.asarray(self_counts)
+                    ) <= 0
                     _iso_source = "all catalog sources"
                 else:
-                    # Fallback: pairwise check among PSF candidates only
-                    tree = cKDTree(np.column_stack([xs, ys]))
-                    pairs = tree.query_ball_point(np.column_stack([xs, ys]), r=iso_r)
-                    isolated = np.array([len(p) == 1 for p in pairs])
+                    # Fallback: pairwise check among PSF candidates only.
+                    # Same self-discount: a near-duplicate entry inside
+                    # self_r is the same star arriving twice, deduplicated
+                    # by the pair-separation cut rather than an isolation
+                    # failure that removes both entries.
+                    _cand_xy = np.column_stack([xs, ys])
+                    tree = cKDTree(_cand_xy)
+                    _self_r = min(2.0, 0.5 * iso_r)
+                    pairs = tree.query_ball_point(_cand_xy, r=iso_r)
+                    pairs_self = tree.query_ball_point(_cand_xy, r=_self_r)
+                    isolated = np.array(
+                        [len(p) <= len(s) for p, s in zip(pairs, pairs_self)]
+                    )
                     _iso_source = "PSF candidates only"
                 _add_strike(~isolated, "isolation")
                 n_keep_iso = int(isolated.sum())
@@ -8583,12 +8640,45 @@ class PSF:
                     _hard = _cur_snr >= _snr_hard
                     _n_drop = int((~_hard).sum())
                     if _n_drop:
-                        log.info(
-                            "Hard SNR floor (>= %.1f): dropping %d candidates.",
-                            _snr_hard,
-                            _n_drop,
+                        # Keep-floor rescue: on a starved field an S/N 5-10
+                        # star is still a usable ePSF sample (the cutout
+                        # vetting gates junk), and a pool emptied here gets
+                        # no empirical attempt at all.  Rescue the
+                        # highest-S/N rejects down to psf_snr_rescue_min
+                        # until the pool reaches min_psf_candidates.
+                        _n_after = len(df) - _n_drop
+                        _rescue_min = float(
+                            phot_cfg.get("psf_snr_rescue_min", 5.0)
                         )
-                        df = df[_hard]
+                        if _n_after < min_psf_candidates and np.isfinite(
+                            _rescue_min
+                        ) and _rescue_min > 0 and _rescue_min < _snr_hard:
+                            _rej = _cur_snr[~_hard]
+                            _resc_idx = (
+                                _rej[_rej >= _rescue_min]
+                                .sort_values(ascending=False)
+                                .index[: min_psf_candidates - _n_after]
+                            )
+                            if len(_resc_idx):
+                                _hard.loc[_resc_idx] = True
+                                log.info(
+                                    "SNR hard-floor rescue: keeping %d "
+                                    "candidate(s) with S/N >= %.1f so the "
+                                    "pool does not starve below %d "
+                                    "(strict floor %.1f).",
+                                    len(_resc_idx),
+                                    _rescue_min,
+                                    min_psf_candidates,
+                                    _snr_hard,
+                                )
+                                _n_drop = int((~_hard).sum())
+                        if _n_drop:
+                            log.info(
+                                "Hard SNR floor (>= %.1f): dropping %d candidates.",
+                                _snr_hard,
+                                _n_drop,
+                            )
+                            df = df[_hard]
             log.debug("Sources after cuts: %s", len(df))
 
             if len(df) == 0:
@@ -10010,13 +10100,11 @@ class PSF:
             # stars worse than the pixel-integrated analytic model (the
             # ePSF is fitted to these stars, so it has every advantage --
             # measured: degraded production stamps fit 3-16x worse than
-            # the analytic model while good builds sit at ~parity).  When
-            # the gate fires and a sane analytic deliverable exists the
-            # analytic composite is delivered: an empirical model that
-            # loses on its own training stars carries noise, not signal
-            # (J2344: ePSF epochs median chi2 ~11 vs ~1.7 for the
-            # analytic-composite epochs).  Set psf_epsf_residual_swap off
-            # to keep the old always-empirical behaviour.
+            # the analytic model while good builds sit at ~parity).  The
+            # gate reports the ratio and marks the verdict non-converged;
+            # the analytic swap is opt-in (psf_epsf_residual_swap) since
+            # the analytic model is a last-resort deliverable, not a
+            # replacement for an empirical model that passed every gate.
             if (
                 _good
                 and _res_gate
@@ -10045,14 +10133,11 @@ class PSF:
                         _mad_emp, _mad_ana, _fit_rad, len(_stars_eval),
                     )
                     if _mad_emp > _res_ratio_max * _mad_ana:
+                        _swap_on = bool(
+                            phot_cfg.get("psf_epsf_residual_swap", False)
+                        )
                         _ad = (
-                            _analytic_deliverable()
-                            if bool(
-                                phot_cfg.get(
-                                    "psf_epsf_residual_swap", True
-                                )
-                            )
-                            else None
+                            _analytic_deliverable() if _swap_on else None
                         )
                         if _ad is not None:
                             _astamp, _af = _ad
@@ -10078,10 +10163,15 @@ class PSF:
                                 "Empirical ePSF fits the PSF stars %.2fx "
                                 "worse than the analytic composite "
                                 "(residual MAD %.4f vs %.4f) -- the "
-                                "empirical model is degraded, but no sane "
-                                "analytic substitute exists, so it is "
-                                "kept.",
+                                "empirical model is degraded but stays "
+                                "the delivered model%s.",
                                 _mad_emp / _mad_ana, _mad_emp, _mad_ana,
+                                (
+                                    " (psf_epsf_residual_swap is off)"
+                                    if not _swap_on
+                                    else "; no sane analytic substitute "
+                                    "exists"
+                                ),
                             )
                         # Honest accounting: a model that fits its own stars
                         # grossly worse than the analytic fallback has not
@@ -10401,16 +10491,60 @@ class PSF:
             # built the ePSF is often thinner than the pool that passed
             # the main-driver gate -- isolation, contamination and shape
             # vetting all run inside the build.  Below
-            # psf_empirical_min_stars a native-resolution ePSF is just a
-            # noisy stack where every grid cell carries star noise, so on
-            # well-sampled data deliver the fitted analytic composite
-            # instead (the joint Moffat fit is constrained by every pixel
-            # of every cutout).  Undersampled images keep the empirical
-            # model -- an analytic profile cannot represent pixel-phase
-            # structure -- and frozen-oversample grid cells keep it
-            # because a GriddedPSFModel stacks per-cell empirical stamps.
+            # psf_empirical_min_stars a native-resolution ePSF is a thin
+            # stack, so a failed thin model swaps for the fitted analytic
+            # composite.  A WORKING thin model stays empirical unless the
+            # residual gate shows it losing to the analytic seed on its
+            # own stars -- count alone cannot condemn a model that passed
+            # every quality gate, and the analytic model is the
+            # last-resort deliverable.  Undersampled images keep the
+            # empirical model -- an analytic profile cannot represent
+            # pixel-phase structure -- and frozen-oversample grid cells
+            # keep it because a GriddedPSFModel stacks per-cell empirical
+            # stamps.
             if n_epsf_stars < _emp_floor and not _delivered_analytic:
-                _ad = _analytic_deliverable()
+                _ad = None
+                _ad_attempted = False
+                if not _good:
+                    # The kept model already failed a quality gate; the
+                    # analytic composite is the resort.
+                    _ad_attempted = True
+                    _ad = _analytic_deliverable()
+                elif (
+                    _res_gate
+                    and init_kept is not None
+                    and _epsf_usable(init_kept)
+                ):
+                    _stars_eval = (
+                        fitted_stars
+                        if fitted_stars is not None
+                        else epsfstars
+                    )
+                    _fit_rad = max(3.0, 0.5 * fit_boxsize)
+                    _mad_emp_s = _epsf_residual_mad(
+                        _stars_eval, epsf, _fit_rad
+                    )
+                    _mad_ana_s = _epsf_residual_mad(
+                        _stars_eval, init_kept, _fit_rad
+                    )
+                    if (
+                        np.isfinite(_mad_emp_s)
+                        and np.isfinite(_mad_ana_s)
+                        and _mad_ana_s > 0
+                        and _mad_emp_s > _res_ratio_max * _mad_ana_s
+                    ):
+                        _ad_attempted = True
+                        _ad = _analytic_deliverable()
+                        if _ad is not None:
+                            log.info(
+                                "Thin ePSF fits its %d stars %.2fx worse "
+                                "than the analytic composite (residual "
+                                "MAD %.4f vs %.4f).",
+                                n_epsf_stars,
+                                _mad_emp_s / _mad_ana_s,
+                                _mad_emp_s,
+                                _mad_ana_s,
+                            )
                 if _ad is not None:
                     _astamp, _ana_fwhm = _ad
                     log.warning(
@@ -10438,7 +10572,8 @@ class PSF:
                         n_epsf_stars,
                     )
                 elif (
-                    not undersampled
+                    _ad_attempted
+                    and not undersampled
                     and not _freeze_osamp
                     and bool(phot_cfg.get("psf_analytic_fallback", True))
                     and _analytic_fitted
