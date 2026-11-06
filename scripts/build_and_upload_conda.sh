@@ -12,9 +12,11 @@ set -euo pipefail
 #   - Bumps the version in pyproject.toml and conda/recipe/meta.yaml
 #   - Auto-regenerates requirements.txt from pyproject.toml dependencies
 #   - Validates environment.yml and meta.yaml for dependency drift (warn-only)
-#   - Tests the built package in a fresh conda env before uploading
-#   - Removes stale autophot/autophot-object installs and old build artifacts
-#     after a successful upload so old code cannot shadow the new package
+#   - Tests the built package in a fresh conda env before uploading; the
+#     test env is always removed afterwards, on success or failure
+#   - Removes stale autophot/autophot-object installs and all build
+#     artifacts (including the just-uploaded package) after a successful
+#     upload so old code cannot shadow the new package
 #
 # Requirements:
 #   - conda
@@ -245,13 +247,13 @@ for p in pkgs:
 ')
 
     # Extractions in an env-local pkgs cache and artifacts in an env-local
-    # conda-bld keep serving the old code to --use-local installs.  The just
-    # built artifact for SELECTED_VERSION is kept; it was already uploaded.
+    # conda-bld keep serving the old code to --use-local installs.  The
+    # just-built artifact is removed too: it is on Anaconda.org already
+    # and the local copy is a stale file.
     for stale_dir in "${prefix}/pkgs" "${prefix}/conda-bld"; do
       [[ -d "${stale_dir}" ]] || continue
       find "${stale_dir}" -maxdepth 2 \
         \( -name 'autophot-*' -o -name 'autophot-object-*' \) \
-        ! -name "autophot-${SELECTED_VERSION}-*" \
         -exec rm -rf {} + 2>/dev/null || true
     done
     # Re-index so the local channel stops listing the deleted artifacts.
@@ -272,7 +274,6 @@ print("\n".join(envs))
     [[ -d "${pdir}" ]] || continue
     find "${pdir}" -maxdepth 2 \
       \( -name 'autophot-*' -o -name 'autophot-object-*' \) \
-      ! -name "autophot-${SELECTED_VERSION}-*" \
       -exec rm -rf {} + 2>/dev/null || true
   done < <(conda config --show pkgs_dirs --json 2>/dev/null | python -c '
 import json, sys
@@ -511,12 +512,28 @@ BACKUP_DIR="$(mktemp -d)"
 VERSION_BUMPED=0
 BUILD_LOG=""
 TEST_ENV_NAME=""
+TEST_WORKDIR=""
 cleanup() {
   local ec=$?
   if [[ -n "${TEST_ENV_NAME}" ]]; then
     conda env remove -y -n "${TEST_ENV_NAME}" >/dev/null 2>&1 || true
   fi
   rm -f "${BUILD_LOG}"
+  rm -rf "${TEST_WORKDIR}"
+  if [[ "${ec}" -ne 0 ]]; then
+    # A failed run leaves partial autophot builds in conda-bld; they are
+    # stale files on the next run, so purge them here too.
+    for _bld in "${CONDA_PREFIX:-}/conda-bld" \
+                "$(conda info --base 2>/dev/null)/conda-bld"; do
+      [[ -d "${_bld}" ]] || continue
+      find "${_bld}" -maxdepth 2 \
+        \( -name 'autophot-*' -o -name 'autophot-object-*' \) \
+        -exec rm -rf {} + 2>/dev/null || true
+      # Re-index so the local channel drops the deleted entries; a stale
+      # index makes the next --use-local install fetch a missing file.
+      run_in_env conda index "${_bld}" >/dev/null 2>&1 || true
+    done
+  fi
   # Restore version files on failure so the repo is left clean.
   if [[ "${ec}" -ne 0 && "${VERSION_BUMPED}" -eq 1 ]]; then
     log "Rolling back version changes (build/test/upload failed)..."
@@ -678,6 +695,23 @@ log "Creating test conda environment: ${TEST_ENV_NAME} (python=${TEST_PYTHON}, c
 # install re-solve fails outright.
 conda create -y -n "${TEST_ENV_NAME}" --override-channels -c conda-forge "python=${TEST_PYTHON}" cython 2>&1 || die "Failed to create test environment"
 
+# Resolve the env prefix and call its binaries directly.  `conda run` is
+# unsafe here: when it cannot find the executable inside the env it falls
+# back to PATH resolution, which can silently run a bare system python
+# (e.g. ~/.local/bin/python -> /usr/bin/python3, no numpy) and make the
+# install test fail on the repo file instead of the real package.
+TEST_ENV_PREFIX="$(conda env list --json 2>/dev/null | python - "${TEST_ENV_NAME}" <<'PY'
+import json, os, sys
+name = sys.argv[1]
+for p in json.load(sys.stdin).get("envs", []):
+    if os.path.basename(p.rstrip("/")) == name:
+        print(p)
+        break
+PY
+)"
+[[ -x "${TEST_ENV_PREFIX}/bin/python" ]] || \
+  die "Test env has no python binary at ${TEST_ENV_PREFIX}/bin/python"
+
 # Install the local package by name from the local conda-bld channel.
 # Using --use-local (equivalent to -c local) lets conda find the locally-
 # built package and properly resolve its run dependencies (numpy, scipy,
@@ -700,22 +734,32 @@ log "Installing pip-only deps (sfft, sip_tpv) in test environment..."
 # without it the env's Python 3.12 sees user packages first on sys.path,
 # pip skips installs it can already see there, and stale user copies
 # shadow the env's own packages at test time.
-if ! PYTHONNOUSERSITE=1 conda run -n "${TEST_ENV_NAME}" pip install --no-deps sfft==1.7.3 sip_tpv==1.1 2>&1; then
+if ! PYTHONNOUSERSITE=1 "${TEST_ENV_PREFIX}/bin/pip" install --no-deps sfft==1.7.3 sip_tpv==1.1 2>&1; then
   log "WARNING: Failed to install sfft/sip_tpv via pip in test environment"
   log "         The import test below may fail if these are required at import time."
 fi
 
 log "Testing autophot installation..."
 TEST_OUTPUT="$(mktemp)"
-if PYTHONNOUSERSITE=1 conda run -n "${TEST_ENV_NAME}" autophot-main -h >"${TEST_OUTPUT}" 2>&1; then
-  log "Test passed: autophot-main -h succeeded"
+# Mirror the README install check: import test first, then the CLI.  Run
+# from a scratch dir -- `python -c` puts the cwd on sys.path, and the
+# repo's flat autophot.py would shadow the installed package here.
+TEST_WORKDIR="$(mktemp -d)"
+if (cd "${TEST_WORKDIR}" && \
+    PYTHONNOUSERSITE=1 "${TEST_ENV_PREFIX}/bin/python" -c "from autophot import AutomatedPhotometry; print('OK')" && \
+    PYTHONNOUSERSITE=1 "${TEST_ENV_PREFIX}/bin/autophot-main" -h) >"${TEST_OUTPUT}" 2>&1; then
+  log "Test passed: import check and autophot-main -h succeeded"
 else
-  log "ERROR: Package test failed (autophot-main -h). Output:"
+  log "ERROR: Package test failed. Output:"
   sed 's/^/  /' "${TEST_OUTPUT}" >&2
+  log "Env contents for autophot/numpy:"
+  conda list -n "${TEST_ENV_NAME}" 2>/dev/null | grep -E 'autophot|numpy' | sed 's/^/  /' >&2 || true
   rm -f "${TEST_OUTPUT}"
   die "Package test failed; aborting upload"
 fi
 rm -f "${TEST_OUTPUT}"
+rm -rf "${TEST_WORKDIR}"
+TEST_WORKDIR=""
 
 log "Cleaning up test environment..."
 conda env remove -y -n "${TEST_ENV_NAME}" >/dev/null 2>&1 || true
@@ -766,4 +810,4 @@ else
 fi
 
 log "---"
-log "Done. Install with: conda install -c ${CHANNEL_USERNAME}${LABEL:+/label/${LABEL}} autophot"
+log "Done. Install with: conda install -c conda-forge -c ${CHANNEL_USERNAME}${LABEL:+/label/${LABEL}} autophot"
