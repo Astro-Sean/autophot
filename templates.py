@@ -1662,9 +1662,11 @@ def _zogy_residual_warp(
     The global alignment (spalipy cubic spline) leaves spatially varying
     misregistration of ~0.2-0.4 px -- the dipole residuals around bright
     stars that no global matching kernel can absorb.  The residual
-    pattern is smooth (dominated by linear gradients), so a degree-1
-    polynomial displacement field fit to per-source lags recovers most
-    of it without risking a high-order warp on sparse anchors.
+    pattern is smooth and usually dominated by linear gradients, so a
+    degree-1 polynomial displacement field fit to per-source lags
+    recovers most of it without risking a high-order warp on sparse
+    anchors.  A degree-2 field is tried alongside when enough anchors
+    are available and kept only on a clear win.
 
     Anchors are the same vetted stellar positions feeding the kernel
     stamp pool; variable/target/banned positions are excluded.  Returns
@@ -1728,39 +1730,68 @@ def _zogy_residual_warp(
         return ref, info
 
     H, W = ref.shape
-    A = np.c_[m[:, 0] / W, m[:, 1] / H, np.ones(len(m))]
-    # MAD-clip passes: anchors whose lag is a fit outlier (mismatched
-    # pair, resolved galaxy) must not bend the whole field.
-    keep = np.ones(len(m), dtype=bool)
-    for _ in range(2):
-        if keep.sum() < min_sources:
-            break
+    xn = m[:, 0] / W
+    yn = m[:, 1] / H
+    A1 = np.c_[xn, yn, np.ones(len(m))]
+    # Degree-2 terms are added only when the anchor count can constrain
+    # them (~4 anchors per coefficient) - on thin fields the extra free
+    # parameters fit anchor noise instead of the field.
+    A2 = None
+    if len(m) >= 24:
+        A2 = np.c_[A1, xn * yn, xn**2, yn**2]
+
+    def _fit(A):
+        # MAD-clip passes: anchors whose lag is a fit outlier
+        # (mismatched pair, resolved galaxy) must not bend the field.
+        keep = np.ones(len(m), dtype=bool)
+        for _ in range(2):
+            if keep.sum() < min_sources:
+                break
+            cdx, _, _, _ = np.linalg.lstsq(A[keep], m[keep, 2], rcond=None)
+            cdy, _, _, _ = np.linalg.lstsq(A[keep], m[keep, 3], rcond=None)
+            res = np.hypot(m[:, 2] - A @ cdx, m[:, 3] - A @ cdy)
+            mad = np.median(np.abs(res[keep] - np.median(res[keep])))
+            lim = max(4.0 * 1.4826 * mad, 0.05)
+            keep = res <= np.median(res[keep]) + lim
+        if keep.sum() < max(3, int(min_sources)):
+            return None
         cdx, _, _, _ = np.linalg.lstsq(A[keep], m[keep, 2], rcond=None)
         cdy, _, _, _ = np.linalg.lstsq(A[keep], m[keep, 3], rcond=None)
-        res = np.hypot(m[:, 2] - A @ cdx, m[:, 3] - A @ cdy)
-        mad = np.median(np.abs(res[keep] - np.median(res[keep])))
-        lim = max(4.0 * 1.4826 * mad, 0.05)
-        keep = res <= np.median(res[keep]) + lim
-    if keep.sum() < max(3, int(min_sources)):
-        # The clip rejected below the configured floor: a degree-1 fit
-        # on a handful of survivors is underdetermined noise, not a
-        # registration measurement.
-        info["reason"] = "field fit lost too many anchors"
-        info["n_used"] = int(keep.sum())
-        return ref, info
-    cdx, _, _, _ = np.linalg.lstsq(A[keep], m[keep, 2], rcond=None)
-    cdy, _, _, _ = np.linalg.lstsq(A[keep], m[keep, 3], rcond=None)
-    fit_rms = float(
-        np.sqrt(
-            np.mean(
-                (m[keep, 2] - A[keep] @ cdx) ** 2
-                + (m[keep, 3] - A[keep] @ cdy) ** 2
+        res_rms = float(
+            np.sqrt(
+                np.mean(
+                    (m[keep, 2] - A[keep] @ cdx) ** 2
+                    + (m[keep, 3] - A[keep] @ cdy) ** 2
+                )
             )
         )
-    )
+        return keep, cdx, cdy, res_rms
+
+    best = _fit(A1)
+    degree = 1
+    if A2 is not None:
+        cand = _fit(A2)
+        # The higher order must win clearly; a marginal gain on sparse
+        # anchors is noise, not signal.
+        if (
+            cand is not None
+            and best is not None
+            and cand[3] < 0.85 * best[3]
+        ) or (best is None and cand is not None):
+            best, degree = cand, 2
+
+    if best is None:
+        # The clip rejected below the configured floor: a polynomial
+        # fit on a handful of survivors is underdetermined noise, not a
+        # registration measurement.
+        info["reason"] = "field fit lost too many anchors"
+        info["n_used"] = 0
+        return ref, info
+    keep, cdx, cdy, fit_rms = best
     info.update(
         fit_rms=fit_rms,
         n_used=int(keep.sum()),
+        degree=degree,
         dx_coeff=cdx.tolist(),
         dy_coeff=cdy.tolist(),
     )
@@ -1771,8 +1802,13 @@ def _zogy_residual_warp(
         return ref, info
 
     yy, xx = np.mgrid[0:H, 0:W]
-    dxf = cdx[0] * xx / W + cdx[1] * yy / H + cdx[2]
-    dyf = cdy[0] * xx / W + cdy[1] * yy / H + cdy[2]
+    xg = xx / W
+    yg = yy / H
+    dxf = cdx[0] * xg + cdx[1] * yg + cdx[2]
+    dyf = cdy[0] * xg + cdy[1] * yg + cdy[2]
+    if degree == 2:
+        dxf += cdx[3] * xg * yg + cdx[4] * xg**2 + cdx[5] * yg**2
+        dyf += cdy[3] * xg * yg + cdy[4] * xg**2 + cdy[5] * yg**2
     info["max_fitted"] = float(np.max(np.hypot(dxf, dyf)))
     if info["max_fitted"] > max_shift:
         info["reason"] = "fitted displacement unphysically large"
@@ -13181,15 +13217,37 @@ class Templates:
                 _auto_ratio = _fwhm_broad_ck / _fwhm_narrow_ck
                 _auto_n_eff = len(matching_sources) if matching_sources else 0
                 _has_psfs = science_psf is not None and template_psf is not None
-                if _has_psfs and _auto_ratio < 1.5 and _fwhm_broad_ck >= 2.5:
+                _zogy_ok = _has_psfs and _fwhm_broad_ck >= 2.5
+                # SFFT's delta-basis kernel needs about
+                # sfft_kernel_pix_per_source pixels per vetted prior to stay
+                # out of the noise-dominated regime (negative-mass fraction
+                # ~0.5, broken flux scaling).  ZOGY derives its kernel from
+                # the PSF models and needs almost no sources, so it is the
+                # better backend whenever SFFT cannot constrain its kernel --
+                # even when the PSF mismatch sits past the 1.5 ratio rule.
+                try:
+                    _px_per_src = float(
+                        ts_cfg_ker.get("sfft_kernel_pix_per_source", 35.0)
+                    )
+                except (TypeError, ValueError):
+                    _px_per_src = 35.0
+                if not (np.isfinite(_px_per_src) and _px_per_src > 0):
+                    _px_per_src = 35.0
+                _sfft_constrained = (
+                    _auto_n_eff * _px_per_src
+                    >= (2.0 * float(sfft_kernel_hw) + 1.0) ** 2
+                )
+                if _zogy_ok and (_auto_ratio < 1.5 or not _sfft_constrained):
                     method = "zogy"
                 else:
                     method = "sfft"
                 logger.info(
                     "Subtraction backend auto-selected: %s (FWHM ratio=%.2f, "
-                    "FWHM_broad=%.2f px, n_matched=%d, PSFs=%s).",
+                    "FWHM_broad=%.2f px, n_matched=%d, PSFs=%s, "
+                    "sfft kernel constrained=%s).",
                     method, _auto_ratio, _fwhm_broad_ck, _auto_n_eff,
                     "present" if _has_psfs else "absent",
+                    _sfft_constrained,
                 )
 
             # =============================================================
@@ -17449,16 +17507,27 @@ class Templates:
                 )
             except (TypeError, ValueError):
                 _fscal_ap_min = 5
+            try:
+                _diff_rescale_min_frac = float(
+                    ts_sub.get("sfft_diff_rescale_min_frac", 0.10)
+                )
+            except (TypeError, ValueError):
+                _diff_rescale_min_frac = 0.10
 
             def _stamp_fscal_cards(diff_path) -> None:
-                """Record the aperture scale and repair a broken FSCAL_PHOT.
+                """Record the aperture scale, repair FSCAL_PHOT, and
+                rescale a badly-scaled CONVD=REF product.
 
                 The stamp must be re-applied to every diff a retry writes,
                 because a fresh SFFT product carries fresh SExtractor-based
                 FSCAL cards.  FSCAL_PHO2 keeps the original value for
                 provenance; FSCAL_DISC is recomputed against the repaired
                 photometric scale so downstream retries and the error
-                budget see the trustworthy discrepancy.
+                budget see the trustworthy discrepancy.  When the aperture
+                referee convicts the convolution scale outright, the REF
+                diff is rewritten at the aperture scale (original kept in
+                FSCAL_CV2) -- idempotent, since the stamped product then
+                reads conv==ap.
                 """
                 try:
                     if not diff_path or not os.path.isfile(str(diff_path)):
@@ -17538,6 +17607,95 @@ class Templates:
                                 float(_disc_new),
                                 "FSCAL_CONV vs FSCAL_PHOT discrepancy (pct)",
                             )
+                        # CONVD=REF pixel repair.  DIFF = SCI - CONV*Conv(REF)
+                        # - B, so SCI - r*(SCI - DIFF) with r = AP/CONV is
+                        # algebraically SCI - AP*Conv(REF) - r*B: the product
+                        # re-expressed at the photometric scale while the
+                        # transient keeps native science units.  B is the
+                        # single solved background constant (sub-percent of
+                        # the sky noise here); its rescale is absorbed by the
+                        # local-sky photometry.  Requires the aperture
+                        # referee to be trusted and CONV to be the clear
+                        # outlier -- when AP and CONV both fail or AP is
+                        # missing, the raw product stands and the
+                        # discrepancy stays in the cards.
+                        if (
+                            str(_convd).upper() == "REF"
+                            and _conv_hdr is not None
+                            and np.isfinite(_s_ap_cmp)
+                            and _s_ap_cmp > 0
+                            and int(_s_ap_n) >= _fscal_ap_min
+                            and _diff_rescale_min_frac > 0
+                        ):
+                            _conv_val = float(_conv_hdr)
+                            _disc_ap = abs(_conv_val - _s_ap_cmp) / _s_ap_cmp
+                            if (
+                                np.isfinite(_conv_val)
+                                and _conv_val > 0
+                                and _disc_ap > _diff_rescale_min_frac
+                            ):
+                                try:
+                                    _sci_arr = np.asarray(
+                                        fits.getdata(scienceFpath),
+                                        dtype=np.float64,
+                                    )
+                                    if _sci_arr.shape == _hdul[0].data.shape:
+                                        _r_phot = _s_ap_cmp / _conv_val
+                                        _hdul[0].data = (
+                                            _sci_arr
+                                            - _r_phot
+                                            * (_sci_arr - _hdul[0].data)
+                                        )
+                                        _h["HIERARCH FSCAL_CV2"] = (
+                                            _conv_val,
+                                            "Original SFFT convolution "
+                                            "flux scale",
+                                        )
+                                        _h["HIERARCH FSCAL_CONV"] = (
+                                            float(_s_ap_cmp),
+                                            "Flux scale after photometric "
+                                            "rescale",
+                                        )
+                                        _h["HIERARCH FSCAL_DISC"] = (
+                                            abs(_s_ap_cmp - _phot_use)
+                                            / max(
+                                                abs(_s_ap_cmp),
+                                                abs(_phot_use),
+                                                1e-10,
+                                            )
+                                            * 100.0,
+                                            "FSCAL_CONV vs FSCAL_PHOT "
+                                            "discrepancy (pct)",
+                                        )
+                                        logger.warning(
+                                            "SFFT conv flux scale %.4f "
+                                            "disagrees with the "
+                                            "matched-aperture scale %.4f "
+                                            "(%d ratios) by %.0f%% - "
+                                            "rewrote CONVD=REF diff as "
+                                            "SCI - %.4f*(SCI - DIFF); "
+                                            "original scale kept in "
+                                            "FSCAL_CV2.",
+                                            _conv_val,
+                                            float(_s_ap_cmp),
+                                            int(_s_ap_n),
+                                            _disc_ap * 100.0,
+                                            float(_r_phot),
+                                        )
+                                    else:
+                                        logger.warning(
+                                            "SFFT diff photometric rescale "
+                                            "skipped: science shape %s != "
+                                            "diff shape %s.",
+                                            _sci_arr.shape,
+                                            _hdul[0].data.shape,
+                                        )
+                                except Exception as _rs_e:
+                                    logger.warning(
+                                        "SFFT diff photometric rescale "
+                                        "failed: %s",
+                                        _rs_e,
+                                    )
                         _hdul.flush()
                 except Exception as _st_e:
                     logger.debug(
