@@ -311,6 +311,26 @@ class FitsInfo:
         Returns:
             Validated answer in expected type
         """
+        invalid_answers = 0
+        max_invalid = 20
+
+        def _give_up():
+            # A piped answer stream (e.g. `yes`) that cannot satisfy this
+            # prompt would otherwise loop forever; take the default.
+            self.logger.warning(
+                "ask_question: %d consecutive invalid answers; using "
+                "default %r for %r",
+                invalid_answers,
+                default_answer,
+                question,
+            )
+            try:
+                if expect_answer_type is str:
+                    return str(default_answer)
+                return expect_answer_type(float(default_str))
+            except (ValueError, TypeError):
+                return default_answer
+
         while True:
             # Format default nicely (e.g. 0.400 for floats, plain for strings)
             if isinstance(default_answer, (float, int)):
@@ -330,7 +350,12 @@ class FitsInfo:
 
             # Prompt and echo go to stderr so piped stdout stays clean.
             print(prompt, file=sys.stderr, end="", flush=True)
-            raw = input()
+            try:
+                raw = input()
+            except EOFError:
+                # Closed or exhausted stdin (non-interactive batch):
+                # take the default rather than crash or hang.
+                raw = ""
             ans = raw.strip() or default_str
             print(f"  Selected: {ans}", file=sys.stderr)
 
@@ -347,6 +372,9 @@ class FitsInfo:
                             f"  Invalid. Choose one of: {', '.join(options)}",
                             file=sys.stderr,
                         )
+                        invalid_answers += 1
+                        if invalid_answers >= max_invalid:
+                            return _give_up()
                         continue
                     return ans
                 return expect_answer_type(float(ans))
@@ -357,12 +385,18 @@ class FitsInfo:
                             f"  Invalid. Choose one of: {', '.join(options)}",
                             file=sys.stderr,
                         )
+                        invalid_answers += 1
+                        if invalid_answers >= max_invalid:
+                            return _give_up()
                         continue
                     return ans
                 print(
                     "  Invalid format. Enter one of the options.",
                     file=sys.stderr,
                 )
+                invalid_answers += 1
+                if invalid_answers >= max_invalid:
+                    return _give_up()
 
     def find_similar_keywords(self, keywords, search_term, cutoff=0.6):
         """
@@ -717,10 +751,15 @@ class FitsInfo:
             f"\n  Standard bands:  {opts_str}\n"
             f"\n  Map {header_value!r} to [{default}]: "
         )
+        invalid_answers = 0
         while True:
             # Case is significant for band names (I vs i); preserve it.
             print(prompt, file=sys.stderr, end="", flush=True)
-            ans = input().strip() or default
+            try:
+                ans = input().strip() or default
+            except EOFError:
+                # Closed or exhausted stdin: take the default.
+                ans = default
             print(f"  Selected: {ans}", file=sys.stderr)
             if ans == default:
                 try:
@@ -757,6 +796,23 @@ class FitsInfo:
                 f"  Invalid. Choose one of {opts_str}, or '{default}'.",
                 file=sys.stderr,
             )
+            invalid_answers += 1
+            if invalid_answers >= 20:
+                self.logger.warning(
+                    "filter map prompt: %d invalid answers; using default %r "
+                    "for %r",
+                    invalid_answers,
+                    default,
+                    header_value,
+                )
+                try:
+                    self._remember_mapping(db, header_value, default)
+                    self._save_db(db)
+                except Exception as _db_exc:
+                    self.logger.debug(
+                        "Could not persist keyword mapping: %s", _db_exc
+                    )
+                return default
 
     @staticmethod
     def _next_filter_key_num(entry):
@@ -1006,14 +1062,14 @@ class FitsInfo:
 
     def _load_db(self):
         """Load existing telescope.yml from wdir or return empty dict.
-        
+
         Auto-converts legacy CAMERA blocks to INSTRUME.
         """
         db = {}
         if self.telescope_file.exists():
             with open(self.telescope_file) as f:
                 db = yaml.safe_load(f) or {}
-        
+
         # Auto-convert legacy CAMERA blocks to INSTRUME
         for tele, tele_data in db.items():
             if isinstance(tele_data, dict) and "CAMERA" in tele_data:
@@ -1031,7 +1087,7 @@ class FitsInfo:
                     for inst, inst_data in camera_data.items():
                         if inst not in tele_data["INSTRUME"]:
                             tele_data["INSTRUME"][inst] = inst_data
-        
+
         return db
 
     def _save_db(self, db):
