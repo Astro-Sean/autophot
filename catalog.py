@@ -2352,7 +2352,7 @@ class Catalog:
         query = f"""
             SELECT TOP {fetch_n} ra, dec, type, mag_g, mag_r, mag_i, mag_z,
                 flux_ivar_g, flux_ivar_r, flux_ivar_i, flux_ivar_z,
-                sqrt(power(ra - {ra}, 2) + power(dec - {dec}, 2)) AS angular_distance
+                sqrt(power(ra - ({ra}), 2) + power(dec - ({dec}), 2)) AS angular_distance
             FROM ls_dr10.tractor
             WHERE 't'= Q3C_RADIAL_QUERY(ra, dec, {ra}, {dec}, {radius})
             ORDER BY angular_distance ASC
