@@ -1725,6 +1725,10 @@ def _zogy_residual_warp(
     m = np.asarray(meas)
     raw_rms = float(np.sqrt(np.mean(m[:, 2] ** 2 + m[:, 3] ** 2)))
     info["raw_rms"] = raw_rms
+    # Per-axis lags feed the Scorr astrometric-noise term - registration
+    # error is often anisotropic (tracking drift, DCR along zenith).
+    info["raw_rms_x"] = float(np.sqrt(np.mean(m[:, 2] ** 2)))
+    info["raw_rms_y"] = float(np.sqrt(np.mean(m[:, 3] ** 2)))
     if raw_rms < min_rms:
         info["reason"] = "residual registration already fine"
         return ref, info
@@ -1765,7 +1769,13 @@ def _zogy_residual_warp(
                 )
             )
         )
-        return keep, cdx, cdy, res_rms
+        res_rms_x = float(
+            np.sqrt(np.mean((m[keep, 2] - A[keep] @ cdx) ** 2))
+        )
+        res_rms_y = float(
+            np.sqrt(np.mean((m[keep, 3] - A[keep] @ cdy) ** 2))
+        )
+        return keep, cdx, cdy, res_rms, res_rms_x, res_rms_y
 
     best = _fit(A1)
     degree = 1
@@ -1787,9 +1797,11 @@ def _zogy_residual_warp(
         info["reason"] = "field fit lost too many anchors"
         info["n_used"] = 0
         return ref, info
-    keep, cdx, cdy, fit_rms = best
+    keep, cdx, cdy, fit_rms, fit_rms_x, fit_rms_y = best
     info.update(
         fit_rms=fit_rms,
+        fit_rms_x=fit_rms_x,
+        fit_rms_y=fit_rms_y,
         n_used=int(keep.sum()),
         degree=degree,
         dx_coeff=cdx.tolist(),
@@ -2210,6 +2222,8 @@ def _zogy_subtract(
     gain_r=1.0,
     source_var_n=None,
     source_var_r=None,
+    sigma_ast_x=0.0,
+    sigma_ast_y=0.0,
 ):
     """Core ZOGY subtraction (Zackay, Ofek & Gal-Yam 2016, ApJ, 830, 27).
 
@@ -2251,6 +2265,13 @@ def _zogy_subtract(
         Optional source Poisson variance maps in the respective image units.
         Use these when a source image was pre-convolved, since its variance
         must be convolved with the squared matching kernel.
+    sigma_ast_x, sigma_ast_y : float
+        Residual registration error per axis in pixels (ZOGY 2016,
+        Sec. III.3).  When > 0, an astrometric variance map
+        sigma_ast^2 * |grad I|^2 is added to each image's variance before
+        the kernel convolutions, so the dipole residuals left by
+        misregistration are correctly weighted in Scorr instead of
+        flagged as transients.  0 disables the term.
 
     Returns
     -------
@@ -2259,8 +2280,9 @@ def _zogy_subtract(
     S : np.ndarray (float)
         Score image (Eq. 2).
     Scorr : np.ndarray (float)
-        Corrected significance (Eq. 13), with astrometric noise ignored
-        (approximation valid for well-aligned images).
+        Corrected significance (Eq. 13).  Astrometric noise is included
+        via sigma_ast_x/y when supplied; with both zero the term drops
+        out (approximation valid for well-aligned images).
     P_D : np.ndarray (float)
         PSF of the difference image (Eq. 12), in native image pixels,
         same shape as D.  Used for photometry when forceconv=AUTO
@@ -2429,6 +2451,27 @@ def _zogy_subtract(
         Vr = source_var_r + np.asarray(sr_map, dtype=np.float64) ** 2
     else:
         Vr = source_var_r + sr2
+
+    # Astrometric noise (ZOGY 2016, Sec. III.3): a registration error of
+    # sigma_ast pixels leaves residuals proportional to the local image
+    # gradient, so its variance contribution is sigma_ast^2 * |grad I|^2.
+    # It propagates through the same matching-kernel convolution as the
+    # Poisson variance, which puts the extra weight where dipoles live -
+    # bright source edges - and leaves blank-sky significance untouched.
+    # Central differences of white noise add a floor of ~0.5*sigma_ast^2*
+    # sn^2, negligible for sub-pixel errors.
+    try:
+        _sax2 = float(sigma_ast_x) ** 2
+        _say2 = float(sigma_ast_y) ** 2
+    except (TypeError, ValueError):
+        _sax2 = _say2 = 0.0
+    if not (np.isfinite(_sax2) and np.isfinite(_say2)):
+        _sax2 = _say2 = 0.0
+    if _sax2 > 0.0 or _say2 > 0.0:
+        _gy_n, _gx_n = np.gradient(N)
+        Vn = Vn + _say2 * _gy_n**2 + _sax2 * _gx_n**2
+        _gy_r, _gx_r = np.gradient(R)
+        Vr = Vr + _say2 * _gy_r**2 + _sax2 * _gx_r**2
     Vn_hat = np.fft.fft2(Vn)
     Vr_hat = np.fft.fft2(Vr)
 
@@ -14941,6 +14984,7 @@ class Templates:
             # represent).  Measure per-anchor lags on the vetted
             # positions and warp the reference onto the science grid
             # before any stamp or kernel work consumes it.
+            _warp_info = {"applied": False, "n_anchors": 0}
             if _as_bool(ts_cfg.get("zogy_residual_warp", True), True):
                 _warp_pos = []
                 _wseen = set()
@@ -16326,6 +16370,69 @@ class Templates:
             # (R==0)|(N==0) fallback inside _zogy_subtract still catches any
             # remaining exact-zero pixels, and the caller re-imposes NaN on
             # the output difference image.
+            #
+            # sigma_ast feeds the Scorr astrometric-noise term (ZOGY Sec.
+            # III.3): residual misregistration raises the detection-map
+            # variance at source gradients, so the dipoles it leaves are
+            # weighted down rather than flagged as transients.  Prefer the
+            # residual-warp anchor residuals when available - they measure
+            # the registration error that survives every correction applied
+            # above; otherwise fall back to the global alignment RMS card.
+            _sigma_ast_x = _sigma_ast_y = 0.0
+            if _as_bool(
+                ts_cfg.get("zogy_astrometric_noise", True), True
+            ):
+                try:
+                    _ast_floor = float(
+                        ts_cfg.get("zogy_astrometric_noise_floor_px", 0.02)
+                        or 0.02
+                    )
+                except (TypeError, ValueError):
+                    _ast_floor = 0.02
+                if not np.isfinite(_ast_floor) or _ast_floor < 0:
+                    _ast_floor = 0.02
+                _mx = _my = None
+                if _warp_info.get("applied"):
+                    _mx = _warp_info.get("fit_rms_x")
+                    _my = _warp_info.get("fit_rms_y")
+                elif _warp_info.get("n_anchors"):
+                    _mx = _warp_info.get("raw_rms_x")
+                    _my = _warp_info.get("raw_rms_y")
+                if _mx is None or _my is None:
+                    # The aligned template header carries the ALIGRMS card
+                    # stamped by the alignment stage.
+                    _al = 0.0
+                    try:
+                        _al = float(
+                            fits.getheader(templateFpath).get("ALIGRMS", 0.0)
+                            or 0.0
+                        )
+                    except Exception:
+                        _al = 0.0
+                    if np.isfinite(_al) and _al > 0:
+                        _mx = _my = _al
+                _ok = (
+                    _mx is not None
+                    and _my is not None
+                    and np.isfinite(_mx)
+                    and np.isfinite(_my)
+                    and _mx >= 0
+                    and _my >= 0
+                )
+                if _ok:
+                    _sigma_ast_x = max(float(_mx), _ast_floor)
+                    _sigma_ast_y = max(float(_my), _ast_floor)
+                else:
+                    # Unmeasured registration still leaves the irreducible
+                    # scintillation floor.
+                    _sigma_ast_x = _sigma_ast_y = _ast_floor
+                logger.info(
+                    "ZOGY: astrometric noise sigma=(%.3f, %.3f) px "
+                    "(floor %.3f).",
+                    _sigma_ast_x,
+                    _sigma_ast_y,
+                    _ast_floor,
+                )
             _D, _S, _Scorr, _P_D = _zogy_subtract(
                 _sci_clean, _ref_clean, _psf_sci, _psf_ref, _sn, _sr,
                 sn_map=_sn_map,
@@ -16335,6 +16442,8 @@ class Templates:
                 gain_r=template_gain / _flux_scale,
                 source_var_n=_source_var_n,
                 source_var_r=_source_var_r,
+                sigma_ast_x=_sigma_ast_x,
+                sigma_ast_y=_sigma_ast_y,
             )
             if _zogy_convolved is not None:
                 # After pre-convolution both images share (approximately) the
@@ -16390,6 +16499,14 @@ class Templates:
             _zogy_hdr["ZSHFT_DY"] = (
                 float(_zogy_shift_dy),
                 "residual astrometric y-shift applied to template [px]",
+            )
+            _zogy_hdr["ASTN_X"] = (
+                float(_sigma_ast_x),
+                "astrometric-noise sigma x in Scorr [px]",
+            )
+            _zogy_hdr["ASTN_Y"] = (
+                float(_sigma_ast_y),
+                "astrometric-noise sigma y in Scorr [px]",
             )
             if _zogy_convolved == "REF":
                 # Reference was convolved to science PSF -> diff has science PSF
