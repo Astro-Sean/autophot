@@ -31,7 +31,7 @@ from astropy.table import Table
 
 # --- Local Imports (optional) ---
 try:
-    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, copy_wcs_from_header, cap_console_lines, STATUS  # type: ignore
+    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, copy_wcs_from_header, cap_console_lines, which_exe, STATUS  # type: ignore
 except (ModuleNotFoundError, ImportError):
     # Minimal fallback for environments missing the full photometry stack.
     STATUS = logging.INFO  # degrade STATUS to INFO when functions is absent
@@ -61,6 +61,8 @@ except (ModuleNotFoundError, ImportError):
     def strip_subprocess_noise(text):
         return str(text)
 
+    which_exe = shutil.which
+
 
 def _resolve_sextractor_exe():
     """Lazy resolver for SExtractor executable to avoid circular import."""
@@ -68,7 +70,8 @@ def _resolve_sextractor_exe():
         from utils.run_sex import get_sextractor_executable
         return get_sextractor_executable()
     except (ModuleNotFoundError, ImportError):
-        return shutil.which("sex") or shutil.which("sextractor")
+        from functions import which_exe
+        return which_exe("sex") or which_exe("sextractor")
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -2104,9 +2107,9 @@ class WCSSolver:
         """
         logger.info(log_step("WCS: SCAMP"))
 
-        scamp_exe = wcs_cfg.get("scamp_exe_loc") or shutil.which("scamp")
+        scamp_exe = wcs_cfg.get("scamp_exe_loc") or which_exe("scamp")
         sex_exe = wcs_cfg.get("sextractor_exe_loc") or _resolve_sextractor_exe()
-        if not scamp_exe and shutil.which("scamp") is None:
+        if not scamp_exe and which_exe("scamp") is None:
             logger.warning("SCAMP executable not found; cannot use SCAMP solver.")
             return np.nan
         if not sex_exe:
@@ -2115,7 +2118,7 @@ class WCSSolver:
         scamp_exe = str(
             scamp_exe
             if scamp_exe and os.path.isfile(str(scamp_exe))
-            else shutil.which("scamp")
+            else which_exe("scamp")
         )
         sex_exe = str(
             sex_exe if sex_exe and os.path.isfile(str(sex_exe)) else _resolve_sextractor_exe()
@@ -3016,9 +3019,9 @@ class WCSSolver:
             if os.path.isfile(_candidate) and os.access(_candidate, os.X_OK):
                 solvefield_exe = _candidate
             else:
-                solvefield_exe = shutil.which(_candidate)
+                solvefield_exe = which_exe(_candidate)
         else:
-            solvefield_exe = shutil.which("solve-field")
+            solvefield_exe = which_exe("solve-field")
 
         if not solvefield_exe or not os.path.isfile(solvefield_exe):
             _common_paths = [
