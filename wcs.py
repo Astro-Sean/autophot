@@ -1274,6 +1274,46 @@ def _header_position_hint(header):
     return None
 
 
+def _solve_field_parity(wcs_cfg, header):
+    """Return 'pos'/'neg' parity for solve-field --parity, or None.
+
+    'auto' (default) derives the parity as sign(det(CD)) from the header;
+    explicit 'pos'/'neg' overrides; anything else omits the flag.
+    """
+    setting = str(wcs_cfg.get("solve_field_parity", "auto") or "").lower()
+    if setting in ("pos", "neg"):
+        return setting
+    if setting not in ("auto", "true", "yes"):
+        return None
+    try:
+        cd = np.array(
+            [
+                [header.get("CD1_1", np.nan), header.get("CD1_2", np.nan)],
+                [header.get("CD2_1", np.nan), header.get("CD2_2", np.nan)],
+            ],
+            dtype=float,
+        )
+        if not np.all(np.isfinite(cd)):
+            pc = np.array(
+                [
+                    [header.get("PC1_1", 1.0), header.get("PC1_2", 0.0)],
+                    [header.get("PC2_1", 0.0), header.get("PC2_2", 1.0)],
+                ],
+                dtype=float,
+            )
+            cd = pc * np.array(
+                [header.get("CDELT1", np.nan), header.get("CDELT2", np.nan)]
+            )[None, :]
+        if not np.all(np.isfinite(cd)):
+            return None
+        det = float(np.linalg.det(cd))
+        if not np.isfinite(det) or det == 0:
+            return None
+        return "pos" if det > 0 else "neg"
+    except Exception:
+        return None
+
+
 def _choose_position_hints(
     header,
     target_ra,
@@ -3103,16 +3143,36 @@ class WCSSolver:
         # call (all retries, tweak orders, and downsample levels).  Without
         # it a field that fails everywhere burns each per-attempt cpulimit
         # in sequence - tens of minutes to hours.  null or <=0 disables.
+        # When the input header already carries a usable WCS, a failed
+        # solve falls back to it anyway (see below), so a shorter budget
+        # produces the same result sooner.
+        try:
+            _has_input_wcs = get_wcs(self.header) is not None
+        except Exception:
+            _has_input_wcs = False
+        _budget_key = (
+            "solve_field_input_wcs_budget"
+            if _has_input_wcs
+            else "solve_field_total_budget"
+        )
+        _budget_default = 60.0 if _has_input_wcs else 1800.0
         try:
             _total_budget_sec = float(
-                wcs_cfg.get("solve_field_total_budget", 1800.0) or 0.0
+                wcs_cfg.get(_budget_key, _budget_default) or 0.0
             )
         except (TypeError, ValueError):
             logger.warning(
-                "Ignoring invalid wcs.solve_field_total_budget=%r.",
-                wcs_cfg.get("solve_field_total_budget"),
+                "Ignoring invalid wcs.%s=%r.",
+                _budget_key,
+                wcs_cfg.get(_budget_key),
             )
             _total_budget_sec = 0.0
+        if _has_input_wcs and 0 < _total_budget_sec < 1800.0:
+            logger.debug(
+                "Input header WCS is usable; capping solve-field budget "
+                "at %.0f s (wcs.solve_field_input_wcs_budget).",
+                _total_budget_sec,
+            )
         self._solve_deadline = (
             time.monotonic() + _total_budget_sec
             if _total_budget_sec > 0
@@ -3416,6 +3476,34 @@ class WCSSolver:
                 logger.debug(
                     "solve-field: omitting --crpix-center (solver reference pixel; often closer to instrument WCS - set wcs.solve_field_crpix_center: true for legacy)"
                 )
+            # Additional solve-field inputs that raise solve odds:
+            #   --parity: sign of the header CD determinant, when the
+            #   image already carries WCS keywords.  Handedness is an
+            #   instrument property (unlike pointing, it is rarely
+            #   wrong), and fixing it halves the index space searched.
+            #   --depth / --logodds: optional pass-throughs for sparse
+            #   fields and marginal matches.
+            #   solve_field_extra_args: verbatim escape hatch for any
+            #   other flag the caller wants on every attempt.
+            _parity = _solve_field_parity(wcs_cfg, self.header)
+            if _parity is not None:
+                common_args.insert(-1, "--parity")
+                common_args.insert(-1, _parity)
+                logger.debug("solve-field parity hint: --parity %s", _parity)
+            _depth = wcs_cfg.get("solve_field_depth", None)
+            if _depth is not None:
+                common_args.insert(-1, "--depth")
+                common_args.insert(-1, str(_depth))
+            _logodds = wcs_cfg.get("solve_field_logodds", None)
+            if _logodds is not None:
+                common_args.insert(-1, "--logodds")
+                common_args.insert(-1, str(_logodds))
+            _extra = wcs_cfg.get("solve_field_extra_args", None)
+            if _extra:
+                if not isinstance(_extra, (list, tuple)):
+                    _extra = [_extra]
+                for _a in _extra:
+                    common_args.insert(-1, str(_a))
             # Tweak order(s) for solve-field. Single int or list, e.g. YAML:
             #   solve_field_tweak_order: 5
             #   solve_field_tweak_orders: [5, 3, 2, 1, 0]
