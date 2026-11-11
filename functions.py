@@ -181,6 +181,99 @@ def patch_simbad_session_timeout(timeout: float = 30.0) -> None:
     except Exception:
         return
 
+    _select_simbad_mirror()
+
+
+# VizieR mirror list (https://vizier.cds.unistra.fr/doc/asu-summary.htx).
+# The query itself is the health check: only exceptions trigger failover,
+# an empty TableList is a valid answer on any host.  The first winner is
+# cached on the class so later calls in the process skip dead mirrors.
+VIZIER_MIRRORS = (
+    "vizier.cds.unistra.fr",
+    "vizier.cfa.harvard.edu",
+    "vizier.hia.nrc.ca",
+    "vizier.nao.ac.jp",
+    "vizier.ast.cam.ac.uk",
+    "vizier.iucaa.in",
+    "data.bao.ac.cn",
+)
+
+
+def vizier_query_region(*args, **kwargs):
+    """Vizier.query_region with failover across the public mirrors.
+
+    CDS outages return 404s on /viz-bin/*, which astroquery turns into
+    HTTPError - retry the same query on the next mirror instead of
+    failing the whole image.
+    """
+    from astroquery.vizier import Vizier
+
+    hosts = list(VIZIER_MIRRORS)
+    current = getattr(
+        Vizier, "_autophot_vizier_host", getattr(Vizier, "VIZIER_SERVER", None)
+    )
+    if current in hosts:
+        hosts.remove(current)
+    if current:
+        hosts.insert(0, current)
+
+    last_exc = None
+    for host in hosts:
+        Vizier.VIZIER_SERVER = host
+        try:
+            result = Vizier.query_region(*args, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("VizieR query via %s failed (%s); trying next mirror", host, exc)
+            continue
+        Vizier._autophot_vizier_host = host
+        return result
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("No VizieR mirrors configured")
+
+
+def _select_simbad_mirror() -> None:
+    """Move SIMBAD to the Harvard mirror when the CDS endpoint is down.
+
+    CDS outages (vizier, simbad, sesame share cds.unistra.fr) make the
+    default server fail inside pyvo's capabilities probe, so variable-
+    source masking silently loses every field source.  astroquery only
+    accepts the two registered server names, and Simbad.server is a
+    validated property, so probe the primary once per process and
+    switch before the first TAP call builds against it.
+    """
+    try:
+        from astroquery.simbad import Simbad
+        import requests
+    except Exception:
+        return
+    if getattr(Simbad, "_autophot_mirror_checked", False):
+        return
+    Simbad._autophot_mirror_checked = True
+    server = getattr(Simbad, "server", None)
+    if not server or server != "simbad.cds.unistra.fr":
+        return
+    try:
+        ok = (
+            requests.get(
+                f"https://{server}/simbad/sim-tap/capabilities",
+                timeout=8,
+            ).status_code
+            < 400
+        )
+    except Exception:
+        ok = False
+    if ok:
+        return
+    try:
+        Simbad.server = "simbad.harvard.edu"
+        logger.warning(
+            "SIMBAD primary endpoint unreachable; using simbad.harvard.edu mirror"
+        )
+    except Exception:
+        pass
+
 
 def _fits_cache_key(fpath):
     """Return a cache key tuple (path, mtime, size) or None if stat fails."""
