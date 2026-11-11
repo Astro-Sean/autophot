@@ -1128,6 +1128,7 @@ class Limits:
         image_zeropoint: dict = None,
         _return_details: bool = False,
         avoid_positions=None,
+        fitted_position=None,
     ) -> float:
         """
         Bracket-and-bisect search for the limiting magnitude by injecting
@@ -1152,6 +1153,9 @@ class Limits:
         n_jobs          : worker processes; None defaults to 1 (serial)
         avoid_positions : additional full-frame ``(x, y)`` transient positions
                           that injected sources must not overlap
+        fitted_position : optional full-frame ``(x, y)`` of the PSF-fitted
+                          target position; diagnostic-plot marker only. The
+                          cutout stays centred on ``position``.
 
         Returns
         -------
@@ -1274,6 +1278,26 @@ class Limits:
                         continue
                     _avoid_positions_full.append((float(_ax), float(_ay)))
 
+            # Fitted target position for the diagnostic plot only; the cutout
+            # must stay centred on the requested position.
+            _fitted_position_full = None
+            if fitted_position is not None:
+                try:
+                    _fp = np.asarray(fitted_position, dtype=float).reshape(-1)
+                except (TypeError, ValueError):
+                    _fp = np.empty(0)
+                if (
+                    _fp.size >= 2
+                    and np.isfinite(_fp[0])
+                    and np.isfinite(_fp[1])
+                    and np.hypot(
+                        float(_fp[0]) - _orig_position[0],
+                        float(_fp[1]) - _orig_position[1],
+                    )
+                    > 0.5
+                ):
+                    _fitted_position_full = (float(_fp[0]), float(_fp[1]))
+
             def _extract_cutouts(scale_px: float):
                 result = self.get_cutout(
                     image=_orig_frame, position=_orig_position, scale_override=scale_px
@@ -1325,6 +1349,17 @@ class Limits:
                     (float(px - ox), float(py - oy))
                     for px, py in _avoid_positions_full
                 ]
+
+            def _fitted_position_cutout():
+                """Map the fitted target position onto this cutout."""
+                if _fitted_position_full is None:
+                    return None
+                ox = _orig_position[0] - float(cutout_cx)
+                oy = _orig_position[1] - float(cutout_cy)
+                return (
+                    float(_fitted_position_full[0] - ox),
+                    float(_fitted_position_full[1] - oy),
+                )
 
             # A configured aperture_radius equal to the FWHM is the fallback
             # sentinel; the optimum-radius measurement runs further below.
@@ -3319,6 +3354,7 @@ class Limits:
                             snr_limit=effective_snr_limit,
                             snr_gate_factor=_snr_gate_factor,
                             avoid_positions=_avoid_positions_cutout(),
+                            fitted_position=_fitted_position_cutout(),
                         )
                     except Exception as exc:
                         logger.warning(
@@ -3482,6 +3518,7 @@ class Limits:
                     "cutout_cx": cutout_cx,
                     "cutout_cy": cutout_cy,
                     "avoid_positions": _avoid_positions_cutout(),
+                    "fitted_position": _fitted_position_cutout(),
                     # Empirical uncertainty calibration (or None when skipped).
                     "uncal": (
                         self.last_uncal["result"].to_dict()
@@ -4208,6 +4245,7 @@ class Limits:
         snr_limit=None,
         snr_gate_factor=None,
         avoid_positions=None,
+        fitted_position=None,
         multi_snr_details=None,
         fig=None,
         gs=None,
@@ -4577,6 +4615,20 @@ class Limits:
             except (TypeError, ValueError):
                 _avoid_plot = np.empty((0, 2), dtype=float)
 
+            # PSF-fitted target position in cutout coords (marker only).
+            _fitted_plot = None
+            if fitted_position is not None:
+                try:
+                    _fp = np.asarray(fitted_position, dtype=float).reshape(-1)
+                except (TypeError, ValueError):
+                    _fp = np.empty(0)
+                if (
+                    _fp.size >= 2
+                    and np.isfinite(_fp[0])
+                    and np.isfinite(_fp[1])
+                ):
+                    _fitted_plot = (float(_fp[0]), float(_fp[1]))
+
             def _clear_of_transients(sx, sy):
                 if float(np.hypot(sx - target_x, sy - target_y)) < min_sep:
                     return False
@@ -4912,6 +4964,15 @@ class Limits:
                                     linewidth=0.5,
                                 )
                             )
+                    if _fitted_plot is not None:
+                        ax_inject.plot(
+                            [_fitted_plot[0]],
+                            [_fitted_plot[1]],
+                            "x",
+                            color=PLOT_COLORS.get("transient_marker", "#FF00FF"),
+                            markersize=6,
+                            markeredgewidth=1.2,
+                        )
                     # Label with target_name (TNS-prefixed) or '1' as fallback.
                     if target_name and target_name.strip():
                         name_prefix = self.input_yaml.get("name_prefix", "")
@@ -5198,6 +5259,41 @@ class Limits:
                                 linewidth=0.8,
                             )
                         )
+                if _fitted_plot is not None:
+                    _fit_color = PLOT_COLORS.get("transient_marker", "#FF00FF")
+                    ax_sites.plot(
+                        [_fitted_plot[0]],
+                        [_fitted_plot[1]],
+                        "x",
+                        color=_fit_color,
+                        markersize=6,
+                        markeredgewidth=1.2,
+                    )
+                    _ftx, _fty, _ftha, _ftva = _confined(
+                        ax_sites,
+                        _fitted_plot[0],
+                        _fitted_plot[1] + aperture_radius,
+                        "fit",
+                        8,
+                        "center",
+                        "bottom",
+                    )
+                    ax_sites.text(
+                        _ftx,
+                        _fty,
+                        "fit",
+                        color=_fit_color,
+                        fontsize=8,
+                        ha=_ftha,
+                        va=_ftva,
+                        bbox=dict(
+                            boxstyle="round,pad=0.15",
+                            facecolor="white",
+                            alpha=0.8,
+                            linewidth=0,
+                        ),
+                        clip_on=True,
+                    )
                 _stx, _sty, _stha, _stva = _confined(
                     ax_sites, target_x, target_y + aperture_radius,
                     transient_label, 8, 'center', 'bottom')
@@ -5721,6 +5817,7 @@ class Limits:
             cutout_cy=primary.get("cutout_cy"),
             snr_limit=primary.get("snr_limit"),
             avoid_positions=primary.get("avoid_positions"),
+            fitted_position=primary.get("fitted_position"),
             multi_snr_details=all_details,
             fig=fig,
             gs=gs,
@@ -5759,6 +5856,9 @@ class Limits:
                 snr_limit=detail.get("snr_limit"),
                 avoid_positions=detail.get(
                     "avoid_positions", primary.get("avoid_positions")
+                ),
+                fitted_position=detail.get(
+                    "fitted_position", primary.get("fitted_position")
                 ),
                 multi_snr_details=None,
                 fig=fig,
@@ -5807,6 +5907,7 @@ class Limits:
         n_jobs: int = None,
         image_zeropoint: dict = None,
         avoid_positions=None,
+        fitted_position=None,
     ) -> dict:
         """
         Calculate limiting magnitudes for multiple S/N thresholds using injection/recovery.
@@ -5829,6 +5930,8 @@ class Limits:
         n_jobs          : worker processes; None defaults to 1 (serial)
         avoid_positions : additional full-frame ``(x, y)`` transient positions
                           that injected sources must not overlap
+        fitted_position : optional full-frame ``(x, y)`` of the PSF-fitted
+                          target position; diagnostic-plot marker only
 
         Returns
         -------
@@ -5882,6 +5985,7 @@ class Limits:
                     image_zeropoint=image_zeropoint,
                     _return_details=True,
                     avoid_positions=avoid_positions,
+                    fitted_position=fitted_position,
                 )
                 limit = detail["inject_lmag"]
                 all_details.append(detail)
