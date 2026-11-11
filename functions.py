@@ -112,6 +112,18 @@ def photutils_n_threads(cfg=None, default=1):
     return max(1, min(requested, n_cpu, _PHOTUTILS_THREADS_CAP))
 
 
+def which_exe(name: str) -> Optional[str]:
+    """Resolve an executable on PATH, then next to the interpreter.
+
+    Running from an unactivated conda env leaves env tools (sex, scamp,
+    swarp, solve-field, hotpants) off PATH even though they live next to
+    the python being used - probe that bin dir too before giving up.
+    """
+    return shutil.which(name) or shutil.which(
+        name, path=os.path.dirname(sys.executable)
+    )
+
+
 def _python_free_threaded():
     """True on CPython free-threaded builds where the GIL is disabled."""
     is_gil = getattr(sys, "_is_gil_enabled", None)
