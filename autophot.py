@@ -74,6 +74,41 @@ def _to_yaml_native(obj):
     return obj
 
 
+def _import_local_module(name):
+    """
+    Import a sibling module by file path rather than through sys.path.
+
+    The pipeline creates a `templates/` download folder inside `wdir`; when a
+    driver script lives in that directory, `from templates import ...` binds
+    the folder as a namespace package and shadows the real templates.py, so
+    template downloads fail on every re-run. Loading by absolute path avoids
+    the shadowing, and registering in sys.modules lets later bare imports of
+    the same name reuse the real module.
+    """
+    import importlib.util
+
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    mod = sys.modules.get(name)
+    mod_file = getattr(mod, "__file__", None)
+    if (
+        mod is not None
+        and mod_file
+        and os.path.dirname(os.path.abspath(mod_file)) == repo_dir
+    ):
+        return mod
+    spec = importlib.util.spec_from_file_location(
+        name, os.path.join(repo_dir, name + ".py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        del sys.modules[name]
+        raise
+    return mod
+
+
 def _get_default_input_schema() -> dict:
     """
     Load and cache the default configuration schema from `databases/default_input.yml`.
@@ -257,7 +292,11 @@ def list_parameters(
                 continue
 
         start_line = idx0 + 1
-        end_line = start_line + 1 if (idx0 + 1 < len(lines) and lines[idx0 + 1].strip() == "") else start_line
+        end_line = (
+            start_line + 1
+            if (idx0 + 1 < len(lines) and lines[idx0 + 1].strip() == "")
+            else start_line
+        )
 
         entries.append(
             {
@@ -365,7 +404,9 @@ def list_parameters(
         max_key_w_by_term = term_w - def_w - type_w - per_w - len(sep) * 4 - min_desc_w
         key_w = min(60, nat_key_w, max(18, max_key_w_by_term))
         key_w = max(18, key_w)
-        desc_w = max(min_desc_w, term_w - (key_w + def_w + type_w + per_w + len(sep) * 4))
+        desc_w = max(
+            min_desc_w, term_w - (key_w + def_w + type_w + per_w + len(sep) * 4)
+        )
     header = (
         f"{'KEY'.ljust(key_w)}{sep}"
         f"{'DEFAULT'.ljust(def_w)}{sep}"
@@ -430,15 +471,12 @@ def list_parameters(
         # Keep description text clean; per-image status is in the PER-IMG column.
         info = desc
         if wrap:
-            key_lines = (
-                textwrap.wrap(
-                    e["path"],
-                    width=key_w,
-                    break_long_words=False,
-                    break_on_hyphens=False,
-                )
-                or [""]
-            )
+            key_lines = textwrap.wrap(
+                e["path"],
+                width=key_w,
+                break_long_words=False,
+                break_on_hyphens=False,
+            ) or [""]
             desc_lines = (
                 textwrap.wrap(
                     info,
@@ -513,11 +551,10 @@ def _find_unknown_config_paths(
             continue
         schema_value = schema[key]
         if isinstance(value, dict) and isinstance(schema_value, dict):
-            unknown.extend(
-                _find_unknown_config_paths(value, schema_value, prefix=path)
-            )
+            unknown.extend(_find_unknown_config_paths(value, schema_value, prefix=path))
 
     return unknown
+
 
 # These imports pull in the full scientific stack (e.g. scikit-image). Keep them
 # optional so lightweight utilities (like list_parameters) can be imported in
@@ -759,9 +796,7 @@ def _scan_image_footprints(file_list, band_map=None, pixscale_fallback=None):
             if hdr is not None:
                 info["wcs"] = _get_wcs(hdr, silent=True)
                 if info["wcs"] is None:
-                    info["pixscale"] = (
-                        _pixscale_arcsec(hdr) or pixscale_fallback
-                    )
+                    info["pixscale"] = _pixscale_arcsec(hdr) or pixscale_fallback
                 nx, ny = hdr.get("NAXIS1"), hdr.get("NAXIS2")
                 if nx and ny:
                     info["shape"] = (int(ny), int(nx))
@@ -774,9 +809,7 @@ def _scan_image_footprints(file_list, band_map=None, pixscale_fallback=None):
                             pass
         except Exception:
             pass
-        info["band"] = band_map.get(os.path.abspath(fpath)) or band_map.get(
-            fpath
-        )
+        info["band"] = band_map.get(os.path.abspath(fpath)) or band_map.get(fpath)
         infos.append(info)
     return infos
 
@@ -801,9 +834,7 @@ def _trim_clamped_region(region, trim_arcmin, target_coords, margin, max_arcmin)
         circumscribed = min(circumscribed, float(max_arcmin))
     try:
         reg_r = (
-            float(region.get("radius_arcmin"))
-            if isinstance(region, dict)
-            else np.inf
+            float(region.get("radius_arcmin")) if isinstance(region, dict) else np.inf
         )
     except (TypeError, ValueError):
         reg_r = np.inf
@@ -849,6 +880,7 @@ def find_variable_sources(
     # call below, including the metadata fetches votable-field setup makes.
     try:
         from functions import patch_simbad_session_timeout
+
         patch_simbad_session_timeout()
     except Exception as exc:
         _log(f"SIMBAD timeout patch could not be applied ({exc}); queries may stall.")
@@ -874,9 +906,7 @@ def find_variable_sources(
     original_row_limit = getattr(Simbad, "ROW_LIMIT", 1000)
     Simbad.ROW_LIMIT = 500
 
-    centre_coord = SkyCoord(
-        ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs"
-    )
+    centre_coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
     _log(
         f"Querying SIMBAD within {radius_arcmin}' of "
         f"{centre_coord.to_string('hmsdms')}."
@@ -1044,18 +1074,35 @@ def find_variable_sources(
 
     # Replace generic SIMBAD type codes (e.g. "G", "AGN", "QSO") with
     # IAU-style coordinate designations so plot labels are meaningful.
-    _generic_types = {"G", "AGN", "QSO", "BLL", "SyG", "LIN", "GiG", "SBG",
-                      "X", "HII", "PN", "Em*", "Be*"}
+    _generic_types = {
+        "G",
+        "AGN",
+        "QSO",
+        "BLL",
+        "SyG",
+        "LIN",
+        "GiG",
+        "SBG",
+        "X",
+        "HII",
+        "PN",
+        "Em*",
+        "Be*",
+    }
+
     def _iau_name(ra_deg, dec_deg):
         """Build an IAU-style designation JHHMMSS+/-DDMMSS from coordinates."""
         from astropy.coordinates import SkyCoord as _SC
         import astropy.units as _u
+
         _c = _SC(ra=ra_deg * _u.deg, dec=dec_deg * _u.deg, frame="icrs")
         _ra_hms = _c.ra.hms
         _dec_dms = _c.dec.dms
         _sign = "+" if _dec_dms.d >= 0 else "-"
-        return (f"J{int(_ra_hms.h):02d}{int(_ra_hms.m):02d}{int(_ra_hms.s):02d}"
-                f"{_sign}{abs(int(_dec_dms.d)):02d}{int(abs(_dec_dms.m)):02d}{int(abs(_dec_dms.s)):02d}")
+        return (
+            f"J{int(_ra_hms.h):02d}{int(_ra_hms.m):02d}{int(_ra_hms.s):02d}"
+            f"{_sign}{abs(int(_dec_dms.d)):02d}{int(abs(_dec_dms.m)):02d}{int(abs(_dec_dms.s)):02d}"
+        )
 
     if "MAIN_ID" in df.columns and "RA" in df.columns and "DEC" in df.columns:
         for idx in df.index:
@@ -1309,6 +1356,7 @@ def inspect_telescope(
         """Return pixel scale in arcsec/pixel from the WCS in *header*."""
         try:
             from astropy.wcs import WCS, utils as wcsutils
+
             with _np.errstate(all="ignore"):
                 wcs_obj = WCS(header, naxis=2)
                 scales = wcsutils.proj_plane_pixel_scales(wcs_obj)
@@ -1331,7 +1379,9 @@ def inspect_telescope(
 
     def _read_filter(header, forced_key):
         """Find the filter value and keyword from *header* using candidate keys."""
-        candidates = ([forced_key] + _FILTER_CANDIDATES) if forced_key else _FILTER_CANDIDATES
+        candidates = (
+            ([forced_key] + _FILTER_CANDIDATES) if forced_key else _FILTER_CANDIDATES
+        )
         for key in candidates:
             val = _hval(header, key)
             if val is not None and str(val).strip().lower() not in _AVOID_FILTERS:
@@ -1358,7 +1408,9 @@ def inspect_telescope(
         """Write *data* to a YAML file, creating parent directories as needed."""
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w") as f:
-            _yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            _yaml.dump(
+                data, f, default_flow_style=False, sort_keys=False, allow_unicode=True
+            )
 
     # ---- main logic ----
     fits_dir = os.path.abspath(str(fits_dir))
@@ -1390,7 +1442,9 @@ def inspect_telescope(
         inst = _hval(header, "INSTRUME")
         if not tele or not inst:
             if verbose:
-                log_it.info("  SKIP (no TELESCOP/INSTRUME): %s", os.path.basename(fpath))
+                log_it.info(
+                    "  SKIP (no TELESCOP/INSTRUME): %s", os.path.basename(fpath)
+                )
             skipped += 1
             continue
 
@@ -1400,10 +1454,18 @@ def inspect_telescope(
 
         if (tele, inst) not in seen:
             seen[(tele, inst)] = {
-                "filters": {}, "filter_header_key": None, "pixel_scales": [],
-                "gain_keys": set(), "rn_keys": set(), "sat_keys": set(),
-                "exptime_keys": set(), "mjd_keys": set(), "date_keys": set(),
-                "airmass_keys": set(), "gain_val": None, "rn_val": None,
+                "filters": {},
+                "filter_header_key": None,
+                "pixel_scales": [],
+                "gain_keys": set(),
+                "rn_keys": set(),
+                "sat_keys": set(),
+                "exptime_keys": set(),
+                "mjd_keys": set(),
+                "date_keys": set(),
+                "airmass_keys": set(),
+                "gain_val": None,
+                "rn_val": None,
             }
         rec = seen[(tele, inst)]
 
@@ -1415,9 +1477,13 @@ def inspect_telescope(
             rec["pixel_scales"].append(ps)
 
         for attr, kw in [
-            ("gain_keys", gain_key), ("rn_keys", rn_key), ("sat_keys", sat_key),
-            ("exptime_keys", exptime_key), ("mjd_keys", mjd_key),
-            ("date_keys", date_key), ("airmass_keys", airmass_key),
+            ("gain_keys", gain_key),
+            ("rn_keys", rn_key),
+            ("sat_keys", sat_key),
+            ("exptime_keys", exptime_key),
+            ("mjd_keys", mjd_key),
+            ("date_keys", date_key),
+            ("airmass_keys", airmass_key),
         ]:
             if kw and kw in header:
                 rec[attr].add(kw)
@@ -1436,15 +1502,20 @@ def inspect_telescope(
         if verbose:
             log_it.info(
                 "  %-40s  TELESCOP=%-20s INSTRUME=%-15s FILTER=%-8s ps=%s",
-                os.path.basename(fpath), tele, inst,
-                fval or "?", f'{ps:.3f}"' if ps else "N/A",
+                os.path.basename(fpath),
+                tele,
+                inst,
+                fval or "?",
+                f'{ps:.3f}"' if ps else "N/A",
             )
 
     if skipped:
         log_it.info("inspect_telescope: skipped %d file(s).", skipped)
 
     if not seen:
-        log_it.warning("inspect_telescope: no valid telescope/instrument entries found.")
+        log_it.warning(
+            "inspect_telescope: no valid telescope/instrument entries found."
+        )
         return None
 
     existing = _load_yml(yml_path)
@@ -1486,21 +1557,28 @@ def inspect_telescope(
 
         log_it.info(
             "inspect_telescope: %-20s / %-15s  filters=[%s]  pixel_scale=%s",
-            tele, inst,
+            tele,
+            inst,
             ", ".join(sorted(rec["filters"])) or "(none)",
             f'{ps_med:.4f}"' if ps_med else "N/A",
         )
 
     if dry_run:
         print("\n# ---- telescope.yml (dry-run, not written) ----")
-        print(_yaml.dump(new_data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+        print(
+            _yaml.dump(
+                new_data, default_flow_style=False, sort_keys=False, allow_unicode=True
+            )
+        )
         print("# -----------------------------------------------")
         return new_data
 
     _write_yml(yml_path, new_data)
     log_it.info("inspect_telescope: telescope.yml written to %s", yml_path)
     if existing:
-        log_it.info("inspect_telescope: existing entries preserved; new keys merged in.")
+        log_it.info(
+            "inspect_telescope: existing entries preserved; new keys merged in."
+        )
     return new_data
 
 
@@ -1649,7 +1727,7 @@ class AutomatedPhotometry:
         # Deep-copy the input configuration to prevent modifications from
         # persisting across multiple calls to run_photometry()
         default_input = copy.deepcopy(default_input)
-        
+
         t0 = time.perf_counter()
         gc.collect()
 
@@ -1730,11 +1808,13 @@ class AutomatedPhotometry:
         # This prevents state contamination when processing multiple images
         try:
             from limits import _flux_for_mag_cached
+
             _flux_for_mag_cached.cache_clear()
         except Exception:
             pass
         try:
             from background import _disk_structuring_element
+
             _disk_structuring_element.cache_clear()
         except Exception:
             pass
@@ -1804,7 +1884,11 @@ class AutomatedPhotometry:
         def _is_gaia_custom_token(v) -> bool:
             if v is None:
                 return False
-            return str(v).strip().lower() in {"gaia_custom", "gaia-custom", "gaiacustom"}
+            return str(v).strip().lower() in {
+                "gaia_custom",
+                "gaia-custom",
+                "gaiacustom",
+            }
 
         use_catalog_cfg = catalog_cfg.get("use_catalog", None)
         gaia_custom_requested = False
@@ -1819,7 +1903,10 @@ class AutomatedPhotometry:
                     gaia_custom_groups.append(str(k))
 
         if gaia_custom_requested and do_photometry:
-            from functions import parse_supported_filter_group_key, normalize_photometric_filter_name
+            from functions import (
+                parse_supported_filter_group_key,
+                normalize_photometric_filter_name,
+            )
 
             curve_map = catalog_cfg.get("transmission_curve_map", None)
             if curve_map is None or curve_map == {}:
@@ -1877,7 +1964,7 @@ class AutomatedPhotometry:
             elif isinstance(use_catalog_cfg, dict):
                 new_map = {}
                 for k, v in use_catalog_cfg.items():
-                    new_map[k] = ("custom" if _is_gaia_custom_token(v) else v)
+                    new_map[k] = "custom" if _is_gaia_custom_token(v) else v
                 catalog_cfg["use_catalog"] = new_map
 
             default_input["catalog"] = catalog_cfg
@@ -1927,12 +2014,16 @@ class AutomatedPhotometry:
                     catalog_cfg.get("gaia_xp_max_sources", 100),
                 )
             )
-            curve_order = str(
-                catalog_cfg.get(
-                    "gaia_curve_map_order_by",
-                    catalog_cfg.get("gaia_xp_order_by", "distance"),
+            curve_order = (
+                str(
+                    catalog_cfg.get(
+                        "gaia_curve_map_order_by",
+                        catalog_cfg.get("gaia_xp_order_by", "distance"),
+                    )
                 )
-            ).strip().lower()
+                .strip()
+                .lower()
+            )
             svo_curve_map = catalog_cfg.get("curve_map_svo", None)
 
             _log(log_step("Gaia custom catalog (gaia_custom) curve map"))
@@ -1987,15 +2078,11 @@ class AutomatedPhotometry:
                 gaia_nearest_prefetch_max=int(
                     catalog_cfg.get("gaia_nearest_prefetch_max", 10000)
                 ),
-                gaia_xp_min_sources=int(
-                    catalog_cfg.get("gaia_xp_min_sources", 25)
-                ),
+                gaia_xp_min_sources=int(catalog_cfg.get("gaia_xp_min_sources", 25)),
                 gaia_xp_max_radius_deg=float(
                     catalog_cfg.get("gaia_xp_max_radius_deg", 1.0)
                 ),
-                gaia_xp_grow_factor=float(
-                    catalog_cfg.get("gaia_xp_grow_factor", 1.5)
-                ),
+                gaia_xp_grow_factor=float(catalog_cfg.get("gaia_xp_grow_factor", 1.5)),
             )
             logging.getLogger(__name__).debug(
                 "Gaia curve-map catalog written: %s",
@@ -2103,7 +2190,11 @@ class AutomatedPhotometry:
         python_executable = sys.executable
 
         if do_photometry:
-            _log(border_msg("AutoPhOT Photometry Run") if border_msg else log_step("AutoPhOT photometry run"))
+            _log(
+                border_msg("AutoPhOT Photometry Run")
+                if border_msg
+                else log_step("AutoPhOT photometry run")
+            )
             _log("Report any issues at: https://github.com/Astro-Sean/autophot/issues")
 
             # List of available filters (excluding error columns)
@@ -2172,6 +2263,7 @@ class AutomatedPhotometry:
             # ------------------------------------------------------------------
             try:
                 from additional_targets import resolve_additional_targets
+
                 _additional = resolve_additional_targets(
                     default_input, prepare_db=prepare_db
                 )
@@ -2204,7 +2296,9 @@ class AutomatedPhotometry:
                         file_list = prepare_db.validate_fits_headers(flist=file_list)
                         if len(file_list) == 0:
                             _log(
-                                log_step("No images left after header validation; skipping photometry")
+                                log_step(
+                                    "No images left after header validation; skipping photometry"
+                                )
                             )
                             do_photometry = False
                     if do_photometry:
@@ -2251,9 +2345,7 @@ class AutomatedPhotometry:
                     # per-dataset folders (<dataset>/templates) count as
                     # user-supplied templates, same as the flat layout.
                     _user_tpl = []
-                    for _troot in template_roots_under(
-                        default_input["fits_dir"]
-                    ):
+                    for _troot in template_roots_under(default_input["fits_dir"]):
                         for _ext in (".fits", ".fit", ".fz", ".fits.gz"):
                             for _f in Path(_troot).rglob(f"*{_ext}"):
                                 if not _dl_pat.match(_f.name):
@@ -2279,7 +2371,11 @@ class AutomatedPhotometry:
                             "download fresh ones."
                         )
 
-                    filters_str = ", ".join(sorted(required_filters)) if required_filters else "None"
+                    filters_str = (
+                        ", ".join(sorted(required_filters))
+                        if required_filters
+                        else "None"
+                    )
                     _log(
                         f"Downloading templates for science image filters: {filters_str}"
                     )
@@ -2300,9 +2396,7 @@ class AutomatedPhotometry:
                             or (default_input.get("wcs") or {}).get(
                                 "pixel_scale_arcsec"
                             )
-                            or (default_input.get("wcs") or {}).get(
-                                "pixel_scale"
-                            )
+                            or (default_input.get("wcs") or {}).get("pixel_scale")
                         )
                         _tpl_infos = _scan_image_footprints(
                             file_list,
@@ -2318,14 +2412,11 @@ class AutomatedPhotometry:
                         # _footprint_region bounds a cone; scale so the
                         # box side lands in [templates_size,
                         # templates_max_arcmin].
-                        _tpl_margin = float(
-                            ts_cfg.get("templates_margin", 1.1) or 1.1
-                        )
+                        _tpl_margin = float(ts_cfg.get("templates_margin", 1.1) or 1.1)
                         _tpl_min_r = float(size_default) / np.sqrt(2.0)
-                        _tpl_max_r = (
-                            float(ts_cfg.get("templates_max_arcmin", 60.0))
-                            / np.sqrt(2.0)
-                        )
+                        _tpl_max_r = float(
+                            ts_cfg.get("templates_max_arcmin", 60.0)
+                        ) / np.sqrt(2.0)
                         for _bf in required_filters:
                             _tpl_regions[str(_bf)] = _footprint_region(
                                 _tpl_infos,
@@ -2341,12 +2432,9 @@ class AutomatedPhotometry:
                         # A centre-trimmed science frame shrinks the usable
                         # field to the trim box: clamp the template cutouts
                         # so no sky is fetched the trimmed frame cannot cover.
-                        _trim_arcmin = (
-                            (default_input.get("preprocessing") or {}).get(
-                                "trim_image", 0
-                            )
-                            or 0
-                        )
+                        _trim_arcmin = (default_input.get("preprocessing") or {}).get(
+                            "trim_image", 0
+                        ) or 0
                         if _trim_arcmin:
                             for _bf in required_filters:
                                 _tpl_regions[str(_bf)] = _trim_clamped_region(
@@ -2396,7 +2484,9 @@ class AutomatedPhotometry:
 
                     if download_kind == "panstarrs":
                         _log(log_step("Download templates: Pan-STARRS"))
-                        from templates import download_panstarrs_template
+                        download_panstarrs_template = _import_local_module(
+                            "templates"
+                        ).download_panstarrs_template
 
                         for f in required_filters:
                             _tra, _tdec, _tw, _th = _tpl_geometry(f)
@@ -2410,7 +2500,9 @@ class AutomatedPhotometry:
                             )
                     elif download_kind == "sdss":
                         _log(log_step("Download templates: SDSS"))
-                        from templates import download_sdss_template
+                        download_sdss_template = _import_local_module(
+                            "templates"
+                        ).download_sdss_template
 
                         for f in required_filters:
                             _tra, _tdec, _tw, _th = _tpl_geometry(f)
@@ -2422,10 +2514,10 @@ class AutomatedPhotometry:
                                 f=f,
                             )
                     elif download_kind == "legacy":
-                        _log(
-                            log_step("Download templates: Legacy Surveys")
-                        )
-                        from templates import download_legacy_template
+                        _log(log_step("Download templates: Legacy Surveys"))
+                        download_legacy_template = _import_local_module(
+                            "templates"
+                        ).download_legacy_template
 
                         for f in required_filters:
                             _tra, _tdec, _tw, _th = _tpl_geometry(f)
@@ -2438,7 +2530,9 @@ class AutomatedPhotometry:
                             )
                     elif download_kind == "2mass":
                         _log(log_step("Download templates: 2MASS"))
-                        from templates import download_2mass_template
+                        download_2mass_template = _import_local_module(
+                            "templates"
+                        ).download_2mass_template
 
                         for f in required_filters:
                             _tra, _tdec, _tw, _th = _tpl_geometry(f)
@@ -2459,7 +2553,11 @@ class AutomatedPhotometry:
                     logger = logging.getLogger(__name__)
                     logger.info(
                         "Looking for templates for science image filters: %s",
-                        ", ".join(sorted(template_required_filters)) if template_required_filters else "None"
+                        (
+                            ", ".join(sorted(template_required_filters))
+                            if template_required_filters
+                            else "None"
+                        ),
                     )
                     template_file_list = prepare_db.find_templates(
                         required_filters=template_required_filters
@@ -2492,16 +2590,12 @@ class AutomatedPhotometry:
 
                         _tpl_prefixes = tuple(
                             os.path.normpath(r) + os.sep
-                            for r in template_roots_under(
-                                default_input["fits_dir"]
-                            )
+                            for r in template_roots_under(default_input["fits_dir"])
                         )
                         file_list = [
                             f
                             for f in combined_checked
-                            if not os.path.normpath(f).startswith(
-                                _tpl_prefixes
-                            )
+                            if not os.path.normpath(f).startswith(_tpl_prefixes)
                         ]
                         template_file_list = [
                             f
@@ -2543,13 +2637,15 @@ class AutomatedPhotometry:
                 # cached catalog under e.g. "sn2026yos/" but main.py looks for
                 # it under "2026yos/", causing a cache miss and redundant Gaia
                 # archive downloads.
-                backup_yaml["target_name"] = canonical_target_name(
-                    backup_yaml
-                )
+                backup_yaml["target_name"] = canonical_target_name(backup_yaml)
 
                 # Pre-download reference catalog(s) once, before the per-image loop.
                 # main.py will find the cached CSV and skip re-downloading.
-                _log(border_msg("Reference Photometric Catalog") if border_msg else log_step("Reference photometric catalog (pre-download)"))
+                _log(
+                    border_msg("Reference Photometric Catalog")
+                    if border_msg
+                    else log_step("Reference photometric catalog (pre-download)")
+                )
                 try:
                     from catalog import (
                         Catalog as _Catalog,
@@ -2561,6 +2657,7 @@ class AutomatedPhotometry:
                         _fmt_region,
                     )
                     from functions import parse_supported_filter_group_key
+
                     _cat = _Catalog(input_yaml=backup_yaml)
                     _use_cat = backup_yaml.get("catalog", {}).get("use_catalog")
 
@@ -2580,22 +2677,29 @@ class AutomatedPhotometry:
                         )
 
                     _available_catalogs = [
-                        "gaia", "pan_starrs", "sdss", "apass",
-                        "2mass", "legacy", "refcat", "skymapper",
+                        "gaia",
+                        "pan_starrs",
+                        "sdss",
+                        "apass",
+                        "2mass",
+                        "legacy",
+                        "refcat",
+                        "skymapper",
                     ]
                     _target_coords = SkyCoord(
                         backup_yaml["target_ra"],
                         backup_yaml["target_dec"],
-                        unit=(u.deg, u.deg), frame="icrs",
+                        unit=(u.deg, u.deg),
+                        frame="icrs",
                     )
 
                     # Configured pixel scale (arcsec/pix) - lets footprint
                     # sizing work on images whose headers carry no WCS.
-                    _cfg_scale = backup_yaml.get("pixel_scale") or (
-                        backup_yaml.get("wcs") or {}
-                    ).get("pixel_scale_arcsec") or (
-                        backup_yaml.get("wcs") or {}
-                    ).get("pixel_scale")
+                    _cfg_scale = (
+                        backup_yaml.get("pixel_scale")
+                        or (backup_yaml.get("wcs") or {}).get("pixel_scale_arcsec")
+                        or (backup_yaml.get("wcs") or {}).get("pixel_scale")
+                    )
 
                     # Image footprint descriptors - filled by the optimizer
                     # scan, or lazily before the pre-fetch so the catalog
@@ -2609,8 +2713,7 @@ class AutomatedPhotometry:
                     # restarted run skips the scan entirely; delete the
                     # file to force a fresh optimization.
                     _auto_mode = (
-                        isinstance(_use_cat, str)
-                        and _use_cat.strip().lower() == "auto"
+                        isinstance(_use_cat, str) and _use_cat.strip().lower() == "auto"
                     )
                     _opt = None
                     _opt_cache = None
@@ -2633,20 +2736,12 @@ class AutomatedPhotometry:
                                     _cached = yaml.safe_load(_fh) or {}
                                 _cached_map = _cached.get("use_catalog")
                                 if isinstance(_cached_map, dict) and _cached_map:
-                                    _need = {
-                                        str(b) for b in required_filters
-                                    }
-                                    _have = {
-                                        str(k) for k in _cached_map
-                                    }
+                                    _need = {str(b) for b in required_filters}
+                                    _have = {str(k) for k in _cached_map}
                                     if _need <= _have or "default" in _cached_map:
                                         _use_cat = _cached_map
-                                        if isinstance(
-                                            _cached.get("regions"), dict
-                                        ):
-                                            _scan_regions = _cached[
-                                                "regions"
-                                            ]
+                                        if isinstance(_cached.get("regions"), dict):
+                                            _scan_regions = _cached["regions"]
                                         _log(
                                             "  use_catalog=auto: reusing "
                                             "cached selection "
@@ -2712,9 +2807,9 @@ class AutomatedPhotometry:
                                     )
                                 if isinstance(_use_cat, dict):
                                     try:
-                                        Path(
-                                            os.path.dirname(_opt_cache)
-                                        ).mkdir(parents=True, exist_ok=True)
+                                        Path(os.path.dirname(_opt_cache)).mkdir(
+                                            parents=True, exist_ok=True
+                                        )
                                         with open(_opt_cache, "w") as _fh:
                                             yaml.safe_dump(
                                                 {
@@ -2723,12 +2818,9 @@ class AutomatedPhotometry:
                                                         for k, v in _use_cat.items()
                                                     },
                                                     "bands": [
-                                                        str(b)
-                                                        for b in required_filters
+                                                        str(b) for b in required_filters
                                                     ],
-                                                    "n_images": len(
-                                                        _image_infos
-                                                    ),
+                                                    "n_images": len(_image_infos),
                                                     "target_ra": float(
                                                         backup_yaml["target_ra"]
                                                     ),
@@ -2743,8 +2835,7 @@ class AutomatedPhotometry:
                                                     "regions": {
                                                         str(k): v
                                                         for k, v in (
-                                                            _scan_regions
-                                                            or {}
+                                                            _scan_regions or {}
                                                         ).items()
                                                     },
                                                 },
@@ -2768,15 +2859,16 @@ class AutomatedPhotometry:
                                     f"({_oe}); falling back to 'gaia'."
                                 )
                                 _use_cat = "gaia"
-                        backup_yaml.setdefault("catalog", {})[
-                            "use_catalog"
-                        ] = _use_cat
+                        backup_yaml.setdefault("catalog", {})["use_catalog"] = _use_cat
 
                     if isinstance(_use_cat, dict):
-                        _unique_cats = sorted(set(
-                            v for v in _use_cat.values()
-                            if v is not None and str(v).strip() != ""
-                        ))
+                        _unique_cats = sorted(
+                            set(
+                                v
+                                for v in _use_cat.values()
+                                if v is not None and str(v).strip() != ""
+                            )
+                        )
                     elif _use_cat is not None and str(_use_cat).strip() != "":
                         _unique_cats = [str(_use_cat).strip()]
                     else:
@@ -2820,7 +2912,9 @@ class AutomatedPhotometry:
                     )
                     if _needs_gaia_xp:
                         if _auto_phot_systems:
-                            backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = _auto_phot_systems
+                            backup_yaml.setdefault("catalog", {})[
+                                "gaia_xp_photometric_systems"
+                            ] = _auto_phot_systems
                             _log(
                                 "  GaiaXPy photometric systems: "
                                 f"{', '.join(_auto_phot_systems)} "
@@ -2828,7 +2922,9 @@ class AutomatedPhotometry:
                             )
                     else:
                         # Non-Gaia catalog: disable GaiaXPy to avoid unnecessary archive queries.
-                        backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = []
+                        backup_yaml.setdefault("catalog", {})[
+                            "gaia_xp_photometric_systems"
+                        ] = []
                         _log(
                             "  Skipping GaiaXPy: no selected catalog "
                             "needs Gaia XP spectra"
@@ -2868,28 +2964,20 @@ class AutomatedPhotometry:
                     )
                     _bands_req = [str(b) for b in required_filters]
                     _band_regions = {
-                        b: _footprint_region(
-                            _image_infos, [b], _target_coords, **_rb
-                        )
+                        b: _footprint_region(_image_infos, [b], _target_coords, **_rb)
                         for b in _bands_req
                     }
                     for _b, _br in _band_regions.items():
-                        _log(
-                            f"  {_b}-band coverage region: "
-                            f"{_fmt_region(_br)}"
-                        )
+                        _log(f"  {_b}-band coverage region: " f"{_fmt_region(_br)}")
                     _global_region = _footprint_region(
                         _image_infos, None, _target_coords, **_rb
                     )
                     # A centre-trimmed science frame shrinks the usable
                     # field to the trim box: clamp the query regions so
                     # prefetch/scans do not fetch the full pre-trim field.
-                    _trim_arcmin = (
-                        (backup_yaml.get("preprocessing") or {}).get(
-                            "trim_image", 0
-                        )
-                        or 0
-                    )
+                    _trim_arcmin = (backup_yaml.get("preprocessing") or {}).get(
+                        "trim_image", 0
+                    ) or 0
                     if _trim_arcmin:
                         _global_region = _trim_clamped_region(
                             _global_region,
@@ -2920,20 +3008,13 @@ class AutomatedPhotometry:
                             _bs = []
                             if isinstance(_use_cat, dict):
                                 for _k, _v in _use_cat.items():
-                                    if (
-                                        str(_v).strip().lower() != key
-                                        or _v is None
-                                    ):
+                                    if str(_v).strip().lower() != key or _v is None:
                                         continue
                                     _kl = str(_k).strip().lower()
                                     if _kl in {"default", "*", "all"}:
                                         continue
-                                    _exp = parse_supported_filter_group_key(
-                                        str(_k)
-                                    )
-                                    _bs.extend(
-                                        _exp if _exp else [str(_k)]
-                                    )
+                                    _exp = parse_supported_filter_group_key(str(_k))
+                                    _bs.extend(_exp if _exp else [str(_k)])
                             _regions_by_cat[key] = _footprint_region(
                                 _image_infos,
                                 _bs or _bands_req,
@@ -2980,20 +3061,17 @@ class AutomatedPhotometry:
                     )
                     if _measured:
                         _cat_section = backup_yaml.setdefault("catalog", {})
-                        _cat_section[
-                            "catalog_query_radius_arcmin"
-                        ] = _prefetch_radius
+                        _cat_section["catalog_query_radius_arcmin"] = _prefetch_radius
                         _cat_section["catalog_query_regions"] = {
                             "default": _global_region,
                             **{
-                                _cat._normalize_catalog_name(str(c)):
-                                _resolve_query_region(c)
+                                _cat._normalize_catalog_name(
+                                    str(c)
+                                ): _resolve_query_region(c)
                                 for c in _unique_cats
                             },
                         }
-                        _log(
-                            f"  Catalog query region: {_fmt_region(_global_region)}"
-                        )
+                        _log(f"  Catalog query region: {_fmt_region(_global_region)}")
                     else:
                         _log(
                             "  Catalog query radius: 10.0 arcmin default "
@@ -3004,9 +3082,7 @@ class AutomatedPhotometry:
                     # optimizer report when the scan ran this session, else
                     # the coverage CSV the earlier scan left in the output
                     # directory.
-                    _opt_report = (
-                        _opt.get("report") if isinstance(_opt, dict) else None
-                    )
+                    _opt_report = _opt.get("report") if isinstance(_opt, dict) else None
                     _cov_csv = os.path.join(
                         new_output_dir,
                         f"{backup_yaml.get('target_name', 'target')}"
@@ -3033,19 +3109,14 @@ class AutomatedPhotometry:
                         )
                         if not os.path.exists(_cov_png):
                             try:
-                                if _opt_report is not None and len(
-                                    _opt_report
-                                ):
+                                if _opt_report is not None and len(_opt_report):
                                     _rep_cats = sorted(
-                                        _opt_report["catalog"]
-                                        .astype(str)
-                                        .unique()
+                                        _opt_report["catalog"].astype(str).unique()
                                     )
                                     _rep_bands = {
                                         str(_c): sorted(
                                             _opt_report.loc[
-                                                _opt_report["catalog"]
-                                                .astype(str)
+                                                _opt_report["catalog"].astype(str)
                                                 == str(_c),
                                                 "band",
                                             ]
@@ -3061,9 +3132,7 @@ class AutomatedPhotometry:
                                     # with detections reaches the map, not
                                     # just the winners.  Downloads hit the
                                     # scan's CSV cache.
-                                    _cat_cfg = (
-                                        backup_yaml.get("catalog", {}) or {}
-                                    )
+                                    _cat_cfg = backup_yaml.get("catalog", {}) or {}
                                     _cand = list(_AUTO_CATALOGS)
                                     if _cat_cfg.get(
                                         "MASTcasjobs_wsid"
@@ -3078,27 +3147,18 @@ class AutomatedPhotometry:
                                     }
                                     if isinstance(_use_cat, dict):
                                         _pool |= {
-                                            _cat._normalize_catalog_name(
-                                                str(c)
-                                            )
+                                            _cat._normalize_catalog_name(str(c))
                                             for c in _use_cat.values()
-                                            if c is not None
-                                            and str(c).strip()
+                                            if c is not None and str(c).strip()
                                         }
                                     elif _use_cat:
                                         _pool.add(
-                                            _cat._normalize_catalog_name(
-                                                str(_use_cat)
-                                            )
+                                            _cat._normalize_catalog_name(str(_use_cat))
                                         )
                                     _rep_cats = sorted(_pool)
-                                    _sup = _cat._catalog_supported_bands(
-                                        _rep_cats
-                                    )[0]
+                                    _sup = _cat._catalog_supported_bands(_rep_cats)[0]
                                     _rep_bands = {
-                                        _c: sorted(
-                                            _sup.get(_c, set())
-                                        )
+                                        _c: sorted(_sup.get(_c, set()))
                                         for _c in _rep_cats
                                     }
                                 _rep_regions = {
@@ -3111,19 +3171,14 @@ class AutomatedPhotometry:
                                     _rebuilt_report,
                                 ) = _cat._optimizer_plot_sources(
                                     _rep_cats,
-                                    band_set=sorted(
-                                        str(b)
-                                        for b in required_filters
-                                    ),
+                                    band_set=sorted(str(b) for b in required_filters),
                                     image_infos=_image_infos or [],
                                     target_coords=_target_coords,
                                     radius=_prefetch_radius,
                                     regions=_rep_regions,
                                     return_report=True,
                                 )
-                                if _opt_report is None or not len(
-                                    _opt_report
-                                ):
+                                if _opt_report is None or not len(_opt_report):
                                     # The coverage CSV did not survive
                                     # (or the scan ran on another output
                                     # dir) - the offline rebuild supplies
@@ -3131,16 +3186,12 @@ class AutomatedPhotometry:
                                     # row is not lost on cached runs.
                                     _opt_report = _rebuilt_report
                                     try:
-                                        _opt_report.to_csv(
-                                            _cov_csv, index=False
-                                        )
+                                        _opt_report.to_csv(_cov_csv, index=False)
                                     except Exception:
                                         pass
                                 _plot_coverage(
                                     {
-                                        "footprints": _mk_footprints(
-                                            _image_infos
-                                        ),
+                                        "footprints": _mk_footprints(_image_infos),
                                         "sources": _rebuilt_sources,
                                         "winners": (
                                             {
@@ -3153,8 +3204,7 @@ class AutomatedPhotometry:
                                             else {}
                                         ),
                                         "band_set": sorted(
-                                            str(b)
-                                            for b in required_filters
+                                            str(b) for b in required_filters
                                         ),
                                         "evaluated": list(_rep_cats),
                                         "band_regions": _band_regions,
@@ -3189,7 +3239,13 @@ class AutomatedPhotometry:
                             _log(f"  Pre-building catalog: {_name}")
                             _cat.build_complete_catalog(
                                 target_coords=_target_coords,
-                                catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
+                                catalog_list=[
+                                    "refcat",
+                                    "sdss",
+                                    "pan_starrs",
+                                    "apass",
+                                    "2mass",
+                                ],
                                 max_separation=5,
                                 radius=_prefetch_radius,
                                 regions=backup_yaml.get("catalog", {}).get(
@@ -3213,11 +3269,7 @@ class AutomatedPhotometry:
                         _pf_region = _resolve_query_region(_resolved)
                         _log(
                             f"  Pre-fetching catalog: {_resolved}"
-                            + (
-                                f" (bands: {', '.join(_pf_bands)})"
-                                if _pf_bands
-                                else ""
-                            )
+                            + (f" (bands: {', '.join(_pf_bands)})" if _pf_bands else "")
                             + f" [{_fmt_region(_pf_region)}]"
                         )
                         # A fallback onto a Gaia-backed catalog needs the XP
@@ -3243,9 +3295,7 @@ class AutomatedPhotometry:
                             catalog_custom_fpath=backup_yaml.get("catalog", {}).get(
                                 "catalog_custom_fpath", None
                             ),
-                            radius=_pf_region.get(
-                                "radius_arcmin", _prefetch_radius
-                            ),
+                            radius=_pf_region.get("radius_arcmin", _prefetch_radius),
                             region=_pf_region,
                         )
 
@@ -3255,11 +3305,7 @@ class AutomatedPhotometry:
 
                         def _push(c):
                             c = str(c).strip().lower()
-                            if (
-                                c
-                                and c not in _ordered
-                                and c not in _prefetch_failed
-                            ):
+                            if c and c not in _ordered and c not in _prefetch_failed:
                                 _ordered.append(c)
 
                         if _opt_report is not None and len(_opt_report):
@@ -3270,9 +3316,7 @@ class AutomatedPhotometry:
                                 _rank = (
                                     _sub.groupby("catalog")["n_usable"]
                                     .agg(["min", "mean"])
-                                    .sort_values(
-                                        ["min", "mean"], ascending=False
-                                    )
+                                    .sort_values(["min", "mean"], ascending=False)
                                 )
                                 for _c in _rank.index:
                                     _push(_c)
@@ -3289,16 +3333,15 @@ class AutomatedPhotometry:
                         try:
                             _prefetch_one(_cat_name)
                         except Exception as _ce:
-                            _prefetch_failed[
-                                str(_cat_name).strip().lower()
-                            ] = _ce
+                            _prefetch_failed[str(_cat_name).strip().lower()] = _ce
                             if (
                                 not _auto_mode
                                 and isinstance(_ce, RuntimeError)
                                 and "0 sources" in str(_ce)
                             ):
                                 _alternatives = [
-                                    c for c in _available_catalogs
+                                    c
+                                    for c in _available_catalogs
                                     if c not in [n.lower() for n in _unique_cats]
                                 ]
                                 _log(
@@ -3325,7 +3368,9 @@ class AutomatedPhotometry:
                                 )
                                 _log("")
                                 sys.exit(0)
-                            _log(f"  [WARNING] Pre-fetch of '{_cat_name}' failed: {_ce}")
+                            _log(
+                                f"  [WARNING] Pre-fetch of '{_cat_name}' failed: {_ce}"
+                            )
 
                     # Auto-resolved mappings demote a failed winner to the
                     # best still-working candidate per band rather than
@@ -3346,13 +3391,11 @@ class AutomatedPhotometry:
                                 _failed_keys = [
                                     k
                                     for k, v in _use_cat.items()
-                                    if str(v).strip().lower()
-                                    in _prefetch_failed
+                                    if str(v).strip().lower() in _prefetch_failed
                                 ]
                             elif (
                                 _use_cat is not None
-                                and str(_use_cat).strip().lower()
-                                in _prefetch_failed
+                                and str(_use_cat).strip().lower() in _prefetch_failed
                             ):
                                 _failed_keys = [None]
                             else:
@@ -3366,15 +3409,11 @@ class AutomatedPhotometry:
                                     not in {"default", "*", "all"}
                                     else None
                                 )
-                                _nxt = next(
-                                    iter(_auto_candidates(_band)), None
-                                )
+                                _nxt = next(iter(_auto_candidates(_band)), None)
                                 if _nxt is None:
                                     continue
                                 _acted = True
-                                _was = (
-                                    _use_cat[_k] if _k is not None else _use_cat
-                                )
+                                _was = _use_cat[_k] if _k is not None else _use_cat
                                 _log(
                                     f"  Catalog '{_was}' failed; trying "
                                     f"'{_nxt}'"
@@ -3383,9 +3422,7 @@ class AutomatedPhotometry:
                                 try:
                                     _prefetch_one(_nxt)
                                 except Exception as _ce2:
-                                    _prefetch_failed[
-                                        str(_nxt).strip().lower()
-                                    ] = _ce2
+                                    _prefetch_failed[str(_nxt).strip().lower()] = _ce2
                                     _log(
                                         "  [WARNING] Fallback catalog "
                                         f"'{_nxt}' also failed: "
@@ -3409,8 +3446,7 @@ class AutomatedPhotometry:
                             else (
                                 [None]
                                 if _use_cat is not None
-                                and str(_use_cat).strip().lower()
-                                in _prefetch_failed
+                                and str(_use_cat).strip().lower() in _prefetch_failed
                                 else []
                             )
                         )
@@ -3445,9 +3481,7 @@ class AutomatedPhotometry:
                             sys.exit(0)
 
                         # Commit the remapped selection for this run.
-                        backup_yaml.setdefault("catalog", {})[
-                            "use_catalog"
-                        ] = _use_cat
+                        backup_yaml.setdefault("catalog", {})["use_catalog"] = _use_cat
                         if isinstance(_use_cat, dict):
                             _unique_cats = sorted(
                                 {
@@ -3464,8 +3498,7 @@ class AutomatedPhotometry:
                         # A genuine 0-source (no coverage) failure demotes the
                         # catalog in the optimizer cache so restarts skip it.
                         _demoted = any(
-                            isinstance(e, RuntimeError)
-                            and "0 sources" in str(e)
+                            isinstance(e, RuntimeError) and "0 sources" in str(e)
                             for e in _prefetch_failed.values()
                         )
                         if (
@@ -3478,13 +3511,10 @@ class AutomatedPhotometry:
                                 with open(_opt_cache) as _fh:
                                     _cached = yaml.safe_load(_fh) or {}
                                 _cached["use_catalog"] = {
-                                    str(k): str(v)
-                                    for k, v in _use_cat.items()
+                                    str(k): str(v) for k, v in _use_cat.items()
                                 }
                                 with open(_opt_cache, "w") as _fh:
-                                    yaml.safe_dump(
-                                        _cached, _fh, sort_keys=True
-                                    )
+                                    yaml.safe_dump(_cached, _fh, sort_keys=True)
                                 _log(
                                     "  Demoted failed catalog(s) in cached "
                                     f"selection: {_opt_cache}"
@@ -3496,7 +3526,9 @@ class AutomatedPhotometry:
                                 )
                 except Exception as _pe:
                     _log(f"[WARNING] Catalog pre-download step failed: {_pe}")
-                    _log("         main.py will retry per-image (cached CSV may still exist).")
+                    _log(
+                        "         main.py will retry per-image (cached CSV may still exist)."
+                    )
                 _log("")
 
                 # SIMBAD variable sources near target for context
@@ -3548,13 +3580,9 @@ class AutomatedPhotometry:
                                     input_file,
                                     True,
                                     suppress_output=True,
-                                    gpu_ordinal=(
-                                        (i % n_gpu) if n_gpu > 0 else None
-                                    ),
+                                    gpu_ordinal=((i % n_gpu) if n_gpu > 0 else None),
                                 ): template
-                                for i, template in enumerate(
-                                    template_file_list
-                                )
+                                for i, template in enumerate(template_file_list)
                             }
                             total_t = len(futures)
                             done_t = 0
@@ -3565,9 +3593,7 @@ class AutomatedPhotometry:
                                     fname, rc = fut.result()
                                 except Exception as exc:
                                     fname, rc = futures[fut], 1
-                                    _log_always(
-                                        f"[WORKER ERROR] {fname}: {exc}"
-                                    )
+                                    _log_always(f"[WORKER ERROR] {fname}: {exc}")
                                 done_t += 1
                                 if rc != 0:
                                     failed_templates.append(fname)
@@ -3599,9 +3625,7 @@ class AutomatedPhotometry:
                             )
                             if rc != 0:
                                 failed_templates.append(fname)
-                                _log_always(
-                                    f"[TEMPLATE FAIL] {fname} (exit code {rc})"
-                                )
+                                _log_always(f"[TEMPLATE FAIL] {fname} (exit code {rc})")
                             gc.collect()
                         if failed_templates:
                             _log_always(
@@ -3631,15 +3655,11 @@ class AutomatedPhotometry:
                     # across every subfolder, so a single counter hides
                     # where one folder ends and the next begins.  Track a
                     # per-folder position alongside the overall count.
-                    _fits_root = os.path.abspath(
-                        str(default_input["fits_dir"])
-                    )
+                    _fits_root = os.path.abspath(str(default_input["fits_dir"]))
 
                     def _folder_of(fpath) -> str:
                         return os.path.relpath(
-                            os.path.abspath(
-                                os.path.dirname(str(fpath))
-                            ),
+                            os.path.abspath(os.path.dirname(str(fpath))),
                             _fits_root,
                         )
 
@@ -3678,9 +3698,7 @@ class AutomatedPhotometry:
                                     input_file,
                                     False,
                                     suppress_output=True,
-                                    gpu_ordinal=(
-                                        (i % n_gpu) if n_gpu > 0 else None
-                                    ),
+                                    gpu_ordinal=((i % n_gpu) if n_gpu > 0 else None),
                                 ): str(file)
                                 for i, file in enumerate(file_list)
                             }
@@ -3695,9 +3713,7 @@ class AutomatedPhotometry:
                                     _log_always(f"[WORKER ERROR] {fname}: {exc}")
                                 counter += 1
                                 _fkey = _folder_of(fname)
-                                _folder_seen[_fkey] = (
-                                    _folder_seen.get(_fkey, 0) + 1
-                                )
+                                _folder_seen[_fkey] = _folder_seen.get(_fkey, 0) + 1
                                 if rc == 0:
                                     _log_always(
                                         f"{_progress_str(fname)} [OK]    {fname}"
@@ -3723,9 +3739,7 @@ class AutomatedPhotometry:
                             f"Done: {total - len(failed_files)}/{total} images OK"
                             + (f", {len(failed_files)} failed" if failed_files else "")
                         )
-                        _log_always(
-                            border_msg(_done_msg) if border_msg else _done_msg
-                        )
+                        _log_always(border_msg(_done_msg) if border_msg else _done_msg)
                         gc.collect()
                     else:
                         # Only show progress bar for multiple files. tqdm is an
@@ -3802,7 +3816,9 @@ class AutomatedPhotometry:
                                 print(flush=True)
                                 print(flush=True)
                         if len(file_list) > 1:
-                            _done_msg = f"Done: {counter}/{len(file_list)} images processed"
+                            _done_msg = (
+                                f"Done: {counter}/{len(file_list)} images processed"
+                            )
                             _log(border_msg(_done_msg) if border_msg else _done_msg)
 
             # Concatenate per-image outputs into one light curve CSV
@@ -3815,7 +3831,9 @@ class AutomatedPhotometry:
                 loc_file="Output_*.csv",
             )
 
-            _run_transient_color_correction(default_input, output_loc, reduced_loc, _log)
+            _run_transient_color_correction(
+                default_input, output_loc, reduced_loc, _log
+            )
 
             # Concatenate additional-target per-image CSVs into per-target
             # lightcurve files.  Each additional target's per-image CSV is
@@ -3824,7 +3842,10 @@ class AutomatedPhotometry:
             _additional_lc_paths = []
             _at_resolved = default_input.get("_additional_targets_resolved") or []
             if _at_resolved:
-                from additional_targets import sanitize_target_name_for_filename as _stfn
+                from additional_targets import (
+                    sanitize_target_name_for_filename as _stfn,
+                )
+
                 _sub_targets_dir = os.path.join(reduced_loc, "sub_targets")
                 os.makedirs(_sub_targets_dir, exist_ok=True)
                 for _at in _at_resolved:
@@ -3860,12 +3881,15 @@ class AutomatedPhotometry:
             if not default_input.get("_additional_targets_resolved"):
                 try:
                     from additional_targets import resolve_additional_targets
+
                     _additional = resolve_additional_targets(
                         default_input, prepare_db=None
                     )
                     default_input["_additional_targets_resolved"] = _additional
                 except Exception as _at_exc:
-                    _log(f"[WARNING] Additional-target resolution failed in recovery mode: {_at_exc}")
+                    _log(
+                        f"[WARNING] Additional-target resolution failed in recovery mode: {_at_exc}"
+                    )
                     default_input["_additional_targets_resolved"] = []
 
             # Concatenate existing per-image outputs into one light curve CSV
@@ -3886,7 +3910,10 @@ class AutomatedPhotometry:
                 # Recover additional-target lightcurves too
                 _at_resolved = default_input.get("_additional_targets_resolved") or []
                 if _at_resolved:
-                    from additional_targets import sanitize_target_name_for_filename as _stfn
+                    from additional_targets import (
+                        sanitize_target_name_for_filename as _stfn,
+                    )
+
                     _sub_targets_dir = os.path.join(reduced_loc, "sub_targets")
                     os.makedirs(_sub_targets_dir, exist_ok=True)
                     _additional_lc_paths = []
@@ -3903,7 +3930,9 @@ class AutomatedPhotometry:
                         )
                         _additional_lc_paths.append(_at_lc_path)
                         _log(f"Additional-target light curve: {_at_lc_path}")
-                    default_input["_additional_targets_lightcurve_paths"] = _additional_lc_paths
+                    default_input["_additional_targets_lightcurve_paths"] = (
+                        _additional_lc_paths
+                    )
             else:
                 _log_always(f"[WARNING] Reduced directory not found: {reduced_loc}")
                 output_photometry = ""
@@ -3967,7 +3996,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     silence_noisy_loggers()
 
     driver_start = time.time()
-    _log("Started: %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(driver_start)))
+    _log(
+        "Started: %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(driver_start))
+    )
 
     do_run = any(str(a).lower() == "run" for a in argv)
     output = ap.run_photometry(config, do_photometry=do_run)
@@ -3975,8 +4006,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     driver_end = time.time()
     _log(
         "Finished: %s  (%.1f s)"
-        % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(driver_end)),
-           driver_end - driver_start)
+        % (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(driver_end)),
+            driver_end - driver_start,
+        )
     )
     return 0
 
