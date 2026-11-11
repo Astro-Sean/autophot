@@ -14117,6 +14117,96 @@ class PSF:
         combined = pd.concat(results)
         idx_out = np.asarray(combined["idx"], int)
 
+        # A free target fit that lands on its bound edge was chasing a
+        # source outside the allowed window - the bound clamped the
+        # centroid mid-approach, so the fitted position and flux describe
+        # the neighbour, not the target.  Refit held at the seed so the
+        # reported photometry is measured at the catalog position; this
+        # matters most for low-S/N targets next to bright neighbours.
+        try:
+            _edge_frac = float(phot_cfg.get("fitting_xy_bounds_edge_frac", 0.9))
+        except (TypeError, ValueError):
+            _edge_frac = 0.9
+        if (
+            is_target_fit
+            and _edge_frac > 0
+            and len(init_params) == 1
+            and len(combined) == 1
+            and not bool(xy_hold_arr[0])
+        ):
+            try:
+                _bx = float(xy_bounds_by_source[0])
+                _fx = float(
+                    self._first_present(
+                        combined, ["x_fit", "xcenter_fit", "x_0_fit"]
+                    )[0]
+                )
+                _fy = float(
+                    self._first_present(
+                        combined, ["y_fit", "ycenter_fit", "y_0_fit"]
+                    )[0]
+                )
+                _sx = float(np.asarray(init_params["x"], float)[0])
+                _sy = float(np.asarray(init_params["y"], float)[0])
+                _edge_hit = (
+                    np.isfinite(_bx)
+                    and _bx > 0
+                    and np.isfinite(_fx)
+                    and np.isfinite(_fy)
+                    and (
+                        abs(_fx - _sx) >= _edge_frac * _bx
+                        or abs(_fy - _sy) >= _edge_frac * _bx
+                    )
+                )
+            except Exception:
+                _edge_hit = False
+            if _edge_hit:
+                log.warning(
+                    "Target PSF fit landed on its bound edge "
+                    "(d=%.2f, %.2f px vs bound %.2f px) - the fit was "
+                    "chasing a source outside the window; refitting held "
+                    "at the catalog position (bound %.2f px).",
+                    abs(_fx - _sx),
+                    abs(_fy - _sy),
+                    _bx,
+                    _hold_px_eff,
+                )
+                res_held, _ = _psf_fit(
+                    np.ones(len(init_params), dtype=bool),
+                    bright_inner,
+                    bright_outer,
+                    fit_shape,
+                    lsq_fitter,
+                    False,
+                    xy_bound=_hold_px_eff,
+                )
+                if res_held is not None and len(res_held):
+                    _hf = self._first_present(res_held, ["flux_fit", "flux"])
+                    _hx = self._first_present(
+                        res_held, ["x_fit", "xcenter_fit", "x_0_fit"]
+                    )
+                    _hy = self._first_present(
+                        res_held, ["y_fit", "ycenter_fit", "y_0_fit"]
+                    )
+                    if (
+                        np.isfinite(_hf[0])
+                        and np.isfinite(_hx[0])
+                        and np.isfinite(_hy[0])
+                    ):
+                        combined = res_held
+                        idx_out = np.asarray(combined["idx"], int)
+                        xy_hold_arr[0] = True
+                    else:
+                        log.warning(
+                            "Held-position refit returned non-finite values; "
+                            "keeping the edge-latched fit."
+                        )
+                else:
+                    log.warning(
+                        "Held-position refit failed; keeping the "
+                        "edge-latched fit."
+                    )
+
         # Values are re-extracted after the inverted-fit merge below.
 
         # Check which fits have significant negative SNR and need inverted retry
