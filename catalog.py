@@ -69,6 +69,7 @@ from functions import (
     log_warning_from_exception,
     canonical_target_name,
     SUPPORTED_PHOTOMETRIC_FILTERS,
+    vizier_query_region,
 )
 from aperture import Aperture
 from filter_transformations import (
@@ -3031,11 +3032,13 @@ class Catalog:
                     logger.info(
                         f"Downloading Sequence Stars from {catalogName.upper()}"
                     )
+                    # vizier_query_region retries across the public
+                    # mirrors; a CDS outage no longer fails the image.
                     if use_box:
                         # Rectangular query matched to the footprint
                         # bounds: no cone-corner waste (~36% of the
                         # circumscribed disk for square fields).
-                        catalog_search = Vizier.query_region(
+                        catalog_search = vizier_query_region(
                             query_coords,
                             width=Angle(box_wh[0], "deg"),
                             height=Angle(box_wh[1], "deg"),
@@ -3043,7 +3046,7 @@ class Catalog:
                             frame="icrs",
                         )
                     else:
-                        catalog_search = Vizier.query_region(
+                        catalog_search = vizier_query_region(
                             query_coords,
                             radius=Angle(radius_deg, "deg"),
                             catalog=catalogName,
@@ -3152,8 +3155,24 @@ class Catalog:
                     temp_vot_path = os.path.join(target_dir, "temp.vot")
                     try:
                         logger.info("Downloading Sequence Stars from SkyMapper")
-                        response = requests.get(server, params=params, timeout=60)
-                        response.raise_for_status()
+                        # Retry: the cone service drops connections under load
+                        # and a transient failure is not a 0-source result.
+                        response = None
+                        for _sm_try in range(1, 4):
+                            try:
+                                response = requests.get(
+                                    server, params=params, timeout=60
+                                )
+                                response.raise_for_status()
+                                break
+                            except requests.RequestException:
+                                if _sm_try >= 3:
+                                    raise
+                                logger.warning(
+                                    "SkyMapper catalog query failed "
+                                    "(attempt %d/3); retrying", _sm_try,
+                                )
+                                time.sleep(5)
                         with open(temp_vot_path, "wb") as f:
                             f.write(response.content)
                         selectedCatalog = (
