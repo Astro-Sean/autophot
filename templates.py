@@ -3571,66 +3571,109 @@ def _resolve_alignment_target_positions(
     return targets
 
 
+def _wcs_linear_matrix(wcs_obj) -> Optional[np.ndarray]:
+    """Return the 2x2 linear pixel -> world matrix (deg per px).
+
+    Uses the CD matrix when present, otherwise PC scaled by CDELT for
+    headers carrying the older PCi_j + CDELTi form (e.g. SkyMapper
+    cutouts).  Returns None when no usable linear term exists.
+    """
+    try:
+        cw = wcs_obj.wcs
+        if cw.has_cd():
+            mat = np.asarray(cw.cd, dtype=float)
+            if mat.shape == (2, 2) and np.all(np.isfinite(mat)):
+                return mat
+        pc = np.asarray(getattr(cw, "pc", np.eye(2)), dtype=float)
+        cdelt = np.asarray(getattr(cw, "cdelt", []), dtype=float)
+        if pc.shape == (2, 2) and cdelt.size >= 2:
+            return np.diag(cdelt[:2]) @ pc
+    except Exception:
+        pass
+    return None
+
+
 def _wcs_offset_at_position(
     wcs_a, wcs_b, target_xy: Tuple[float, float], radius_px: float = 10.0
 ) -> Optional[float]:
     """Compute the WCS agreement offset (arcsec -> pixels) at a position.
 
-    Samples several points within ``radius_px`` of ``target_xy`` and returns
-    the median angular separation between the two WCS predictions, converted
-    to pixels using the local pixel scale from ``wcs_a``.  Returns None when
-    the computation cannot run.
+    Compares the local sky -> pixel mapping of the two WCS at the target.
+    Each sample point near ``target_xy`` on the ``wcs_b`` grid is mapped
+    to sky by ``wcs_b`` and to template pixels by ``wcs_a``; the pixel
+    displacement from the target is then compared in the tangent plane
+    through each frame's linear matrix.  A scale, rotation, or distortion
+    error in either WCS at the target appears as a residual.  A uniform
+    pointing (translation) error cancels in the relative displacement and
+    cannot be detected by comparing two WCS alone - that failure mode is
+    covered by the footprint/coverage gates and post-alignment source
+    matching.
 
     Used by reproject target-region validation to detect locally-wrong WCS
     that would pass a global check but misalign at the transient position.
+    Returns the median residual in ``wcs_a`` pixels, or None when the
+    computation cannot run.
     """
     try:
-        from astropy.coordinates import SkyCoord
-        import astropy.units as u
-
-        tx, ty = target_xy
-        ny, nx = getattr(wcs_a, "array_shape", None) or (0, 0)
-        if ny == 0 or nx == 0:
+        shape_b = getattr(wcs_b, "array_shape", None)
+        if not shape_b:
+            return None
+        ny_b, nx_b = int(shape_b[0]), int(shape_b[1])
+        if nx_b <= 0 or ny_b <= 0:
             return None
 
-        # Sample points in a small circle around the target
+        mat_a = _wcs_linear_matrix(wcs_a)
+        mat_b = _wcs_linear_matrix(wcs_b)
+        if mat_a is None or mat_b is None:
+            return None
+        det_a = abs(float(np.linalg.det(mat_a)))
+        if det_a <= 0:
+            return None
+        # arcsec per wcs_a pixel, used to report the residual in px
+        scale_a = np.sqrt(det_a) * 3600.0
+
+        tx, ty = float(target_xy[0]), float(target_xy[1])
+        sky_t = wcs_b.all_pix2world(tx, ty, 0)
+        sky_t = (float(sky_t[0]), float(sky_t[1]))
+        if not (np.isfinite(sky_t[0]) and np.isfinite(sky_t[1])):
+            return None
+        q_t = wcs_a.all_world2pix(sky_t[0], sky_t[1], 0)
+        q_t = np.array([float(q_t[0]), float(q_t[1])])
+        if not np.all(np.isfinite(q_t)):
+            return None
+        cosd = np.cos(np.radians(sky_t[1]))
+
+        # Sample points in a small circle around the target on the
+        # wcs_b (science/output) grid.
         n_pts = 7
         angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
-        radii = np.linspace(0.0, radius_px, n_pts)
+        radii = np.linspace(0.0, float(radius_px), n_pts)
 
         offsets_arcsec = []
         for r in radii:
             for a in angles:
                 x = tx + r * np.cos(a)
                 y = ty + r * np.sin(a)
-                if x < 0 or x >= nx or y < 0 or y >= ny:
+                if x < 0 or x >= nx_b or y < 0 or y >= ny_b:
                     continue
-                ra_a, dec_a = wcs_a.all_pix2world(x, y, 0)
-                ra_b, dec_b = wcs_b.all_world2pix(
-                    wcs_b.all_pix2world(x, y, 0)[0],
-                    wcs_b.all_pix2world(x, y, 0)[1],
-                    0,
+                ra_b, dec_b = wcs_b.all_pix2world(x, y, 0)
+                ra_b, dec_b = float(ra_b), float(dec_b)
+                if not (np.isfinite(ra_b) and np.isfinite(dec_b)):
+                    continue
+                qx, qy = wcs_a.all_world2pix(ra_b, dec_b, 0)
+                qx, qy = float(qx), float(qy)
+                if not (np.isfinite(qx) and np.isfinite(qy)):
+                    continue
+                d_a = mat_a @ (np.array([qx, qy]) - q_t)
+                d_b = mat_b @ (np.array([x, y]) - np.array([tx, ty]))
+                res = np.hypot(
+                    (d_a[0] - d_b[0]) * cosd, d_a[1] - d_b[1]
                 )
-                # Convert wcs_b's sky back through wcs_a to compare pixel positions
-                ra_a2, dec_a2 = wcs_b.all_pix2world(x, y, 0)
-                c_a = SkyCoord(ra_a * u.deg, dec_a * u.deg, frame="icrs")
-                c_b = SkyCoord(ra_a2 * u.deg, dec_a2 * u.deg, frame="icrs")
-                sep = c_a.separation(c_b).to(u.arcsec).value
-                offsets_arcsec.append(sep)
+                offsets_arcsec.append(float(res) * 3600.0)
 
         if not offsets_arcsec:
             return None
-
-        med_offset_arcsec = float(np.median(offsets_arcsec))
-        # Convert arcsec to pixels using local pixel scale from wcs_a
-        try:
-            scales = wcs_a.proj_plane_pixel_scales()
-            pix_scale_arcsec = float(scales[0]) * 3600.0
-        except Exception:
-            pix_scale_arcsec = 1.0
-        if pix_scale_arcsec <= 0:
-            return None
-        return med_offset_arcsec / pix_scale_arcsec
+        return float(np.median(offsets_arcsec)) / scale_a
     except Exception:
         return None
 
@@ -4444,13 +4487,76 @@ def _reproject_template(
         or 0.0
     )
     if n_total and (n_footprint / n_total) < _min_overlap:
-        logger.error(
-            "Reproject footprint coverage %.1f%% below minimum %.1f%%; "
-            "too little overlap for a meaningful subtraction.",
+        # The global gate assumes the template spans most of the science
+        # frame; a survey cutout trimmed to the target legitimately covers
+        # a small fraction of a wide-field frame.  The difference image
+        # only needs the target neighbourhood, so re-check coverage inside
+        # a target-centred window before rejecting.
+        _local_cov = None
+        _rp_radius_cov = None
+        try:
+            _txy_cov = (
+                _resolve_target_xy(input_yaml, science_image.shape)
+                if _target_xy_available(input_yaml, science_image.shape)
+                else None
+            )
+            if _txy_cov is not None:
+                _rp_radius_cov = float(
+                    (input_yaml or {}).get("template_subtraction", {}).get(
+                        "reproject_target_radius_px", None
+                    )
+                    or max(
+                        3.0 * float(fwhm_pixels),
+                        0.25 * float(min(science_image.shape)),
+                    )
+                )
+                # Cap the window to the template footprint's own extent:
+                # a small cutout cannot fill a large window, but the
+                # region it does cover should be well covered.  The
+                # bounding box of the footprint on the science grid gives
+                # that usable scale.
+                _fp_rows = np.any(fp_mask, axis=1)
+                _fp_cols = np.any(fp_mask, axis=0)
+                if _fp_rows.any() and _fp_cols.any():
+                    _fp_h = float(
+                        np.flatnonzero(_fp_rows)[-1]
+                        - np.flatnonzero(_fp_rows)[0]
+                    )
+                    _fp_w = float(
+                        np.flatnonzero(_fp_cols)[-1]
+                        - np.flatnonzero(_fp_cols)[0]
+                    )
+                    _rp_radius_cov = min(
+                        _rp_radius_cov, 0.5 * min(_fp_h, _fp_w)
+                    )
+                _yy, _xx = np.ogrid[
+                    : science_image.shape[0], : science_image.shape[1]
+                ]
+                _win = (
+                    (_xx - _txy_cov[0]) ** 2 + (_yy - _txy_cov[1]) ** 2
+                ) <= _rp_radius_cov ** 2
+                _local_cov = float(
+                    np.count_nonzero(fp_mask & _win)
+                ) / max(1, int(np.count_nonzero(_win)))
+        except Exception:
+            _local_cov = None
+        if _local_cov is None or _local_cov < _min_overlap:
+            logger.error(
+                "Reproject footprint coverage %.1f%% below minimum %.1f%%; "
+                "too little overlap for a meaningful subtraction.",
+                100.0 * n_footprint / n_total,
+                100.0 * _min_overlap,
+            )
+            return _FAIL
+        logger.warning(
+            "Reproject footprint coverage %.1f%% is below the global "
+            "minimum %.1f%%, but %.1f%% of the target window (r=%.0f px) "
+            "is covered - accepting for subtraction.",
             100.0 * n_footprint / n_total,
             100.0 * _min_overlap,
+            100.0 * _local_cov,
+            _rp_radius_cov,
         )
-        return _FAIL
 
     logger.info("Reproject footprint coverage: %s/%s pixels (%.1f%)", n_footprint, n_total, 100*n_footprint/n_total)
 
