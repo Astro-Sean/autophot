@@ -151,7 +151,7 @@ from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        resolve_verbose_level, safe_fits_write,
                        silence_noisy_loggers, stat_block, stat_pairs,
                        strict_config_enabled,
-                       verbose_to_console_level, write_output_csv,
+                       verbose_to_console_level, which_exe, write_output_csv,
                        FILTER_HEADER_CANDIDATES, NON_FILTER_VALUES,
                        find_filter_header_key)
 from fwhm import Find_FWHM
@@ -1438,12 +1438,12 @@ def run_photometry():
     try:
         from utils.run_sex import get_sextractor_executable
     except (ModuleNotFoundError, ImportError):
-        get_sextractor_executable = lambda: shutil.which("sex") or shutil.which(
+        get_sextractor_executable = lambda: which_exe("sex") or which_exe(
             "sextractor"
         )
     sextractor_exe = get_sextractor_executable()
-    scamp_exe = shutil.which("scamp")
-    swarp_exe = shutil.which("swarp")
+    scamp_exe = which_exe("scamp")
+    swarp_exe = which_exe("swarp")
 
     missing_tools = []
     if not sextractor_exe:
@@ -15365,20 +15365,31 @@ def run_photometry():
                             ),
                         )
                         # For consistency, run injection directly on the full image.
-                        # Prefer the fitted position; fall back to the expected pixel
-                        # position when the PSF fit did not converge (x_fit/y_fit NaN).
-                        _lp_x = float(TargetPosition.at[idx, "x_fit"])
-                        _lp_y = float(TargetPosition.at[idx, "y_fit"])
+                        # Injection is centred on the supplied target position:
+                        # the limit must describe depth where the source was
+                        # requested, not wherever the PSF centroid converged.
+                        _lp_x = float(TargetPosition.at[idx, "x_pix"])
+                        _lp_y = float(TargetPosition.at[idx, "y_pix"])
                         if not (np.isfinite(_lp_x) and np.isfinite(_lp_y)):
-                            _lp_x = float(TargetPosition.at[idx, "x_pix"])
-                            _lp_y = float(TargetPosition.at[idx, "y_pix"])
+                            _lp_x = float(TargetPosition.at[idx, "x_fit"])
+                            _lp_y = float(TargetPosition.at[idx, "y_fit"])
                             logging.info(
-                                "Limiting magnitude: PSF fit position is NaN; "
-                                "using expected pixel position (%.2f, %.2f) for injection.",
+                                "Limiting magnitude: input position is NaN; "
+                                "falling back to fitted position (%.2f, %.2f) for injection.",
                                 _lp_x,
                                 _lp_y,
                             )
                         lim_pos = (_lp_x, _lp_y)
+                        # The fitted position still gets marked on the
+                        # diagnostic plot so a drifted centroid stays visible
+                        # next to the requested position.
+                        _lf_x = float(TargetPosition.at[idx, "x_fit"])
+                        _lf_y = float(TargetPosition.at[idx, "y_fit"])
+                        _lim_fitted_position = (
+                            (_lf_x, _lf_y)
+                            if (np.isfinite(_lf_x) and np.isfinite(_lf_y))
+                            else None
+                        )
                         _lim_avoid_positions = []
                         for _a in _additional_targets_for_fit or []:
                             _ax = _a.get("x_pix", np.nan)
@@ -15542,6 +15553,7 @@ def run_photometry():
                                         n_jobs=lim_n_jobs,
                                         image_zeropoint=image_zeropoint,
                                         avoid_positions=_lim_avoid_positions,
+                                        fitted_position=_lim_fitted_position,
                                     )
                                 )
 
@@ -15603,6 +15615,7 @@ def run_photometry():
                                     image_zeropoint=image_zeropoint,
                                     _return_details=True,
                                     avoid_positions=_lim_avoid_positions,
+                                    fitted_position=_lim_fitted_position,
                                 )
                                 if isinstance(_lim_details, dict):
                                     InjectedLimit = float(
