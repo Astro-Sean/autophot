@@ -193,7 +193,7 @@ try:
 except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
-from functions import clean_subprocess_log, log_result, log_warning_from_exception, safe_fits_write, cap_console_lines, photutils_n_threads, stat_block, STATUS, _sfft_post_anomaly_retry_viable
+from functions import clean_subprocess_log, log_result, log_warning_from_exception, safe_fits_write, cap_console_lines, photutils_n_threads, stat_block, which_exe, STATUS, _sfft_post_anomaly_retry_viable
 try:
     from functions import invalidate_fits_cache
 except ImportError:
@@ -19298,7 +19298,7 @@ class Templates:
                     )
                     return False
             else:
-                which = shutil.which(exe)
+                which = which_exe(exe)
                 if which is None:
                     logger.warning(
                         "HOTPANTS executable '%s' not found on PATH. Install HOTPANTS and/or set template_subtraction.hotpants_exe_loc to its full path.",
