@@ -5726,9 +5726,21 @@ def download_panstarrs_template(
         svc = "https://ps1images.stsci.edu/cgi-bin/ps1filenames.py"
         url = f"{svc}?ra={ra}&dec={dec}&size={max(size_px, height_px)}&format=fits&sep=,&filters={band}"
 
+        resp = None
         with requests.Session() as session:
-            resp = session.get(url, timeout=30)
-            resp.raise_for_status()
+            for attempt in range(1, 4):
+                try:
+                    resp = session.get(url, timeout=30)
+                    resp.raise_for_status()
+                    break
+                except requests.RequestException as exc:
+                    if attempt >= 3:
+                        raise
+                    logger.warning(
+                        "PS1 filename query failed (%s); retry %d/3",
+                        exc, attempt,
+                    )
+                    time.sleep(5)
             lines = [line.decode("utf-8") for line in resp.iter_lines()]
 
         df = pd.DataFrame(
@@ -5822,6 +5834,10 @@ def download_panstarrs_template(
 
 SDSS_FILTERS = ("u", "g", "r", "i", "z")
 
+# Retries for flaky SkyServer responses (truncated CSV, parse errors)
+SDSS_DOWNLOAD_ATTEMPTS = 3
+SDSS_DOWNLOAD_RETRY_DELAY = 5  # seconds
+
 
 def download_sdss_template(
     ra: float,
@@ -5885,12 +5901,26 @@ def download_sdss_template(
     try:
         coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
         # get_images returns list of HDUList; we get the full frame for this band.
-        images = SDSS.get_images(
-            coordinates=coord,
-            band=band,
-            cache=True,
-            show_progress=False,
-        )
+        # SkyServer responses are flaky (truncated CSV -> parse errors);
+        # retry briefly before declaring the band unavailable.
+        images = None
+        for attempt in range(1, SDSS_DOWNLOAD_ATTEMPTS + 1):
+            try:
+                images = SDSS.get_images(
+                    coordinates=coord,
+                    band=band,
+                    cache=True,
+                    show_progress=False,
+                )
+                break
+            except Exception as exc:
+                if attempt >= SDSS_DOWNLOAD_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "SDSS %s-band query failed (%s); retry %d/%d",
+                    band, exc, attempt, SDSS_DOWNLOAD_ATTEMPTS,
+                )
+                time.sleep(SDSS_DOWNLOAD_RETRY_DELAY)
         if not images or len(images) == 0:
             logger.warning(
                 "No SDSS %s-band image found for (%.4f, %.4f)", band, ra, dec
@@ -6321,15 +6351,30 @@ def download_2mass_template(
     }
 
     try:
-        resp = requests.get(sia_url, params=params, timeout=30)
-        resp.raise_for_status()
-        table = Table.read(BytesIO(resp.content), format="votable")
-
-        if len(table) == 0:
-            raise RuntimeError("No image returned for the given coordinates and band.")
-
-        img_resp = requests.get(table[0]["download"], timeout=30)
-        img_resp.raise_for_status()
+        # Retry both fetches: the IRSA SIA service drops connections under
+        # load and a transient failure is not a no-coverage result.
+        img_resp = None
+        for attempt in range(1, 4):
+            try:
+                resp = requests.get(sia_url, params=params, timeout=30)
+                resp.raise_for_status()
+                table = Table.read(BytesIO(resp.content), format="votable")
+                if len(table) == 0:
+                    raise RuntimeError(
+                        "No image returned for the given coordinates and band."
+                    )
+                img_resp = requests.get(table[0]["download"], timeout=30)
+                img_resp.raise_for_status()
+                break
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                if attempt >= 3:
+                    raise
+                logger.warning(
+                    "2MASS template query failed (%s); retry %d/3", exc, attempt
+                )
+                time.sleep(5)
         # Create the subfolder only when we have data ready to write
         sub_folder.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(img_resp.content)
