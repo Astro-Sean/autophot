@@ -13165,6 +13165,19 @@ class PSF:
                 _ap_flux = float(np.sum(_sub[_ap] - _bkg))
                 if is_difference_image:
                     _ap_flux = abs(_ap_flux)
+                # A bright in-window peak far from the seed is a neighbour,
+                # not the source being tested: crediting it would free a
+                # faint source's centroid into that neighbour. Measure the
+                # source's own significance at the seed aperture instead.
+                _d_pk = float(
+                    np.hypot((_x0 + _px) - _cx, (_y0 + _py) - _cy)
+                )
+                if _d_pk > _hold_px_eff:
+                    _seed_ap = _ok & (_d2 <= aperture_radius ** 2)
+                    _seed_flux = float(np.sum(_sub[_seed_ap] - _bkg))
+                    if is_difference_image:
+                        _seed_flux = abs(_seed_flux)
+                    _ap_flux = _seed_flux
                 detect_snr_arr[_si] = _ap_flux / _ap_noise
                 xy_hold_arr[_si] = not (
                     np.isfinite(detect_snr_arr[_si])
