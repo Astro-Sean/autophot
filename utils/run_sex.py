@@ -17,6 +17,7 @@ import os
 import shutil
 from typing import Union
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -79,9 +80,15 @@ def get_sextractor_executable() -> Optional[str]:
         return None
 
     candidates = []
+    # The interpreter's own bin dir covers running from an unactivated
+    # conda env: env tools live next to the python being used even though
+    # PATH lacks them.
+    search_dirs = os.environ.get("PATH", "").split(os.pathsep) + [
+        os.path.dirname(sys.executable)
+    ]
     for name in ("sex", "sextractor"):
         # Search all PATH entries, not just the first hit
-        for search_dir in os.environ.get("PATH", "").split(os.pathsep):
+        for search_dir in search_dirs:
             candidate = os.path.join(search_dir, name)
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 candidates.append(candidate)
