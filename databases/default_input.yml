@@ -504,6 +504,11 @@ default_input:
     late_cpulimit: 120 # int --- CPU time limit (seconds) for the later solve retries (wide scale bounds, no-SExtractor pass); they sweep more index tiles than the hinted tries.
     blind_cpulimit: 300 # int --- CPU time limit (seconds) for the position-free blind solve; a sky-wide search needs minutes, the hinted cap gives it no chance.
     solve_field_total_budget: 1800 # float|null --- Wall-clock budget (seconds) shared by the whole solve-field cascade (all retries, tweak orders, downsample levels); attempts are skipped once it is spent and SCAMP/header fallbacks still run. null or <=0 disables the cap.
+    solve_field_input_wcs_budget: 60 # float|null --- Same as solve_field_total_budget but applied when the input header already has a usable WCS; on failure the header WCS is kept anyway, so a short budget reaches the same result faster. null or <=0 disables the cap.
+    solve_field_parity: auto # auto|pos|neg|null --- --parity hint for solve-field: 'auto' derives sign(det(CD)) from the input header (image handedness rarely changes even when pointing is wrong), 'pos'/'neg' force it, null/anything else omits the flag.
+    solve_field_depth: null # int|range-str|null --- Optional --depth value (e.g. 30 or '10-50'); deeper index sweeps help sparse fields at higher CPU cost. null leaves astrometry.net's default.
+    solve_field_logodds: null # float|null --- Optional --logodds acceptance threshold; lower values accept weaker matches (guarded downstream by the solved-scale/position checks). null leaves astrometry.net's default.
+    solve_field_extra_args: null # list[str]|str|null --- Extra arguments appended verbatim to every solve-field attempt (escape hatch for flags without a dedicated key).
 
     TNS_BOT_ID: null # str|null --- Optional TNS bot ID (if querying TNS).
     TNS_BOT_NAME: null # str|null --- Optional TNS bot name (if querying TNS).
