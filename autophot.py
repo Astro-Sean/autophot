@@ -431,12 +431,13 @@ def list_parameters(
         if section != last_section:
             if last_section is not None:
                 print("-" * len(header))
-            # Section headings in the same framed-banner style as the logs.
-            section_title = str(section).replace("_", " ").upper()
+            # Section headings in the same framed style as the logs;
+            # names stay as they appear in the YAML file.
+            section_title = str(section).replace("_", " ")
             if border_msg:
-                print(border_msg(section_title))
+                print(border_msg(section_title, body="-"))
             else:
-                rule = "=" * 80
+                rule = "-" * 70
                 print(f"\n{rule}\n{section_title}\n{rule}")
             last_section = section
 
@@ -3726,7 +3727,7 @@ class AutomatedPhotometry:
                         if not _multi_folder:
                             return f"[{_c}/{len(file_list)}]"
                         return (
-                            f"[{_c}/{len(file_list)} | "
+                            f"[{_c}/{len(file_list)}, "
                             f"{_fr}: {_folder_seen.get(_fr, 0)}/"
                             f"{_folder_totals[_fr]}]"
                         )
@@ -3833,6 +3834,12 @@ class AutomatedPhotometry:
                                         f"{_folder_totals[_fkey]}"
                                     )
                                 print(flush=True)
+                            if len(file_list) > 1:
+                                _log(
+                                    border_msg(str(file))
+                                    if border_msg
+                                    else str(file)
+                                )
                             try:
                                 fname, rc = _run_main_subprocess(
                                     python_executable,
@@ -3849,19 +3856,34 @@ class AutomatedPhotometry:
                                     break
                                 gc.collect()
                                 counter += 1
+                                # Multi-file runs name the file in the
+                                # banner above; single-file runs carry it
+                                # on the outcome line instead.
+                                if len(file_list) > 1:
+                                    _tag = _progress_str(file)
+                                    _name = ""
+                                else:
+                                    _tag = ""
+                                    _name = f" {str(file)}"
                                 if rc == 0:
-                                    _log(f"{_progress_str(file)} [OK]    {str(file)}")
+                                    _log(f"{_tag} [OK]{_name}")
                                 else:
                                     _log(
-                                        f"{_progress_str(file)} [FAIL]  {str(file)} "
+                                        f"{_tag} [FAIL]{_name} "
                                         f"(exit code {rc})"
                                     )
                             except Exception as e:
                                 import traceback
 
                                 tb = traceback.format_exc(limit=1)
+                                _err_tag = (
+                                    _progress_str(file, counter + 1) + " "
+                                    if len(file_list) > 1
+                                    else ""
+                                )
                                 _log(
-                                    f"{_progress_str(file, counter + 1)} [ERROR] Problem with file: {file}: {e} | {tb}"
+                                    f"[ERROR] {_err_tag}Problem with file: "
+                                    f"{file}: {e}\n{tb.rstrip()}"
                                 )
                             # Two blank lines between the [OK]/[ERROR] line
                             # and the bar redraw - the next iteration's
