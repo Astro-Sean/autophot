@@ -230,7 +230,7 @@ def _logged_var_ratio(caplog):
     """Extract the 'ratio X.XX' value emitted by plot_variability_check."""
     import re
 
-    m = re.search(r"ratio ([0-9]+\.[0-9]+)", caplog.text)
+    m = re.search(r"ratio\s+([0-9]+\.[0-9]+)", caplog.text)
     return float(m.group(1)) if m else None
 
 
