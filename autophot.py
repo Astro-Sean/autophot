@@ -365,8 +365,11 @@ def list_parameters(
 
     rel_file = os.path.relpath(yml_path, here)
     title = f"AutoPhOT parameters (from {rel_file})"
-    print(title)
-    print("-" * min(len(title), term_w))
+    if border_msg:
+        print(border_msg(title).lstrip("\n"))
+    else:
+        rule = "=" * 80
+        print(f"{rule}\n{title}\n{rule}")
     if not entries:
         print("(no matches)")
         return entries
@@ -428,13 +431,13 @@ def list_parameters(
         if section != last_section:
             if last_section is not None:
                 print("-" * len(header))
-            # Section headings in the same === TITLE === style as the logs.
+            # Section headings in the same framed-banner style as the logs.
             section_title = str(section).replace("_", " ").upper()
             if border_msg:
                 print(border_msg(section_title))
             else:
-                print(f"=== {section_title} ===")
-            print("")
+                rule = "=" * 80
+                print(f"\n{rule}\n{section_title}\n{rule}")
             last_section = section
 
         desc = (e.get("description") or "").strip()
@@ -640,6 +643,29 @@ except Exception as _exc:  # pragma: no cover
 # =============================================================================
 # =============================================================================
 # --- Logging / subprocess helpers ---
+# A leading "[LEVEL]" text tag selects the record's level; the console
+# formatter supplies its own tag, so the text tag is stripped on that path
+# to avoid "[WARNING] [WARNING] ..." doubles.  Non-level tags ([OK],
+# [FAIL], [MCMC]) are kept as message text.
+_LOG_TAG_RE = re.compile(
+    r"^\s*\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]\s*(.*)$", re.S
+)
+_LOG_TAG_LEVEL = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def _split_level_tag(message):
+    m = _LOG_TAG_RE.match(str(message))
+    if not m:
+        return None, None
+    return _LOG_TAG_LEVEL[m.group(1)], m.group(2)
+
+
 def _log(message: str) -> None:
     """
     Logs a message using the logging module if handlers are configured,
@@ -652,7 +678,9 @@ def _log(message: str) -> None:
     if logger.handlers:
         # Driver messages are user-facing progress; STATUS shows them in
         # normal mode without leaking per-image INFO diagnostics.
-        logger.log(STATUS, message)
+        level, text = _split_level_tag(message)
+        logger.log(level if level is not None else STATUS,
+                   text if text is not None else message)
     else:
         # Fallback for environments without configured logging handlers.
         if not QUIET_MODE:
@@ -666,7 +694,9 @@ def _log_always(message: str) -> None:
     """
     logger = logging.getLogger(__name__)
     if logger.handlers:
-        logger.warning(message)
+        level, text = _split_level_tag(message)
+        logger.log(level if level is not None else logging.WARNING,
+                   text if text is not None else message)
     else:
         # flush=True: when stdout is piped (tee, batch logs) print() is
         # block-buffered and the parallel progress counter would lag.
@@ -2138,7 +2168,7 @@ class AutomatedPhotometry:
         python_executable = sys.executable
 
         if do_photometry:
-            _log(border_msg("AutoPhOT Photometry Run") if border_msg else log_step("AutoPhOT photometry run"))
+            _log(border_msg("AutoPhOT photometry run") if border_msg else log_step("AutoPhOT photometry run"))
             _log("Report any issues at: https://github.com/Astro-Sean/autophot/issues")
 
             # List of available filters (excluding error columns)
@@ -2178,8 +2208,7 @@ class AutomatedPhotometry:
                         "and no fallback RA/Dec provided in the configuration."
                     )
                     print(
-                        "\n"
-                        + (
+                        (
                             ascii_card(
                                 "ERROR: cannot proceed without target coordinates",
                                 [
@@ -2195,8 +2224,8 @@ class AutomatedPhotometry:
                             )
                             if ascii_card
                             else "ERROR: Cannot proceed without target coordinates."
-                        )
-                        + "\n"
+                        ),
+                        file=sys.stderr,
                     )
                     sys.exit("Stopped: No target coordinates provided.")
 
@@ -2592,7 +2621,7 @@ class AutomatedPhotometry:
 
                 # Pre-download reference catalog(s) once, before the per-image loop.
                 # main.py will find the cached CSV and skip re-downloading.
-                _log(border_msg("Reference Photometric Catalog") if border_msg else log_step("Reference photometric catalog (pre-download)"))
+                _log(border_msg("Reference photometric catalog") if border_msg else log_step("Reference photometric catalog (pre-download)"))
                 try:
                     from catalog import (
                         Catalog as _Catalog,
@@ -2841,7 +2870,6 @@ class AutomatedPhotometry:
                             if ascii_card
                             else "No photometric catalog selected."
                         )
-                        _log("")
                         sys.exit(0)
                     # Auto-select GaiaXPy photometric systems based on required filters.
                     # SDSS_Std covers u,g,r,i,z; JKC_Std covers U,B,V,R,I.
@@ -3366,7 +3394,6 @@ class AutomatedPhotometry:
                                     if ascii_card
                                     else f"Catalog '{_cat_name}' returned 0 sources."
                                 )
-                                _log("")
                                 sys.exit(0)
                             _log(f"  [WARNING] Pre-fetch of '{_cat_name}' failed: {_ce}")
 
@@ -3484,7 +3511,6 @@ class AutomatedPhotometry:
                                 if ascii_card
                                 else "No working photometric catalog found."
                             )
-                            _log("")
                             sys.exit(0)
 
                         # Commit the remapped selection for this run.
