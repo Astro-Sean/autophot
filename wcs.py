@@ -41,7 +41,8 @@ except (ModuleNotFoundError, ImportError):
         m = str(message).strip()
         if not m:
             return ""
-        return f"\n---- {m} ----"
+        rule = "-" * 70
+        return f"\n{rule}\n{m}\n{rule}"
 
     def log_warning_from_exception(logger, message, exc, *, exc_info=False):
         logger.warning("%s: %s", message, exc, exc_info=exc_info)
@@ -1247,18 +1248,21 @@ def _sky_sep_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
 
 def _header_position_hint(header):
     """
-    World position (ra_deg, dec_deg) of the header WCS reference point.
+    World position (ra_deg, dec_deg) of the image center.
 
-    Uses the reference pixel (CRPIX) projected through the header WCS so
-    distorted models still report the field center they actually encode;
-    falls back to CRVAL when the projection fails.  Returns None when the
-    header carries no usable WCS.
+    Project the current image center through the WCS, including distortion.
+    Fall back to the reference pixel when image dimensions are unavailable.
+    Return None when the header carries no usable WCS.
     """
     wcs_obj = get_wcs(header)
     if wcs_obj is None:
         return None
     try:
         crpix = np.asarray(getattr(wcs_obj.wcs, "crpix", []), dtype=float)
+        width = float(header.get("NAXIS1", 0) or 0)
+        height = float(header.get("NAXIS2", 0) or 0)
+        if np.isfinite([width, height]).all() and width > 0 and height > 0:
+            crpix = np.array([(width + 1.0) / 2.0, (height + 1.0) / 2.0])
         if crpix.size >= 2 and np.all(np.isfinite(crpix[:2])):
             # CRPIX is FITS 1-based; origin=1 evaluates it directly.
             ra_h, dec_h = wcs_obj.all_pix2world(crpix[0], crpix[1], 1)
@@ -1277,8 +1281,8 @@ def _header_position_hint(header):
 def _solve_field_parity(wcs_cfg, header):
     """Return 'pos'/'neg' parity for solve-field --parity, or None.
 
-    'auto' (default) derives the parity as sign(det(CD)) from the header;
-    explicit 'pos'/'neg' overrides; anything else omits the flag.
+    'auto' uses astrometry.net's convention: 'pos' for det(CD) < 0,
+    'neg' for det(CD) > 0. Explicit overrides pass through unchanged.
     """
     setting = str(wcs_cfg.get("solve_field_parity", "auto") or "").lower()
     if setting in ("pos", "neg"):
@@ -1301,15 +1305,18 @@ def _solve_field_parity(wcs_cfg, header):
                 ],
                 dtype=float,
             )
-            cd = pc * np.array(
-                [header.get("CDELT1", np.nan), header.get("CDELT2", np.nan)]
-            )[None, :]
+            cd = (
+                pc
+                * np.array(
+                    [header.get("CDELT1", np.nan), header.get("CDELT2", np.nan)]
+                )[None, :]
+            )
         if not np.all(np.isfinite(cd)):
             return None
         det = float(np.linalg.det(cd))
         if not np.isfinite(det) or det == 0:
             return None
-        return "pos" if det > 0 else "neg"
+        return "pos" if det < 0 else "neg"
     except Exception:
         return None
 
