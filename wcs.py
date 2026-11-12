@@ -31,11 +31,19 @@ from astropy.table import Table
 
 # --- Local Imports (optional) ---
 try:
-    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, copy_wcs_from_header, cap_console_lines, which_exe, STATUS  # type: ignore
+    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, copy_wcs_from_header, cap_console_lines, which_exe, ascii_table, STATUS  # type: ignore
 except (ModuleNotFoundError, ImportError):
     # Minimal fallback for environments missing the full photometry stack.
     STATUS = logging.INFO  # degrade STATUS to INFO when functions is absent
     cap_console_lines = None
+
+    def ascii_table(title, headers, rows):
+        # Plain two-column-space layout; no frame rules in fallback mode.
+        lines = [str(title), "  " + "  ".join(str(h) for h in headers)]
+        lines += [
+            "  " + "  ".join(str(c) for c in row) for row in rows
+        ]
+        return "\n".join(lines)
 
     def log_step(message: str, *args, **kwargs) -> str:
         m = str(message).strip()
@@ -4786,14 +4794,24 @@ class WCSSolver:
                             med_sv, p95_sv, sh_sv = np.nan, np.nan, 0.0
                         logger.log(
                             STATUS,
-                            "WCS compare:\tn=%d | input med/p95=%.3f/%.3f\" (shift=%+.1f px) | solved med/p95=%.3f/%.3f\" (shift=%+.1f px)",
-                            int(len(x_d)),
-                            float(med_in),
-                            float(p95_in),
-                            float(sh_in),
-                            float(med_sv),
-                            float(p95_sv),
-                            float(sh_sv),
+                            ascii_table(
+                                "WCS compare (n=%d sources)" % int(len(x_d)),
+                                ["Solution", 'Median ["]', 'p95 ["]', "Shift [px]"],
+                                [
+                                    [
+                                        "Input",
+                                        f"{float(med_in):.3f}",
+                                        f"{float(p95_in):.3f}",
+                                        f"{float(sh_in):+.1f}",
+                                    ],
+                                    [
+                                        "Solved",
+                                        f"{float(med_sv):.3f}",
+                                        f"{float(p95_sv):.3f}",
+                                        f"{float(sh_sv):+.1f}",
+                                    ],
+                                ],
+                            ),
                         )
                         # If solve-field switches distortion model family
                         # (e.g. TPV -> TAN-SIP) without clear improvement,
@@ -4960,8 +4978,8 @@ class WCSSolver:
                     ) * 3600.0
                     ddec_arcsec = (crval2_sv - crval2_in) * 3600.0
                     logger.info(
-                        "WCS header delta: CTYPE (%s, %s) -> (%s, %s) | "
-                        "dCRPIX=(%g, %g) px | dCRVAL=(%g, %g) arcsec",
+                        "WCS header delta: CTYPE (%s, %s) -> (%s, %s); "
+                        "dCRPIX=(%g, %g) px; dCRVAL=(%g, %g) arcsec",
                         ctype1_in, ctype2_in, ctype1_sv, ctype2_sv,
                         float(crpix1_sv - crpix1_in), float(crpix2_sv - crpix2_in),
                         float(dra_arcsec), float(ddec_arcsec),
