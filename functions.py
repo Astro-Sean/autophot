@@ -312,7 +312,7 @@ def _cache_evict(cache):
 def _message_kind(msg: str) -> str:
     """Classify a normalized log message for console spacing rules.
 
-    ``banner`` - ruled section header (``==== X ====`` or ``---- X ----``)
+    ``banner`` - framed section header (opening rule is all ``=`` or ``-``)
     ``step``   - bracketed one-line marker (``[X]``)
     ``msg``    - everything else
     """
@@ -346,16 +346,33 @@ class PlainFormatter(logging.Formatter):
         self._last_kind = None     # last emitted message kind ("banner" | "step" | "msg")
 
     def format(self, record: logging.LogRecord) -> str:
-        msg = super().format(record)
+        # A leading newline in the message is spacing, not content: move it
+        # in front of the record so the level prefix labels the first real
+        # line instead of dangling on a blank one.
+        raw = record.getMessage()
+        leading_blank = str(raw).startswith("\n")
+        old_msg, old_args = record.msg, record.args
+        if leading_blank:
+            record.msg, record.args = str(raw).lstrip("\n"), ()
+        try:
+            msg = super().format(record)
+        finally:
+            record.msg, record.args = old_msg, old_args
         msg = self.ANSI_ESCAPE.sub('', msg)
         msg = normalize_log_message(msg, width=self._max_width)
         kind = _message_kind(record.getMessage())
+        first_ever = self._last_kind is None
+        if first_ever:
+            # No blank line at the top of the log file either.
+            msg = msg.lstrip("\n")
+            leading_blank = False
         # Stage-result lines close a section: blank line before them unless
-        # a ruled header just opened it.
+        # a ruled header just opened it or the message carries its own.
         result_lead = (
             kind != "banner"
             and getattr(record, "result", False)
             and self._last_kind not in (None, "banner", "step")
+            and not msg.startswith("\n")
         )
         self._last_kind = kind
         # Indent continuation lines so border banners and other multi-line
@@ -368,7 +385,7 @@ class PlainFormatter(logging.Formatter):
             prefix_len = len(prefix)
             lines = [lines[0]] + [' ' * prefix_len + ln for ln in lines[1:]]
             msg = '\n'.join(lines)
-        if result_lead:
+        if result_lead or leading_blank:
             msg = "\n" + msg
         return msg
 
@@ -426,31 +443,40 @@ class ColoredLevelFormatter(logging.Formatter):
     def _format_info(self, record: logging.LogRecord, msg_clean: str) -> str:
         self._msg_count += 1
         first_ever = self._msg_count == 1
+        if first_ever:
+            # No blank line at the very top of a run.
+            msg_clean = msg_clean.lstrip("\n")
         kind = _message_kind(msg_clean)
+        # Helpers (border_msg, ascii_table, ...) carry their own leading
+        # blank; adding another would leave two blank lines in a row.
+        wants_blank = (
+            kind == "banner"
+            # Sub-step markers get a blank line unless a banner just opened.
+            or (kind == "step" and self._last_kind != "banner")
+            # Stage-result lines get a blank line unless a ruled header
+            # just opened the section (content hugs its header).
+            or (
+                getattr(record, "result", False)
+                and self._last_kind not in ("banner", "step")
+            )
+        )
+        lead = (
+            "\n"
+            if wants_blank and not first_ever and not msg_clean.startswith("\n")
+            else ""
+        )
 
         if kind == "banner":
             self._in_section = True
-            lead = "" if first_ever else "\n"
-        elif kind == "step" and self._last_kind != "banner":
-            # Sub-step markers get a blank line unless a banner just opened.
-            lead = "" if first_ever else "\n"
-        elif (
-            getattr(record, "result", False)
-            and self._last_kind not in ("banner", "step")
-        ):
-            # Stage-result lines get a blank line unless a ruled header
-            # just opened the section (content hugs its header).
-            lead = "" if first_ever else "\n"
-        else:
-            lead = ""
-        base = f"{lead}{msg_clean}"
-
         self._last_kind = kind
-        return base
+        return f"{lead}{msg_clean}"
 
     def _format_leveled(self, record: logging.LogRecord, msg_clean: str) -> str:
         label = f"[{record.levelname}]"
-        msg_clean = self._align_continuation(msg_clean, len(label) + 1)
+        # A leading blank belongs before the level tag, not after it.
+        msg_clean = self._align_continuation(
+            msg_clean.lstrip("\n"), len(label) + 1
+        )
         base = f"{label} {msg_clean}"
         self._msg_count += 1
         # Warnings and errors get a leading blank line so they stand out from
@@ -890,7 +916,9 @@ def log_result(msg: str, *args, **kwargs) -> None:
     Marks the record ``result=True`` so the console and log-file formatters
     emit a blank line before it, matching the stage layout::
 
-        ==== Stage ====
+        ================================================================================
+        Stage
+        ================================================================================
         stats ...
 
         Conclusion.
@@ -1917,108 +1945,133 @@ def beta_psf(n, flux_psf, flux_psf_err):
     return beta
 
 
+# --- Console layout constants -------------------------------------------
+# One fixed rule width per heading level, one indent unit, one column
+# gap: every banner, subheader, and table lands on the same columns, so a
+# scan down the log finds straight edges.  '=' frames major sections at
+# 80 columns, which still fits the narrowest handler budget (the
+# "[WARNING] " tag reserve leaves 80 of the 90-column console width);
+# '-' frames step subheaders and table titles at 70.
+LOG_HEADER_WIDTH = 80
+LOG_SUBHEADER_WIDTH = 70
+LOG_INDENT = "  "
+LOG_COL_GAP = "  "
+
+
 def log_step(msg: str) -> str:
     """
-    One-line subheader for pipeline steps: ``---- X ----``.
+    Framed subheader for pipeline steps::
 
-    Subordinate to ``border_msg`` section banners (``==== X ====``);
-    prefer for routine stages inside a major section.
+        ----------------------------------------------------------------------
+        X
+        ----------------------------------------------------------------------
+
+    Subordinate to ``border_msg`` section banners ('=' rules); prefer for
+    routine stages inside a major section.
     """
     return border_msg(msg, body="-")
 
 
-def _rule_line(title: str, char: str, width: int = 70) -> str:
-    """Centered title embedded in a full-width rule, e.g. ``=== X ===``."""
+def _framed_lines(title: str, char: str, width: int) -> list[str]:
+    """Rule / title / rule lines for a framed heading."""
     t = str(title).strip()
-    inner = width
-    if len(t) > inner - 2:
-        t = t[: inner - 5] + "..."
-    side = (inner - len(t) - 2) // 2
-    return f"{char * side} {t} {char * (inner - side - len(t) - 2)}"
+    if len(t) > width:
+        t = t[: width - 3] + "..."
+    return [char * width, t, char * width]
 
 
 def border_msg(msg: str, body: str = "=", corner: str = "+",
-               metadata: str | None = None, width: int = 70, use_ansi: bool | None = None) -> str:
+               metadata: str | None = None, width: int | None = None,
+               use_ansi: bool | None = None) -> str:
     """
-    Section banner for major log sections: ``=== Title ===``.
+    Section banner for major log sections::
+
+        ================================================================================
+        Title
+        ================================================================================
 
     Parameters
     ----------
     msg : str
-        Main section title (centered in a full-width '=' rule)
+        Section title, framed by full-width rules above and below.
     body : str
-        Rule character (default '=')
+        Rule character ('=' for major sections, '-' for sub-sections).
     corner : str
         Unused; kept for backward compatibility with older call sites.
     metadata : str | None
-        Optional second line, rendered as ``--- metadata ---``
-    width : int
-        Total banner width in characters
+        Optional second line inside the frame.
+    width : int | None
+        Rule width; defaults to LOG_HEADER_WIDTH for '=' banners and
+        LOG_SUBHEADER_WIDTH for everything else.
     use_ansi : bool | None
         Unused; kept for backward compatibility.
 
     Example:
-        logging.info(border_msg("Template Preparation", metadata="align=SWarp catalog=Gaia"))
+        logging.info(border_msg("Template preparation", metadata="align=SWarp catalog=Gaia"))
     """
     text = str(msg).strip()
     if not text:
         return ""
     rule = str(body or "=")[0]
-    lines = [_rule_line(text, rule, width)]
+    if width is None:
+        width = LOG_HEADER_WIDTH if rule == "=" else LOG_SUBHEADER_WIDTH
+    lines = _framed_lines(text, rule, int(width))
     if metadata:
-        lines.append(_rule_line(str(metadata).strip(), "-", width))
+        lines.insert(-1, str(metadata).strip())
     # Leading newline separates the banner from dense output above it.
     return "\n" + "\n".join(lines)
 
 
-def ascii_kv(title: str, pairs, width: int = 70, framed: bool = False) -> str:
+def ascii_kv(title: str, pairs, width: int = LOG_SUBHEADER_WIDTH,
+             framed: bool = False) -> str:
     """
     Key/value block with dotted leaders.
 
     pairs : iterable of (label, value) tuples; values are pre-formatted
-    strings.  With ``framed=False`` the block is a lightweight sub-section:
+    strings.  With ``framed=False`` the block is a plain labelled group:
 
-        * Title
-          ------------------  ----------------
+        Title:
           label ........... value
 
-    With ``framed=True`` it is wrapped in '=' rules for major blocks:
+    With ``framed=True`` it is boxed in '=' rules for major blocks:
 
-        ============================ Title ============================
+        ========================================================================
+        Title
+        ========================================================================
           label ........... value
-        ================================================================
+        ========================================================================
     """
     rows = [(str(k), str(v)) for k, v in pairs]
     if not rows:
         return ""
     label_w = max(len(k) for k, _ in rows)
     label_w = max(label_w, 8)
-    val_x = label_w + 8  # '  ' + label + ' ... ' gap
-    val_w = width - val_x - 2
+    val_x = label_w + 8  # indent + label + ' ... ' gap
     lines = []
     if framed:
-        lines.append(_rule_line(str(title), "=", width))
+        lines.extend(_framed_lines(str(title).strip(), "=", width))
     else:
-        lines.append(f"* {str(title).strip()}")
-        lines.append("  " + "-" * label_w + "  " + "-" * max(8, min(val_w, 24)))
+        lines.append(f"{str(title).strip()}:")
     for k, v in rows:
         dots = "." * max(3, val_x - 2 - len(k) - 4)
-        line = f"  {k} {dots} {v}"
+        line = f"{LOG_INDENT}{k} {dots} {v}"
         lines.append(line[:width] if len(line) > width else line)
     if framed:
         lines.append("=" * width)
     return "\n" + "\n".join(lines)
 
 
-def ascii_table(title: str, headers, rows, width: int = 70) -> str:
+def ascii_table(title: str, headers, rows, width: int = LOG_SUBHEADER_WIDTH) -> str:
     """
     Column table framed in '-' rules; numeric columns right-align:
 
-        --------------------------- Title ----------------------------
-           Method      ZP    err    N
-           ------  ------  -----  ---
-           AP      24.547  0.003  159
-        -----------------------------------------------------------------
+        ----------------------------------------------------------------------
+        Title
+        ----------------------------------------------------------------------
+          Method      ZP    err    N
+          ------  ------  -----  ---
+          AP      24.547  0.003  159
+        ----------------------------------------------------------------------
     """
     def _is_numeric_cell(c: str) -> bool:
         c = c.strip()
@@ -2053,27 +2106,28 @@ def ascii_table(title: str, headers, rows, width: int = 70) -> str:
     # the console formatter.  Shrink the widest columns until the body
     # fits `width` (never below a header) and wrap cell text onto
     # aligned continuation lines instead.
-    budget = width - (4 + 2 * ncols)
+    pad_w = len(LOG_INDENT) + len(LOG_COL_GAP) * (ncols - 1)
+    budget = width - pad_w
     while sum(col_w) > budget:
         wide = [k for k in range(ncols) if col_w[k] > len(headers[k])]
         if not wide:
             break
         col_w[max(wide, key=lambda k: col_w[k])] -= 1
-    body_w = 4 + sum(col_w) + 2 * ncols  # leading indent + columns + gaps
-    rule_w = min(max(width, body_w), max(width, 40))
     lines = []
     if title:
-        lines.append(_rule_line(str(title), "-", rule_w))
+        lines.extend(_framed_lines(str(title), "-", width))
     else:
-        lines.append("-" * rule_w)
+        lines.append("-" * width)
     lines.append(
-        "   "
-        + "  ".join(
+        LOG_INDENT
+        + LOG_COL_GAP.join(
             h.rjust(col_w[i]) if num_col[i] else h.ljust(col_w[i])
             for i, h in enumerate(headers)
         ).rstrip()
     )
-    lines.append("   " + "  ".join("-" * col_w[i] for i in range(ncols)))
+    lines.append(
+        LOG_INDENT + LOG_COL_GAP.join("-" * col_w[i] for i in range(ncols))
+    )
     for r in rows:
         cells = [r[i] if i < len(r) else "" for i in range(ncols)]
         wrapped = [
@@ -2088,8 +2142,8 @@ def ascii_table(title: str, headers, rows, width: int = 70) -> str:
         ]
         for k in range(max(len(w) for w in wrapped)):
             lines.append(
-                "   "
-                + "  ".join(
+                LOG_INDENT
+                + LOG_COL_GAP.join(
                     (
                         (w[k] if k < len(w) else "").rjust(col_w[i])
                         if num_col[i]
@@ -2098,24 +2152,28 @@ def ascii_table(title: str, headers, rows, width: int = 70) -> str:
                     for i, w in enumerate(wrapped)
                 ).rstrip()
             )
-    lines.append("-" * rule_w)
+    lines.append("-" * width)
     return "\n" + "\n".join(lines)
 
 
-def ascii_card(title: str, lines, width: int = 70) -> str:
+def ascii_card(title: str, lines, width: int = LOG_SUBHEADER_WIDTH) -> str:
     """
     Framed free-text block for errors, warnings, and explanatory cards:
 
-        ============================ Title ============================
+        ========================================================================
+        Title
+        ========================================================================
           some explanatory line
           another line
-        ================================================================
+        ========================================================================
     """
     body = [str(l) for l in lines]
     if not any(l.strip() for l in body):
         return ""
-    out = [_rule_line(str(title), "=", width)]
-    out.extend(f"  {l[: width - 4]}" if l.strip() else "" for l in body)
+    out = _framed_lines(str(title).strip(), "=", width)
+    out.extend(
+        f"{LOG_INDENT}{l[: width - 4]}" if l.strip() else "" for l in body
+    )
     out.append("=" * width)
     return "\n" + "\n".join(out)
 
@@ -2153,7 +2211,8 @@ def stat_pairs(pairs) -> str:
     return "\n".join(f"{k.ljust(width)}  {v}" for k, v in rows)
 
 
-def metrics_table(metrics: dict[str, tuple], title: str | None = None, width: int = 70) -> str:
+def metrics_table(metrics: dict[str, tuple], title: str | None = None,
+                  width: int = LOG_SUBHEADER_WIDTH) -> str:
     """
     Format a compact two-column metrics table.
 
@@ -4522,7 +4581,7 @@ def print_progress_bar(
         return f"{prefix} [{bar}] {percent:5.1f}%"
 
     if title:
-        logger.info(border_msg(title))
+        logger.info(log_step(title))
 
     last_logged = -1
     try:
