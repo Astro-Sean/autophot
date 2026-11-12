@@ -2537,16 +2537,18 @@ class AutomatedPhotometry:
                     template_file_list = prepare_db.find_templates(
                         required_filters=template_required_filters
                     )
-                    template_file_list = prepare_db.check_files(
-                        flist=template_file_list, template_files=True
-                    )
-                    if default_input.get("validate_fits_headers", False):
-                        template_file_list = prepare_db.validate_fits_headers(
+                    if template_file_list:
+                        template_file_list = prepare_db.check_files(
                             flist=template_file_list, template_files=True
                         )
-                    template_file_list, _ = prepare_db.check_filters(
-                        flist=template_file_list, available_filters=available_filters
-                    )
+                        if default_input.get("validate_fits_headers", False):
+                            template_file_list = prepare_db.validate_fits_headers(
+                                flist=template_file_list, template_files=True
+                            )
+                        template_file_list, _ = prepare_db.check_filters(
+                            flist=template_file_list,
+                            available_filters=available_filters,
+                        )
                     # Re-run telescope header check on science + templates so template images
                     # with TELESCOP/INSTRUME are included in the telescope database
                     if template_file_list and not default_input.get(
