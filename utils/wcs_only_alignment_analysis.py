@@ -394,7 +394,8 @@ if __name__ == "__main__":
         
         result = analyze_alignment_feasibility(sci_path, ref_path)
         
-        print("=== ALIGNMENT FEASIBILITY ANALYSIS ===")
+        rule = "=" * 80
+        print(f"{rule}\nAlignment feasibility analysis\n{rule}")
         print(f"WCS-only alignment possible: {result['analysis']['wcs_only_possible']}")
         print(f"Resampling required: {result['analysis']['resampling_required']}")
         
