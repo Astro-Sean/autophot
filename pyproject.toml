@@ -110,6 +110,7 @@ py-modules = [
   "check",
   "color_correction",
   "cosmic",
+  "differential_photometry",
   "filter_transformations",
   "functions",
   "inspect_telescope",
