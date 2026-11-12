@@ -19,9 +19,19 @@ relative photometry:
   brightness cut cannot;
 * within each epoch, member measurements that deviate strongly from the
   epoch mean are clipped (cosmic rays, satellite crossings);
-* epochs where the ensemble flux falls below a fraction of its median
-  (thick clouds) or too few members survive clipping are flagged
-  ``used=False`` in the output rather than silently dropped.
+* epochs where a member jumps several sigma from its running median
+  (events lasting several frames that per-epoch clipping cannot see) are
+  flagged, as are epochs where the ensemble flux falls below a fraction
+  of its median (thick clouds) or too few members survive clipping --
+  all reported as ``used=False`` in the output rather than dropped;
+* target points deviating strongly from their own running median are
+  flagged ``outlier=True`` and excluded from ``used`` (single-epoch
+  excursions such as cosmic-ray remnants);
+* optionally, residual systematics common to many stars (extinction x
+  color terms, position-dependent flat errors as the field drifts) are
+  removed with SysRem (Tamuz, Mazeh & Zucker 2005); frame coefficients
+  are fit only from well-behaved stars so a genuinely variable target
+  does not bias the systematic model.
 
 The figure shows, per band, the instrumental-drift comparison, a
 diagnostics panel (ensemble transparency, airmass and FWHM when the
@@ -37,6 +47,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.ndimage import median_filter
 from matplotlib.gridspec import GridSpec
 from matplotlib.ticker import MaxNLocator
 
@@ -261,6 +272,244 @@ def _p2p_scatter(resid):
     return float(np.diff(r).std(ddof=1) / np.sqrt(2.0))
 
 
+def _p2p_scatter_robust(resid):
+    """MAD-based point-to-point scatter (insensitive to slow trends)."""
+    r = np.asarray(resid, dtype=float)
+    r = r[np.isfinite(r)]
+    if r.size < 6:
+        return np.nan
+    d = np.diff(r)
+    return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
+
+
+def _leave_one_out_residuals(dm, wts):
+    """(E x N) residual of each member against the weighted mean of the others."""
+    valid = np.isfinite(dm) & np.isfinite(wts) & (wts > 0)
+    w = np.where(valid, wts, 0.0)
+    d0 = np.where(valid, dm, 0.0)
+    s = (w * d0).sum(axis=1)
+    wt = w.sum(axis=1)
+    denom = wt[:, None] - w
+    loo = np.divide(
+        s[:, None] - w * d0,
+        denom,
+        out=np.full_like(dm, np.nan),
+        where=denom > 0,
+    )
+    return dm - loo
+
+
+def _running_median_mask(resid, usable, window, sigma):
+    """Points deviating from a per-series running median by > sigma x MAD scale.
+
+    A running median follows slow stellar and instrumental drift, so a
+    sharp excursion stands out even when it persists for several epochs
+    (a regime per-epoch clipping cannot see).  ``usable`` restricts both
+    the flagged points and the scale estimate; filled values stand in
+    for missing points so gaps do not distort the running median.
+    """
+    resid = np.asarray(resid, dtype=float)
+    ok = np.asarray(usable, dtype=bool) & np.isfinite(resid)
+    out = np.zeros(resid.shape, dtype=bool)
+    win = int(window) if window else 0
+    if win < 3 or resid.shape[0] < 3 or sigma <= 0:
+        return out
+    win = min(win, resid.shape[0])
+    if resid.ndim == 1:
+        resid = resid[:, None]
+        ok = ok[:, None]
+        out = out[:, None]
+    for j in range(resid.shape[1]):
+        # Require a full window of usable points: on short series the MAD
+        # scale of |r - running median| is unreliable (the running median
+        # nearly interpolates), which would flag plain noise points.
+        if np.count_nonzero(ok[:, j]) < window:
+            continue
+        r = resid[:, j]
+        filled = np.where(np.isfinite(r), r, np.nanmedian(r[ok[:, j]]))
+        running = median_filter(filled, size=win, mode="nearest")
+        dev = np.abs(filled - running)
+        scale = 1.4826 * np.median(dev[ok[:, j]])
+        if np.isfinite(scale) and scale > 0:
+            out[:, j] = ok[:, j] & (dev > sigma * scale)
+    return out.squeeze()
+
+
+def _comparison_systematics(resid, usable, bin_size=10):
+    """Median excess scatter of binned comparison residuals beyond white noise.
+
+    For each member, consecutive residuals are averaged in blocks of
+    ``bin_size`` epochs; the scatter of the bin means is compared to the
+    level expected from the point-to-point (white) noise.  The median
+    excess over members is the level of slow systematics (flat-field
+    drift, patchy extinction, residual colour terms) that a differential
+    light curve of this field carries.  Returns scalar mag, NaN when
+    underdetermined.
+    """
+    resid = np.asarray(resid, dtype=float)
+    b = int(bin_size)
+    if b < 2 or resid.shape[0] < 3 * b:
+        return np.nan
+    excess = []
+    for j in range(resid.shape[1]):
+        ok = np.asarray(usable)[:, j] if np.ndim(usable) == 2 else usable
+        r = resid[:, j][ok & np.isfinite(resid[:, j])]
+        n_bins = r.size // b
+        p2p = _p2p_scatter_robust(r)
+        if n_bins < 3 or not np.isfinite(p2p):
+            continue
+        binned = r[: n_bins * b].reshape(n_bins, b).mean(axis=1)
+        excess.append(
+            np.sqrt(max(float(np.std(binned)) ** 2 - p2p**2 / b, 0.0))
+        )
+    return float(np.median(excess)) if excess else np.nan
+
+
+def _sysrem(resid, errs, n_components, star_weights, epoch_weights=None,
+            iterations=15, clip=4.0):
+    """SysRem (Tamuz, Mazeh & Zucker 2005) on an (E x S) residual matrix.
+
+    Removes effects common to many stars, each modelled as c_star x
+    a_epoch (e.g. extinction x colour, flat-field drift).  Frame
+    coefficients ``a`` are fit only from stars with ``star_weights`` > 0
+    and from inlier points, so a deeply variable star cannot imprint its
+    signal on the systematic model shared by all stars.  ``epoch_weights``
+    masks rejected epochs out of the fit.  Returns (cleaned residuals,
+    list of (c_star, a_epoch) components).
+    """
+    finite = np.isfinite(resid) & np.isfinite(errs) & (errs > 0)
+    weights = np.where(finite, 1.0 / np.where(finite, errs, 1.0) ** 2, 0.0)
+    if epoch_weights is not None:
+        weights = weights * np.asarray(epoch_weights, dtype=float)[:, None]
+    cleaned = np.where(finite, resid, 0.0)
+    with _ignore_nan_warnings():
+        col_med = np.nanmedian(
+            np.where(finite, resid, np.nan), axis=0, keepdims=True
+        )
+        star_scatter = 1.4826 * np.nanmedian(
+            np.abs(np.where(finite, resid, np.nan) - col_med), axis=0
+        )
+    inliers = np.abs(cleaned) < clip * np.where(
+        np.isfinite(star_scatter), star_scatter, np.inf
+    )[None, :]
+    frame_weights = weights * np.asarray(star_weights, dtype=float)[None, :] * inliers
+    components = []
+    for _ in range(int(n_components)):
+        a = np.ones(resid.shape[0])
+        for _ in range(iterations):
+            c = ((cleaned * weights) * a[:, None]).sum(axis=0) / np.maximum(
+                (weights * a[:, None] ** 2).sum(axis=0), 1e-30
+            )
+            a = ((cleaned * frame_weights) * c[None, :]).sum(axis=1) / np.maximum(
+                (frame_weights * c[None, :] ** 2).sum(axis=1), 1e-30
+            )
+        # The residuals are column-centred, so a frame term's mean only
+        # re-expresses the centring; removing it keeps the component a
+        # pure epoch pattern and stops the mean leaking into the c fit.
+        a = a - np.mean(a)
+        c = ((cleaned * weights * inliers) * a[:, None]).sum(axis=0) / np.maximum(
+            ((weights * inliers) * a[:, None] ** 2).sum(axis=0), 1e-30
+        )
+        cleaned = cleaned - np.outer(a, c)
+        components.append((c, a))
+    return np.where(finite, cleaned, np.nan), components
+
+
+def _sysrem_subtract(delta, delta_err, A_rows, used):
+    """Subtract the fitted SysRem frame terms from a light curve.
+
+    ``A_rows`` is the per-point frame-term design matrix (one row per
+    light-curve point, one column per SysRem component).  The star's
+    response ``c`` is solved by weighted least squares over its used
+    points: the frame terms are known, so the model is linear.
+    """
+    A = np.asarray(A_rows, dtype=float)
+    if A.ndim != 2 or A.shape[1] == 0:
+        return delta
+    ok = np.isfinite(delta) & np.isfinite(delta_err) & (delta_err > 0) & used
+    if np.count_nonzero(ok) <= A.shape[1]:
+        return delta
+    n_comp = A.shape[1]
+    # A constant column absorbs the curve's mean level: without it the
+    # response fit conflates the instrumental offset with the frame
+    # terms whenever a term has a nonzero mean over the used points.
+    A = np.column_stack([A, np.ones(A.shape[0])])
+    w = 1.0 / delta_err[ok] ** 2
+    Aw = A[ok] * np.sqrt(w)[:, None]
+    c_t, *_ = np.linalg.lstsq(Aw, delta[ok] * np.sqrt(w), rcond=None)
+    return delta - A[:, :n_comp] @ c_t[:n_comp]
+
+
+def _observatory_location(observatory, meta_list):
+    """EarthLocation from an explicit argument or Calib-header site keys.
+
+    ``observatory`` may be an ``EarthLocation`` or a (lon_deg, lat_deg,
+    alt_m) tuple; when None the first Calib header carrying
+    ``site_lon``/``site_lat`` is used.  Returns None when no location is
+    available.
+    """
+    if observatory is not None:
+        from astropy.coordinates import EarthLocation
+
+        if isinstance(observatory, EarthLocation):
+            return observatory
+        try:
+            lon, lat, *rest = np.atleast_1d(observatory)
+            alt = rest[0] if rest else 0.0
+            return EarthLocation.from_geodetic(
+                lon=float(lon), lat=float(lat), height=float(alt)
+            )
+        except Exception:
+            return None
+    lon = lat = alt = np.nan
+    for m in meta_list:
+        try:
+            lon = float(m.get("site_lon", "nan"))
+            lat = float(m.get("site_lat", "nan"))
+            alt = float(m.get("site_alt", "0") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(lon) and np.isfinite(lat):
+            break
+    if not (np.isfinite(lon) and np.isfinite(lat)):
+        return None
+    try:
+        from astropy.coordinates import EarthLocation
+
+        return EarthLocation.from_geodetic(
+            lon=lon, lat=lat, height=alt if np.isfinite(alt) else 0.0
+        )
+    except Exception:
+        return None
+
+
+def _mid_bjd_times(mjds, exposures, location, target_radec):
+    """(mjd_mid, bjd_tdb) arrays; bjd_tdb is None without location+coords.
+
+    ``mjd_mid`` adds half the exposure to the stored start-of-exposure
+    MJD (epochs lacking an exposure time pass through unchanged).  The
+    barycentric correction needs both the observatory location and the
+    target coordinates.
+    """
+    mid = np.asarray(mjds, dtype=float)
+    # Header values arrive as strings; coerce junk to NaN rather than fail.
+    exp = pd.to_numeric(np.atleast_1d(exposures), errors="coerce").astype(float)
+    mid = mid + np.where(np.isfinite(exp) & (exp > 0), 0.5 * exp / 86400.0, 0.0)
+    bjd = None
+    if location is not None and target_radec is not None:
+        from astropy.coordinates import SkyCoord
+        from astropy.time import Time
+        import astropy.units as u
+
+        coord = SkyCoord(
+            ra=float(target_radec[0]) * u.deg,
+            dec=float(target_radec[1]) * u.deg,
+        )
+        t = Time(mid, format="mjd", scale="utc", location=location)
+        bjd = (t.tdb + t.light_travel_time(coord)).jd
+    return mid, bjd
+
+
 # -----------------------------------------------------------------------------
 # Main entry point
 # -----------------------------------------------------------------------------
@@ -281,6 +530,14 @@ def differential_photometry(
     epoch_sigma_clip=5.0,
     min_ensemble_per_epoch=3,
     minimum_transparency=0.7,
+    jump_sigma=5.0,
+    jump_window=9,
+    outlier_sigma=5.0,
+    outlier_window=11,
+    n_sysrem=0,
+    systematics_bin=10,
+    time_scale="mjd",
+    observatory=None,
     n_bin=0,
     show_drift_panel=True,
     show_diagnostics=True,
@@ -342,6 +599,31 @@ def differential_photometry(
     minimum_transparency : float
         Epochs whose ensemble relative flux falls below this fraction of
         the median are flagged unused (cloud rejection; 0 disables).
+    jump_sigma, jump_window : float, int
+        Epochs where an ensemble member deviates more than ``jump_sigma``
+        times its MAD scale from a running median of ``jump_window``
+        epochs are flagged unused (multi-frame events such as satellites
+        or tracking loss; <=0 or window <3 disables).
+    outlier_sigma, outlier_window : float, int
+        Target points deviating more than ``outlier_sigma`` times the MAD
+        scale from a running median of ``outlier_window`` epochs are
+        flagged ``outlier=True`` and excluded from ``used`` (<=0 or
+        window <3 disables).
+    n_sysrem : int
+        Number of SysRem systematic components removed from the light
+        curves (0 disables; typical 1-3 for multi-night data).
+    systematics_bin : int
+        Epochs per bin for the comparison-systematics floor diagnostic.
+    time_scale : str
+        'mjd' (default, stored MJD unchanged), 'mid' (add half the
+        exposure time; assumes stored MJD is start-of-exposure), or
+        'bjd' (mid-exposure barycentric-corrected BJD_TDB; needs the
+        observatory location and target coordinates).
+    observatory : EarthLocation, tuple or None
+        Observatory location for time_scale='bjd': an EarthLocation or a
+        (lon_deg, lat_deg, alt_m) tuple.  When None, the ``site_lon`` /
+        ``site_lat`` / ``site_alt`` keys written into newer Calib_*.csv
+        headers are used.
     n_bin : int
         If >= 2, overlay binned target points of this many consecutive
         used epochs on the residual panel.
@@ -457,6 +739,13 @@ def differential_photometry(
                 "filter": str(info.get("filter", "")).strip(),
                 "airmass": _meta_float(info, "airmass"),
                 "fwhm": _meta_float(info, "image_fwhm", "fwhm"),
+                "exposure_time": _meta_float(info, "exposure_time"),
+                "site_lon": _meta_float(info, "site_lon"),
+                "site_lat": _meta_float(info, "site_lat"),
+                "site_alt": _meta_float(info, "site_alt"),
+                "mjd_keyword": str(info.get("mjd_keyword", "")).strip(),
+                "target_ra": _meta_float(info, "target_ra"),
+                "target_dec": _meta_float(info, "target_dec"),
             }
         )
     if not calib_meta:
@@ -741,16 +1030,103 @@ def differential_photometry(
                 else np.ones(n_epochs, dtype=bool)
             )
         )
+
+        # Running-median jump rejection: a member deviating from its own
+        # running median for several consecutive epochs (satellite trails,
+        # tracking loss, uncaught variability) contaminates the common
+        # mode of every epoch it touches, so the epoch is flagged rather
+        # than only the member measurement.  Members already clipped by
+        # the per-epoch sigma test are not re-flagged.
+        ens_w = np.where(ens["keep"], wts[:, ens_idx], 0.0)
+        loo_resid = _leave_one_out_residuals(dm[:, ens_idx], ens_w)
+        jumped = (
+            _running_median_mask(
+                loo_resid, ens["keep"], window=jump_window, sigma=jump_sigma
+            ).any(axis=1)
+            if loo_resid.size
+            else np.zeros(n_epochs, dtype=bool)
+        )
+        n_jump = int(jumped.sum())
+        if n_jump:
+            used_epoch = used_epoch & ~jumped
+            log.info(
+                "differential_photometry: band %s - %d epoch(s) flagged "
+                "unused (ensemble member jumped > %.1f sigma from its "
+                "running median).",
+                band,
+                n_jump,
+                jump_sigma,
+            )
         n_rej = int((~used_epoch).sum())
         if n_rej:
             log.info(
                 "differential_photometry: band %s - %d epoch(s) flagged "
-                "unused (transparency < %.2f or < %d ensemble members).",
+                "unused (transparency < %.2f, < %d ensemble members, or "
+                "member jump).",
                 band,
                 n_rej,
                 minimum_transparency,
                 min_ensemble_per_epoch,
             )
+
+        # Slow-systematics floor: the median excess scatter of binned
+        # member residuals beyond what the point-to-point noise predicts.
+        sys_floor = _comparison_systematics(
+            loo_resid,
+            ens["keep"] & used_epoch[:, None],
+            bin_size=systematics_bin,
+        )
+
+        # SysRem: remove residual systematics shared by many stars that a
+        # single common-mode mean cannot (extinction x colour, flat-field
+        # errors as the field drifts).  Frame coefficients are fit only
+        # from well-behaved stars so a variable star or the target does
+        # not leak into the systematic model.
+        components = []
+        sysrem_model = None
+        n_sysrem_use = int(n_sysrem or 0)
+        if n_sysrem_use > 0:
+            resid_all = dm - ens_c[:, None]
+            with _ignore_nan_warnings():
+                cover = np.mean(np.isfinite(resid_all[used_epoch]), axis=0)
+                col_med = np.nanmedian(resid_all, axis=0, keepdims=True)
+                init_scat = 1.4826 * np.nanmedian(
+                    np.abs(resid_all - col_med), axis=0
+                )
+                exp_err = np.nanmedian(err_use, axis=0)
+            star_ok = (
+                keep_mask
+                & (cover > 0.5)
+                & np.isfinite(init_scat)
+                & (
+                    ~np.isfinite(exp_err)
+                    | (init_scat < 3.0 * np.maximum(exp_err, 1e-4))
+                )
+            )
+            if np.count_nonzero(star_ok) < 5:
+                log.info(
+                    "differential_photometry: band %s - fewer than 5 "
+                    "well-measured reference stars; SysRem skipped.",
+                    band,
+                )
+                n_sysrem_use = 0
+            else:
+                resid_clean, components = _sysrem(
+                    resid_all,
+                    err_use,
+                    n_sysrem_use,
+                    star_ok.astype(float),
+                    epoch_weights=used_epoch.astype(float),
+                )
+                sysrem_model = resid_all - resid_clean
+                n_sysrem_use = len(components)
+                log.info(
+                    "differential_photometry: band %s - SysRem removed %d "
+                    "component(s) fit from %d stars.",
+                    band,
+                    n_sysrem_use,
+                    int(np.count_nonzero(star_ok)),
+                )
 
         ens_epoch = pd.DataFrame(
             {
@@ -760,6 +1136,7 @@ def differential_photometry(
                 "ens_n": ens["n_mem"],
                 "transparency": ens["transparency"],
                 "used": used_epoch,
+                "jumped": jumped,
             }
         )
         # Per-epoch observing diagnostics from the Calib headers.
@@ -770,6 +1147,49 @@ def differential_photometry(
         ens_epoch["fwhm"] = [
             meta_by_mjd.get(m, {}).get("fwhm", np.nan) for m in epochs
         ]
+
+        # Optional mid-exposure / barycentric timestamps for the CSV.  The
+        # stored MJD is taken as start-of-exposure unless the Calib header
+        # records a mid-exposure keyword (e.g. MJD-MID).
+        ts_mode = str(time_scale).strip().lower()
+        mjd_mid = bjd_tdb = None
+        if ts_mode in ("mid", "bjd", "bjd_tdb"):
+            exp_arr = np.array(
+                [
+                    meta_by_mjd.get(m, {}).get("exposure_time", np.nan)
+                    for m in epochs
+                ]
+            )
+            mjd_kw = next(
+                (m["mjd_keyword"] for m in band_files if m.get("mjd_keyword")),
+                "",
+            )
+            if "MID" in mjd_kw.upper():
+                exp_arr = np.zeros(len(epochs))
+            mjd_mid, _ = _mid_bjd_times(epochs, exp_arr, None, None)
+            if ts_mode in ("bjd", "bjd_tdb"):
+                location = _observatory_location(observatory, calib_meta)
+                t_radec = next(
+                    (
+                        (m["target_ra"], m["target_dec"])
+                        for m in band_files
+                        if np.isfinite(m.get("target_ra", np.nan))
+                        and np.isfinite(m.get("target_dec", np.nan))
+                    ),
+                    None,
+                )
+                if location is None or t_radec is None:
+                    log.info(
+                        "differential_photometry: band %s - time_scale='bjd' "
+                        "needs the observatory location (site_lon/site_lat in "
+                        "Calib headers or the observatory argument) and target "
+                        "coordinates; mjd_mid written instead.",
+                        band,
+                    )
+                else:
+                    _, bjd_tdb = _mid_bjd_times(
+                        mjd_mid, np.zeros(len(epochs)), location, t_radec
+                    )
 
         # Brightest qualifying stars not in the ensemble form the plotted
         # reference cloud (independent of the common-mode correction).
@@ -793,6 +1213,18 @@ def differential_photometry(
         with _ignore_nan_warnings():
             ref_dm = ref_dm - np.nanmean(ref_dm, axis=0)
             ref_delta = ref_dm - ens_c[:, None]
+            if sysrem_model is not None:
+                # Plotted stars are candidates, so their per-star SysRem
+                # response is already fitted; subtract the model columns.
+                plot_idx = [
+                    cand_ids.index(sid) if sid in cand_ids else None
+                    for sid in sorted(plot_ids)
+                ]
+                for col, idx in enumerate(plot_idx):
+                    if idx is not None:
+                        ref_delta[:, col] = (
+                            ref_delta[:, col] - sysrem_model[:, idx]
+                        )
             ref_delta = ref_delta - np.nanmean(ref_delta, axis=0)
         ref = pd.DataFrame(
             {
@@ -846,9 +1278,46 @@ def differential_photometry(
                 )
         if tgt.empty:
             continue
+        # Time-order the rows first: the running-median filters below
+        # assume consecutive rows are consecutive in time.
+        tgt = tgt.sort_values("mjd").reset_index(drop=True)
+        # SysRem: subtract the target's response to the shared frame
+        # terms, solved by weighted least squares over its used points.
+        if components:
+            A_rows = np.column_stack([a for _, a in components])[
+                tgt["ep_i"].to_numpy(dtype=int)
+            ]
+            tgt["diff"] = _sysrem_subtract(
+                tgt["diff"].to_numpy(dtype=float),
+                tgt["delta_err"].to_numpy(dtype=float),
+                A_rows,
+                tgt["used"].to_numpy(dtype=bool),
+            )
+        # Running-median outlier flag: single- or few-epoch excursions
+        # (cosmic-ray remnants, unmasked defects) that the ensemble-level
+        # checks cannot attribute.  Outlier points stay in the CSV but
+        # are excluded from `used` and from the centring below.
+        used_t = tgt["used"].to_numpy(dtype=bool)
+        outlier_t = _running_median_mask(
+            tgt["diff"].to_numpy(dtype=float),
+            used_t,
+            window=outlier_window,
+            sigma=outlier_sigma,
+        )
+        tgt["outlier"] = outlier_t
+        n_outlier = int(np.count_nonzero(outlier_t))
+        if n_outlier:
+            used_t = used_t & ~outlier_t
+            tgt["used"] = used_t
+            log.info(
+                "differential_photometry: band %s - %d target point(s) "
+                "flagged as outliers (%.1f sigma from running median).",
+                band,
+                n_outlier,
+                outlier_sigma,
+            )
         # Centre on the used subset so rejected epochs do not drag the
         # effective zero point of the plotted/product residuals.
-        used_t = tgt["used"].to_numpy(dtype=bool)
         diff_ref = (
             float(tgt.loc[used_t, "diff"].mean())
             if used_t.any()
@@ -860,7 +1329,6 @@ def differential_photometry(
         tgt["rel_flux_err"] = (
             np.log(10.0) / 2.5 * tgt["rel_flux"] * tgt["delta_err"]
         )
-        tgt = tgt.sort_values("mjd")
 
         ref_rms = (
             float(np.nanstd(ref_delta[used_epoch, :]))
@@ -883,7 +1351,8 @@ def differential_photometry(
         log.info(
             "differential_photometry: band %s - %d ensemble stars, %d "
             "plotted refs, %d epochs (%d rejected); target RMS %.4f mag, "
-            "ref RMS %.4f mag, ratio %.2f, p2p %.1f mmag, beta %.2f.",
+            "ref RMS %.4f mag, ratio %.2f, p2p %.1f mmag, beta %.2f, "
+            "sys floor %.1f mmag.",
             band,
             len(ensemble_ids),
             n_ref_plotted,
@@ -894,6 +1363,7 @@ def differential_photometry(
             var_ratio,
             (p2p * 1e3) if np.isfinite(p2p) else np.nan,
             beta,
+            (sys_floor * 1e3) if np.isfinite(sys_floor) else np.nan,
         )
 
         # Long-form differential light curve rows for the CSV product.
@@ -903,6 +1373,12 @@ def differential_photometry(
             csv_rows.append(
                 {
                     "mjd": row.mjd,
+                    "mjd_mid": (
+                        mjd_mid[ei] if mjd_mid is not None else np.nan
+                    ),
+                    "bjd_tdb": (
+                        bjd_tdb[ei] if bjd_tdb is not None else np.nan
+                    ),
                     "filter": band,
                     "inst_mag": row.inst,
                     "inst_mag_err": row.inst_err,
@@ -915,6 +1391,9 @@ def differential_photometry(
                     "n_ensemble": int(row.ens_n),
                     "airmass": meta.get("airmass", np.nan),
                     "fwhm": meta.get("fwhm", np.nan),
+                    "systematics": sys_floor,
+                    "jumped": bool(jumped[ei]),
+                    "outlier": bool(row.outlier),
                     "used": bool(row.used),
                 }
             )
@@ -931,6 +1410,9 @@ def differential_photometry(
                 "var_ratio": var_ratio,
                 "p2p": p2p,
                 "beta": beta,
+                "sys_floor": sys_floor,
+                "n_sysrem": n_sysrem_use,
+                "n_jump": n_jump,
             }
         )
         all_mjds.extend(tgt["mjd"].tolist())
@@ -1255,6 +1737,12 @@ def differential_photometry(
                     note_lines.append(f"p2p = {payload['p2p'] * 1e3:.0f} mmag")
                 if np.isfinite(payload["beta"]):
                     note_lines.append(f"beta = {payload['beta']:.2f}")
+                if np.isfinite(payload.get("sys_floor", np.nan)):
+                    note_lines.append(
+                        f"sys floor = {payload['sys_floor'] * 1e3:.0f} mmag"
+                    )
+                if payload.get("n_sysrem"):
+                    note_lines.append(f"SysRem x{payload['n_sysrem']}")
                 if note_lines:
                     ax.text(
                         0.02,
