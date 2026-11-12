@@ -6091,7 +6091,7 @@ class Catalog:
                 )
                 logger.info(
                     f"Linearity fit: {n_points}/{len(X_full)} inliers "
-                    f"(RANSAC on {len(X_fit)} high-S/N, -{n_sigma_outliers} clip) | "
+                    f"(RANSAC on {len(X_fit)} high-S/N, -{n_sigma_outliers} clip); "
                     f"ZP={intercept:.3f}{_zp_err_str}{linear_range_str}"
                 )
 
@@ -6814,7 +6814,7 @@ class Catalog:
         ]
 
         logger.info(
-            f"Point sources: {len(inliers)} | Extended/rejected sources: {len(outliers)}"
+            f"Point sources: {len(inliers)}; extended/rejected: {len(outliers)}"
         )
         logger.info(
             f"Rejection breakdown - FWHM: {sum(~fwhm_mask)}, "
