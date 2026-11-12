@@ -351,6 +351,7 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
 # ---------------------------------------------------------------------------
 from functions import (
     log_step,
+    log_result,
     set_size,
     log_warning_from_exception,
     photutils_n_threads,
@@ -9105,9 +9106,9 @@ class PSF:
                 maxiters=epsf_clip_maxiters,
             )
             log.info(
-                "ePSF build: candidates=%d->%d->%d | fwhm=%.2f->%.2f px (%s) | "
-                "oversample=x%d recenter=%s | cutout=%dpx fit_box=%dpx | "
-                "fft_reject=%s (n_sigma=%.2f)",
+                "ePSF build: candidates %d->%d->%d; fwhm %.2f->%.2f px (%s); "
+                "oversample x%d, recenter %s; cutout %dpx, fit_box %dpx; "
+                "fft_reject %s (n_sigma %.2f)",
                 int(n_before), int(len(df)), int(len(df_uniform)),
                 float(fwhm_input), float(fwhm),
                 f"{fwhm_arcsec:.2f}\"" if np.isfinite(fwhm_arcsec) else "unknown",
@@ -9116,10 +9117,10 @@ class PSF:
                 str(bool(do_fft)), float(fft_n_sigma),
             )
             log.debug(
-                "ePSF build details: make_template_psf=%s | cuts: min_cand=%d "
-                "threshold=%s SNR=[%s,%s] keep_frac=%.2f saturate_frac=%.2f | "
-                "norm: aperture=%.2fpx | epsf: sigma_clip=%.2f maxiters=%d | "
-                "fft: min_frac_keep=%.2f min_stars=%d",
+                "ePSF build details: make_template_psf=%s; cuts: min_cand=%d, "
+                "threshold=%s, SNR=[%s,%s], keep_frac=%.2f, saturate_frac=%.2f; "
+                "norm: aperture=%.2fpx; epsf: sigma_clip=%.2f, maxiters=%d; "
+                "fft: min_frac_keep=%.2f, min_stars=%d",
                 str(bool(make_template_psf)),
                 int(min_psf_candidates),
                 str(float(threshold_limit_eff) if threshold_limit_eff is not None else np.nan),
@@ -10619,14 +10620,12 @@ class PSF:
                 )
             )
             _fwhm_txt = (
-                f" | measured FWHM {_epsf_fwhm_meas:.2f} px (image {fwhm:.2f} px)"
+                f"; measured FWHM {_epsf_fwhm_meas:.2f} px (image {fwhm:.2f} px)"
                 if np.isfinite(_epsf_fwhm_meas)
                 else ""
             )
-            log.log(
-                STATUS,
-                "PSF model: %s | built from %d stars | oversample=x%d | "
-                "ePSF converged: %s%s",
+            log_result(
+                "[OK] model: %s; %d stars; oversample x%d; ePSF converged: %s%s",
                 _model_txt,
                 int(n_epsf_stars),
                 int(oversample),
@@ -10817,8 +10816,8 @@ class PSF:
             # STATUS model summary above - nothing between them changes
             # the verdict.
             log.info(
-                "PSF model: %s | ePSF converged: %s | PSF stars: %d | "
-                "oversample=x%d",
+                "PSF model: %s; ePSF converged: %s; PSF stars: %d; "
+                "oversample x%d",
                 self.psf_model_kind,
                 _conv_txt,
                 int(n_epsf_stars),
@@ -12583,9 +12582,9 @@ class PSF:
 
         if is_target_fit:
             log.info(
-                "Target-fit:\tshape=%s | scale=%.2g FWHM | "
-                "boost=%.2g (target %.2g) | xy_bounds=%.3g px (eff=%.3g px) | "
-                "undersampled=%s | pix_scale=%s\"/px",
+                "Target-fit:\tshape=%s; scale=%.2g FWHM; "
+                "boost=%.2g (target %.2g); xy_bounds=%.3g px (eff=%.3g px); "
+                "undersampled=%s; pix_scale=%s\"/px",
                 str(fit_shape[0]),
                 fs_scale,
                 fit_sampling_boost, target_shape_boost,
@@ -12595,7 +12594,7 @@ class PSF:
             )
         else:
             log.debug(
-                "Fit shape: %s | xy_bounds=%.3g px | undersampled=%s",
+                "Fit shape: %s; xy_bounds=%.3g px; undersampled=%s",
                 str(fit_shape), float(xy_bounds), str(bool(undersampled)),
             )
 
