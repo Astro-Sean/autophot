@@ -265,7 +265,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(f"  {f}", file=sys.stderr)
         return 1
 
-    print("All files processed successfully.")
+    print(f"All {len(fits_files)} files processed successfully.")
     return 0
 
 
