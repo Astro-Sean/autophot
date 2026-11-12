@@ -20,6 +20,7 @@ from wcs import (
     _choose_position_hints,
     _coerce_detected_xy,
     _should_verify_input_wcs,
+    _solve_field_parity,
     _wcs_cfg_float,
     verify_wcs_residuals,
 )
@@ -144,6 +145,44 @@ def test_position_hints_dedupe():
 
 def test_position_hints_no_inputs():
     assert _choose_position_hints(fits.Header(), None, None) == []
+
+
+def test_position_hint_uses_cropped_image_center():
+    hdr = _tan_header()
+    hdr["CRPIX1"] = 1180.5
+    hdr["CRPIX2"] = -936.5
+    hdr["NAXIS1"] = 751
+    hdr["NAXIS2"] = 618
+    expected = WCS(hdr).all_pix2world([[376.0, 309.5]], 1)[0]
+    hints = _choose_position_hints(hdr, None, None)
+    assert hints[0] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("representation", ["cd", "pc"])
+@pytest.mark.parametrize("sign, expected", [(-1, "pos"), (1, "neg")])
+def test_solver_parity_uses_astrometry_convention(representation, sign, expected):
+    hdr = fits.Header()
+    scale = 1.0 / 3600.0
+    if representation == "cd":
+        hdr["CD1_1"] = sign * scale
+        hdr["CD1_2"] = 0.0
+        hdr["CD2_1"] = 0.0
+        hdr["CD2_2"] = scale
+    else:
+        hdr["CDELT1"] = sign * scale
+        hdr["CDELT2"] = scale
+    assert _solve_field_parity({}, hdr) == expected
+
+
+@pytest.mark.parametrize("setting", ["pos", "neg"])
+def test_solver_parity_preserves_explicit_override(setting):
+    assert (
+        _solve_field_parity({"solve_field_parity": setting}, fits.Header()) == setting
+    )
+
+
+def test_solver_parity_omits_unusable_header():
+    assert _solve_field_parity({}, fits.Header()) is None
 
 
 # ---------------------------------------------------------------------------
