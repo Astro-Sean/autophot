@@ -249,7 +249,17 @@ class Prepare:
             ]
 
         for search_root in search_roots:
-            for root, _, files in os.walk(search_root):
+            for root, dirs, files in os.walk(search_root):
+                # Pipeline output trees nested under the scan root (*_REDUCED
+                # output dirs or per-dataset *_APT dirs) must not be
+                # re-ingested: their _APT.fits copies carry valid
+                # TELESCOP/INSTRUME headers and would be processed again as
+                # new science frames.
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if not (d.endswith(new_dir) or d.endswith("_APT"))
+                ]
                 for filename in files:
                     if _is_valid_file(filename, root):
                         filepath = os.path.join(root, filename)
@@ -349,6 +359,8 @@ class Prepare:
             n_duplicates,
             len(pending_files),
         )
+        for _f in pending_files:
+            self.logger.debug("  pending input: %s", _f)
 
         return pending_files
 
@@ -1348,8 +1360,9 @@ class Prepare:
                 continue
 
             headinfo = get_header(name)
-            tele = str(headinfo.get(tele_key) or "").strip()
-            inst = str(headinfo.get(inst_key) or "").strip()
+            # Missing keywords resolve to 'unknown', matching FitsInfo.
+            tele = str(headinfo.get(tele_key) or "").strip() or "unknown"
+            inst = str(headinfo.get(inst_key) or "").strip() or "unknown"
 
             mapping = None
             block_key = None
