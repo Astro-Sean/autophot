@@ -1130,6 +1130,7 @@ class Limits:
         _return_details: bool = False,
         avoid_positions=None,
         fitted_position=None,
+        mask=None,
     ) -> float:
         """
         Bracket-and-bisect search for the limiting magnitude by injecting
@@ -1157,6 +1158,11 @@ class Limits:
         fitted_position : optional full-frame ``(x, y)`` of the PSF-fitted
                           target position; diagnostic-plot marker only. The
                           cutout stays centred on ``position``.
+        mask            : optional full-frame boolean exclusion mask
+                          (True = contaminated pixel, e.g. detected-source
+                          footprints).  Injection sites whose aperture disk
+                          overlaps a masked pixel are rejected, so trials
+                          are never placed on real bright flux.
 
         Returns
         -------
@@ -1199,6 +1205,15 @@ class Limits:
                         "background_rms must match full_image shape; got "
                         f"{np.shape(background_rms)} vs {np.shape(full_image)}"
                     )
+            if mask is not None:
+                if np.shape(mask) == np.shape(full_image):
+                    mask = np.asarray(mask, dtype=bool)
+                else:
+                    logger.warning(
+                        "Ignoring site mask with shape %s; expected %s.",
+                        np.shape(mask), np.shape(full_image),
+                    )
+                    mask = None
             if epsf_model is None:
                 # Injection needs a PSF-shaped stamp even for aperture-only
                 # recovery; substitute an analytic Moffat at the measured
@@ -1257,6 +1272,7 @@ class Limits:
             _orig_frame = np.asarray(full_image, dtype=float)  # full science frame
             _orig_position = [float(position[0]), float(position[1])]  # full-frame coords (target position)
             _orig_background_rms = background_rms  # full-frame RMS map
+            _orig_mask = mask  # full-frame site-exclusion mask
 
             _avoid_positions_full = []
             if avoid_positions is not None:
@@ -1304,7 +1320,7 @@ class Limits:
                     image=_orig_frame, position=_orig_position, scale_override=scale_px
                 )
                 if result is None:
-                    return None, None, np.nan, np.nan
+                    return None, None, None, np.nan, np.nan
                 img, cx, cy = result
                 rms = None
                 if _orig_background_rms is not None:
@@ -1315,10 +1331,19 @@ class Limits:
                     )
                     if rms_result is not None:
                         rms = np.abs(np.asarray(rms_result[0], dtype=float))
-                return img, rms, cx, cy
+                msk = None
+                if _orig_mask is not None:
+                    msk_result = self.get_cutout(
+                        image=_orig_mask,
+                        position=_orig_position,
+                        scale_override=scale_px,
+                    )
+                    if msk_result is not None:
+                        msk = np.asarray(msk_result[0], dtype=bool)
+                return img, rms, msk, cx, cy
 
             # Cutouts are always extracted internally from the full frame.
-            cutout_img, cutout_rms, cutout_cx, cutout_cy = _extract_cutouts(scale_used)
+            cutout_img, cutout_rms, cutout_mask, cutout_cx, cutout_cy = _extract_cutouts(scale_used)
             if cutout_img is None and growth_factor > 1:
                 # Try a slightly larger cutout if the initial one fails.
                 for _ in range(2):
@@ -1326,7 +1351,7 @@ class Limits:
                         float(growth_max),
                         max(scale_used + 1.0, scale_used * growth_factor),
                     )
-                    cutout_img, cutout_rms, cutout_cx, cutout_cy = _extract_cutouts(scale_used)
+                    cutout_img, cutout_rms, cutout_mask, cutout_cx, cutout_cy = _extract_cutouts(scale_used)
                     if cutout_img is not None:
                         break
 
@@ -1539,6 +1564,47 @@ class Limits:
                         ok &= (vals != 0.0)
                     n_ok = int(np.count_nonzero(ok))
                     if n_ok >= min_pix and (n_ok / float(total)) >= min_frac:
+                        keep[i] = True
+                return df[keep].copy()
+
+            def _filter_masked_sites(
+                df: pd.DataFrame,
+                mask2d: np.ndarray | None,
+                *,
+                aperture_radius_pix: float,
+            ) -> pd.DataFrame:
+                """
+                Reject sites whose aperture disk overlaps a masked pixel.
+
+                Deterministic complement to _filter_pixel_statistics: a
+                detected-source footprint (host galaxy, bright neighbour)
+                may be smooth enough to pass the variance/mean tests yet
+                still leave real flux under the injected source.  The
+                annulus is not vetoed - neighbour wings there are the
+                honest local background a source at that site would face.
+                """
+                if df is None or len(df) == 0 or mask2d is None:
+                    return df
+                m = np.asarray(mask2d, dtype=bool)
+                if m.ndim != 2:
+                    return df
+                Hm, Wm = m.shape
+                r = float(max(1.0, aperture_radius_pix))
+                keep = np.zeros(len(df), dtype=bool)
+                for i, (x, y) in enumerate(
+                    zip(df["x_pix"].to_numpy(float), df["y_pix"].to_numpy(float))
+                ):
+                    if not (np.isfinite(x) and np.isfinite(y)):
+                        continue
+                    x0 = max(0, int(np.floor(x - r)))
+                    x1 = min(Wm, int(np.ceil(x + r)) + 1)
+                    y0 = max(0, int(np.floor(y - r)))
+                    y1 = min(Hm, int(np.ceil(y + r)) + 1)
+                    if x1 <= x0 or y1 <= y0:
+                        continue
+                    yy, xx = np.mgrid[y0:y1, x0:x1]
+                    disk = (xx - x) ** 2 + (yy - y) ** 2 <= r * r
+                    if not np.any(m[y0:y1, x0:x1] & disk):
                         keep[i] = True
                 return df[keep].copy()
 
@@ -2009,10 +2075,11 @@ class Limits:
                 _old_H, _old_W = int(H), int(W)
                 if new_scale > scale_used:
                     scale_used = new_scale
-                    _new_cutout, _new_rms, _new_cx, _new_cy = _extract_cutouts(scale_used)
+                    _new_cutout, _new_rms, _new_msk, _new_cx, _new_cy = _extract_cutouts(scale_used)
                     if _new_cutout is not None and np.isfinite(_new_cx) and np.isfinite(_new_cy):
                         cutout = _new_cutout
                         cutout_rms = _new_rms
+                        cutout_mask = _new_msk
                         background_rms = _new_rms
                         cutout_cx = _new_cx
                         cutout_cy = _new_cy
@@ -2079,6 +2146,11 @@ class Limits:
                         cutout,
                         annulus_in_pix=float(annulus_in_local),
                         annulus_out_pix=float(annulus_out_local),
+                    )
+                    probe_df = _filter_masked_sites(
+                        probe_df,
+                        cutout_mask,
+                        aperture_radius_pix=float(aperture_radius_local),
                     )
                     probe_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
                     probe_meas = probe_ap.measure(
@@ -2387,6 +2459,16 @@ class Limits:
             )
             n4 = int(len(cand_df))
 
+            # Drop sites whose aperture overlaps masked/detected-source
+            # pixels (host galaxy, neighbours): real flux under the
+            # injected PSF biases recovery regardless of the trials.
+            cand_df = _filter_masked_sites(
+                cand_df,
+                cutout_mask,
+                aperture_radius_pix=float(aperture_radius_local),
+            )
+            n5 = int(len(cand_df))
+
             # Drop sites contaminated by bright-star subtraction residuals
             # (elevated local variance or biased mean).
             cand_df = _filter_pixel_statistics(
@@ -2395,7 +2477,7 @@ class Limits:
                 aperture_radius_pix=float(aperture_radius_local),
                 rms_map=cutout_rms,
             )
-            n5 = int(len(cand_df))
+            n6 = int(len(cand_df))
 
             logger.info(
                 ascii_kv(
@@ -2406,7 +2488,8 @@ class Limits:
                         ("edge", f"{n2}"),
                         ("aperture_validity", f"{n3}"),
                         ("annulus_support", f"{n4}"),
-                        ("pixel_stats", f"{n5}"),
+                        ("masked_sites", f"{n5}"),
+                        ("pixel_stats", f"{n6}"),
                         ("cutout", f"{int(W)}x{int(H)}"),
                         ("center", f"{float(cutout_cx):.1f}, {float(cutout_cy):.1f}"),
                         ("r_min", f"{float(r_min_with_jitter):.1f}"),
@@ -5908,6 +5991,7 @@ class Limits:
         image_zeropoint: dict = None,
         avoid_positions=None,
         fitted_position=None,
+        mask=None,
     ) -> dict:
         """
         Calculate limiting magnitudes for multiple S/N thresholds using injection/recovery.
@@ -5932,6 +6016,8 @@ class Limits:
                           that injected sources must not overlap
         fitted_position : optional full-frame ``(x, y)`` of the PSF-fitted
                           target position; diagnostic-plot marker only
+        mask            : optional full-frame boolean exclusion mask forwarded
+                          to ``get_injected_limit`` (True = contaminated pixel)
 
         Returns
         -------
@@ -5986,6 +6072,7 @@ class Limits:
                     _return_details=True,
                     avoid_positions=avoid_positions,
                     fitted_position=fitted_position,
+                    mask=mask,
                 )
                 limit = detail["inject_lmag"]
                 all_details.append(detail)
