@@ -268,6 +268,7 @@ from functions import (
     points_in_circum,
     beta_aperture,
     ascii_kv,
+    log_result,
     STATUS,
     biweight_sky_sigma,
 )
@@ -2754,7 +2755,7 @@ class Limits:
                 _n_det = int(det_flags.sum())
                 _n_tot = len(det_flags)
                 logger.debug(
-                    "inject m=%+7.3f | %5.1f%%  (%d/%d detected)",
+                    "inject m=%+7.3f -> %5.1f%%  (%d/%d detected)",
                     m, 100.0 * _rate, _n_det, _n_tot,
                 )
 
@@ -3413,7 +3414,7 @@ class Limits:
                             _rm = str(recovery_method).strip().upper()
                             if _rm == "AP":
                                 app_mag += _ap_diff_resid(self.input_yaml)
-                            app_str = f"  apparent={app_mag:.3f}"
+                            app_str = f", apparent={app_mag:.3f}"
                     except (TypeError, ValueError):
                         pass
 
@@ -3426,20 +3427,19 @@ class Limits:
                 cal_str = ""
                 if _snr_gate_factor != 1.0:
                     cal_str = (
-                        f"  S/N gate calibrated x{_snr_gate_factor:.3f}"
+                        f", S/N gate x{_snr_gate_factor:.3f}"
                         f" (raw m50={float(inject_lmag_raw):.3f})"
                     )
-                logger.log(
-                    STATUS,
-                    "Limiting magnitude: inst=%.3f %s%s  ZP=%s  "
-                    "method=%s  completeness=%.0f%%  trials=%d%s  [%.1fs]",
+                log_result(
+                    "[OK] inst=%.3f %s%s, ZP=%s, method=%s, "
+                    "completeness=%.0f%%, trials=%d%s (%.1f s)",
                     float(inject_lmag), err_str, app_str, zp_log,
                     str(recovery_method), 100.0 * completeness_target,
                     n_trials_total, cal_str, elapsed,
                 )
             else:
-                logger.info(
-                    "Limiting magnitude search failed  [%.1fs]", elapsed
+                logger.warning(
+                    "Limiting magnitude search failed (%.1f s)", elapsed
                 )
 
             # ----------------------------------------------------------
