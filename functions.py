@@ -312,13 +312,24 @@ def _cache_evict(cache):
 def _message_kind(msg: str) -> str:
     """Classify a normalized log message for console spacing rules.
 
-    ``banner`` - framed section header (opening rule is all ``=`` or ``-``)
+    ``banner`` - framed section header: rule / title / rule (3 lines, or 4
+                 with a metadata line inside the frame).  Following content
+                 hugs the closing rule.
+    ``block``  - any other rule-led block (tables, cards, framed kv lists):
+                 terminal content, gets a blank line on both sides.
     ``step``   - bracketed one-line marker (``[X]``)
     ``msg``    - everything else
     """
-    first = msg.lstrip().split("\n")[0] if msg else ""
+    lines = [ln for ln in str(msg).strip().split("\n") if ln.strip()]
+    first = lines[0] if lines else ""
     if first[:1] in ("-", "+", "="):
-        return "banner"
+        ch = first[:1]
+        is_banner = (
+            len(lines) in (3, 4)
+            and all(set(ln.strip()) <= {ch} for ln in (lines[0], lines[-1]))
+            and all(set(ln.strip()) - {ch} for ln in lines[1:-1])
+        )
+        return "banner" if is_banner else "block"
     if (
         first.startswith("[")
         and first.rstrip().endswith("]")
@@ -350,17 +361,24 @@ class PlainFormatter(logging.Formatter):
         # in front of the record so the level prefix labels the first real
         # line instead of dangling on a blank one.
         raw = record.getMessage()
+        kind = _message_kind(raw)
         leading_blank = str(raw).startswith("\n")
+        # Columns the level prefix ("INFO - ", timestamps) will occupy on
+        # line 1: reserve them from the wrap budget and reuse them to hang
+        # continuation lines under the message body.
+        dummy = copy.copy(record)
+        dummy.msg, dummy.args = '', ()
+        prefix_len = len(super().format(dummy))
         old_msg, old_args = record.msg, record.args
-        if leading_blank:
-            record.msg, record.args = str(raw).lstrip("\n"), ()
+        record.msg, record.args = normalize_log_message(
+            str(raw).lstrip("\n") if leading_blank else str(raw),
+            width=max(40, self._max_width - prefix_len),
+        ), ()
         try:
             msg = super().format(record)
         finally:
             record.msg, record.args = old_msg, old_args
         msg = self.ANSI_ESCAPE.sub('', msg)
-        msg = normalize_log_message(msg, width=self._max_width)
-        kind = _message_kind(record.getMessage())
         first_ever = self._last_kind is None
         if first_ever:
             # No blank line at the top of the log file either.
@@ -371,7 +389,13 @@ class PlainFormatter(logging.Formatter):
         result_lead = (
             kind != "banner"
             and getattr(record, "result", False)
-            and self._last_kind not in (None, "banner", "step")
+            and self._last_kind not in (None, "banner", "step", "block")
+            and not msg.startswith("\n")
+        )
+        # Framed blocks are terminal content: one blank line after them.
+        block_gap = (
+            self._last_kind == "block"
+            and kind not in ("banner", "block")
             and not msg.startswith("\n")
         )
         self._last_kind = kind
@@ -379,13 +403,9 @@ class PlainFormatter(logging.Formatter):
         # output align under the first line's timestamp/level prefix.
         if '\n' in msg:
             lines = msg.split('\n')
-            dummy = copy.copy(record)
-            dummy.msg, dummy.args = '', ()
-            prefix = super().format(dummy)
-            prefix_len = len(prefix)
             lines = [lines[0]] + [' ' * prefix_len + ln for ln in lines[1:]]
             msg = '\n'.join(lines)
-        if result_lead or leading_blank:
+        if result_lead or leading_blank or block_gap:
             msg = "\n" + msg
         return msg
 
@@ -450,14 +470,17 @@ class ColoredLevelFormatter(logging.Formatter):
         # Helpers (border_msg, ascii_table, ...) carry their own leading
         # blank; adding another would leave two blank lines in a row.
         wants_blank = (
-            kind == "banner"
+            kind in ("banner", "block")
+            # Framed blocks (tables, cards) are terminal content: the next
+            # record gets a blank line no matter what it is.
+            or self._last_kind == "block"
             # Sub-step markers get a blank line unless a banner just opened.
             or (kind == "step" and self._last_kind != "banner")
             # Stage-result lines get a blank line unless a ruled header
             # just opened the section (content hugs its header).
             or (
                 getattr(record, "result", False)
-                and self._last_kind not in ("banner", "step")
+                and self._last_kind not in ("banner", "step", "block")
             )
         )
         lead = (
@@ -597,6 +620,18 @@ def _is_metric_dense(line: str) -> bool:
 
 _METRIC_KEY = re.compile(r"^[(\[]?[A-Za-z_][\w.\[\]()]{0,40}=")
 
+# Leading "Label: " or "[tag] " prefix on a message line.  Wrapped
+# continuation lines hang under the first character of the message body,
+# i.e. just past this prefix, and the offset is computed from the match -
+# never a hand-typed indent.
+_LINE_PREFIX = re.compile(r"^(\[[A-Za-z]+\]\s+|[^\s][^:\n]{0,50}?:\s+)")
+
+
+def _continuation_col(ln: str, indent: str, hang: int) -> int:
+    """Column where a wrapped continuation of *ln* should start."""
+    m = _LINE_PREFIX.match(ln.strip())
+    return len(indent) + hang + (len(m.group(0)) if m else 0)
+
 
 def _metric_atoms(s: str):
     """Split a metric-dense line into atoms, each starting at a logical
@@ -622,18 +657,19 @@ def _metric_atoms(s: str):
     return atoms
 
 
-def _wrap_metric_line(ln: str, width: int, indent: str) -> list[str]:
+def _wrap_metric_line(ln: str, width: int, indent: str,
+                      hang: int = 0) -> list[str] | None:
     """Wrap a stat-dump line at metric boundaries, packing whole atoms
-    per line and aligning continuations under the first value after a
-    'Label:' prefix.  Returns None when the line has too few atoms to
+    per line.  Continuation lines hang under the first body character
+    (after any 'Label:'/'[tag]' prefix and the *hang* columns a rendered
+    level tag adds).  Returns None when the line has too few atoms to
     benefit (caller falls back to plain textwrap)."""
     atoms = _metric_atoms(ln.strip())
     if len(atoms) < 2:
         return None
-    m = re.match(r"^([^\s][^:]{0,50}?:)(\s+)", ln.strip())
-    cont_col = len(indent) + len(m.group(0)) if m else 0
+    cont_col = _continuation_col(ln, indent, hang)
     if not (0 < cont_col <= width // 2):
-        cont_col = len(indent) + 2
+        cont_col = len(indent) + hang
     cont = " " * cont_col
 
     # cur is either pure indentation or ends with a separator space, so
@@ -667,7 +703,8 @@ def _wrap_metric_line(ln: str, width: int, indent: str) -> list[str]:
     return out
 
 
-def normalize_log_message(message: str, width: int = 150) -> str:
+def normalize_log_message(message: str, width: int = 150,
+                          hang: int = 0) -> str:
     """
     Normalize log message formatting for readability and consistency.
 
@@ -676,6 +713,13 @@ def normalize_log_message(message: str, width: int = 150) -> str:
     - Trims trailing whitespace.
     - Collapses repeated blank lines.
     - Soft-wraps long lines to a fixed width with indentation preserved.
+
+    ``hang`` is the number of columns that will be prepended to the first
+    line at render time without reaching the continuation lines (a level
+    tag such as ``"WARNING - "`` or ``"[WARNING] "``).  Wrapped
+    continuation lines indent by ``hang`` so they start under the first
+    body character; a ``Label: `` or ``[tag] `` prefix extends the offset
+    to just past the prefix, computed from its length in code.
     """
     text = _to_ascii(str(message)).replace("\t", "    ")
     lines = [ln.rstrip() for ln in text.splitlines()]
@@ -705,7 +749,7 @@ def normalize_log_message(message: str, width: int = 150) -> str:
         indent_len = len(ln) - len(ln.lstrip(" "))
         indent = " " * indent_len
         if _is_metric_dense(ln):
-            dense = _wrap_metric_line(ln, width, indent)
+            dense = _wrap_metric_line(ln, width, indent, hang=hang)
             if dense is not None:
                 wrapped.extend(dense)
                 continue
@@ -713,7 +757,7 @@ def normalize_log_message(message: str, width: int = 150) -> str:
             ln.strip(),
             width=width,
             initial_indent=indent,
-            subsequent_indent=indent + "  ",
+            subsequent_indent=" " * _continuation_col(ln, indent, hang),
             break_long_words=True,
             break_on_hyphens=False,
         )
@@ -794,8 +838,18 @@ class LogMessageNormalizeFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
+            # The stock formatter's "LEVEL - " prefix sits only on line 1;
+            # pass its width as `hang` so wrapped continuations start
+            # under the message body, not at column 0.
+            hang = 0
+            if self.prefix_fmt and record.levelno >= self.prefix_min_level:
+                hang = len(
+                    self.prefix_fmt.format(levelname=record.levelname)
+                )
             normalized = normalize_log_message(
-                record.getMessage(), width=self._line_budget(record)
+                record.getMessage(),
+                width=self._line_budget(record),
+                hang=hang,
             )
             record.msg = normalized
             record.args = ()
@@ -864,8 +918,12 @@ def configure_console_logging(
     if formatter is None:
         # ColoredLevelFormatter wraps lines itself (max_width=90).
         formatter = ColoredLevelFormatter(use_color=use_color)
-    elif not isinstance(formatter, ColoredLevelFormatter):
+    elif not isinstance(
+        formatter, (ColoredLevelFormatter, PlainFormatter)
+    ):
         # Stock/plain formatters do not wrap; reserve the "LEVEL - " prefix.
+        # The two custom formatters normalize internally - running the
+        # filter on top would double-indent wrapped continuations.
         handler.addFilter(
             LogMessageNormalizeFilter(
                 width=90, prefix_fmt="{levelname} - ", prefix_min_level=0
@@ -1500,12 +1558,12 @@ def log_warning_from_exception(
         einfo = (type(exc), exc, exc.__traceback__)
 
     logger.warning(
-        "%s | exc at %s | logged at %s | %s: %s",
+        "%s: %s: %s (exc at %s; logged at %s)",
         message,
-        exc_origin,
-        log_origin,
         type(exc).__name__,
         exc,
+        exc_origin,
+        log_origin,
         exc_info=einfo,
     )
 
