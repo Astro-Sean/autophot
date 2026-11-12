@@ -34,6 +34,7 @@ from scipy.spatial import cKDTree
 from functions import (
     STATUS,
     fwhm_outlier_clip,
+    log_result,
     log_step,
     log_warning_from_exception,
 )
@@ -1808,9 +1809,9 @@ class SExtractorWrapper:
             # FWHM-based scale is too small.
             raw_scale = max(float(scale_multiplier) * float(fwhm), float(default_scale))
             scale = clamp_scale_from_config(self.config, raw_scale)
-            logger.log(
-                STATUS,
-                "Detected %d/%d point sources | robust FWHM %.2f px | scale %.1f px (FWHM x %.2f)",
+            log_result(
+                "[OK] %d/%d point sources detected; robust FWHM %.2f px; "
+                "scale %.1f px (FWHM x %.2f)",
                 final_count,
                 initial_count,
                 fwhm,
