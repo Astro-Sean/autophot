@@ -2556,7 +2556,7 @@ class Catalog:
                     logger.info("Retrying in %.0fs...", delay)
                     time.sleep(delay)
 
-        logger.error("\n> Catalog retrieval failed after %d attempts! \n", max_retries)
+        logger.error("Catalog retrieval failed after %d attempts", max_retries)
         logger.error("Last error: %s: %s", type(last_error).__name__, last_error)
         return None
 
