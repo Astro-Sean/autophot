@@ -2365,6 +2365,23 @@ INSTRUMENT_ENTRY_STRUCTURE = {
 
 # Built-in fallback when telescope.yml is missing (one example; add others to telescope.yml).
 BUILTIN_TELESCOPE_DEFAULTS = {
+    # Catch-all for images with missing/empty TELESCOP and/or INSTRUME.
+    "unknown": {
+        "INSTRUME": {
+            "unknown": {
+                "Name": "unknown",
+                "filter_key_0": "FILTER",
+                "mjd": "MJD-OBS",
+                "date": "DATE-OBS",
+                "gain": "GAIN",
+                "saturate": "SATURATE",
+                "readnoise": "RDNOISE",
+                "airmass": "AIRMASS",
+                "exptime": "EXPTIME",
+                "pixel_scale": 0.4,
+            },
+        },
+    },
     "Palomar 48-inch": {
         "INSTRUME": {
             "ZTF/MOSAIC": {
