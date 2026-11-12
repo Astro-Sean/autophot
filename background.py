@@ -1967,7 +1967,7 @@ class BackgroundSubtractor:
                 bkg_data = np.asarray(bkg.background, dtype=np.float32)
 
                 self.logger.debug(
-                    "Attempt: %d | Box: %s | Filter: %d | Exclude: %.1f%%",
+                    "Attempt %d; box %s; filter %d; exclude %.1f%%",
                     i + 1,
                     bs,
                     fs,
