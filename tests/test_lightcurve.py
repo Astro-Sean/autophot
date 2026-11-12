@@ -1,4 +1,4 @@
-"""Tests for lightcurve.py: sub-day time axis and variability check plot."""
+"""Tests for lightcurve.py and differential_photometry.py."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from lightcurve import (
     plot_lightcurve,
     plot_variability_check,
 )
+from differential_photometry import differential_photometry
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +228,7 @@ def _make_calib_tree(root, mjds, filt="g", n_ens=5, n_extra=8, drift=None, noisy
 
 
 def _logged_var_ratio(caplog):
-    """Extract the 'ratio X.XX' value emitted by plot_variability_check."""
+    """Extract the 'ratio X.XX' value emitted by differential_photometry."""
     import re
 
     m = re.search(r"ratio\s+([0-9]+\.[0-9]+)", caplog.text)
@@ -347,11 +348,52 @@ def test_plot_lightcurve_multiday_mjd_axis(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# plot_variability_check
+# differential_photometry
 # ---------------------------------------------------------------------------
 
-def test_plot_variability_check_produces_figure(tmp_path):
+def test_differential_photometry_produces_figure_and_csv(tmp_path):
     mjds = 60000.0 + np.linspace(0.0, 0.3, 6)  # intra-night
+    _make_calib_tree(tmp_path, mjds, filt="g")
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lightcurve_csv(csv_path, mjds)
+
+    out = differential_photometry(
+        str(csv_path), method="PSF", n_ensemble=5, format="png", show=False
+    )
+    assert out is not None
+    assert (tmp_path / "Differential_Photometry_PSF.png").exists()
+    lc_path = tmp_path / "Differential_Photometry_PSF.csv"
+    assert lc_path.exists()
+    lc = pd.read_csv(lc_path)
+    for col in (
+        "mjd",
+        "filter",
+        "inst_mag",
+        "ensemble_mag",
+        "diff_mag",
+        "diff_mag_err",
+        "rel_flux",
+        "rel_flux_err",
+        "transparency",
+        "n_ensemble",
+        "used",
+    ):
+        assert col in lc.columns
+    assert (lc["filter"] == "g").all()
+    assert lc["used"].all()
+    np.testing.assert_allclose(lc["rel_flux"].median(), 1.0, atol=0.05)
+
+
+def test_differential_photometry_no_calib_files(tmp_path):
+    mjds = 60000.0 + np.linspace(0.0, 5.0, 4)
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lightcurve_csv(csv_path, mjds)
+    out = differential_photometry(str(csv_path), method="PSF", show=False)
+    assert out is None
+
+
+def test_plot_variability_check_alias_delegates(tmp_path):
+    mjds = 60000.0 + np.linspace(0.0, 0.3, 6)
     _make_calib_tree(tmp_path, mjds, filt="g")
     csv_path = tmp_path / "LightCurve_Output.csv"
     _write_lightcurve_csv(csv_path, mjds)
@@ -360,15 +402,7 @@ def test_plot_variability_check_produces_figure(tmp_path):
         str(csv_path), method="PSF", n_ensemble=5, format="png", show=False
     )
     assert out is not None
-    assert (tmp_path / "Variability_Check_PSF.png").exists()
-
-
-def test_plot_variability_check_no_calib_files(tmp_path):
-    mjds = 60000.0 + np.linspace(0.0, 5.0, 4)
-    csv_path = tmp_path / "LightCurve_Output.csv"
-    _write_lightcurve_csv(csv_path, mjds)
-    out = plot_variability_check(str(csv_path), method="PSF", show=False)
-    assert out is None
+    assert (tmp_path / "Differential_Photometry_PSF.png").exists()
 
 
 def _write_lc_csv(path, mjds, inst, filt="g", zp=25.0):
@@ -389,7 +423,7 @@ def _write_lc_csv(path, mjds, inst, filt="g", zp=25.0):
     df.to_csv(path, index=False)
 
 
-def test_plot_variability_check_common_mode_rejected(tmp_path, caplog):
+def test_differential_photometry_common_mode_rejected(tmp_path, caplog):
     """A target whose only variation is the common-mode drift should have
     delta RMS comparable to the reference-star scatter."""
     import logging
@@ -404,8 +438,8 @@ def test_plot_variability_check_common_mode_rejected(tmp_path, caplog):
     csv_path = tmp_path / "LightCurve_Output.csv"
     _write_lc_csv(csv_path, mjds, inst)
 
-    with caplog.at_level(logging.INFO, logger="lightcurve"):
-        out = plot_variability_check(
+    with caplog.at_level(logging.INFO, logger="differential_photometry"):
+        out = differential_photometry(
             str(csv_path),
             method="PSF",
             n_ensemble=5,
@@ -421,7 +455,7 @@ def test_plot_variability_check_common_mode_rejected(tmp_path, caplog):
     assert ratio < 4.0
 
 
-def test_plot_variability_check_intrinsic_detected(tmp_path, caplog):
+def test_differential_photometry_intrinsic_detected(tmp_path, caplog):
     """A target with a genuine 0.4-mag step must show a large target/ref
     residual-RMS ratio."""
     import logging
@@ -437,8 +471,8 @@ def test_plot_variability_check_intrinsic_detected(tmp_path, caplog):
     csv_path = tmp_path / "LightCurve_Output.csv"
     _write_lc_csv(csv_path, mjds, inst)
 
-    with caplog.at_level(logging.INFO, logger="lightcurve"):
-        out = plot_variability_check(
+    with caplog.at_level(logging.INFO, logger="differential_photometry"):
+        out = differential_photometry(
             str(csv_path),
             method="PSF",
             n_ensemble=5,
@@ -452,7 +486,7 @@ def test_plot_variability_check_intrinsic_detected(tmp_path, caplog):
     assert ratio > 5.0
 
 
-def test_plot_variability_check_vetoes_variable_ensemble_star(tmp_path, caplog):
+def test_differential_photometry_vetoes_variable_ensemble_star(tmp_path, caplog):
     """A variable star in the ensemble must be rejected before the
     common-mode mean is formed."""
     import logging
@@ -467,8 +501,8 @@ def test_plot_variability_check_vetoes_variable_ensemble_star(tmp_path, caplog):
     csv_path = tmp_path / "LightCurve_Output.csv"
     _write_lc_csv(csv_path, mjds, inst)
 
-    with caplog.at_level(logging.INFO, logger="lightcurve"):
-        out = plot_variability_check(
+    with caplog.at_level(logging.INFO, logger="differential_photometry"):
+        out = differential_photometry(
             str(csv_path),
             method="PSF",
             n_ensemble=6,
@@ -481,6 +515,66 @@ def test_plot_variability_check_vetoes_variable_ensemble_star(tmp_path, caplog):
     ratio = _logged_var_ratio(caplog)
     assert ratio is not None
     assert ratio < 4.0
+
+
+def test_differential_photometry_flags_low_transparency_epoch(tmp_path):
+    """An epoch where every star fades together (thick clouds) must be
+    flagged used=False in the differential light curve CSV."""
+    n_epochs = 8
+    mjds = 60000.0 + np.arange(n_epochs) * 0.05
+    drift = np.zeros(n_epochs)
+    drift[3] = 1.0  # +1 mag on every star at epoch 3 -> transparency ~0.4
+    _make_calib_tree(tmp_path, mjds, filt="g", drift=drift)
+
+    rng = np.random.default_rng(3)
+    inst = -7.0 + drift + rng.normal(0.0, 0.005, n_epochs)
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lc_csv(csv_path, mjds, inst)
+
+    out = differential_photometry(
+        str(csv_path),
+        method="PSF",
+        n_ensemble=5,
+        flux_min=1.0,
+        format="png",
+        show=False,
+    )
+    assert out is not None
+    lc = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    lc = lc.sort_values("mjd").reset_index(drop=True)
+    used = lc["used"].astype(bool).to_numpy()
+    assert not used[3]
+    assert used[:3].all() and used[4:].all()
+    assert lc.loc[3, "transparency"] == pytest.approx(0.4, abs=0.05)
+
+
+def test_differential_photometry_no_epoch_flags_below_transparency_floor(
+    tmp_path,
+):
+    """minimum_transparency=0 disables the cloud rejection."""
+    n_epochs = 8
+    mjds = 60000.0 + np.arange(n_epochs) * 0.05
+    drift = np.zeros(n_epochs)
+    drift[3] = 1.0
+    _make_calib_tree(tmp_path, mjds, filt="g", drift=drift)
+
+    rng = np.random.default_rng(3)
+    inst = -7.0 + drift + rng.normal(0.0, 0.005, n_epochs)
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lc_csv(csv_path, mjds, inst)
+
+    out = differential_photometry(
+        str(csv_path),
+        method="PSF",
+        n_ensemble=5,
+        flux_min=1.0,
+        minimum_transparency=0.0,
+        format="png",
+        show=False,
+    )
+    assert out is not None
+    lc = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    assert lc["used"].astype(bool).all()
 
 
 # ---------------------------------------------------------------------------
