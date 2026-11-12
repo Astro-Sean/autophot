@@ -502,27 +502,37 @@ class TestParseFilterGroupKey:
 class TestAsciiOutputFormat:
     """Shared ASCII output helpers keep a consistent table style."""
 
-    def test_border_msg_centered_equals(self):
+    def test_border_msg_framed(self):
         from functions import border_msg
 
-        out = border_msg("Source detection", width=70)
+        out = border_msg("Source detection")
         lines = out.split("\n")
         # Leading blank line separates the banner from preceding output.
         assert lines[0] == ""
-        assert lines[1].startswith("=")
-        assert lines[1].endswith("=")
-        assert "Source detection" in lines[1]
-        assert len(lines[1]) == 70
+        assert lines[1] == "=" * 80
+        assert lines[2] == "Source detection"
+        assert lines[3] == "=" * 80
 
-    def test_border_msg_metadata_second_line(self):
+    def test_log_step_framed_dashes(self):
+        from functions import log_step
+
+        out = log_step("Sub step")
+        lines = out.split("\n")
+        assert lines[0] == ""
+        assert lines[1] == "-" * 70
+        assert lines[2] == "Sub step"
+        assert lines[3] == "-" * 70
+
+    def test_border_msg_metadata_inside_frame(self):
         from functions import border_msg
 
         out = border_msg("Title", metadata="a=1 b=2", width=60)
         lines = out.split("\n")
         assert lines[0] == ""
-        assert lines[1].startswith("=")
-        assert lines[2].startswith("-")
-        assert "a=1 b=2" in lines[2]
+        assert lines[1] == "=" * 60
+        assert lines[2] == "Title"
+        assert lines[3] == "a=1 b=2"
+        assert lines[4] == "=" * 60
 
     def test_ascii_kv_framed(self):
         from functions import ascii_kv
@@ -531,10 +541,12 @@ class TestAsciiOutputFormat:
                        framed=True, width=60)
         lines = out.split("\n")
         assert lines[0] == ""
-        assert lines[1].startswith("=") and "IMAGE" in lines[1]
+        assert lines[1] == "=" * 60
+        assert lines[2] == "IMAGE"
+        assert lines[3] == "=" * 60
+        assert "Exposure time" in lines[4]
+        assert "30 s" in lines[4]
         assert lines[-1] == "=" * 60
-        assert "Exposure time" in lines[2]
-        assert "30 s" in lines[2]
 
     def test_ascii_kv_sub_block(self):
         from functions import ascii_kv
@@ -542,8 +554,9 @@ class TestAsciiOutputFormat:
         out = ascii_kv("Attrition", [("generated", "300")], width=50)
         lines = out.split("\n")
         assert lines[0] == ""
-        assert lines[1] == "* Attrition"
-        assert lines[2].strip().startswith("-")
+        assert lines[1] == "Attrition:"
+        assert lines[2].strip().startswith("generated")
+        assert "300" in lines[2]
 
     def test_ascii_kv_empty(self):
         from functions import ascii_kv
@@ -561,12 +574,14 @@ class TestAsciiOutputFormat:
         )
         lines = out.split("\n")
         assert lines[0] == ""
-        assert lines[1].startswith("-") and "Zeropoint" in lines[1]
-        assert "Method" in lines[2] and "ZP" in lines[2]
+        assert lines[1] == "-" * 60
+        assert lines[2] == "Zeropoint"
+        assert lines[3] == "-" * 60
+        assert "Method" in lines[4] and "ZP" in lines[4]
         # Column underline row: only dashes and separating spaces.
-        assert set(lines[3].strip()) <= {"-", " "} and "-" in lines[3]
-        assert "AP" in lines[4] and "24.547" in lines[4]
-        assert "PSF" in lines[5]
+        assert set(lines[5].strip()) <= {"-", " "} and "-" in lines[5]
+        assert "AP" in lines[6] and "24.547" in lines[6]
+        assert "PSF" in lines[7]
         assert lines[-1] == "-" * 60
         # No trailing whitespace on any line.
         assert all(ln == ln.rstrip() for ln in lines)
@@ -582,10 +597,12 @@ class TestAsciiOutputFormat:
         out = ascii_card("Error", ["line one", "", "line two"], width=50)
         lines = out.split("\n")
         assert lines[0] == ""
-        assert lines[1].startswith("=") and "Error" in lines[1]
-        assert "line one" in lines[2]
-        assert lines[3] == ""  # blank body lines preserved
-        assert "line two" in lines[4]
+        assert lines[1] == "=" * 50
+        assert lines[2] == "Error"
+        assert lines[3] == "=" * 50
+        assert "line one" in lines[4]
+        assert lines[5] == ""  # blank body lines preserved
+        assert "line two" in lines[6]
         assert lines[-1] == "=" * 50
         assert ascii_card("Empty", ["", ""]) == ""
 
