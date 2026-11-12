@@ -299,17 +299,17 @@ Limiting magnitudes are measured by injecting artificial sources and checking re
 
 ```python
 from lightcurve import (
-    plot_lightcurve, plot_variability_check,
-    generate_photometry_table, check_detection_plots,
+    plot_lightcurve, generate_photometry_table, check_detection_plots,
 )
+from differential_photometry import differential_photometry
 
 plot_lightcurve(output_file, snr_limit=3, method="PSF")      # detections + limits
-plot_variability_check(output_file, method="PSF")            # target vs reference stars
+differential_photometry(output_file, method="PSF")           # target vs reference ensemble
 generate_photometry_table(output_file, snr_limit=3, method="PSF")  # ASCII table
 check_detection_plots(detections_loc, method="PSF")          # sort plots into folders
 ```
 
-The output CSV is long-form: one row per image with a `filter` column. Lightcurve x-axes default to MJD and switch to minutes or hours for spans under a day. `plot_variability_check` removes each epoch's common-mode drift before comparing the target to the reference ensemble.
+The output CSV is long-form: one row per image with a `filter` column. Lightcurve x-axes default to MJD and switch to minutes or hours for spans under a day. `differential_photometry` removes each epoch's common-mode drift (inverse-variance weighted ensemble mean, variable members vetoed, cloudy/jumped epochs flagged) before comparing the target to the reference ensemble, and writes the normalized relative-flux light curve to `Differential_Photometry_<METHOD>.csv`.
 
 <h2 align="center">Environment variables</h2>
 
