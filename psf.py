@@ -12546,6 +12546,44 @@ class PSF:
                     )
                     xy_bounds = xy_bounds_fwhm_floor
 
+                # The target seed is a catalog position, not a detection, so
+                # the fit may only drift as far as astrometric error and real
+                # displacement allow.  A full-field fitting_xy_bounds lets a
+                # marginal detection hop onto a brighter neighbour; the
+                # target cap tightens that window.  It never undercuts the
+                # FWHM-relative floor above, which exists to keep
+                # re-centering possible on coarse pixel scales.
+                cfg_target_max = phot_cfg.get(
+                    "fitting_xy_bounds_target_arcsec", None
+                )
+                if cfg_target_max is not None:
+                    try:
+                        target_max_px = float(cfg_target_max) / float(
+                            pixel_scale
+                        )
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        target_max_px = np.nan
+                    if np.isfinite(target_max_px) and target_max_px > 0:
+                        target_max_px = max(
+                            target_max_px, xy_bounds_fwhm_floor
+                        )
+                        if xy_bounds > target_max_px:
+                            log.info(
+                                "Target fit: capping xy_bounds %.2f px at "
+                                "%.2f px "
+                                "(fitting_xy_bounds_target_arcsec=%.2f).",
+                                float(xy_bounds),
+                                target_max_px,
+                                float(cfg_target_max),
+                            )
+                            xy_bounds = target_max_px
+                    else:
+                        log.warning(
+                            "fitting_xy_bounds_target_arcsec=%r ignored; "
+                            "needs a positive value and a usable pixel_scale.",
+                            cfg_target_max,
+                        )
+
         def _effective_xy_bounds_for_shape(fit_shape):
             """
             Constrain search bounds to be consistent with the PSF fit cutout.
@@ -13161,9 +13199,12 @@ class PSF:
                     _xx[:, _x0:_x1] - (_x0 + _px)
                 ) ** 2
                 _ap = _ok & (_apd2 <= aperture_radius ** 2)
-                _ap_flux = float(np.sum(_sub[_ap] - _bkg))
-                if is_difference_image:
-                    _ap_flux = abs(_ap_flux)
+                _ap_flux_signed = float(np.sum(_sub[_ap] - _bkg))
+                _ap_flux = (
+                    abs(_ap_flux_signed)
+                    if is_difference_image
+                    else _ap_flux_signed
+                )
                 # A bright in-window peak far from the seed is a neighbour,
                 # not the source being tested: crediting it would free a
                 # faint source's centroid into that neighbour. Measure the
@@ -13174,9 +13215,33 @@ class PSF:
                 if _d_pk > _hold_px_eff:
                     _seed_ap = _ok & (_d2 <= aperture_radius ** 2)
                     _seed_flux = float(np.sum(_sub[_seed_ap] - _bkg))
-                    if is_difference_image:
-                        _seed_flux = abs(_seed_flux)
-                    _ap_flux = _seed_flux
+                    if is_target_fit and _d_pk > max(
+                        _hold_px_eff, 0.5 * float(fwhm)
+                    ):
+                        # For the target, a peak beyond ~0.5 FWHM is a
+                        # separate object at the astrometric accuracies
+                        # involved.  Its wing still lands inside the seed
+                        # aperture when the aperture is large, so subtract
+                        # the contribution a Gaussian PSF centred on the
+                        # peak would deposit there (scaled to the peak's
+                        # aperture flux).  Without this a faint or absent
+                        # target next to a brighter neighbour inherits the
+                        # neighbour's flux, counts as detected, and has
+                        # its centroid freed onto it.  Catalog rows keep
+                        # the raw seed flux so a displaced catalog match
+                        # is still rescued.
+                        _sig_g = max(float(fwhm) / 2.3548, 0.5)
+                        _gpk = np.exp(-_apd2 / (2.0 * _sig_g**2))
+                        _g_ap = float(np.sum(_gpk[_ap]))
+                        if _g_ap > 0:
+                            _seed_flux -= _ap_flux_signed * float(
+                                np.sum(_gpk[_seed_ap])
+                            ) / _g_ap
+                    _ap_flux = (
+                        abs(_seed_flux)
+                        if is_difference_image
+                        else _seed_flux
+                    )
                 detect_snr_arr[_si] = _ap_flux / _ap_noise
                 xy_hold_arr[_si] = not (
                     np.isfinite(detect_snr_arr[_si])
