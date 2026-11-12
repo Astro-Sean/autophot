@@ -772,6 +772,127 @@ def _measure_worker(args):
         return {"idx": i, "fail_reason": str(exc)}
 
 
+def _empirical_noise_factor(
+    image_e,
+    error,
+    radius,
+    annulus_inner,
+    annulus_outer,
+    defects_mask=None,
+    source_xy=None,
+    n_trials=500,
+    seed=0,
+):
+    """Ratio of measured to predicted scatter in empty-sky apertures.
+
+    Resampling (alignment, SWarp) correlates the noise of neighbouring
+    pixels, so summing the per-pixel variance under-counts the noise of
+    an aperture sum; unresolved faint sources add further scatter.  Both
+    effects are measured directly here: apertures are placed at random
+    sky positions (away from detected sources and defect pixels), each
+    sum is corrected by the local annulus median exactly as the science
+    apertures are, and the robust scatter of the residuals is compared
+    to the predicted error (pixel variance plus the annulus-median
+    term).  The factor is floored at 1 -- the test can only inflate the
+    reported errors, never shrink them.
+    """
+    if error is None:
+        return 1.0, 0
+    rng = np.random.default_rng(seed)
+    ny, nx = image_e.shape
+    margin = int(np.ceil(annulus_outer)) + 2
+    if nx <= 2 * margin or ny <= 2 * margin:
+        return 1.0, 0
+    xs = rng.uniform(margin, nx - margin, 4 * int(n_trials))
+    ys = rng.uniform(margin, ny - margin, 4 * int(n_trials))
+    if source_xy is not None and len(source_xy):
+        from scipy.spatial import cKDTree
+
+        tree = cKDTree(np.asarray(source_xy, dtype=float))
+        d, _ = tree.query(np.c_[xs, ys])
+        keep = d > annulus_outer
+        xs, ys = xs[keep], ys[keep]
+    positions = np.c_[xs, ys]
+    if len(positions) == 0:
+        return 1.0, 0
+
+    # A test aperture touching a bad pixel (even a fractional edge
+    # overlap) is rejected, as is any annulus that is mostly bad.
+    bad = ~np.isfinite(image_e) | ~np.isfinite(error)
+    if defects_mask is not None:
+        bad = bad | np.asarray(defects_mask, dtype=bool)
+    apertures = CircularAperture(positions, r=radius)
+    bad_frac = np.asarray(
+        AperturePhotometry(bad.astype(float), apertures, method="exact")
+        .to_table()["flux"],
+        dtype=float,
+    )
+    positions = positions[bad_frac == 0][: int(n_trials)]
+    if len(positions) < 50:
+        return 1.0, int(len(positions))
+    apertures = CircularAperture(positions, r=radius)
+    annuli = CircularAnnulus(
+        positions, r_in=annulus_inner, r_out=annulus_outer
+    )
+    masked_image = np.where(bad, np.nan, image_e)
+
+    sums = np.asarray(
+        AperturePhotometry(image_e, apertures, method="exact")
+        .to_table()["flux"],
+        dtype=float,
+    )
+    var_sums = np.asarray(
+        AperturePhotometry(
+            np.where(np.isfinite(error), error**2, 0.0),
+            apertures,
+            method="exact",
+        ).to_table()["flux"],
+        dtype=float,
+    )
+    area = np.pi * radius**2
+    resid = np.full(len(positions), np.nan)
+    pred = np.full(len(positions), np.nan)
+    for i, an_mask in enumerate(annuli.to_mask(method="center")):
+        vals = np.asarray(an_mask.get_values(masked_image), dtype=float)
+        # Same sky convention as the worker: drop exact zeros (SWarp
+        # padding), sigma-clip, then take the median.
+        vals = vals[np.isfinite(vals) & (vals != 0.0)]
+        if vals.size < 10:
+            continue
+        clipped = sigma_clip(vals, sigma=4.0, maxiters=3, masked=False)
+        if clipped.size >= 10:
+            vals = clipped
+        med = float(np.median(vals))
+        std = 1.4826 * np.median(np.abs(vals - med))
+        if not np.isfinite(std) or std <= 0:
+            std = float(np.std(vals))
+        if not np.isfinite(std) or std <= 0:
+            continue
+        resid[i] = sums[i] - med * area
+        se = 1.2533 * std / np.sqrt(vals.size)
+        pred[i] = np.sqrt(max(float(var_sums[i]), 0.0) + (se * area) ** 2)
+    ok = np.isfinite(resid) & np.isfinite(pred) & (pred > 0)
+    n_used = int(np.count_nonzero(ok))
+    if n_used < 50:
+        return 1.0, n_used
+    r = resid[ok]
+    # A test aperture can still catch an undetected faint source; clip
+    # the residual sample so the factor tracks noise, not confusion
+    # outliers.
+    clipped = sigma_clip(r, sigma=4.0, maxiters=3, masked=False)
+    if clipped.size >= 20:
+        r = clipped
+    measured = 1.4826 * np.median(np.abs(r - np.median(r)))
+    predicted = float(np.median(pred[ok]))
+    if (
+        predicted <= 0
+        or not np.isfinite(measured)
+        or not np.isfinite(predicted)
+    ):
+        return 1.0, n_used
+    return float(max(measured / predicted, 1.0)), n_used
+
+
 def _cog_cutout(image, error, mask, x_pix, y_pix, outer_r):
     """Return per-source cutouts of image/error/mask around (x_pix, y_pix).
 
@@ -1304,6 +1425,7 @@ class Aperture:
             "threshold",
             "area",
             "ap_flags",
+            "noise_factor",
         ]
         str_cols = ["bkg_std_method", "fail_reason", "ap_flags_decoded"]
         for col in float_cols:
@@ -1418,6 +1540,44 @@ class Aperture:
         # annulus median low, which then mis-subtracts sky and confuses diagnostics.
         annulus_masks = [an.to_mask(method="center") for an in annuli_obj]
 
+        # ---- Empirical noise factor ----------------------------------------
+        # Resampling correlates pixel noise, so summed per-pixel variance
+        # under-counts the noise of an aperture sum.  Measure the deficit
+        # directly from the scatter of empty-sky aperture sums and inflate
+        # the propagated errors by it (never deflate: factor >= 1).
+        noise_factor = 1.0
+        if error is not None and phot_cfg.get("empirical_noise_factor", True):
+            try:
+                noise_factor, n_noise_ap = _empirical_noise_factor(
+                    image_e,
+                    error,
+                    ap_size,
+                    annulusIN,
+                    annulusOUT,
+                    defects_mask=mask,
+                    source_xy=np.asarray(positions),
+                    seed=int(self.input_yaml.get("rng_seed") or 0),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Empirical noise factor failed (%s); using 1.0.", exc
+                )
+                noise_factor, n_noise_ap = 1.0, 0
+            if n_noise_ap > 0:
+                logger.info(
+                    "Empirical noise factor: %.3f from %d empty apertures.",
+                    noise_factor,
+                    n_noise_ap,
+                )
+            if noise_factor > 1.5:
+                logger.warning(
+                    "Background noise is %.1fx larger than the propagated "
+                    "variance predicts (resampling correlation and/or "
+                    "confusion noise); aperture errors are inflated "
+                    "accordingly.",
+                    noise_factor,
+                )
+
         # ---- Dispatch (parallel for large catalogs) ------------------------
         # Pooled path: broadcast shared state once per worker via initializer;
         # only the source index is pickled per task (image/masks/phot can be
@@ -1507,15 +1667,24 @@ class Aperture:
             updates["ap_flags"][i] = res["ap_flags"]
             updates["counts_AP"][i] = res["counts_AP"]
             updates["flux_AP"][i] = res["flux_AP"]
-            updates["flux_AP_err"][i] = res["flux_AP_err"]
+            # flux_AP_err covers the aperture sum (pixel noise + annulus
+            # term), so the empirical factor scales it, and through it
+            # SNR and mag_err; maxPixel_err and noiseSky are per-pixel
+            # quantities that pixel correlation does not change.
+            updates["flux_AP_err"][i] = res["flux_AP_err"] * noise_factor
+            updates["noise_factor"][i] = noise_factor
             updates["sky_bkg_total"][i] = res["sky_bkg_total"]
             updates["sky_bkg_total_flux"][i] = res["sky_bkg_total_flux"]
             updates["noiseSky"][i] = res["noiseSky"]
             updates["threshold"][i] = res["threshold"]
-            updates["SNR"][i] = res["SNR"]
+            updates["SNR"][i] = (
+                res["SNR"] / noise_factor
+                if np.isfinite(res["SNR"])
+                else np.nan
+            )
             updates["bkg_std_method"][i] = res["bkg_std_method"]
             updates[mag_col][i] = res["mag"]
-            updates[err_col][i] = res["mag_err"]
+            updates[err_col][i] = res["mag_err"] * noise_factor
 
         # Single DataFrame assignment per column - avoids .at[] overhead.
         for col, vals in updates.items():
@@ -3256,6 +3425,7 @@ class Aperture:
             )
 
         corrections = []
+        corr_errs = []
         n_out_of_range = 0
         for _, row in selected.iterrows():
             try:
@@ -3285,6 +3455,23 @@ class Aperture:
                 frac = np.interp(ap_size, cog.radii, cog.profile)
                 if 0 < frac <= 1:
                     corrections.append(-2.5 * np.log10(1.0 / frac))
+                    # Per-star correction error from the normalized profile
+                    # error at the science radius (only meaningful when an
+                    # error map was supplied to the CoG).
+                    frac_err = (
+                        float(
+                            np.interp(
+                                ap_size, cog.radii, cog.profile_error
+                            )
+                        )
+                        if error is not None
+                        else np.nan
+                    )
+                    corr_errs.append(
+                        (2.5 / np.log(10.0)) * frac_err / frac
+                        if np.isfinite(frac_err) and frac_err > 0
+                        else np.nan
+                    )
             except Exception as exc:
                 log_warning_from_exception(logger, "Skipping star", exc)
 
@@ -3324,9 +3511,41 @@ class Aperture:
         # Using std overestimates the error when many sources are available
         # (e.g. 25 sources: std ~ 0.05 mag, SE ~ 0.01 mag).
         _n_corr = len(corrections)
+        corr_errs = np.asarray(corr_errs, dtype=float)
+        # Median per-star correction error: the part of the star-to-star
+        # scatter explained by measurement noise.
+        expected_noise = (
+            float(np.nanmedian(corr_errs))
+            if np.isfinite(corr_errs).any()
+            else np.nan
+        )
+        intrinsic_scatter = np.nan
         if _n_corr >= 2:
             _mad_corr = float(median_abs_deviation(corrections, nan_policy="omit"))
-            correction_err = float(1.858 * _mad_corr / np.sqrt(_n_corr))
+            robust_scatter = 1.4826 * _mad_corr
+            # Scatter beyond measurement noise is a true star-to-star
+            # variation of the correction (PSF shape changes across the
+            # field, residual neighbour light).  It does not shrink with
+            # the number of stars and is a systematic floor every
+            # corrected magnitude inherits; the measurement-noise part
+            # still averages down as 1/sqrt(N).
+            intrinsic_scatter = (
+                float(
+                    np.sqrt(max(robust_scatter**2 - expected_noise**2, 0.0))
+                )
+                if np.isfinite(expected_noise)
+                else np.nan
+            )
+            if np.isfinite(expected_noise) and np.isfinite(intrinsic_scatter):
+                correction_err = float(
+                    np.hypot(
+                        expected_noise / np.sqrt(_n_corr), intrinsic_scatter
+                    )
+                )
+            else:
+                # Use the standard error of the median
+                # (SE = 1.858 * MAD / sqrt(N)), not the population std.
+                correction_err = float(1.858 * _mad_corr / np.sqrt(_n_corr))
             # An identical-corrections ensemble (MAD=0) reports zero error;
             # floor at the quantization level of the CoG grid rather than
             # claiming infinite precision.
@@ -3338,7 +3557,17 @@ class Aperture:
             logger.warning(
                 "Aperture correction from a single star; error unknown."
             )
-        logger.info("Aperture correction: %.3f +/- %.3f (N=%d, SE of median)", correction, correction_err, _n_corr)
+        logger.info(
+            "Aperture correction: %.3f +/- %.3f (N=%d%s)",
+            correction,
+            correction_err,
+            _n_corr,
+            (
+                f", intrinsic scatter {intrinsic_scatter:.3f} mag"
+                if np.isfinite(intrinsic_scatter)
+                else ", SE of median"
+            ),
+        )
 
         if plot:
             plt.ioff()
