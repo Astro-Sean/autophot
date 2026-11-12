@@ -2237,15 +2237,17 @@ def run_photometry():
                 safe_fits_write(fpath, image, minimal_header)
 
         if not telescope or str(telescope).strip() == "":
-            raise ValueError(
-                f"FITS header missing or empty TELESCOP keyword. Image: {fpath}. "
-                "All images must have TELESCOP and INSTRUME header keywords."
+            logging.warning(
+                "FITS header missing or empty TELESCOP keyword; using 'unknown'. Image: %s",
+                fpath,
             )
+            telescope = "unknown"
         if not instrument or str(instrument).strip() == "":
-            raise ValueError(
-                f"FITS header missing or empty INSTRUME keyword. Image: {fpath}. "
-                "All images must have TELESCOP and INSTRUME header keywords."
+            logging.warning(
+                "FITS header missing or empty INSTRUME keyword; using 'unknown'. Image: %s",
+                fpath,
             )
+            instrument = "unknown"
         telescope = str(telescope).strip()
         instrument = str(instrument).strip()
 
@@ -2254,6 +2256,16 @@ def run_photometry():
         instrument_key, telescope_config = get_instrument_config(
             telescope_data, telescope, instrument
         )
+        if telescope_config is None and (
+            telescope == "unknown" or instrument == "unknown"
+        ):
+            # Mixed case (e.g. real TELESCOP with missing INSTRUME) with no
+            # matching entry: fall back to the built-in unknown/unknown config.
+            instrument_key, telescope_config = get_instrument_config(
+                telescope_data, "unknown", "unknown"
+            )
+            if telescope_config is not None:
+                telescope, instrument = "unknown", "unknown"
         if telescope_config is None:
             raise ValueError(
                 f"No telescope.yml entry found for telescope '{telescope}' and instrument '{instrument}'. "
@@ -2392,33 +2404,32 @@ def run_photometry():
         input_yaml["airmass"] = airmass
         header["RDNOISE"] = readnoise
 
-        #  Handle Exposure Time - science frames must have a valid header; ZTF reference
-        # templates often omit EXPTIME, so use default_input exposure_time for template paths only.
+        #  Handle Exposure Time - coadds and reference templates often omit EXPTIME.
+        # Fall back to default_input exposure_time (30 s) and warn rather than fail.
         primary_key = telescope_config.get("exptime", "EXPTIME")
         pref = [] if primary_key == "not_given_by_user" else [primary_key]
         try:
             exposure_time, used_exptime_key = exposure_seconds_from_header(header, pref)
         except ValueError as exc:
+            fallback = float(input_yaml.get("exposure_time", 30.0) or 30.0)
+            if not (np.isfinite(fallback) and fallback > 0):
+                fallback = 30.0
+            exposure_time = fallback
             if is_template:
-                fallback = float(input_yaml.get("exposure_time", 30.0) or 30.0)
-                if not (np.isfinite(fallback) and fallback > 0):
-                    fallback = 30.0
-                exposure_time = fallback
                 used_exptime_key = "default_input.exposure_time (template)"
-                logging.warning(
-                    "No usable EXPTIME in template header for %s; using %.3g s from "
-                    "default_input.exposure_time. (%s)",
-                    fpath,
-                    float(exposure_time),
-                    exc,
-                )
-                header["EXPTIME"] = float(exposure_time)
-                if "EXPOSURE" not in header:
-                    header["EXPOSURE"] = float(exposure_time)
             else:
-                raise ValueError(
-                    f"No valid exposure time in FITS header for {fpath!r}: {exc}"
-                ) from exc
+                used_exptime_key = "default_input.exposure_time (assumed)"
+            logging.warning(
+                "No usable exposure time in FITS header for %s; assuming %.3g s "
+                "from default_input.exposure_time. Set EXPTIME in the header to "
+                "override. (%s)",
+                fpath,
+                float(exposure_time),
+                exc,
+            )
+            header["EXPTIME"] = float(exposure_time)
+            if "EXPOSURE" not in header:
+                header["EXPOSURE"] = float(exposure_time)
         header["exptime"] = float(exposure_time)
         _img_kv.append(
             ("Exposure time", f"{float(exposure_time):.5g} s ({used_exptime_key})")
@@ -5309,14 +5320,32 @@ def run_photometry():
         optimum_radius_crowded = input_yaml["photometry"].get(
             "crowded_optimum_radius_fwhm", 1.5
         )
+        # Fixed-radius fallback in FWHM units: an explicit pixel radius
+        # (photometry.aperture_radius) always wins, then the crowded-field
+        # cap, then the user's FWHM multiplier (photometry.aperture_size).
+        _explicit_ap_px = input_yaml["photometry"].get("aperture_radius", None)
+        _ap_size_fwhm = float(
+            input_yaml["photometry"].get("aperture_size", 1.7) or 1.7
+        )
+
+        def _fixed_radius_fwhm():
+            if _explicit_ap_px is not None:
+                return float(_explicit_ap_px) / float(ImageFWHM)
+            if crowded_field:
+                return float(optimum_radius_crowded)
+            return _ap_size_fwhm
+
         if len(IsolatedSources) < min_sources_for_psf:
             logging.warning(
                 "Too few isolated sources (%d) to build PSF or measure optimum radius; continuing with aperture-only photometry.",
                 len(IsolatedSources),
             )
             do_aperture_ONLY = True
-            optimum_radius = optimum_radius_crowded if crowded_field else 1.7
-        elif input_yaml["photometry"].get("find_optimum_radius", True):
+            optimum_radius = _fixed_radius_fwhm()
+        elif (
+            input_yaml["photometry"].get("find_optimum_radius", True)
+            and _explicit_ap_px is None
+        ):
             try:
                 # The optimum radius is a sigma-clipped median over the pool:
                 # hundreds of extra stars add runtime, not information.  Keep
@@ -5367,16 +5396,16 @@ def run_photometry():
                 if optimum_radius < 5:
                     input_yaml["scale"] = odd(scale)
                 else:
-                    optimum_radius = optimum_radius_crowded if crowded_field else 1.7
+                    optimum_radius = _fixed_radius_fwhm()
                 if crowded_field:
                     optimum_radius = min(optimum_radius, optimum_radius_crowded)
             except Exception as e:
                 log_exception(
                     e, "measure_optimum_radius failed; using default aperture radius."
                 )
-                optimum_radius = optimum_radius_crowded if crowded_field else 1.7
+                optimum_radius = _fixed_radius_fwhm()
         else:
-            optimum_radius = optimum_radius_crowded if crowded_field else 1.7
+            optimum_radius = _fixed_radius_fwhm()
 
         # If optimum-radius filtering left a small set, keep using the
         # broader pre-optimum pool for PSF modelling while retaining the
@@ -5420,9 +5449,16 @@ def run_photometry():
         else:
             psf_source_pool = IsolatedSources.copy()
 
-        input_yaml["photometry"]["aperture_radius"] = odd(
-            int(np.ceil(optimum_radius * ImageFWHM))
-        )
+        if _explicit_ap_px is not None:
+            # Keep the user's explicit pixel value; the FWHM-unit
+            # optimum_radius above is only the equivalent for logging.
+            input_yaml["photometry"]["aperture_radius"] = float(
+                _explicit_ap_px
+            )
+        else:
+            input_yaml["photometry"]["aperture_radius"] = odd(
+                int(np.ceil(optimum_radius * ImageFWHM))
+            )
         aperture_radius = float(input_yaml["photometry"]["aperture_radius"])
         log_result(
             "[OK] aperture radius %.2f px (%.2f FWHM%s)",
@@ -13363,10 +13399,26 @@ def run_photometry():
         target_cutout = None
         target_cutout_rms = None
         target_cutout_mask = None
+        target_cutout_srcmask = None
         cutout_x0 = 0
         cutout_y0 = 0
         cutout_target_x = float(bg_target_x_pix)
         cutout_target_y = float(bg_target_y_pix)
+
+        # defects_mask already unions detected sources (host galaxy,
+        # neighbours) with hardware defects; fold in the post-pass
+        # hardware mask too so CR unions are not lost.
+        _full_src_defects = None
+        if defects_mask is not None and np.ndim(defects_mask) == 2:
+            _full_src_defects = np.asarray(defects_mask, dtype=bool)
+            if (
+                hardware_defects_mask is not None
+                and np.ndim(hardware_defects_mask) == 2
+                and hardware_defects_mask.shape == _full_src_defects.shape
+            ):
+                _full_src_defects |= np.asarray(
+                    hardware_defects_mask, dtype=bool
+                )
 
         # Limits is instantiated here only for its get_cutout method.
         from limits import Limits
@@ -13403,6 +13455,15 @@ def run_photometry():
                     if mask_result is not None:
                         target_cutout_mask, _, _ = mask_result
                         target_cutout_mask = np.asarray(target_cutout_mask, dtype=bool)
+                if _full_src_defects is not None:
+                    smask_result = getDetectionLimits.get_cutout(
+                        image=_full_src_defects
+                    )
+                    if smask_result is not None:
+                        target_cutout_srcmask, _, _ = smask_result
+                        target_cutout_srcmask = np.asarray(
+                            target_cutout_srcmask, dtype=bool
+                        )
                 # Target position in cutout-local coordinates, as returned by
                 # Cutout2D.position_cutout.  Do NOT assume the geometric centre
                 # of the array: near image edges the cutout is partial and the
@@ -13417,6 +13478,7 @@ def run_photometry():
             target_cutout = None
             target_cutout_rms = None
             target_cutout_mask = None
+            target_cutout_srcmask = None
 
         # Fallback to direct slicing if get_cutout failed
         if target_cutout is None and local_cutout_box is not None:
@@ -13437,12 +13499,17 @@ def run_photometry():
                     target_cutout_mask = np.asarray(
                         hardware_defects_mask[y0b:y1b, x0b:x1b], dtype=bool
                     )
+                if _full_src_defects is not None:
+                    target_cutout_srcmask = np.asarray(
+                        _full_src_defects[y0b:y1b, x0b:x1b], dtype=bool
+                    )
                 cutout_target_x = float(bg_target_x_pix) - float(x0b)
                 cutout_target_y = float(bg_target_y_pix) - float(y0b)
             except Exception:
                 target_cutout = None
                 target_cutout_rms = None
                 target_cutout_mask = None
+                target_cutout_srcmask = None
 
         # If a DC lift was applied (only when explicitly enabled via YAML), log it.
         # By default the lift is disabled because it inflates the Poisson noise term
@@ -13485,6 +13552,7 @@ def run_photometry():
                 target_cutout = None
                 target_cutout_rms = None
                 target_cutout_mask = None
+                target_cutout_srcmask = None
                 cutout_x0 = 0
                 cutout_y0 = 0
                 cutout_target_x = float(bg_target_x_pix)
@@ -13498,6 +13566,26 @@ def run_photometry():
             target_cutout_mask
             if target_cutout_mask is not None
             else hardware_defects_mask
+        )
+        # Source footprints (host galaxy, neighbours) also belong in the
+        # target mask: smooth residual light is not caught by the annulus
+        # sigma-clip and would bias both the aperture background and the
+        # PSF local background.  The measured positions are kept unmasked
+        # below so the aperture/fit region itself stays usable.
+        _ap_rad_eff = float(
+            input_yaml.get("photometry", {}).get("aperture_radius", ImageFWHM)
+        )
+        # Stay inside the annulus inner edge (ap + ~0.5 FWHM gap):
+        # unmasking galaxy pixels inside the annulus would put the
+        # contamination straight back into the background estimate.
+        _r_keep = min(
+            max(_ap_rad_eff, float(ImageFWHM)),
+            _ap_rad_eff + 0.5 * float(ImageFWHM),
+        )
+        _srcmask_for_target = (
+            target_cutout_srcmask
+            if target_cutout is not None and target_cutout_srcmask is not None
+            else _full_src_defects
         )
 
         # =============================================================================
@@ -13552,6 +13640,377 @@ def run_photometry():
                 len(_additional_targets_for_fit),
                 ", ".join(t["name"] for t in _additional_targets_for_fit),
             )
+
+        if _srcmask_for_target is not None:
+            _src = np.asarray(_srcmask_for_target, dtype=bool)
+            _hw = (
+                np.asarray(mask_for_target, dtype=bool)
+                if mask_for_target is not None
+                else np.zeros(_src.shape, dtype=bool)
+            )
+            if _src.shape == _hw.shape:
+                _merged = _hw | _src
+                # Fully unmask a disk around each measured position: no
+                # mask may overlap the target location.  Non-finite image
+                # values are still vetoed by the aperture worker's own
+                # isfinite check, so this only admits finite data.
+                _yy_m, _xx_m = np.ogrid[: _merged.shape[0], : _merged.shape[1]]
+                for _mx, _my in zip(
+                    TargetPosition["x_pix"], TargetPosition["y_pix"]
+                ):
+                    _disk = (_xx_m - _mx) ** 2 + (_yy_m - _my) ** 2 <= _r_keep**2
+                    _merged[_disk] = False
+                _n_added = int(np.count_nonzero(_merged & ~_hw))
+                if _n_added:
+                    logging.info(
+                        "Target mask: excluded %d detected-source pixel(s) "
+                        "(host/neighbour footprints) from the target "
+                        "aperture annulus and PSF fit.",
+                        _n_added,
+                    )
+                mask_for_target = _merged
+
+        # ---------------------------------------------------------------------
+        # Optional GALFIT host model (host_model.enabled): fit Sersic
+        # component(s) to the host on the target cutout and photometer the
+        # residual.  The galfit mask keeps the host region open (large disk
+        # around the target) while all other detected sources and hardware
+        # defects stay masked; the target's own disk is masked too unless a
+        # PSF component is fitted for it.
+        # ---------------------------------------------------------------------
+        _host_cfg = input_yaml.get("host_model") or {}
+        if bool(_host_cfg.get("enabled", False)):
+            try:
+                from galfit_host import find_galfit, fit_host_model
+
+                if find_galfit(_host_cfg) is None:
+                    logging.warning(
+                        "host_model.enabled is set but no galfit executable "
+                        "was found (PATH or host_model.galfit_path); "
+                        "proceeding without host subtraction."
+                    )
+                else:
+                    _fwhm_h = float(ImageFWHM)
+                    _fit_r = (
+                        float(_host_cfg.get("fit_radius_fwhm", 10.0)) * _fwhm_h
+                    )
+                    # Fit on a box of radius fit_radius_fwhm*FWHM around the
+                    # target in full-image coordinates.  The pipeline target
+                    # cutout is much smaller; a galaxy clipped by the cutout
+                    # edge cannot be modelled (component centres pin at the
+                    # frame edge and the residual stays structured).
+                    _Hf, _Wf = image.shape
+                    _bx0 = max(0, int(np.floor(bg_target_x_pix - _fit_r)))
+                    _bx1 = min(_Wf, int(np.ceil(bg_target_x_pix + _fit_r)) + 1)
+                    _by0 = max(0, int(np.floor(bg_target_y_pix - _fit_r)))
+                    _by1 = min(_Hf, int(np.ceil(bg_target_y_pix + _fit_r)) + 1)
+                    _sci_box = np.asarray(
+                        image[_by0:_by1, _bx0:_bx1], dtype=float
+                    )
+                    _rms_box = (
+                        np.asarray(
+                            background_rms[_by0:_by1, _bx0:_bx1], dtype=float
+                        )
+                        if background_rms is not None
+                        and np.ndim(background_rms) == 2
+                        and background_rms.shape == image.shape
+                        else None
+                    )
+                    # All target positions in box coordinates (primary
+                    # target plus any additional targets inside the box).
+                    _tgt_box = [
+                        (float(bg_target_x_pix - _bx0),
+                         float(bg_target_y_pix - _by0))
+                    ]
+                    for _at in _additional_targets_for_fit:
+                        _atxb = float(_at["x_pix"] - _bx0)
+                        _atyb = float(_at["y_pix"] - _by0)
+                        if 0 <= _atxb < (_bx1 - _bx0) and 0 <= _atyb < (
+                            _by1 - _by0
+                        ):
+                            _tgt_box.append((_atxb, _atyb))
+                    _gm = None
+                    _seed_mask = None
+                    if (
+                        _full_src_defects is not None
+                        and _full_src_defects.shape == image.shape
+                    ):
+                        _hw_g = (
+                            np.asarray(
+                                hardware_defects_mask[
+                                    _by0:_by1, _bx0:_bx1
+                                ],
+                                dtype=bool,
+                            )
+                            if hardware_defects_mask is not None
+                            and np.ndim(hardware_defects_mask) == 2
+                            and hardware_defects_mask.shape == image.shape
+                            else np.zeros(_sci_box.shape, dtype=bool)
+                        )
+                        # Source-only layer: defects_mask unions hardware,
+                        # source and CR pixels, so drop the hardware part.
+                        _src_g = (
+                            _full_src_defects[_by0:_by1, _bx0:_bx1] & ~_hw_g
+                        )
+                        _yy_g, _xx_g = np.indices(_sci_box.shape)
+                        _gm = _hw_g | _src_g
+                        _host_disk = np.zeros(_sci_box.shape, dtype=bool)
+                        for _mx, _my in _tgt_box:
+                            _host_disk |= (
+                                (_xx_g - _mx) ** 2 + (_yy_g - _my) ** 2
+                                <= _fit_r**2
+                            )
+                        # Reopen only the detected-source component(s)
+                        # near the target: that is the host.  Every other
+                        # source stays masked so it cannot drag the
+                        # Sersic model.
+                        _near_r = max(
+                            2.0 * _fwhm_h,
+                            float(
+                                _host_cfg.get(
+                                    "seed_exclude_target_fwhm", 1.5
+                                )
+                            )
+                            * _fwhm_h,
+                        )
+                        _reopen = np.zeros(_sci_box.shape, dtype=bool)
+                        _cand = _src_g & _host_disk & ~_hw_g
+                        if np.any(_cand):
+                            from scipy.ndimage import label as _ndi_label
+
+                            _lab, _nl = _ndi_label(
+                                _cand, structure=np.ones((3, 3), int)
+                            )
+                            _d2 = np.full(_nl + 1, np.inf)
+                            for _mx, _my in _tgt_box:
+                                for _li in range(1, _nl + 1):
+                                    _cl = _lab == _li
+                                    _d = np.min(
+                                        (_xx_g[_cl] - _mx) ** 2
+                                        + (_yy_g[_cl] - _my) ** 2
+                                    )
+                                    _d2[_li] = min(_d2[_li], _d)
+                            _keep_lab = np.where(_d2 <= _near_r**2)[0]
+                            if _keep_lab.size == 0:
+                                _keep_lab = np.array(
+                                    [int(np.argmin(_d2[1:]) + 1)]
+                                )
+                            _reopen = np.isin(_lab, _keep_lab)
+                        if np.any(_reopen):
+                            # Source detection can merge the whole field
+                            # into one giant footprint; cap the reopened
+                            # region to the host's local extent around the
+                            # target, or the fit chases a bright core many
+                            # FWHM away and subtracts nothing locally.
+                            _loc_r = max(4.0 * _fwhm_h, _near_r)
+                            _loc_disk = np.zeros(_sci_box.shape, dtype=bool)
+                            for _mx, _my in _tgt_box:
+                                _loc_disk |= (
+                                    (_xx_g - _mx) ** 2
+                                    + (_yy_g - _my) ** 2
+                                    <= _loc_r**2
+                                )
+                            _reopen &= _loc_disk
+                            # Unmask only the host footprint dilated by a
+                            # few FWHM (plus target disk masking below).
+                            # A large mostly-empty box lets a Sersic drift
+                            # onto sky gradients and the fit runs away.
+                            from scipy.ndimage import (
+                                binary_dilation as _ndilate,
+                            )
+
+                            _fit_reg = _ndilate(
+                                _reopen,
+                                iterations=int(np.ceil(3.0 * _fwhm_h)),
+                            )
+                            _gm = ~(_fit_reg & ~_hw_g)
+                        else:
+                            # Nothing detected near the target to model.
+                            _gm = None
+                        # Seed positions should come from the reopened
+                        # host pixels, not an arbitrary bright pixel.
+                        _seed_mask = (_reopen & ~_hw_g).copy()
+                        if _gm is not None and not bool(
+                            _host_cfg.get("fit_point_source", False)
+                        ):
+                            # Keep target flux out of the host fit; a real
+                            # point source inside the host disk would
+                            # otherwise be absorbed into the Sersic model.
+                            for _mx, _my in _tgt_box:
+                                _t_disk = (
+                                    (_xx_g - _mx) ** 2 + (_yy_g - _my) ** 2
+                                    <= _r_keep**2
+                                )
+                                _gm[_t_disk] = True
+                                _seed_mask[_t_disk] = False
+                    _hm_workdir = os.path.join(
+                        os.path.dirname(fpath), "galfit_host"
+                    )
+                    _zp_h = 22.5
+                    try:
+                        if np.isfinite(float(zeropoint)):
+                            _zp_h = float(zeropoint)
+                    except Exception:
+                        pass
+                    try:
+                        _pixel_scale_h = float(pixel_scale)
+                        if not np.isfinite(_pixel_scale_h) or _pixel_scale_h <= 0:
+                            _pixel_scale_h = 1.0
+                    except Exception:
+                        _pixel_scale_h = 1.0
+                    if _gm is None:
+                        # No detected host component near the target:
+                        # nothing to subtract, so skip the fit.
+                        _hm = {"success": False, "error": "no host detected"}
+                        logging.info(
+                            "GALFIT host stage skipped: no detected source "
+                            "component near the target inside the fit box."
+                        )
+                    else:
+                        _hm = fit_host_model(
+                            _sci_box,
+                            _rms_box,
+                            _gm,
+                            seed_mask=_seed_mask,
+                            target_xy=_tgt_box[0],
+                            fwhm=_fwhm_h,
+                            pixel_scale=_pixel_scale_h,
+                            zeropoint=_zp_h,
+                            cfg=_host_cfg,
+                            workdir=_hm_workdir,
+                            epsf_model=None,
+                            logger=logging.getLogger(__name__),
+                        )
+                    if _hm.get("success"):
+                        # A converged galfit exit is not proof of a sane
+                        # model: reject components that ran away (centre
+                        # outside the box, absurd size or magnitude) and
+                        # keep the unsubtracted data instead.
+                        _bxw = max(_sci_box.shape)
+                        for _c in _hm["fit_info"].get("components", []):
+                            if _c["type"] not in (
+                                "sersic", "expdisk", "gaussian", "moffat"
+                            ):
+                                continue
+                            try:
+                                _v = [float(q) for q in _c["values"]]
+                            except (TypeError, ValueError):
+                                _v = []
+                            if len(_v) < 4:
+                                continue
+                            _bad_comp = (
+                                not (-0.5 * _bxw < _v[0] < 1.5 * _bxw)
+                                or not (-0.5 * _bxw < _v[1] < 1.5 * _bxw)
+                                or not (0.0 < _v[3] < 2.0 * _bxw)
+                                or not np.isfinite(_v[2])
+                                or _v[2] > 40.0
+                            )
+                            if _bad_comp:
+                                _hm["success"] = False
+                                _hm["error"] = (
+                                    "fitted component outside sane bounds"
+                                )
+                                break
+                    if _hm.get("success"):
+                        # Slice the fitted residual/model from the galfit
+                        # box back into the pipeline cutout coordinates;
+                        # pixels outside the overlap keep their values.
+                        _th, _tw = image_for_target.shape
+                        _cx0 = int(round(cutout_x0 - _bx0))
+                        _cy0 = int(round(cutout_y0 - _by0))
+                        _sx0 = max(0, _cx0)
+                        _sy0 = max(0, _cy0)
+                        _sx1 = min(_sci_box.shape[1], _cx0 + _tw)
+                        _sy1 = min(_sci_box.shape[0], _cy0 + _th)
+                        _resid_cut = np.array(
+                            image_for_target, dtype=np.float64
+                        )
+                        _model_cut = np.full((_th, _tw), np.nan)
+                        if _sx1 > _sx0 and _sy1 > _sy0:
+                            _dh = _sy1 - _sy0
+                            _dw = _sx1 - _sx0
+                            _dy0 = _sy0 - _cy0
+                            _dx0 = _sx0 - _cx0
+                            _resid_cut[
+                                _dy0:_dy0 + _dh, _dx0:_dx0 + _dw
+                            ] = _hm["residual"][_sy0:_sy1, _sx0:_sx1]
+                            _model_cut[
+                                _dy0:_dy0 + _dh, _dx0:_dx0 + _dw
+                            ] = _hm["model"][_sy0:_sy1, _sx0:_sx1]
+                        image_for_target = _resid_cut
+                        # The host light is subtracted now: unmask the
+                        # model-supported host footprint so residual pixels
+                        # feed the annulus/fit, but keep every other detected
+                        # source masked.
+                        if _srcmask_for_target is not None:
+                            _sky_h = _hm.get("fit_info", {}).get("sky", np.nan)
+                            _model_host = _model_cut - (
+                                float(_sky_h)
+                                if np.isfinite(_sky_h)
+                                else np.nanmedian(_model_cut)
+                            )
+                            _peak_h = np.nanmax(_model_host)
+                            _rms_h = (
+                                float(np.nanmedian(background_rms_for_target))
+                                if background_rms_for_target is not None
+                                else np.nan
+                            )
+                            _hthr = (
+                                max(3.0 * _rms_h, 0.02 * _peak_h)
+                                if np.isfinite(_rms_h) and _rms_h > 0
+                                else 0.02 * _peak_h
+                            )
+                            _host_support = (
+                                np.asarray(_srcmask_for_target, dtype=bool)
+                                & np.isfinite(_model_host)
+                                & (_model_host > _hthr)
+                            )
+                            _m2 = (
+                                np.asarray(mask_for_target, dtype=bool)
+                                if mask_for_target is not None
+                                else np.zeros(_host_support.shape, dtype=bool)
+                            )
+                            _m2[_host_support] = False
+                            _yy_c, _xx_c = np.indices(_m2.shape)
+                            for _mx, _my in zip(
+                                TargetPosition["x_pix"], TargetPosition["y_pix"]
+                            ):
+                                _disk2 = (
+                                    (_xx_c - _mx) ** 2 + (_yy_c - _my) ** 2
+                                    <= _r_keep**2
+                                )
+                                _m2[_disk2] = False
+                            mask_for_target = _m2
+                        logging.info(
+                            "GALFIT host model subtracted from target cutout "
+                            "(chi2nu=%s; products in %s).",
+                            (
+                                f"{_hm['fit_info'].get('chi2nu', np.nan):.3f}"
+                                if np.isfinite(
+                                    _hm.get("fit_info", {}).get("chi2nu", np.nan)
+                                )
+                                else "n/a"
+                            ),
+                            _hm_workdir,
+                        )
+                        if _hm.get("fit_info", {}).get("starred_params"):
+                            logging.warning(
+                                "GALFIT host fit has parameters pinned at "
+                                "their bounds (*...* in fit.log); inspect "
+                                "%s before trusting the subtraction.",
+                                _hm_workdir,
+                            )
+                    else:
+                        logging.warning(
+                            "GALFIT host model unavailable (%s); using "
+                            "unsubtracted cutout.",
+                            _hm.get("error", "unknown"),
+                        )
+            except Exception as _hm_exc:
+                logging.warning(
+                    "GALFIT host modelling failed (%s); using unsubtracted cutout.",
+                    _hm_exc,
+                )
 
         # Centroid-refinement box: ~1xFWHM, forced odd for a central pixel.
         boxsize = int(np.ceil(ImageFWHM))
@@ -13661,6 +14120,16 @@ def run_photometry():
         fit_bound_arcsec = float(
             (input_yaml.get("photometry", {}) or {}).get("fitting_xy_bounds", 1.0)
         )
+        _target_max_arcsec = (input_yaml.get("photometry", {}) or {}).get(
+            "fitting_xy_bounds_target_arcsec", None
+        )
+        if _target_max_arcsec is not None:
+            try:
+                fit_bound_arcsec = min(
+                    fit_bound_arcsec, float(_target_max_arcsec)
+                )
+            except (TypeError, ValueError):
+                pass
         pix_scale = input_yaml.get("pixel_scale", np.nan)
         if np.isfinite(pix_scale) and float(pix_scale) > 0:
             fit_bound_pix = fit_bound_arcsec / float(pix_scale)
@@ -15593,6 +16062,7 @@ def run_photometry():
                                         image_zeropoint=image_zeropoint,
                                         avoid_positions=_lim_avoid_positions,
                                         fitted_position=_lim_fitted_position,
+                                        mask=_full_src_defects,
                                     )
                                 )
 
@@ -15655,6 +16125,7 @@ def run_photometry():
                                     _return_details=True,
                                     avoid_positions=_lim_avoid_positions,
                                     fitted_position=_lim_fitted_position,
+                                    mask=_full_src_defects,
                                 )
                                 if isinstance(_lim_details, dict):
                                     InjectedLimit = float(
