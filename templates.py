@@ -10644,8 +10644,9 @@ class Templates:
                 )
 
             logger.info(
-                "Target coords updated after %s alignment:\t(%.1f, %.1f) -> (%.1f, %.1f) px | "
-                "WCS CRPIX=(%.1f, %.1f) CRVAL=(%.6f, %.6f)",
+                "Target coords updated after %s alignment: (%.1f, %.1f) -> "
+                "(%.1f, %.1f) px; WCS CRPIX=(%.1f, %.1f), "
+                "CRVAL=(%.6f, %.6f)",
                 method_name, old_target_x, old_target_y, new_target_x, new_target_y,
                 aligned_header.get("CRPIX1", np.nan), aligned_header.get("CRPIX2", np.nan),
                 aligned_header.get("CRVAL1", np.nan), aligned_header.get("CRVAL2", np.nan)
@@ -14519,7 +14520,7 @@ class Templates:
                     diff_std = np.nanstd(valid_pixels)
                     diff_rms = np.sqrt(np.mean(valid_pixels ** 2))
                     logger.info(
-                        "Subtraction stats: median=%.3f std=%.3f rms=%.3f | valid=%d px",
+                        "Subtraction stats: median=%.3f std=%.3f rms=%.3f; valid=%d px",
                         diff_median, diff_std, diff_rms, len(valid_pixels)
                     )
                     if abs(diff_median) > 0.1 * diff_std:
