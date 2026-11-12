@@ -1524,13 +1524,12 @@ def run_photometry():
 
         key_w = max(len(k) for k, _ in out)
         try:
-            print(f"\nAutoPHOT YAML options from: {yml_path}\n")
+            print(log_step(f"AutoPHOT YAML options from: {yml_path}"))
             for k, expl in out:
                 if expl:
                     print(f"{k:<{key_w}}  {expl}")
                 else:
                     print(f"{k:<{key_w}}")
-            print("")
         except BrokenPipeError:
             # Allows piping to `head`/`less` without noisy tracebacks.
             return
@@ -2061,7 +2060,6 @@ def run_photometry():
         base_filename = os.path.basename(fpath)
         write_dir = (cur_dir + "/").replace(" ", "_")
         input_yaml["write_dir"] = write_dir
-        logging.info("")
         logging.info("Running AutoPhOT v%s on %s", AUTOPHOT_VERSION, base_filename)
         logging.info(
             "Report any issues at: https://github.com/Astro-Sean/autophot/issues"
@@ -7357,7 +7355,7 @@ def run_photometry():
                 )
 
             safe_fits_write(os.path.join(cur_dir, newBasename), image, header)
-            logging.info("\n\nEnd of %s template calibration\n\n", imageFilter)
+            log_result("End of %s template calibration", imageFilter)
             return 0
 
         # =============================================================================
@@ -17271,7 +17269,6 @@ def run_photometry():
         log_status(ascii_kv("PHOTOMETRY", _res_pairs, framed=True), ui=True)
 
         log_status(log_step("Photometry finished"))
-        log_status("")
         end_mem = _process_memory_gb()
         _mem_str = ""
         if end_mem is not None and start_mem is not None:
@@ -17287,8 +17284,6 @@ def run_photometry():
             end - start,
             _mem_str,
         )
-        log_status("")
-        logging.info("")
 
     except Exception as e:
         log_exception(e)
