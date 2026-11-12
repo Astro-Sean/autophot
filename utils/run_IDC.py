@@ -3700,7 +3700,7 @@ class ImageDistortionCorrector:
                                 for _ql, _qd in _quadrant_stats.items()
                             )
                             self.logger.info(
-                                "Per-quadrant alignment: %s | worst_quadrant_median=%.2f px",
+                                "Per-quadrant alignment: %s; worst_quadrant_median=%.2f px",
                                 _quad_summary, _worst_quadrant_offset,
                             )
 
@@ -5220,7 +5220,7 @@ class ImageDistortionCorrector:
                                 for _rql, _rqd in _reproj_quadrant_stats.items()
                             )
                             self.logger.info(
-                                "Reproject per-quadrant: %s | worst=%.2f px",
+                                "Reproject per-quadrant: %s; worst=%.2f px",
                                 _rq_summary, _reproj_worst_quad,
                             )
 
