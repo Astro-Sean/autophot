@@ -81,7 +81,10 @@ class TestTargetXYHold:
         assert "free within" in caplog.text
 
     def test_moderate_snr_gets_intermediate_bound(self):
-        img = _add_source(_noise(13), 33.5, 30.5, 10.0)
+        # A moderate-S/N source inside the ~0.5 FWHM same-source window
+        # counts as a detection and gets a bound ramped between the held
+        # and free values by detection S/N.
+        img = _add_source(_noise(13), 30.7, 30.3, 8.0)
         rows = {"x_pix": [29.5], "y_pix": [29.5], "counts_AP": [100.0]}
         out = _fit(img, rows)
         snr = float(out["detect_snr_psf"][0])
@@ -92,6 +95,31 @@ class TestTargetXYHold:
         assert 0.5 < bound < 4.5
         assert abs(out["x_fit"][0] - 29.5) <= bound + 1e-6
         assert abs(out["y_fit"][0] - 29.5) <= bound + 1e-6
+
+    def test_bright_neighbour_does_not_free_target(self, caplog):
+        # A bright peak several FWHM from the catalog position is a
+        # neighbour.  Its wing inside the seed aperture must not inflate
+        # the detection S/N and free the centroid onto it - the failure
+        # mode reported for a low-S/N target near unrelated flux.
+        img = _add_source(_noise(14), 35.0, 30.5, 4000.0)
+        rows = {"x_pix": [29.5], "y_pix": [29.5], "counts_AP": [40000.0]}
+        with caplog.at_level(logging.INFO, logger="psf"):
+            out = _fit(img, rows)
+        assert float(out["detect_snr_psf"][0]) < 4.0
+        assert abs(out["x_fit"][0] - 29.5) <= 0.5 + 1e-6
+        assert abs(out["y_fit"][0] - 29.5) <= 0.5 + 1e-6
+        assert "held to" in caplog.text
+
+    def test_faint_target_next_to_neighbour_stays_held(self):
+        # Faint flux at the seed plus a bright neighbour outside the
+        # same-source window: the neighbour's wing must be discounted so
+        # the target's own (sub-threshold) flux leaves the fit held.
+        img = _add_source(_noise(19), 29.5, 29.5, 3.0)
+        img = _add_source(img, 35.0, 30.5, 4000.0)
+        rows = {"x_pix": [29.5], "y_pix": [29.5], "counts_AP": [100.0]}
+        out = _fit(img, rows)
+        assert abs(out["x_fit"][0] - 29.5) <= 0.5 + 1e-6
+        assert abs(out["y_fit"][0] - 29.5) <= 0.5 + 1e-6
 
     def test_faded_target_position_held(self, caplog):
         img = _noise(2)
@@ -255,6 +283,57 @@ class TestTargetXYHold:
         )
         assert out["xy_bounds_psf"][0] == pytest.approx(0.5)
         assert abs(out["x_fit"][0] - 29.5) <= 0.5 + 1e-6
+
+    def test_target_arcsec_cap_tightens_bound(self, caplog):
+        # A detected target is normally free within the fit-shape limit
+        # (~5.4 px here); fitting_xy_bounds_target_arcsec must cap that
+        # to the configured arcsec value (5 px at pixel_scale=1).
+        yaml = _yaml(
+            fitting_xy_bounds=10.0, fitting_xy_bounds_target_arcsec=5.0
+        )
+        img = _add_source(_noise(20), 30.5, 30.5, 4000.0)
+        rows = {"x_pix": [30.5], "y_pix": [30.5], "counts_AP": [40000.0]}
+        p = psf_mod.PSF(yaml, img, header={})
+        with caplog.at_level(logging.INFO, logger="psf"):
+            out = p.fit(
+                CircularGaussianPRF(fwhm=FWHM),
+                pd.DataFrame(rows),
+                is_target_fit=True,
+                background_rms=np.ones_like(img),
+            )
+        assert out["xy_bounds_psf"][0] == pytest.approx(5.0)
+        assert "capping xy_bounds" in caplog.text
+
+    def test_target_arcsec_cap_never_below_floor(self):
+        # The FWHM-relative floor (1.5*FWHM = 4.5 px) wins over a cap
+        # that would make re-centering impossible on coarse pixels.
+        yaml = _yaml(
+            fitting_xy_bounds=10.0, fitting_xy_bounds_target_arcsec=2.0
+        )
+        img = _add_source(_noise(21), 30.5, 30.5, 4000.0)
+        rows = {"x_pix": [30.5], "y_pix": [30.5], "counts_AP": [40000.0]}
+        p = psf_mod.PSF(yaml, img, header={})
+        out = p.fit(
+            CircularGaussianPRF(fwhm=FWHM),
+            pd.DataFrame(rows),
+            is_target_fit=True,
+            background_rms=np.ones_like(img),
+        )
+        assert out["xy_bounds_psf"][0] == pytest.approx(4.5)
+
+    def test_no_target_arcsec_cap_keeps_free_bound(self):
+        # Without the cap the free bound reaches the fit-shape limit.
+        yaml = _yaml(fitting_xy_bounds=10.0)
+        img = _add_source(_noise(22), 30.5, 30.5, 4000.0)
+        rows = {"x_pix": [30.5], "y_pix": [30.5], "counts_AP": [40000.0]}
+        p = psf_mod.PSF(yaml, img, header={})
+        out = p.fit(
+            CircularGaussianPRF(fwhm=FWHM),
+            pd.DataFrame(rows),
+            is_target_fit=True,
+            background_rms=np.ones_like(img),
+        )
+        assert out["xy_bounds_psf"][0] > 5.0
 
 
 class TestCatalogXYHold:
