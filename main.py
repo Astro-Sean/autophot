@@ -1519,12 +1519,16 @@ def run_photometry():
             out.append((path, expl))
 
         if not out:
-            print(f"[WARN] No keys parsed from: {yml_path}", file=sys.stderr)
+            print(f"[WARNING] No keys parsed from: {yml_path}", file=sys.stderr)
             return
 
         key_w = max(len(k) for k, _ in out)
         try:
-            print(log_step(f"AutoPHOT YAML options from: {yml_path}"))
+            print(
+                border_msg(f"AutoPhOT YAML options from: {yml_path}").lstrip(
+                    "\n"
+                )
+            )
             for k, expl in out:
                 if expl:
                     print(f"{k:<{key_w}}  {expl}")
@@ -3222,7 +3226,7 @@ def run_photometry():
 
         # Stage-closing summary: what the preprocessing pass produced.
         log_result(
-            "Preprocessing: done | %dx%d px | trim=%.1f arcmin | NaN-edge-trim=%s",
+            "[OK] %dx%d px, trim %.1f arcmin, NaN-edge-trim %s",
             image.shape[1],
             image.shape[0],
             float(input_yaml["preprocessing"].get("trim_image", 0) or 0),
@@ -3242,7 +3246,7 @@ def run_photometry():
                 _dc_wcs = get_wcs(header)
                 if _dc_wcs is None or not getattr(_dc_wcs, "has_celestial", False):
                     log_result(
-                        "Distortion correction: skipped | no usable header WCS "
+                        "[SKIP] no usable header WCS "
                         "(SCAMP needs a WCS seed)"
                     )
                 else:
@@ -3266,8 +3270,8 @@ def run_photometry():
                             _dc_wcs_new = get_wcs(_dc_hdul[0].header)
                         if _dc_wcs_new is None:
                             log_result(
-                                "Distortion correction: skipped | corrected "
-                                "image has no usable WCS (keeping original)"
+                                "[SKIP] corrected image has no usable WCS; "
+                                "keeping original"
                             )
                         else:
                             # SWarp COPY_KEYWORDS keeps only a small key
@@ -3288,14 +3292,13 @@ def run_photometry():
                                 input_yaml["target_x_pix"] = float(_dtx)
                                 input_yaml["target_y_pix"] = float(_dty)
                             log_result(
-                                "Distortion correction: applied | %s "
-                                "resampled onto undistorted grid",
+                                "[OK] %s resampled onto undistorted grid",
                                 base_filename,
                             )
                     else:
                         log_result(
-                            "Distortion correction: skipped | SCAMP/SWarp "
-                            "unavailable or failed (keeping original image)"
+                            "[SKIP] SCAMP/SWarp unavailable or failed; "
+                            "keeping original image"
                         )
             except Exception as _dc_exc:
                 log_exception(
@@ -3391,7 +3394,7 @@ def run_photometry():
             float(ImageFWHM) * pixel_scale if np.isfinite(ImageFWHM) else float("nan")
         )
         logging.info("Preliminary FWHM: %.1f pixels", ImageFWHM)
-        log_result("Image seeing: %.2f arcseconds", _seeing_arcsec)
+        log_result("Image seeing: %.2f arcsec", _seeing_arcsec)
 
         # Save the initially measured FWHM for the post-alignment inflation
         # check.  input_yaml["fwhm"] may still hold the config default (e.g.,
@@ -3416,7 +3419,8 @@ def run_photometry():
         )
         input_yaml["sampling_regime"] = _sampling_regime
         log_result(
-            "Undersampled mode: %s | Sampling regime: %s (FWHM=%.2f px, threshold=%.2f px)",
+            "Undersampled mode %s; sampling regime %s "
+            "(FWHM %.2f px, threshold %.2f px)",
             input_yaml["undersampled_mode"],
             _sampling_regime,
             float(ImageFWHM),
@@ -3642,12 +3646,12 @@ def run_photometry():
             # next FITS write (which is after the second background pass).
             safe_fits_write(fpath, image, header)
             log_result(
-                "Cosmic rays: cleaned | %d px masked (%.2f%%)",
+                "[OK] cosmic-ray cleaning masked %d px (%.2f%%)",
                 int(cosmic_rays_mask.sum()),
                 100.0 * cosmic_rays_mask.sum() / cosmic_rays_mask.size,
             )
         elif input_yaml["cosmic_rays"].get("remove_cmrays", False):
-            log_result("Cosmic rays: skipped (already cleaned)")
+            log_result("[SKIP] cosmic rays already cleaned")
 
         # =============================================================================
         #          Check for Existing WCS
@@ -3736,9 +3740,9 @@ def run_photometry():
                     getattr(imageWCS_obj, "solved_new_wcs", False)
                 )
                 log_result(
-                    "Plate solve successful"
+                    "[OK] plate solve adopted new WCS"
                     if _new_solve
-                    else "Plate solve kept existing WCS"
+                    else "[OK] plate solve kept existing WCS"
                 )
                 header = updated_header
                 safe_fits_write(fpath, image, header)
@@ -3806,7 +3810,18 @@ def run_photometry():
         _wcs_state = (
             "solved" if wcs_updated else ("existing" if existingWCS else "none")
         )
-        log_result("WCS: %s | scale=%.3f arcsec/px", _wcs_state, pixel_scale)
+        if _wcs_state == "none":
+            log_result(
+                "[SKIP] no WCS; pixel scale %.3f arcsec/px "
+                "(configured fallback)",
+                pixel_scale,
+            )
+        else:
+            log_result(
+                "[OK] %s WCS, pixel scale %.3f arcsec/px",
+                _wcs_state,
+                pixel_scale,
+            )
 
         # =============================================================================
         # WCS Refinement (optional: enable via wcs.refine_after_solve if needed)
@@ -3915,9 +3930,23 @@ def run_photometry():
             input_yaml["target_ra"], input_yaml["target_dec"], 0
         )
         logging.info(
-            f"TNS check:\t{input_yaml.get('target_name_display', 'Transient')} | "
-            f"RA/Dec: {input_yaml['target_ra']:.6f}, {input_yaml['target_dec']:.6f} | "
-            f"Pixel: ({target_x_expected:.2f}, {target_y_expected:.2f})"
+            stat_pairs(
+                [
+                    (
+                        "TNS check:",
+                        input_yaml.get("target_name_display", "Transient"),
+                    ),
+                    (
+                        "RA/Dec:",
+                        f"{input_yaml['target_ra']:.6f}, "
+                        f"{input_yaml['target_dec']:.6f}",
+                    ),
+                    (
+                        "Pixel:",
+                        f"({target_x_expected:.2f}, {target_y_expected:.2f})",
+                    ),
+                ]
+            )
         )
 
         # =============================================================================
@@ -4012,7 +4041,7 @@ def run_photometry():
         safe_fits_write(weight_fpath, background_rms, weight_header)
         # Stage-closing summary for the masked background pass.
         log_result(
-            "Background (masked): sky=%.3e ADU | RMS=%.3e ADU | masked=%.1f%%",
+            "[OK] sky %.3e ADU, RMS %.3e ADU (%.1f%% of pixels masked)",
             float(np.nanmedian(background_surface)),
             float(np.nanmedian(background_rms)),
             100.0
@@ -4154,20 +4183,20 @@ def run_photometry():
         dy_center = float(y - y_center)
         border_margin_px = float(min(x, y, (nx - 1) - x, (ny - 1) - y))
         logging.info(
-            "Target:\t\t%s | Sky: RA %.6f, Dec %.6f | Pixel: (%.2f, %.2f) | "
-            "Image: %dx%d px | Offset: dx=%+.2f, dy=%+.2f px | "
-            "Bounds: %s (margin %.2f px)",
-            target_label,
-            ra,
-            dec,
-            x,
-            y,
-            nx,
-            ny,
-            dx_center,
-            dy_center,
-            "within bounds" if in_bounds else "OUTSIDE bounds",
-            border_margin_px,
+            stat_pairs(
+                [
+                    ("Target:", target_label),
+                    ("Sky:", f"RA {ra:.6f}, Dec {dec:.6f}"),
+                    ("Pixel:", f"({x:.2f}, {y:.2f})"),
+                    ("Image:", f"{nx}x{ny} px"),
+                    ("Offset:", f"dx={dx_center:+.2f}, dy={dy_center:+.2f} px"),
+                    (
+                        "Bounds:",
+                        f"{'within bounds' if in_bounds else 'OUTSIDE bounds'}"
+                        f" (margin {border_margin_px:.2f} px)",
+                    ),
+                ]
+            )
         )
 
         # =============================================================================
@@ -4526,7 +4555,7 @@ def run_photometry():
         safe_fits_write(weight_fpath, background_rms, weight_header)
         # Stage-closing summary for the calibration stage.
         log_result(
-            "Calibration: sky=%.3e ADU | RMS=%.3e ADU | weight=%s",
+            "[OK] sky %.3e ADU, RMS %.3e ADU; weight map %s",
             float(np.nanmedian(background_surface)),
             float(np.nanmedian(background_rms)),
             os.path.basename(weight_fpath),
@@ -5264,8 +5293,7 @@ def run_photometry():
         IsolatedSources = IsolatedSources[mask]
         # STATUS-level so the section shows a result at normal verbosity.
         log_result(
-            "Aperture photometry: %d isolated stars measured "
-            "(aperture radius %.1f px)",
+            "[OK] %d isolated stars measured at radius %.1f px",
             len(IsolatedSources),
             1.7 * ImageFWHM,
         )
@@ -5273,8 +5301,6 @@ def run_photometry():
         # selection is tuned for aperture stability and can become too strict
         # for reliable ePSF construction in sparse/crowded epochs.
         psf_source_pool = IsolatedSources.copy()
-
-        log_status(border_msg("Optimum aperture radius", body="-"))
 
         # Too few isolated stars: cannot build PSF or measure optimum radius; continue with aperture-only.
         min_sources_for_psf = 3
@@ -5399,7 +5425,7 @@ def run_photometry():
         )
         aperture_radius = float(input_yaml["photometry"]["aperture_radius"])
         log_result(
-            "Aperture radius: %.2f [pixels] (optimum_radius=%.2f FWHM%s)",
+            "[OK] aperture radius %.2f px (%.2f FWHM%s)",
             aperture_radius,
             optimum_radius,
             ", crowded" if crowded_field else "",
@@ -5424,7 +5450,7 @@ def run_photometry():
             if IsolatedSources is not None and len(IsolatedSources) >= 5:
                 logging.info(
                     "Computing aperture correction using %d isolated sources "
-                    "at radius %.2f pixels",
+                    "at radius %.2f px",
                     len(IsolatedSources),
                     aperture_radius,
                 )
@@ -5451,19 +5477,18 @@ def run_photometry():
                     )
                     input_yaml["aperture_correction_radius"] = float(aperture_radius)
                     log_result(
-                        "Aperture correction (AP to total): %.3f +/- %.3f mag "
-                        "at %.1f px (embedded in ZP_AP; stored for AP/PSF "
-                        "scale bridging)",
+                        "[OK] AP-to-total correction %.3f +/- %.3f mag "
+                        "at %.1f px (folded into ZP_AP for AP/PSF bridging)",
                         input_yaml["aperture_correction"],
                         input_yaml["aperture_correction_err"],
                         aperture_radius,
                     )
                 else:
-                    log_result("Aperture correction not reliable; leaving as 0.0 mag.")
+                    log_result("[SKIP] correction not reliable; left at 0.0 mag")
             else:
                 log_result(
-                    "Too few isolated sources (%s) for aperture correction; "
-                    "skipping and leaving correction at 0.0 mag.",
+                    "[SKIP] too few isolated sources (%s); "
+                    "correction left at 0.0 mag",
                     "none" if IsolatedSources is None else len(IsolatedSources),
                 )
         except Exception as e:
@@ -5507,9 +5532,10 @@ def run_photometry():
                 CatalogSources
             )
             log_result(
-                "Catalog sources: %d of %d kept after cleaning",
+                "[OK] %d of %d kept after cleaning (%d removed)",
                 len(CatalogSources),
                 n_catalog_total,
+                n_catalog_total - len(CatalogSources),
             )
 
             # Transfer per-source FWHM and peak_flux from SExtractor (FWHMSources) to catalog sources.
@@ -6787,7 +6813,7 @@ def run_photometry():
             )
         ):
             log_result(
-                "PSF model: none (pool has %d sources; need >= %d for an "
+                "[SKIP] no PSF model (pool has %d sources; need >= %d for an "
                 "empirical build%s)",
                 0 if psf_source_pool is None else len(psf_source_pool),
                 psf_build_gate_stars,
@@ -6813,7 +6839,7 @@ def run_photometry():
                     f"PSF sources roundness: {mean_roundness:.2f} +/- {std_roundness:.2f}"
                 )
             if not epsf_model:
-                log_result("PSF photometry: skipped (no PSF model available)")
+                log_result("[SKIP] no PSF model available")
                 do_aperture_ONLY = True
                 PSFSources = None
             else:
@@ -6850,7 +6876,7 @@ def run_photometry():
                     else:
                         _n_psf_fit = 0
                     log_result(
-                        "PSF photometry: %d of %d catalog sources fitted",
+                        "[OK] %d of %d catalog sources fitted",
                         _n_psf_fit,
                         0 if CatalogSources is None else len(CatalogSources),
                     )
@@ -7355,7 +7381,7 @@ def run_photometry():
                 )
 
             safe_fits_write(os.path.join(cur_dir, newBasename), image, header)
-            log_result("End of %s template calibration", imageFilter)
+            log_result("[OK] %s template calibration complete", imageFilter)
             return 0
 
         # =============================================================================
@@ -11300,9 +11326,9 @@ def run_photometry():
                         except Exception:
                             pass
                         log_result(
-                            "Subtraction: OK | %s (forceconv=%s, kernel=%s) | "
-                            "matched=%d | diff med=%.2f std=%.2f ADU | "
-                            "masked=%.1f%%",
+                            "[OK] %s subtraction (forceconv=%s, kernel=%s); "
+                            "matched %d sources; diff med %.2f, std %.2f ADU; "
+                            "%.1f%% masked",
                             _ts_cfg.get("method", "?"),
                             _convd_rep,
                             _ts_cfg.get("kernel_order", "?"),
@@ -14467,6 +14493,7 @@ def run_photometry():
                 return default
             return f if np.isfinite(f) else default
 
+        _cal_applied = []
         for method in ["AP", "PSF"]:
             if (
                 method not in image_zeropoint
@@ -14903,6 +14930,10 @@ def run_photometry():
                         TargetPosition.at[idx, cal_mag_col],
                         TargetPosition.at[idx, cal_err_col],
                     )
+                if np.isfinite(cal_mag):
+                    _cal_applied.append(
+                        (method, float(image_zeropoint[method]["zeropoint"]))
+                    )
 
             except Exception as e:
                 log_exception(e)
@@ -14967,6 +14998,16 @@ def run_photometry():
                     TargetPosition.at[idx, "flux_AP_err_inverted"] = float(
                         np.hypot(_fae, float(lpi_extra_flux_err))
                     )
+
+        # Close the section with an outcome line so the header always has a
+        # result under it even when every method lacked a zeropoint.
+        if _cal_applied:
+            log_result(
+                "[OK] zero point applied to %s",
+                ", ".join(f"{m} {z:.3f} mag" for m, z in _cal_applied),
+            )
+        else:
+            log_result("[SKIP] no calibrated magnitudes produced")
 
         # =============================================================================
         # Other Transients Photometry (optional, default False)
@@ -15657,6 +15698,8 @@ def run_photometry():
                 log_exception(e)
                 InjectedLimit = np.nan
                 InjectedLimitErr = np.nan
+            if not np.isfinite(InjectedLimit):
+                log_result("[SKIP] no limiting magnitude produced")
 
         # =============================================================================
         # Empirical uncertainty calibration (from injection/recovery trials)
@@ -16002,30 +16045,49 @@ def run_photometry():
             # --- Log detection decision with all metrics ---
             _det_status = "DETECTION" if is_det else "non-detection"
             log_result(
-                "Detection decision: %s | SNR=%.2f (threshold=%.1f) | "
-                "prob_detect=%s | FAP=%s | flux_psf=%.4f flux_ap=%.4f | "
-                "chi2=%s | inverted=%s",
+                "Detection decision: %s (SNR %.2f vs threshold %.1f)",
                 _det_status,
                 best_snr if np.isfinite(best_snr) else -1,
                 det_thresh,
-                (
-                    f"{float(output.get('prob_detect', np.nan)):.3f}"
-                    if np.isfinite(output.get("prob_detect", np.nan))
-                    else "N/A"
-                ),
-                (
-                    f"{float(output.get('empirical_p_false', np.nan)):.3f}"
-                    if np.isfinite(output.get("empirical_p_false", np.nan))
-                    else "N/A"
-                ),
-                float(output.get("flux_psf", np.nan)),
-                float(output.get("flux_ap", np.nan)),
-                (
-                    f"{float(output.get('reduced_chi2', np.nan)):.2f}"
-                    if np.isfinite(output.get("reduced_chi2", np.nan))
-                    else "N/A"
-                ),
-                _is_inverted,
+            )
+            log_status(
+                ascii_table(
+                    "Detection metrics",
+                    ["Metric", "Value"],
+                    [
+                        [
+                            "prob_detect",
+                            (
+                                f"{float(output.get('prob_detect', np.nan)):.3f}"
+                                if np.isfinite(output.get("prob_detect", np.nan))
+                                else "N/A"
+                            ),
+                        ],
+                        [
+                            "FAP",
+                            (
+                                f"{float(output.get('empirical_p_false', np.nan)):.3f}"
+                                if np.isfinite(
+                                    output.get("empirical_p_false", np.nan)
+                                )
+                                else "N/A"
+                            ),
+                        ],
+                        ["flux_psf", f"{float(output.get('flux_psf', np.nan)):.4f}"],
+                        ["flux_ap", f"{float(output.get('flux_ap', np.nan)):.4f}"],
+                        [
+                            "chi2",
+                            (
+                                f"{float(output.get('reduced_chi2', np.nan)):.2f}"
+                                if np.isfinite(
+                                    output.get("reduced_chi2", np.nan)
+                                )
+                                else "N/A"
+                            ),
+                        ],
+                        ["inverted", str(bool(_is_inverted))],
+                    ],
+                )
             )
 
             output["is_detection"] = is_det
@@ -17268,21 +17330,22 @@ def run_photometry():
         ]
         log_status(ascii_kv("PHOTOMETRY", _res_pairs, framed=True), ui=True)
 
-        log_status(log_step("Photometry finished"))
         end_mem = _process_memory_gb()
-        _mem_str = ""
+        _finish_body = f"Time Taken: {end - start:.1f} s"
         if end_mem is not None and start_mem is not None:
-            _mem_str = (
-                f", {end_mem[1]:.2f} GB peak RAM "
+            _finish_body += (
+                f"\nUsage: {end_mem[1]:.2f} GB peak RAM "
                 f"({end_mem[0] - start_mem[0]:+.2f} GB during image)"
             )
         elif end_mem is not None:
-            _mem_str = f", {end_mem[1]:.2f} GB peak RAM"
+            _finish_body += f"\nUsage: {end_mem[1]:.2f} GB peak RAM"
         log_status(
-            "Finished: %s  (%.1f s%s)",
-            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end)),
-            end - start,
-            _mem_str,
+            border_msg(
+                "Photometry finished - "
+                + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end)),
+                body="-",
+                metadata=_finish_body,
+            )
         )
 
     except Exception as e:
