@@ -2278,10 +2278,15 @@ def run_photometry():
         mjd_key = telescope_config.get("mjd", "MJD-OBS")
         date_key = telescope_config.get("date", "DATE-OBS")
         date_mjd = np.nan
+        # Which header keyword produced the MJD (recorded in the Calib
+        # header so downstream time corrections know the convention).
+        mjd_key_used = None
         try:
             if mjd_key and mjd_key != "not_given_by_user" and mjd_key in header:
                 mjd_value = header[mjd_key]
                 date_mjd = float(mjd_value) if mjd_value is not None else np.nan
+                if np.isfinite(date_mjd) and date_mjd != 0:
+                    mjd_key_used = mjd_key
         except (TypeError, ValueError):
             pass
         if not np.isfinite(date_mjd) or date_mjd == 0:
@@ -2292,6 +2297,7 @@ def run_photometry():
                         date_mjd = float(mjd_value) if mjd_value is not None else np.nan
                         if np.isfinite(date_mjd) and date_mjd != 0:
                             logging.info("MJD from keyword %r: %.3f", alt, date_mjd)
+                            mjd_key_used = alt
                             break
                     except (TypeError, ValueError):
                         pass
@@ -2300,12 +2306,15 @@ def run_photometry():
                 if date_key and date_key != "not_given_by_user" and date_key in header:
                     date_iso = header[date_key]
                     date_mjd = convert_to_mjd_astropy(date_iso)
+                    if np.isfinite(date_mjd) and date_mjd != 0:
+                        mjd_key_used = date_key
             except Exception as e:
                 logging.warning(
                     "Failed to convert date from header key %s: %s", date_key, e
                 )
         if telescope == "MPI-2.2" and "TDP-MID" in header:
             date_mjd = header["TDP-MID"]
+            mjd_key_used = "TDP-MID"
             logging.info("MPI-2.2MM detected (TDP-MID); MJD: %.3f", date_mjd)
         if not np.isfinite(date_mjd) or date_mjd == 0:
             date_mjd = Time.now().mjd
@@ -17506,6 +17515,27 @@ def run_photometry():
         if "target_y_pix" in input_yaml and input_yaml["target_y_pix"] is not None:
             target_lines.append(f"# target_y_pix: {input_yaml['target_y_pix']:.6f} px")
 
+        # Observatory location (telescope.yml ``location`` block) and the
+        # MJD keyword used, so post-processing can build mid-exposure or
+        # barycentric timestamps without re-reading the FITS headers.
+        site_lines = []
+        try:
+            _site_loc = (
+                (telescope_data.get(telescope) or {}).get("location") or {}
+            )
+            _sl_lon = float(_site_loc.get("lon"))
+            _sl_lat = float(_site_loc.get("lat"))
+            _sl_alt_raw = _site_loc.get("alt")
+            _sl_alt = float(_sl_alt_raw) if _sl_alt_raw is not None else 0.0
+            if np.isfinite(_sl_lon) and np.isfinite(_sl_lat):
+                site_lines.append("# Site information")
+                site_lines.append(f"# site_lon: {_sl_lon:.6f} deg")
+                site_lines.append(f"# site_lat: {_sl_lat:.6f} deg")
+                site_lines.append(f"# site_alt: {_sl_alt:.1f} m")
+        except (TypeError, ValueError):
+            pass
+        site_lines.append(f"# mjd_keyword: {mjd_key_used or mjd_key or ''}")
+
         def _fmt6(v):
             # fit_params values may be None rather than NaN; a bare
             # f"{None:.6f}" raises TypeError and aborts the CALIB write
@@ -17586,6 +17616,8 @@ def run_photometry():
             file.write("# Output dictionary\n")
             file.write(output_str)
             file.write("\n" + "\n".join(target_lines))
+            if site_lines:
+                file.write("\n" + "\n".join(site_lines))
             file.write("\n" + "\n".join(zp_lines))
 
         # Append sequence star catalog to CALIB file.
