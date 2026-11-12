@@ -40,6 +40,7 @@ from functions import (
     log_warning_from_exception,
     ascii_table,
     ascii_kv,
+    ascii_card,
     border_msg,
 )
 from check import FitsInfo
@@ -798,18 +799,23 @@ class Prepare:
                 self.input_yaml.get("target_dec"),
             )
             print(
-                f"\n{'='*60}\n"
-                f"ERROR: target_name and explicit coordinates conflict.\n\n"
-                f"  target_name : {name}\n"
-                f"  target_ra   : {self.input_yaml.get('target_ra')}\n"
-                f"  target_dec  : {self.input_yaml.get('target_dec')}\n\n"
-                f"target_name requests a TNS/SIMBAD position lookup, but\n"
-                f"explicit coordinates silently override it.\n\n"
-                f"To fix this, either:\n"
-                f"  a) Remove target_ra and target_dec to resolve '{name}'\n"
-                f"     via TNS/SIMBAD, or\n"
-                f"  b) Remove target_name to use the manual coordinates.\n"
-                f"{'='*60}\n"
+                ascii_card(
+                    "Error: target_name and explicit coordinates conflict",
+                    [
+                        f"target_name : {name}",
+                        f"target_ra   : {self.input_yaml.get('target_ra')}",
+                        f"target_dec  : {self.input_yaml.get('target_dec')}",
+                        "",
+                        "target_name requests a TNS/SIMBAD position lookup,",
+                        "but explicit coordinates silently override it.",
+                        "",
+                        "To fix this, either:",
+                        f"  a) Remove target_ra and target_dec to resolve '{name}'",
+                        "     via TNS/SIMBAD, or",
+                        "  b) Remove target_name to use the manual coordinates.",
+                    ],
+                ),
+                file=sys.stderr,
             )
             sys.exit(
                 "Stopped: target_name conflicts with explicit "
@@ -996,23 +1002,29 @@ class Prepare:
                         target_name,
                     )
                     print(
-                        f"\n{'='*60}\n"
-                        f"ERROR: Target '{target_name}' not found on TNS or SIMBAD.\n\n"
-                        f"You provided a target_name but:\n"
-                        f"  1. TNS lookup failed (no API credentials or object not found), AND\n"
-                        f"  2. SIMBAD lookup also failed, AND\n"
-                        f"  3. No manual RA/Dec coordinates were provided.\n\n"
-                        f"To fix this, either:\n"
-                        f"  a) Provide TNS API credentials in your input YAML:\n"
-                        f"       wcs:\n"
-                        f"         TNS_BOT_ID: <your_bot_id>\n"
-                        f"         TNS_BOT_NAME: <your_bot_name>\n"
-                        f"         TNS_BOT_API: <your_api_key>\n\n"
-                        f"  b) Provide RA/Dec coordinates manually:\n"
-                        f"       autophot_input['target_ra'] = <RA in degrees>\n"
-                        f"       autophot_input['target_dec'] = <Dec in degrees>\n\n"
-                        f"  c) Remove target_name to run without a specific target\n"
-                        f"{'='*60}\n"
+                        ascii_card(
+                            f"Error: target '{target_name}' not found on TNS or SIMBAD",
+                            [
+                                "You provided a target_name but:",
+                                "  1. TNS lookup failed (no API key or target not found), AND",
+                                "  2. SIMBAD lookup also failed, AND",
+                                "  3. No manual RA/Dec coordinates were provided.",
+                                "",
+                                "To fix this, either:",
+                                "  a) Provide TNS API credentials in your input YAML:",
+                                "       wcs:",
+                                "         TNS_BOT_ID: <your_bot_id>",
+                                "         TNS_BOT_NAME: <your_bot_name>",
+                                "         TNS_BOT_API: <your_api_key>",
+                                "",
+                                "  b) Provide RA/Dec coordinates manually:",
+                                "       autophot_input['target_ra'] = <RA in degrees>",
+                                "       autophot_input['target_dec'] = <Dec in degrees>",
+                                "",
+                                "  c) Remove target_name to run without a specific target",
+                            ],
+                        ),
+                        file=sys.stderr,
                     )
                     sys.exit("Stopped: TNS and SIMBAD both failed and no RA/Dec provided for target_name.")
             
