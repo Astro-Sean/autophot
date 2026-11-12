@@ -51,7 +51,7 @@ default_input:
   fpath: '' # str --- Runtime: current FITS file path (set internally).
   write_dir: null # str|null --- Runtime: output directory for current image (set internally).
   imageFilter: '' # str --- Runtime: band name for current image after mapping (set internally).
-  exposure_time: 30.0 # float --- Used only for workflows without a FITS header; science frames must supply EXPTIME/EXPOSURE in the header (see main + aperture.resolve_exposure_time_seconds).
+  exposure_time: 30.0 # float --- Fallback exposure time (s) when the FITS header lacks EXPTIME/EXPOSURE (e.g. survey coadds, reference templates); a warning is logged when assumed.
   gain: 1.0 # float --- Used only for workflows without a FITS header; science frames must supply GAIN (or the telescope.yml gain keyword) in the header (see main + aperture.resolve_gain_e_per_adu).
   read_noise: 0.0 # float --- Runtime fallback read noise (e-) if header key is missing.
   pixel_scale: null # float|null --- Runtime fallback pixel scale (arcsec/pixel) if not in telescope DB/header.
@@ -87,14 +87,15 @@ default_input:
     detection_mf_prob_min: 0.9 # float --- Minimum prob_detect required for the matched-filter rescue (see detection_mf_snr_min).
     detection_max_offset_arcsec: 2.0 # float --- Reject a detection whose fitted centroid lies farther than this from the target position (arcsec). The PSF fit may recentre to absorb small WCS/centroid errors, but a large offset means it locked onto an offset source or subtraction artifact rather than the target. Set 0 to disable.
     upper_limit_snr: 5.0 # float --- S/N threshold for reporting upper limits for non-detections (SNU in ZTF terminology). If the multi-SNR limiting-magnitude machinery includes this threshold, the corresponding limit is used for non-detection upper limits; otherwise the 50% completeness limit is used.
-    aperture_size: 1.7 # float --- Aperture radius in units of FWHM (pixels = `aperture_size * fwhm`).
+    aperture_size: 1.7 # float --- Aperture radius in units of FWHM (pixels = `aperture_size * fwhm`). Used directly when `find_optimum_radius` is False or the optimum-radius search cannot run or fails; in crowded fields `crowded_optimum_radius_fwhm` still takes precedence. Ignored when `aperture_radius` is set.
     enforce_nonnegative_local_background: False # bool --- If True, clamp annulus-estimated local background to >=0 before subtraction (prevents flux inflation when local sky is negative from over-subtraction/miscalibration).
     apply_aperture_correction: False # bool --- DEPRECATED no-op, kept for backward compatibility. ZP_AP is fitted on raw flux_AP and already embeds the aperture loss, so calibrated aperture mags always carry the correction; setting this only logs a note. The measured correction is still stored and used for AP/PSF scale bridging.
     plot_aperture_correction: False # bool --- If True, save the aperture-correction diagnostic plot (curve of growth).
     apply_colorterms: False # bool --- If True, measure and apply color term corrections to catalog sources during calibration.
     color_term_poly_order: 1 # int --- Polynomial order for color term fitting: 1 for linear, 2 for quadratic.
     color_term_n_segments: 1 # int --- Number of segments for piecewise linear fitting: 1 for single line, 2 for two segments with breakpoint, etc. Overrides poly_order if > 1.
-    aperture_radius: null # float|null --- Explicit aperture radius (pixels). If null, computed from `fwhm` (typically max(1.5*FWHM, 2.0)).
+    aperture_radius: null # float|null --- Explicit aperture radius (pixels). When set, the data-driven optimum-radius search is skipped entirely and this value is used as-is. If null, the radius is the optimum-radius result when `find_optimum_radius` succeeds, else `aperture_size * fwhm`.
+    find_optimum_radius: True # bool --- If True, derive the aperture radius from a curve-of-growth optimisation over isolated stars. If False, use the fixed `aperture_size` FWHM multiplier instead (or `aperture_radius` / `crowded_optimum_radius_fwhm` when those apply).
     psf_oversample: 1 # int --- Oversampling factor for PSF modelling/fitting grids.
     oversample_psf: False # bool --- If True, enable adaptive PSF oversampling based on FWHM threshold. If False, use fixed psf_oversample value.
     oversample_psf_fwhm: 2.5 # float --- DEPRECATED: oversampling now uses undersampled_fwhm_threshold. Kept for backward compatibility.
@@ -111,8 +112,9 @@ default_input:
     redo_sources: False # bool --- If True, redo source detection/photometry even if intermediate outputs exist.
     fitting_xy_bounds: 3.0 # float --- Allowed X/Y fitting offset bound in arcseconds; converted to pixels using image pixel_scale. The effective bound is additionally capped near half the PSF fit box, so very large values require a correspondingly larger fit shape.
     fitting_xy_bounds_target_fwhm: 1.5 # float --- Minimum X/Y fitting offset bound for TARGET fits, in FWHM units. Ensures the target PSF fit can still re-center even when fitting_xy_bounds in pixels is smaller than the FWHM (e.g. coarse pixel scales like ZTF). The larger of this FWHM-relative floor and fitting_xy_bounds is used. Clamped to [0.5, 5.0] FWHM.
+    fitting_xy_bounds_target_arcsec: 1.5 # float --- Maximum X/Y fitting offset bound for TARGET fits, in arcseconds; converted to pixels using image pixel_scale. The target seed is a catalog position, so the fit may only drift as far as astrometric error and real displacement allow - this caps the window so a marginal detection cannot hop onto a brighter neighbour. Set to null to disable and use the full fitting_xy_bounds. The cap never undercuts the fitting_xy_bounds_target_fwhm floor.
     fitting_xy_bounds_detect_snr: 4.0 # float --- Detection S/N required before the fitted X/Y position may move within xy_bounds. The peak is searched anywhere inside the bound window, so a source displaced by bad WCS or proper motion still counts as detected; on difference images either sign counts. Target sources are always window-checked; catalog sources skip the window check when their aperture S/N already clears this threshold. At or below 0 the check is disabled and every source may re-center.
-    fitting_xy_bounds_full_snr: 20.0
+    fitting_xy_bounds_full_snr: 20.0 # float --- Detection S/N at which a single target is allowed the full free-fit bound. Between fitting_xy_bounds_detect_snr and this value the target bound grows linearly from the held bound to the free bound, so marginal detections get only a small recentering allowance.
     fitting_xy_bounds_hold_px: 0.5 # float --- X/Y bound in pixels applied when the detection S/N falls below fitting_xy_bounds_detect_snr; the fit then becomes forced photometry pinned near the seed position instead of chasing a noise peak. Must be > 0 (photutils).
     fitting_xy_bounds_astrometric: True # bool --- If True, widen the held (forced-photometry) X/Y bound by the measured astrometric uncertainty: the residual dx/dy scatter from the WCS-vs-PSF and science-vs-template offset diagnostics plus the median matched-source position error, capped at the free-fit bound.
     fitting_xy_bounds_edge_frac: 0.9 # float --- Single-target fits whose fitted centre lands at or beyond this fraction of the per-source X/Y bound are treated as edge-latched onto a source outside the window (the bound clamped the centroid mid-approach); the target is then refit held at the catalog position so the reported flux belongs to the target rather than the neighbour. Range (0,1]; 0 disables the guard.
@@ -748,6 +750,24 @@ default_input:
     uncal_min_sources: 30 # int --- Minimum finite injection trials required before the calibration factor may be applied.
     uncal_factor_clip: [0.5, 2.0] # list[float] --- Allowed range for the applied calibration factor; factors outside the range indicate a pathological injection sample and are not applied.
     recovery_calibrate_snr: True # bool --- If true (and uncal_apply is on), re-evaluate the injection detection flags under errors scaled by the empirical calibration factor and re-solve the limiting magnitude. The real detection flag is decided on calibrated S/N, so an uncalibrated gate would report a limit ~2.5*log10(factor) mag deeper than the pipeline's own detection threshold. The pre-calibration limit is kept in result details as inject_lmag_raw; a failed re-solve reverts to the raw gate.
+
+  host_model:
+    # Optional host-galaxy removal for targets embedded in galaxy light
+    # (no template subtraction available). Requires the external `galfit`
+    # binary on PATH (or host_model.galfit_path). When enabled, a Sersic
+    # (+ optional PSF) model is fitted on the target cutout and the fitted
+    # non-sky component is subtracted before aperture/PSF photometry; all
+    # feedme files and model products are kept under <outdir>/galfit_host/.
+    enabled: false # bool --- Master switch for the optional GALFIT host-subtraction stage. Default off: the pipeline is unchanged when the binary is absent.
+    galfit_path: null # str|null --- Explicit path to the galfit executable. Null searches PATH, then ~/bin/galfit.
+    engine: galfit # str --- Host-model engine. Only "galfit" is supported.
+    fit_radius_fwhm: 10.0 # float --- Radius (FWHM units) around the target for the galfit fit region. The fit runs on a full-frame box of this radius (larger than the pipeline cutout) so the host body is not clipped at the frame edge; only the detected-source component(s) near the target are unmasked, everything else detected stays masked. Should comfortably cover the host plus the measurement annulus.
+    n_sersic: 1 # int --- Number of free Sersic components (1-4). Extra components can absorb a bright off-centre nucleus, bulge, or close companion inside the host footprint; seeded at the brightest reopened host pixels at least 2 FWHM apart.
+    n_psf: 0 # int --- Number of galfit `psf` (point-source) components (0-3) seeded at the brightest reopened host pixels at least 2 FWHM from the Sersic seeds. Use for unresolved host nuclei or compact neighbours: a Sersic collapses on a point source and crashes galfit, a psf component models it exactly. Requires the PSF stamp (analytic Moffat fallback).
+    fit_point_source: false # bool --- If true, add a `psf` component at the target position; its fitted flux is logged (psf_target_mag) and added back to the residual so the pipeline still measures the target. Useful as a galfit cross-check flux.
+    hold_target_position: true # bool --- With fit_point_source: fix the PSF component position at the catalog target (true, consistent with force_photometry) or let it move (false).
+    seed_exclude_target_fwhm: 1.5 # float --- Radius (FWHM units) around the target excluded when seeding the host centroid, so target flux cannot steer the Sersic centre.
+    timeout_s: 120 # float --- Wall-clock limit for the galfit subprocess.
 
   alignment:
     # reproject_method: "exact" uses exact pixel-area resampling (most geometrically accurate, handles all WCS distortions exactly)
