@@ -179,7 +179,8 @@ except (ModuleNotFoundError, ImportError):
         m = str(message).strip()
         if not m:
             return ""
-        return f"\n---- {m} ----"
+        rule = "-" * 70
+        return f"\n{rule}\n{m}\n{rule}"
 
     distance_to_uniform_row_col = None
     get_header = None
@@ -3457,9 +3458,8 @@ def _alignment_gate_accept(
 ) -> bool:
     """Decide whether an alignment of the given quality may be used.
 
-    'fail' always rejects.  'unverified' and 'warn' are accepted by default
-    (best-available fallback) unless the caller opts into strict mode via
-    ``alignment_require_verification`` / ``alignment_fail_on_poor_coverage``.
+    'fail' always rejects.  'unverified' and 'warn' are accepted
+    (best-available fallback).
 
     A 'warn' carries two very different meanings.  An evidence-limited warn
     (metrics inside the gates but thin/clustered coverage, translation-only
@@ -3470,20 +3470,12 @@ def _alignment_gate_accept(
     exceeded the gates and the small sample merely softened the verdict to
     warn: that is a bad alignment, not a sparse one, and it always rejects.
     """
-    ts_cfg = (input_yaml or {}).get("template_subtraction", {}) or {}
     if quality == "fail":
         return False
-    if quality == "unverified" and bool(
-        ts_cfg.get("alignment_require_verification", False)
+    if quality == "warn" and reasons is not None and any(
+        _WARN_DEMOTED_FROM_FAIL in r for r in reasons
     ):
         return False
-    if quality == "warn":
-        if reasons is not None and any(
-            _WARN_DEMOTED_FROM_FAIL in r for r in reasons
-        ):
-            return False
-        if bool(ts_cfg.get("alignment_fail_on_poor_coverage", False)):
-            return False
     return True
 
 
@@ -4293,16 +4285,22 @@ def _target_region_alignment_stats(dxy, anchor_xy, target_xy, radius_px):
     return {"per_target": per_target, "worst": worst, "radius_px": float(radius_px)}
 
 
-def _finite_coverage_floor(cfg_min_ff, src_finite_px, out_size):
+def _finite_coverage_floor(cfg_min_ff, src_finite_px, out_size, area_scale=1.0):
     """Finite-fraction floor for a warped template.
 
     A stamp template can only fill its own footprint on the science grid,
     so the gate checks that the warp retained most of the attainable
     coverage (20% allowed for resample edge losses) rather than an
-    absolute fraction the source can never reach.  Returns
+    absolute fraction the source can never reach.  ``area_scale`` is the
+    warp's pixel-area factor (|det| of the affine linear part): a
+    template at 0.5"/px warped onto a 0.79"/px grid legitimately keeps
+    only ~0.4x its source pixel count.  Returns
     ``(floor, attainable_fraction)``.
     """
-    attainable = float(src_finite_px) / max(1.0, float(out_size))
+    attainable = (
+        float(src_finite_px) * float(area_scale) / max(1.0, float(out_size))
+    )
+    attainable = min(attainable, 1.0)
     return min(float(cfg_min_ff), 0.8 * attainable), attainable
 
 
@@ -7961,8 +7959,7 @@ class Templates:
                     _squality, self.input_yaml, _sreasons
                 ):
                     logger.warning(
-                        "SCAMP+SWarp alignment rejected: quality=%s "
-                        "(strict verification gate enabled).",
+                        "SCAMP+SWarp alignment rejected: quality=%s.",
                         _squality,
                     )
                     return _fail("swarp", f"quality={_squality}")
@@ -8100,8 +8097,7 @@ class Templates:
                     _aquality, self.input_yaml, _areasons
                 ):
                     logger.warning(
-                        "AstroAlign alignment rejected: quality=%s "
-                        "(strict verification gate enabled).",
+                        "AstroAlign alignment rejected: quality=%s.",
                         _aquality,
                     )
                     return _fail("astroalign", f"quality={_aquality}")
@@ -9417,21 +9413,61 @@ class Templates:
                         )
                         return _fail("spalipy", "output shape mismatch")
                     _finite_frac = float(np.mean(np.isfinite(aligned_template)))
+                    # Attainable coverage must be measured in output
+                    # pixels: the affine warp rescales the template
+                    # footprint by |det(A)| (e.g. ~0.4x when mapping a
+                    # 0.5"/px template onto a 0.79"/px science grid).
+                    try:
+                        _aff_det = abs(
+                            float(
+                                np.linalg.det(
+                                    sp.affine_transform.params[:2, :2]
+                                )
+                            )
+                        )
+                        if not np.isfinite(_aff_det) or _aff_det <= 0:
+                            _aff_det = 1.0
+                    except Exception:
+                        try:
+                            # SimilarityTransform.scale is a scalar (area
+                            # s^2); AffineTransform.scale is (sx, sy)
+                            # (area sx*sy).  |prod| ^ (2/ndim) covers both.
+                            _s = np.asarray(
+                                sp.affine_transform.scale, dtype=float
+                            )
+                            _aff_det = float(np.abs(np.prod(_s))) ** (
+                                2.0 / max(_s.size, 1)
+                            )
+                        except Exception:
+                            _aff_det = 1.0
                     _min_ff, _attainable_ff = _finite_coverage_floor(
                         _ts_cfg.get("alignment_min_finite_fraction", 0.25),
                         float(np.count_nonzero(~_tpl_nan)),
                         aligned_template.size,
+                        area_scale=_aff_det,
                     )
                     _min_px = int(
                         _ts_cfg.get("alignment_min_valid_pixels", 1000)
                     )
                     _valid_px = aligned_template[np.isfinite(aligned_template)]
                     if _finite_frac < _min_ff or _valid_px.size < _min_px:
+                        _ff_reason = (
+                            f"finite={100.0 * _finite_frac:.1f}% below "
+                            f"floor {100.0 * _min_ff:.1f}% "
+                            f"(attainable {100.0 * _attainable_ff:.1f}%)"
+                            if _finite_frac < _min_ff
+                            else ""
+                        )
+                        _px_reason = (
+                            f"valid pixels {_valid_px.size} < {_min_px}"
+                            if _valid_px.size < _min_px
+                            else ""
+                        )
                         logger.warning(
-                            "spalipy output nearly empty (finite=%.1f%% "
-                            "vs attainable %.1f%%, n=%d < %d); rejecting.",
-                            100.0 * _finite_frac, 100.0 * _attainable_ff,
-                            _valid_px.size, _min_px,
+                            "spalipy output nearly empty (%s); rejecting.",
+                            "; ".join(
+                                r for r in (_ff_reason, _px_reason) if r
+                            ),
                         )
                         return _fail("spalipy", "insufficient finite coverage")
                     if float(np.nanstd(_valid_px)) <= 0:
@@ -10066,8 +10102,7 @@ class Templates:
                         _tquality, self.input_yaml, _treasons
                     ):
                         logger.warning(
-                            "tweakwcs alignment rejected: quality=%s "
-                            "(strict verification gate enabled).",
+                            "tweakwcs alignment rejected: quality=%s.",
                             _tquality,
                         )
                         return _fail("tweakwcs", f"quality={_tquality}")
