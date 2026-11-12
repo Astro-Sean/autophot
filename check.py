@@ -174,8 +174,8 @@ class FitsInfo:
         Args:
             input_yaml (dict): Config with 'wdir', 'fits_dir' keys
             flist (list, optional): Explicit FITS files list. Auto-discovers if None
-            template_files (bool): If True, do not reject files missing TELESCOP/INSTRUME
-                (used when validating template images, which may lack those headers).
+            template_files (bool): If True, do not write IncorrectFiles.txt for
+                unreadable headers (used when validating template images).
 
         Initializes:
             - File list from fits_dir or provided flist
@@ -190,7 +190,9 @@ class FitsInfo:
         self.fits_dir = Path(str(fits_dir))
         self.template_files = bool(template_files)
 
-        if flist:
+        if flist is not None:
+            # An explicit list is authoritative, even when empty - a caller
+            # passing [] means "nothing to check", not "rescan fits_dir".
             self.flist = flist
         else:
             # ``*.[fi][t]s*`` fails to match the common ``.fits`` extension
@@ -480,10 +482,13 @@ class FitsInfo:
         if incorrect_files and not self.template_files:
             outfile = self.fits_dir / "IncorrectFiles.txt"
             with open(outfile, "w") as f:
-                for fname, has_t, has_i in incorrect_files:
-                    missing = [k for k, ok in [("TELESCOP", has_t), ("INSTRUME", has_i)] if not ok]
-                    f.write(f"{fname}: missing {', '.join(missing)}\n")
-            self.logger.info("%d files missing headers -> %s", len(incorrect_files), outfile)
+                for fname, reason in incorrect_files:
+                    f.write(f"{fname}: {reason}\n")
+            self.logger.info(
+                "%d files with unreadable headers -> %s",
+                len(incorrect_files),
+                outfile,
+            )
 
         db = self._setup_telescope_entries(tele_dict, headers_cache, correct_files)
         self._extract_filters(db, headers_cache, correct_files)
@@ -492,23 +497,36 @@ class FitsInfo:
         return correct_files
 
     def _classify_files(self, headers_cache):
-        """Phase 1: Classify files by TELESCOP/INSTRUME presence."""
+        """Phase 1: Classify files by TELESCOP/INSTRUME presence.
+
+        Missing or empty TELESCOP/INSTRUME values resolve to 'unknown' so the
+        file stays in the run; only unreadable headers are rejected.
+        """
         self.logger.log(STATUS, border_msg("Headers", body="-"))
         incorrect, correct = [], []
         tele_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
         for fname in tqdm(self.flist) if len(self.flist) > 1 else self.flist:
             header = headers_cache.get(fname)
             if not header:
+                incorrect.append([fname, "unreadable or empty FITS header"])
                 continue
             tk = next((k for k in KEYWORD_ALIASES["TELESCOP"] if k in header), None)
             ik = next((k for k in KEYWORD_ALIASES["INSTRUME"] if k in header), None)
-            if tk and ik:
-                correct.append(fname)
-                tele_dict[header[tk].strip()]["INSTRUME"][header[ik].strip()] = {}
-            elif self.template_files:
-                correct.append(fname)
-            else:
-                incorrect.append([fname, bool(tk), bool(ik)])
+            tele = str(header[tk]).strip() if tk is not None else ""
+            inst = str(header[ik]).strip() if ik is not None else ""
+            if not tele or not inst:
+                missing = [
+                    name
+                    for name, val in (("TELESCOP", tele), ("INSTRUME", inst))
+                    if not val
+                ]
+                self.logger.warning(
+                    "%s: missing %s; using 'unknown'",
+                    os.path.basename(fname),
+                    ", ".join(missing),
+                )
+            correct.append(fname)
+            tele_dict[tele or "unknown"]["INSTRUME"][inst or "unknown"] = {}
         return correct, incorrect, tele_dict
 
     def _setup_telescope_entries(self, tele_dict, headers_cache, correct_files):
@@ -536,14 +554,19 @@ class FitsInfo:
         return db
 
     def _find_sample_header(self, headers_cache, correct_files, tele, inst_name):
-        """Find first header matching telescope/instrument."""
+        """Find first header matching telescope/instrument.
+
+        Missing keywords compare as 'unknown', matching _classify_files.
+        """
         for fname in correct_files:
             h = headers_cache.get(fname)
             if not h:
                 continue
             tk = next((k for k in KEYWORD_ALIASES["TELESCOP"] if k in h), None)
             ik = next((k for k in KEYWORD_ALIASES["INSTRUME"] if k in h), None)
-            if tk and ik and h[tk].strip() == tele and h[ik].strip() == inst_name:
+            h_tele = str(h[tk]).strip() if tk is not None else ""
+            h_inst = str(h[ik]).strip() if ik is not None else ""
+            if (h_tele or "unknown") == tele and (h_inst or "unknown") == inst_name:
                 return h
         return None
 
@@ -610,9 +633,9 @@ class FitsInfo:
                 continue
             tk = next((k for k in KEYWORD_ALIASES["TELESCOP"] if k in header), None)
             ik = next((k for k in KEYWORD_ALIASES["INSTRUME"] if k in header), None)
-            if not tk or not ik:
-                continue
-            tele, inst = header[tk].strip(), header[ik].strip()
+            tele = str(header[tk]).strip() if tk is not None else ""
+            inst = str(header[ik]).strip() if ik is not None else ""
+            tele, inst = tele or "unknown", inst or "unknown"
             db.setdefault(tele, {}).setdefault("INSTRUME", {})
             if inst not in db[tele]["INSTRUME"]:
                 db[tele]["INSTRUME"][inst] = {"Name": f"{tele}+{inst}", "filter_key_0": "FILTER"}
