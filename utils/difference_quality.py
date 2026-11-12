@@ -762,7 +762,7 @@ def assess_difference_image(
         "    median=%.3f std=%.3f rms=%.3f\n"
         "    dipoles=%d/%d checked (%.1f%%)\n"
         "    bright_star_resid_rms=%.2f sigma (n=%d)\n"
-        "    bg_spatial_std=%.3f | edge_ratio=%.2f | autocorr_peak=%.3f",
+        "    bg_spatial_std=%.3f, edge_ratio=%.2f, autocorr_peak=%.3f",
         metrics.quality_class, metrics.quality_score,
         metrics.diff_median, metrics.diff_std, metrics.diff_rms,
         metrics.dipole_count, metrics.dipole_checked,
