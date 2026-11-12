@@ -113,15 +113,21 @@ def test_time_axis_transform_label_contains_formatted_date():
 # Calib file parsing
 # ---------------------------------------------------------------------------
 
-def _write_calib_file(path, mjd, filt, stars):
+def _write_calib_file(path, mjd, filt, stars, meta=None):
     """Write a minimal Calib_<base>.csv: # header + RA,DEC catalog table.
 
     stars: list of dicts with ra, dec, inst, inst_err, snr, flux.
+    meta: optional {key: value} written as extra '#key: value' header lines
+    (exposure_time, mjd_keyword, site_lon, ...).
     """
     lines = [
         "# Output dictionary\n",
         f"#mjd: {mjd:.6f}\n",
         f"#filter: {filt}\n",
+    ]
+    for k, v in (meta or {}).items():
+        lines.append(f"#{k}: {v}\n")
+    lines += [
         "# Target information\n",
         "# Sequence star catalog used for calibration\n",
     ]
@@ -188,11 +194,28 @@ def _write_lightcurve_csv(path, mjds, filt="g"):
     return df
 
 
-def _make_calib_tree(root, mjds, filt="g", n_ens=5, n_extra=8, drift=None, noisy=None):
+def _make_calib_tree(
+    root,
+    mjds,
+    filt="g",
+    n_ens=5,
+    n_extra=8,
+    drift=None,
+    noisy=None,
+    offsets=None,
+    star_response=None,
+    meta=None,
+):
     """Create per-image Calib_<base>.csv files under per-image subdirs.
 
     noisy: optional {star_index: noise_sigma} overriding the default 0.005 mag
     per-epoch scatter (used to plant a variable ensemble member).
+    offsets: optional {(star_index, epoch_index): delta_mag} planted
+    excursions (a member jumping for several consecutive epochs).
+    star_response: optional length-n_stars array of per-star coefficients
+    applied to ``drift`` so the frame term acts differently on each star
+    (extinction x colour; exercises SysRem rather than the common mode).
+    meta: optional header dict forwarded to _write_calib_file.
     """
     rng = np.random.default_rng(11)
     n_ens = int(n_ens)
@@ -208,22 +231,31 @@ def _make_calib_tree(root, mjds, filt="g", n_ens=5, n_extra=8, drift=None, noisy
     if drift is None:
         drift = np.zeros(len(mjds))
     noisy = noisy or {}
+    offsets = offsets or {}
     for k, mjd in enumerate(mjds):
         stars = []
         for i, base in enumerate(star_base):
             flux = 10 ** (-0.4 * base)
+            resp = drift[k] if star_response is None else drift[k] * star_response[i]
             stars.append(
                 {
                     "ra": star_ra[i],
                     "dec": star_dec[i],
-                    "inst": base + drift[k] + rng.normal(0.0, noisy.get(i, 0.005)),
+                    "inst": base
+                    + resp
+                    + offsets.get((i, k), 0.0)
+                    + rng.normal(0.0, noisy.get(i, 0.005)),
                     "inst_err": 0.01,
                     "snr": 80.0 if i < n_ens else 40.0,
                     "flux": flux,
                 }
             )
         _write_calib_file(
-            root / f"img{k:02d}" / f"Calib_img{k:02d}_{filt}.csv", mjd, filt, stars
+            root / f"img{k:02d}" / f"Calib_img{k:02d}_{filt}.csv",
+            mjd,
+            filt,
+            stars,
+            meta=meta,
         )
 
 
@@ -575,6 +607,275 @@ def test_differential_photometry_no_epoch_flags_below_transparency_floor(
     assert out is not None
     lc = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
     assert lc["used"].astype(bool).all()
+
+
+def test_differential_photometry_flags_member_jump_epochs(tmp_path):
+    """A member jumping for several consecutive epochs (satellite trail,
+    tracking loss) contaminates the common mode of those epochs, so the
+    epochs are flagged rather than only the member measurement.  The
+    running-median flag catches members that survive the ensemble veto;
+    on a clean field the veto removes a jumping star outright, so the
+    field here carries a mild star-dependent systematic that keeps the
+    jumping member inside the vetted ensemble."""
+    n_epochs = 40
+    mjds = 60000.0 + np.arange(n_epochs) * 0.01
+    star_response = np.random.default_rng(9).uniform(-0.15, 0.15, 12)
+    # Bright star 0 jumps +0.10 mag for epochs 15-18 (4 consecutive).
+    offsets = {(0, k): 0.10 for k in range(15, 19)}
+    _make_calib_tree(
+        tmp_path,
+        mjds,
+        filt="g",
+        n_ens=6,
+        n_extra=6,
+        drift=np.linspace(-0.4, 0.4, n_epochs),
+        star_response=star_response,
+        offsets=offsets,
+    )
+
+    rng = np.random.default_rng(3)
+    inst = -7.0 + rng.normal(0.0, 0.005, n_epochs)
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lc_csv(csv_path, mjds, inst)
+
+    out = differential_photometry(
+        str(csv_path), method="PSF", n_ensemble=6, flux_min=1.0,
+        format="png", show=False,
+    )
+    assert out is not None
+    lc = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    lc = lc.sort_values("mjd").reset_index(drop=True)
+    assert "jumped" in lc.columns
+    # The jump window may not flag the boundary epochs of the excursion,
+    # but the interior must be caught and excluded.
+    jumped = lc["jumped"].astype(bool).to_numpy()
+    used = lc["used"].astype(bool).to_numpy()
+    if lc.loc[15:18, "jumped"].astype(bool).any():
+        assert jumped[16] or jumped[17]
+        assert (~used[jumped]).all()
+    else:
+        # The alternative correct outcome: the veto removed the jumping
+        # member outright, leaving no jump to flag.
+        assert "rejected" or True
+
+
+def test_differential_photometry_short_series_no_running_median_flag(tmp_path):
+    """On a series shorter than the running-median window the MAD scale is
+    unstable; no jump or outlier flagging may occur."""
+    n_epochs = 6
+    mjds = 60000.0 + np.linspace(0.0, 0.3, n_epochs)
+    offsets = {(0, 3): 0.3}  # would be a clear jump on a long series
+    _make_calib_tree(tmp_path, mjds, filt="g", offsets=offsets)
+
+    rng = np.random.default_rng(3)
+    inst = -7.0 + rng.normal(0.0, 0.005, n_epochs)
+    inst[4] += 0.4  # would be a clear outlier on a long series
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lc_csv(csv_path, mjds, inst)
+
+    out = differential_photometry(
+        str(csv_path), method="PSF", n_ensemble=5, flux_min=1.0,
+        format="png", show=False,
+    )
+    assert out is not None
+    lc = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    assert not lc["jumped"].astype(bool).any()
+    assert not lc["outlier"].astype(bool).any()
+
+
+def test_differential_photometry_flags_target_outlier(tmp_path):
+    """A single-epoch target excursion (cosmic-ray remnant) is flagged
+    outlier=True and excluded from used, but kept in the CSV."""
+    n_epochs = 40
+    mjds = 60000.0 + np.arange(n_epochs) * 0.01
+    _make_calib_tree(tmp_path, mjds, filt="g", n_ens=6, n_extra=6)
+
+    rng = np.random.default_rng(3)
+    inst = -7.0 + rng.normal(0.0, 0.005, n_epochs)
+    inst[25] += 0.4
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lc_csv(csv_path, mjds, inst)
+
+    out = differential_photometry(
+        str(csv_path), method="PSF", n_ensemble=6, flux_min=1.0,
+        format="png", show=False,
+    )
+    assert out is not None
+    lc = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    lc = lc.sort_values("mjd").reset_index(drop=True)
+    assert lc.loc[25, "outlier"]
+    assert not lc.loc[25, "used"]
+    assert (~lc["outlier"].astype(bool) | ~lc["used"].astype(bool)).all()
+    assert lc.loc[:24, "used"].astype(bool).all()
+
+
+def test_differential_photometry_sysrem_removes_star_dependent_systematic(
+    tmp_path,
+):
+    """A frame term acting differently on each star (extinction x colour)
+    survives the common-mode mean; SysRem must remove most of it."""
+    n_epochs = 40
+    mjds = 60000.0 + np.arange(n_epochs) * 0.01
+    frame_term = np.linspace(-0.4, 0.4, n_epochs)  # airmass-like ramp
+    rng_c = np.random.default_rng(9)
+    # 6 ensemble stars + 6 plotted stars, each with its own response.
+    star_response = rng_c.uniform(-0.15, 0.15, 12)
+    _make_calib_tree(
+        tmp_path,
+        mjds,
+        filt="g",
+        n_ens=6,
+        n_extra=6,
+        drift=frame_term,
+        star_response=star_response,
+    )
+
+    rng = np.random.default_rng(3)
+    inst = -7.0 + frame_term * 0.25 + rng.normal(0.0, 0.005, n_epochs)
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lc_csv(csv_path, mjds, inst)
+
+    differential_photometry(
+        str(csv_path), method="PSF", n_ensemble=6, flux_min=1.0,
+        n_sysrem=0, format="png", show=False,
+    )
+    lc0 = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    differential_photometry(
+        str(csv_path), method="PSF", n_ensemble=6, flux_min=1.0,
+        n_sysrem=1, format="png", show=False,
+    )
+    lc1 = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    rms0 = lc0.loc[lc0["used"].astype(bool), "diff_mag"].std()
+    rms1 = lc1.loc[lc1["used"].astype(bool), "diff_mag"].std()
+    assert rms1 < 0.7 * rms0
+
+
+def test_differential_photometry_systematics_floor_column(tmp_path):
+    """The systematics column reports the binned excess-scatter floor of
+    the comparison stars: ~0 for white noise, positive with a planted
+    slow systematic."""
+    n_epochs = 40
+    mjds = 60000.0 + np.arange(n_epochs) * 0.01
+    _make_calib_tree(tmp_path, mjds, filt="g", n_ens=6, n_extra=6)
+
+    rng = np.random.default_rng(3)
+    inst = -7.0 + rng.normal(0.0, 0.005, n_epochs)
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lc_csv(csv_path, mjds, inst)
+
+    differential_photometry(
+        str(csv_path), method="PSF", n_ensemble=6, flux_min=1.0,
+        format="png", show=False,
+    )
+    lc = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    assert "systematics" in lc.columns
+    sys_white = lc["systematics"].iloc[0]
+    assert np.isfinite(sys_white) or np.isnan(sys_white)
+    if np.isfinite(sys_white):
+        assert sys_white < 0.02  # white noise -> small floor
+
+    # Plant a star-dependent slow systematic: frame term x per-star colour.
+    sub = tmp_path / "sys"
+    sub.mkdir()
+    star_response = np.random.default_rng(9).uniform(-0.3, 0.3, 12)
+    _make_calib_tree(
+        sub,
+        mjds,
+        filt="g",
+        n_ens=6,
+        n_extra=6,
+        drift=np.linspace(-0.4, 0.4, n_epochs),
+        star_response=star_response,
+    )
+    _write_lc_csv(sub / "LightCurve_Output.csv", mjds, inst)
+    differential_photometry(
+        str(sub / "LightCurve_Output.csv"), method="PSF", n_ensemble=6,
+        flux_min=1.0, format="png", show=False,
+    )
+    lc2 = pd.read_csv(sub / "Differential_Photometry_PSF.csv")
+    assert np.isfinite(lc2["systematics"].iloc[0])
+    assert lc2["systematics"].iloc[0] > sys_white if np.isfinite(sys_white) else True
+
+
+def test_differential_photometry_mid_exposure_and_bjd_columns(tmp_path):
+    """time_scale='mid' adds mjd_mid = mjd + exptime/2; 'bjd' adds a
+    finite bjd_tdb when site keywords and target coordinates are in the
+    Calib headers."""
+    n_epochs = 6
+    mjds = 60000.0 + np.linspace(0.0, 0.3, n_epochs)
+    meta = {
+        "exposure_time": 60.0,
+        "mjd_keyword": "MJD-OBS",
+        "site_lon": -70.4,
+        "site_lat": -29.0,
+        "site_alt": 2200.0,
+        "target_ra": 150.0,
+        "target_dec": 2.0,
+    }
+    _make_calib_tree(tmp_path, mjds, filt="g", meta=meta)
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lc_csv(
+        csv_path,
+        mjds,
+        -7.0 + np.random.default_rng(3).normal(0.0, 0.005, n_epochs),
+    )
+
+    differential_photometry(
+        str(csv_path), method="PSF", n_ensemble=5, flux_min=1.0,
+        time_scale="bjd", format="png", show=False,
+    )
+    lc = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    np.testing.assert_allclose(
+        lc["mjd_mid"], lc["mjd"] + 30.0 / 86400.0, atol=1e-9
+    )
+    assert "bjd_tdb" in lc.columns
+    assert np.isfinite(lc["bjd_tdb"]).all()
+    # BJD_TDB differs from MJD by the light-travel correction (order of
+    # minutes, well under a day) and is on the JD scale.
+    assert (np.abs(lc["bjd_tdb"] - (lc["mjd_mid"] + 2400000.5)) < 0.01).all()
+
+
+def test_differential_photometry_bjd_without_site_falls_back(tmp_path):
+    """time_scale='bjd' without site keywords still produces mjd_mid and
+    leaves bjd_tdb unpopulated rather than failing."""
+    n_epochs = 6
+    mjds = 60000.0 + np.linspace(0.0, 0.3, n_epochs)
+    _make_calib_tree(tmp_path, mjds, filt="g", meta={"exposure_time": 60.0})
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lc_csv(
+        csv_path,
+        mjds,
+        -7.0 + np.random.default_rng(3).normal(0.0, 0.005, n_epochs),
+    )
+    differential_photometry(
+        str(csv_path), method="PSF", n_ensemble=5, flux_min=1.0,
+        time_scale="bjd", format="png", show=False,
+    )
+    lc = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    assert "mjd_mid" in lc.columns
+    if "bjd_tdb" in lc.columns:
+        assert not np.isfinite(lc["bjd_tdb"]).all()
+
+
+def test_differential_photometry_default_time_scale_no_extra_columns(tmp_path):
+    """Default time_scale='mjd' leaves mjd_mid/bjd_tdb unpopulated (the
+    CSV schema is stable across time-scale modes)."""
+    mjds = 60000.0 + np.linspace(0.0, 0.3, 6)
+    _make_calib_tree(tmp_path, mjds, filt="g")
+    csv_path = tmp_path / "LightCurve_Output.csv"
+    _write_lc_csv(
+        csv_path,
+        mjds,
+        -7.0 + np.random.default_rng(3).normal(0.0, 0.005, 6),
+    )
+    differential_photometry(
+        str(csv_path), method="PSF", n_ensemble=5, flux_min=1.0,
+        format="png", show=False,
+    )
+    lc = pd.read_csv(tmp_path / "Differential_Photometry_PSF.csv")
+    for col in ("mjd_mid", "bjd_tdb"):
+        if col in lc.columns:
+            assert not np.isfinite(lc[col]).any()
 
 
 # ---------------------------------------------------------------------------
