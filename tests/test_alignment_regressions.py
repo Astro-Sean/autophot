@@ -27,6 +27,7 @@ import wcs as wcs_mod
 from templates import (
     AlignmentResult,
     Templates,
+    _WARN_DEMOTED_FROM_FAIL,
     _alignment_gate_accept,
     _alignment_gate_thresholds,
     _atomic_fits_write,
@@ -434,11 +435,9 @@ class TestQualityClassifier:
         assert _alignment_gate_accept("pass", {})
         assert _alignment_gate_accept("warn", {})
         assert _alignment_gate_accept("unverified", {})
-        # Strict modes opt in via config.
-        strict = {"template_subtraction": {"alignment_require_verification": True}}
-        assert not _alignment_gate_accept("unverified", strict)
-        cov = {"template_subtraction": {"alignment_fail_on_poor_coverage": True}}
-        assert not _alignment_gate_accept("warn", cov)
+        # A warn demoted from fail is measured-bad and always rejects.
+        demoted = [_WARN_DEMOTED_FROM_FAIL]
+        assert not _alignment_gate_accept("warn", {}, demoted)
 
 
 # ---------------------------------------------------------------------------
