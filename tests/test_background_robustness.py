@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from background import BackgroundSubtractor
+from autophot.pipeline.background import BackgroundSubtractor
 
 
 @pytest.fixture
