@@ -49,6 +49,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.ndimage import median_filter
 from matplotlib.gridspec import GridSpec
+from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 
 from ..core.functions import set_size, border_msg
@@ -1453,26 +1454,46 @@ def differential_photometry(
         return kinds
 
     panel_plan = [_panel_kinds(p) for p in band_payloads]
-    n_rows = sum(len(k) for k in panel_plan)
-    height_ratios = [
-        {"drift": 1.0, "diag": 0.55, "resid": 1.0}[k]
-        for kinds in panel_plan
-        for k in kinds
-    ]
+
+    # Layout: panels group by band with a clear gap between groups and a
+    # tight stack within one.  The residual panel (the publishable
+    # product) gets the most room; legends and the title live above the
+    # panel stack, never over data.
+    _H = {"drift": 1.0, "diag": 0.55, "resid": 1.3}
+    total_rel = sum(_H[k] for kinds in panel_plan for k in kinds)
+    n_bands = len(band_payloads)
+
     width_in = set_size(540, aspect=1)[0]
-    height_in = set_size(505, aspect=1)[1] * 0.62 * sum(
-        1.0 if k != "diag" else 0.55 for kinds in panel_plan for k in kinds
-    )
+    height_in = 0.95 * total_rel + 1.5 + 0.5 * (n_bands - 1)
 
     fig = plt.figure(figsize=(width_in, height_in))
-    gs = GridSpec(
-        n_rows, 1, figure=fig, height_ratios=height_ratios, hspace=0.12
+    # Reserve the top of the figure for the title plus one legend row per
+    # content class; product entries (~6 + one per band) may wrap.
+    _leg_row = 0.17 / height_in
+    _prod_rows = max(1, int(np.ceil((n_bands + 6) / 8.0)))
+    n_leg = _prod_rows + int(show_diagnostics)
+    _head = _leg_row * (1.7 if target_name else 0.4) + n_leg * _leg_row + 0.03
+    outer = GridSpec(
+        n_bands,
+        1,
+        figure=fig,
+        hspace=0.18,
+        left=0.105,
+        right=0.885,
+        top=1.0 - _head,
+        bottom=max(0.55 / height_in, 0.04),
     )
-    axes = [fig.add_subplot(gs[i]) for i in range(n_rows)]
+    band_axes = []
+    for i, kinds in enumerate(panel_plan):
+        sub = outer[i].subgridspec(
+            len(kinds), 1, height_ratios=[_H[k] for k in kinds], hspace=0.1
+        )
+        band_axes.append([fig.add_subplot(sub[j]) for j in range(len(kinds))])
+    axes = [a for axs in band_axes for a in axs]
     for a in axes[1:]:
         a.sharex(axes[0])
 
-    row = 0
+    saw_airmass = saw_fwhm = saw_binned = saw_rejected = False
     for i, payload in enumerate(band_payloads):
         band = payload["band"]
         c = BAND_COLORS.get(band, BAND_COLORS.get(str(band).lower(), "k"))
@@ -1481,10 +1502,23 @@ def differential_photometry(
         ref = payload["ref"]
         ref_epoch = payload["ref_epoch"]
 
-        for kind in panel_plan[i]:
+        # Band tag on the group's top panel replaces the old per-panel
+        # legends as the group identifier.
+        band_axes[i][0].text(
+            0.99,
+            0.96,
+            f"{band} band",
+            transform=band_axes[i][0].transAxes,
+            ha="right",
+            va="top",
+            fontsize=9,
+            fontweight="bold",
+            color=c,
+        )
+
+        for ax, kind in zip(band_axes[i], panel_plan[i]):
             if kind == "drift":
-                ax_drift = axes[row]
-                row += 1
+                ax_drift = ax
                 # Centre the ensemble curve over the epochs the target
                 # actually covers so the two curves are directly comparable.
                 _tgt_ep = ens_epoch["mjd"].isin(set(tgt["epoch"]))
@@ -1521,17 +1555,15 @@ def differential_photometry(
                     label=f"{band} target",
                     zorder=3,
                 )
-                ax_drift.set_ylabel("Delta Instrumental Magnitude [mag]")
+                ax_drift.set_ylabel("Delta Mag [mag]")
                 ax_drift.invert_yaxis()
                 ax_drift.grid(
                     True, which="major", alpha=0.35, linestyle="-", linewidth=0.5
                 )
                 ax_drift.minorticks_on()
-                ax_drift.legend(loc="best", frameon=False, fontsize=7)
 
             elif kind == "diag":
-                ax_diag = axes[row]
-                row += 1
+                ax_diag = ax
                 xe = x_transform(ens_epoch["mjd"])
                 tr = ens_epoch["transparency"]
                 ax_diag.plot(
@@ -1555,6 +1587,7 @@ def differential_photometry(
                     )
                 bad = ~ens_epoch["used"].to_numpy(dtype=bool)
                 if bad.any():
+                    saw_rejected = True
                     ax_diag.plot(
                         xe[bad],
                         tr[bad],
@@ -1564,7 +1597,7 @@ def differential_photometry(
                         label="Rejected epoch",
                         zorder=4,
                     )
-                ax_diag.set_ylabel("Transparency")
+                ax_diag.set_ylabel("Transp.", fontsize=8)
                 ax_diag.set_ylim(
                     bottom=min(
                         0.0,
@@ -1582,6 +1615,7 @@ def differential_photometry(
                 twin_axes = []
                 am = pd.to_numeric(ens_epoch["airmass"], errors="coerce")
                 if np.isfinite(am).any():
+                    saw_airmass = True
                     ax_am = ax_diag.twinx()
                     twin_axes.append(ax_am)
                     ax_am.plot(
@@ -1599,6 +1633,7 @@ def differential_photometry(
                     ax_am.tick_params(axis="y", colors="steelblue", labelsize=7)
                 fw = pd.to_numeric(ens_epoch["fwhm"], errors="coerce")
                 if np.isfinite(fw).any():
+                    saw_fwhm = True
                     ax_fw = ax_diag.twinx()
                     if twin_axes:
                         ax_fw.spines["right"].set_position(("outward", 40))
@@ -1618,16 +1653,8 @@ def differential_photometry(
                         "FWHM [pix]", color="darkorchid", fontsize=8
                     )
                     ax_fw.tick_params(axis="y", colors="darkorchid", labelsize=7)
-                h1, l1 = ax_diag.get_legend_handles_labels()
-                for _ax_t in twin_axes:
-                    _h, _l = _ax_t.get_legend_handles_labels()
-                    h1 += _h
-                    l1 += _l
-                ax_diag.legend(h1, l1, loc="best", frameon=False, fontsize=7)
 
             else:  # resid
-                ax = axes[row]
-                row += 1
                 ax.axhline(0, color="black", lw=0.5, ls="--", zorder=1)
                 if not ref.empty:
                     ax.scatter(
@@ -1675,6 +1702,7 @@ def differential_photometry(
                 )
                 trej = tgt[~used_t]
                 if not trej.empty:
+                    saw_rejected = True
                     ax.plot(
                         x_transform(trej["mjd"]),
                         trej["delta"],
@@ -1685,6 +1713,7 @@ def differential_photometry(
                         zorder=6,
                     )
                 if n_bin and n_bin >= 2 and len(tu) >= 2 * n_bin:
+                    saw_binned = True
                     tb = tu.sort_values("mjd")
                     nbb = len(tb) // n_bin
                     bx, by, be = [], [], []
@@ -1709,20 +1738,22 @@ def differential_photometry(
                         label=f"Binned x{n_bin}",
                         zorder=4,
                     )
-                ax.set_ylabel("Residual Instrumental Magnitude [mag]")
-                # Fit the y-limits to the target residuals (+/- errors) with
-                # a small margin, extended to zero so the residual reference
-                # line stays in view; reference-star outliers cannot stretch
-                # the axis.
-                _tgt_d = np.asarray(tgt["delta"], dtype=float)
-                _tgt_e = np.asarray(tgt["delta_err"], dtype=float)
+                ax.set_ylabel("Resid. Mag [mag]")
+                # Fit the y-limits to the used target residuals (+/- errors)
+                # with a small margin, extended to zero so the residual
+                # reference line stays in view.  Rejected epochs cannot
+                # stretch the axis (they are flagged in the CSV and on the
+                # diagnostics panel).
+                _sel = tgt[used_t] if used_t.any() else tgt
+                _tgt_d = np.asarray(_sel["delta"], dtype=float)
+                _tgt_e = np.asarray(_sel["delta_err"], dtype=float)
                 _y_lo = np.nanmin(_tgt_d - _tgt_e)
                 _y_hi = np.nanmax(_tgt_d + _tgt_e)
                 if not (np.isfinite(_y_lo) and np.isfinite(_y_hi)):
                     _y_lo, _y_hi = -0.05, 0.05
                 _y_lo = min(_y_lo, 0.0)
                 _y_hi = max(_y_hi, 0.0)
-                _pad = max(0.05 * (_y_hi - _y_lo), 0.01)
+                _pad = max(0.08 * (_y_hi - _y_lo), 0.02)
                 ax.set_ylim(_y_hi + _pad, _y_lo - _pad)
                 ax.grid(
                     True, which="major", alpha=0.35, linestyle="-", linewidth=0.5
@@ -1743,6 +1774,9 @@ def differential_photometry(
                     )
                 if payload.get("n_sysrem"):
                     note_lines.append(f"SysRem x{payload['n_sysrem']}")
+                n_out = int((~used_t).sum())
+                if n_out:
+                    note_lines.append(f"{n_out} rejected")
                 if note_lines:
                     ax.text(
                         0.02,
@@ -1759,7 +1793,170 @@ def differential_photometry(
                             linewidth=0.5,
                         ),
                     )
-                ax.legend(loc="best", frameon=False, fontsize=7)
+
+    # Figure-level legends above the panel stack keep symbols out of the
+    # data axes: products on the top row(s), diagnostics below them.
+    _ms = get_marker_size("medium")
+    _r1 = [
+        Line2D(
+            [0],
+            [0],
+            marker="D",
+            ls="-",
+            color="dimgrey",
+            markersize=3,
+            lw=0.8,
+            label="Ensemble mean",
+        )
+    ]
+    for p in band_payloads:
+        _b = p["band"]
+        _bc = BAND_COLORS.get(_b, BAND_COLORS.get(str(_b).lower(), "k"))
+        _r1.append(
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                ls="",
+                color=_bc,
+                markeredgecolor="black",
+                markeredgewidth=0.5,
+                markersize=_ms,
+                label=f"{_b} target",
+            )
+        )
+    _r2 = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            ls="",
+            color="lightgrey",
+            markeredgecolor="none",
+            markersize=3.5,
+            alpha=0.9,
+            label="Ref. stars",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="D",
+            ls="",
+            color="whitesmoke",
+            markeredgecolor="dimgrey",
+            markeredgewidth=0.5,
+            markersize=3,
+            label="Epoch mean",
+        ),
+    ]
+    if saw_rejected:
+        _r2.append(
+            Line2D(
+                [0],
+                [0],
+                marker="x",
+                ls="",
+                color="red",
+                markersize=5,
+                label="Rejected",
+            )
+        )
+    if saw_binned:
+        _r2.append(
+            Line2D(
+                [0],
+                [0],
+                marker="s",
+                ls="",
+                color="black",
+                markersize=3.5,
+                label=f"Binned x{n_bin}",
+            )
+        )
+    # matplotlib fills legends column-major: interleave the two logical
+    # rows so targets sit together on the top row.
+    prod_h = []
+    if _prod_rows == 1:
+        prod_h = _r1 + _r2
+    else:
+        for _i in range(max(len(_r1), len(_r2))):
+            if _i < len(_r1):
+                prod_h.append(_r1[_i])
+            if _i < len(_r2):
+                prod_h.append(_r2[_i])
+
+    _top_y = 1.0 - _head + 0.012
+    _y_prod = _top_y + (n_leg - _prod_rows) * _leg_row
+    fig.legend(
+        handles=prod_h,
+        loc="lower center",
+        bbox_to_anchor=(0.5, _y_prod),
+        ncol=max(1, int(np.ceil(len(prod_h) / _prod_rows))),
+        fontsize=7,
+        frameon=False,
+        handlelength=1.5,
+        columnspacing=0.9,
+    )
+    if show_diagnostics:
+        diag_h = [
+            Line2D(
+                [0],
+                [0],
+                marker="s",
+                ls="-",
+                color="darkslategray",
+                markersize=3,
+                lw=0.8,
+                label="Transparency",
+            )
+        ]
+        if minimum_transparency:
+            diag_h.append(
+                Line2D(
+                    [0],
+                    [0],
+                    ls=":",
+                    color="firebrick",
+                    lw=0.8,
+                    label="Rej. limit",
+                )
+            )
+        if saw_airmass:
+            diag_h.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker="^",
+                    ls="--",
+                    color="steelblue",
+                    markersize=2.5,
+                    lw=0.6,
+                    label="Airmass",
+                )
+            )
+        if saw_fwhm:
+            diag_h.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker="v",
+                    ls="-.",
+                    color="darkorchid",
+                    markersize=2.5,
+                    lw=0.6,
+                    label="FWHM",
+                )
+            )
+        fig.legend(
+            handles=diag_h,
+            loc="lower center",
+            bbox_to_anchor=(0.5, _top_y),
+            ncol=len(diag_h),
+            fontsize=7,
+            frameon=False,
+            handlelength=1.5,
+            columnspacing=0.9,
+        )
 
     axes[-1].set_xlabel(xlabel)
     for a in axes[:-1]:
