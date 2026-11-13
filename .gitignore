@@ -61,7 +61,6 @@ Thumbs.db
 # AutoPHOT-specific outputs
 *_REDUCED/
 *_TEMPLATE/
-!.github/ISSUE_TEMPLATE/
 *_DIFF/
 *_SUB/
 *_PLOTS/
@@ -111,4 +110,5 @@ run_autophot_VIPER.py
 # Build artifacts
 dist/
 .github/
+conda/
 build/
