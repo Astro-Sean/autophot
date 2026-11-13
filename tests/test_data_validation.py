@@ -7,7 +7,7 @@ import pytest
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from utils.data_validation import (
+from autophot.core.data_validation import (
     validate_image,
     format_report,
     ValidationReport,
