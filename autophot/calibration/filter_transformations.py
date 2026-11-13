@@ -35,7 +35,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 # Catalog-name aliases used by the resolver paths in catalog.py.
