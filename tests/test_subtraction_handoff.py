@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from templates import (
+from autophot.subtraction.templates import (
     Templates,
     _ensure_diff_wcs,
     _validate_noise_map,
@@ -73,7 +73,7 @@ class TestNoiseMapValidation:
         assert _validate_noise_map(p, (8, 8), "science") == p
 
     def test_wcs_mismatch_rejected(self, tmp_path):
-        from wcs import get_wcs
+        from autophot.pipeline.wcs import get_wcs
 
         ref_wcs = get_wcs(_wcs_header())
         # Same shape, but the map carries a shifted (stale) grid.
@@ -86,7 +86,7 @@ class TestNoiseMapValidation:
         )
 
     def test_matching_wcs_map_accepted(self, tmp_path):
-        from wcs import get_wcs
+        from autophot.pipeline.wcs import get_wcs
 
         hdr = _wcs_header()
         p = _write_fits(tmp_path / "w.fits", np.ones((8, 8)), hdr)
@@ -102,7 +102,7 @@ class TestCommonGrid:
     def test_identical_wcs_is_common_grid(self):
         hdr = _wcs_header()
         w1 = w2 = None
-        from wcs import get_wcs
+        from autophot.pipeline.wcs import get_wcs
 
         w1 = get_wcs(hdr)
         w2 = get_wcs(hdr.copy())
@@ -110,7 +110,7 @@ class TestCommonGrid:
         assert _wcs_on_common_grid(w1, w2, (64, 64), tol_px=0.5)
 
     def test_shifted_wcs_is_not_common_grid(self):
-        from wcs import get_wcs
+        from autophot.pipeline.wcs import get_wcs
 
         w1 = get_wcs(_wcs_header())
         # 1-pixel CRPIX shift moves the grid by ~1 px everywhere.
@@ -123,7 +123,7 @@ class TestEnsureDiffWCS:
         sci_hdr = _wcs_header()
         diff_hdr = fits.Header()  # no WCS cards
         out = _ensure_diff_wcs(diff_hdr, sci_hdr, (64, 64))
-        from wcs import get_wcs
+        from autophot.pipeline.wcs import get_wcs
 
         assert get_wcs(out) is not None
 
@@ -132,7 +132,7 @@ class TestEnsureDiffWCS:
         diff_hdr = sci_hdr.copy()
         out = _ensure_diff_wcs(diff_hdr, sci_hdr, (64, 64))
         # Round-trip through get_wcs to prove the grid still agrees.
-        from wcs import get_wcs
+        from autophot.pipeline.wcs import get_wcs
 
         assert _wcs_on_common_grid(
             get_wcs(out), get_wcs(sci_hdr), (64, 64), tol_px=0.01
@@ -142,7 +142,7 @@ class TestEnsureDiffWCS:
         sci_hdr = _wcs_header()
         bad_hdr = _wcs_header(shift_x=3.0)
         out = _ensure_diff_wcs(bad_hdr, sci_hdr, (64, 64))
-        from wcs import get_wcs
+        from autophot.pipeline.wcs import get_wcs
 
         # After injection the diff WCS must agree with the science grid.
         assert _wcs_on_common_grid(
