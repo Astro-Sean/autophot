@@ -14,6 +14,8 @@ set -euo pipefail
 #   - Validates environment.yml and meta.yaml for dependency drift (warn-only)
 #   - Tests the built package in a fresh conda env before uploading; the
 #     test env is always removed afterwards, on success or failure
+#   - Runs the bundled example dataset (template-subtracted photometry on
+#     examples/example_data) in that test env as an end-to-end install test
 #   - Removes stale autophot/autophot-object installs and all build
 #     artifacts (including the just-uploaded package) after a successful
 #     upload so old code cannot shadow the new package
@@ -34,6 +36,7 @@ LABEL=""
 NEW_VERSION=""
 AUTO_VERSION=0
 TEST_PYTHON="3.12"
+SKIP_DATASET_TEST=0
 
 usage() {
   cat <<'EOF'
@@ -47,6 +50,7 @@ Options:
   --new-version VERSION     Set an explicit new version (X.Y.Z) non-interactively.
   --update-version          Auto-increment the patch version (e.g. 1.0.1 -> 1.0.2) without prompting.
   --test-python VERSION     Python version for the test env (default: 3.12).
+  --skip-dataset-test       Skip the end-to-end example dataset run in the test env.
   -h, --help                Show this help.
 EOF
 }
@@ -89,6 +93,10 @@ while [[ $# -gt 0 ]]; do
     --test-python)
       TEST_PYTHON="${2:-}"
       shift 2
+      ;;
+    --skip-dataset-test)
+      SKIP_DATASET_TEST=1
+      shift
       ;;
     -h|--help)
       usage
@@ -767,7 +775,10 @@ TEST_OUTPUT="$(mktemp)"
 # Mirror the README install check: import test first, then the CLIs.  Run
 # from a scratch dir -- `python -c` puts the cwd on sys.path, and the
 # repo's autophot/ package dir would shadow the installed package here.
-TEST_WORKDIR="$(mktemp -d)"
+# The scratch dir lives inside the repo (and therefore $HOME): external
+# helpers invoked during the dataset test may be snap-confined, and a snap
+# cannot read files under /tmp.
+TEST_WORKDIR="$(mktemp -d "${REPO_ROOT}/.test_workdir_XXXXXX")"
 if (cd "${TEST_WORKDIR}" && \
     PYTHONNOUSERSITE=1 "${TEST_ENV_PREFIX}/bin/python" -c "from autophot import AutomatedPhotometry; print('OK')" && \
     PYTHONNOUSERSITE=1 "${TEST_ENV_PREFIX}/bin/autophot" -h && \
@@ -782,6 +793,116 @@ else
   die "Package test failed; aborting upload"
 fi
 rm -f "${TEST_OUTPUT}"
+
+# -----------------------------------------------------------------------------
+# End-to-end dataset test: run the bundled template-subtraction example with
+# the installed package.  Working on a copy of the data keeps the repo clean
+# and guarantees `import autophot` resolves to site-packages, not this source
+# tree.  examples/example_data is not committed to the repo - the test is
+# skipped when the data is absent.
+# -----------------------------------------------------------------------------
+if [[ "${SKIP_DATASET_TEST}" -eq 1 ]]; then
+  log "Skipping dataset test (--skip-dataset-test)."
+elif [[ ! -d "${REPO_ROOT}/examples/example_data" ]]; then
+  log "WARNING: examples/example_data not found; skipping dataset test."
+else
+  log "Running bundled example dataset with the installed package..."
+  DATASET_DIR="${TEST_WORKDIR}/example_run"
+  mkdir -p "${DATASET_DIR}"
+  cp -r "${REPO_ROOT}/examples/example_data" "${DATASET_DIR}/"
+  cp -r "${REPO_ROOT}/examples/autophot_db" "${DATASET_DIR}/"
+  cat > "${DATASET_DIR}/run_example.py" <<'PYEOF'
+import os
+import sys
+from pathlib import Path
+
+import autophot
+import pandas as pd
+from autophot import AutomatedPhotometry
+
+# The scratch dir holds only data, so this import must resolve to the
+# installed package, never a source checkout on sys.path.
+if "site-packages" not in autophot.__file__:
+    raise SystemExit(f"autophot resolved outside site-packages: {autophot.__file__}")
+print(f"[dataset-test] autophot {autophot.__version__} at {autophot.__file__}")
+
+autophot_input = AutomatedPhotometry.load()
+
+# Absolute paths: the pipeline os.chdir()s into each output directory while
+# running, so relative locations here would resolve against the wrong cwd.
+examples_dir = Path.cwd()
+
+autophot_input["fits_dir"] = str(examples_dir / "example_data")
+autophot_input["wdir"] = str(examples_dir / "autophot_db")
+autophot_input["outdir_name"] = "REDUCED"
+autophot_input["target_name"] = "2022mop"
+autophot_input["selected_filters"] = ["i"]
+autophot_input["restart"] = False
+autophot_input["rng_seed"] = 42
+
+autophot_input["catalog"]["use_catalog"] = "custom"
+autophot_input["catalog"]["catalog_custom_fpath"] = str(
+    examples_dir / "autophot_db" / "sn2022mop_ps1_catalog.csv"
+)
+
+autophot_input["wcs"]["redo_wcs"] = False
+
+ts = autophot_input["template_subtraction"]
+ts["do_subtraction"] = True
+ts["alignment_method"] = "reproject"
+ts["method"] = "sfft"
+ts["sfft_backend"] = "numpy"
+ts["forceconv"] = "REF"
+ts["kernel_order"] = 0
+
+autophot_input["nCPU"] = 1
+autophot_input["nGPU"] = 0
+autophot_input["global_verbose_level"] = 1
+
+loc = AutomatedPhotometry.run_photometry(default_input=autophot_input)
+if not loc or not Path(loc).exists():
+    raise SystemExit(f"run_photometry returned no output CSV: {loc!r}")
+
+# A subtraction failure degrades gracefully to photometry on the science
+# image, which still detects this bright target - so check the difference
+# image exists, not just the detection flag.
+diffs = list(Path(loc).parent.glob("*/diff_*.fits"))
+if not diffs:
+    raise SystemExit(
+        "no difference image produced; template subtraction did not run "
+        "(check SFFT/HOTPANTS availability)"
+    )
+
+lc = pd.read_csv(loc)
+if lc.empty:
+    raise SystemExit("LightCurve_Output.csv is empty")
+row = lc.iloc[0]
+print(
+    f"[dataset-test] is_detection={row['is_detection']} "
+    f"mag_psf={row['mag_psf']:.3f}+/-{row['mag_psf_err']:.3f} "
+    f"snr={row['snr']:.1f} limiting_mag={row['limiting_mag']:.2f}"
+)
+if not bool(row["is_detection"]):
+    raise SystemExit("target not detected on the example dataset")
+print("[dataset-test] PASS")
+PYEOF
+  DATASET_OUTPUT="$(mktemp)"
+  # Prepend the env's bin dir to PATH so `sex`, `scamp`, and `swarp` resolve
+  # exactly as they would in an activated env.
+  if (cd "${DATASET_DIR}" && \
+      PATH="${TEST_ENV_PREFIX}/bin:${PATH}" PYTHONNOUSERSITE=1 \
+      "${TEST_ENV_PREFIX}/bin/python" run_example.py) >"${DATASET_OUTPUT}" 2>&1; then
+    grep '\[dataset-test\]' "${DATASET_OUTPUT}" | sed 's/^/  /' || true
+    log "Dataset test passed"
+  else
+    log "ERROR: Dataset test failed. Last lines of output:"
+    tail -40 "${DATASET_OUTPUT}" | sed 's/^/  /' >&2
+    rm -f "${DATASET_OUTPUT}"
+    die "Dataset test failed; aborting upload"
+  fi
+  rm -f "${DATASET_OUTPUT}"
+fi
+
 rm -rf "${TEST_WORKDIR}"
 TEST_WORKDIR=""
 
