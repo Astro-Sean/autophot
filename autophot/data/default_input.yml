@@ -1125,3 +1125,24 @@ default_input:
     transient_color_correction: False # bool --- If True, after the light curve is collected, apply per-image zeropoint color terms to the transient using its own paired color-index observations (same telescope+instrument, within color_correction_dt days; solved iteratively). Writes LightCurve_Output_colorcorrected.csv.
     color_correction_dt: 1.0 # float --- Max |t1 - t2| in days for pairing color-index filters (e.g. ZTF g and r) in the transient color correction.
     color_correction_max_err: 0.5 # float --- Max magnitude error (mag) for both members of a color-index pair; non-detections and low-S/N points cannot anchor a color.
+
+    # --- RGB color-composite image ---
+    color_image: False # bool --- If True, after the light curve is collected, build an RGB composite (Color_Image.<plot_format>) in the reduced directory: every band's frames are resampled onto the reddest channel's WCS, median-combined, scaled by exposure time and zeropoint, and stretched. Requires >=1 band with a usable WCS; skipped bands log a warning.
+    color_image_stretch: asinh # str --- Stretch applied after normalization: "asinh" (linear near the noise floor, logarithmic for bright structure), "log", "sqrt", or "linear".
+    color_image_softening: 10.0 # float --- asinh/log stretch strength; higher values keep more dynamic range visible.
+    color_image_black_percentile: 1.0 # float --- Percentile of finite pixels mapped to black per band.
+    color_image_white_percentile: 99.5 # float --- Percentile of finite pixels mapped to white per band.
+    color_image_gamma: 1.0 # float --- Gamma correction applied to the stretched image (>1 brightens midtones).
+    color_image_saturation: 1.0 # float --- Color saturation multiplier (1 = natural).
+    color_image_channels: null # dict|null --- Optional channel-to-band map, e.g. {R: i, G: r, B: g}; a list mixes bands ({G: [g, V]}). Default: effective-wavelength order (reddest -> R, bluest -> B, G synthesized as (R+B)/2 with two bands).
+    color_image_max_frames_per_band: 0 # int --- Cap on frames stacked per band (sharpest FWHM first); 0 = use all frames.
+    color_image_save_fits: False # bool --- Also write the pre-stretch linear RGB cube as Color_Image.fits carrying the reference WCS.
+    color_image_dpi: 200 # int --- Output image resolution in dots per inch.
+
+    # --- Lomb-Scargle period analysis ---
+    periodogram: False # bool --- If True, after the light curve is collected, run a Lomb-Scargle period search per band on the target (prefers Differential_Photometry_<method>.csv relative fluxes, else calibrated magnitudes converted to flux). Writes Periodogram_<band>.<plot_format> and periodogram_<band>.csv peak tables.
+    periodogram_method: PSF # str --- Photometry method whose series is analyzed: "PSF" or "AP".
+    periodogram_min_period: null # float|null --- Shortest trial period in days; null = twice the median cadence.
+    periodogram_max_period: null # float|null --- Longest trial period in days; null = half the observing baseline.
+    periodogram_samples_per_peak: 5 # int --- Frequency-grid oversampling factor for the periodogram.
+    periodogram_top_peaks: 5 # int --- Number of top periodogram peaks reported per band.
