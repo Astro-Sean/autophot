@@ -53,10 +53,9 @@ from scipy.optimize import minimize
 from concurrent.futures import ThreadPoolExecutor
 import astropy.units as u
 
-sys.path.append(str(Path(__file__).parent.parent))
-from functions import remove_wcs_from_header, log_warning_from_exception, resolve_verbose_level, clean_subprocess_log, refresh_sibling_weight_map, invalidate_fits_cache
-from wcs import get_wcs, _normalize_projection_codes
-from utils.run_sex import SExtractorWrapper
+from ..core.functions import remove_wcs_from_header, log_warning_from_exception, resolve_verbose_level, clean_subprocess_log, refresh_sibling_weight_map, invalidate_fits_cache
+from ..pipeline.wcs import get_wcs, _normalize_projection_codes
+from .run_sex import SExtractorWrapper
 
 
 def _normalize_head_file(head_path: Union[str, Path]) -> bool:
@@ -235,7 +234,7 @@ class ImageDistortionCorrector:
             verbose_level = (input_yaml or {}).get("global_verbose_level", 1)
         self.verbose_level = resolve_verbose_level(verbose_level)
         self.delete_originals = delete_originals
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         self.default_threads = 4
         self._executables: Dict[str, str] = {}
         self._temp_dirs: set[str] = set()
@@ -602,7 +601,7 @@ class ImageDistortionCorrector:
         try:
             if figsize is None:
                 # Prefer AutoPHoT figure sizing (golden-ratio based).
-                from functions import set_size
+                from ..core.functions import set_size
 
                 golden_ratio = (5**0.5 + 1) / 2
                 figsize = set_size(340, aspect=golden_ratio)  # square-ish
@@ -617,7 +616,7 @@ class ImageDistortionCorrector:
             zscale = ZScaleInterval()
             vmin, vmax = zscale.get_limits(data)
 
-            from plotting_utils import (
+            from ..core.plotting_utils import (
                 apply_autophot_mplstyle,
                 get_plot_color,
                 overlay_mask_hatch,
@@ -755,7 +754,7 @@ class ImageDistortionCorrector:
     def _resolve_sextractor() -> Optional[str]:
         """Return the highest-version SExtractor binary, else None."""
         try:
-            from utils.run_sex import get_sextractor_executable
+            from .run_sex import get_sextractor_executable
 
             return get_sextractor_executable()
         except Exception:
@@ -1246,7 +1245,7 @@ class ImageDistortionCorrector:
                         cleaned.sort("SNR_WIN", reverse=True)
                     # Add SCAMP-required columns if not present
                     try:
-                        from wcs import get_wcs as _get_wcs_for_scamp
+                        from ..pipeline.wcs import get_wcs as _get_wcs_for_scamp
                         wcs = _get_wcs_for_scamp(fits.getheader(fits_image))
                         if wcs is None:
                             raise ValueError("get_wcs returned None")
@@ -1301,7 +1300,7 @@ class ImageDistortionCorrector:
                     pixel_scale = 0.1585 / 3600.0
                     _pixscale_src = "nominal fallback (0.1585 arcsec/px)"
                     try:
-                        from wcs import get_wcs as _get_wcs_for_err
+                        from ..pipeline.wcs import get_wcs as _get_wcs_for_err
                         _wcs_err = _get_wcs_for_err(fits.getheader(fits_image))
                         if _wcs_err is not None:
                             _ps = np.asarray(
@@ -1624,7 +1623,7 @@ class ImageDistortionCorrector:
                     # AND has no non-linear distortion (SIP/TPV).
                     if (_ref_shape[0] > _sci_shape[0] * 1.5 or _ref_shape[1] > _sci_shape[1] * 1.5) \
                             and not (_ref_has_sip or _ref_has_pv):
-                        from functions import nan_crop
+                        from ..core.functions import nan_crop
 
                         # numpy 0-based image center: (nx-1)/2, (ny-1)/2
                         _scx = (_sci_shape[1] - 1) / 2.0
@@ -3129,7 +3128,7 @@ class ImageDistortionCorrector:
                     match_radius_arcsec=max(float(crossid_arcsec), 2.0),
                 )
             try:
-                from plotting_utils import get_plot_ext
+                from ..core.plotting_utils import get_plot_ext
                 self.plot_matched_sources_side_by_side(
                     sci_image_path=str(sci_image_copy),
                     ref_image_path=str(ref_image_copy),
@@ -3248,7 +3247,7 @@ class ImageDistortionCorrector:
                 if head_file.exists():
                     self.logger.info("Applying SCAMP .head WCS to reference image header")
                     try:
-                        from wcs import _normalize_projection_codes
+                        from ..pipeline.wcs import _normalize_projection_codes
                         scamp_header = fits.Header.fromtextfile(str(head_file))
                         scamp_header = _normalize_projection_codes(scamp_header, inplace=False)
                         with fits.open(aligned_ref, mode="update", memmap=False) as hdul:
@@ -4371,7 +4370,7 @@ class ImageDistortionCorrector:
                         # science and reference share the same celestial anchor point.
                         ny_target, nx_target = _sci_shape
 
-                        from functions import nan_crop
+                        from ..core.functions import nan_crop
 
                         try:
                             ref_cx_arr, ref_cy_arr = _ref_wcs.all_world2pix(
@@ -4755,7 +4754,7 @@ class ImageDistortionCorrector:
                             output_head_path=_refine_head_path,
                         )
                         if _refine_result is not None and Path(_refine_head_path).exists():
-                            from wcs import _normalize_projection_codes
+                            from ..pipeline.wcs import _normalize_projection_codes
                             _corrected_hdr = fits.Header.fromtextfile(_refine_head_path)
                             _corrected_hdr = _normalize_projection_codes(
                                 _corrected_hdr, inplace=False
@@ -5033,12 +5032,12 @@ class ImageDistortionCorrector:
 
             out_header = ref_header.copy()
             out_header = remove_wcs_from_header(out_header)
-            from functions import copy_wcs_from_header
+            from ..core.functions import copy_wcs_from_header
             copy_wcs_from_header(sci_header, out_header)
             base_ref = Path(reference_image).stem
             ext_ref = Path(reference_image).suffix
             aligned_reference_fpath = output_dir / f"{base_ref}{ext_ref}"
-            from functions import safe_fits_write
+            from ..core.functions import safe_fits_write
             safe_fits_write(str(aligned_reference_fpath), aligned_ref, out_header)
             # The write may have overwritten the original template in place;
             # a sibling weight map still on the old grid must be refreshed.
@@ -5626,7 +5625,7 @@ class ImageDistortionCorrector:
         would replace entirely.
         """
         try:
-            from wcs import get_wcs as _get_wcs
+            from ..pipeline.wcs import get_wcs as _get_wcs
 
             with fits.open(sci_cat_path) as hs, fits.open(ref_cat_path) as hr:
                 sci_tab = Table(hs[2].data)
@@ -5994,7 +5993,7 @@ class ImageDistortionCorrector:
             if head_file.exists():
                 self.logger.info("Applying SCAMP .head WCS to reference for reproject")
                 try:
-                    from wcs import _normalize_projection_codes
+                    from ..pipeline.wcs import _normalize_projection_codes
                     scamp_header = fits.Header.fromtextfile(str(head_file))
                     scamp_header = _normalize_projection_codes(scamp_header, inplace=False)
 
@@ -6196,7 +6195,7 @@ class ImageDistortionCorrector:
             aligned_ref[~fp_mask] = np.nan
 
             # Build output header: science WCS keywords copied into ref header
-            from functions import copy_wcs_from_header, safe_fits_write
+            from ..core.functions import copy_wcs_from_header, safe_fits_write
             out_header = ref_header.copy()
             out_header = remove_wcs_from_header(out_header)
             copy_wcs_from_header(sci_header, out_header)
@@ -6258,7 +6257,7 @@ class ImageDistortionCorrector:
         interp_order_norm = _interp_map.get(interp_order, "bilinear")
         use_parallel = bool(align_cfg.get("reproject_parallel", True))
 
-        from wcs import get_wcs as _get_wcs_for_reproj
+        from ..pipeline.wcs import get_wcs as _get_wcs_for_reproj
         with fits.open(target_image) as target_hdul:
             target_wcs = _get_wcs_for_reproj(target_hdul[0].header)
             if target_wcs is None:
@@ -6312,7 +6311,7 @@ class ImageDistortionCorrector:
             self.logger.error("_reproject_to_match: all reproject methods failed")
             return None
 
-        from functions import update_header_from_wcs
+        from ..core.functions import update_header_from_wcs
         output_header = source_header.copy()
         update_header_from_wcs(output_header, target_wcs)
         output_header["REPROJ"] = (True, "Reprojected to match science grid")
@@ -6563,7 +6562,7 @@ class ImageDistortionCorrector:
                 ref_image_path=str(ref_image_copy),
             )
             try:
-                from plotting_utils import get_plot_ext
+                from ..core.plotting_utils import get_plot_ext
                 self.plot_matched_sources_side_by_side(
                     sci_image_path=str(sci_image_copy),
                     ref_image_path=str(ref_image_copy),
@@ -6783,7 +6782,7 @@ class ImageDistortionCorrector:
             )
 
             def _save_aligned_image(data, header, output_path):
-                from functions import safe_fits_write
+                from ..core.functions import safe_fits_write
                 safe_fits_write(output_path, data, header)
 
             base_ref = os.path.splitext(os.path.basename(reference_image))[0]
@@ -6792,7 +6791,7 @@ class ImageDistortionCorrector:
             aligned_science_fpath = science_image
             out_hdr = ref_head.copy()
             out_hdr = remove_wcs_from_header(out_hdr)
-            from functions import copy_wcs_from_header as _copy_wcs2
+            from ..core.functions import copy_wcs_from_header as _copy_wcs2
             _copy_wcs2(sci_head, out_hdr)
             _save_aligned_image(aligned_ref_img, out_hdr, aligned_reference_fpath)
             # The write may have overwritten the original template in place;
@@ -7895,7 +7894,7 @@ class ImageDistortionCorrector:
         sex_dir = out_dir / "sextractor"
         sex_dir.mkdir(parents=True, exist_ok=True)
         try:
-            from utils.run_sex import nan_filled_copy_for_detection
+            from .run_sex import nan_filled_copy_for_detection
 
             det_path = str(
                 nan_filled_copy_for_detection(fits_path, sex_dir)
@@ -8193,7 +8192,7 @@ class ImageDistortionCorrector:
                 rebin_scale = 0.25  # Coordinates must be scaled by 1/4
                 logging.info("Rebinned images by 4x for display, coordinates will be scaled by %s", rebin_scale)
 
-            from plotting_utils import apply_autophot_mplstyle, get_plot_color
+            from ..core.plotting_utils import apply_autophot_mplstyle, get_plot_color
             apply_autophot_mplstyle()
 
             # Palette defaults keep matched/unmatched semantics consistent
@@ -8257,7 +8256,7 @@ class ImageDistortionCorrector:
                 **imshow_kwargs,
                 origin="lower",
             )
-            from plotting_utils import overlay_mask_hatch
+            from ..core.plotting_utils import overlay_mask_hatch
             overlay_mask_hatch(ax1, ~np.isfinite(np.asarray(sci_data)))
             ax1.set_title("Science Image")
             cbar1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
@@ -9081,8 +9080,8 @@ class ImageDistortionCorrector:
             else:
                 intercept = None
         if len(sci_cat_matched) >= 5 and intercept is not None:
-            from functions import set_size
-            from plotting_utils import (
+            from ..core.functions import set_size
+            from ..core.plotting_utils import (
                 apply_autophot_mplstyle, get_ransac_color, get_marker_size,
                 get_alpha, get_line_width, ransac_grid, ransac_savefig,
                 ransac_legend_top_outside, set_mag_axes_inverted_xy,
@@ -9235,7 +9234,7 @@ class ImageDistortionCorrector:
             tuple of (dRA_arcsec, dDec_arcsec) representing the median offset
             between the science and reference WCS at the same pixel positions.
         """
-        from wcs import get_wcs as _get_wcs_for_offset
+        from ..pipeline.wcs import get_wcs as _get_wcs_for_offset
 
         with fits.open(sci_image_path) as hdul:
             sci_wcs = _get_wcs_for_offset(hdul[0].header)
