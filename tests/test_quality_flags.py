@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from utils.quality_flags import (
+from autophot.core.quality_flags import (
     QualityFlag,
     from_photutils_flags,
     from_snr,
