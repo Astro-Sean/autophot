@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 
 photutils = pytest.importorskip("photutils")
 
-from fwhm import Find_FWHM
+from autophot.pipeline.fwhm import Find_FWHM
 
 
 def _stellar_field(n_stars=8, fwhm=4.0, noise=3.0, seed=0, shape=(220, 220)):
