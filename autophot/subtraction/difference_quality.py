@@ -43,7 +43,7 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d, binary_dilation, generate_binary_structure
 from astropy.stats import sigma_clipped_stats
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 # ===========================================================================
