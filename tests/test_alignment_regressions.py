@@ -22,9 +22,9 @@ import pytest
 from astropy.io import fits
 from astropy.wcs import WCS
 
-import templates
-import wcs as wcs_mod
-from templates import (
+from autophot.subtraction import templates
+import autophot.pipeline.wcs as wcs_mod
+from autophot.subtraction.templates import (
     AlignmentResult,
     Templates,
     _WARN_DEMOTED_FROM_FAIL,
