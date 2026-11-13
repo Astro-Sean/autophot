@@ -13,9 +13,9 @@ from scipy.spatial import cKDTree
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from functions import ascii_kv
+from ..core.functions import ascii_kv
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 class AlignmentVerifier:
@@ -38,7 +38,7 @@ class AlignmentVerifier:
         """
         self.verbose_level = verbose_level
         self.plot_format = plot_format
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
     def verify_precise_alignment(
         self,
@@ -378,7 +378,7 @@ class AlignmentVerifier:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         try:
-            from plotting_utils import apply_autophot_mplstyle, get_plot_ext
+            from ..core.plotting_utils import apply_autophot_mplstyle, get_plot_ext
             apply_autophot_mplstyle()
         except Exception:
             pass
@@ -409,7 +409,7 @@ class AlignmentVerifier:
         ax_sci, ax_ref = axes[0]
         ax_diff, ax_off = axes[1]
 
-        from plotting_utils import get_plot_color, overlay_mask_hatch
+        from ..core.plotting_utils import get_plot_color, overlay_mask_hatch
         im = ax_sci.imshow(sci_data, cmap=_cmap, origin='lower')
         overlay_mask_hatch(ax_sci, ~np.isfinite(np.asarray(sci_data)))
         ax_sci.set_title('Science Image')
