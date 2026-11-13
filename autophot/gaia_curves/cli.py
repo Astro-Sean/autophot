@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+if __package__ in (None, ""):
+    # Support "python <path>" execution: expose the repo root and
+    # anchor the package so relative imports resolve.
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(
+        0,
+        _os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        ),
+    )
+    __package__ = "autophot.gaia_curves"
+
 import argparse
 import logging
 from pathlib import Path
@@ -71,7 +85,7 @@ def main() -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     try:
-        from functions import cap_console_lines
+        from ..core.functions import cap_console_lines
     except ImportError:
         pass
     else:
