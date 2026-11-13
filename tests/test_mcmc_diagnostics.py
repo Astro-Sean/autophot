@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from utils.mcmc_diagnostics import (
+from autophot.analysis.mcmc_diagnostics import (
     compute_split_rhat,
     compute_rhat_all_params,
     compute_ess,
