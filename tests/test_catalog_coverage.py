@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import catalog as catalog_mod
-from catalog import (
+import autophot.calibration.catalog as catalog_mod
+from autophot.calibration.catalog import (
     Catalog,
     _catalog_cone_radius_arcmin,
     _catalog_radec,
