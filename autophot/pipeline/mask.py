@@ -34,7 +34,7 @@ import subprocess
 import numpy as np
 from astropy.io import fits
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 def append_id(filename):
@@ -154,7 +154,7 @@ def create_image_mask(filename, layers=None):
     if layers is None:
         layers = ["CR"]
 
-    from functions import log_step
+    from ..core.functions import log_step
 
     if filename is None:
         return None
