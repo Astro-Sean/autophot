@@ -11179,6 +11179,43 @@ class Templates:
         return None, None
 
     @staticmethod
+    def _psf_chi2_threshold(
+        values: np.ndarray,
+        chi2_max: float,
+        recal_nsigma: float,
+        min_n: int,
+    ) -> Tuple[float, float]:
+        """Effective reduced-chi2 cut for one image side.
+
+        Returns ``(threshold, median)`` where the threshold is
+        ``max(chi2_max, med + recal_nsigma * sigma_MAD)`` estimated on the
+        finite entries of ``values``.  When the noise model is right the
+        field-star median sits near ~1 and the configured absolute cut
+        governs; when the whole distribution is inflated - resampled or
+        correlated pixel noise on the aligned image, a model-limited
+        analytic vetting PSF, structured background - the cut lifts to the
+        distribution's own upper tail so the veto keeps rejecting true
+        outliers instead of typical field stars.  The cut is never
+        tightened below ``chi2_max``.
+
+        Fewer than ``min_n`` finite entries (or ``recal_nsigma`` <= 0)
+        falls back to the absolute cut and reports a NaN median.
+        """
+        fin = np.asarray(values, dtype=float)
+        fin = fin[np.isfinite(fin)]
+        if (
+            not np.isfinite(recal_nsigma)
+            or recal_nsigma <= 0
+            or fin.size < int(min_n)
+        ):
+            return float(chi2_max), np.nan
+        med = float(np.median(fin))
+        sig = float(median_abs_deviation(fin, scale="normal"))
+        if not np.isfinite(sig) or sig <= 0:
+            return max(float(chi2_max), med), med
+        return max(float(chi2_max), med + recal_nsigma * sig), med
+
+    @staticmethod
     def _psf_stamp_chi2(
         image: Optional[np.ndarray],
         x_pos: Optional[np.ndarray],
@@ -11350,17 +11387,30 @@ class Templates:
             overrides - use a larger floor where the vetting model is
             analytic and cannot capture real PSF structure, else bright
             stars are vetoed for model error), ``min_keep`` (minimum
-            surviving inlier sources, default ``sfft_psf_min_keep`` = 8)
-            and ``min_keep_frac`` (minimum surviving fraction of the
-            robust inlier pool, default ``sfft_psf_min_keep_frac`` = 0.5).
-            A source is vetoed when its PSF-stamp reduced chi2 exceeds
-            ``chi2_max`` in either image; sources that cannot be measured
-            (edge/masked stamps) are kept.  The veto is adaptive: if it
-            would leave fewer than ``min_keep`` sources or less than
-            ``min_keep_frac`` of the robust pool, the best-fitting vetoed
-            sources (lowest worst-image chi2) are restored until the
-            floor is met and the relaxed effective threshold is logged.
-            When omitted the selection is unchanged.
+            surviving inlier sources, default ``sfft_psf_min_keep`` = 8),
+            ``min_keep_frac`` (minimum surviving fraction of the
+            robust inlier pool, default ``sfft_psf_min_keep_frac`` = 0.5),
+            ``recal_nsigma`` (robust recalibration strength of the
+            per-side cut, default ``sfft_psf_chi2_recal_nsigma`` = 4.0;
+            0 disables) and ``recal_min_sources`` (minimum finite
+            measurements per side to trust the recalibration, default
+            ``sfft_psf_chi2_recal_min_sources`` = 8).
+            A source is vetoed when its PSF-stamp reduced chi2 exceeds the
+            effective per-side threshold in either image; sources that
+            cannot be measured (edge/masked stamps) are kept.  The
+            effective threshold is ``max(chi2_max, med + recal_nsigma *
+            sigma_MAD)`` of that side's own distribution over the
+            pair-residual-robust pool: a systematically inflated side
+            (resampled/correlated pixels, model-limited vetting PSF,
+            structured background) is cut at its upper tail rather than at
+            an absolute value no field star can pass.  The veto is
+            adaptive: if it would leave fewer than ``min_keep`` sources or
+            less than ``min_keep_frac`` of the robust pool, the
+            best-fitting vetoed sources (lowest worst-side chi2, each side
+            normalised by its own threshold) are restored until the floor
+            is met and the relaxation is logged.  Restored sources are
+            flagged ``is_psf_restored``; ``is_psf_inlier`` reports the raw
+            veto outcome.  When omitted the selection is unchanged.
 
         Returns
         -------
@@ -11483,12 +11533,19 @@ class Templates:
             # with the pipeline's "cannot verify -> keep" convention -- and
             # reported in the log so the reason for rejection stays visible.
             psf_ok = np.ones(len(mag_img), dtype=bool)
+            psf_pass_raw = np.ones(len(mag_img), dtype=bool)
             psf_chi2_sci = np.full(len(mag_img), np.nan)
             psf_chi2_tpl = np.full(len(mag_img), np.nan)
             psf_q = np.full(len(mag_img), np.nan)
             _pv_chi2_max = 0.0
             _pv_min_keep = 0
             _pv_min_keep_frac = 0.0
+            _pv_recal_nsigma = 0.0
+            _pv_recal_min = 8
+            _pv_floor_sci = np.nan
+            _pv_floor_tpl = np.nan
+            _t_sci = np.nan
+            _t_tpl = np.nan
             if psf_vetting:
                 _pv_chi2_max = float(
                     psf_vetting.get(
@@ -11527,70 +11584,64 @@ class Templates:
                         _ts_cfg_fc.get("sfft_psf_min_keep_frac", 0.5),
                     )
                 )
+                _pv_recal_nsigma = float(
+                    psf_vetting.get(
+                        "recal_nsigma",
+                        _ts_cfg_fc.get("sfft_psf_chi2_recal_nsigma", 4.0),
+                    )
+                )
+                _pv_recal_min = int(
+                    psf_vetting.get(
+                        "recal_min_sources",
+                        _ts_cfg_fc.get("sfft_psf_chi2_recal_min_sources", 8),
+                    )
+                )
                 if _pv_chi2_max > 0:
                     _pv_x, _pv_y = self._catalog_xy(catalog_img.loc[indices])
                     _pv_x_t, _pv_y_t = self._catalog_xy(catalog_tpl.loc[indices])
                     _pv_njobs = int(
                         (self.input_yaml or {}).get("n_jobs", 1) or 1
                     )
-                    try:
-                        psf_chi2_sci = self._psf_stamp_chi2(
-                            psf_vetting.get("image_sci"),
-                            _pv_x,
-                            _pv_y,
-                            psf_vetting.get("psf_sci"),
-                            psf_vetting.get("fwhm_sci", np.nan),
-                            gain=psf_vetting.get("gain_sci", 1.0),
-                            mask=psf_vetting.get("mask_sci"),
-                            model_floor_frac=_pv_floor_sci,
-                            n_jobs=_pv_njobs,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "Science-side PSF quality fit failed; skipping.",
-                            exc_info=True,
-                        )
-                    try:
-                        psf_chi2_tpl = self._psf_stamp_chi2(
-                            psf_vetting.get("image_tpl"),
-                            _pv_x_t,
-                            _pv_y_t,
-                            psf_vetting.get("psf_tpl"),
-                            psf_vetting.get("fwhm_tpl", np.nan),
-                            gain=psf_vetting.get("gain_tpl", 1.0),
-                            mask=psf_vetting.get("mask_tpl"),
-                            model_floor_frac=_pv_floor_tpl,
-                            n_jobs=_pv_njobs,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "Reference-side PSF quality fit failed; skipping.",
-                            exc_info=True,
-                        )
-                    bad_sci = ~np.isnan(psf_chi2_sci) & (
-                        psf_chi2_sci > _pv_chi2_max
-                    )
-                    bad_tpl = ~np.isnan(psf_chi2_tpl) & (
-                        psf_chi2_tpl > _pv_chi2_max
-                    )
-                    psf_ok = ~(bad_sci | bad_tpl)
-                    # Worst-image chi2 per source, used to rank vetoed
-                    # sources if the keep floor forces a partial restore.
-                    # fmax ignores NaN (unmeasurable) so an unverifiable
-                    # side does not punish an otherwise-good source.
-                    psf_q = np.fmax(psf_chi2_sci, psf_chi2_tpl)
-                    n_bad_s = int(bad_sci.sum())
-                    n_bad_t = int(bad_tpl.sum())
-                    n_unmeas = int(
-                        (np.isnan(psf_chi2_sci) | np.isnan(psf_chi2_tpl)).sum()
-                    )
-                    logger.info(
-                        "PSF-fit quality (chi2_red <= %.2f, floors sci=%.2f "
-                        "tpl=%.2f): %d rejected in science, %d in reference, "
-                        "%d unmeasurable (kept)",
-                        _pv_chi2_max, _pv_floor_sci, _pv_floor_tpl,
-                        n_bad_s, n_bad_t, n_unmeas,
-                    )
+                    # A side without usable position columns is skipped:
+                    # its chi2 column stays NaN (unmeasurable -> kept),
+                    # so missing catalog columns cannot abort the whole
+                    # consistency check.
+                    if _pv_x is not None and _pv_y is not None:
+                        try:
+                            psf_chi2_sci = self._psf_stamp_chi2(
+                                psf_vetting.get("image_sci"),
+                                _pv_x,
+                                _pv_y,
+                                psf_vetting.get("psf_sci"),
+                                psf_vetting.get("fwhm_sci", np.nan),
+                                gain=psf_vetting.get("gain_sci", 1.0),
+                                mask=psf_vetting.get("mask_sci"),
+                                model_floor_frac=_pv_floor_sci,
+                                n_jobs=_pv_njobs,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Science-side PSF quality fit failed; skipping.",
+                                exc_info=True,
+                            )
+                    if _pv_x_t is not None and _pv_y_t is not None:
+                        try:
+                            psf_chi2_tpl = self._psf_stamp_chi2(
+                                psf_vetting.get("image_tpl"),
+                                _pv_x_t,
+                                _pv_y_t,
+                                psf_vetting.get("psf_tpl"),
+                                psf_vetting.get("fwhm_tpl", np.nan),
+                                gain=psf_vetting.get("gain_tpl", 1.0),
+                                mask=psf_vetting.get("mask_tpl"),
+                                model_floor_frac=_pv_floor_tpl,
+                                n_jobs=_pv_njobs,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Reference-side PSF quality fit failed; skipping.",
+                                exc_info=True,
+                            )
 
             # --- MAD-based outlier removal on paired magnitude residuals ---
             if params.fix_slope_to_one:
@@ -11608,6 +11659,66 @@ class Templates:
             else:
                 robust_mask = np.ones(len(mag_img), dtype=bool)
             n_pair_residual = int(robust_mask.sum())
+
+            # The cut applies a per-side effective threshold, calibrated on
+            # the pair-residual-robust pool rather than a single absolute
+            # value.  The two sides are measured in different regimes - the
+            # science image usually has an empirical ePSF on raw pixels
+            # while the template is always the resampled/aligned product
+            # vetted with an analytic model - so one chi2_max cannot be
+            # right on both.  A systematically inflated side (correlated
+            # resampled noise, model-limited PSF, structured background)
+            # would otherwise mass-veto typical stars and silently reduce
+            # the selection to "keep the better fraction by raw chi2",
+            # ranked by whichever side is worse calibrated.
+            if _pv_chi2_max > 0:
+                _t_sci, _med_sci = self._psf_chi2_threshold(
+                    psf_chi2_sci[robust_mask],
+                    _pv_chi2_max,
+                    _pv_recal_nsigma,
+                    _pv_recal_min,
+                )
+                _t_tpl, _med_tpl = self._psf_chi2_threshold(
+                    psf_chi2_tpl[robust_mask],
+                    _pv_chi2_max,
+                    _pv_recal_nsigma,
+                    _pv_recal_min,
+                )
+                bad_sci = ~np.isnan(psf_chi2_sci) & (psf_chi2_sci > _t_sci)
+                bad_tpl = ~np.isnan(psf_chi2_tpl) & (psf_chi2_tpl > _t_tpl)
+                psf_ok = ~(bad_sci | bad_tpl)
+                psf_pass_raw = psf_ok.copy()
+                # Worst-side chi2 per source, normalised by that side's
+                # effective cut so the ranking is not dictated by the
+                # inflated side.  fmax ignores NaN (unmeasurable) so an
+                # unverifiable side does not punish an otherwise-good
+                # source; the values rank vetoed sources if the keep floor
+                # forces a partial restore.
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    psf_q = np.fmax(
+                        psf_chi2_sci / _t_sci, psf_chi2_tpl / _t_tpl
+                    )
+                n_bad_s = int(bad_sci.sum())
+                n_bad_t = int(bad_tpl.sum())
+                n_unmeas = int(
+                    (np.isnan(psf_chi2_sci) | np.isnan(psf_chi2_tpl)).sum()
+                )
+                logger.info(
+                    "PSF-fit quality (chi2_red cut sci=%.2f tpl=%.2f "
+                    "[base=%.2f, med=%.2f/%.2f], floors sci=%.2f tpl=%.2f): "
+                    "%d rejected in science, %d in reference, "
+                    "%d unmeasurable (kept)",
+                    _t_sci,
+                    _t_tpl,
+                    _pv_chi2_max,
+                    _med_sci,
+                    _med_tpl,
+                    _pv_floor_sci,
+                    _pv_floor_tpl,
+                    n_bad_s,
+                    n_bad_t,
+                    n_unmeas,
+                )
             keep_mask = robust_mask & psf_ok
 
             # Adaptive relaxation: the veto must never starve the source
@@ -11615,11 +11726,10 @@ class Templates:
             # the veto stripped more than (1 - min_keep_frac) of the
             # robust pool, which signals systematic model-limited
             # rejection rather than real pathologies -- restore just
-            # enough vetoed sources, best (lowest) worst-image chi2
-            # first, so n_want inliers remain.  This keeps the veto for
-            # genuinely bad fits while guaranteeing a usable prior set;
-            # the relaxation is logged with the effective threshold so
-            # it stays diagnosable.
+            # enough vetoed sources, best (lowest) worst-side normalised
+            # chi2 first, so n_want inliers remain.  This keeps the veto
+            # for genuinely bad fits while guaranteeing a usable prior
+            # set; the relaxation is logged so it stays diagnosable.
             _n_want = min(
                 max(
                     _pv_min_keep,
@@ -11640,13 +11750,18 @@ class Templates:
                     _chi2_eff = (
                         float(q_rank[restore].max())
                         if n_restore > 0
-                        else _pv_chi2_max
+                        else np.nan
                     )
                     logger.warning(
                         "PSF-quality veto relaxed to keep %d sources: "
-                        "effective chi2_red threshold %.2f -> %.2f "
-                        "(%d best-fitting vetoed sources restored)",
-                        _n_want, _pv_chi2_max, _chi2_eff, int(n_restore),
+                        "worst restored worst-side chi2/cut %.2f "
+                        "(per-side cuts sci=%.2f tpl=%.2f; "
+                        "%d best-fitting vetoed sources restored)",
+                        _n_want,
+                        _chi2_eff,
+                        _t_sci,
+                        _t_tpl,
+                        int(n_restore),
                     )
             n_psf_vetted = int(keep_mask.sum())
             mag_img_r = mag_img[keep_mask]
@@ -12116,7 +12231,11 @@ class Templates:
             result["is_robust"] = True
             result["psf_chi2_sci"] = psf_chi2_sci[keep_mask]
             result["psf_chi2_tpl"] = psf_chi2_tpl[keep_mask]
-            result["is_psf_inlier"] = psf_ok[keep_mask]
+            # is_psf_inlier records the raw veto outcome; sources let back
+            # in by the keep-floor restore carry is_psf_restored instead of
+            # being silently marked as passing the cut.
+            result["is_psf_inlier"] = psf_pass_raw[keep_mask]
+            result["is_psf_restored"] = (psf_ok & ~psf_pass_raw)[keep_mask]
 
             non_robust_idx = indices[~keep_mask]
             nr = catalog_img.loc[non_robust_idx].copy()
@@ -12141,7 +12260,8 @@ class Templates:
             nr["is_robust"] = robust_mask[~keep_mask]
             nr["psf_chi2_sci"] = psf_chi2_sci[~keep_mask]
             nr["psf_chi2_tpl"] = psf_chi2_tpl[~keep_mask]
-            nr["is_psf_inlier"] = psf_ok[~keep_mask]
+            nr["is_psf_inlier"] = psf_pass_raw[~keep_mask]
+            nr["is_psf_restored"] = (psf_ok & ~psf_pass_raw)[~keep_mask]
 
             full = pd.concat([result, nr])
 
