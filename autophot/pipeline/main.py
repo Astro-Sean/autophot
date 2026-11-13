@@ -16004,6 +16004,17 @@ def run_photometry():
                                 "(source mask excluded: %.1f%% of pixels would have been NaN).",
                                 _src_frac * 100.0,
                             )
+                        # Site mask must match the NaN-fill policy above:
+                        # _full_src_defects carries the source mask built on
+                        # the science frame, and on a difference image every
+                        # candidate aperture overlaps a footprint left by flux
+                        # the subtraction removed, so masked_sites vetoes all
+                        # sites and the completeness curve comes out empty.
+                        _lim_site_mask = (
+                            hardware_defects_mask
+                            if is_diff_image
+                            else _full_src_defects
+                        )
                         try:
                             lim_cfg_local = input_yaml.get("limiting_magnitude") or {}
                             revert_lift = bool(
@@ -16087,7 +16098,7 @@ def run_photometry():
                                         image_zeropoint=image_zeropoint,
                                         avoid_positions=_lim_avoid_positions,
                                         fitted_position=_lim_fitted_position,
-                                        mask=_full_src_defects,
+                                        mask=_lim_site_mask,
                                     )
                                 )
 
@@ -16150,7 +16161,7 @@ def run_photometry():
                                     _return_details=True,
                                     avoid_positions=_lim_avoid_positions,
                                     fitted_position=_lim_fitted_position,
-                                    mask=_full_src_defects,
+                                    mask=_lim_site_mask,
                                 )
                                 if isinstance(_lim_details, dict):
                                     InjectedLimit = float(
