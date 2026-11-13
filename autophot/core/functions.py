@@ -58,7 +58,7 @@ from photutils.background import Background2D, MedianBackground
 from photutils.centroids import centroid_2dg, centroid_com, centroid_sources
 from photutils.segmentation import detect_sources, SourceCatalog, make_2dgaussian_kernel
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 # Sentinel floor for SATURATE placeholders: real detectors saturate below
 # ~1e6 ADU, while "no limit" markers are written as 1e10-1e30 by this
@@ -84,6 +84,17 @@ _FITS_CACHE_MAX = 64      # max entries per cache
 # CPython - but the pipeline stays serial unless configured, matching
 # the sextractor_nthreads/aperture_n_jobs convention.
 _PHOTUTILS_THREADS_CAP = 16
+
+
+def data_path(name: str) -> str:
+    """Absolute path to a bundled resource under ``autophot/data/``.
+
+    Replaces the old ``<repo>/databases/`` lookups so config files resolve
+    identically from a source checkout or an installed package.
+    """
+    from importlib import resources
+
+    return str(resources.files("autophot.data").joinpath(name))
 
 
 def photutils_n_threads(cfg=None, default=1):
@@ -965,7 +976,7 @@ def log_status(msg: str, *args, ui: bool = False, **kwargs) -> None:
     extra = kwargs.pop("extra", None) or {}
     if ui:
         extra = {**extra, "ui": True}
-    logging.getLogger(__name__).log(STATUS, msg, *args, extra=extra, **kwargs)
+    logging.getLogger(__name__.rsplit(".", 1)[-1]).log(STATUS, msg, *args, extra=extra, **kwargs)
 
 
 def log_result(msg: str, *args, **kwargs) -> None:
@@ -1579,7 +1590,7 @@ def log_exception(e: Exception, msg: str = None):
     msg : str, optional
         An optional message to display at the top of the log.
     """
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
     exc_type, exc_obj, exc_tb = sys.exc_info()
     fname = exc_tb.tb_frame.f_code.co_filename if exc_tb else "unknown"
@@ -1869,7 +1880,7 @@ def save_to_fits(data, output_filename):
             output_filename, overwrite=True, output_verify="silentfix+ignore"
         )
     except Exception as exc:
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         exc_type, _, exc_tb = sys.exc_info()
         fname = (
             os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
@@ -2529,7 +2540,7 @@ def load_telescope_config(wdir):
     all supported telescopes/instruments. User config overrides built-in.
     Returns merged dict keyed by TELESCOP then INSTRUME.
     """
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
     out = copy.deepcopy(BUILTIN_TELESCOPE_DEFAULTS)
 
     # Only load from wdir telescope.yml (wdir-specific configuration)
@@ -2999,13 +3010,13 @@ _CONFIG_SCHEMA_CACHE = None
 
 
 def load_default_input_schema() -> dict:
-    """Return the accepted config-key schema: databases/default_input.yml plus
+    """Return the accepted config-key schema: autophot/data/default_input.yml plus
     the empty sections AutomatedPhotometry.load() creates, so a generated
     input.yaml round-trips validation cleanly.  Cached; do not mutate."""
     global _CONFIG_SCHEMA_CACHE
     if _CONFIG_SCHEMA_CACHE is not None:
         return _CONFIG_SCHEMA_CACHE
-    path = Path(__file__).resolve().parent / "databases" / "default_input.yml"
+    path = Path(data_path("default_input.yml"))
     with open(path, "r") as f:
         schema = yaml.safe_load(f) or {}
     schema = schema.get("default_input", schema)
@@ -3651,7 +3662,7 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
                 concatenated_data.append(df)
 
     if not concatenated_data:
-        logging.getLogger(__name__).info(
+        logging.getLogger(__name__.rsplit(".", 1)[-1]).info(
             "No CSV files matched the requested pattern; nothing to concatenate."
         )
         return None
@@ -3669,7 +3680,7 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
         output_filename, index=False, na_rep="NaN"
     )  # write NaN explicitly
 
-    logging.getLogger(__name__).info(
+    logging.getLogger(__name__.rsplit(".", 1)[-1]).info(
         "Concatenated %d rows of tabular data into '%s'.",
         len(concatenated_data),
         output_filename,
@@ -4647,7 +4658,7 @@ def print_progress_bar(
     if total is None:
         total = len(iterable)
 
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
     def format_bar(iteration):
         percent = 100 * (iteration / float(total))
@@ -4794,7 +4805,7 @@ def refresh_sibling_weight_map(
     sibling at all, are left untouched - no new convention is created.
     All failures are non-fatal.
     """
-    _log = logger if logger is not None else logging.getLogger(__name__)
+    _log = logger if logger is not None else logging.getLogger(__name__.rsplit(".", 1)[-1])
     try:
         p = Path(str(image_fpath))
         candidates = [
