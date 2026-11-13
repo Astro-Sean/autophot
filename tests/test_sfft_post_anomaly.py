@@ -27,8 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from functions import _sfft_match_bad_mask, _sfft_post_anomaly_retry_viable
-from utils.run_sfft import (
+from autophot.core.functions import _sfft_match_bad_mask, _sfft_post_anomaly_retry_viable
+from autophot.subtraction.run_sfft import (
     _adopt_prior_free_retry,
     _coords_from_prep_data,
     _diff_source_residual_scale,
@@ -38,7 +38,7 @@ from utils.run_sfft import (
 )
 
 try:
-    from main import (
+    from autophot.pipeline.main import (
         _additional_target_sfft_ban_xy,
         _header_numeric_value,
         _ranked_keep_mask,
@@ -144,7 +144,7 @@ class TestRetrySourceMetrics:
         assert not _adopt_prior_free_retry(7, 4, 10, 100.0, None)
 
     def test_self_match_threshold_covers_sparse_prior_target(self):
-        cfg = yaml.safe_load((ROOT / "databases/default_input.yml").read_text())
+        cfg = yaml.safe_load((ROOT / "autophot" / "data" / "default_input.yml").read_text())
         ts_cfg = cfg["default_input"]["template_subtraction"]
         assert (
             ts_cfg["sfft_self_match_min_sources"]
