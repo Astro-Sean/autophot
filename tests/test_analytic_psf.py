@@ -13,12 +13,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-psf = pytest.importorskip("psf")
+psf = pytest.importorskip("autophot.photometry.psf")
 pytest.importorskip("photutils.psf")
 from photutils.psf import MoffatPRF
 
-import limits
-import main as main_mod
+from autophot.analysis import limits
+import autophot.pipeline.main as main_mod
 
 TRUTH_BETA = 3.0
 
