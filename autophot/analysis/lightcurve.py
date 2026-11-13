@@ -150,7 +150,7 @@ COLOR_INDEX_COLORS = {
     "u-g": "#6A0DAD",
     "g-r": "#20B2AA",
     "r-i": "#E55B3C",
-    "i-z": "#A52A2A",
+    "i-z": "#003366",
     "g-i": "#4682B4",
     "r-z": "#CD5C5C",
     "u-r": "#8A2BE2",
@@ -996,10 +996,13 @@ def plot_lightcurve(
 
         ratios = [1.5] * n_curve + ([1] if plot_color else [])
         fig = plt.figure(figsize=figsize)
-        gs = GridSpec(n_total, 1, figure=fig, height_ratios=ratios, hspace=0.08)
+        gs = GridSpec(n_total, 1, figure=fig, height_ratios=ratios, hspace=0.16)
         axes = np.array([fig.add_subplot(gs[i]) for i in range(n_total)])
         for i in range(1, n_total):
             axes[i].sharex(axes[0])
+        # Stacked panels share x; only the bottom panel keeps tick labels.
+        for _ax in axes[:-1]:
+            _ax.tick_params(axis="x", labelbottom=False)
     curve_axes = axes[:n_curve]
     color_ax = axes[-1] if plot_color else None
 
@@ -1389,7 +1392,8 @@ def plot_lightcurve(
             ax.grid(True, which="major", alpha=0.35, linestyle="-", linewidth=0.5)
             ax.minorticks_on()
 
-    curve_axes[0].set_ylabel("Apparent Magnitude [mag]")
+    if single_plot:
+        curve_axes[0].set_ylabel("Apparent Magnitude [mag]")
     (color_ax if plot_color else curve_axes[-1]).set_xlabel(xlabel)
     if subday_unit == "min":
         # Integer minute ticks for intra-night axes
@@ -1546,7 +1550,8 @@ def plot_lightcurve(
             frameon=False,
         )
 
-    ax0.invert_yaxis()
+    for _ax in curve_axes:
+        _ax.yaxis.set_inverted(True)
 
     # ---------- Colour evolution panel (same-night pairs only) ----------
     if plot_color and color_ax is not None and photometry_filter_series(data) is not None:
