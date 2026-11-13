@@ -11,13 +11,13 @@ matplotlib.use("Agg")
 
 from astropy.time import Time
 
-from plot import (
+from autophot.analysis.plot import (
     Plot,
     _instrumental_limit_to_apparent,
     _resolve_plot_limit,
     _resolve_plot_snr,
 )
-from lightcurve import (
+from autophot.analysis.lightcurve import (
     _format_reference_datetime,
     _time_axis_transform,
     _parse_calib_header,
@@ -25,7 +25,7 @@ from lightcurve import (
     plot_lightcurve,
     plot_variability_check,
 )
-from differential_photometry import differential_photometry
+from autophot.photometry.differential_photometry import differential_photometry
 
 
 # ---------------------------------------------------------------------------
@@ -882,7 +882,7 @@ def test_differential_photometry_default_time_scale_no_extra_columns(tmp_path):
 # Sloan i vs Johnson-Cousins I must never merge
 # ---------------------------------------------------------------------------
 
-from lightcurve import (
+from autophot.analysis.lightcurve import (
     _band_key,
     filter_value_matches_band,
     canonical_bands_from_filter_series,
