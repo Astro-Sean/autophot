@@ -27,7 +27,7 @@ from typing import Optional
 
 import numpy as np
 
-log = logging.getLogger(__name__)
+log = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 @dataclass
