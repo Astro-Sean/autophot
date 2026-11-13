@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
-from wcs import (
+from autophot.pipeline.wcs import (
     _coerce_detected_flux,
     _detect_solve_sources,
     _downsample_levels_for,
