@@ -1584,6 +1584,62 @@ def _run_transient_color_correction(default_input, output_loc, reduced_loc, log)
         log(f"[WARNING] Transient color correction skipped: {exc}")
 
 
+def _run_color_composite(default_input, reduced_loc, log):
+    """Optional post-step: RGB composite image of the field.
+
+    Resamples each band's processed frames onto a common WCS grid,
+    median-combines them and writes ``Color_Image.<plot_format>`` (plus
+    an optional linear FITS cube) next to the light curve.  Failures are
+    logged and never fatal.
+    """
+    try:
+        pp_cfg = default_input.get("postprocessing", {}) or {}
+        if not pp_cfg.get("color_image", False):
+            return
+        cfg = dict(default_input)
+        cfg.update(pp_cfg)
+        from .analysis.color_composite import generate_color_image_from_run
+
+        written = generate_color_image_from_run(reduced_loc, input_yaml=cfg)
+        if written:
+            log(f"Color composite image: {written['image']}")
+    except Exception as exc:
+        log(f"[WARNING] Color image skipped: {exc}")
+
+
+def _run_periodogram(default_input, output_loc, reduced_loc, log):
+    """Optional post-step: Lomb-Scargle period search on the light curve.
+
+    Prefers the differential-photometry relative fluxes when the CSV is
+    present, else uses the calibrated magnitudes.  Writes
+    ``Periodogram_<band>.<plot_format>`` and a peak table per band.
+    Failures are logged and never fatal.
+    """
+    try:
+        pp_cfg = default_input.get("postprocessing", {}) or {}
+        if not pp_cfg.get("periodogram", False):
+            return
+        from .analysis.periodogram import run_periodogram
+
+        results = run_periodogram(
+            output_loc,
+            outdir=reduced_loc,
+            method=pp_cfg.get("periodogram_method", "PSF"),
+            min_period=pp_cfg.get("periodogram_min_period"),
+            max_period=pp_cfg.get("periodogram_max_period"),
+            samples_per_peak=int(
+                pp_cfg.get("periodogram_samples_per_peak", 5) or 5
+            ),
+            top_peaks=int(pp_cfg.get("periodogram_top_peaks", 5) or 5),
+            input_yaml=default_input,
+            target_name=default_input.get("target_name"),
+        )
+        for res in results:
+            log(f"Periodogram ({res['band']}): {res['figure']}")
+    except Exception as exc:
+        log(f"[WARNING] Periodogram skipped: {exc}")
+
+
 def __getattr__(name: str):
     """
     Resolve common misspellings for public module symbols.
@@ -3898,6 +3954,8 @@ class AutomatedPhotometry:
             )
 
             _run_transient_color_correction(default_input, output_loc, reduced_loc, _log)
+            _run_color_composite(default_input, reduced_loc, _log)
+            _run_periodogram(default_input, output_loc, reduced_loc, _log)
 
             # Concatenate additional-target per-image CSVs into per-target
             # lightcurve files.  Each additional target's per-image CSV is
@@ -3962,6 +4020,10 @@ class AutomatedPhotometry:
                 )
                 _log_always(f"Output light curve: {output_photometry}")
                 _run_transient_color_correction(
+                    default_input, output_photometry, reduced_loc, _log
+                )
+                _run_color_composite(default_input, reduced_loc, _log)
+                _run_periodogram(
                     default_input, output_photometry, reduced_loc, _log
                 )
 
