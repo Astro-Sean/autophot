@@ -1908,8 +1908,7 @@ class BackgroundSubtractor:
         fast_mode = bool(cfg_bkg.get("fast_mode", False))
         # photutils>=3 deprecated the Background2D interpolator kwarg and
         # always resizes the mesh with a cubic spline zoom; the
-        # global_interpolator / global_interp_order config keys no longer
-        # have an effect.
+        # global_interpolator config key no longer has an effect.
         global_interpolator = (
             str(cfg_bkg.get("global_interpolator", "zoom")).strip().lower()
         )
