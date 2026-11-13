@@ -18,8 +18,8 @@ from astropy.io import fits
 from scipy.ndimage import binary_dilation, binary_fill_holes
 from skimage.morphology import disk
 
-import cosmic
-from functions import drop_mask_components_at_positions
+from autophot.pipeline import cosmic
+from autophot.core.functions import drop_mask_components_at_positions
 
 
 def _run(monkeypatch, raw_mask, **kwargs):
