@@ -3482,7 +3482,6 @@ class Catalog:
                     catalogName.upper(),
                     len(selectedCatalog),
                 )
-                warnings.filterwarnings("default")
 
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
