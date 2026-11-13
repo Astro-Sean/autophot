@@ -33,7 +33,7 @@ Requires the `astro` conda environment (`MaxiMask` + `tensorflow`).
 
 ## Pipeline integration
 
-`background.use_maximask: true` in `databases/default_input.yml`
+`background.use_maximask: true` in `autophot/data/default_input.yml`
 enables the stage inside `BackgroundSubtractor.remove()`: detections
 from `background.maximask_classes` (default CR/HCL/DCL/HP/DP/P/TRL/
 SAT/SP/OV; BG/BBG/FR/NEB excluded) are unioned into
