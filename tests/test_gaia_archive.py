@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from autophot_gaia_curves import gaia_archive
-from autophot_gaia_curves.gaia_archive import (
+from autophot.gaia_curves import gaia_archive
+from autophot.gaia_curves.gaia_archive import (
     _chunk_list,
     _is_permanent_http_error,
     gaia_xp_sql_top_n,
@@ -21,7 +21,7 @@ from autophot_gaia_curves.gaia_archive import (
     retry_with_backoff,
     sort_gaia_table_nearest_to_target,
 )
-from autophot_gaia_curves.builder import (
+from autophot.gaia_curves.builder import (
     GaiaCurveCatalogBuilder,
     _format_gaia_source_id,
 )
@@ -722,7 +722,7 @@ class TestGaiaXPyRequestCap:
     per call; larger batches are split internally."""
 
     def test_chunk_size_clamps_to_archive_limit(self):
-        from autophot_gaia_curves.gaia_archive import _gaiaxpy_chunk_size
+        from autophot.gaia_curves.gaia_archive import _gaiaxpy_chunk_size
 
         assert _gaiaxpy_chunk_size(200, 66, None) == 50
         assert _gaiaxpy_chunk_size(0, 66, None) == 50
