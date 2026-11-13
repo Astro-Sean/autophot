@@ -349,7 +349,7 @@ class _BoundedShiftEPSFBuilder(EPSFBuilder):
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import (
+from ..core.functions import (
     log_step,
     log_result,
     set_size,
@@ -358,8 +358,8 @@ from functions import (
     psf_photometry_threads,
     STATUS,
 )
-from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
-from aperture import (
+from ..core.plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
+from .aperture import (
     gain_e_per_adu_from_header,
     resolve_exposure_time_seconds,
     resolve_gain_e_per_adu,
@@ -368,7 +368,7 @@ from aperture import (
 # ---------------------------------------------------------------------------
 # Module-level logger
 # ---------------------------------------------------------------------------
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 def _nddata_clone(nd: NDData, data: Optional[np.ndarray] = None) -> NDData:
@@ -665,7 +665,7 @@ def get_smoothing_kernel(
                 scale_px = 0.7 * _f_auto
                 _auto_cells = scale_px * osamp
             else:
-                logging.getLogger(__name__).warning(
+                logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
                     "psf_smoothing_kernel='auto' needs a finite FWHM; "
                     "using 'quartic'."
                 )
@@ -693,7 +693,7 @@ def get_smoothing_kernel(
         cap_cells = _odd_floor(cap_px * osamp)
         if kernel_size > cap_cells:
             if explicit_size:
-                logging.getLogger(__name__).warning(
+                logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
                     "psf_smoothing_kernel_size=%d (footprint %.2f px) exceeds "
                     "the %.2gxFWHM cap (%.2f px) -- capping to %d.",
                     kernel_size,
@@ -726,7 +726,7 @@ def get_smoothing_kernel(
         ker = ker / np.sum(ker)
         return ker
     if k not in ("quartic", "quadratic"):
-        log_module = logging.getLogger(__name__)
+        log_module = logging.getLogger(__name__.rsplit(".", 1)[-1])
         log_module.warning(
             "Unknown psf_smoothing_kernel %r; using 'quartic'.",
             kind,
@@ -1009,7 +1009,7 @@ def _repair_starved_cells(
     cnt = _counts(xe, ye)
     n_starved = int(np.count_nonzero(cnt < min_per_cell))
     if n_starved:
-        logging.getLogger(__name__).warning(
+        logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
             "Grid repair incomplete: %d of %d cells still have < %d "
             "sources; those cells' local ePSFs will be under-constrained.",
             n_starved,
@@ -1042,7 +1042,7 @@ def _select_adaptive_oversample(
     residuals per gridpoint, so the caller can flag the resulting ePSF as
     low-confidence instead of treating a 1x fallback as healthy.
     """
-    log = logging.getLogger(__name__)
+    log = logging.getLogger(__name__.rsplit(".", 1)[-1])
     n_final = int(n_stars)
     hard_min = int(phot_cfg.get("psf_oversample_hard_min_stars", 5))
     if n_final < hard_min:
@@ -1248,7 +1248,7 @@ def _analytic_moffat_psf(fwhm, oversampling, cutout_n, beta):
     beta = max(1.1, float(beta))
     fwhm = float(fwhm)
     if not np.isfinite(fwhm) or fwhm <= 0:
-        logging.getLogger(__name__).warning(
+        logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
             "Analytic PSF got non-positive FWHM=%s; clamping to 2 px.",
             fwhm,
         )
@@ -2771,7 +2771,7 @@ def _warm_gridded_spline_cache(model):
                 y_0=float(_fy),
             )
     except Exception as exc:
-        logging.getLogger(__name__).debug(
+        logging.getLogger(__name__.rsplit(".", 1)[-1]).debug(
             "Gridded ePSF spline warm-up skipped: %s", exc
         )
 
@@ -4120,7 +4120,7 @@ class MCMCFitter:
         use_nddata_uncertainty=False,
     ):
         t0 = time.time()
-        log = logging.getLogger(__name__)
+        log = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         # Use instance noise settings when fitter was created for MCMC from fit() (photutils does not pass these)
         if getattr(self, "_use_nddata_uncertainty", False):
@@ -4514,7 +4514,7 @@ class PoissonLikelihoodFitter:
         fitted_model : The fitted model
         """
         import logging
-        log = logging.getLogger(__name__)
+        log = logging.getLogger(__name__.rsplit(".", 1)[-1])
         
         self._data_shape = data.shape
 
@@ -4752,7 +4752,7 @@ def plot_analytic_psf(
     component so each term's contribution to the profile is visible
     directly.
     """
-    log = logging.getLogger(__name__)
+    log = logging.getLogger(__name__.rsplit(".", 1)[-1])
     try:
         data = np.asarray(getattr(stamp, "data", None), float)
         if data is None or data.ndim != 2 or data.size == 0:
@@ -6806,7 +6806,7 @@ class PSF:
         if SNR_limit is None:
             SNR_limit = [10, 1e6]
 
-        log = logging.getLogger(__name__)
+        log = logging.getLogger(__name__.rsplit(".", 1)[-1])
         self.psf_model_kind = "none"
         self.n_epsf_stars = None
         # True/False for the empirical ePSF build; None when no empirical
@@ -7008,7 +7008,7 @@ class PSF:
             )
             # Use consistent fallback with main.py
             try:
-                from main import SATURATE_INTERNAL_FALLBACK
+                from ..pipeline.main import SATURATE_INTERNAL_FALLBACK
             except ImportError:
                 SATURATE_INTERNAL_FALLBACK = np.inf
             saturate = float(self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK))
@@ -7440,7 +7440,7 @@ class PSF:
                     # locus on defect-dominated pools and would flag the
                     # real stellar side - the helper floors the scatter at
                     # 10% of the median to avoid both failure modes.
-                    from functions import fwhm_outlier_clip
+                    from ..core.functions import fwhm_outlier_clip
 
                     _rej_clip, _clip_med, _clip_eff = fwhm_outlier_clip(
                         src_fwhm.to_numpy(dtype=float), sigma=_clip_sigma
@@ -10737,7 +10737,7 @@ class PSF:
                     )
 
             save_path = os.path.join(write_dir, f"{filename_prefix}_{base}.fits")
-            from functions import safe_fits_write
+            from ..core.functions import safe_fits_write
             # Record the ePSF grid convention so downstream consumers (ZOGY
             # PSF stamps, ImagePSF reloads) can recover the native-pixel
             # sampling.  Without OVERSAMP a 4x-oversampled stamp is read back
@@ -10856,7 +10856,7 @@ class PSF:
         image panel (with half-FWHM guides on the projections), and the
         measured ePSF FWHM is shown in the title.
         """
-        log = logging.getLogger(__name__)
+        log = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         try:
             data = np.asarray(psf_model.data, float)
@@ -11066,7 +11066,7 @@ class PSF:
         cannot support a grid - the caller then falls back to the single
         field-averaged ePSF.
         """
-        log = logging.getLogger(__name__)
+        log = logging.getLogger(__name__.rsplit(".", 1)[-1])
         min_per_cell = max(
             1, int(phot_cfg.get("psf_grid_min_stars_per_cell", 25))
         )
@@ -11722,7 +11722,7 @@ class PSF:
         # ePSF (SFFT prior vetting, ZOGY stamps, reloads) keep working; the
         # full cube + grid fiducials go to PSF_model_grid_*.
         try:
-            from functions import safe_fits_write
+            from ..core.functions import safe_fits_write
 
             write_dir = self.input_yaml["write_dir"]
             hdr = fits.Header()
@@ -12027,7 +12027,7 @@ class PSF:
         )
         fig.savefig(out, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
-        logging.getLogger(__name__).info(
+        logging.getLogger(__name__.rsplit(".", 1)[-1]).info(
             "Saved gridded ePSF diagnostic plot: %s", os.path.basename(out)
         )
 
@@ -12320,7 +12320,7 @@ class PSF:
         -------
         updated : DataFrame  (copy of sources with fit columns added)
         """
-        log = logging.getLogger(__name__)
+        log = logging.getLogger(__name__.rsplit(".", 1)[-1])
         t0 = time.perf_counter()
         if sources is None:
             log.warning("PSF photometry: no sources provided (sources=None); skipping PSF fit.")
@@ -12990,7 +12990,7 @@ class PSF:
         # render, C = sum(P^2).  One render suffices - this only feeds the
         # LSQ-vs-MCMC tiering heuristic.
         try:
-            from limits import _render_epsf_on_cutout
+            from ..analysis.limits import _render_epsf_on_cutout
 
             _m_fisher = epsf_model
             if isinstance(_m_fisher, GriddedPSFModel):
@@ -14680,7 +14680,7 @@ class PSF:
         # should be read as lower bounds, not honest sigmas.
         _n_clamped = int(np.count_nonzero(np.asarray(_chi2, float) > 100.0))
         if _n_clamped:
-            logging.getLogger(__name__).warning(
+            logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
                 "%d PSF fit(s) have reduced_chi2 > 100 - error inflation is "
                 "clamped at 10x, so their reported errors are lower bounds.",
                 _n_clamped,
@@ -15301,7 +15301,7 @@ class PSF:
         base = os.path.splitext(os.path.basename(fpath))[0]
         write_dir = os.path.dirname(fpath)
         plt.ioff()
-        log = logging.getLogger(__name__)
+        log = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         try:
             nd_for_plot = ndimage
@@ -16014,7 +16014,7 @@ class PSF:
         bounds=None,
     ):
         """Corner plot for MCMC posterior of one source."""
-        log = logging.getLogger(__name__)
+        log = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         # Accept both spellings.
         if writedir is None:
