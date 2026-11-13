@@ -18,8 +18,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from fwhm import Find_FWHM
-from aperture import Aperture
+from autophot.pipeline.fwhm import Find_FWHM
+from autophot.photometry.aperture import Aperture
 
 
 def _linearity_catalog(n=70, offset_scatter=0.25, n_saturated=0, seed=1):
