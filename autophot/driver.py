@@ -1640,6 +1640,63 @@ def _run_periodogram(default_input, output_loc, reduced_loc, log):
         log(f"[WARNING] Periodogram skipped: {exc}")
 
 
+# Working directories whose noise-factor ledger was already cleared this
+# run; several file groups can share one wdir and must not wipe each
+# other's entries.
+_ENF_CLEARED_DIRS: set = set()
+
+
+def _noise_factor_ledger_path(wdir):
+    from .photometry.aperture import NOISE_FACTOR_LEDGER_NAME
+
+    return os.path.join(os.path.abspath(str(wdir or ".")), NOISE_FACTOR_LEDGER_NAME)
+
+
+def _reset_noise_factor_ledger(wdir):
+    """Drop stale noise-factor entries once per working directory.
+
+    Per-image subprocesses append to the ledger during the run, so it
+    must be cleared before processing starts; repeated calls for the
+    same directory are no-ops so earlier entries are not lost.
+    """
+    wdir = os.path.abspath(str(wdir or "."))
+    if wdir in _ENF_CLEARED_DIRS:
+        return
+    _ENF_CLEARED_DIRS.add(wdir)
+    try:
+        os.remove(_noise_factor_ledger_path(wdir))
+    except OSError:
+        pass
+
+
+def _report_noise_factor_summary(wdir, log):
+    """Emit a single aggregated warning for per-image noise-factor events."""
+    ledger = _noise_factor_ledger_path(wdir)
+    factors = {}
+    try:
+        with open(ledger, "r", encoding="utf-8") as fh:
+            for line in fh:
+                tag, _, val = line.strip().rpartition(",")
+                try:
+                    factors[tag] = max(factors.get(tag, 0.0), float(val))
+                except ValueError:
+                    continue
+    except OSError:
+        return
+    if not factors:
+        return
+    vals = sorted(factors.values())
+    n = len(vals)
+    med = vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
+    log(
+        f"[WARNING] Empirical noise factor exceeded 1.5x on {n} image(s) "
+        f"(median {med:.1f}x, worst {vals[-1]:.1f}x; resampling correlation "
+        "and/or confusion noise) - aperture errors were inflated "
+        "accordingly; per-file values recorded in "
+        f"{os.path.basename(ledger)}"
+    )
+
+
 def __getattr__(name: str):
     """
     Resolve common misspellings for public module symbols.
@@ -2656,6 +2713,9 @@ class AutomatedPhotometry:
                 # redundant Gaia archive downloads.
                 _raw_wdir = backup_yaml.get("wdir", ".")
                 backup_yaml["wdir"] = os.path.abspath(_raw_wdir)
+                # Fresh run: clear the per-image noise-factor ledger so
+                # the end-of-run summary only counts this run's images.
+                _reset_noise_factor_ledger(backup_yaml["wdir"])
 
                 # Normalize target_name to match what main.py does, so the
                 # catalog cache directory is consistent between pre-fetch and
@@ -3942,6 +4002,10 @@ class AutomatedPhotometry:
                         if len(file_list) > 1:
                             _done_msg = f"Done: {counter}/{len(file_list)} images processed"
                             _log(border_msg(_done_msg) if border_msg else _done_msg)
+
+            # One aggregated warning for all per-image noise-factor
+            # threshold crossings recorded in the shared ledger.
+            _report_noise_factor_summary(default_input.get("wdir"), _log_always)
 
             # Concatenate per-image outputs into one light curve CSV
             reduced_loc = f"{default_input['fits_dir']}_{default_input['outdir_name']}"
