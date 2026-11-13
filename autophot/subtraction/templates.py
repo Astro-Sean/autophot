@@ -160,11 +160,11 @@ from typing import NamedTuple
 # Custom / Local Module Imports
 # =============================================================================
 try:
-    from catalog import Catalog
+    from ..calibration.catalog import Catalog
 except ModuleNotFoundError:
     Catalog = None
 try:
-    from functions import (
+    from ..core.functions import (
         log_step,
         distance_to_uniform_row_col,
         get_header,
@@ -188,15 +188,15 @@ except (ModuleNotFoundError, ImportError):
     get_image_stats = None
     save_to_fits = None
     remove_wcs_from_header = None
-from wcs import get_wcs
+from ..pipeline.wcs import get_wcs
 try:
-    from utils import run_IDC
+    from ..subtraction import run_IDC
 except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
-from functions import clean_subprocess_log, log_result, log_warning_from_exception, safe_fits_write, cap_console_lines, photutils_n_threads, stat_block, which_exe, STATUS, _sfft_post_anomaly_retry_viable
+from ..core.functions import clean_subprocess_log, log_result, log_warning_from_exception, safe_fits_write, cap_console_lines, photutils_n_threads, stat_block, which_exe, STATUS, _sfft_post_anomaly_retry_viable
 try:
-    from functions import invalidate_fits_cache
+    from ..core.functions import invalidate_fits_cache
 except ImportError:
     def invalidate_fits_cache(fpath=None):
         return None
@@ -248,7 +248,7 @@ logging.basicConfig(
     format="%(levelname)s - %(message)s",
 )
 cap_console_lines(logging.getLogger().handlers)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 # =============================================================================
 # Global Constants
@@ -2729,7 +2729,7 @@ def _detect_sextractor_sources(data_or_path, input_yaml=None, fwhm_pix=3.0,
     if fwhm_min is None:
         fwhm_min = 0.8 if (fwhm_pix and fwhm_pix < 2.0) else 1.5
     try:
-        from utils.run_sex import SExtractorWrapper
+        from .run_sex import SExtractorWrapper
     except ModuleNotFoundError:
         return _none
 
@@ -3925,7 +3925,7 @@ def _check_spalipy_sub_tile_feasibility(
 
     Returns ``sub_tile`` when every tile supports a quad, else 1.
     """
-    log = log or logging.getLogger(__name__)
+    log = log or logging.getLogger(__name__.rsplit(".", 1)[-1])
     if sub_tile <= 1:
         return sub_tile
     try:
@@ -4345,7 +4345,7 @@ def _reproject_template(
     shape_out = science_image.shape
 
     # reproject needs real WCS objects; raw headers drop SIP distortion terms.
-    from wcs import get_wcs
+    from ..pipeline.wcs import get_wcs
     template_proj = get_wcs(template_header)
     science_proj = get_wcs(science_header)
     if template_proj is None or science_proj is None:
@@ -4647,7 +4647,7 @@ def _reproject_template(
     # ------------------------------------------------------------------
     hdr = template_header.copy()
     hdr = remove_wcs_from_header(hdr)
-    from functions import copy_wcs_from_header
+    from ..core.functions import copy_wcs_from_header
     copy_wcs_from_header(science_header, hdr)
     hdr["NAXIS1"] = aligned.shape[1]
     hdr["NAXIS2"] = aligned.shape[0]
@@ -4682,7 +4682,7 @@ def _reproject_template(
     # sibling weight map still on the pre-resampling grid (the reproject
     # footprint doubles as a coverage weight on the new grid).
     try:
-        from functions import refresh_sibling_weight_map
+        from ..core.functions import refresh_sibling_weight_map
 
         refresh_sibling_weight_map(
             output_path,
@@ -5245,7 +5245,7 @@ def write_fits(
     overwrite: bool = True,
 ) -> None:
     """Write *data* and *header* to a FITS file with silent verification."""
-    from functions import safe_fits_write
+    from ..core.functions import safe_fits_write
     safe_fits_write(fpath, data, header, overwrite=overwrite)
 
 
@@ -5706,7 +5706,7 @@ def fill_masked_regions_in_fits(
         raise ValueError("No unmasked pixels available for background estimation.")
 
     if apply_sigma_clip:
-        from functions import biweight_sky_sigma
+        from ..core.functions import biweight_sky_sigma
 
         mean, _, _ = sigma_clipped_stats(bg_pixels, sigma=sigma)
         std = biweight_sky_sigma(bg_pixels)
@@ -5900,7 +5900,7 @@ def download_panstarrs_template(
                 }
             )
             template_wcs = get_wcs(src_header)
-            from functions import update_header_from_wcs
+            from ..core.functions import update_header_from_wcs
             update_header_from_wcs(new_header, template_wcs)
 
             # Create the subfolder only when we have data ready to write
@@ -6043,7 +6043,7 @@ def download_sdss_template(
         if not (0 <= xc < data.shape[1] and 0 <= yc < data.shape[0]):
             logger.warning("Target (%.4f, %.4f) outside SDSS frame", ra, dec)
             return None
-        from functions import nan_crop
+        from ..core.functions import nan_crop
         new_header = fits.PrimaryHDU().header
         new_header.update(
             {
@@ -6056,7 +6056,7 @@ def download_sdss_template(
             }
         )
         # Copy WCS keywords from source header, then nan_crop will update CRPIX
-        from functions import copy_wcs_from_header
+        from ..core.functions import copy_wcs_from_header
         copy_wcs_from_header(new_header, src_header)
         cutout_size = int(2 * half_size_px)
         cutout_data, new_header = nan_crop(
@@ -6527,7 +6527,7 @@ def _psf_stamp_eval(x, y, ctx):
     (image, mask, PSF model, fit-box geometry, gain).
     """
     from astropy.stats import biweight_scale
-    from limits import _render_epsf_on_cutout
+    from ..analysis.limits import _render_epsf_on_cutout
     from photutils.centroids import centroid_2dg
 
     img = ctx["img"]
@@ -6587,7 +6587,7 @@ def _psf_stamp_eval(x, y, ctx):
     _m = ctx["psf_model"]
     if ctx["psf_is_gridded"]:
         try:
-            from psf import epsf_at_position as _epsf_at_pos
+            from ..photometry.psf import epsf_at_position as _epsf_at_pos
 
             _m = _epsf_at_pos(_m, x, y)
         except Exception:
@@ -6645,8 +6645,8 @@ def _psf_stamp_eval(x, y, ctx):
 # Canonical implementation lives in zeropoint.PenalisedSlopeRegressor.
 # Alias kept here so all call sites in this file continue to work unchanged.
 
-from zeropoint import PenalisedSlopeRegressor as ConstrainedSlopeRegressor  # noqa: E402
-from zeropoint import FixedSlopeRegressor  # noqa: E402
+from ..calibration.zeropoint import PenalisedSlopeRegressor as ConstrainedSlopeRegressor  # noqa: E402
+from ..calibration.zeropoint import FixedSlopeRegressor  # noqa: E402
 
 
 # =============================================================================
@@ -6924,7 +6924,7 @@ class Templates:
             # no WCS.
             _fbs_radius = 10.0
             try:
-                from catalog import (
+                from ..calibration.catalog import (
                     _catalog_cone_radius_arcmin,
                     _pixscale_arcsec,
                 )
@@ -7163,7 +7163,7 @@ class Templates:
                                     (float(_cx_c), float(_cy_c))
                                 )
 
-            from functions import biweight_stdfunc
+            from ..core.functions import biweight_stdfunc
 
             _, image_median, image_std = sigma_clipped_stats(
                 finite_data,
@@ -7724,7 +7724,7 @@ class Templates:
                     )
                 ):
                     try:
-                        from utils.alignment_verification import (
+                        from .alignment_verification import (
                             AlignmentVerifier,
                         )
 
@@ -9194,7 +9194,7 @@ class Templates:
                         )
                     # spalipy logs per-quad progress through the root logger;
                     # keep only warnings on normal runs.
-                    from functions import quiet_root_logger
+                    from ..core.functions import quiet_root_logger
                     import inspect as _inspect
                     _spalipy_sig = _inspect.signature(Spalipy.__init__).parameters
                     while not _aligned_ok:
@@ -9670,7 +9670,7 @@ class Templates:
                     # Write aligned template under the science WCS.
                     hdr = templateHeader.copy()
                     hdr = remove_wcs_from_header(hdr)
-                    from functions import copy_wcs_from_header
+                    from ..core.functions import copy_wcs_from_header
                     copy_wcs_from_header(scienceHeader, hdr)
                     hdr["NAXIS1"] = aligned_template.shape[1]
                     hdr["NAXIS2"] = aligned_template.shape[0]
@@ -9739,7 +9739,7 @@ class Templates:
                         logger.debug("spalipy: failed to write quality header", exc_info=True)
                     _atomic_fits_write(new_templateFpath, aligned_template, hdr)
                     try:
-                        from functions import refresh_sibling_weight_map
+                        from ..core.functions import refresh_sibling_weight_map
 
                         refresh_sibling_weight_map(new_templateFpath)
                     except Exception:
@@ -9772,7 +9772,7 @@ class Templates:
                                 np.asarray(_tpl_m["y"], float),
                             ])
                         if _sci_matched_xy is not None and len(_sci_matched_xy) > 0:
-                            from plot import Plot as _Plot
+                            from ..analysis.plot import Plot as _Plot
                             _plot_inst = _Plot(input_yaml={
                                 "fpath": scienceFpath,
                                 "fwhm": float(np.median(
@@ -10110,7 +10110,7 @@ class Templates:
                     # Write aligned template with science WCS + quality keywords
                     hdr = templateHeader.copy()
                     hdr = remove_wcs_from_header(hdr)
-                    from functions import copy_wcs_from_header
+                    from ..core.functions import copy_wcs_from_header
                     copy_wcs_from_header(scienceHeader, hdr)
                     hdr["NAXIS1"] = to_write.shape[1]
                     hdr["NAXIS2"] = to_write.shape[0]
@@ -10134,7 +10134,7 @@ class Templates:
                         pass
                     _atomic_fits_write(new_templateFpath, to_write, hdr)
                     try:
-                        from functions import refresh_sibling_weight_map
+                        from ..core.functions import refresh_sibling_weight_map
 
                         refresh_sibling_weight_map(new_templateFpath)
                     except Exception:
@@ -10298,7 +10298,7 @@ class Templates:
                     # Write with science WCS
                     hdr = templateHeader.copy()
                     hdr = remove_wcs_from_header(hdr)
-                    from functions import copy_wcs_from_header
+                    from ..core.functions import copy_wcs_from_header
                     copy_wcs_from_header(scienceHeader, hdr)
                     hdr["NAXIS1"] = aligned_tpl.shape[1]
                     hdr["NAXIS2"] = aligned_tpl.shape[0]
@@ -10367,7 +10367,7 @@ class Templates:
                         pass
                     _atomic_fits_write(new_templateFpath, aligned_tpl, hdr)
                     try:
-                        from functions import refresh_sibling_weight_map
+                        from ..core.functions import refresh_sibling_weight_map
 
                         refresh_sibling_weight_map(new_templateFpath)
                     except Exception:
@@ -10678,7 +10678,7 @@ class Templates:
         ----------
         coords : (min_row, min_col, max_row, max_col)
         """
-        from functions import nan_crop
+        from ..core.functions import nan_crop
         # Use exact float centre; nan_crop handles the rounding.
         center_x = (coords[3] + coords[1]) / 2.0
         center_y = (coords[2] + coords[0]) / 2.0
@@ -10816,7 +10816,7 @@ class Templates:
                 raise ValueError(
                     f"Invalid crop center: cx={cx}, cy={cy} (must be finite)"
                 )
-            from functions import nan_crop
+            from ..core.functions import nan_crop
             scienceImage, scienceHeader = nan_crop(
                 scienceImage, scienceHeader,
                 np.floor(cx), np.floor(cy),
@@ -10842,7 +10842,7 @@ class Templates:
                 border <= target_x_pix < w - border
                 and border <= target_y_pix < h - border
             ):
-                from functions import update_header_from_wcs
+                from ..core.functions import update_header_from_wcs
                 scienceImage = scienceImage_tmp
                 update_header_from_wcs(scienceHeader, scienceHeader_newwcs)
 
@@ -10921,7 +10921,7 @@ class Templates:
             
             # nan_crop preserves WCS distortion keywords that a plain
             # slice+CRPIX update would lose.
-            from functions import nan_crop
+            from ..core.functions import nan_crop
             scienceImage, scienceHeader = nan_crop(
                 scienceImage, scienceHeader,
                 position[0], position[1],
@@ -10963,7 +10963,7 @@ class Templates:
                 border <= target_x_pix < w - border
                 and border <= target_y_pix < h - border
             ):
-                from functions import update_header_from_wcs
+                from ..core.functions import update_header_from_wcs
                 scienceImage = scienceImage_tmp
                 templateImage = templateImage_tmp
                 update_header_from_wcs(scienceHeader, scienceHeader_newwcs)
@@ -11273,7 +11273,7 @@ class Templates:
         # threshold its startup cost exceeds the serial loop's runtime.
         if n_jobs > 1 and n >= 64:
             try:
-                from aperture import _resolve_n_jobs
+                from ..photometry.aperture import _resolve_n_jobs
                 from multiprocessing import Pool
 
                 workers = _resolve_n_jobs(n_jobs)
@@ -11420,7 +11420,7 @@ class Templates:
             # nonlinear_peak_frac * saturate, same convention as
             # zeropoint/main.py), not just fully saturated ones.
             try:
-                from main import SATURATE_INTERNAL_FALLBACK
+                from ..pipeline.main import SATURATE_INTERNAL_FALLBACK
             except ImportError:
                 SATURATE_INTERNAL_FALLBACK = np.inf
             saturate = self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK)
@@ -12243,8 +12243,8 @@ class Templates:
         power-law slope.
         """
         from matplotlib import pyplot as plt
-        from functions import set_size
-        from plotting_utils import (
+        from ..core.functions import set_size
+        from ..core.plotting_utils import (
             apply_autophot_mplstyle, get_ransac_color, get_marker_size,
             get_alpha, get_line_width, ransac_grid, ransac_savefig,
             set_mag_axes_inverted_xy, get_plot_ext,
@@ -12952,7 +12952,7 @@ class Templates:
                     _aligrms_ck, _fwhm_broad_ck,
                 )
 
-            from aperture import gain_e_per_adu_from_header, resolve_gain_e_per_adu
+            from ..photometry.aperture import gain_e_per_adu_from_header, resolve_gain_e_per_adu
 
             try:
                 science_gain = resolve_gain_e_per_adu(None, self.input_yaml)
@@ -12974,8 +12974,8 @@ class Templates:
             # "do not mask on saturation".
             # Use consistent fallback values with main.py
             try:
-                from main import SATURATE_INTERNAL_FALLBACK
-                from functions import SATURATE_SENTINEL_MIN
+                from ..pipeline.main import SATURATE_INTERNAL_FALLBACK
+                from ..core.functions import SATURATE_SENTINEL_MIN
             except ImportError:
                 SATURATE_INTERNAL_FALLBACK = np.inf
                 SATURATE_SENTINEL_MIN = 1e8
@@ -13024,7 +13024,7 @@ class Templates:
                 template_saturate
             ):
                 try:
-                    from utils.inpaint import InpaintConfig, inpaint_saturated_cores
+                    from .inpaint import InpaintConfig, inpaint_saturated_cores
 
                     cfg = InpaintConfig(
                         enabled=True,
@@ -13600,7 +13600,7 @@ class Templates:
                         except Exception:
                             continue
                 if _defect_rescue_xy:
-                    from functions import drop_mask_components_at_positions
+                    from ..core.functions import drop_mask_components_at_positions
 
                     # Both the compactness extent and the area cap scale
                     # with the science FWHM: a false-flag footprint grows
@@ -14622,7 +14622,7 @@ class Templates:
                 raise ValueError(
                     f"ZOGY requires same image shapes: science {science_data.shape} vs reference {reference_data.shape}"
                 )
-            from aperture import gain_e_per_adu_from_header, resolve_gain_e_per_adu
+            from ..photometry.aperture import gain_e_per_adu_from_header, resolve_gain_e_per_adu
 
             if science_gain is None:
                 try:
@@ -14698,7 +14698,7 @@ class Templates:
             # Noise RMS via biweight scale: a plain std is inflated by
             # sources, which would bias ZOGY's sn/sr noise terms, while
             # MAD staircases on quantized (compressed) stacks.
-            from functions import biweight_sky_sigma as _rbs
+            from ..core.functions import biweight_sky_sigma as _rbs
             # Masked pixels carry real but unusable flux (saturated cores);
             # including them would inflate the noise scale.
             if _um is not None:
@@ -15112,7 +15112,7 @@ class Templates:
                         _n_scale_ratios,
                     )
             if not np.isfinite(_flux_scale) or _flux_scale <= 0:
-                from aperture import (
+                from ..photometry.aperture import (
                     exposure_seconds_from_header,
                     resolve_exposure_time_seconds,
                 )
@@ -17044,7 +17044,7 @@ class Templates:
             return min(sfft_timeout, max(_sfft_time_left(), 0.0))
 
         try:
-            script = Path(__file__).parent / "utils" / "run_sfft.py"
+            script = Path(__file__).parent / "run_sfft.py"
             # Allow user to control whether variable sources are passed to SFFT
             pass_masked_sources = _as_bool(
                 ts_sub.get("sfft_pass_masked_sources", False), False
