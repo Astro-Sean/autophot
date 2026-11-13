@@ -30,8 +30,8 @@ if str(ROOT) not in sys.path:
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from functions import SATURATE_SENTINEL_MIN, _bounded_centroid, _keep_floor_cut
-from utils.data_validation import (
+from autophot.core.functions import SATURATE_SENTINEL_MIN, _bounded_centroid, _keep_floor_cut
+from autophot.core.data_validation import (
     VAL_MISSING_SATURATE,
     VAL_SATURATED_PIXELS,
     validate_image,
@@ -229,7 +229,7 @@ class TestStampRadialFwhm:
         )
 
     def test_star_measures_true_fwhm(self):
-        from main import _stamp_radial_fwhm
+        from autophot.pipeline.main import _stamp_radial_fwhm
 
         img = self._add_gauss(self._field(), 100, 100, 3.0, 5000)
         got = _stamp_radial_fwhm(img, 100.4, 99.6, 3.0)
@@ -237,7 +237,7 @@ class TestStampRadialFwhm:
         assert abs(got - 3.0) < 0.5
 
     def test_extended_source_flagged(self):
-        from main import _stamp_radial_fwhm
+        from autophot.pipeline.main import _stamp_radial_fwhm
 
         img = self._add_gauss(self._field(), 60, 60, 8.0, 5000)
         got = _stamp_radial_fwhm(img, 60, 60, 3.0)
@@ -248,7 +248,7 @@ class TestStampRadialFwhm:
         # A flat-top blob fills the stamp so the sky annulus sits
         # inside the source; the raw-level guard must still flag it
         # rather than hide the extent behind an overestimated sky.
-        from main import _stamp_radial_fwhm
+        from autophot.pipeline.main import _stamp_radial_fwhm
 
         rng = np.random.default_rng(0)
         img = np.full((200, 200), 100.0) + rng.normal(0, 2.0, (200, 200))
@@ -259,7 +259,7 @@ class TestStampRadialFwhm:
         assert got / 3.0 > 1.6
 
     def test_unmeasurable_returns_nan(self):
-        from main import _stamp_radial_fwhm
+        from autophot.pipeline.main import _stamp_radial_fwhm
 
         img = self._field()
         # blank sky: no peak
@@ -311,7 +311,7 @@ class TestSparsePriorSupplement:
         return sci, tpl, cat
 
     def test_only_mutual_stars_kept(self):
-        from main import _sparse_prior_supplement
+        from autophot.pipeline.main import _sparse_prior_supplement
 
         sci, tpl, cat = self._field()
         out = _sparse_prior_supplement(
@@ -335,7 +335,7 @@ class TestSparsePriorSupplement:
 
     def test_empty_inputs_and_max_add(self):
         import pandas as pd
-        from main import _sparse_prior_supplement
+        from autophot.pipeline.main import _sparse_prior_supplement
 
         sci, tpl, cat = self._field()
         assert len(
@@ -371,7 +371,7 @@ class TestStampRadialFwhmEmptyBins:
     interpolation must not be poisoned by a NaN neighbour bin."""
 
     def test_broad_template_star_measures(self):
-        from main import _stamp_radial_fwhm
+        from autophot.pipeline.main import _stamp_radial_fwhm
 
         rng = np.random.default_rng(11)
         tpl = rng.normal(50.0, 1.0, (300, 300))
