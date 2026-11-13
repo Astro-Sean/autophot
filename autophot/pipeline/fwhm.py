@@ -57,7 +57,7 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 
 # --- Local Imports ---
-from functions import (
+from ..core.functions import (
     fwhm_outlier_clip,
     get_normalized_histogram,
     log_step,
@@ -70,7 +70,7 @@ from functions import (
 
 # --- Logging and Warnings ---
 warnings.simplefilter("ignore", category=AstropyWarning)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 # --- Constants ---
 SQRT2LOG2 = 2 * np.sqrt(2 * np.log(2))  # Gaussian sigma -> FWHM
@@ -538,7 +538,7 @@ class Find_FWHM:
         cleaned_df = coordinates_df[coordinates_df["is_isolated"]].copy()
 
         if plot:
-            from plotting_utils import (
+            from ..core.plotting_utils import (
                 apply_autophot_mplstyle,
                 get_marker_size,
                 get_plot_color,
@@ -937,7 +937,7 @@ class Find_FWHM:
 
             # --- Diagnostic plot (small markers, minimal overlap) ---
             try:
-                from plotting_utils import (
+                from ..core.plotting_utils import (
                     get_plot_ext,
                     get_ransac_color, get_marker_size, get_alpha, get_line_width,
                     apply_autophot_mplstyle, ransac_legend_top_outside, ransac_grid, ransac_savefig,
@@ -1046,7 +1046,7 @@ class Find_FWHM:
                 # Saturation marker: only drawn when data reach ~90% of it.
                 # Fallback constant shared with main.py.
                 try:
-                    from main import SATURATE_INTERNAL_FALLBACK
+                    from .main import SATURATE_INTERNAL_FALLBACK
                 except ImportError:
                     SATURATE_INTERNAL_FALLBACK = np.inf
 
@@ -1056,7 +1056,7 @@ class Find_FWHM:
                     # pipeline flux convention (e-/s). Convert so the marker
                     # lands at the correct position on the m_inst axis.
                     try:
-                        from aperture import (
+                        from ..photometry.aperture import (
                             resolve_exposure_time_seconds,
                             resolve_gain_e_per_adu,
                         )
@@ -1304,7 +1304,7 @@ class Find_FWHM:
             tuple: (fwhm_global, sources_dataframe, scale_pixels)
         """
         t0 = time.time()
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         try:
             self.logger.info(log_step("SExtractor: detect sources & FWHM"))
