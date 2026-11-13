@@ -17676,18 +17676,18 @@ def run_photometry():
             # Prefer per-source SExtractor fwhm over constant fwhm_psf for CALIB output
             if "fwhm" in _calib_df.columns and "fwhm_psf" in _calib_df.columns:
                 _calib_df["fwhm"] = _calib_df["fwhm"].fillna(_calib_df["fwhm_psf"])
-                _calib_df.drop(columns=["fwhm_psf"], inplace=True)
+                _calib_df = _calib_df.drop(columns=["fwhm_psf"])
 
             # Disambiguate duplicate SNR columns:
             #   SNR  = aperture photometry SNR (aperture_sum / sqrt_var)
             #   snr  = maxPixel / noiseSky (from functions.snr)
             #   SNR_err is never populated - drop it
             if "SNR" in _calib_df.columns:
-                _calib_df.rename(columns={"SNR": "snr_ap"}, inplace=True)
+                _calib_df = _calib_df.rename(columns={"SNR": "snr_ap"})
             if "snr" in _calib_df.columns:
-                _calib_df.rename(columns={"snr": "snr_peak"}, inplace=True)
+                _calib_df = _calib_df.rename(columns={"snr": "snr_peak"})
             if "SNR_err" in _calib_df.columns:
-                _calib_df.drop(columns=["SNR_err"], inplace=True)
+                _calib_df = _calib_df.drop(columns=["SNR_err"])
 
             # Drop columns that are entirely NaN / empty to keep CALIB tidy
             _all_nan = _calib_df.columns[
