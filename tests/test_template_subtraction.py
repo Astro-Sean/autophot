@@ -1708,6 +1708,7 @@ class TestPSFVettingFluxMatch:
             "fwhm_sci": 3.3, "fwhm_tpl": 3.3,
             "chi2_max": 1e-9,  # nominally vetoes every source
             "min_keep": 5,
+            "recal_nsigma": 0.0,  # absolute cut - exercises the restore path
         }
         out, _ = t.find_flux_consistent_sources(
             cat_s, cat_t, make_plot=False, psf_vetting=vet
@@ -1749,6 +1750,8 @@ class TestPSFVettingFluxMatch:
             "psf_sci": psf, "psf_tpl": psf,
             "fwhm_sci": 3.3, "fwhm_tpl": 3.3,
             "chi2_max": 5.0,
+            # absolute cut - this test isolates the per-side floor
+            "recal_nsigma": 0.0,
         }
         out_default, _ = t.find_flux_consistent_sources(
             cat_s, cat_t, make_plot=False, psf_vetting=vet
@@ -1781,6 +1784,8 @@ class TestPSFVettingFluxMatch:
             "fwhm_sci": 3.3, "fwhm_tpl": 3.3,
             "chi2_max": 5.0,
             "min_keep": 5,
+            # absolute cut - this test isolates the keep-floor machinery
+            "recal_nsigma": 0.0,
         }
         out_abs, _ = t.find_flux_consistent_sources(
             cat_s, cat_t, make_plot=False,
@@ -1794,6 +1799,110 @@ class TestPSFVettingFluxMatch:
         # floor must pull the surviving pool well above it (0.7*13 ~ 9+).
         assert len(out_frac) >= 9
         assert len(out_frac) > len(out_abs)
+
+    def test_recalibration_relaxes_inflated_side(self):
+        """A side whose chi2 distribution is systematically inflated
+        (model-limited/resampled) must not mass-veto typical stars:
+        the cut lifts to the distribution's own upper tail."""
+        img, psf, cat_s, cat_t = self._setup()
+        t = Templates(input_yaml={})
+        pos = list(zip(cat_s["x_pix"], cat_s["y_pix"]))
+        img_t = self._elliptical_image(pos, np.full(len(pos), 20000.0))
+        vet = {
+            "image_sci": img, "image_tpl": img_t,
+            "psf_sci": psf, "psf_tpl": psf,
+            "fwhm_sci": 3.3, "fwhm_tpl": 3.3,
+            "chi2_max": 5.0,
+            "min_keep": 5,
+            "min_keep_frac": 0.0,  # isolate the cut from the floor
+        }
+        out_strict, _ = t.find_flux_consistent_sources(
+            cat_s, cat_t, make_plot=False,
+            psf_vetting=dict(vet, recal_nsigma=0.0),
+        )
+        out_recal, _ = t.find_flux_consistent_sources(
+            cat_s, cat_t, make_plot=False,
+            psf_vetting=dict(vet, recal_nsigma=4.0),
+        )
+        assert len(out_recal) > len(out_strict)
+        # science-side veto is unaffected: the science-image blend
+        # stays rejected
+        assert not (
+            (out_recal["x_pix"] == 60) & (out_recal["y_pix"] == 130)
+        ).any()
+
+    def test_recalibrated_cut_still_removes_worst(self):
+        """Recalibration lifts the cut to the distribution's upper tail
+        only - a gross outlier must still be vetoed even when every
+        source on that side is model-limited."""
+        img, psf, cat_s, cat_t = self._setup()
+        t = Templates(input_yaml={})
+        pos_all = list(zip(cat_s["x_pix"], cat_s["y_pix"]))
+        flux_all = cat_s["flux_AP"].to_numpy()
+        # Science side: clean Gaussian stars everywhere, including a
+        # single star at the catalog's (60, 130) position.
+        ax = np.arange(41) - 20
+        g = np.exp(
+            -0.5 * (ax[None, :] ** 2 + ax[:, None] ** 2) / 1.4 ** 2
+        )
+        g /= g.sum()
+        img_clean = np.random.default_rng(7).normal(0.0, 0.5, (160, 160))
+        for (x, y), f in zip(pos_all, flux_all):
+            xi, yi = int(round(x)), int(round(y))
+            img_clean[yi - 20 : yi + 21, xi - 20 : xi + 21] += f * g
+        # Template side: model-limited (elliptical) stars everywhere -
+        # the chi2 distribution is inflated - plus a blended pair at
+        # (60, 130) so that one source sits far above the bulk.
+        img_t = self._elliptical_image(
+            pos_all, np.full(len(pos_all), 20000.0), seed=4
+        )
+        ge = np.exp(
+            -0.5
+            * ((ax[None, :] / 1.60) ** 2 + (ax[:, None] / 1.30) ** 2)
+        )
+        ge /= ge.sum()
+        img_t[110:151, 40:81] += 16000.0 * ge
+        img_t[112:153, 43:84] += 16000.0 * ge
+        vet = {
+            "image_sci": img_clean, "image_tpl": img_t,
+            "psf_sci": psf, "psf_tpl": psf,
+            "fwhm_sci": 3.3, "fwhm_tpl": 3.3,
+            "chi2_max": 5.0,
+            "min_keep": 5,
+        }
+        out, _ = t.find_flux_consistent_sources(
+            cat_s, cat_t, make_plot=False, psf_vetting=vet
+        )
+        # the grossly blended source is still vetoed (template side) ...
+        assert not ((out["x_pix"] == 60) & (out["y_pix"] == 130)).any()
+        # ... while the recalibrated cut keeps the model-limited bulk
+        # that an absolute 5.0 cut would have removed.
+        assert len(out) >= 9
+
+    def test_restored_flag_marks_floor_restores(self):
+        """Sources let back in by the keep-floor carry is_psf_restored;
+        is_psf_inlier keeps the raw veto outcome."""
+        img, psf, cat_s, cat_t = self._setup()
+        t = Templates(input_yaml={})
+        vet = {
+            "image_sci": img, "image_tpl": img,
+            "psf_sci": psf, "psf_tpl": psf,
+            "fwhm_sci": 3.3, "fwhm_tpl": 3.3,
+            "chi2_max": 1e-9,  # vetoes every measurable source
+            "min_keep": 5,
+            "min_keep_frac": 0.6,
+            "recal_nsigma": 0.0,
+        }
+        out, _ = t.find_flux_consistent_sources(
+            cat_s, cat_t, make_plot=False, psf_vetting=vet
+        )
+        assert len(out) >= 5
+        assert {"is_psf_inlier", "is_psf_restored"} <= set(out.columns)
+        assert out["is_psf_restored"].to_numpy(bool).any()
+        # every kept source was vetoed first, so none is a raw inlier
+        assert not out["is_psf_inlier"].to_numpy(bool).any()
+        # the worst-fitting source (the blend) is never restored
+        assert not ((out["x_pix"] == 60) & (out["y_pix"] == 130)).any()
 
 
 class TestSparseApertureFluxScale:
