@@ -333,6 +333,11 @@ def _scoped_quiet(fn):
 # instead of being pickled into every per-source task.
 _AP_CTX: dict = {}
 
+# Per-image ledger recording files whose empirical noise factor exceeded
+# the warning threshold; the driver reads it once per run and reports a
+# single aggregated warning instead of one line per image.
+NOISE_FACTOR_LEDGER_NAME = ".empirical_noise_factor.csv"
+
 
 def _measure_init_shared(
     aperture_masks, annulus_masks, image_e, error, read_noise_sq,
@@ -1571,24 +1576,44 @@ class Aperture:
             _enf_tag = os.path.basename(
                 str(self.input_yaml.get("fpath") or "image")
             )
-            if n_noise_ap > 0:
+            # measure() runs several times per file and the driver runs
+            # each file in its own subprocess, so report only on the
+            # first pass per file; the driver aggregates the threshold
+            # crossings into a single warning at the end of the run.
+            _seen = self.input_yaml.setdefault("_noise_factor_seen", set())
+            _first = _enf_tag not in _seen
+            _seen.add(_enf_tag)
+            if _first and n_noise_ap > 0:
                 logger.info(
                     "Empirical noise factor: %.3f from %d empty apertures [%s].",
                     noise_factor,
                     n_noise_ap,
                     _enf_tag,
                 )
-            if noise_factor > 1.5:
-                # measure() is invoked several times per file with
-                # different array views (catalog prep, image sources,
-                # target, inverted image), so dedupe on the file tag,
-                # not on the array identity.  The per-call factor is
-                # still logged at INFO above.
-                _warned = self.input_yaml.setdefault(
-                    "_noise_factor_warned", set()
-                )
-                if _enf_tag not in _warned:
-                    _warned.add(_enf_tag)
+            if _first and noise_factor > 1.5:
+                _led_dir = self.input_yaml.get("wdir")
+                _written = False
+                if _led_dir:
+                    try:
+                        _led = os.path.join(
+                            str(_led_dir), NOISE_FACTOR_LEDGER_NAME
+                        )
+                        _fd = os.open(
+                            _led, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                        )
+                        try:
+                            os.write(
+                                _fd,
+                                f"{_enf_tag},{noise_factor:.3f}\n".encode(),
+                            )
+                        finally:
+                            os.close(_fd)
+                        _written = True
+                    except OSError:
+                        pass
+                if not _written:
+                    # No ledger destination (standalone use): warn here
+                    # instead so the threshold crossing is not lost.
                     logger.warning(
                         "[%s] Background noise is %.1fx larger than the "
                         "propagated variance predicts (resampling "
