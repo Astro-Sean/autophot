@@ -795,6 +795,11 @@ def _empirical_noise_factor(
     to the predicted error (pixel variance plus the annulus-median
     term).  The factor is floored at 1 -- the test can only inflate the
     reported errors, never shrink them.
+
+    The residuals are standardised by their own predicted error before
+    the scatter is measured, so the factor stays unbiased when the noise
+    varies across the frame (e.g. a coadd depth map); on a uniform-noise
+    image it reduces to scatter/median(pred) as before.
     """
     if error is None:
         return 1.0, 0
@@ -817,51 +822,56 @@ def _empirical_noise_factor(
         return 1.0, 0
 
     # A test aperture touching a bad pixel (even a fractional edge
-    # overlap) is rejected, as is any annulus that is mostly bad.
+    # overlap) is rejected, as is any annulus that is mostly bad.  A
+    # single photometry pass does the rejection bookkeeping (aperture
+    # flags mark masked/non-finite overlap) and returns both the sum and
+    # the propagated error; the error path uses weight-squared
+    # propagation, the same convention aperture_sum_err uses upstream.
     bad = ~np.isfinite(image_e) | ~np.isfinite(error)
     if defects_mask is not None:
         bad = bad | np.asarray(defects_mask, dtype=bool)
     apertures = CircularAperture(positions, r=radius)
-    bad_frac = np.asarray(
-        AperturePhotometry(bad.astype(float), apertures, method="exact")
-        .to_table()["flux"],
-        dtype=float,
-    )
-    positions = positions[bad_frac == 0][: int(n_trials)]
+    phot = AperturePhotometry(
+        image_e, apertures, error=error, mask=bad, method="exact"
+    ).to_table()
+    flags = np.asarray(phot["flags"], dtype=int)
+    idx = np.nonzero((flags & 24) == 0)[0][: int(n_trials)]
+    positions = positions[idx]
+    sums = np.asarray(phot["flux"], dtype=float)[idx]
+    pix_err = np.asarray(phot["flux_err"], dtype=float)[idx]
     if len(positions) < 50:
         return 1.0, int(len(positions))
-    apertures = CircularAperture(positions, r=radius)
-    annuli = CircularAnnulus(
-        positions, r_in=annulus_inner, r_out=annulus_outer
-    )
-    masked_image = np.where(bad, np.nan, image_e)
 
-    sums = np.asarray(
-        AperturePhotometry(image_e, apertures, method="exact")
-        .to_table()["flux"],
-        dtype=float,
-    )
-    var_sums = np.asarray(
-        AperturePhotometry(
-            np.where(np.isfinite(error), error**2, 0.0),
-            apertures,
-            method="exact",
-        ).to_table()["flux"],
-        dtype=float,
-    )
+    # Gather each aperture's annulus pixels in one vectorised step.
+    # photutils' "center" convention includes a pixel centre when
+    # r_in <= d < r_out, measured from the exact (fractional) position.
+    r_out_i = int(np.ceil(annulus_outer))
+    rel = np.arange(-r_out_i, r_out_i + 1)
+    fx = positions[:, 0] - np.floor(positions[:, 0])
+    fy = positions[:, 1] - np.floor(positions[:, 1])
+    dx = rel[None, :] - fx[:, None]
+    dy = rel[None, :] - fy[:, None]
+    dist2 = dx[:, :, None] ** 2 + dy[:, None, :] ** 2
+    in_ann = (dist2 >= annulus_inner**2) & (dist2 < annulus_outer**2)
+    xi = (np.floor(positions[:, 0])[:, None] + rel[None, :]).astype(np.intp)
+    yi = (np.floor(positions[:, 1])[:, None] + rel[None, :]).astype(np.intp)
+    masked_image = np.where(bad, np.nan, image_e)
+    ann_vals = np.where(
+        in_ann, masked_image[yi[:, None, :], xi[:, :, None]], np.nan
+    ).reshape(len(positions), -1)
+
     area = np.pi * radius**2
     resid = np.full(len(positions), np.nan)
     pred = np.full(len(positions), np.nan)
-    for i, an_mask in enumerate(annuli.to_mask(method="center")):
-        vals = np.asarray(an_mask.get_values(masked_image), dtype=float)
+    for i in range(len(positions)):
+        vals = ann_vals[i]
         # Same sky convention as the worker: drop exact zeros (SWarp
-        # padding), sigma-clip, then take the median.
+        # padding), then take the median.  No sigma-clip is needed here:
+        # the median/MAD are already robust to contaminated pixels, and
+        # outlier apertures are clipped at the residual stage below.
         vals = vals[np.isfinite(vals) & (vals != 0.0)]
         if vals.size < 10:
             continue
-        clipped = sigma_clip(vals, sigma=4.0, maxiters=3, masked=False)
-        if clipped.size >= 10:
-            vals = clipped
         med = float(np.median(vals))
         std = 1.4826 * np.median(np.abs(vals - med))
         if not np.isfinite(std) or std <= 0:
@@ -870,27 +880,22 @@ def _empirical_noise_factor(
             continue
         resid[i] = sums[i] - med * area
         se = 1.2533 * std / np.sqrt(vals.size)
-        pred[i] = np.sqrt(max(float(var_sums[i]), 0.0) + (se * area) ** 2)
+        pred[i] = np.hypot(float(pix_err[i]), se * area)
     ok = np.isfinite(resid) & np.isfinite(pred) & (pred > 0)
     n_used = int(np.count_nonzero(ok))
     if n_used < 50:
         return 1.0, n_used
-    r = resid[ok]
+    z = resid[ok] / pred[ok]
     # A test aperture can still catch an undetected faint source; clip
-    # the residual sample so the factor tracks noise, not confusion
+    # the standardised sample so the factor tracks noise, not confusion
     # outliers.
-    clipped = sigma_clip(r, sigma=4.0, maxiters=3, masked=False)
+    clipped = sigma_clip(z, sigma=4.0, maxiters=3, masked=False)
     if clipped.size >= 20:
-        r = clipped
-    measured = 1.4826 * np.median(np.abs(r - np.median(r)))
-    predicted = float(np.median(pred[ok]))
-    if (
-        predicted <= 0
-        or not np.isfinite(measured)
-        or not np.isfinite(predicted)
-    ):
+        z = clipped
+    measured = 1.4826 * np.median(np.abs(z - np.median(z)))
+    if not np.isfinite(measured) or measured <= 0:
         return 1.0, n_used
-    return float(max(measured / predicted, 1.0)), n_used
+    return float(max(measured, 1.0)), n_used
 
 
 def _cog_cutout(image, error, mask, x_pix, y_pix, outer_r):
@@ -1563,20 +1568,35 @@ class Aperture:
                     "Empirical noise factor failed (%s); using 1.0.", exc
                 )
                 noise_factor, n_noise_ap = 1.0, 0
+            _enf_tag = os.path.basename(
+                str(self.input_yaml.get("fpath") or "image")
+            )
             if n_noise_ap > 0:
                 logger.info(
-                    "Empirical noise factor: %.3f from %d empty apertures.",
+                    "Empirical noise factor: %.3f from %d empty apertures [%s].",
                     noise_factor,
                     n_noise_ap,
+                    _enf_tag,
                 )
             if noise_factor > 1.5:
-                logger.warning(
-                    "Background noise is %.1fx larger than the propagated "
-                    "variance predicts (resampling correlation and/or "
-                    "confusion noise); aperture errors are inflated "
-                    "accordingly.",
-                    noise_factor,
+                # measure() is invoked several times per file with
+                # different array views (catalog prep, image sources,
+                # target, inverted image), so dedupe on the file tag,
+                # not on the array identity.  The per-call factor is
+                # still logged at INFO above.
+                _warned = self.input_yaml.setdefault(
+                    "_noise_factor_warned", set()
                 )
+                if _enf_tag not in _warned:
+                    _warned.add(_enf_tag)
+                    logger.warning(
+                        "[%s] Background noise is %.1fx larger than the "
+                        "propagated variance predicts (resampling "
+                        "correlation and/or confusion noise); aperture "
+                        "errors are inflated accordingly.",
+                        _enf_tag,
+                        noise_factor,
+                    )
 
         # ---- Dispatch (parallel for large catalogs) ------------------------
         # Pooled path: broadcast shared state once per worker via initializer;
