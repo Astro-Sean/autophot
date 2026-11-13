@@ -103,4 +103,5 @@ run_autophot_VIPER.py
 
 # Build artifacts
 dist/
+.github/
 build/
