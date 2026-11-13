@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from psf import (
+from autophot.photometry.psf import (
     PSF,
     _psf_mask_distances,
     _psf_pair_separation_drop,
@@ -870,7 +870,7 @@ class TestNonConvergedOutOfBandReject:
 
     def test_nonconverged_out_of_band_returns_none(self, tmp_path, monkeypatch):
         pytest.importorskip("photutils")
-        import psf as psf_module
+        import autophot.photometry.psf as psf_module
 
         # Force the non-converged verdict at the builder boundary: the
         # spike stack converges numerically, so the real signal is
@@ -968,7 +968,7 @@ class TestElongatedField:
         return q, pa
 
     def test_elliptical_radius_deforms_isophotes(self):
-        from psf import _elliptical_radius
+        from autophot.photometry.psf import _elliptical_radius
 
         # Point on the major axis -> r = |x|; on the minor axis the
         # distance is stretched by 1/q so the same isophote reads as
@@ -979,7 +979,7 @@ class TestElongatedField:
         assert _elliptical_radius(3.0, 4.0, None) == pytest.approx(5.0)
 
     def test_ensemble_recovers_shared_shape(self):
-        from psf import _ensemble_ellipticity
+        from autophot.photometry.psf import _ensemble_ellipticity
 
         rng = np.random.default_rng(11)
         theta = np.radians(30.0)
@@ -996,7 +996,7 @@ class TestElongatedField:
         assert np.degrees(ell[1]) == pytest.approx(30.0, abs=3.0)
 
     def test_ensemble_none_when_round_or_incoherent(self):
-        from psf import _ensemble_ellipticity
+        from autophot.photometry.psf import _ensemble_ellipticity
 
         rng = np.random.default_rng(3)
         round_stars = [
@@ -1018,7 +1018,7 @@ class TestElongatedField:
         assert _ensemble_ellipticity(mix, 19.0) is None
 
     def test_composite_stamp_matches_ellipticity(self):
-        from psf import _composite_moffat_psf, _default_moffat_composite
+        from autophot.photometry.psf import _composite_moffat_psf, _default_moffat_composite
 
         comps = _default_moffat_composite(19.0, 3.0)
         ell = (0.30, np.radians(60.0))
@@ -1134,7 +1134,7 @@ class TestShapeOutlierDrop:
         return s
 
     def test_single_bad_cutout_dropped(self):
-        from psf import _psf_shape_outlier_indices
+        from autophot.photometry.psf import _psf_shape_outlier_indices
 
         rng = np.random.default_rng(9)
         stars = [
@@ -1150,7 +1150,7 @@ class TestShapeOutlierDrop:
         assert idx == [4]
 
     def test_miscentred_cutout_dropped(self):
-        from psf import _psf_shape_outlier_indices
+        from autophot.photometry.psf import _psf_shape_outlier_indices
 
         rng = np.random.default_rng(10)
         stars = [
@@ -1165,7 +1165,7 @@ class TestShapeOutlierDrop:
         assert idx == [6]
 
     def test_uniform_pool_untouched(self):
-        from psf import _psf_shape_outlier_indices
+        from autophot.photometry.psf import _psf_shape_outlier_indices
 
         rng = np.random.default_rng(11)
         # Uniformly noisy-but-similar stars: the check must not invent
@@ -1177,13 +1177,13 @@ class TestShapeOutlierDrop:
         assert _psf_shape_outlier_indices(stars, 6.0) == []
 
     def test_tiny_pool_skipped(self):
-        from psf import _psf_shape_outlier_indices
+        from autophot.photometry.psf import _psf_shape_outlier_indices
 
         stars = [self._star(self._gauss(45, 6.0, 2000.0)) for _ in range(4)]
         assert _psf_shape_outlier_indices(stars, 6.0) == []
 
     def test_removal_bounds(self):
-        from psf import _psf_shape_outlier_indices
+        from autophot.photometry.psf import _psf_shape_outlier_indices
 
         rng = np.random.default_rng(12)
         stars = [
@@ -1213,7 +1213,7 @@ class TestShapeOutlierDrop:
     def test_sub_floor_cutout_dropped(self):
         """A hot-pixel spike far sharper than the image FWHM is dropped
         by the absolute floor even if it is not an ensemble outlier."""
-        from psf import _psf_shape_outlier_indices
+        from autophot.photometry.psf import _psf_shape_outlier_indices
 
         rng = np.random.default_rng(13)
         stars = [
@@ -1225,7 +1225,7 @@ class TestShapeOutlierDrop:
         assert 5 in idx
 
     def test_floor_disabled_by_zero(self):
-        from psf import _psf_shape_outlier_indices
+        from autophot.photometry.psf import _psf_shape_outlier_indices
 
         # Homogeneous defect pool: with the floor disabled nothing is
         # ensemble-anomalous, so nothing is dropped.
@@ -1243,7 +1243,7 @@ class TestShapeOutlierDrop:
         """When the ensemble itself is mostly hot-pixel clusters the
         relative test would flag the real stars; the absolute floor
         removes the defects instead (bounded by min_keep)."""
-        from psf import _psf_shape_outlier_indices
+        from autophot.photometry.psf import _psf_shape_outlier_indices
 
         rng = np.random.default_rng(15)
         # 6 spikes (indices 0-5) + 3 real stars (indices 6-8).
@@ -1416,7 +1416,7 @@ class TestPruneUnsettledRetry:
         from astropy.table import Table
         from photutils.psf import extract_stars
 
-        from psf import (
+        from autophot.photometry.psf import (
             _BoundedShiftEPSFBuilder,
             _composite_moffat_psf,
             _default_moffat_composite,
@@ -1500,7 +1500,7 @@ class TestEPSFCrashResilience:
         return extract_stars(NDData(img), tbl, size=45)
 
     def _builder(self, **kw):
-        from psf import _BoundedShiftEPSFBuilder
+        from autophot.photometry.psf import _BoundedShiftEPSFBuilder
 
         return _BoundedShiftEPSFBuilder(
             oversampling=1,
@@ -1511,7 +1511,7 @@ class TestEPSFCrashResilience:
         )
 
     def _seed(self):
-        from psf import _composite_moffat_psf, _default_moffat_composite
+        from autophot.photometry.psf import _composite_moffat_psf, _default_moffat_composite
 
         return _composite_moffat_psf(
             _default_moffat_composite(6.0, 4.765), 1, 45
