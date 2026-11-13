@@ -2091,6 +2091,72 @@ def border_msg(msg: str, body: str = "=", corner: str = "+",
     return "\n" + "\n".join(lines)
 
 
+def _autophot_version() -> str:
+    """
+    Best-effort AutoPhOT version string.
+
+    The pyproject.toml next to the code wins over install metadata: editable
+    installs and PYTHONPATH runs keep __file__ in the source tree, where the
+    checkout's declared version is newer than any install-time snapshot.
+    """
+    try:
+        import re
+        from pathlib import Path
+
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        m = re.search(
+            r'^\s*version\s*=\s*"([^"]+)"', pyproject.read_text(), re.M
+        )
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version as pkg_version
+
+        return pkg_version("autophot")
+    except Exception:
+        return "unknown"
+
+
+def autophot_logo(
+    version: str | None = None,
+    title: str | None = None,
+    width: int = LOG_HEADER_WIDTH,
+) -> str:
+    """
+    Startup banner with the AutoPhOT wordmark and package version::
+
+        ================================================================================
+
+                                    A U T O P H O T
+                                      v1.5.0
+
+        ================================================================================
+
+    version : str | None
+        Version string to print under the wordmark; resolved from the
+        pyproject.toml beside the code, or installed package metadata,
+        when omitted.
+    title : str | None
+        Optional stage label printed under the version line (e.g. the
+        section this banner opens).
+    """
+    if version is None:
+        version = _autophot_version()
+    w = int(width)
+    lines = [
+        "=" * w,
+        "",
+        "A U T O P H O T".center(w).rstrip(),
+        f"v{version}".center(w).rstrip(),
+    ]
+    if title:
+        lines.append(str(title).center(w).rstrip())
+    lines += ["", "=" * w]
+    return "\n" + "\n".join(lines)
+
+
 def ascii_kv(title: str, pairs, width: int = LOG_SUBHEADER_WIDTH,
              framed: bool = False) -> str:
     """
