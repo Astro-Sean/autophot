@@ -11,7 +11,7 @@ vetoes still apply.
 import numpy as np
 import pytest
 
-from main import _decide_detection
+from autophot.pipeline.main import _decide_detection
 
 
 def _out(**kw):
