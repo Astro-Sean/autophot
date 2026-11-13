@@ -262,7 +262,7 @@ from photutils.aperture import (
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import (
+from ..core.functions import (
     set_size,
     mag,
     points_in_circum,
@@ -272,12 +272,12 @@ from functions import (
     STATUS,
     biweight_sky_sigma,
 )
-from aperture import (
+from ..photometry.aperture import (
     Aperture,
     resolve_exposure_time_seconds,
     resolve_gain_e_per_adu,
 )
-from plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
+from ..core.plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
 
 
 def _effective_exposure_seconds(input_yaml: dict) -> float:
@@ -793,7 +793,7 @@ def _injection_worker(args):
             # PSF pipeline. Run serial (n_jobs=1) at the get_injected_limit
             # level: trials are expensive and models may not pickle cleanly.
             try:
-                from psf import MCMCFitter
+                from ..photometry.psf import MCMCFitter
 
                 phot_cfg = input_yaml.get("photometry") or {}
                 fwhm_px = float(input_yaml.get("fwhm", 3.0))
@@ -1036,7 +1036,7 @@ class Limits:
             handles partial cutouts).  On failure the array is None and the
             coordinates are NaN.
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         try:
             if position is None:
                 tx = self.input_yaml["target_x_pix"]
@@ -1168,7 +1168,7 @@ class Limits:
         -------
         float - limiting instrumental magnitude, or np.nan on failure
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         start_time = time.time()
         self.last_uncal = None
 
@@ -3105,7 +3105,7 @@ class Limits:
                             and bool(lim_cfg.get("uncal_apply", True))
                             and len(_uncal_rows) > 0
                         ):
-                            from utils.uncertainty_calibration import (
+                            from .uncertainty_calibration import (
                                 calibrate_uncertainties,
                             )
 
@@ -3534,7 +3534,7 @@ class Limits:
             self.last_uncal = None
             if _uncal_collect and len(_uncal_rows) > 0:
                 try:
-                    from utils.uncertainty_calibration import (
+                    from .uncertainty_calibration import (
                         calibrate_uncertainties,
                     )
 
@@ -3734,7 +3734,7 @@ class Limits:
             rms_stamp = np.asarray(background_rms[y1:y2, x1:x2], dtype=float)
             rms_stamp = np.abs(rms_stamp)
 
-        from psf import MCMCFitter
+        from ..photometry.psf import MCMCFitter
 
         model = epsf_model.copy()
         model.x_0.value = float(x0 - x1)
@@ -3920,7 +3920,7 @@ class Limits:
         # finish: R-hat, ESS, and acceptance fraction are checked and a
         # non-converged fit falls back to the bisection result upstream.
         try:
-            from utils.mcmc_diagnostics import assess_convergence
+            from .mcmc_diagnostics import assess_convergence
 
             _conv = assess_convergence(
                 # emcee returns (steps, walkers, params); the diagnostics
@@ -3997,7 +3997,7 @@ class Limits:
                 outdir, f"Completeness_EMCEE_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
             )
 
-            from plotting_utils import apply_autophot_mplstyle
+            from ..core.plotting_utils import apply_autophot_mplstyle
 
             apply_autophot_mplstyle()
 
@@ -4097,7 +4097,7 @@ class Limits:
         # underestimate the uncertainty -- draw one site-index set shared by
         # all magnitudes.  Requires identical flag order across mags.
         if not np.all(n_per == n_per[0]):
-            logger = logging.getLogger(__name__)
+            logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
             logger.debug(
                 "m50 bootstrap skipped: flag counts differ across magnitudes"
             )
@@ -4161,7 +4161,7 @@ class Limits:
         dict
             Dictionary with S/N bins and corresponding magnitude statistics
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         
         if snr_bins is None:
             snr_bins = [3, 5, 10, 20, 50, 100]
@@ -4172,7 +4172,7 @@ class Limits:
         
         if "flux_AP" in sources.columns:
             # flux_AP is e-/s from Aperture.measure; mag() is instrumental in that system
-            from functions import mag
+            from ..core.functions import mag
             sources["apparent_mag"] = (
                 mag(sources["flux_AP"].values)
                 + zeropoint
@@ -4229,9 +4229,9 @@ class Limits:
         Create diagnostic plot showing S/N vs apparent magnitude relationship.
         """
         import logging
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         import matplotlib.pyplot as plt
-        from functions import set_size
+        from ..core.functions import set_size
         
         fpath = str(self.input_yaml.get("fpath", "frame"))
         base = os.path.splitext(os.path.basename(fpath))[0]
@@ -4344,7 +4344,7 @@ class Limits:
         inset_row controls which GridSpec row to use for insets (default=1).
         draw_main_plot=False skips the main completeness plot (for adding inset rows only).
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         # The apparent-mag axis uses the zeropoint for the recovery method.
         if image_zeropoint is not None:
@@ -5525,9 +5525,9 @@ class Limits:
         Catalog sources are overplotted for comparison.
         """
         import matplotlib.pyplot as plt
-        from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width, get_okabe_color
+        from ..core.plotting_utils import get_color, get_marker_size, get_alpha, get_line_width, get_okabe_color
 
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         # Prefer the denser extended grid; bracket/bisect steps are the fallback.
         all_steps = extended_steps if extended_steps else (bracket_steps + bisect_steps)
@@ -5854,7 +5854,7 @@ class Limits:
         ----------
         all_details : list of dicts returned by get_injected_limit(_return_details=True)
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         if not all_details:
             return
@@ -6023,7 +6023,7 @@ class Limits:
         -------
         dict - results for each S/N threshold with limiting magnitudes and comparisons
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         
         # Fall back to the configured thresholds.
         if snr_thresholds is None:
