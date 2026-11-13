@@ -11,9 +11,9 @@ import json
 import logging
 from collections import OrderedDict
 
-from functions import ascii_kv, patch_simbad_session_timeout
+from ..core.functions import ascii_kv, patch_simbad_session_timeout
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 def format_to_json(source):
