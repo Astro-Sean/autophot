@@ -13,8 +13,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from catalog import _legacy_ivar_to_mag_err
-from limits import _combine_limit_errors
+from autophot.calibration.catalog import _legacy_ivar_to_mag_err
+from autophot.analysis.limits import _combine_limit_errors
 
 
 class TestLegacyIvarToMagErr:
