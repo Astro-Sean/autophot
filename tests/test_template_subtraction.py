@@ -22,8 +22,8 @@ if str(ROOT) not in sys.path:
 
 from astropy.io import fits
 
-import templates as templates_mod
-from templates import _zogy_subtract, _pad_psf_to_image, Templates
+import autophot.subtraction.templates as templates_mod
+from autophot.subtraction.templates import _zogy_subtract, _pad_psf_to_image, Templates
 
 
 def _gauss_psf(sigma: float, size: int = 31) -> np.ndarray:
@@ -1009,7 +1009,7 @@ class TestSubtractZogyWrapper:
         DIFFPSF product must carry that substitute stamp (real-data
         failure: degenerate ePSFs on TDP5_4/TDP8_2 produced sharpening
         kernels and dipole residuals)."""
-        from templates import _measure_stamp_fwhm, _zogy_star_psf
+        from autophot.subtraction.templates import _measure_stamp_fwhm, _zogy_star_psf
 
         # A delta-like stamp: unmeasurable FWHM -> unsanitary.
         bad = np.zeros((31, 31))
@@ -1088,7 +1088,7 @@ class TestSubtractZogyWrapper:
         """The star stack must reject positions that are blank sky or
         spikes in the cutout frame -- a matched list can carry cosmic
         rays that are only present in one epoch."""
-        from templates import _zogy_star_psf
+        from autophot.subtraction.templates import _zogy_star_psf
 
         rng = np.random.default_rng(1)
         psf = _gauss_psf(2.0)
@@ -1116,7 +1116,7 @@ class TestSubtractZogyWrapper:
         a broad PSF on a noisy frame spreads its light so the peak SNR
         alone is the wrong statistic (TDP6 60553 r: every matched star
         peaked at 6-9 sigma and the stack died silently)."""
-        from templates import _zogy_star_psf
+        from autophot.subtraction.templates import _zogy_star_psf
 
         rng = np.random.default_rng(7)
         shape = (220, 220)
@@ -1143,7 +1143,7 @@ class TestSubtractZogyWrapper:
         vetting ran but rejected everything, and None only when no
         positions were offered -- the caller treats "vetted, none
         survived" differently from "no vetting"."""
-        from templates import _zogy_star_psf
+        from autophot.subtraction.templates import _zogy_star_psf
 
         rng = np.random.default_rng(2)
         psf = _gauss_psf(2.0)
@@ -1400,7 +1400,7 @@ class TestSubtractZogyWrapper:
 
 class TestMeasureStampFwhm:
     def test_gaussian_recovers_true_fwhm(self):
-        from templates import _measure_stamp_fwhm
+        from autophot.subtraction.templates import _measure_stamp_fwhm
         sigma = 2.0
         stamp = _gauss_psf(sigma, size=41)
         fwhm = _measure_stamp_fwhm(stamp)
@@ -1408,14 +1408,14 @@ class TestMeasureStampFwhm:
         assert fwhm == pytest.approx(expected, rel=0.15)
 
     def test_degenerate_stamp_returns_nan(self):
-        from templates import _measure_stamp_fwhm
+        from autophot.subtraction.templates import _measure_stamp_fwhm
         assert np.isnan(_measure_stamp_fwhm(np.zeros((15, 15))))
         assert np.isnan(_measure_stamp_fwhm(np.full((15, 15), np.nan)))
 
 
 class TestZogyKernelHelpers:
     def test_taper_suppresses_wings_not_core(self):
-        from templates import _zogy_taper_stamp
+        from autophot.subtraction.templates import _zogy_taper_stamp
 
         stamp = _gauss_psf(2.0, size=41)
         out = _zogy_taper_stamp(stamp, fwhm=4.7)
@@ -1426,7 +1426,7 @@ class TestZogyKernelHelpers:
         assert np.isfinite(out).all()
 
     def test_taper_handles_nan_stamp(self):
-        from templates import _zogy_taper_stamp
+        from autophot.subtraction.templates import _zogy_taper_stamp
 
         stamp = _gauss_psf(2.0, size=21)
         # ePSF-style NaN border in the taper-suppressed corner band is
@@ -1440,7 +1440,7 @@ class TestZogyKernelHelpers:
         assert not np.isfinite(_zogy_taper_stamp(stamp2, fwhm=4.7)).all()
 
     def test_window_kernel_truncates_and_conserves(self):
-        from templates import _zogy_window_kernel
+        from autophot.subtraction.templates import _zogy_window_kernel
 
         rng = np.random.default_rng(0)
         k = rng.normal(0.0, 1.0, (31, 31))
@@ -1457,7 +1457,7 @@ class TestZogyKernelHelpers:
         )
 
     def test_window_kernel_degenerate(self):
-        from templates import _zogy_window_kernel
+        from autophot.subtraction.templates import _zogy_window_kernel
 
         k = np.zeros((9, 9))
         kw = _zogy_window_kernel(k, half_width=2)
@@ -1871,7 +1871,7 @@ class TestSparseApertureFluxScale:
         assert fits.getheader(diff_f)["FLXSCALE"] == pytest.approx(10.0)
 
     def test_aperture_scale_reports_ratio_count(self):
-        from templates import _zogy_matched_aperture_scale
+        from autophot.subtraction.templates import _zogy_matched_aperture_scale
 
         sci = np.full((61, 61), 100.0)
         ref = np.full((61, 61), 50.0)
@@ -1885,7 +1885,7 @@ class TestSparseApertureFluxScale:
         assert scale == pytest.approx(2.0, rel=0.05)
 
     def test_no_valid_ratios_returns_nan_and_zero(self):
-        from templates import _zogy_matched_aperture_scale
+        from autophot.subtraction.templates import _zogy_matched_aperture_scale
 
         sci = np.full((61, 61), 100.0)
         ref = np.full((61, 61), 50.0)
@@ -1945,7 +1945,7 @@ class TestZogyLsqKernel:
     def test_smoothing_kernel_absorbs_subpixel_shift(self):
         """The LSQ kernel must carry the 0.4 px misregistration the
         Wiener PSF-ratio kernel cannot represent."""
-        from templates import _pack_lsq_kernel, _zogy_lsq_kernel
+        from autophot.subtraction.templates import _pack_lsq_kernel, _zogy_lsq_kernel
 
         sci, ref, stars = self._pair(shift=(0.4, -0.3))
         k, info = _zogy_lsq_kernel(
@@ -1981,7 +1981,7 @@ class TestZogyLsqKernel:
     def test_raw_kernel_sum_recovers_flux_ratio(self):
         """ksum is the free photometric factor (SFFT ConstPhotRatio
         equivalent): a reference 1.96x brighter must produce ksum ~1.96."""
-        from templates import _zogy_lsq_kernel
+        from autophot.subtraction.templates import _zogy_lsq_kernel
 
         sci, ref, stars = self._pair(flux_ratio=1.96)
         k, info = _zogy_lsq_kernel(
@@ -1993,7 +1993,7 @@ class TestZogyLsqKernel:
     def test_sharpening_direction_carries_negative_mass(self):
         """An impossible direction must still read as deconvolution so
         the probe veto can reject it."""
-        from templates import _zogy_lsq_kernel
+        from autophot.subtraction.templates import _zogy_lsq_kernel
 
         sci, ref, stars = self._pair()
         k, info = _zogy_lsq_kernel(
@@ -2006,7 +2006,7 @@ class TestZogyLsqKernel:
         assert info["neg"] > 0.3
 
     def test_too_few_stamps_returns_none(self):
-        from templates import _zogy_lsq_kernel
+        from autophot.subtraction.templates import _zogy_lsq_kernel
 
         sci, ref, _ = self._pair()
         k, info = _zogy_lsq_kernel(
@@ -2017,7 +2017,7 @@ class TestZogyLsqKernel:
 
     def test_mask_excludes_stamp_footprints(self):
         """A masked blob inside a stamp must not teach the kernel."""
-        from templates import _zogy_lsq_kernel
+        from autophot.subtraction.templates import _zogy_lsq_kernel
 
         sci, ref, stars = self._pair()
         mask = np.zeros_like(sci, dtype=bool)
@@ -2035,7 +2035,7 @@ class TestZogyLsqKernel:
         satisfy it the least-negative attempt is returned so the caller's
         veto sees an honest diagnostic (TDP6 60881 r: neg 1.7 at
         lam=1e-3 needed lam=0.1 to reach a usable kernel)."""
-        from templates import _zogy_lsq_kernel
+        from autophot.subtraction.templates import _zogy_lsq_kernel
 
         sci, ref, stars = self._pair()
         _, i_raw = _zogy_lsq_kernel(
@@ -2065,7 +2065,7 @@ class TestZogyLsqKernel:
         scipy convolve with the flipped centred kernel."""
         from scipy.ndimage import convolve
 
-        from templates import _pack_lsq_kernel
+        from autophot.subtraction.templates import _pack_lsq_kernel
 
         rng = np.random.default_rng(1)
         img = rng.normal(0, 1, (64, 64))
@@ -2099,7 +2099,7 @@ class TestZogyWienerAdaptiveEps:
         return out
 
     def test_smoothing_direction_stays_clean_at_low_eps(self):
-        from templates import _zogy_wiener_kernel_adaptive
+        from autophot.subtraction.templates import _zogy_wiener_kernel_adaptive
 
         src = self._padded(2.5)
         tgt = self._padded(4.0)
@@ -2113,7 +2113,7 @@ class TestZogyWienerAdaptiveEps:
         """No amount of regularization can legitimately sharpen; the
         veto diagnostic uses the fixed-eps probe, which must keep the
         high negative mass so the veto fires."""
-        from templates import (
+        from autophot.subtraction.templates import (
             _ZOGY_KERNEL_NEG_HARD,
             _zogy_wiener_kernel,
             _zogy_wiener_kernel_adaptive,
@@ -2130,7 +2130,7 @@ class TestZogyWienerAdaptiveEps:
         assert np.isfinite(neg)
 
     def test_fixed_eps_still_available(self):
-        from templates import _zogy_wiener_kernel
+        from autophot.subtraction.templates import _zogy_wiener_kernel
 
         src = self._padded(2.5)
         tgt = self._padded(4.0)
@@ -2144,7 +2144,7 @@ class TestZogyWienerAdaptiveEps:
         corners; measuring the raw layout under-reads the width enough
         to veto good kernels (TDP6 60881 r vetoed every REF kernel on a
         phantom 127% width error)."""
-        from templates import (
+        from autophot.subtraction.templates import (
             _zogy_kernel_fid_err,
             _zerolag_stamp_fwhm,
         )
@@ -2187,7 +2187,7 @@ class TestLsqFitPositions:
     ]
 
     def test_both_vetted_lists_intersect(self):
-        from templates import _zogy_lsq_fit_positions
+        from autophot.subtraction.templates import _zogy_lsq_fit_positions
 
         out = _zogy_lsq_fit_positions(
             self._srcs,
@@ -2197,7 +2197,7 @@ class TestLsqFitPositions:
         assert out == [(30.0, 40.0)]
 
     def test_small_intersection_does_not_fallback_to_raw(self):
-        from templates import _zogy_lsq_fit_positions
+        from autophot.subtraction.templates import _zogy_lsq_fit_positions
 
         out = _zogy_lsq_fit_positions(
             self._srcs, [(10.0, 20.0)], [(50.0, 60.0)]
@@ -2205,7 +2205,7 @@ class TestLsqFitPositions:
         assert out == []
 
     def test_single_vetted_list_is_used(self):
-        from templates import _zogy_lsq_fit_positions
+        from autophot.subtraction.templates import _zogy_lsq_fit_positions
 
         out = _zogy_lsq_fit_positions(
             self._srcs, [(10.0, 20.0), (70.0, 80.0)], None
@@ -2213,13 +2213,13 @@ class TestLsqFitPositions:
         assert out == [(10.0, 20.0), (70.0, 80.0)]
 
     def test_no_vetting_uses_raw_matches(self):
-        from templates import _zogy_lsq_fit_positions
+        from autophot.subtraction.templates import _zogy_lsq_fit_positions
 
         out = _zogy_lsq_fit_positions(self._srcs, None, None)
         assert len(out) == 4
 
     def test_non_finite_and_malformed_entries_dropped(self):
-        from templates import _zogy_lsq_fit_positions
+        from autophot.subtraction.templates import _zogy_lsq_fit_positions
 
         srcs = [
             {"x": np.nan, "y": 5.0},
@@ -2297,7 +2297,7 @@ class TestZogyAnalyticPsfStamps:
         return img, [(50, 50), (100, 60), (150, 80), (60, 130), (140, 140)]
 
     def test_cutout_extraction_keeps_edge_stars(self):
-        import main as main_mod
+        import autophot.pipeline.main as main_mod
 
         img, xy = self._stars_image()
         df = pd.DataFrame([(3, 3)] + xy, columns=["x_pix", "y_pix"])
@@ -2306,7 +2306,7 @@ class TestZogyAnalyticPsfStamps:
         assert len(stars) == 6
 
     def test_fitted_stamp_written_and_normalized(self, tmp_path):
-        import main as main_mod
+        import autophot.pipeline.main as main_mod
 
         img, xy = self._stars_image()
         df = pd.DataFrame(xy, columns=["x_pix", "y_pix"])
@@ -2323,8 +2323,8 @@ class TestZogyAnalyticPsfStamps:
         assert np.nansum(data) == pytest.approx(1.0, abs=1e-6)
 
     def test_stamp_kwarg_serializes_model_verbatim(self, tmp_path):
-        import main as main_mod
-        from psf import _analytic_psf_stamp
+        import autophot.pipeline.main as main_mod
+        from autophot.photometry.psf import _analytic_psf_stamp
 
         img, xy = self._stars_image()
         df = pd.DataFrame(xy, columns=["x_pix", "y_pix"])
@@ -2340,7 +2340,7 @@ class TestZogyAnalyticPsfStamps:
         assert np.allclose(fits.getdata(str(out)), model.data)
 
     def test_fwhm_fallback_chain(self):
-        import main as main_mod
+        import autophot.pipeline.main as main_mod
 
         assert main_mod._zogy_fwhm_fallback(np.nan, None, 3.7) == 3.7
         assert main_mod._zogy_fwhm_fallback(np.nan, -1.0) == 5.0
@@ -2351,27 +2351,27 @@ class TestFscalPhotRepair:
     """_fscal_phot_needs_repair gates the FSCAL_PHOT sanity fix."""
 
     def test_broken_phot_is_repaired(self):
-        from templates import _fscal_phot_needs_repair
+        from autophot.subtraction.templates import _fscal_phot_needs_repair
 
         # SExtractor scale 5.5 vs aperture truth ~1.0 (the SN2024pba case).
         assert _fscal_phot_needs_repair(5.5, 1.0, 20)
         assert _fscal_phot_needs_repair(0.42, 1.0, 20)
 
     def test_close_values_left_alone(self):
-        from templates import _fscal_phot_needs_repair
+        from autophot.subtraction.templates import _fscal_phot_needs_repair
 
         # A few-percent aperture bias is real; do not touch it.
         assert not _fscal_phot_needs_repair(1.05, 1.0, 20)
         assert not _fscal_phot_needs_repair(0.97, 1.0, 20)
 
     def test_too_few_ratios_disables_repair(self):
-        from templates import _fscal_phot_needs_repair
+        from autophot.subtraction.templates import _fscal_phot_needs_repair
 
         assert not _fscal_phot_needs_repair(5.5, 1.0, 4, min_ratios=5)
         assert _fscal_phot_needs_repair(5.5, 1.0, 5, min_ratios=5)
 
     def test_non_finite_inputs_rejected(self):
-        from templates import _fscal_phot_needs_repair
+        from autophot.subtraction.templates import _fscal_phot_needs_repair
 
         assert not _fscal_phot_needs_repair(np.nan, 1.0, 20)
         assert not _fscal_phot_needs_repair(1.0, np.nan, 20)
@@ -2380,7 +2380,7 @@ class TestFscalPhotRepair:
         assert not _fscal_phot_needs_repair(5.5, 1.0, np.nan)
 
     def test_custom_sanity_frac(self):
-        from templates import _fscal_phot_needs_repair
+        from autophot.subtraction.templates import _fscal_phot_needs_repair
 
         assert _fscal_phot_needs_repair(1.2, 1.0, 20, sanity_frac=0.10)
         assert not _fscal_phot_needs_repair(1.2, 1.0, 20, sanity_frac=0.30)
@@ -2391,14 +2391,14 @@ class TestFscalApCardScale:
     FSCAL-card direction, which flips for CONVD=SCI products."""
 
     def test_sci_direction_inverts(self):
-        from templates import _fscal_ap_card_scale
+        from autophot.subtraction.templates import _fscal_ap_card_scale
 
         # SN2024pba 2024-08-09: aperture ratio f_sci/f_ref = 1.84 while the
         # FSCAL cards carry the convolved/static scale f_ref/f_sci = 0.54.
         assert np.isclose(_fscal_ap_card_scale(1.84, "SCI"), 1.0 / 1.84)
 
     def test_ref_direction_untouched(self):
-        from templates import _fscal_ap_card_scale
+        from autophot.subtraction.templates import _fscal_ap_card_scale
 
         assert np.isclose(_fscal_ap_card_scale(9.18, "REF"), 9.18)
         assert np.isclose(_fscal_ap_card_scale(0.42, "ref"), 0.42)
@@ -2407,7 +2407,7 @@ class TestFscalApCardScale:
         # End-to-end check on the SN2024pba false-repair cases: with the
         # card-direction value, a healthy FSCAL_PHOT is left alone on every
         # CONVD=SCI epoch, while the genuine CONVD=REF breakage still fires.
-        from templates import _fscal_ap_card_scale, _fscal_phot_needs_repair
+        from autophot.subtraction.templates import _fscal_ap_card_scale, _fscal_phot_needs_repair
 
         # 2024-08-09: PHOT=0.559 (correct) vs raw aperture 1.84 -> 0.543.
         ap = _fscal_ap_card_scale(1.8402, "SCI")
@@ -2417,7 +2417,7 @@ class TestFscalApCardScale:
         assert _fscal_phot_needs_repair(5.529, ap_ref, 9)
 
     def test_invalid_inputs(self):
-        from templates import _fscal_ap_card_scale
+        from autophot.subtraction.templates import _fscal_ap_card_scale
 
         assert not np.isfinite(_fscal_ap_card_scale(np.nan, "SCI"))
         assert not np.isfinite(_fscal_ap_card_scale(0.0, "SCI"))
@@ -2438,7 +2438,7 @@ class TestSuppliedNoiseMap:
         return str(path)
 
     def test_structure_anchored_to_scalar(self, tmp_path):
-        from templates import _supplied_noise_map
+        from autophot.subtraction.templates import _supplied_noise_map
 
         m = np.full((20, 20), 1.0, np.float32)
         m[:, 10:] = 4.0
@@ -2450,14 +2450,14 @@ class TestSuppliedNoiseMap:
         assert out[5, 5] / out[5, 15] == pytest.approx(0.25, rel=1e-6)
 
     def test_flat_map_reduces_to_scalar(self, tmp_path):
-        from templates import _supplied_noise_map
+        from autophot.subtraction.templates import _supplied_noise_map
 
         p = self._write(tmp_path / "n.fits", np.full((10, 10), 7.0))
         out = _supplied_noise_map(p, 3.3, "science")
         np.testing.assert_allclose(out, np.full((10, 10), 3.3))
 
     def test_invalid_pixels_fall_back_to_scalar(self, tmp_path):
-        from templates import _supplied_noise_map
+        from autophot.subtraction.templates import _supplied_noise_map
 
         m = np.ones((10, 10), np.float32)
         m[:2, :] = np.nan
@@ -2469,7 +2469,7 @@ class TestSuppliedNoiseMap:
         assert (out[-2:, :] == 5.0).all()
 
     def test_missing_or_unusable_returns_none(self, tmp_path):
-        from templates import _supplied_noise_map
+        from autophot.subtraction.templates import _supplied_noise_map
 
         assert _supplied_noise_map(None, 2.0, "science") is None
         assert (
