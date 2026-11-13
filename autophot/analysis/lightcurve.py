@@ -2671,7 +2671,9 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
             if not files:
                 continue
 
-            date = "".join(str(row.get("date", "")).split("-"))
+            # ISO "YYYY-MM-DD HH:MM:SS" -> "YYYYMMDD" (the date column used to
+            # carry the raw MJD, which left the 8-char date_token unused).
+            date = "".join(str(row.get("date", "")).split()[0].split("-"))
             band = str(row.get("filter", "unknown")).strip() or "unknown"
             is_detection = _row_detection_state(row)
             split_root = det_root if is_detection else nondet_root
