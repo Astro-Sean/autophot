@@ -31,16 +31,16 @@ from astropy.stats import sigma_clip
 from astropy.table import Table
 from scipy.spatial import cKDTree
 
-from functions import (
+from ..core.functions import (
     STATUS,
     fwhm_outlier_clip,
     log_result,
     log_step,
     log_warning_from_exception,
 )
-from wcs import get_wcs
+from ..pipeline.wcs import get_wcs
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 # Cached path to a working SExtractor binary (avoids repeated subprocess checks).
 _SEXTRACTOR_EXE: Optional[str] = None
@@ -290,7 +290,7 @@ def _write_fits_array_to_file(array: np.ndarray, path: Path) -> None:
         array (np.ndarray): 2D array to write.
         path (Path): Destination path for the FITS file.
     """
-    from functions import safe_fits_write
+    from ..core.functions import safe_fits_write
     safe_fits_write(str(path), array, fits.Header())
 
 
@@ -1301,7 +1301,7 @@ class SExtractorWrapper:
                 # frames whose true ceiling is unknown.  Use the same default
                 # as a missing key instead.
                 try:
-                    from functions import SATURATE_SENTINEL_MIN
+                    from ..core.functions import SATURATE_SENTINEL_MIN
                 except ImportError:
                     SATURATE_SENTINEL_MIN = 1e8
                 if saturation >= SATURATE_SENTINEL_MIN:
