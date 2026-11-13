@@ -21,9 +21,18 @@ import sys
 import time
 import warnings
 
-# Add parent directory to path to import functions.py
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from functions import ColoredLevelFormatter, set_size, safe_fits_write, border_msg
+if __package__ in (None, ""):
+    # Spawned as a standalone script (python run_sfft.py): expose the
+    # repo root and anchor the package so relative imports resolve.
+    sys.path.insert(
+        0,
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ),
+    )
+    __package__ = "autophot.subtraction"
+
+from ..core.functions import ColoredLevelFormatter, set_size, safe_fits_write, border_msg
 
 # Limit BLAS/OpenMP threads before any scientific imports (avoids libgomp
 # "Resource temporarily unavailable" when this script is run as a subprocess
@@ -513,7 +522,7 @@ def _write_post_anomaly_sources_csv(
         return 0
     df_anom = df_anom.drop_duplicates().reset_index(drop=True)
     df_anom.to_csv(out_csv, index=False, float_format="%.6f")
-    logging.getLogger(__name__).info(
+    logging.getLogger(__name__.rsplit(".", 1)[-1]).info(
         f"Exported {len(df_anom)} post-anomaly sources for feedback: {out_csv}"
     )
     return int(len(df_anom))
@@ -538,7 +547,7 @@ def run_sfft() -> Optional[int]:
         root_logger = logging.getLogger()
         for h in root_logger.handlers:
             h.setFormatter(ColoredLevelFormatter(use_color=True))
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
     warnings.filterwarnings("ignore")
     t0_total = time.time()
 
@@ -1184,8 +1193,8 @@ def run_sfft() -> Optional[int]:
     # Write values into headers so SFFT/MeLOn find the keywords (avoids KeyError when SATURATE missing).
     # Use consistent fallback values with main.py
     try:
-        from main import SATURATE_INTERNAL_FALLBACK, SATURATE_FITS_FALLBACK
-        from functions import SATURATE_SENTINEL_MIN
+        from ..pipeline.main import SATURATE_INTERNAL_FALLBACK, SATURATE_FITS_FALLBACK
+        from ..core.functions import SATURATE_SENTINEL_MIN
     except ImportError:
         # Fallback if main module not available
         SATURATE_INTERNAL_FALLBACK = np.inf
@@ -2836,7 +2845,7 @@ def run_sfft() -> Optional[int]:
                             LinearSegmentedColormap,
                             TwoSlopeNorm,
                         )
-                        from plotting_utils import (
+                        from ..core.plotting_utils import (
                             apply_autophot_mplstyle,
                             get_divergent_color,
                             get_plot_color,
@@ -3245,7 +3254,7 @@ def run_sfft() -> Optional[int]:
                         median - CVREJ_MAGD_THRESH,
                         median + CVREJ_MAGD_THRESH,
                     )
-                    from plotting_utils import apply_autophot_mplstyle, get_plot_color
+                    from ..core.plotting_utils import apply_autophot_mplstyle, get_plot_color
                     apply_autophot_mplstyle()
                     fig, ax = plt.subplots(
                         figsize=set_size(540, aspect=1.01), dpi=150
@@ -3333,11 +3342,9 @@ def run_sfft() -> Optional[int]:
 
 
 if __name__ == "__main__":
-    # Ensure repo root is on sys.path when run as a standalone script.
-    # This avoids `ModuleNotFoundError: No module named 'functions'` when the
-    # current working directory is not the project root.
+    # Ensure the package parent dir is on sys.path when run as a script.
     _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _repo_root = os.path.abspath(os.path.join(_script_dir, ".."))
+    _repo_root = os.path.abspath(os.path.join(_script_dir, "..", ".."))
     if _repo_root not in sys.path:
         sys.path.insert(0, _repo_root)
     sys.exit(0 if run_sfft() else 1)
