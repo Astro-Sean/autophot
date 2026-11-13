@@ -2,7 +2,7 @@
 
 All network access is mocked: ``Catalog.download`` is replaced with a stub
 returning synthetic raw catalogs whose column names match
-``databases/catalog.yml`` so the real ``clean()`` column mapping runs.
+``autophot/data/catalog.yml`` so the real ``clean()`` column mapping runs.
 """
 
 import os
@@ -19,17 +19,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from catalog import (
+from autophot.calibration.catalog import (
     AUTO_OPTIMIZE_CATALOGS,
     Catalog,
     _coverage_optimal_center,
     _in_required_region,
     _region_from_corners,
 )
-from functions import SUPPORTED_PHOTOMETRIC_FILTERS
+from autophot.core.functions import SUPPORTED_PHOTOMETRIC_FILTERS
 
 try:
-    from prepare import Prepare
+    from autophot.pipeline.prepare import Prepare
 except Exception:  # pragma: no cover - optional heavy deps (tqdm etc.)
     Prepare = None
 
@@ -394,7 +394,7 @@ class TestCoveragePlotScoreRow:
         }
 
     def test_combined_figure_written(self, tmp_path):
-        from catalog import plot_optimized_catalog_coverage
+        from autophot.calibration.catalog import plot_optimized_catalog_coverage
 
         out = plot_optimized_catalog_coverage(
             self._plot_data(),
@@ -410,7 +410,7 @@ class TestCoveragePlotScoreRow:
         assert os.path.getsize(out) > 1000
 
     def test_missing_coverage_column_tolerated(self, tmp_path):
-        from catalog import plot_optimized_catalog_coverage
+        from autophot.calibration.catalog import plot_optimized_catalog_coverage
 
         rep = self._report().drop(columns=["coverage"])
         out = plot_optimized_catalog_coverage(
@@ -422,7 +422,7 @@ class TestCoveragePlotScoreRow:
         assert out is not None and os.path.exists(out)
 
     def test_map_only_without_report(self, tmp_path):
-        from catalog import plot_optimized_catalog_coverage
+        from autophot.calibration.catalog import plot_optimized_catalog_coverage
 
         out = plot_optimized_catalog_coverage(
             self._plot_data(), target_coords=CENTER, wdir=str(tmp_path)
@@ -432,7 +432,7 @@ class TestCoveragePlotScoreRow:
     def test_all_sources_underlay_and_unknown_bands(self, tmp_path):
         """catalog_sources renders as a faint underlay; bands missing
         from the palette still draw (unique hashed fallback colour)."""
-        from catalog import plot_optimized_catalog_coverage
+        from autophot.calibration.catalog import plot_optimized_catalog_coverage
 
         data = self._plot_data()
         data["catalog_sources"] = {
@@ -461,7 +461,7 @@ class TestCoveragePlotScoreRow:
         attributable."""
         import matplotlib.figure as mfig
 
-        from catalog import plot_optimized_catalog_coverage
+        from autophot.calibration.catalog import plot_optimized_catalog_coverage
 
         data = self._plot_data()
         data["catalog_sources"] = {
@@ -549,7 +549,7 @@ class TestQueryRegions:
     and routed to download() as box (VizieR) or circumscribed cone."""
 
     def test_region_centres_on_footprint_bbox_not_target(self):
-        from catalog import _footprint_region
+        from autophot.calibration.catalog import _footprint_region
 
         # r images on-target; J images offset +20' in RA.
         infos = [
@@ -574,7 +574,7 @@ class TestQueryRegions:
         assert reg_all["radius_arcmin"] > reg_r["radius_arcmin"]
 
     def test_region_bounds(self):
-        from catalog import _region_from_corners
+        from autophot.calibration.catalog import _region_from_corners
 
         # Tiny field -> min bound.
         reg_small = _region_from_corners(
@@ -596,7 +596,7 @@ class TestQueryRegions:
         assert reg_none["box_deg"] is None
 
     def test_region_ra_wrap(self):
-        from catalog import _footprint_region
+        from autophot.calibration.catalog import _footprint_region
 
         target = SkyCoord(0.02, -10.0, unit="deg", frame="icrs")
         w = _tan_wcs()
@@ -666,7 +666,7 @@ class TestDownloadRegionRouting:
     def test_vizier_box_query_used_when_region_given(
         self, tmp_path, monkeypatch
     ):
-        from catalog import _region_from_corners
+        from autophot.calibration.catalog import _region_from_corners
 
         calls = {}
 
@@ -675,7 +675,7 @@ class TestDownloadRegionRouting:
             calls["kwargs"] = kwargs
             return [self._vizier_table()]
 
-        monkeypatch.setattr("catalog.Vizier.query_region", fake_query)
+        monkeypatch.setattr("autophot.calibration.catalog.Vizier.query_region", fake_query)
         cat = _make_catalog(
             tmp_path, catalog={"use_catalog": "2mass", "max_distance": 10}
         )
@@ -697,7 +697,7 @@ class TestDownloadRegionRouting:
     ):
         """pan_starrs (cone-only) gets the region centre + circumscribed
         radius, not the box."""
-        from catalog import _region_from_corners
+        from autophot.calibration.catalog import _region_from_corners
 
         captured = {}
 
@@ -705,7 +705,7 @@ class TestDownloadRegionRouting:
             captured.update(params)
             return _FakeResponse(_ps_payload(8))
 
-        monkeypatch.setattr("catalog.requests.get", fake_get)
+        monkeypatch.setattr("autophot.calibration.catalog.requests.get", fake_get)
         cat = _ps_catalog(tmp_path)
         region = _region_from_corners(
             np.array([151.0, 151.4]), np.array([31.0, 31.2]), CENTER
@@ -725,7 +725,7 @@ class TestDownloadRegionRouting:
     ):
         """A box query reuses the wider cone cache at the same centre -
         the cone result is a superset, so no re-download is needed."""
-        from catalog import _region_from_corners
+        from autophot.calibration.catalog import _region_from_corners
 
         calls = {"n": 0}
 
@@ -733,7 +733,7 @@ class TestDownloadRegionRouting:
             calls["n"] += 1
             return [self._vizier_table()]
 
-        monkeypatch.setattr("catalog.Vizier.query_region", fake_query)
+        monkeypatch.setattr("autophot.calibration.catalog.Vizier.query_region", fake_query)
         cat = _make_catalog(
             tmp_path, catalog={"use_catalog": "2mass", "max_distance": 10}
         )
@@ -837,7 +837,7 @@ class TestPanStarrsRetry:
                 raise _req.ReadTimeout("simulated MAST timeout")
             return _FakeResponse(_ps_payload(10))
 
-        monkeypatch.setattr("catalog.requests.get", fake_get)
+        monkeypatch.setattr("autophot.calibration.catalog.requests.get", fake_get)
         cat = _ps_catalog(tmp_path)
         out = cat.download(
             CENTER, catalogName="pan_starrs", radius=10, target_name="T1"
@@ -852,7 +852,7 @@ class TestPanStarrsRetry:
         def fake_get(url, params=None, timeout=None):
             raise _req.ReadTimeout("simulated MAST timeout")
 
-        monkeypatch.setattr("catalog.requests.get", fake_get)
+        monkeypatch.setattr("autophot.calibration.catalog.requests.get", fake_get)
         cat = _ps_catalog(tmp_path, retries=2)
         with pytest.raises(RuntimeError) as excinfo:
             cat.download(
@@ -871,7 +871,7 @@ class TestPanStarrsRetry:
         def fake_get(url, params=None, timeout=None):
             return _FakeResponse({"info": [{"name": "raMean"}], "data": []})
 
-        monkeypatch.setattr("catalog.requests.get", fake_get)
+        monkeypatch.setattr("autophot.calibration.catalog.requests.get", fake_get)
         cat = _ps_catalog(tmp_path)
         with pytest.raises(RuntimeError, match="0 sources"):
             cat.download(
@@ -892,7 +892,7 @@ class TestUsableMagErrGate:
         )
 
     def test_mask_requires_finite_capped_error(self):
-        from catalog import _usable_mag_mask
+        from autophot.calibration.catalog import _usable_mag_mask
 
         mask = _usable_mag_mask(
             self._df(), "g", 11.0, 22.0, mag_err_max=0.2
@@ -900,7 +900,7 @@ class TestUsableMagErrGate:
         assert mask.tolist() == [True, False, False, False, False, False]
 
     def test_no_cap_still_requires_finite_error(self):
-        from catalog import _usable_mag_mask
+        from autophot.calibration.catalog import _usable_mag_mask
 
         mask = _usable_mag_mask(
             self._df(), "g", 11.0, 22.0, mag_err_max=None
@@ -909,14 +909,14 @@ class TestUsableMagErrGate:
         assert mask.tolist() == [True, True, False, False, False, False]
 
     def test_missing_err_column_tolerated(self):
-        from catalog import _usable_mag_mask
+        from autophot.calibration.catalog import _usable_mag_mask
 
         df = pd.DataFrame({"g": [15.0, 30.0]})
         mask = _usable_mag_mask(df, "g", 11.0, 22.0, mag_err_max=0.2)
         assert mask.tolist() == [True, False]
 
     def test_missing_band_returns_none(self):
-        from catalog import _usable_mag_mask
+        from autophot.calibration.catalog import _usable_mag_mask
 
         assert (
             _usable_mag_mask(self._df(), "r", 11.0, 22.0, 0.2) is None
@@ -1040,7 +1040,7 @@ class TestOptimizerPlotSourcesReport:
         persisted CSV - the figure height includes the score row."""
         import matplotlib.figure as mfig
 
-        from catalog import plot_optimized_catalog_coverage
+        from autophot.calibration.catalog import plot_optimized_catalog_coverage
 
         def fake_download(self, target_coords, catalogName=None, **kw):
             return _raw_catalog(catalogName, 9, 15.0)
@@ -1088,7 +1088,7 @@ class TestUsableMarkersOpen:
     def test_usable_scatter_has_no_facecolors(self, tmp_path):
         import matplotlib.figure as mfig
 
-        from catalog import plot_optimized_catalog_coverage
+        from autophot.calibration.catalog import plot_optimized_catalog_coverage
 
         ra, dec = _field_ras_decs(9)
         data = {
