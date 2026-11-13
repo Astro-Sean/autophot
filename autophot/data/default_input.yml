@@ -1146,3 +1146,7 @@ default_input:
     periodogram_max_period: null # float|null --- Longest trial period in days; null = half the observing baseline.
     periodogram_samples_per_peak: 5 # int --- Frequency-grid oversampling factor for the periodogram.
     periodogram_top_peaks: 5 # int --- Number of top periodogram peaks reported per band.
+
+    # --- Light curve summary table ---
+    lightcurve_instrument_column: True # bool --- If True, append an "Instrument" column ("<TELESCOP>+<INSTRUME>" from the FITS header) to the LightCurve_<method>_<target>.dat photometry table; unknown header values write "-". Canonical survey abbreviations shorten common labels (e.g. Palomar 48-inch+ZTF/MOSAIC -> P48+ZTF).
+    lightcurve_instrument_aliases: {} # dict|null --- Optional renames for the joined telescope+instrument label, e.g. {"LCO 2m0-02+Sinistro": "FTS+Sinistro"}.
