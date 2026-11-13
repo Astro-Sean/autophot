@@ -299,6 +299,29 @@ class TestInjectedLimitEndToEnd:
         assert det["snr_gate_factor"] == pytest.approx(1.0)
         assert not np.isfinite(det["inject_lmag_raw"])
 
+    def test_mask_covering_annulus_vetoes_all_sites(self):
+        # A mask that blankets the injection annulus (e.g. a host-galaxy
+        # source footprint inherited from the science frame) leaves no
+        # valid sites, so the search must bail out instead of fitting an
+        # empty completeness curve.
+        img = _noise_image()
+        mask = np.zeros_like(img, dtype=bool)
+        yy, xx = np.mgrid[: img.shape[0], : img.shape[1]]
+        mask[(xx - 80.0) ** 2 + (yy - 80.0) ** 2 <= 40.0**2] = True
+        det = self._run(_lim_cfg(), image=img, mask=mask)
+        assert not np.isfinite(det["inject_lmag"])
+
+    def test_sparse_mask_keeps_sites(self):
+        # Masked pixels elsewhere in the frame must not veto annulus
+        # sites: masked_sites only rejects sites whose aperture disk
+        # overlaps a masked pixel.
+        img = _noise_image()
+        mask = np.zeros_like(img, dtype=bool)
+        yy, xx = np.mgrid[: img.shape[0], : img.shape[1]]
+        mask[(xx - 15.0) ** 2 + (yy - 15.0) ** 2 <= 25.0**2] = True
+        det = self._run(_lim_cfg(), image=img, mask=mask)
+        assert np.isfinite(det["inject_lmag"])
+
 
 class TestOversampledRenderNormalization:
     """photutils ePSF data sums to prod(oversampling); the dense-grid render
