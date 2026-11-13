@@ -2999,7 +2999,19 @@ _CONFIG_DATA_KEYS = frozenset({"variable_sources", "name_prefix", "objname"})
 
 # Removed keys that older configs may still carry; warn rather than
 # reject - they are ignored, not honoured.
-_CONFIG_REMOVED_KEYS = frozenset({"template_subtraction.zogy_update"})
+_CONFIG_REMOVED_KEYS = frozenset(
+    {
+        "template_subtraction.zogy_update",
+        # 2026-11 audit: no consumer anywhere in the package.
+        "wcs.code_tolerance",
+        "host_model.engine",
+        "template_subtraction.alignment_clustered_span_frac",
+        "template_subtraction.alignment_clustered_quadrant_frac",
+        "photometry.psf_adaptive_smoothing_kernel",
+        "background.local_interp_order",
+        "background.global_interp_order",
+    }
+)
 
 # Renamed keys still honoured at point of use; warn rather than reject.
 _CONFIG_DEPRECATED_KEYS = {
