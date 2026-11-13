@@ -22,12 +22,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from functions import (
+from autophot.core.functions import (
     _sfft_actual_convd,
     _sfft_difference_gain,
     _sfft_photometric_flux_correction,
 )
-from templates import (
+from autophot.subtraction.templates import (
     _apply_sfft_deconvolution_veto,
     _diff_resid_at_sources,
     _select_forceconv,
@@ -108,7 +108,7 @@ class TestSelectForceconv:
         # -- not this resolution -- protects that case.
         import yaml
 
-        cfg = yaml.safe_load((ROOT / "databases" / "default_input.yml").read_text())
+        cfg = yaml.safe_load((ROOT / "autophot" / "data" / "default_input.yml").read_text())
         ts = cfg["default_input"]["template_subtraction"]
         cfg_dir = str(ts["forceconv"]).strip().upper()
         assert cfg_dir == "REF"
