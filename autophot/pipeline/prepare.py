@@ -21,7 +21,7 @@ from typing import List, Dict, Optional, Tuple, Union
 
 import astropy.wcs as WCS
 
-from functions import (
+from ..core.functions import (
     AutophotYaml,
     get_header,
     get_instrument_config,
@@ -42,10 +42,11 @@ from functions import (
     ascii_kv,
     ascii_card,
     border_msg,
+    data_path,
 )
-from check import FitsInfo
-from tns import get_coords, get_coords_simbad
-from wcs import get_wcs, pixel_area_scale_arcsec
+from .telescope import FitsInfo
+from ..services.tns import get_coords, get_coords_simbad
+from .wcs import get_wcs, pixel_area_scale_arcsec
 
 
 def _dedupe_identical_files(file_list):
@@ -149,7 +150,7 @@ class Prepare:
         root_logger = logging.getLogger()
         for handler in root_logger.handlers:
             handler.setFormatter(ColoredLevelFormatter(use_color=True))
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
     # --- Load Configuration ---
     @staticmethod
@@ -160,8 +161,7 @@ class Prepare:
         Returns:
             Dict: Parsed YAML configuration.
         """
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        default_input_path = os.path.join(script_dir, "databases", "default_input.yml")
+        default_input_path = data_path("default_input.yml")
         default_input_yaml = AutophotYaml(default_input_path, "default_input").load()
         logging.info(log_step(f"Default input: {default_input_path}"))
         return default_input_yaml
@@ -565,8 +565,7 @@ class Prepare:
             List[str]: List of available filter names.
         """
         selected_catalog = self.input_yaml["catalog"]["use_catalog"]
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        catalog_yml_path = os.path.join(script_dir, "databases", "catalog.yml")
+        catalog_yml_path = data_path("catalog.yml")
 
         # Keys that parse to no supported band never match and silently
         # fall back to "default" - warn once here.
@@ -749,7 +748,7 @@ class Prepare:
         # to synthesizing a missing image band so the zeropoint can be
         # computed. allow_filter_transformations only controls proactive
         # synthesis and auto-catalog selection.
-        from filter_transformations import transformable_bands
+        from ..calibration.filter_transformations import transformable_bands
 
         if isinstance(selected_catalog, dict):
             _ft_cats = {
@@ -1496,7 +1495,7 @@ class Prepare:
                     # Raw values like 'r#784' are not catalog keys; the
                     # telescope-blind heuristic covers band+digits forms.
                     try:
-                        from main import _heuristic_filter_mapping
+                        from .main import _heuristic_filter_mapping
 
                         _heur = _heuristic_filter_mapping(filter_name)
                     except Exception:
@@ -1670,20 +1669,14 @@ class Prepare:
                         ", ".join(sorted(required_filters))
                     )
                 else:
-                    base_filepath = os.path.dirname(os.path.abspath(__file__))
-                    base_database = os.path.join(base_filepath, "databases")
-                    filters_yml = "filters.yml"
                     required_filters = (
-                        AutophotYaml(os.path.join(base_database, filters_yml))
+                        AutophotYaml(data_path("filters.yml"))
                         .load()["default_dmag"]
                         .keys()
                     )
             except Exception:
-                base_filepath = os.path.dirname(os.path.abspath(__file__))
-                base_database = os.path.join(base_filepath, "databases")
-                filters_yml = "filters.yml"
                 required_filters = (
-                    AutophotYaml(os.path.join(base_database, filters_yml))
+                    AutophotYaml(data_path("filters.yml"))
                     .load()["default_dmag"]
                     .keys()
                 )
