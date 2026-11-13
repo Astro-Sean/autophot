@@ -35,6 +35,12 @@ def main(argv=None):
     sub.add_parser(
         "gaia-curves", help="Build a custom catalog from Gaia XP curves"
     )
+    sub.add_parser(
+        "color-image", help="RGB composite from per-band FITS frames"
+    )
+    sub.add_parser(
+        "periodogram", help="Lomb-Scargle period search of the light curve"
+    )
 
     args, rest = parser.parse_known_args(argv)
 
@@ -54,6 +60,14 @@ def main(argv=None):
         return _main(rest)
     if args.command == "inspect-telescope":
         from .pipeline.telescope import main as _main
+
+        return _main(rest)
+    if args.command == "color-image":
+        from .analysis.color_composite import main as _main
+
+        return _main(rest)
+    if args.command == "periodogram":
+        from .analysis.periodogram import main as _main
 
         return _main(rest)
 
