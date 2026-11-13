@@ -2670,16 +2670,19 @@ class AutomatedPhotometry:
                         combined_checked = prepare_db.check_files(
                             flist=combined, template_files=True
                         )
-                        # A `templates` path segment marks a template.  The
-                        # location is not fixed: find_templates returns
-                        # staged copies under the output tree while
-                        # downloaded templates stay under fits_dir.
-                        _tpl_segment = os.sep + "templates" + os.sep
+                        # A `templates` or `ready_templates` path segment
+                        # marks a template.  The location is not fixed:
+                        # find_templates returns staged copies under the
+                        # output tree while downloaded templates stay
+                        # under fits_dir.
+                        _tpl_segments = (
+                            os.sep + "templates" + os.sep,
+                            os.sep + "ready_templates" + os.sep,
+                        )
 
                         def _is_template(f):
-                            return _tpl_segment in (
-                                os.path.normpath(f) + os.sep
-                            )
+                            _p = os.path.normpath(f) + os.sep
+                            return any(seg in _p for seg in _tpl_segments)
 
                         file_list = [
                             f for f in combined_checked if not _is_template(f)
