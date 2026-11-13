@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from scipy.special import erf, erfinv
 
-from functions import (
+from autophot.core.functions import (
     quadrature_add,
     beta_psf,
     beta_aperture,
@@ -503,7 +503,7 @@ class TestAsciiOutputFormat:
     """Shared ASCII output helpers keep a consistent table style."""
 
     def test_border_msg_framed(self):
-        from functions import border_msg
+        from autophot.core.functions import border_msg
 
         out = border_msg("Source detection")
         lines = out.split("\n")
@@ -514,7 +514,7 @@ class TestAsciiOutputFormat:
         assert lines[3] == "=" * 80
 
     def test_log_step_framed_dashes(self):
-        from functions import log_step
+        from autophot.core.functions import log_step
 
         out = log_step("Sub step")
         lines = out.split("\n")
@@ -524,7 +524,7 @@ class TestAsciiOutputFormat:
         assert lines[3] == "-" * 70
 
     def test_border_msg_metadata_inside_frame(self):
-        from functions import border_msg
+        from autophot.core.functions import border_msg
 
         out = border_msg("Title", metadata="a=1 b=2", width=60)
         lines = out.split("\n")
@@ -535,7 +535,7 @@ class TestAsciiOutputFormat:
         assert lines[4] == "=" * 60
 
     def test_ascii_kv_framed(self):
-        from functions import ascii_kv
+        from autophot.core.functions import ascii_kv
 
         out = ascii_kv("IMAGE", [("Exposure time", "30 s"), ("Airmass", "1.9")],
                        framed=True, width=60)
@@ -549,7 +549,7 @@ class TestAsciiOutputFormat:
         assert lines[-1] == "=" * 60
 
     def test_ascii_kv_sub_block(self):
-        from functions import ascii_kv
+        from autophot.core.functions import ascii_kv
 
         out = ascii_kv("Attrition", [("generated", "300")], width=50)
         lines = out.split("\n")
@@ -559,12 +559,12 @@ class TestAsciiOutputFormat:
         assert "300" in lines[2]
 
     def test_ascii_kv_empty(self):
-        from functions import ascii_kv
+        from autophot.core.functions import ascii_kv
 
         assert ascii_kv("Empty", []) == ""
 
     def test_ascii_table(self):
-        from functions import ascii_table
+        from autophot.core.functions import ascii_table
 
         out = ascii_table(
             "Zeropoint",
@@ -587,12 +587,12 @@ class TestAsciiOutputFormat:
         assert all(ln == ln.rstrip() for ln in lines)
 
     def test_ascii_table_empty(self):
-        from functions import ascii_table
+        from autophot.core.functions import ascii_table
 
         assert ascii_table("T", ["a"], []) == ""
 
     def test_ascii_card(self):
-        from functions import ascii_card
+        from autophot.core.functions import ascii_card
 
         out = ascii_card("Error", ["line one", "", "line two"], width=50)
         lines = out.split("\n")
@@ -633,7 +633,7 @@ class TestUnscaledIntWarning:
 
     def test_warns_on_blank_without_bzero(self, tmp_path, caplog):
         import logging
-        from functions import get_image_and_header
+        from autophot.core.functions import get_image_and_header
 
         f = self._write_int_fits(tmp_path / "unscaled.fits")
         with caplog.at_level(logging.WARNING, logger="functions"):
@@ -643,7 +643,7 @@ class TestUnscaledIntWarning:
 
     def test_no_warning_for_positive_median(self, tmp_path, caplog):
         import logging
-        from functions import get_image_and_header
+        from autophot.core.functions import get_image_and_header
 
         f = self._write_int_fits(tmp_path / "normal.fits", median=1500)
         with caplog.at_level(logging.WARNING, logger="functions"):
@@ -657,7 +657,7 @@ class TestBiweightSkySigma:
     finite, positive values or NaN - never a silent wrong answer."""
 
     def test_recovers_gaussian_sigma(self):
-        from functions import biweight_sky_sigma
+        from autophot.core.functions import biweight_sky_sigma
 
         rng = np.random.default_rng(42)
         data = rng.normal(100.0, 5.0, 400 * 400)
@@ -668,7 +668,7 @@ class TestBiweightSkySigma:
         """Quantized sky noise (delta-spaced lattice) must not snap the
         estimate to an integer multiple of delta * 1.4826 the way MAD does."""
         from astropy.stats import mad_std
-        from functions import biweight_sky_sigma
+        from autophot.core.functions import biweight_sky_sigma
 
         rng = np.random.default_rng(7)
         delta = 1.34  # ADU quantization step, as on PS1 pswarp stacks
@@ -686,7 +686,7 @@ class TestBiweightSkySigma:
         assert abs(bw_val - true_sigma) <= abs(mad_val - true_sigma)
 
     def test_ignores_nan_and_mask(self):
-        from functions import biweight_sky_sigma
+        from autophot.core.functions import biweight_sky_sigma
 
         rng = np.random.default_rng(1)
         data = rng.normal(0.0, 2.0, (100, 100))
@@ -698,14 +698,14 @@ class TestBiweightSkySigma:
         assert sig == pytest.approx(2.0, rel=0.1)
 
     def test_all_nan_returns_nan(self):
-        from functions import biweight_sky_sigma
+        from autophot.core.functions import biweight_sky_sigma
 
         assert np.isnan(biweight_sky_sigma(np.full((10, 10), np.nan)))
 
     def test_constant_returns_zero(self):
         """A constant image honestly has zero pixel noise; callers guard
         sig <= 0 themselves."""
-        from functions import biweight_sky_sigma
+        from autophot.core.functions import biweight_sky_sigma
 
         assert biweight_sky_sigma(np.full((50, 50), 3.0)) == 0.0
 
@@ -713,7 +713,7 @@ class TestBiweightSkySigma:
         """get_image_stats' std must come from the same continuous estimator
         as the rest of the pipeline (not mad_std)."""
         from astropy.stats import mad_std
-        from functions import get_image_stats
+        from autophot.core.functions import get_image_stats
 
         rng = np.random.default_rng(3)
         delta = 1.34
@@ -836,7 +836,7 @@ class TestFWHMOutlierClip:
     """
 
     def test_rejects_extended_outliers(self):
-        from functions import fwhm_outlier_clip
+        from autophot.core.functions import fwhm_outlier_clip
 
         vals = np.array([4.0, 4.1, 3.9, 4.05, 4.0, 8.0, 12.0])
         rej, med, sig = fwhm_outlier_clip(vals, sigma=2.5)
@@ -847,7 +847,7 @@ class TestFWHMOutlierClip:
         # 9 defect rows at fwhm 3.5, 4 genuine stars at 4.0: MAD is
         # pinned to the defect locus (MAD=0); the relative floor keeps
         # the 12%-offset stars in the band.
-        from functions import fwhm_outlier_clip
+        from autophot.core.functions import fwhm_outlier_clip
 
         vals = np.concatenate([np.full(9, 3.5), np.full(4, 4.0)])
         rej, med, sig = fwhm_outlier_clip(vals, sigma=2.5)
@@ -855,14 +855,14 @@ class TestFWHMOutlierClip:
         assert sig == pytest.approx(0.10 * 3.5)
 
     def test_nonfinite_kept(self):
-        from functions import fwhm_outlier_clip
+        from autophot.core.functions import fwhm_outlier_clip
 
         vals = np.array([4.0, np.nan, -1.0, 4.2, 20.0])
         rej, _, _ = fwhm_outlier_clip(vals, sigma=2.5)
         assert rej.tolist() == [False, False, False, False, True]
 
     def test_sigma_zero_disables(self):
-        from functions import fwhm_outlier_clip
+        from autophot.core.functions import fwhm_outlier_clip
 
         vals = np.array([4.0, 4.1, 20.0])
         rej, med, sig = fwhm_outlier_clip(vals, sigma=0.0)
@@ -920,7 +920,7 @@ class TestExternalWeightToRms:
     def test_flat_weight_preserves_ref(self, tmp_path):
         from astropy.io import fits
 
-        from functions import external_weight_to_rms
+        from autophot.core.functions import external_weight_to_rms
 
         p = self._write(tmp_path / "w.fits", np.ones((20, 20)))
         ref = np.full((20, 20), 2.5, np.float32)
@@ -930,7 +930,7 @@ class TestExternalWeightToRms:
     def test_inverse_variance_structure(self, tmp_path):
         from astropy.io import fits
 
-        from functions import external_weight_to_rms
+        from autophot.core.functions import external_weight_to_rms
 
         w = np.ones((20, 20), np.float32)
         w[:, 10:] = 4.0  # 4x deeper coverage -> half the sigma
@@ -943,7 +943,7 @@ class TestExternalWeightToRms:
     def test_invalid_weight_pixels_become_nan(self, tmp_path):
         from astropy.io import fits
 
-        from functions import external_weight_to_rms
+        from autophot.core.functions import external_weight_to_rms
 
         w = np.ones((20, 20), np.float32)
         w[:, :3] = 0.0
@@ -958,7 +958,7 @@ class TestExternalWeightToRms:
     def test_rms_maptype_folds_sigma_ratio(self, tmp_path):
         from astropy.io import fits
 
-        from functions import external_weight_to_rms
+        from autophot.core.functions import external_weight_to_rms
 
         hdr = fits.Header()
         hdr["MAPTYPE"] = "RMS"
@@ -974,7 +974,7 @@ class TestExternalWeightToRms:
         np.testing.assert_allclose(out, 3.0 * m / np.median(m), rtol=1e-3)
 
     def test_missing_file_returns_none(self, tmp_path):
-        from functions import external_weight_to_rms
+        from autophot.core.functions import external_weight_to_rms
 
         ref = np.full((10, 10), 1.0, np.float32)
         assert external_weight_to_rms(None, ref, None) is None
@@ -985,7 +985,7 @@ class TestExternalWeightToRms:
     def test_shape_mismatch_without_wcs_returns_none(self, tmp_path):
         from astropy.io import fits
 
-        from functions import external_weight_to_rms
+        from autophot.core.functions import external_weight_to_rms
 
         p = self._write(tmp_path / "w.fits", np.ones((8, 8)))
         ref = np.full((10, 10), 1.0, np.float32)
@@ -996,7 +996,7 @@ class TestExternalWeightToRms:
         from astropy.io import fits
         from astropy.wcs import WCS
 
-        from functions import external_weight_to_rms
+        from autophot.core.functions import external_weight_to_rms
 
         def _wcs(n, cd):
             w = WCS(naxis=2)
