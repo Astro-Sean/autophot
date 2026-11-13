@@ -18,8 +18,8 @@ import pytest
 from astropy.io import fits
 from astropy.wcs import WCS
 
-import templates
-from templates import (
+from autophot.subtraction import templates
+from autophot.subtraction.templates import (
     compute_alignment_rms,
     _wcs_footprints_overlap,
     _pad_to_shape,
@@ -29,7 +29,7 @@ from templates import (
 )
 
 try:
-    from utils.run_IDC import ImageDistortionCorrector
+    from autophot.subtraction.run_IDC import ImageDistortionCorrector
 except ImportError:  # astroalign / optional deps not installed
     ImageDistortionCorrector = None
 
