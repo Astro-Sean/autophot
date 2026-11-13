@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from zeropoint import Zeropoint
+from autophot.calibration.zeropoint import Zeropoint
 
 
 def _catalog(n=30, zp_true=24.5, seed=1):
