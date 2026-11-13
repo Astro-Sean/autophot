@@ -48,6 +48,20 @@ Target:
     - Saves the updated FITS files and CSV outputs.
 """
 
+if __package__ in (None, ""):
+    # Support "python <path>" execution: expose the repo root and
+    # anchor the package so relative imports resolve.
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(
+        0,
+        _os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        ),
+    )
+    __package__ = "autophot.pipeline"
+
 import contextlib
 # Safeguard: force BLAS/OpenMP to 1 thread before any scientific imports (avoids exhausting
 # process/thread limits when using multiprocessing on HPC; OpenBLAS often defaults to 128).
@@ -113,7 +127,7 @@ try:
     # When running from a source checkout (clone or editable install) the
     # adjacent pyproject.toml describes the code actually executing - the
     # installed-dist lookup above would report a stale or missing version.
-    _pyproject = Path(__file__).resolve().parent / "pyproject.toml"
+    _pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
     if _pyproject.is_file():
         import tomllib
 
@@ -125,13 +139,13 @@ except Exception:
     pass
 
 # Local Modules
-from aperture import (Aperture, exposure_seconds_from_header,
+from ..photometry.aperture import (Aperture, exposure_seconds_from_header,
                       gain_e_per_adu_from_header, resolve_gain_e_per_adu)
-from background import BackgroundSubtractor
-from catalog import (Catalog, catalog_magsys, cross_match_sources,
+from .background import BackgroundSubtractor
+from ..calibration.catalog import (Catalog, catalog_magsys, cross_match_sources,
                      _catalog_cone_radius_arcmin)
-from cosmic import RemoveCosmicRays
-from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
+from .cosmic import RemoveCosmicRays
+from ..core.functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        AutophotYaml, ColoredLevelFormatter, ConsoleLevelFilter,
                        PlainFormatter, SuppressStdout, _bounded_centroid,
                        _keep_floor_cut, _sfft_actual_convd,
@@ -154,15 +168,15 @@ from functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        verbose_to_console_level, which_exe, write_output_csv,
                        FILTER_HEADER_CANDIDATES, NON_FILTER_VALUES,
                        find_filter_header_key)
-from fwhm import Find_FWHM
-from limits import BETA_APERTURE_SIGMA_N, Limits, _analytic_psf_for_injection
-from plot import Plot
-from psf import PSF, _psf_mask_distances
-from templates import Templates
-from utils import run_IDC
-from utils.run_sex import SExtractorWrapper
-from wcs import WCSSolver, get_wcs, invalidate_wcs_cache
-from zeropoint import Zeropoint
+from .fwhm import Find_FWHM
+from ..analysis.limits import BETA_APERTURE_SIGMA_N, Limits, _analytic_psf_for_injection
+from ..analysis.plot import Plot
+from ..photometry.psf import PSF, _psf_mask_distances
+from ..subtraction.templates import Templates
+from ..subtraction import run_IDC
+from ..subtraction.run_sex import SExtractorWrapper
+from .wcs import WCSSolver, get_wcs, invalidate_wcs_cache
+from ..calibration.zeropoint import Zeropoint
 
 # TODO: add trimming if the template image is smaller than the science image
 
@@ -924,7 +938,7 @@ def _write_analytic_psf_stamp(
     marks it analytic (photometry's empirical-only policy does not
     apply to subtraction PSFs).
     """
-    from psf import _analytic_psf_stamp
+    from ..photometry.psf import _analytic_psf_stamp
 
     phot_cfg = input_yaml.get("photometry") or {}
     beta = max(1.1, float(phot_cfg.get("psf_init_moffat_beta", 4.765)))
@@ -1083,7 +1097,7 @@ def _trim_nan_boundaries(
     cutout_ny = y_max - y_min + 1
     cutout_nx = x_max - x_min + 1
 
-    from functions import nan_crop
+    from ..core.functions import nan_crop
 
     trimmed_header = header.copy()
     trimmed_data, trimmed_header = nan_crop(
@@ -1426,17 +1440,17 @@ def run_photometry():
     matplotlib.use("Agg")
     # Hard guarantee for the per-image work: no plot call may pop a GUI
     # window during image iteration, even if a show flag ever leaks in.
-    from plotting_utils import force_headless_plots
+    from ..core.plotting_utils import force_headless_plots
 
     force_headless_plots()
 
     # ---------------------------------------------------------------------
     # Check for optional Astromatic tools
     # ---------------------------------------------------------------------
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
     try:
-        from utils.run_sex import get_sextractor_executable
+        from ..subtraction.run_sex import get_sextractor_executable
     except (ModuleNotFoundError, ImportError):
         get_sextractor_executable = lambda: which_exe("sex") or which_exe(
             "sextractor"
@@ -1473,10 +1487,12 @@ def run_photometry():
         """
         Print available YAML options and their inline explanations.
 
-        This reads `databases/default_input.yml` and uses indentation to infer
+        This reads `autophot/data/default_input.yml` and uses indentation to infer
         nested key paths. Explanations are taken from trailing `# ...` comments.
         """
-        yml_path = Path(__file__).resolve().parent / "databases" / "default_input.yml"
+        from ..core.functions import data_path
+
+        yml_path = Path(data_path("default_input.yml"))
         if not yml_path.exists():
             print(f"[ERROR] Default YAML not found at: {yml_path}", file=sys.stderr)
             return
@@ -1543,7 +1559,7 @@ def run_photometry():
         "--config-help",
         dest="config_help",
         action="store_true",
-        help="Print all keys in databases/default_input.yml with inline explanations, then exit.",
+        help="Print all keys in autophot/data/default_input.yml with inline explanations, then exit.",
         default=False,
     )
     parser.add_argument("-f", dest="filepath", type=str, help="Filepath of FITS file")
@@ -1603,7 +1619,7 @@ def run_photometry():
         with open(input_yaml_loc, "r") as file:
             input_yaml = yaml.safe_load(file)
     except FileNotFoundError:
-        logging.getLogger(__name__).error(
+        logging.getLogger(__name__.rsplit(".", 1)[-1]).error(
             "Input YAML file is missing: %s\n"
             "It looks like this file was deleted mid-run. The pipeline must be re-run.",
             str(input_yaml_loc),
@@ -1620,13 +1636,13 @@ def run_photometry():
         _cfg_report = check_input_config(input_yaml)
     except Exception as _cfg_exc:
         # An unloadable schema must not block the run.
-        logging.getLogger(__name__).warning(
+        logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
             "Config validation skipped: %s", _cfg_exc
         )
         _cfg_report = None
     if _cfg_report is not None:
         for _dep_key, _dep_new in _cfg_report["deprecated"]:
-            logging.getLogger(__name__).warning(
+            logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
                 "Deprecated config key %s in %s: rename to %s "
                 "(still honoured).",
                 _dep_key,
@@ -1634,7 +1650,7 @@ def run_photometry():
                 _dep_new,
             )
         for _rm_key in _cfg_report.get("removed", []):
-            logging.getLogger(__name__).warning(
+            logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
                 "Removed config key %s in %s: no longer used; "
                 "safe to delete.",
                 _rm_key,
@@ -1645,9 +1661,9 @@ def run_photometry():
         )
         if _cfg_errs:
             if strict_config_enabled():
-                logging.getLogger(__name__).error("%s", _cfg_errs)
+                logging.getLogger(__name__.rsplit(".", 1)[-1]).error("%s", _cfg_errs)
                 raise SystemExit(2)
-            logging.getLogger(__name__).warning("%s", _cfg_errs)
+            logging.getLogger(__name__.rsplit(".", 1)[-1]).warning("%s", _cfg_errs)
 
     # CLI verbosity flags override the YAML setting.  The resolved 0-3
     # value is written back so every sub-component sees a consistent level.
@@ -1662,7 +1678,7 @@ def run_photometry():
         input_yaml["global_verbose_level"] = _cli_verbose
         if isinstance(_cli_verbose, str) and not _cli_verbose.strip().isdigit():
             if _cli_verbose.strip().lower() not in VERBOSE_LEVELS:
-                logging.getLogger(__name__).warning(
+                logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
                     "Unknown --verbose-level %r; falling back to normal (1).",
                     _cli_verbose,
                 )
@@ -1680,13 +1696,13 @@ def run_photometry():
 
     # Clear module-level caches so batch runs don't leak state between images.
     try:
-        from limits import _flux_for_mag_cached
+        from ..analysis.limits import _flux_for_mag_cached
 
         _flux_for_mag_cached.cache_clear()
     except Exception:
         pass
     try:
-        from background import _disk_structuring_element
+        from .background import _disk_structuring_element
 
         _disk_structuring_element.cache_clear()
     except Exception:
@@ -1698,7 +1714,7 @@ def run_photometry():
     target_dec = input_yaml.get("target_dec")
 
     if target_name is None and target_ra is None and target_dec is None:
-        logging.getLogger(__name__).warning(
+        logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
             "No target information provided: target_name, target_ra, and target_dec are all missing. "
             "Please provide at least one of these parameters to proceed."
         )
@@ -2125,7 +2141,7 @@ def run_photometry():
                         hdul.flush()
                 # Invalidate FITS cache so subsequent reads see the updated header
                 try:
-                    from functions import invalidate_fits_cache
+                    from ..core.functions import invalidate_fits_cache
 
                     invalidate_fits_cache(fpath)
                 except Exception:
@@ -3081,7 +3097,7 @@ def run_photometry():
 
                     # Create pixel-based cutout using nan_crop to preserve WCS
                     # (nan_crop promotes non-float dtypes itself).
-                    from functions import nan_crop
+                    from ..core.functions import nan_crop
 
                     image, header = nan_crop(
                         image,
@@ -3097,7 +3113,7 @@ def run_photometry():
                         input_yaml["target_ra"], input_yaml["target_dec"], 0
                     )
                     trim_pixels = int((trim_image * 60) / pixel_scale)
-                    from functions import nan_crop
+                    from ..core.functions import nan_crop
 
                     image, header = nan_crop(
                         image,
@@ -3172,7 +3188,7 @@ def run_photometry():
                 )
                 position = (center_x, center_y)  # (x, y) position
                 # Use nan_crop to preserve WCS distortion keywords.
-                from functions import nan_crop
+                from ..core.functions import nan_crop
 
                 image, header = nan_crop(
                     image, header, center_x, center_y, height, width
@@ -3279,7 +3295,7 @@ def run_photometry():
                         ),
                     )
                     if _dc_out:
-                        from functions import (invalidate_fits_cache,
+                        from ..core.functions import (invalidate_fits_cache,
                                                update_header_from_wcs)
 
                         with fits.open(_dc_out) as _dc_hdul:
@@ -3432,7 +3448,7 @@ def run_photometry():
             np.isfinite(ImageFWHM) and float(ImageFWHM) <= undersampled_thr
         )
         # 4-tier sampling regime classification (extends the binary flag).
-        from functions import classify_sampling_regime
+        from ..core.functions import classify_sampling_regime
 
         _sampling_regime = classify_sampling_regime(
             float(ImageFWHM) if np.isfinite(ImageFWHM) else 3.0, input_yaml
@@ -3632,7 +3648,7 @@ def run_photometry():
             # PSF, while a real elongated defect (column, trail) crossing
             # the position is kept by the extent check.
             if _cr_protect_positions and np.any(cosmic_rays_defect_mask):
-                from functions import drop_mask_components_at_positions
+                from ..core.functions import drop_mask_components_at_positions
 
                 _cr_rescue_extent = (
                     float(_cr_cfg.get("cr_defect_target_extent_fwhm", 2.5))
@@ -3733,7 +3749,7 @@ def run_photometry():
                             "Plate solve raised %r; falling back to pre-existing WCS",
                             solve_exc,
                         )
-                        from functions import update_header_from_wcs
+                        from ..core.functions import update_header_from_wcs
 
                         update_header_from_wcs(header, WCSvalues_old)
                         invalidate_wcs_cache()
@@ -3746,7 +3762,7 @@ def run_photometry():
                 logging.info("Plate solve returned NaN or None")
                 if existingWCS and allow_fallback_on_fail:
                     logging.info("Falling back to pre-existing WCS")
-                    from functions import update_header_from_wcs
+                    from ..core.functions import update_header_from_wcs
 
                     update_header_from_wcs(header, WCSvalues_old)
                     invalidate_wcs_cache()  # WCS keywords changed after fallback
@@ -5733,8 +5749,8 @@ def run_photometry():
                 import matplotlib.pyplot as plt
                 from scipy.stats import median_abs_deviation
 
-                from functions import set_size
-                from plotting_utils import (
+                from ..core.functions import set_size
+                from ..core.plotting_utils import (
                     apply_autophot_mplstyle,
                     get_plot_color,
                     get_plot_ext,
@@ -6410,7 +6426,7 @@ def run_photometry():
             and "fwhm" in psf_source_pool.columns
         ):
             try:
-                from functions import fwhm_outlier_clip
+                from ..core.functions import fwhm_outlier_clip
 
                 _pool_fwhm = pd.to_numeric(
                     psf_source_pool["fwhm"], errors="coerce"
@@ -6709,7 +6725,7 @@ def run_photometry():
             and bool(phot_cfg.get("psf_analytic_fallback", True))
         ):
             try:
-                from psf import _analytic_psf_stamp
+                from ..photometry.psf import _analytic_psf_stamp
 
                 _an_beta = max(
                     1.1, float(phot_cfg.get("psf_init_moffat_beta", 4.765))
@@ -6756,7 +6772,7 @@ def run_photometry():
                         # narrower than the empirical FWHM without being
                         # degenerate; outside it the canonical composite at
                         # the measured FWHM is the honest model.
-                        from psf import measure_epsf_fwhm_native
+                        from ..photometry.psf import measure_epsf_fwhm_native
 
                         _an_meas = measure_epsf_fwhm_native(
                             np.asarray(epsf_model.data, dtype=float), 1
@@ -6817,8 +6833,8 @@ def run_photometry():
                         # residuals plus the component breakdown - the main
                         # visual check on what the analytic fit actually did.
                         try:
-                            from plotting_utils import get_plot_ext
-                            from psf import plot_analytic_psf
+                            from ..core.plotting_utils import get_plot_ext
+                            from ..photometry.psf import plot_analytic_psf
 
                             _an_png = os.path.join(
                                 write_dir,
@@ -7397,7 +7413,7 @@ def run_photometry():
                     weight_image,
                     weight_header,
                 )
-                logging.getLogger(__name__).debug(
+                logging.getLogger(__name__.rsplit(".", 1)[-1]).debug(
                     "Weight map written: %s",
                     os.path.join(cur_dir, newWeightBasename),
                 )
@@ -7531,7 +7547,7 @@ def run_photometry():
                     )
                     # nan_crop avoids a WCS round-trip that can drop
                     # CD matrix / SIP distortion keywords.
-                    from functions import nan_crop
+                    from ..core.functions import nan_crop
 
                     science_image, science_header = nan_crop(
                         science_image,
@@ -10183,7 +10199,7 @@ def run_photometry():
 
                         MatchingSources = ms
                     except Exception as e:
-                        logging.getLogger(__name__).warning(
+                        logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
                             "Refining matching sources for SFFT/HOTPANTS\n"
                             "    failed (non-fatal): %s.\n"
                             "    Unrefined sources (%d) will be passed to\n"
@@ -10966,7 +10982,7 @@ def run_photometry():
                 # Compute combined pipeline scale (source-detection cutout size, typically
                 # 5*FWHM).  This is passed to subtract() for HOTPANTS kernel sizing.
                 # SFFT computes its own kernel half-width from FWHM inside subtract().
-                from utils.run_sex import (clamp_scale_from_config,
+                from ..subtraction.run_sex import (clamp_scale_from_config,
                                            scale_multiplier_from_config)
 
                 sci_scale = input_yaml.get("scale")
@@ -12179,7 +12195,7 @@ def run_photometry():
                                     _kk.ndim == 2 and _kk.shape[0] == _L
                                     for _kk in _ker_list
                                 ):
-                                    from psf import \
+                                    from ..photometry.psf import \
                                         convolve_gridded_epsf_with_kernel
 
                                     (
@@ -12280,7 +12296,7 @@ def run_photometry():
                                         from astropy.visualization import \
                                             ZScaleInterval
 
-                                        from plotting_utils import (
+                                        from ..core.plotting_utils import (
                                             apply_autophot_mplstyle,
                                             get_plot_color, get_plot_ext,
                                             overlay_mask_hatch,
@@ -12394,7 +12410,7 @@ def run_photometry():
                                 # resamples to the native grid via the exact
                                 # ePSF grid mapping (no zoom stretch), convolves,
                                 # and maps back to the original oversampled grid.
-                                from psf import convolve_epsf_with_kernel
+                                from ..photometry.psf import convolve_epsf_with_kernel
 
                                 (
                                     _epsf_conv_model,
@@ -12486,7 +12502,7 @@ def run_photometry():
                                     from astropy.visualization import \
                                         ZScaleInterval
 
-                                    from plotting_utils import (
+                                    from ..core.plotting_utils import (
                                         apply_autophot_mplstyle,
                                         get_plot_color, get_plot_ext,
                                         overlay_mask_hatch,
@@ -12606,7 +12622,7 @@ def run_photometry():
                         try:
                             from astropy.convolution import Gaussian2DKernel
 
-                            from psf import convolve_epsf_with_kernel
+                            from ..photometry.psf import convolve_epsf_with_kernel
 
                             _fwhm_diff = np.sqrt(
                                 max(_ref_fwhm_hdr, 0) ** 2 - max(_sci_fwhm_hdr, 0) ** 2
@@ -12622,7 +12638,7 @@ def run_photometry():
                                     GriddedPSFModel as _GPM
 
                                 if isinstance(epsf_model, _GPM):
-                                    from psf import \
+                                    from ..photometry.psf import \
                                         convolve_gridded_epsf_with_kernel
 
                                     _n_cells = len(epsf_model.grid_xypos)
@@ -12846,7 +12862,7 @@ def run_photometry():
                     from sfft.utils.SFFTSolutionReader import \
                         Realize_MatchingKernel
 
-                    from psf import convolve_epsf_with_kernel
+                    from ..photometry.psf import convolve_epsf_with_kernel
 
                     _kerhw_re = int(header.get("KERHW", 0))
                     _L_re = 2 * _kerhw_re + 1
@@ -12886,7 +12902,7 @@ def run_photometry():
                             import matplotlib.pyplot as plt
                             from astropy.visualization import ZScaleInterval
 
-                            from plotting_utils import (
+                            from ..core.plotting_utils import (
                                 apply_autophot_mplstyle,
                                 get_plot_color, get_plot_ext,
                                 overlay_mask_hatch, safe_tight_layout)
@@ -13000,7 +13016,7 @@ def run_photometry():
                 # Optional external module (Saydjari & Finkbeiner 2022 LPI
                 # background prediction); not shipped with the repo.  The
                 # block below exits gracefully when it is unavailable.
-                from lpi_background import (  # type: ignore  # pyrefly: ignore[missing-import]
+                from .lpi_background import (  # type: ignore  # pyrefly: ignore[missing-import]
                     predict_background_under_source, save_lpi_diagnostic_plot)
 
                 fwhm_px = float(ImageFWHM)
@@ -13105,7 +13121,7 @@ def run_photometry():
                 # Optional diagnostic plot (no "saved plot" log line).
                 try:
                     if bool(phot_cfg.get("lpi_save_diagnostic_plot", True)):
-                        from plotting_utils import get_plot_ext
+                        from ..core.plotting_utils import get_plot_ext
 
                         base0 = os.path.splitext(os.path.basename(fpath))[0]
                         write_dir0 = os.path.dirname(fpath)
@@ -13173,7 +13189,7 @@ def run_photometry():
                 )
             except Exception as e:
                 log_warning_from_exception(
-                    logging.getLogger(__name__),
+                    logging.getLogger(__name__.rsplit(".", 1)[-1]),
                     "Target LPI background infill failed; continuing without it",
                     e,
                 )
@@ -13329,7 +13345,7 @@ def run_photometry():
                         # (input_yaml["fwhm"] was updated to it) is the same
                         # shape the PSF fallback would have built.
                         try:
-                            from psf import _analytic_psf_stamp
+                            from ..photometry.psf import _analytic_psf_stamp
 
                             _an_fwhm = max(1.0, float(input_yaml["fwhm"]))
                             _resid_model, _ = _analytic_psf_stamp(
@@ -13430,7 +13446,7 @@ def run_photometry():
                 )
 
         # Limits is instantiated here only for its get_cutout method.
-        from limits import Limits
+        from ..analysis.limits import Limits
 
         getDetectionLimits = Limits(input_yaml=input_yaml, catalog=CatalogSources)
 
@@ -13690,7 +13706,7 @@ def run_photometry():
         _host_cfg = input_yaml.get("host_model") or {}
         if bool(_host_cfg.get("enabled", False)):
             try:
-                from galfit_host import find_galfit, fit_host_model
+                from ..photometry.galfit_host import find_galfit, fit_host_model
 
                 if find_galfit(_host_cfg) is None:
                     logging.warning(
@@ -13888,7 +13904,7 @@ def run_photometry():
                             cfg=_host_cfg,
                             workdir=_hm_workdir,
                             epsf_model=None,
-                            logger=logging.getLogger(__name__),
+                            logger=logging.getLogger(__name__.rsplit(".", 1)[-1]),
                         )
                     if _hm.get("success"):
                         # A converged galfit exit is not proof of a sane
@@ -14225,7 +14241,7 @@ def run_photometry():
                     from photutils.psf import GriddedPSFModel as _GPM_t
 
                     if isinstance(epsf_model, _GPM_t):
-                        from psf import epsf_at_position
+                        from ..photometry.psf import epsf_at_position
 
                         _epsf_for_target = epsf_at_position(
                             epsf_model,
@@ -15926,7 +15942,7 @@ def run_photometry():
                                 GriddedPSFModel as _GPM_inj
 
                             if isinstance(epsf_for_injection, _GPM_inj):
-                                from psf import epsf_at_position
+                                from ..photometry.psf import epsf_at_position
 
                                 epsf_for_injection = epsf_at_position(
                                     epsf_for_injection,
@@ -16214,7 +16230,7 @@ def run_photometry():
                     and _clip_lo <= _uncal_factor <= _clip_hi
                 )
                 if _uncal_ok:
-                    from utils.uncertainty_calibration import \
+                    from ..analysis.uncertainty_calibration import \
                         scale_error_columns
 
                     _scaled = scale_error_columns(
@@ -17183,7 +17199,7 @@ def run_photometry():
         # long-form schema as the primary target output, so the lightcurve
         # plotting code can consume it without modification.
         if _has_additional_targets:
-            from additional_targets import \
+            from ..services.additional_targets import \
                 sanitize_target_name_for_filename as _stfn
 
             _image_filter = input_yaml.get("imageFilter", "")
