@@ -2,12 +2,13 @@
 """
 Batch launcher for the autophot pipeline.
 
-This script lets you run the existing single-image pipeline (`main.py`)
+This script lets you run the existing single-image pipeline
+(`autophot.pipeline.main`)
 on many FITS files in parallel, using multiple CPU cores on a single node.
 
 Design choices:
-- We DO NOT touch `main.py` or `run_photometry()`. Each image is processed
-  by spawning a separate Python process that calls `main.py -f <file> -c <yaml>`.
+- We DO NOT touch `run_photometry()`. Each image is processed by spawning
+  a separate process that calls `python -m autophot.pipeline.main -f <file> -c <yaml>`.
 - Parallelism is at the *image* level here; within each image, `main.py`
   still uses its own multiprocessing (aperture, CoG) and NTHREADS
   for SExtractor/SCAMP/SWarp.
@@ -15,10 +16,10 @@ Design choices:
 Typical usage:
 
   # Process a list of FITS files in parallel
-  python batch_main.py -f image1.fits image2.fits image3.fits -c config.yml --jobs 3
+  python -m autophot.batch_main -f image1.fits image2.fits -c config.yml --jobs 3
 
   # Or, give a text file with one FITS path per line
-  python batch_main.py --file-list images.txt -c config.yml --jobs 4
+  python -m autophot.batch_main --file-list images.txt -c config.yml --jobs 4
 
 On an HPC system, you would usually run this inside a single job that
 requests enough cores (e.g. --cpus-per-task) to cover the requested
@@ -62,15 +63,17 @@ def _read_file_list(path: str | Path) -> List[str]:
     return lines
 
 
-def _resolve_main_py() -> str:
+def _child_env() -> dict:
+    """Env for ``python -m autophot.pipeline.main`` child processes.
+
+    The package parent dir (repo root in a checkout, site-packages when
+    installed) goes on PYTHONPATH so the child can import autophot even
+    when its cwd is the target workdir.
     """
-    Return the absolute path to main.py in the same directory as this file.
-    """
-    here = Path(__file__).resolve().parent
-    main_py = here / "main.py"
-    if not main_py.exists():
-        raise FileNotFoundError(f"Could not find main.py next to {__file__}")
-    return str(main_py)
+    env = os.environ.copy()
+    parent = str(Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = parent + os.pathsep + env.get("PYTHONPATH", "")
+    return env
 
 
 def _run_single_image(
@@ -85,10 +88,10 @@ def _run_single_image(
 
     Returns (fits_path, return_code).
     """
-    main_py = _resolve_main_py()
     cmd = [
         sys.executable,
-        main_py,
+        "-m",
+        "autophot.pipeline.main",
         "-f",
         fits_path,
         "-c",
@@ -103,7 +106,7 @@ def _run_single_image(
     # In parallel mode, suppress child output to avoid interleaved terminal noise;
     # each main.py still writes per-image log files.
     try:
-        kwargs = {"check": False}
+        kwargs = {"check": False, "env": _child_env()}
         if suppress_output:
             from subprocess import DEVNULL
             kwargs.update({"stdout": DEVNULL, "stderr": DEVNULL})
