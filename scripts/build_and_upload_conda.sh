@@ -14,8 +14,10 @@ set -euo pipefail
 #   - Validates environment.yml and meta.yaml for dependency drift (warn-only)
 #   - Tests the built package in a fresh conda env before uploading; the
 #     test env is always removed afterwards, on success or failure
-#   - Runs the bundled example dataset (template-subtracted photometry on
-#     examples/example_data) in that test env as an end-to-end install test
+#   - Executes the bundled example notebook (template-subtracted photometry
+#     on examples/example_data) in that test env as an end-to-end
+#     install test; --test-only runs the same check against the latest
+#     published package without bumping the version or uploading
 #   - Removes stale autophot/autophot-object installs and all build
 #     artifacts (including the just-uploaded package) after a successful
 #     upload so old code cannot shadow the new package
@@ -37,6 +39,7 @@ NEW_VERSION=""
 AUTO_VERSION=0
 TEST_PYTHON="3.12"
 SKIP_DATASET_TEST=0
+TEST_ONLY=0
 
 usage() {
   cat <<'EOF'
@@ -51,6 +54,8 @@ Options:
   --update-version          Auto-increment the patch version (e.g. 1.0.1 -> 1.0.2) without prompting.
   --test-python VERSION     Python version for the test env (default: 3.12).
   --skip-dataset-test       Skip the end-to-end example dataset run in the test env.
+  --test-only               Skip version bump, build, and upload; install the latest
+                            published package in a fresh env and run the checks.
   -h, --help                Show this help.
 EOF
 }
@@ -96,6 +101,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-dataset-test)
       SKIP_DATASET_TEST=1
+      shift
+      ;;
+    --test-only)
+      TEST_ONLY=1
       shift
       ;;
     -h|--help)
@@ -431,6 +440,53 @@ if missing_meta:
 PY
 }
 
+# -----------------------------------------------------------------------------
+# Shared cleanup: remove the test env and scratch dirs on exit, purge partial
+# builds after a failure, and roll back the version bump if the run aborts
+# before upload.  Set up before either the build or the test-only path.
+# -----------------------------------------------------------------------------
+BACKUP_DIR="$(mktemp -d)"
+VERSION_BUMPED=0
+BUILD_LOG=""
+TEST_ENV_NAME=""
+TEST_WORKDIR=""
+cleanup() {
+  local ec=$?
+  if [[ -n "${TEST_ENV_NAME}" ]]; then
+    conda env remove -y -n "${TEST_ENV_NAME}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${BUILD_LOG}"
+  rm -rf "${TEST_WORKDIR}"
+  if [[ "${ec}" -ne 0 ]]; then
+    # A failed run leaves partial autophot builds in conda-bld; they are
+    # stale files on the next run, so purge them here too.
+    for _bld in "${CONDA_PREFIX:-}/conda-bld" \
+                "$(conda info --base 2>/dev/null)/conda-bld"; do
+      [[ -d "${_bld}" ]] || continue
+      find "${_bld}" -maxdepth 2 \
+        \( -name 'autophot-*' -o -name 'autophot-object-*' \) \
+        -exec rm -rf {} + 2>/dev/null || true
+      # Re-index so the local channel drops the deleted entries; a stale
+      # index makes the next --use-local install fetch a missing file.
+      run_in_env conda index "${_bld}" >/dev/null 2>&1 || true
+    done
+  fi
+  # Restore version files on failure so the repo is left clean.
+  if [[ "${ec}" -ne 0 && "${VERSION_BUMPED}" -eq 1 ]]; then
+    log "Rolling back version changes (build/test/upload failed)..."
+    cp -f "${BACKUP_DIR}/pyproject.toml" pyproject.toml 2>/dev/null || true
+    cp -f "${BACKUP_DIR}/meta.yaml" conda/recipe/meta.yaml 2>/dev/null || true
+    cp -f "${BACKUP_DIR}/requirements.txt" requirements.txt 2>/dev/null || true
+    cp -f "${BACKUP_DIR}/CITATION.cff" CITATION.cff 2>/dev/null || true
+    log "Restored pyproject.toml, meta.yaml, requirements.txt, CITATION.cff to ${CURRENT_VERSION}."
+  fi
+  rm -rf "${BACKUP_DIR}"
+  exit "${ec}"
+}
+trap cleanup EXIT
+
+if [[ "${TEST_ONLY}" -eq 0 ]]; then
+
 log "Checking required tools..."
 run_in_env conda-build --version >/dev/null
 # anaconda-client CLI does not have --version; check availability via --help.
@@ -534,46 +590,6 @@ log "Updating version: ${CURRENT_VERSION} -> ${SELECTED_VERSION}"
 # they can be restored if the build, test, or upload fails.  This prevents the
 # repo from being left with a bumped version but no uploaded package.
 # -----------------------------------------------------------------------------
-BACKUP_DIR="$(mktemp -d)"
-VERSION_BUMPED=0
-BUILD_LOG=""
-TEST_ENV_NAME=""
-TEST_WORKDIR=""
-cleanup() {
-  local ec=$?
-  if [[ -n "${TEST_ENV_NAME}" ]]; then
-    conda env remove -y -n "${TEST_ENV_NAME}" >/dev/null 2>&1 || true
-  fi
-  rm -f "${BUILD_LOG}"
-  rm -rf "${TEST_WORKDIR}"
-  if [[ "${ec}" -ne 0 ]]; then
-    # A failed run leaves partial autophot builds in conda-bld; they are
-    # stale files on the next run, so purge them here too.
-    for _bld in "${CONDA_PREFIX:-}/conda-bld" \
-                "$(conda info --base 2>/dev/null)/conda-bld"; do
-      [[ -d "${_bld}" ]] || continue
-      find "${_bld}" -maxdepth 2 \
-        \( -name 'autophot-*' -o -name 'autophot-object-*' \) \
-        -exec rm -rf {} + 2>/dev/null || true
-      # Re-index so the local channel drops the deleted entries; a stale
-      # index makes the next --use-local install fetch a missing file.
-      run_in_env conda index "${_bld}" >/dev/null 2>&1 || true
-    done
-  fi
-  # Restore version files on failure so the repo is left clean.
-  if [[ "${ec}" -ne 0 && "${VERSION_BUMPED}" -eq 1 ]]; then
-    log "Rolling back version changes (build/test/upload failed)..."
-    cp -f "${BACKUP_DIR}/pyproject.toml" pyproject.toml 2>/dev/null || true
-    cp -f "${BACKUP_DIR}/meta.yaml" conda/recipe/meta.yaml 2>/dev/null || true
-    cp -f "${BACKUP_DIR}/requirements.txt" requirements.txt 2>/dev/null || true
-    cp -f "${BACKUP_DIR}/CITATION.cff" CITATION.cff 2>/dev/null || true
-    log "Restored pyproject.toml, meta.yaml, requirements.txt, CITATION.cff to ${CURRENT_VERSION}."
-  fi
-  rm -rf "${BACKUP_DIR}"
-  exit "${ec}"
-}
-trap cleanup EXIT
-
 cp pyproject.toml "${BACKUP_DIR}/pyproject.toml"
 cp conda/recipe/meta.yaml "${BACKUP_DIR}/meta.yaml"
 cp requirements.txt "${BACKUP_DIR}/requirements.txt"
@@ -699,6 +715,10 @@ fi
 
 log "Package ready: ${PACKAGE_PATH}"
 
+else
+  log "Test-only mode: skipping version bump, build, and upload."
+fi
+
 # -----------------------------------------------------------------------------
 # Test the package in a fresh conda environment before upload
 # -----------------------------------------------------------------------------
@@ -749,10 +769,20 @@ for p in envs:
 # astropy, etc.).  Installing by file path (conda install /path/to.conda)
 # does NOT install dependencies in conda 23.9.0, leaving the test env
 # without numpy and other required packages.
-log "Installing autophot package in test environment..."
-if ! conda install -y -n "${TEST_ENV_NAME}" --override-channels --use-local -c conda-forge "autophot=${SELECTED_VERSION}" 2>&1; then
-  die "Failed to install autophot in test environment"
+# In test-only mode there is no local build; install whatever the channel
+# currently publishes - the same command a user would run.
+if [[ "${TEST_ONLY}" -eq 1 ]]; then
+  log "Installing latest published autophot in test environment..."
+  if ! conda install -y -n "${TEST_ENV_NAME}" --override-channels -c conda-forge -c "${CHANNEL_USERNAME}" autophot 2>&1; then
+    die "Failed to install published autophot in test environment"
+  fi
+else
+  log "Installing autophot package in test environment..."
+  if ! conda install -y -n "${TEST_ENV_NAME}" --override-channels --use-local -c conda-forge "autophot=${SELECTED_VERSION}" 2>&1; then
+    die "Failed to install autophot in test environment"
+  fi
 fi
+conda list -n "${TEST_ENV_NAME}" | grep -E '^autophot ' | sed 's/^/  /' || true
 
 # sfft and sip_tpv are pip-only (not on conda-forge); install them for the test.
 # sfft builds from sdist (Cython extension), so it needs cython + numpy + gcc.
@@ -795,9 +825,9 @@ fi
 rm -f "${TEST_OUTPUT}"
 
 # -----------------------------------------------------------------------------
-# End-to-end dataset test: run the bundled template-subtraction example with
-# the installed package.  Working on a copy of the data keeps the repo clean
-# and guarantees `import autophot` resolves to site-packages, not this source
+# End-to-end dataset test: execute the bundled example notebook with the
+# installed package.  Working on a copy of the data keeps the repo clean and
+# guarantees `import autophot` resolves to site-packages, not this source
 # tree.  examples/example_data is not committed to the repo - the test is
 # skipped when the data is absent.
 # -----------------------------------------------------------------------------
@@ -806,74 +836,34 @@ if [[ "${SKIP_DATASET_TEST}" -eq 1 ]]; then
 elif [[ ! -d "${REPO_ROOT}/examples/example_data" ]]; then
   log "WARNING: examples/example_data not found; skipping dataset test."
 else
-  log "Running bundled example dataset with the installed package..."
+  log "Executing bundled example notebook with the installed package..."
   DATASET_DIR="${TEST_WORKDIR}/example_run"
   mkdir -p "${DATASET_DIR}"
+  cp "${REPO_ROOT}/examples/run_autophot.ipynb" "${DATASET_DIR}/"
   cp -r "${REPO_ROOT}/examples/example_data" "${DATASET_DIR}/"
   cp -r "${REPO_ROOT}/examples/autophot_db" "${DATASET_DIR}/"
-  cat > "${DATASET_DIR}/run_example.py" <<'PYEOF'
-import os
+
+  # Executing the notebook needs nbconvert and a kernel; both are
+  # pure-Python and quick to install.
+  if ! PYTHONNOUSERSITE=1 "${TEST_ENV_PREFIX}/bin/pip" install -q nbconvert ipykernel 2>&1; then
+    die "Failed to install nbconvert/ipykernel in test environment"
+  fi
+
+  # Post-run verification: the notebook's graceful-degradation paths mean a
+  # finished notebook is not proof the subtraction actually ran.
+  cat > "${DATASET_DIR}/verify_run.py" <<'PYEOF'
 import sys
 from pathlib import Path
 
-import autophot
 import pandas as pd
-from autophot import AutomatedPhotometry
 
-# The scratch dir holds only data, so this import must resolve to the
-# installed package, never a source checkout on sys.path.
-if "site-packages" not in autophot.__file__:
-    raise SystemExit(f"autophot resolved outside site-packages: {autophot.__file__}")
-print(f"[dataset-test] autophot {autophot.__version__} at {autophot.__file__}")
-
-autophot_input = AutomatedPhotometry.load()
-
-# Absolute paths: the pipeline os.chdir()s into each output directory while
-# running, so relative locations here would resolve against the wrong cwd.
-examples_dir = Path.cwd()
-
-autophot_input["fits_dir"] = str(examples_dir / "example_data")
-autophot_input["wdir"] = str(examples_dir / "autophot_db")
-autophot_input["outdir_name"] = "REDUCED"
-autophot_input["target_name"] = "2022mop"
-autophot_input["selected_filters"] = ["i"]
-autophot_input["restart"] = False
-autophot_input["rng_seed"] = 42
-
-autophot_input["catalog"]["use_catalog"] = "custom"
-autophot_input["catalog"]["catalog_custom_fpath"] = str(
-    examples_dir / "autophot_db" / "sn2022mop_ps1_catalog.csv"
-)
-
-autophot_input["wcs"]["redo_wcs"] = False
-
-ts = autophot_input["template_subtraction"]
-ts["do_subtraction"] = True
-ts["alignment_method"] = "reproject"
-ts["method"] = "sfft"
-ts["sfft_backend"] = "numpy"
-ts["forceconv"] = "REF"
-ts["kernel_order"] = 0
-
-autophot_input["nCPU"] = 1
-autophot_input["nGPU"] = 0
-autophot_input["global_verbose_level"] = 1
-
-loc = AutomatedPhotometry.run_photometry(default_input=autophot_input)
-if not loc or not Path(loc).exists():
-    raise SystemExit(f"run_photometry returned no output CSV: {loc!r}")
-
-# A subtraction failure degrades gracefully to photometry on the science
-# image, which still detects this bright target - so check the difference
-# image exists, not just the detection flag.
-diffs = list(Path(loc).parent.glob("*/diff_*.fits"))
-if not diffs:
-    raise SystemExit(
-        "no difference image produced; template subtraction did not run "
-        "(check SFFT/HOTPANTS availability)"
-    )
-
-lc = pd.read_csv(loc)
+d = Path(sys.argv[1])
+lcs = sorted(d.glob("example_data_REDUCED/LightCurve_Output.csv"))
+if not lcs:
+    raise SystemExit("notebook run produced no LightCurve_Output.csv")
+if not list(d.glob("example_data_REDUCED/*/diff_*.fits")):
+    raise SystemExit("notebook run produced no difference image")
+lc = pd.read_csv(lcs[0])
 if lc.empty:
     raise SystemExit("LightCurve_Output.csv is empty")
 row = lc.iloc[0]
@@ -886,12 +876,22 @@ if not bool(row["is_detection"]):
     raise SystemExit("target not detected on the example dataset")
 print("[dataset-test] PASS")
 PYEOF
+
   DATASET_OUTPUT="$(mktemp)"
   # Prepend the env's bin dir to PATH so `sex`, `scamp`, and `swarp` resolve
   # exactly as they would in an activated env.
   if (cd "${DATASET_DIR}" && \
       PATH="${TEST_ENV_PREFIX}/bin:${PATH}" PYTHONNOUSERSITE=1 \
-      "${TEST_ENV_PREFIX}/bin/python" run_example.py) >"${DATASET_OUTPUT}" 2>&1; then
+      "${TEST_ENV_PREFIX}/bin/python" -m nbconvert \
+        --to notebook --execute --inplace run_autophot.ipynb && \
+      PYTHONNOUSERSITE=1 "${TEST_ENV_PREFIX}/bin/python" verify_run.py "${DATASET_DIR}" \
+      ) >"${DATASET_OUTPUT}" 2>&1; then
+    # The notebook prints the resolved autophot path; require it to be this
+    # env's site-packages so the test cannot pass against a source tree.
+    if ! grep -q "${TEST_ENV_PREFIX}" "${DATASET_DIR}/run_autophot.ipynb"; then
+      rm -f "${DATASET_OUTPUT}"
+      die "Notebook did not run against the test-env package (${TEST_ENV_PREFIX})"
+    fi
     grep '\[dataset-test\]' "${DATASET_OUTPUT}" | sed 's/^/  /' || true
     log "Dataset test passed"
   else
@@ -910,6 +910,11 @@ log "Cleaning up test environment..."
 conda env remove -y -n "${TEST_ENV_NAME}" >/dev/null 2>&1 || true
 TEST_ENV_NAME=""
 log "Test environment removed successfully"
+
+if [[ "${TEST_ONLY}" -eq 1 ]]; then
+  log "Test-only run finished; nothing was built or uploaded."
+  exit 0
+fi
 
 UPLOAD_ARGS=("${PACKAGE_PATH}" "--user" "${CHANNEL_USERNAME}")
 if [[ -n "${LABEL}" ]]; then
