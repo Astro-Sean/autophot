@@ -17,10 +17,10 @@ import yaml
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from utils import run_sex
+from autophot.subtraction import run_sex
 
 try:
-    from utils.run_IDC import ImageDistortionCorrector
+    from autophot.subtraction.run_IDC import ImageDistortionCorrector
 except ImportError:  # astroalign / optional deps not installed
     ImageDistortionCorrector = None
 
@@ -341,7 +341,7 @@ class TestConfigDefaults:
     def test_disabled_by_default(self):
         cfg_path = (
             Path(__file__).resolve().parents[1]
-            / "databases"
+            / "autophot" / "data"
             / "default_input.yml"
         )
         cfg = yaml.safe_load(cfg_path.read_text())
