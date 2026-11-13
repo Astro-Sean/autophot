@@ -14,7 +14,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from wcs import (
+from autophot.pipeline.wcs import (
     WCSSolver,
     _set_flag_value,
     _solve_artifact_glob,
@@ -301,7 +301,7 @@ class _FakeProc:
 
 
 def test_run_solve_field_timeout_drops_partial_wcs(tmp_path, monkeypatch):
-    import wcs as wcs_mod
+    import autophot.pipeline.wcs as wcs_mod
 
     monkeypatch.setattr(wcs_mod.subprocess, "Popen", _FakeProc)
     solver = _make_solver(tmp_path, {})
