@@ -584,7 +584,7 @@ SLT:
       filter_key_0: FILTER
       gain: GAIN
       readnoise: RMSNOISE
-      saturate: SWCREATE
+      saturate: not_given_by_user
       airmass: AIRMASS
       mjd: MJD-OBS
       date: DATE-OBS
