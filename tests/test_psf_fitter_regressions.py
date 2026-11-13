@@ -28,7 +28,7 @@ import logging
 import numpy as np
 import pytest
 
-from psf import (
+from autophot.photometry.psf import (
     MCMCFitter,
     PoissonLikelihoodFitter,
     _connected_source_groups,
@@ -489,7 +489,7 @@ class TestAnalyticPsfPlot:
     def _stamp_and_stars(seed=3):
         from types import SimpleNamespace
 
-        from psf import _analytic_psf_stamp
+        from autophot.photometry.psf import _analytic_psf_stamp
 
         rng = np.random.default_rng(seed)
         fwhm = 6.0
@@ -516,7 +516,7 @@ class TestAnalyticPsfPlot:
         return stamp, stars
 
     def test_renders_and_saves(self, tmp_path):
-        from psf import plot_analytic_psf
+        from autophot.photometry.psf import plot_analytic_psf
 
         stamp, stars = self._stamp_and_stars()
         out = tmp_path / "analytic.png"
@@ -531,7 +531,7 @@ class TestAnalyticPsfPlot:
     def test_fails_soft_without_components(self, tmp_path):
         from types import SimpleNamespace
 
-        from psf import plot_analytic_psf
+        from autophot.photometry.psf import plot_analytic_psf
 
         bad = SimpleNamespace(
             data=np.zeros((9, 9)), oversampling=1
@@ -546,7 +546,7 @@ class TestAnalyticCalibratorFit:
     def test_analytic_psf_recovers_catalog_positions_and_fluxes(self):
         import pandas as pd
 
-        from psf import PSF, _analytic_psf_stamp
+        from autophot.photometry.psf import PSF, _analytic_psf_stamp
 
         gain = 2.0
         exposure_time = 30.0
@@ -655,7 +655,7 @@ class TestMoffatCompositeStarCap:
         )
 
     def test_single_star_yields_single_component(self):
-        from psf import _fit_moffat_composite
+        from autophot.photometry.psf import _fit_moffat_composite
 
         comps = _fit_moffat_composite([self._star()], fwhm=4.0)
         assert comps is not None
@@ -664,7 +664,7 @@ class TestMoffatCompositeStarCap:
     def test_three_stars_capped_below_component_budget(self):
         """The tried count is capped at n_stars - 1; three stars cannot
         support the full three-component model."""
-        from psf import _fit_moffat_composite
+        from autophot.photometry.psf import _fit_moffat_composite
 
         rng = np.random.default_rng(3)
         stars = []
@@ -677,7 +677,7 @@ class TestMoffatCompositeStarCap:
         assert 1 <= len(comps) <= 2
 
     def test_many_stars_allow_multiple_components(self):
-        from psf import _fit_moffat_composite
+        from autophot.photometry.psf import _fit_moffat_composite
 
         rng = np.random.default_rng(7)
         stars = []
@@ -694,7 +694,7 @@ class TestMoffatCompositeStarCap:
         # budget - BIC only arbitrates between same-count variants in the
         # current fitter, so the guard exercised here is the collapse of
         # a component below the amplitude floor.
-        from psf import _fit_moffat_composite
+        from autophot.photometry.psf import _fit_moffat_composite
 
         def moffat(r, amp, gamma, beta):
             return amp * (1.0 + (r / gamma) ** 2) ** (-beta)
@@ -718,7 +718,7 @@ class TestMoffatCompositeStarCap:
         # A genuine core+wing profile with enough stars must select the
         # second component - under-fitting is the failure mode the BIC
         # guards against.
-        from psf import _fit_moffat_composite
+        from autophot.photometry.psf import _fit_moffat_composite
 
         def moffat(r, amp, gamma, beta):
             return amp * (1.0 + (r / gamma) ** 2) ** (-beta)
@@ -743,7 +743,7 @@ class TestMoffatCompositeStarCap:
         assert len(comps) >= 2
         # The fitted profile - not the component values - must reproduce
         # the true wing level at large radius.
-        from psf import _moffat_sum_profile
+        from autophot.photometry.psf import _moffat_sum_profile
 
         truth = (
             moffat(12.0, 0.05, 2.0, 4.5) + moffat(12.0, 0.004, 8.0, 1.8)
