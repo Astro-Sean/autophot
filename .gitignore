@@ -111,5 +111,7 @@ run_autophot_VIPER.py
 dist/
 .github/*
 !.github/workflows/
+!.github/ISSUE_TEMPLATE/
+!.github/PULL_REQUEST_TEMPLATE.md
 conda/
 build/
