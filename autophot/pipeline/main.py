@@ -16295,7 +16295,9 @@ def run_photometry():
             "filename": input_yaml["base"],
             # Keep full path for downstream code that needs to locate plot files.
             "filename_path": fpath,
-            "date": date,
+            # Time objects stringify to the raw MJD value in the CSV; the
+            # ISO datetime string is what a "date" column should carry.
+            "date": date.iso[0],
             "mjd": date_mjd,
             "telescope": telescope,
             "instrument": instrument,
@@ -17238,7 +17240,9 @@ def run_photometry():
                 _at_out = {
                     "filename": input_yaml["base"],
                     "filename_path": fpath,
-                    "date": date,
+                    # See the primary-target output: keep the ISO string, not
+                    # the Time object (which serializes as the raw MJD).
+                    "date": date.iso[0],
                     "mjd": date_mjd,
                     "telescope": telescope,
                     "instrument": instrument,
