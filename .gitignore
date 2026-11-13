@@ -61,6 +61,7 @@ Thumbs.db
 # AutoPHOT-specific outputs
 *_REDUCED/
 *_TEMPLATE/
+!.github/ISSUE_TEMPLATE/
 *_DIFF/
 *_SUB/
 *_PLOTS/
@@ -73,10 +74,12 @@ opencode.json
 
 temp_autophot/
 
-# Documentation (design notes and manuscripts stay local)
-docs/
+# Documentation: track notes; keep the arXiv PDF local
+docs/*.pdf
 *.tex
 *.bib
+!docs/*.tex
+!docs/*.bib
 
 # Agent session notes
 agents.md
@@ -92,7 +95,9 @@ figures/*.json
 !figures/citations_over_time.png
 
 # Local debug/cluster scripts (not production)
-scripts/
+scripts/debug_*.py
+scripts/run_autophot_VIPER.py
+scripts/__pycache__/
 debug_*.py
 run_autophot_VIPER.py
 
