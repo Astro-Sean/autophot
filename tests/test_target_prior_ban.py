@@ -9,7 +9,7 @@ as a side effect.
 
 import numpy as np
 
-from main import _sources_far_from_positions
+from autophot.pipeline.main import _sources_far_from_positions
 
 
 def test_drops_row_within_radius():
