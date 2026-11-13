@@ -48,7 +48,7 @@ def _render_psf_stamp(epsf_model, fwhm: float) -> np.ndarray | None:
     model = epsf_model
     if model is None:
         try:
-            from limits import _analytic_psf_for_injection
+            from ..analysis.limits import _analytic_psf_for_injection
 
             model = _analytic_psf_for_injection(float(fwhm))
         except Exception:
@@ -298,7 +298,7 @@ def fit_host_model(
     the model (i.e. data - model + sky), so the pipeline's own local
     background treatment still applies.
     """
-    log = logger or logging.getLogger(__name__)
+    log = logger or logging.getLogger(__name__.rsplit(".", 1)[-1])
     cfg = dict(cfg or {})
     img = np.asarray(image, dtype=float)
     out = {
