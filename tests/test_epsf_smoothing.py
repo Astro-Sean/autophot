@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from psf import (
+from autophot.photometry.psf import (
     _epsf_phase_diagnostics,
     _select_adaptive_oversample,
     clean_epsf_stamp,
@@ -233,7 +233,7 @@ class TestStarWeights:
         import pandas as pd
         from astropy.nddata import NDData
 
-        from psf import PSF
+        from autophot.photometry.psf import PSF
 
         rng = np.random.default_rng(3)
         img = rng.normal(100.0, 5.0, (60, 60))
@@ -286,7 +286,7 @@ class TestNormRadiusMaskGate:
         import pandas as pd
         from astropy.nddata import NDData
 
-        from psf import PSF
+        from autophot.photometry.psf import PSF
 
         rng = np.random.default_rng(3)
         img = rng.normal(100.0, 5.0, (60, 60))
@@ -387,7 +387,7 @@ class TestCoreEllipticity:
         from astropy.table import Table
         from photutils.psf import EPSFStar, EPSFStars
 
-        from psf import PSF
+        from autophot.photometry.psf import PSF
 
         # Disable every other flag so only the ellipticity test can fire.
         phot = {
@@ -480,7 +480,7 @@ class TestHotPixelCluster:
         from astropy.table import Table
         from photutils.psf import EPSFStar, EPSFStars
 
-        from psf import PSF
+        from autophot.photometry.psf import PSF
 
         # Disable every other gate so only the hot-pixel test can fire.
         phot = {
@@ -575,7 +575,7 @@ class TestCurveOfGrowth:
         from astropy.table import Table
         from photutils.psf import EPSFStar, EPSFStars
 
-        from psf import PSF
+        from autophot.photometry.psf import PSF
 
         # Disable every other gate so only the CoG test can fire.
         phot = {
@@ -712,7 +712,7 @@ class TestAnalyticModelNormalization:
 
     def test_injection_model_sum_matches_convention(self):
         pytest.importorskip("photutils")
-        from limits import _analytic_psf_for_injection
+        from autophot.analysis.limits import _analytic_psf_for_injection
 
         for osamp in (1, 2, 4):
             m = _analytic_psf_for_injection(2.0, oversampling=osamp)
@@ -722,7 +722,7 @@ class TestAnalyticModelNormalization:
 
     def test_fitted_flux_recovers_source_flux(self):
         pytest.importorskip("photutils")
-        from limits import _analytic_psf_for_injection
+        from autophot.analysis.limits import _analytic_psf_for_injection
 
         f_true = 5e4
         star = self._moffat_star(f_true, fwhm=2.0)
@@ -733,7 +733,7 @@ class TestAnalyticModelNormalization:
 
     def test_injection_render_scales_like_empirical(self):
         pytest.importorskip("photutils")
-        from limits import _analytic_psf_for_injection, _render_epsf_on_cutout
+        from autophot.analysis.limits import _analytic_psf_for_injection, _render_epsf_on_cutout
 
         model = _analytic_psf_for_injection(2.0, oversampling=4)
         stamp = _render_epsf_on_cutout(model, 21, 21, 10.0, 10.0, 1e4, 4)
@@ -940,7 +940,7 @@ class TestEpsfResidualMad:
         # correct FWHM whose grid cells are noise-drawn (speckled wings).
         # A few-% speckle on the stamp lands in every star residual.
         pytest.importorskip("photutils")
-        from psf import _epsf_residual_mad
+        from autophot.photometry.psf import _epsf_residual_mad
 
         stars = self._stars()
         good = self._moffat(self.FWHM_CONT * 1.05, 1)
@@ -962,7 +962,7 @@ class TestEpsfResidualMad:
 
     def test_degenerate_inputs_give_nan(self):
         pytest.importorskip("photutils")
-        from psf import _epsf_residual_mad
+        from autophot.photometry.psf import _epsf_residual_mad
 
         assert not np.isfinite(_epsf_residual_mad(None, None, 4.5))
 
@@ -981,7 +981,7 @@ class TestAnalyticFallbackPolicy:
 
         root = Path(__file__).resolve().parent.parent
         cfg = yaml.safe_load(
-            (root / "databases" / "default_input.yml").read_text()
+            (root / "autophot" / "data" / "default_input.yml").read_text()
         )
         phot = cfg["default_input"]["photometry"]
         # Shipped default must enable the sparse-field fallback; setting it
@@ -991,14 +991,14 @@ class TestAnalyticFallbackPolicy:
 
     def test_psf_model_kind_defaults_none(self):
         pytest.importorskip("photutils")
-        from psf import PSF
+        from autophot.photometry.psf import PSF
 
         p = PSF(input_yaml={}, image=np.zeros((5, 5)))
         assert p.psf_model_kind == "none"
 
     def test_analytic_moffat_psf_wellformed(self):
         pytest.importorskip("photutils")
-        from psf import _analytic_moffat_psf, _epsf_usable, measure_epsf_fwhm_native
+        from autophot.photometry.psf import _analytic_moffat_psf, _epsf_usable, measure_epsf_fwhm_native
 
         m = _analytic_moffat_psf(fwhm=3.0, oversampling=2, cutout_n=25, beta=4.765)
         assert _epsf_usable(m)
@@ -1012,7 +1012,7 @@ class TestAnalyticFallbackPolicy:
 
     def test_analytic_moffat_psf_guards_bad_inputs(self):
         pytest.importorskip("photutils")
-        from psf import _analytic_moffat_psf
+        from autophot.photometry.psf import _analytic_moffat_psf
 
         # beta below the physical floor is clamped, not propagated.
         m = _analytic_moffat_psf(fwhm=3.0, oversampling=0, cutout_n=25, beta=0.5)
@@ -1027,7 +1027,7 @@ class TestAnalyticFallbackPolicy:
         regression)."""
         pytest.importorskip("photutils")
         from photutils.psf import ImagePSF
-        from psf import _epsf_usable
+        from autophot.photometry.psf import _epsf_usable
 
         rng = np.random.default_rng(0)
         n = 119
@@ -1052,7 +1052,7 @@ class TestAnalyticFallbackPolicy:
         centre has no measurable core either."""
         pytest.importorskip("photutils")
         from photutils.psf import ImagePSF
-        from psf import _epsf_usable
+        from autophot.photometry.psf import _epsf_usable
 
         n = 119
         data = np.full((n, n), 1.0 / (n * n))
@@ -1119,13 +1119,13 @@ class TestMoffatComposite:
 
         root = Path(__file__).resolve().parent.parent
         cfg = yaml.safe_load(
-            (root / "databases" / "default_input.yml").read_text()
+            (root / "autophot" / "data" / "default_input.yml").read_text()
         )
         n = cfg["default_input"]["photometry"]["psf_analytic_components"]
         assert 1 <= int(n) <= 4
 
     def test_default_composite_wellformed(self):
-        from psf import _default_moffat_composite
+        from autophot.photometry.psf import _default_moffat_composite
 
         comps = _default_moffat_composite(8.0, 4.765)
         assert len(comps) == 3
@@ -1138,7 +1138,7 @@ class TestMoffatComposite:
 
     def test_composite_stamp_flux_convention(self):
         pytest.importorskip("photutils")
-        from psf import _composite_moffat_psf, _default_moffat_composite, _epsf_usable
+        from autophot.photometry.psf import _composite_moffat_psf, _default_moffat_composite, _epsf_usable
 
         comps = _default_moffat_composite(8.0, 4.765)
         for osamp, expect in ((1, 1.0), (2, 4.0), (4, 16.0)):
@@ -1152,7 +1152,7 @@ class TestMoffatComposite:
         # Component gammas are native px: the stamp FWHM must track the
         # requested core FWHM regardless of oversampling.
         pytest.importorskip("photutils")
-        from psf import (
+        from autophot.photometry.psf import (
             _composite_moffat_psf,
             _default_moffat_composite,
             measure_epsf_fwhm_native,
@@ -1166,7 +1166,7 @@ class TestMoffatComposite:
 
     def test_fit_recovers_profile(self):
         pytest.importorskip("photutils")
-        from psf import _fit_moffat_composite
+        from autophot.photometry.psf import _fit_moffat_composite
 
         fit = _fit_moffat_composite(self._synthetic_stars(), 7.0)
         assert fit is not None and 1 <= len(fit) <= 3
@@ -1181,7 +1181,7 @@ class TestMoffatComposite:
 
     def test_fit_handles_junk_and_empty(self):
         pytest.importorskip("photutils")
-        from psf import _fit_moffat_composite
+        from autophot.photometry.psf import _fit_moffat_composite
 
         assert _fit_moffat_composite([], 7.0) is None
         # A star with only a few valid pixels (<9) is skipped by the
@@ -1198,7 +1198,7 @@ class TestMoffatComposite:
         fit: its positive aperture sum would pass the flux floor, but
         it constrains nothing and drags the shared profile."""
         pytest.importorskip("photutils")
-        from psf import _composite_star_profile, _fit_moffat_composite
+        from autophot.photometry.psf import _composite_star_profile, _fit_moffat_composite
 
         rng = np.random.default_rng(3)
         noise = rng.normal(0.0, 2.0, (61, 61))
@@ -1210,7 +1210,7 @@ class TestMoffatComposite:
 
     def test_stamp_without_stars_uses_canonical(self):
         pytest.importorskip("photutils")
-        from psf import _analytic_psf_stamp, _default_moffat_composite
+        from autophot.photometry.psf import _analytic_psf_stamp, _default_moffat_composite
 
         m, comps = _analytic_psf_stamp(8.0, 2, 51, 4.765, stars=None)
         assert len(comps) == 3
@@ -1219,7 +1219,7 @@ class TestMoffatComposite:
 
     def test_stamp_with_stars_uses_fit(self):
         pytest.importorskip("photutils")
-        from psf import _analytic_psf_stamp, _epsf_usable
+        from autophot.photometry.psf import _analytic_psf_stamp, _epsf_usable
 
         m, comps = _analytic_psf_stamp(
             7.0, 2, 51, 4.765, stars=self._synthetic_stars()
@@ -1269,7 +1269,7 @@ class TestMoffatJointFit:
 
     def test_per_star_positions_recovered(self):
         pytest.importorskip("photutils")
-        from psf import _fit_moffat_composite_full
+        from autophot.photometry.psf import _fit_moffat_composite_full
 
         stars, shifts = self._stars()
         comps, sfits = _fit_moffat_composite_full(stars, 5.0)
@@ -1282,7 +1282,7 @@ class TestMoffatJointFit:
 
     def test_component_offsets_capture_asymmetry(self):
         pytest.importorskip("photutils")
-        from psf import _fit_moffat_composite_full
+        from autophot.photometry.psf import _fit_moffat_composite_full
 
         stars, _ = self._stars()
         comps, _ = _fit_moffat_composite_full(stars, 5.0)
@@ -1297,7 +1297,7 @@ class TestMoffatJointFit:
 
     def test_concentric_variant_keeps_3_tuples(self):
         pytest.importorskip("photutils")
-        from psf import _fit_moffat_composite_full
+        from autophot.photometry.psf import _fit_moffat_composite_full
 
         stars, _ = self._stars()
         comps, sfits = _fit_moffat_composite_full(
@@ -1314,10 +1314,10 @@ class TestMoffatJointFit:
         # provenance the later PSF-fitting path consumes.
         pytest.importorskip("photutils")
         from photutils.psf import ImagePSF
-        from psf import _composite_moffat_psf, _epsf_usable
+        from autophot.photometry.psf import _composite_moffat_psf, _epsf_usable
 
         stars, _ = self._stars()
-        from psf import _fit_moffat_composite_full
+        from autophot.photometry.psf import _fit_moffat_composite_full
 
         comps, sfits = _fit_moffat_composite_full(stars, 5.0)
         stamp = _composite_moffat_psf(comps, 1, 41)
@@ -1331,7 +1331,7 @@ class TestMoffatJointFit:
 
     def test_amplitudes_stay_positive(self):
         pytest.importorskip("photutils")
-        from psf import _fit_moffat_composite_full
+        from autophot.photometry.psf import _fit_moffat_composite_full
 
         stars, _ = self._stars()
         comps, sfits = _fit_moffat_composite_full(stars, 5.0)
@@ -1352,7 +1352,7 @@ class TestSpatialGridConfig:
 
         root = Path(__file__).resolve().parent.parent
         cfg = yaml.safe_load(
-            (root / "databases" / "default_input.yml").read_text()
+            (root / "autophot" / "data" / "default_input.yml").read_text()
         )
         phot = cfg["default_input"]["photometry"]
         assert phot["psf_spatial_grid"] is False
@@ -1360,20 +1360,20 @@ class TestSpatialGridConfig:
         assert phot["psf_spatial_fill_missing"] in ("nearest", "fail")
 
     def test_parse_disabled_values(self):
-        from psf import _parse_spatial_grid
+        from autophot.photometry.psf import _parse_spatial_grid
 
         for v in (False, None, "false", "off", "none", "0", "", 0, 1):
             assert _parse_spatial_grid(v) is None, v
 
     def test_parse_auto(self):
-        from psf import _parse_spatial_grid
+        from autophot.photometry.psf import _parse_spatial_grid
 
         assert _parse_spatial_grid(True) == "auto"
         assert _parse_spatial_grid("auto") == "auto"
         assert _parse_spatial_grid(" AUTO ") == "auto"
 
     def test_parse_int_grid(self):
-        from psf import _parse_spatial_grid
+        from autophot.photometry.psf import _parse_spatial_grid
 
         assert _parse_spatial_grid(2) == 2
         assert _parse_spatial_grid("3") == 3
@@ -1382,7 +1382,7 @@ class TestSpatialGridConfig:
         assert _parse_spatial_grid(9) == 3
 
     def test_parse_garbage_disables(self):
-        from psf import _parse_spatial_grid
+        from autophot.photometry.psf import _parse_spatial_grid
 
         for v in ("bogus", "2x2", object()):
             assert _parse_spatial_grid(v) is None, v
@@ -1409,7 +1409,7 @@ class TestInverseSigmaWeights:
 
         import pandas as pd
 
-        from psf import PSF
+        from autophot.photometry.psf import PSF
 
         # Isolate the weight mechanics: disable the contamination gate
         # and the norm-radius mask gate, both exercised separately.
@@ -1550,9 +1550,9 @@ def _run_build_with_spies(tmp_path, monkeypatch, phot_extra=None,
     (stars, kwargs) handed to every EPSFBuilder.build_epsf call."""
     import functools
 
-    import psf as psf_mod
+    import autophot.photometry.psf as psf_mod
     from photutils.psf import EPSFBuilder
-    from psf import PSF
+    from autophot.photometry.psf import PSF
 
     captured = {"tbl": None, "calls": []}
     orig_extract = psf_mod.extract_stars
@@ -1628,7 +1628,7 @@ class TestEpsfBuildContract:
         self, tmp_path, monkeypatch
     ):
         pytest.importorskip("photutils")
-        import psf as psf_mod
+        import autophot.photometry.psf as psf_mod
 
         captured = _run_build_with_spies(tmp_path, monkeypatch)
         assert captured["calls"], "EPSFBuilder.build_epsf never ran"
@@ -1638,7 +1638,7 @@ class TestEpsfBuildContract:
         self, tmp_path, monkeypatch
     ):
         pytest.importorskip("photutils")
-        import psf as psf_mod
+        import autophot.photometry.psf as psf_mod
 
         captured = _run_build_with_spies(
             tmp_path, monkeypatch, {"psf_use_analytic_init": False}
@@ -1651,8 +1651,8 @@ class TestEpsfBuildContract:
         (edge taper + wing smoothing + radial flattening), so it must
         stay opt-in."""
         pytest.importorskip("photutils")
-        import psf as psf_mod
-        from psf import PSF
+        import autophot.photometry.psf as psf_mod
+        from autophot.photometry.psf import PSF
 
         calls = {"n": 0}
         real = psf_mod.clean_epsf_stamp
@@ -1669,8 +1669,8 @@ class TestEpsfBuildContract:
 
     def test_wing_cleanup_opt_in(self, tmp_path, monkeypatch):
         pytest.importorskip("photutils")
-        import psf as psf_mod
-        from psf import PSF
+        import autophot.photometry.psf as psf_mod
+        from autophot.photometry.psf import PSF
 
         calls = {"n": 0}
         real = psf_mod.clean_epsf_stamp
@@ -1719,8 +1719,8 @@ class TestNonconvergedFwhmDiscard:
         pytest.importorskip("photutils")
         import itertools
 
-        import psf as psf_mod
-        from psf import PSF
+        import autophot.photometry.psf as psf_mod
+        from autophot.photometry.psf import PSF
 
         phot = dict(self._NONCONV)
         phot.update(phot_extra or {})
@@ -1749,7 +1749,7 @@ class TestNonconvergedFwhmDiscard:
         parity with the analytic seed, so it is kept."""
         import itertools
 
-        import psf as psf_mod
+        import autophot.photometry.psf as psf_mod
 
         real = psf_mod._epsf_residual_mad
         seen = []
@@ -1775,7 +1775,7 @@ class TestNonconvergedFwhmDiscard:
         gate must not even run."""
         import itertools
 
-        import psf as psf_mod
+        import autophot.photometry.psf as psf_mod
 
         it = iter([0.01, 1.0])
         monkeypatch.setattr(
@@ -1809,7 +1809,7 @@ class TestNonconvergedFwhmDiscard:
         arbitrate with, so the conservative discard stands."""
         import itertools
 
-        import psf as psf_mod
+        import autophot.photometry.psf as psf_mod
 
         it = iter([0.01, 1.0])
         monkeypatch.setattr(
@@ -1880,7 +1880,7 @@ class TestContaminationSigmaKeys:
         from astropy.table import Table
         from photutils.psf import EPSFStar, EPSFStars
 
-        from psf import PSF
+        from autophot.photometry.psf import PSF
 
         phot = {
             "psf_cutout_contamination_check": True,
@@ -1966,7 +1966,7 @@ class TestShippedPsfDefaults:
 
         root = Path(__file__).resolve().parent.parent
         cfg = yaml.safe_load(
-            (root / "databases" / "default_input.yml").read_text()
+            (root / "autophot" / "data" / "default_input.yml").read_text()
         )
         return cfg["default_input"]["photometry"]
 
@@ -2038,7 +2038,7 @@ class TestMatchedFilterDetectionProb:
 
     def test_strong_source_high_prob(self):
         """A z ~ 6 point source must report prob_detect near 1."""
-        from psf import matched_filter_detection_prob
+        from autophot.photometry.psf import matched_filter_detection_prob
 
         nd, model = self._field(flux=60.0)
         prob, z, dchi2 = matched_filter_detection_prob(
@@ -2050,7 +2050,7 @@ class TestMatchedFilterDetectionProb:
 
     def test_noise_only_is_undecided(self):
         """No source -> prob_detect ~0.5, not a confident rejection."""
-        from psf import matched_filter_detection_prob
+        from autophot.photometry.psf import matched_filter_detection_prob
 
         probs = []
         for seed in range(20):
@@ -2067,7 +2067,7 @@ class TestMatchedFilterDetectionProb:
 
     def test_negative_dip_low_prob(self):
         """PSF-shaped negative flux (oversubtraction) -> prob ~0."""
-        from psf import matched_filter_detection_prob
+        from autophot.photometry.psf import matched_filter_detection_prob
 
         nd, model = self._field(flux=-60.0)
         prob, z, _ = matched_filter_detection_prob(
@@ -2078,7 +2078,7 @@ class TestMatchedFilterDetectionProb:
 
     def test_inverted_evaluates_sign_flipped(self):
         """inverted=True treats a negative source as the detection."""
-        from psf import matched_filter_detection_prob
+        from autophot.photometry.psf import matched_filter_detection_prob
 
         nd, model = self._field(flux=-60.0)
         prob, z, _ = matched_filter_detection_prob(
@@ -2095,7 +2095,7 @@ class TestMatchedFilterDetectionProb:
         import math
 
         from astropy.nddata import NDData, StdDevUncertainty
-        from psf import matched_filter_detection_prob
+        from autophot.photometry.psf import matched_filter_detection_prob
 
         model = self._model()
         rng = np.random.default_rng(3)
@@ -2113,7 +2113,7 @@ class TestMatchedFilterDetectionProb:
 
     def test_extended_source_suppressed(self):
         """A resolved blob is not a point-source detection."""
-        from psf import matched_filter_detection_prob
+        from autophot.photometry.psf import matched_filter_detection_prob
 
         nd, model = self._field(flux=30.0, shape_sigma=4.0, seed=3)
         prob_blob, _, _ = matched_filter_detection_prob(
@@ -2123,7 +2123,7 @@ class TestMatchedFilterDetectionProb:
 
     def test_empirical_fap_strong_source(self):
         """Blank-site FAP is small when the target statistic is strong."""
-        from psf import (
+        from autophot.photometry.psf import (
             empirical_false_alarm_prob,
             matched_filter_detection_prob,
         )
@@ -2151,7 +2151,7 @@ class TestMatchedFilterDetectionProb:
 
     def test_empirical_fap_uses_snr_when_probability_saturates(self, monkeypatch):
         from astropy.nddata import NDData
-        import psf as psf_mod
+        import autophot.photometry.psf as psf_mod
 
         nd = NDData(data=np.zeros((101, 101)))
 
@@ -2181,7 +2181,7 @@ class TestMatchedFilterDetectionProb:
     def test_empirical_fap_noise_field(self):
         """On pure noise the row statistic sits mid-null: FAP ~ 0.5."""
         from astropy.nddata import NDData, StdDevUncertainty
-        from psf import (
+        from autophot.photometry.psf import (
             empirical_false_alarm_prob,
             matched_filter_detection_prob,
         )
@@ -2216,7 +2216,7 @@ class TestMatchedFilterDetectionProb:
     def test_empirical_fap_insufficient_sites(self):
         """Too few valid sites -> NaN, not a spurious small p-value."""
         from astropy.nddata import NDData, StdDevUncertainty
-        from psf import empirical_false_alarm_prob
+        from autophot.photometry.psf import empirical_false_alarm_prob
 
         model = self._model()
         rng = np.random.default_rng(4)
@@ -2244,7 +2244,7 @@ class TestMatchedFilterDetectionProb:
     def test_empirical_fap_exclusion(self):
         """Excluded positions are never sampled as blank sites."""
         from astropy.nddata import NDData, StdDevUncertainty
-        from psf import empirical_false_alarm_prob
+        from autophot.photometry.psf import empirical_false_alarm_prob
 
         model = self._model()
         rng = np.random.default_rng(6)
@@ -2279,7 +2279,7 @@ class TestMatchedFilterDetectionProb:
         import math
 
         from astropy.nddata import NDData, StdDevUncertainty
-        from psf import matched_filter_detection_prob
+        from autophot.photometry.psf import matched_filter_detection_prob
 
         model = self._model()
         gy, gx = np.mgrid[0:51, 0:51]
@@ -2302,7 +2302,7 @@ class TestMatchedFilterDetectionProb:
 
     def test_nonfinite_pixels_excluded(self):
         """NaN data / inf sigma in the box are ignored, not fatal."""
-        from psf import matched_filter_detection_prob
+        from autophot.photometry.psf import matched_filter_detection_prob
 
         nd, model = self._field(flux=60.0)
         img = np.asarray(nd.data, dtype=float).copy()
@@ -2319,7 +2319,7 @@ class TestMatchedFilterDetectionProb:
 
     def test_empty_or_all_nan_returns_nan(self):
         from astropy.nddata import NDData
-        from psf import matched_filter_detection_prob
+        from autophot.photometry.psf import matched_filter_detection_prob
 
         nd = NDData(data=np.full((21, 21), np.nan))
         prob, z, d = matched_filter_detection_prob(
@@ -2343,8 +2343,8 @@ class TestEeCutoutSizing:
                        yaml_extra=None):
         """Run build() and record every ``size`` kwarg extract_stars saw."""
         pytest.importorskip("photutils")
-        import psf as psf_mod
-        from psf import PSF
+        import autophot.photometry.psf as psf_mod
+        from autophot.photometry.psf import PSF
 
         captured = []
         orig = psf_mod.extract_stars
@@ -2366,7 +2366,7 @@ class TestEeCutoutSizing:
         """The EE radius of the analytic init core matches the Moffat
         closed form (within the integer-ring binning tolerance)."""
         pytest.importorskip("photutils")
-        from psf import (
+        from autophot.photometry.psf import (
             _composite_moffat_psf,
             _default_moffat_composite,
             _epsf_ee_radius_native,
@@ -2387,7 +2387,7 @@ class TestEeCutoutSizing:
 
     def test_ee_radius_grows_with_lower_beta(self):
         pytest.importorskip("photutils")
-        from psf import (
+        from autophot.photometry.psf import (
             _composite_moffat_psf,
             _default_moffat_composite,
             _epsf_ee_radius_native,
@@ -2433,7 +2433,7 @@ class TestEeCutoutSizing:
 
     def test_ee_failure_falls_back_to_formula(self, tmp_path, monkeypatch):
         pytest.importorskip("photutils")
-        import psf as psf_mod
+        import autophot.photometry.psf as psf_mod
 
         def _boom(*args, **kwargs):
             raise RuntimeError("forced EE sizing failure")
@@ -2542,7 +2542,7 @@ class TestPhaseDiagnostics:
         assert d_none["n_stars"] == 0
 
     def test_psf_defaults(self):
-        from psf import PSF
+        from autophot.photometry.psf import PSF
 
         p = PSF(input_yaml={"photometry": {}}, image=np.zeros((5, 5)))
         assert p.psf_grid_underresolved is False
@@ -2553,7 +2553,7 @@ class TestPhaseDiagnostics:
         """A completed empirical build records the subpixel-phase
         diagnostics of the fitted star centres."""
         pytest.importorskip("photutils")
-        from psf import PSF
+        from autophot.photometry.psf import PSF
 
         img, df = _star_field(asym_wing=False)
         p = PSF(_psf_build_yaml(tmp_path), img)
