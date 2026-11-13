@@ -23,8 +23,8 @@ if str(ROOT) not in sys.path:
 from astropy.nddata import NDData
 from photutils.psf import GriddedPSFModel, ImagePSF
 
-import psf as psf_mod
-from psf import (
+import autophot.photometry.psf as psf_mod
+from autophot.photometry.psf import (
     PSF,
     convolve_gridded_epsf_with_kernel,
     epsf_at_position,
@@ -525,7 +525,7 @@ class TestGridSufficiencyGating:
         model, _ = res
         # donor stamps are all fwhm=3.0; the filled (1,1) stamp must
         # match a donor's width, not its own 4.4-px build.
-        from psf import measure_epsf_fwhm_native
+        from autophot.photometry.psf import measure_epsf_fwhm_native
 
         assert np.isclose(
             measure_epsf_fwhm_native(
