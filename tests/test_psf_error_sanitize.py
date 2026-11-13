@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from psf import _sanitize_error_array
+from autophot.photometry.psf import _sanitize_error_array
 
 
 class TestSanitizeErrorArray:
