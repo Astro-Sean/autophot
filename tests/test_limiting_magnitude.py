@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from limits import (
+from autophot.analysis.limits import (
     Limits,
     _analytic_psf_for_injection,
     _flux_for_mag_cached,
@@ -266,7 +266,7 @@ class TestInjectedLimitEndToEnd:
             fraction_within_2sigma=0.95,
             to_dict=lambda: {},
         )
-        import utils.uncertainty_calibration as uc
+        import autophot.analysis.uncertainty_calibration as uc
 
         monkeypatch.setattr(uc, "calibrate_uncertainties", lambda *a, **k: fake_res)
         det = self._run(_lim_cfg())
@@ -290,7 +290,7 @@ class TestInjectedLimitEndToEnd:
             fraction_within_2sigma=0.95,
             to_dict=lambda: {},
         )
-        import utils.uncertainty_calibration as uc
+        import autophot.analysis.uncertainty_calibration as uc
 
         monkeypatch.setattr(uc, "calibrate_uncertainties", lambda *a, **k: fake_res)
         yaml = _lim_cfg(limiting_magnitude={"recovery_calibrate_snr": False})
@@ -544,7 +544,7 @@ class TestRedoHonored:
     magnitude (previously accepted but ignored)."""
 
     def test_repetitions_multiply_trials(self, monkeypatch):
-        import limits as limits_mod
+        import autophot.analysis.limits as limits_mod
 
         counts = {}
         real_worker = limits_mod._injection_worker
@@ -616,7 +616,7 @@ class TestInjectionSiteFloor:
 
         root = Path(__file__).resolve().parent.parent
         cfg = yaml_mod.safe_load(
-            (root / "databases" / "default_input.yml").read_text()
+            (root / "autophot" / "data" / "default_input.yml").read_text()
         )
         n = cfg["default_input"]["limiting_magnitude"][
             "inject_final_n_sites"
