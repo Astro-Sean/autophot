@@ -74,44 +74,9 @@ def _to_yaml_native(obj):
     return obj
 
 
-def _import_local_module(name):
-    """
-    Import a sibling module by file path rather than through sys.path.
-
-    The pipeline creates a `templates/` download folder inside `wdir`; when a
-    driver script lives in that directory, `from templates import ...` binds
-    the folder as a namespace package and shadows the real templates.py, so
-    template downloads fail on every re-run. Loading by absolute path avoids
-    the shadowing, and registering in sys.modules lets later bare imports of
-    the same name reuse the real module.
-    """
-    import importlib.util
-
-    repo_dir = os.path.dirname(os.path.abspath(__file__))
-    mod = sys.modules.get(name)
-    mod_file = getattr(mod, "__file__", None)
-    if (
-        mod is not None
-        and mod_file
-        and os.path.dirname(os.path.abspath(mod_file)) == repo_dir
-    ):
-        return mod
-    spec = importlib.util.spec_from_file_location(
-        name, os.path.join(repo_dir, name + ".py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    try:
-        spec.loader.exec_module(mod)
-    except Exception:
-        del sys.modules[name]
-        raise
-    return mod
-
-
 def _get_default_input_schema() -> dict:
     """
-    Load and cache the default configuration schema from `databases/default_input.yml`.
+    Load and cache the default configuration schema from `autophot/data/default_input.yml`.
 
     This is used to validate that driver scripts (e.g. `run_autophot.py`) only set
     keys that exist in the pipeline's declared configuration.
@@ -128,8 +93,9 @@ def _get_default_input_schema() -> dict:
         try:
             _DEFAULT_INPUT_SCHEMA_CACHE = AutomatedPhotometry.load()
         except Exception:
-            here = os.path.dirname(os.path.abspath(__file__))
-            default_input_path = os.path.join(here, "databases", "default_input.yml")
+            from .core.functions import data_path
+
+            default_input_path = data_path("default_input.yml")
             with open(default_input_path, "r") as f:
                 data = yaml.safe_load(f) or {}
             _DEFAULT_INPUT_SCHEMA_CACHE = data.get("default_input", data)
@@ -151,7 +117,7 @@ def list_parameters(
     """
     Print (and return) the configuration parameters accepted by AutoPhOT.
 
-    This reads `databases/default_input.yml` as text to preserve line numbers and
+    This reads `autophot/data/default_input.yml` as text to preserve line numbers and
     presents a flattened key list with defaults.
 
     Examples
@@ -160,11 +126,11 @@ def list_parameters(
     >>> list_parameters(contains="aperture_size")
     >>> list_parameters(show_internal_params=True)
     """
-    import os
     import yaml
 
-    here = os.path.dirname(os.path.abspath(__file__))
-    yml_path = os.path.join(here, "databases", "default_input.yml")
+    from .core.functions import data_path
+
+    yml_path = data_path("default_input.yml")
     with open(yml_path, "r") as f:
         lines = f.read().splitlines()
 
@@ -563,7 +529,7 @@ def _find_unknown_config_paths(
 # minimal environments.
 _IMPORT_ERROR_AUTOPHOT_DEPS: Exception | None = None
 try:
-    from functions import (  # type: ignore
+    from .core.functions import (  # type: ignore
         AutophotYaml,
         ascii_card,
         ascii_kv,
@@ -584,16 +550,16 @@ try:
         silence_noisy_loggers,
         verbose_to_log_level,
     )
-    from prepare import Prepare  # type: ignore
+    from .pipeline.prepare import Prepare  # type: ignore
 except Exception as _exc:  # pragma: no cover
     # If the normal import fails (e.g. in Spyder where sys.path may not
-    # contain the package directory), fall back to importing from the
-    # same directory as this file.
-    _fallback_dir = os.path.dirname(os.path.abspath(__file__))
+    # contain the package parent directory), fall back to absolute imports
+    # after inserting that directory.
+    _fallback_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _fallback_dir not in sys.path:
         sys.path.insert(0, _fallback_dir)
     try:
-        from functions import (  # type: ignore
+        from autophot.core.functions import (  # type: ignore
             AutophotYaml,
             ascii_card,
             ascii_kv,
@@ -614,7 +580,7 @@ except Exception as _exc:  # pragma: no cover
             silence_noisy_loggers,
             verbose_to_log_level,
         )
-        from prepare import Prepare  # type: ignore
+        from autophot.pipeline.prepare import Prepare  # type: ignore
     except Exception as _exc2:
         _IMPORT_ERROR_AUTOPHOT_DEPS = _exc2
         log_step = None  # type: ignore
@@ -675,7 +641,7 @@ def _log(message: str) -> None:
     """
     if QUIET_MODE:
         return
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("autophot")
     if logger.handlers:
         # Driver messages are user-facing progress; STATUS shows them in
         # normal mode without leaking per-image INFO diagnostics.
@@ -693,7 +659,7 @@ def _log_always(message: str) -> None:
     Log a message that should be visible even in QUIET_MODE (parallel mode).
     Used for failures, final summaries, and other critical output.
     """
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("autophot")
     if logger.handlers:
         level, text = _split_level_tag(message)
         logger.log(level if level is not None else logging.WARNING,
@@ -751,6 +717,11 @@ def _run_main_subprocess(
     """
     Run the low-level photometry pipeline (main.py) on a single FITS file.
 
+    ``autophot_exe`` selects the child entry point: pass the module name
+    ``"autophot.pipeline.main"`` for a ``python -m`` invocation (works from
+    a checkout or an installed package), or a ``*.py`` script path to run
+    it directly (legacy form, used by tests).
+
     Returns (filename, return_code) so callers can detect failures.
 
     suppress_output must be passed explicitly: ProcessPoolExecutor workers
@@ -765,7 +736,18 @@ def _run_main_subprocess(
                 "It looks like it was deleted mid-run. Re-run the pipeline to regenerate it."
             )
         return filename, 2
-    args = [python_executable, autophot_exe, "-f", filename, "-c", input_file]
+    if autophot_exe.endswith(".py"):
+        args = [python_executable, autophot_exe, "-f", filename, "-c", input_file]
+    else:
+        args = [
+            python_executable,
+            "-m",
+            autophot_exe,
+            "-f",
+            filename,
+            "-c",
+            input_file,
+        ]
     if is_template:
         args.append("-temp")
 
@@ -777,8 +759,14 @@ def _run_main_subprocess(
     kwargs = {"check": False, "text": True}
     if suppress_output:
         kwargs.update({"stdout": DEVNULL, "stderr": DEVNULL})
+    # -m resolves autophot through sys.path, so the package parent dir goes
+    # on PYTHONPATH: repo root in a checkout, site-packages when installed.
+    env = os.environ.copy()
+    pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = pkg_parent + os.pathsep + env.get("PYTHONPATH", "")
     if gpu_ordinal is not None:
-        kwargs["env"] = _child_gpu_env(os.environ.copy(), gpu_ordinal)
+        env = _child_gpu_env(env, gpu_ordinal)
+    kwargs["env"] = env
 
     try:
         result = subprocess.run(args, **kwargs)
@@ -806,9 +794,9 @@ def _scan_image_footprints(file_list, band_map=None, pixscale_fallback=None):
     a missing/failed WCS leaves wcs=None so the optimizer falls back to
     field-level counts.
     """
-    from functions import get_header as _get_header
-    from wcs import get_wcs as _get_wcs
-    from catalog import _pixscale_arcsec
+    from .core.functions import get_header as _get_header
+    from .pipeline.wcs import get_wcs as _get_wcs
+    from .calibration.catalog import _pixscale_arcsec
 
     band_map = band_map or {}
     infos = []
@@ -914,7 +902,7 @@ def find_variable_sources(
     # patching the shared requests session bounds connect+read for every
     # call below, including the metadata fetches votable-field setup makes.
     try:
-        from functions import patch_simbad_session_timeout
+        from .core.functions import patch_simbad_session_timeout
         patch_simbad_session_timeout()
     except Exception as exc:
         _log(f"SIMBAD timeout patch could not be applied ({exc}); queries may stall.")
@@ -1342,10 +1330,10 @@ def inspect_telescope(
     from astropy.io import fits as _fits
 
     _FITS_EXTENSIONS = (".fits", ".fit", ".fts", ".fits.gz", ".fit.gz", ".fts.gz")
-    from functions import FILTER_HEADER_CANDIDATES as _FILTER_CANDIDATES
-    from functions import NON_FILTER_VALUES as _AVOID_FILTERS
+    from .core.functions import FILTER_HEADER_CANDIDATES as _FILTER_CANDIDATES
+    from .core.functions import NON_FILTER_VALUES as _AVOID_FILTERS
 
-    log_it = logging.getLogger(__name__)
+    log_it = logging.getLogger("autophot")
 
     # ---- helpers ----
     def _find_files(d, rec):
@@ -1585,7 +1573,7 @@ def _run_transient_color_correction(default_input, output_loc, reduced_loc, log)
             return
         dt = float(pp_cfg.get("color_correction_dt", 1.0))
         max_err = float(pp_cfg.get("color_correction_max_err", 0.5))
-        from color_correction import correct_lightcurve
+        from .calibration.color_correction import correct_lightcurve
 
         out = correct_lightcurve(
             output_loc, reduced_dir=reduced_loc, dt=dt, max_err=max_err
@@ -1601,7 +1589,7 @@ def __getattr__(name: str):
     Resolve common misspellings for public module symbols.
 
     This allows typo-tolerant imports like:
-        from autophot import prepapre_template_directory
+        from .driver import prepapre_template_directory
     by dynamically mapping to the closest public callable/class.
     """
     if not isinstance(name, str) or not name or name.startswith("_"):
@@ -1618,7 +1606,7 @@ def __getattr__(name: str):
     matches = get_close_matches(name, list(public_symbols.keys()), n=1, cutoff=0.72)
     if matches:
         target = matches[0]
-        logging.getLogger(__name__).warning(
+        logging.getLogger("autophot").warning(
             "Interpreting unknown symbol '%s' as '%s'.",
             name,
             target,
@@ -1649,8 +1637,9 @@ class AutomatedPhotometry:
             dict: Parsed configuration dictionary.
         """
         t0 = time.perf_counter()
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        default_input_path = os.path.join(script_dir, "databases", "default_input.yml")
+        from .core.functions import data_path
+
+        default_input_path = data_path("default_input.yml")
         default_input = AutophotYaml(default_input_path, "default_input").load()
 
         # Ensure expected nested sections exist so driver scripts can safely override
@@ -1708,7 +1697,7 @@ class AutomatedPhotometry:
 
         # Batch driver context: no plot may pop a GUI window, here or in
         # the per-image subprocesses (children inherit the env flag).
-        from plotting_utils import force_headless_plots
+        from .core.plotting_utils import force_headless_plots
 
         force_headless_plots()
 
@@ -1795,12 +1784,12 @@ class AutomatedPhotometry:
         # Clear module-level caches to ensure independence between image runs
         # This prevents state contamination when processing multiple images
         try:
-            from limits import _flux_for_mag_cached
+            from .analysis.limits import _flux_for_mag_cached
             _flux_for_mag_cached.cache_clear()
         except Exception:
             pass
         try:
-            from background import _disk_structuring_element
+            from .pipeline.background import _disk_structuring_element
             _disk_structuring_element.cache_clear()
         except Exception:
             pass
@@ -1819,7 +1808,7 @@ class AutomatedPhotometry:
             "on",
         }
         try:
-            from functions import check_input_config, format_config_errors
+            from .core.functions import check_input_config, format_config_errors
         except Exception:
             check_input_config = format_config_errors = None
         if check_input_config is not None:
@@ -1847,7 +1836,7 @@ class AutomatedPhotometry:
                 raise KeyError(
                     "Unknown AutoPHOT config keys detected. "
                     "These were found in the driver-provided configuration but "
-                    "do not exist in `databases/default_input.yml`:\n  - "
+                    "do not exist in `autophot/data/default_input.yml`:\n  - "
                     + "\n  - ".join(unique_sorted)
                 )
 
@@ -1885,7 +1874,7 @@ class AutomatedPhotometry:
                     gaia_custom_groups.append(str(k))
 
         if gaia_custom_requested and do_photometry:
-            from functions import parse_supported_filter_group_key, normalize_photometric_filter_name
+            from .core.functions import parse_supported_filter_group_key, normalize_photometric_filter_name
 
             curve_map = catalog_cfg.get("transmission_curve_map", None)
             if curve_map is None or curve_map == {}:
@@ -2007,7 +1996,7 @@ class AutomatedPhotometry:
                 f"radius={radius_deg:.4f} deg, max_sources={max_sources}, "
                 f"order_by={curve_order}, bands={sorted(required_bands) if required_bands else 'curve_map keys'}"
             )
-            from autophot_gaia_curves import build_custom_catalog
+            from .gaia_curves import build_custom_catalog
 
             # The builder decides whether the on-disk catalog can be reused;
             # a cached file with fewer rows than gaia_xp_min_sources or a
@@ -2063,7 +2052,7 @@ class AutomatedPhotometry:
                     catalog_cfg.get("gaia_xp_grow_factor", 1.5)
                 ),
             )
-            logging.getLogger(__name__).debug(
+            logging.getLogger("autophot").debug(
                 "Gaia curve-map catalog written: %s",
                 curve_catalog_csv,
             )
@@ -2163,9 +2152,7 @@ class AutomatedPhotometry:
             # Tokens module is optional; leave config as-is.
             pass
 
-        # Resolve paths and interpreter
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        autophot_exe = os.path.join(current_dir, "main.py")
+        # Resolve interpreter; per-image runs spawn `python -m autophot.pipeline.main`
         python_executable = sys.executable
 
         if do_photometry:
@@ -2236,7 +2223,7 @@ class AutomatedPhotometry:
             # dict so per-image subprocesses (main.py) can use it directly.
             # ------------------------------------------------------------------
             try:
-                from additional_targets import resolve_additional_targets
+                from .services.additional_targets import resolve_additional_targets
                 _additional = resolve_additional_targets(
                     default_input, prepare_db=prepare_db
                 )
@@ -2310,7 +2297,7 @@ class AutomatedPhotometry:
                         r"[a-z0-9.+-]+_band_template\.fits$",
                         re.IGNORECASE,
                     )
-                    from prepare import template_roots_under
+                    from .pipeline.prepare import template_roots_under
 
                     # Every `templates` dir below fits_dir: nested
                     # per-dataset folders (<dataset>/templates) count as
@@ -2358,7 +2345,7 @@ class AutomatedPhotometry:
                     # templates_size square (previous behaviour).
                     _tpl_regions = {}
                     try:
-                        from catalog import _footprint_region, _fmt_region
+                        from .calibration.catalog import _footprint_region, _fmt_region
 
                         _tpl_scale = (
                             default_input.get("pixel_scale")
@@ -2461,9 +2448,11 @@ class AutomatedPhotometry:
 
                     if download_kind == "panstarrs":
                         _log(log_step("Download templates: Pan-STARRS"))
-                        download_panstarrs_template = _import_local_module(
-                            "templates"
-                        ).download_panstarrs_template
+                        # Relative import cannot be shadowed by the
+                        # templates/ download dir under wdir.
+                        from .subtraction.templates import (
+                            download_panstarrs_template,
+                        )
 
                         for f in required_filters:
                             _tra, _tdec, _tw, _th = _tpl_geometry(f)
@@ -2477,9 +2466,9 @@ class AutomatedPhotometry:
                             )
                     elif download_kind == "sdss":
                         _log(log_step("Download templates: SDSS"))
-                        download_sdss_template = _import_local_module(
-                            "templates"
-                        ).download_sdss_template
+                        from .subtraction.templates import (
+                            download_sdss_template,
+                        )
 
                         for f in required_filters:
                             _tra, _tdec, _tw, _th = _tpl_geometry(f)
@@ -2494,9 +2483,9 @@ class AutomatedPhotometry:
                         _log(
                             log_step("Download templates: Legacy Surveys")
                         )
-                        download_legacy_template = _import_local_module(
-                            "templates"
-                        ).download_legacy_template
+                        from .subtraction.templates import (
+                            download_legacy_template,
+                        )
 
                         for f in required_filters:
                             _tra, _tdec, _tw, _th = _tpl_geometry(f)
@@ -2509,9 +2498,9 @@ class AutomatedPhotometry:
                             )
                     elif download_kind == "2mass":
                         _log(log_step("Download templates: 2MASS"))
-                        download_2mass_template = _import_local_module(
-                            "templates"
-                        ).download_2mass_template
+                        from .subtraction.templates import (
+                            download_2mass_template,
+                        )
 
                         for f in required_filters:
                             _tra, _tdec, _tw, _th = _tpl_geometry(f)
@@ -2529,7 +2518,7 @@ class AutomatedPhotometry:
                     # Only prepare templates for filters actually needed by science images
                     # This avoids unnecessary template preparation for unused filters
                     template_required_filters = required_filters
-                    logger = logging.getLogger(__name__)
+                    logger = logging.getLogger("autophot")
                     logger.info(
                         "Looking for templates for science image filters: %s",
                         ", ".join(sorted(template_required_filters)) if template_required_filters else "None"
@@ -2563,7 +2552,7 @@ class AutomatedPhotometry:
                         # are re-scanned here rather than reusing the
                         # download-guard list, which may predate newly
                         # downloaded template folders.
-                        from prepare import template_roots_under
+                        from .pipeline.prepare import template_roots_under
 
                         _tpl_prefixes = tuple(
                             os.path.normpath(r) + os.sep
@@ -2626,7 +2615,7 @@ class AutomatedPhotometry:
                 # main.py will find the cached CSV and skip re-downloading.
                 _log(border_msg("Reference photometric catalog") if border_msg else log_step("Reference photometric catalog (pre-download)"))
                 try:
-                    from catalog import (
+                    from .calibration.catalog import (
                         Catalog as _Catalog,
                         AUTO_OPTIMIZE_CATALOGS as _AUTO_CATALOGS,
                         AUTO_OPTIMIZE_EXCLUDED as _AUTO_EXCLUDED,
@@ -2635,7 +2624,7 @@ class AutomatedPhotometry:
                         _footprint_region,
                         _fmt_region,
                     )
-                    from functions import parse_supported_filter_group_key
+                    from .core.functions import parse_supported_filter_group_key
                     _cat = _Catalog(input_yaml=backup_yaml)
                     _use_cat = backup_yaml.get("catalog", {}).get("use_catalog")
 
@@ -3615,7 +3604,7 @@ class AutomatedPhotometry:
                                 executor.submit(
                                     _run_main_subprocess,
                                     python_executable,
-                                    autophot_exe,
+                                    "autophot.pipeline.main",
                                     template,
                                     input_file,
                                     True,
@@ -3664,7 +3653,7 @@ class AutomatedPhotometry:
                         ):
                             fname, rc = _run_main_subprocess(
                                 python_executable,
-                                autophot_exe,
+                                "autophot.pipeline.main",
                                 template,
                                 input_file,
                                 True,
@@ -3745,7 +3734,7 @@ class AutomatedPhotometry:
                                 executor.submit(
                                     _run_main_subprocess,
                                     python_executable,
-                                    autophot_exe,
+                                    "autophot.pipeline.main",
                                     str(file),
                                     input_file,
                                     False,
@@ -3845,7 +3834,7 @@ class AutomatedPhotometry:
                             try:
                                 fname, rc = _run_main_subprocess(
                                     python_executable,
-                                    autophot_exe,
+                                    "autophot.pipeline.main",
                                     str(file),
                                     input_file,
                                     False,
@@ -3917,7 +3906,7 @@ class AutomatedPhotometry:
             _additional_lc_paths = []
             _at_resolved = default_input.get("_additional_targets_resolved") or []
             if _at_resolved:
-                from additional_targets import sanitize_target_name_for_filename as _stfn
+                from .services.additional_targets import sanitize_target_name_for_filename as _stfn
                 _sub_targets_dir = os.path.join(reduced_loc, "sub_targets")
                 os.makedirs(_sub_targets_dir, exist_ok=True)
                 for _at in _at_resolved:
@@ -3952,7 +3941,7 @@ class AutomatedPhotometry:
             # even when skipping reductions.
             if not default_input.get("_additional_targets_resolved"):
                 try:
-                    from additional_targets import resolve_additional_targets
+                    from .services.additional_targets import resolve_additional_targets
                     _additional = resolve_additional_targets(
                         default_input, prepare_db=None
                     )
@@ -3979,7 +3968,7 @@ class AutomatedPhotometry:
                 # Recover additional-target lightcurves too
                 _at_resolved = default_input.get("_additional_targets_resolved") or []
                 if _at_resolved:
-                    from additional_targets import sanitize_target_name_for_filename as _stfn
+                    from .services.additional_targets import sanitize_target_name_for_filename as _stfn
                     _sub_targets_dir = os.path.join(reduced_loc, "sub_targets")
                     os.makedirs(_sub_targets_dir, exist_ok=True)
                     _additional_lc_paths = []
@@ -4076,4 +4065,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if __package__ in (None, ""):
+        # ``python autophot/driver.py`` has no package context, so the
+        # deferred ``from .x import`` calls inside functions cannot resolve.
+        # Re-exec as ``autophot.driver`` (the old ``python autophot.py``
+        # usage pattern) so every relative import works.
+        import runpy
+
+        _parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if _parent not in sys.path:
+            sys.path.insert(0, _parent)
+        runpy.run_module("autophot.driver", run_name="__main__")
+    else:
+        raise SystemExit(main())
