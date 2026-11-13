@@ -11,10 +11,10 @@ from __future__ import annotations
 import pytest
 from astropy.io import fits
 
-from wcs import _has_nonzero_distortion, get_wcs
+from autophot.pipeline.wcs import _has_nonzero_distortion, get_wcs
 
 try:
-    from functions import copy_wcs_from_header, remove_wcs_from_header
+    from autophot.core.functions import copy_wcs_from_header, remove_wcs_from_header
 except ImportError:  # photutils / optional deps not installed
     copy_wcs_from_header = None
     remove_wcs_from_header = None
