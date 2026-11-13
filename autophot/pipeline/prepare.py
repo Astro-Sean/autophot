@@ -1876,7 +1876,7 @@ class Prepare:
 
         Input ``templates`` folders are read-only: the chosen template (or
         its ``.original`` backup when one exists) is copied to
-        ``<fits_dir>_<outdir_name>/<dataset>/templates/<band>_template/
+        ``<fits_dir>_<outdir_name>/<dataset>/ready_templates/<band>_template/
         ready_template.fits`` with any ``.weight`` sidecar, and every
         downstream step works on that copy.  The dataset segment mirrors
         nested ``<dataset>/templates`` layouts so same-band templates from
@@ -1889,7 +1889,7 @@ class Prepare:
         )
         rel = os.path.relpath(os.path.dirname(template_root), fits_dir)
         stage_dir = os.path.normpath(
-            os.path.join(out_root, rel, "templates", band_dir_name)
+            os.path.join(out_root, rel, "ready_templates", band_dir_name)
         )
         os.makedirs(stage_dir, exist_ok=True)
         # Clear leftovers from earlier runs so this folder only holds what
