@@ -15,7 +15,7 @@ import pytest
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from wcs import (
+from autophot.pipeline.wcs import (
     _build_scale_args,
     _choose_position_hints,
     _coerce_detected_xy,
