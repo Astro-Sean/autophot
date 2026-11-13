@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from catalog import Catalog, _drop_fainter_blended_neighbors
+from autophot.calibration.catalog import Catalog, _drop_fainter_blended_neighbors
 
 
 def _ps1_frame(rows):
