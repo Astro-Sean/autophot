@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "AutoPhOT: The AUTOmated Photometry Of Transients pipeline"
+version: 1.5.0
+authors:
+  - family-names: Brennan
+    given-names: S. J.
+  - family-names: Fraser
+    given-names: M.
+license: MIT
+repository-code: "https://github.com/Astro-Sean/autophot"
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Brennan
+      given-names: S. J.
+    - family-names: Fraser
+      given-names: M.
+  title: "The AUTOmated Photometry Of Transients pipeline (AutoPhOT)"
+  journal: "Astronomy & Astrophysics"
+  year: 2022
+  volume: 667
+  start: A62
+  doi: "10.1051/0004-6361/202243067"
