@@ -56,7 +56,7 @@ from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 import traceback
 
 # Local imports
-from functions import (
+from ..core.functions import (
     AutophotYaml,
     STATUS,
     log_step,
@@ -70,15 +70,16 @@ from functions import (
     canonical_target_name,
     SUPPORTED_PHOTOMETRIC_FILTERS,
     vizier_query_region,
+    data_path,
 )
-from aperture import Aperture
-from filter_transformations import (
+from ..photometry.aperture import Aperture
+from .filter_transformations import (
     apply_filter_transformations,
     transformable_bands,
     transformations_enabled,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 @contextlib.contextmanager
@@ -148,7 +149,7 @@ def _catalog_plot_style(name):
 
 
 # Photometric system of each catalog's reported magnitudes, keyed on the
-# cleaned column names built from databases/catalog.yml. A plain string
+# cleaned column names built from autophot/data/catalog.yml. A plain string
 # means one system covers every band; a dict resolves per band because
 # the catalog mixes systems (APASS: Johnson BV are Vega, Sloan gri are
 # AB; Gaia synthetic columns: SDSS_Std are AB, JKC_Std are Vega).
@@ -480,7 +481,7 @@ def _draw_score_panel(
         ax.set_visible(False)
         return
 
-    from plotting_utils import get_plot_color
+    from ..core.plotting_utils import get_plot_color
 
     xs = np.arange(len(stats))
     ax.bar(
@@ -595,7 +596,7 @@ def plot_optimized_catalog_coverage(
     if not band_set:
         return None
 
-    from lightcurve import BAND_COLORS
+    from ..analysis.lightcurve import BAND_COLORS
     from matplotlib.colors import is_color_like
     from matplotlib.ticker import MaxNLocator
 
@@ -923,7 +924,7 @@ def plot_optimized_catalog_coverage(
         parents=True, exist_ok=True
     )
     try:
-        from plotting_utils import get_plot_color
+        from ..core.plotting_utils import get_plot_color
 
         fig.savefig(
             outpath,
@@ -2116,15 +2117,15 @@ class Catalog:
         import numpy as np
         import logging
 
-        from autophot_gaia_curves.gaia_archive import (
+        from ..gaia_curves.gaia_archive import (
             gaia_xp_sql_top_n,
             generate_source_ids_batched,
             query_gaia_xp_cone_growing,
             sort_gaia_table_nearest_to_target,
         )
-        from autophot_gaia_curves.builder import _format_gaia_source_id
+        from ..gaia_curves.builder import _format_gaia_source_id
 
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         cat_cfg = self.input_yaml.get("catalog", {}) or {}
         query_pause_b = float(cat_cfg.get("gaia_archive_query_pause_before_sec", 0.25))
         query_pause_a = float(cat_cfg.get("gaia_archive_query_pause_after_sec", 0.25))
@@ -3619,7 +3620,7 @@ class Catalog:
         import numpy as np
         import pandas as pd
 
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         if full_clean:
             logger.info("Cleaning %s sources", len(selectedCatalog))
@@ -3631,15 +3632,13 @@ class Catalog:
                 return None
 
             # --- Load catalog configuration ---
-            filepath = os.path.dirname(os.path.abspath(__file__))
-            catalog_autophot_input_yml = "catalog.yml"
             catalogName = catalogName or self.input_yaml["catalog"]["use_catalog"]
 
             # catalog.yml uses 'panstarrs' while the normalized internal
             # catalog name is 'pan_starrs' - translate for the YAML lookup.
             _yml_name = {"pan_starrs": "panstarrs"}.get(catalogName, catalogName)
             catalog_keywords = AutophotYaml(
-                os.path.join(filepath, "databases", catalog_autophot_input_yml),
+                data_path("catalog.yml"),
                 _yml_name,
             ).load()
 
@@ -3832,13 +3831,7 @@ class Catalog:
                         logger.warning("Could not find column %s in catalog; available columns: %s", col, list(selectedCatalog.columns))
 
             # --- Retrieve all available filters ---
-            baseDatabase = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "databases"
-            )
-            filters_yml = "filters.yml"
-            availableFilters = AutophotYaml(
-                os.path.join(baseDatabase, filters_yml)
-            ).load()
+            availableFilters = AutophotYaml(data_path("filters.yml")).load()
 
             for filter_x in availableFilters["default_dmag"].keys():
                 for col in [filter_x, f"{filter_x}_err"]:
@@ -4116,7 +4109,7 @@ class Catalog:
             # wraps the astropy-modelling Gaussian fit so its cov_x overflow
             # / divide-by-zero warnings are contained and a clean NaN is
             # returned on a degenerate fit instead of poisoning the source.
-            from psf import (
+            from ..photometry.psf import (
                 _centroid_sources_with_error_impl,
                 centroid_2dg_with_error,
                 centroid_com_with_error,
@@ -4618,7 +4611,7 @@ class Catalog:
         """
         cat_cfg = self.input_yaml.get("catalog", {}) or {}
         try:
-            from autophot_gaia_curves.gaia_archive import gaia_cone_count
+            from ..gaia_curves.gaia_archive import gaia_cone_count
 
             region_deg = float(region.get("radius_arcmin", 0.0)) / 60.0
             grown_cap = float(cat_cfg.get("gaia_xp_max_radius_deg", 1.0))
@@ -4649,10 +4642,7 @@ class Catalog:
         cat_cfg = cat_cfg if cat_cfg is not None else (
             self.input_yaml.get("catalog", {}) or {}
         )
-        filepath = os.path.dirname(os.path.abspath(__file__))
-        catalog_db = AutophotYaml(
-            os.path.join(filepath, "databases", "catalog.yml")
-        ).load()
+        catalog_db = AutophotYaml(data_path("catalog.yml")).load()
 
         supported_bands = {}
         skipped = {}
@@ -5934,7 +5924,7 @@ class Catalog:
             catalog_mag_err_linear = clean_catalog[f"{use_filter}_err"].values
 
             # Local import: reuse zeropoint's regressor, avoid duplication.
-            from zeropoint import PenalisedSlopeRegressor
+            from .zeropoint import PenalisedSlopeRegressor
             ConstrainedSlopeRegressor = PenalisedSlopeRegressor
 
             # Fit on the high-S/N subset if available, then apply the model
@@ -6102,7 +6092,7 @@ class Catalog:
                 inlier_mask = np.ones_like(catalog_mag_linear, dtype=bool)
 
             # Plotting
-            from plotting_utils import (
+            from ..core.plotting_utils import (
                 apply_autophot_mplstyle, get_ransac_color, get_marker_size,
                 get_alpha, get_line_width, ransac_grid, ransac_savefig,
                 set_mag_axes_inverted_xy, format_log_colorbar_ticks,
@@ -6842,7 +6832,7 @@ class Catalog:
             side_length = int(np.ceil(np.sqrt(num_stars)))
             ncols = side_length
             nrows = ceil(num_stars / ncols)
-            from plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext
+            from ..core.plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext
             apply_autophot_mplstyle()
             plt.ioff()
             fpath = self.input_yaml["fpath"]
@@ -6887,7 +6877,7 @@ class Catalog:
                     norm=norm,
                     interpolation="none",
                 )
-                from plotting_utils import overlay_mask_hatch
+                from ..core.plotting_utils import overlay_mask_hatch
                 overlay_mask_hatch(ax, ~np.isfinite(np.asarray(stars[i])))
                 ax.text(
                     0.98,
@@ -6960,7 +6950,7 @@ class Catalog:
         pd.DataFrame
             Updated DataFrame with measured flux, instrumental magnitude, and SNR for each source.
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         logger.info(
             log_step(
