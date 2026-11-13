@@ -80,6 +80,12 @@ docs/*.pdf
 *.bib
 !docs/*.tex
 !docs/*.bib
+!docs/autophot_methods.pdf
+docs/*.aux
+docs/*.bbl
+docs/*.blg
+docs/*.out
+docs/*.toc
 
 # Agent session notes
 agents.md
