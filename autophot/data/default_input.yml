@@ -288,7 +288,6 @@ default_input:
     psf_oversample_min_undersampled: 1 # int --- Minimum oversampling factor for undersampled images with >= psf_oversample_hard_min_stars stars. Set to 1 so starved fields can reach the robust osamp=1 regime (every star constrains every grid cell); the former floor of 3 forced 1-3 samples/cell builds whose wings were noise-dominated.
     psf_oversample_hard_min_stars: 5 # int --- Below this star count, oversampling is disabled entirely (too few stars for a reliable oversampled ePSF).
     psf_adaptive_sigma_clip: True # bool --- Adapt sigma clipping parameters based on number of PSF stars (less aggressive with few stars, more aggressive with many).
-    psf_adaptive_smoothing_kernel: False # bool --- DEPRECATED/no-op: previously auto-switched to a Gaussian kernel for undersampled data, but the canonical quartic kernel is optimal in both regimes (Anderson & King 2000 designed it for undersampled WFPC2; a Gaussian's pure low-pass broadens the sharp core an undersampled ePSF must capture). Kept for config compatibility; the smoothing kernel is now always psf_smoothing_kernel with a ~1 px native footprint.
     psf_cutout_ee_fraction: 0.9995 # float --- Encircled-energy fraction of the analytic init PSF core profile used to size the star cutout (radius enclosing this fraction + psf_cutout_ee_margin_fwhm x FWHM sets the diameter). Values outside (0, 1) disable EE sizing and use the formula result.
     psf_cutout_ee_margin_fwhm: 1.0 # float --- Extra margin added to the measured EE radius, in FWHM units (covers near wings not captured by the core profile).
     psf_cutout_size_scale_fwhm: 10.0 # float --- Legacy EPSF star-cutout size in FWHM units; used as the fallback when EE-based sizing fails or is disabled.
@@ -443,7 +442,6 @@ default_input:
 
     search_radius: 0.5 # float --- Search radius (degrees) for blind/assisted WCS solving.
     downsample: 4 # int --- Downsampling factor used for source detection/solving speed-up.
-    code_tolerance: 0.01 # float --- Tolerance for WCS solution acceptance (backend-dependent).
     objs: 1200 # int|null --- Optional target number of objects to use in solve-field.
 
     # --- Input-WCS verification (skip solve-field) ---
@@ -766,7 +764,6 @@ default_input:
     # feedme files and model products are kept under <outdir>/galfit_host/.
     enabled: false # bool --- Master switch for the optional GALFIT host-subtraction stage. Default off: the pipeline is unchanged when the binary is absent.
     galfit_path: null # str|null --- Explicit path to the galfit executable. Null searches PATH, then ~/bin/galfit.
-    engine: galfit # str --- Host-model engine. Only "galfit" is supported.
     fit_radius_fwhm: 10.0 # float --- Radius (FWHM units) around the target for the galfit fit region. The fit runs on a full-frame box of this radius (larger than the pipeline cutout) so the host body is not clipped at the frame edge; only the detected-source component(s) near the target are unmasked, everything else detected stays masked. Should comfortably cover the host plus the measurement annulus.
     n_sersic: 1 # int --- Number of free Sersic components (1-4). Extra components can absorb a bright off-centre nucleus, bulge, or close companion inside the host footprint; seeded at the brightest reopened host pixels at least 2 FWHM apart.
     n_psf: 0 # int --- Number of galfit `psf` (point-source) components (0-3) seeded at the brightest reopened host pixels at least 2 FWHM from the Sersic seeds. Use for unresolved host nuclei or compact neighbours: a Sersic collapses on a point source and crashes galfit, a psf component models it exactly. Requires the PSF stamp (analytic Moffat fallback).
@@ -819,8 +816,6 @@ default_input:
     alignment_min_sources_translation: 3 # int --- Matched sources needed before a residual check counts as translation_verified.
     alignment_min_sources_affine: 6 # int --- Matched sources needed for affine_verified.
     alignment_min_sources_spatial: 20 # int --- Matched sources needed for spatially_verified (spline/high-order warps).
-    alignment_clustered_span_frac: 0.1 # float --- Span (fraction of frame axis) below which matched sources count as clustered rather than distributed.
-    alignment_clustered_quadrant_frac: 0.75 # float --- Fraction of matches in a single quadrant above which the anchors count as clustered.
     alignment_require_post_swarp_verification: True # bool --- Reject common-grid SWarp output when subpixel centroid alignment cannot be measured.
     alignment_verify_independent: False # bool --- If True, run the independent post-alignment verifier (utils/alignment_verification.py: WCS consistency, pixel-grid alignment, coordinate accuracy and resampling quality) on each successful aligned product. Its 0-1 score and quality label are stamped as ALIGSCOR/ALIGLABL and recorded in the alignment report. For WCS-derived products (swarp/reproject/tweakwcs) a "poor"/"failed" score demotes a "pass" alignment to "warn"; for source-matched backends the score is recorded but never downgrades (its WCS checks are not authoritative when the template WCS was not resampled).
     alignment_allow_non_scamp_fallback: False
@@ -1070,7 +1065,6 @@ default_input:
     mesh_scale_max: 10.0 # float --- Maximum background mesh scale (in FWHM units unless otherwise specified).
     mesh_filter_size_mesh_units: 3 # int --- Background smoothing filter size expressed in mesh-cell units.
     global_interpolator: zoom # str --- Deprecated/no-op under photutils>=3, which always resizes the mesh with a cubic spline zoom.
-    global_interp_order: 3 # int --- Deprecated/no-op under photutils>=3 (interpolator order is fixed cubic).
     global_sigma_clip_maxiters: 6 # int --- SigmaClip max iterations per mesh cell (lower = faster; use 10+ if noisy).
     # NOTE: global_mask_edge_flatten is automatically disabled when fast_mode=True unless explicitly set to True.
     global_mask_edge_flatten: True # bool --- If True, damp Background2D interpolation overshoot near masked regions by replacing a thin band around mask edges with a smooth estimate from nearby unmasked pixels.
@@ -1114,7 +1108,6 @@ default_input:
     local_filter_size: null # int|null --- Optional explicit local Background2D filter size (pixels). If null, use computed value (capped by local_filter_size_max).
     local_filter_size_max: 3 # int --- Maximum allowed filter size when adaptively increasing filter size.
     local_interpolator: zoom # str --- Deprecated/no-op under photutils>=3, which always resizes the mesh with a cubic spline zoom.
-    local_interp_order: 1 # int --- Deprecated/no-op under photutils>=3 (interpolator order is fixed cubic).
     local_source_mask_nsigma: 5.0 # float --- Sigma threshold for masking sources during local background estimation.
     local_source_mask_npixels: 7 # int --- Minimum connected pixels for source mask creation.
     local_source_mask_iterations: 2 # int --- Number of mask/estimate iterations for local background.
