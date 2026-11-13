@@ -120,7 +120,7 @@ def test_integrates_into_hardware_defects(result):
     defects_mask, so detections must land there - not just in a
     standalone array.
     """
-    from background import BackgroundSubtractor
+    from autophot.pipeline.background import BackgroundSubtractor
 
     sub = BackgroundSubtractor(
         {
