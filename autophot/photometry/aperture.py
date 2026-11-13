@@ -64,7 +64,7 @@ from astropy.visualization import ImageNormalize, ZScaleInterval
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import (
+from ..core.functions import (
     log_step,
     log_exception,
     log_warning_from_exception,
@@ -468,7 +468,7 @@ def _measure_worker(args):
                 return vals
             except Exception as exc:
                 # Fallback to photutils helper (may include bbox-padding zeros).
-                logging.getLogger(__name__).debug(
+                logging.getLogger(__name__.rsplit(".", 1)[-1]).debug(
                     "ApertureMask.multiply failed; using get_values: %s", exc
                 )
                 return mask_obj.get_values(img2d)
@@ -488,7 +488,7 @@ def _measure_worker(args):
                 # Length mismatch means the get_values fallback path ran
                 # for one frame but not the other; without a log bad
                 # pixels would silently enter the aperture sum.
-                logging.getLogger(__name__).debug(
+                logging.getLogger(__name__.rsplit(".", 1)[-1]).debug(
                     "Source %d: defects-mask/aperture length mismatch (%d vs %d); "
                     "defects mask not applied to the aperture.",
                     i, len(ap_mask_vals), len(ap_pix),
@@ -496,7 +496,7 @@ def _measure_worker(args):
             if len(bkg_mask_vals) == len(bkg_pix):
                 bkg_pix = np.where(bkg_mask_vals > 0, np.nan, bkg_pix)
             else:
-                logging.getLogger(__name__).debug(
+                logging.getLogger(__name__.rsplit(".", 1)[-1]).debug(
                     "Source %d: defects-mask/annulus length mismatch (%d vs %d); "
                     "defects mask not applied to the annulus.",
                     i, len(bkg_mask_vals), len(bkg_pix),
@@ -766,7 +766,7 @@ def _measure_worker(args):
 
     except Exception as exc:
         if verbose >= 2:
-            logging.getLogger(__name__).error(
+            logging.getLogger(__name__.rsplit(".", 1)[-1]).error(
                 f"Error processing source {i}: {exc}", exc_info=True
             )
         return {"idx": i, "fail_reason": str(exc)}
@@ -1102,7 +1102,7 @@ def _optimum_radius_worker(args):
                 if len(apix) >= 10:
                     local_env_std = float(biweight_scale(apix))
         except Exception as exc:
-            logging.getLogger(__name__).debug(
+            logging.getLogger(__name__.rsplit(".", 1)[-1]).debug(
                 "Source %s: local_env_std estimation failed: %s", idx, exc
             )
 
@@ -1183,7 +1183,7 @@ class Aperture:
         -------
         (std_bkg, method_name) : (float, str)
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
         def _percentile_std(data):
             p16, p84 = np.percentile(data, [16, 84])
@@ -1228,7 +1228,7 @@ class Aperture:
         -------
         (bkg_level, std, method_name) or (nan, nan, 'InsufficientData')
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         finite = np.isfinite(bkg_pixels)
         if finite.sum() < 10:
             return np.nan, np.nan, "InsufficientData"
@@ -1314,7 +1314,7 @@ class Aperture:
         :class:`Aperture` (integrated e- in frame, and e-/s, respectively, when
         the pipeline uses ``image * gain`` as in this implementation).
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         if verbose is None:
             verbose = (self.input_yaml or {}).get("global_verbose_level", 1)
         verbose = resolve_verbose_level(verbose)
@@ -1827,9 +1827,9 @@ class Aperture:
         ap_size, annulusIN, annulusOUT, fwhm : aperture/annulus parameters
         error, mask      : optional 2-D arrays matching *image*
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         plt.ioff()
-        from plotting_utils import apply_autophot_mplstyle
+        from ..core.plotting_utils import apply_autophot_mplstyle
         apply_autophot_mplstyle()
 
         fpath = self.input_yaml["fpath"]
@@ -1956,7 +1956,7 @@ class Aperture:
                 zmask = ~np.isfinite(zoom_image)
                 zoom_disp = np.ma.array(zoom_image, mask=zmask)
                 ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="equal")
-                from plotting_utils import overlay_mask_hatch
+                from ..core.plotting_utils import overlay_mask_hatch
                 overlay_mask_hatch(ax_main, zmask)
                 ax_main.set_xlim(0, zoom_image.shape[1])
                 ax_main.set_ylim(0, zoom_image.shape[0])
@@ -1972,7 +1972,7 @@ class Aperture:
                     )
                 continue
 
-            from plotting_utils import overlay_mask_hatch
+            from ..core.plotting_utils import overlay_mask_hatch
 
             norm = ImageNormalize(vmin=vmin_shared, vmax=vmax_shared)
             cmap = plt.get_cmap("viridis").copy()
@@ -2127,7 +2127,7 @@ class Aperture:
                     labelcolor="white",
                 )
 
-        from plotting_utils import get_plot_color, get_plot_ext
+        from ..core.plotting_utils import get_plot_color, get_plot_ext
         save_name = f"Aperture_Target_{base}{get_plot_ext(self.input_yaml)}"
         save_name = os.path.join(write_dir, save_name)
         fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor=get_plot_color("figure_facecolor"))
@@ -2157,9 +2157,9 @@ class Aperture:
         """
         Three-panel diagnostic: main image + right / bottom flux profiles.
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         plt.ioff()
-        from plotting_utils import apply_autophot_mplstyle
+        from ..core.plotting_utils import apply_autophot_mplstyle
         apply_autophot_mplstyle()
 
         fpath = self.input_yaml["fpath"]
@@ -2243,7 +2243,7 @@ class Aperture:
                 cmap=cmap,
                 aspect="equal",
             )
-            from plotting_utils import overlay_mask_hatch
+            from ..core.plotting_utils import overlay_mask_hatch
             overlay_mask_hatch(ax_main, zmask)
             ax_main.set_xlim(0, zoom_image.shape[1])
             ax_main.set_ylim(0, zoom_image.shape[0])
@@ -2274,7 +2274,7 @@ class Aperture:
             )
             target_label = base if index == 0 else f"{base}_{index}"
             label = target_label if saveTarget else index
-            from plotting_utils import get_plot_color, get_plot_ext
+            from ..core.plotting_utils import get_plot_color, get_plot_ext
             _ext = get_plot_ext(self.input_yaml)
             save_name = (
                 f"Aperture_Target_{target_label}{_ext}" if saveTarget
@@ -2285,7 +2285,7 @@ class Aperture:
             plt.close(fig)
             return
 
-        from plotting_utils import overlay_mask_hatch
+        from ..core.plotting_utils import overlay_mask_hatch
 
         norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
         cmap = plt.get_cmap("viridis").copy()
@@ -2449,7 +2449,7 @@ class Aperture:
 
         target_label = base if index == 0 else f"{base}_{index}"
         label = target_label if saveTarget else index
-        from plotting_utils import get_plot_color, get_plot_ext
+        from ..core.plotting_utils import get_plot_color, get_plot_ext
         _ext = get_plot_ext(self.input_yaml)
         save_name = (
             f"Aperture_Target_{target_label}{_ext}" if saveTarget
@@ -2540,7 +2540,7 @@ class Aperture:
         -------
         (filtered_sources, optimum_radius, optimum_scale)
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         phot_cfg = self.input_yaml.get("photometry", {}) or {}
 
         def _cfg(key, default, lo, hi):
@@ -3182,13 +3182,13 @@ class Aperture:
         # ---- Plotting (reuses profiles already in profiles_map) ------------
         if plot:
             # No second Pool - profiles were computed in the analysis pass.
-            from plotting_utils import apply_autophot_mplstyle
+            from ..core.plotting_utils import apply_autophot_mplstyle
             try:
                 apply_autophot_mplstyle()
             except Exception:
                 pass
 
-            from plotting_utils import get_plot_color, get_plot_ext, safe_tight_layout
+            from ..core.plotting_utils import get_plot_color, get_plot_ext, safe_tight_layout
             save_loc = os.path.join(
                 self.input_yaml["write_dir"],
                 f'Optimum_Aperture_{self.input_yaml["base"]}{get_plot_ext(self.input_yaml)}',
@@ -3336,7 +3336,7 @@ class Aperture:
         -------
         (correction, correction_err) : (float, float)  [mag]
         """
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         write_dir = self.input_yaml["write_dir"]
         base_name = self.input_yaml["base"]
 
@@ -3571,7 +3571,7 @@ class Aperture:
 
         if plot:
             plt.ioff()
-            from plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext, safe_tight_layout
+            from ..core.plotting_utils import apply_autophot_mplstyle, get_plot_color, get_plot_ext, safe_tight_layout
             apply_autophot_mplstyle()
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.2))
             try:
