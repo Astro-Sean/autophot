@@ -533,6 +533,7 @@ try:
         AutophotYaml,
         ascii_card,
         ascii_kv,
+        autophot_logo,
         border_msg,
         cap_console_lines,
         ConsoleLevelFilter,
@@ -563,6 +564,7 @@ except Exception as _exc:  # pragma: no cover
             AutophotYaml,
             ascii_card,
             ascii_kv,
+            autophot_logo,
             border_msg,
             cap_console_lines,
             ConsoleLevelFilter,
@@ -592,6 +594,7 @@ except Exception as _exc:  # pragma: no cover
         verbose_to_console_level = verbose_to_log_level  # type: ignore
         ascii_card = None  # type: ignore
         ascii_kv = None  # type: ignore
+        autophot_logo = None  # type: ignore
         ColoredLevelFormatter = None  # type: ignore
         AutophotYaml = None  # type: ignore
         concatenate_csv_files = None  # type: ignore
@@ -1781,7 +1784,10 @@ class AutomatedPhotometry:
         # Common preprocessing defaults used by main.py
         default_input["preprocessing"].setdefault("trim_image", 0)
 
-        _log(border_msg("Configuration"))
+        _log(
+            autophot_logo(title="Configuration") if autophot_logo
+            else border_msg("Configuration")
+        )
         _log(f"Configuration loaded in {time.perf_counter() - t0:.3f} seconds.")
         return default_input
 
@@ -2269,7 +2275,11 @@ class AutomatedPhotometry:
         python_executable = sys.executable
 
         if do_photometry:
-            _log(border_msg("AutoPhOT photometry run") if border_msg else log_step("AutoPhOT photometry run"))
+            _log(
+                autophot_logo(title="photometry run") if autophot_logo
+                else border_msg("AutoPhOT photometry run") if border_msg
+                else log_step("AutoPhOT photometry run")
+            )
             _log("Report any issues at: https://github.com/Astro-Sean/autophot/issues")
 
             # List of available filters (excluding error columns)
