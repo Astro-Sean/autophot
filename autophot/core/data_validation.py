@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-log = logging.getLogger(__name__)
+log = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +245,7 @@ def validate_image(
     # ---- 6. Saturation ----
     if saturate is None and header is not None:
         try:
-            from functions import SATURATE_SENTINEL_MIN
+            from .functions import SATURATE_SENTINEL_MIN
         except ImportError:
             SATURATE_SENTINEL_MIN = 1e8
         for key in ("SATURATE", "SATLEVEL", "MAXLIN"):
