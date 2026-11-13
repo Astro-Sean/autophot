@@ -13,24 +13,24 @@ import pytest
 
 class TestPhotutilsThreadsResolver:
     def test_defaults_serial(self):
-        from functions import photutils_n_threads
+        from autophot.core.functions import photutils_n_threads
 
         assert photutils_n_threads() == 1
         assert photutils_n_threads(None) == 1
         assert photutils_n_threads({}) == 1
 
     def test_reads_input_yaml_shape(self):
-        from functions import photutils_n_threads
+        from autophot.core.functions import photutils_n_threads
 
         assert photutils_n_threads({"photometry": {"photutils_n_threads": 4}}) == 4
 
     def test_reads_phot_cfg_shape(self):
-        from functions import photutils_n_threads
+        from autophot.core.functions import photutils_n_threads
 
         assert photutils_n_threads({"photutils_n_threads": 3}) == 3
 
     def test_invalid_and_nonpositive(self):
-        from functions import photutils_n_threads
+        from autophot.core.functions import photutils_n_threads
 
         assert photutils_n_threads({"photometry": {"photutils_n_threads": "x"}}) == 1
         assert photutils_n_threads({"photometry": {"photutils_n_threads": 0}}) == 1
@@ -39,7 +39,7 @@ class TestPhotutilsThreadsResolver:
     def test_capped_by_cpu_and_constant(self):
         import os
 
-        from functions import _PHOTUTILS_THREADS_CAP, photutils_n_threads
+        from autophot.core.functions import _PHOTUTILS_THREADS_CAP, photutils_n_threads
 
         try:
             n_cpu = len(os.sched_getaffinity(0))
@@ -53,7 +53,7 @@ class TestPhotutilsThreadsResolver:
         # resolver must return 1 rather than warning through photutils.
         import sys
 
-        from functions import psf_photometry_threads
+        from autophot.core.functions import psf_photometry_threads
 
         is_gil = getattr(sys, "_is_gil_enabled", None)
         free_threaded = callable(is_gil) and not is_gil()
@@ -66,7 +66,7 @@ class TestAperturePhotometryMigration:
         # measure() must go through AperturePhotometry (not the deprecated
         # aperture_photometry function) and carry the flags column into
         # the per-source output as ap_flags.
-        import aperture as ap_mod
+        import autophot.photometry.aperture as ap_mod
         from photutils.aperture import AperturePhotometry  # noqa: F401
 
         assert not hasattr(ap_mod, "aperture_photometry") or (
@@ -119,7 +119,7 @@ class TestAperturePhotometryMigration:
 
 class TestMoffatPrfStamp:
     def test_stamp_matches_epsf_conventions(self):
-        from psf import _analytic_moffat_psf, measure_epsf_fwhm_native
+        from autophot.photometry.psf import _analytic_moffat_psf, measure_epsf_fwhm_native
 
         for osamp in (1, 2, 4):
             m = _analytic_moffat_psf(3.5, osamp, 25, 4.765)
@@ -137,7 +137,7 @@ class TestMoffatPrfStamp:
         # pixel-integrated) PSF, so the stamp must point-sample the
         # continuous Moffat: a second pixel integration used to widen
         # the stamp ~10% past the requested FWHM.
-        import psf as psf_mod
+        import autophot.photometry.psf as psf_mod
 
         fwhm, osamp, n, beta = 3.5, 4, 25, 4.765
         m = psf_mod._analytic_moffat_psf(fwhm, osamp, n, beta)
@@ -155,7 +155,7 @@ class TestMoffatPrfStamp:
         # Same effective-PSF convention as the psf.py stamps: the
         # injection helper evaluates the continuous Moffat at the grid
         # positions rather than convolving with the pixel response.
-        limits = pytest.importorskip("limits")
+        limits = pytest.importorskip("autophot.analysis.limits")
 
         fwhm, osamp, beta = 3.5, 4, 4.765
         m = limits._analytic_psf_for_injection(fwhm, oversampling=osamp)
@@ -177,7 +177,8 @@ class TestMoffatPrfStamp:
         import inspect
         import re
 
-        import functions, fwhm
+        from autophot.core import functions
+        from autophot.pipeline import fwhm
 
         for mod in (functions, fwhm):
             src = inspect.getsource(mod)
@@ -199,7 +200,7 @@ class TestSegmentationFlags:
         # SourceCatalog.flags is new in 3.1; compute_target_crowding must
         # forward it onto each neighbour dict so downstream QC can tell
         # a deblended/edge sibling from a clean one.
-        from functions import compute_target_crowding
+        from autophot.core.functions import compute_target_crowding
 
         rng = np.random.RandomState(1)
         img = rng.normal(50.0, 3.0, (61, 61))
