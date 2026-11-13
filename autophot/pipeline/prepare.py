@@ -688,7 +688,10 @@ class Prepare:
             available_filters = []
 
             for f in catalog_input.keys():
-                if f in custom_table.columns:
+                if (
+                    f in custom_table.columns
+                    and normalize_photometric_filter_name(f) is not None
+                ):
                     available_filters.append(f)
 
             for col in custom_table.columns:
