@@ -7383,16 +7383,16 @@ class Templates:
             ):
                 while True:
                     rel = Path(cur).relative_to(fits_root)
-                    for base in (out_root / rel, cur):
-                        cand = base / "templates"
+                    for base, name in ((out_root / rel, "ready_templates"), (cur, "templates")):
+                        cand = base / name
                         if cand.is_dir() and cand not in roots:
                             roots.append(cand)
                     if cur == fits_root:
                         break
                     cur = cur.parent
 
-        for base in (out_root, fits_root):
-            default_root = base / "templates"
+        for base, name in ((out_root, "ready_templates"), (fits_root, "templates")):
+            default_root = base / name
             if default_root not in roots:
                 roots.append(default_root)
         return roots
