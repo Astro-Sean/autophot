@@ -252,16 +252,16 @@ def get_divergent_color(color_name):
 def autophot_mplstyle_path():
     """Path to ``autophot.mplstyle``, or None when it is not installed.
 
-    The style sheet ships inside the ``databases`` package so it survives
+    The style sheet ships inside ``autophot.data`` so it survives
     both editable and regular installs; the module-adjacent lookup covers
-    checkouts where the file still sits at the repository root.
+    checkouts where the file still sits next to this module.
     """
     import os
 
     try:
         from importlib import resources
 
-        p = resources.files("databases").joinpath("autophot.mplstyle")
+        p = resources.files("autophot.data").joinpath("autophot.mplstyle")
         if p.is_file():
             return str(p)
     except Exception:
