@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 # Separation (arcsec) below which two targets are considered the same.
 DEDUP_SEP_ARCSEC = 3.0
@@ -71,7 +71,7 @@ def _resolve_one_name(
             # Build a temporary config with this name so check_tns caches
             # under the correct filename.  check_tns skips the TNS query when
             # target_ra/target_dec are already set, so we must NOT copy those.
-            from prepare import Prepare
+            from ..pipeline.prepare import Prepare
             tmp_yaml = dict(input_yaml)
             tmp_yaml["target_name"] = name
             tmp_yaml.pop("target_ra", None)
@@ -96,7 +96,7 @@ def _resolve_one_name(
 
     # --- SIMBAD fallback -------------------------------------------------
     try:
-        from tns import get_coords_simbad
+        from .tns import get_coords_simbad
         simbad_data = get_coords_simbad(name)
         if simbad_data and simbad_data.get("radeg") is not None:
             ra = _safe_float(simbad_data["radeg"])
