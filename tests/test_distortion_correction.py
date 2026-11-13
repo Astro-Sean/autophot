@@ -292,8 +292,9 @@ class TestSexBinaryResolution:
     def test_prefers_highest_version_binary(self, tmp_path):
         idc = _make_idc(tmp_path)
         idc._executables.clear()
-        with mock.patch(
-            "utils.run_sex.get_sextractor_executable",
+        with mock.patch.object(
+            run_sex,
+            "get_sextractor_executable",
             return_value="/opt/astro/bin/sex",
         ):
             assert idc._check_executable("sex") == "/opt/astro/bin/sex"
