@@ -1,0 +1,42 @@
+2022mop:
+  class_ads_bibcodes: 2025TNSCR..54....1S
+  dec: '-02:56:33.90'
+  decdeg: -2.94275
+  decdeg_err: 0
+  discmagfilter:
+    family: P1
+    id: '26'
+    name: w
+  discoverer: K. C. Chambers, T. de Boer, J. Bulger, J. Fairlamb, M. Huber, C.-C.
+    Lin, T. Lowe, E. Magnier, A. Schultz, R. J. Wainscoat, M. Willman (IfA, University
+    of Hawaii), K. W. Smith, D. R. Young, O. McBrien, J. Gillanders, S. Srivastav,
+    M. Fulton, S. J. Smartt, D. O'Neill, P. Clark, S. Sim (Queen's University Belfast),
+    D. E. Wright (University of Minnesota)
+  discoverer_internal_name: PS22fhf
+  discovery_ads_bibcode: 2022TNSTR1650....1C
+  discovery_data_source:
+    group_name: Pan-STARRS
+    groupid: 4
+  discoverydate: '2022-06-11 13:59:06.144'
+  discoverymag: 20.45
+  end_prop_period: null
+  host_redshift: null
+  hostname: null
+  internal_names: PS22fhf,ZTF22aanyxmg,ATLAS24saw,,Gaia25aaf,GOTO25gj
+  name_prefix: SN
+  object_type:
+    id: 13
+    name: SN IIn
+  objid: 110517
+  objname: 2022mop
+  public: 1
+  ra: '23:30:51.220'
+  radeg: 352.713417
+  radeg_err: 0
+  redshift: 0.017219
+  reporter: PS2_Bot1
+  reporterid: 67899
+  reporting_group:
+    group_name: Pan-STARRS
+    groupid: 4
+  source: bot
