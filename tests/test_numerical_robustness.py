@@ -9,8 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from additional_targets import _angular_sep_arcsec
-from utils.mcmc_diagnostics import (
+from autophot.services.additional_targets import _angular_sep_arcsec
+from autophot.analysis.mcmc_diagnostics import (
     assess_convergence,
     MCMC_FLAG_NAN_DIAG,
 )
@@ -107,7 +107,7 @@ class TestApertureWorkerNoise:
         return args
 
     def test_annulus_noise_term_present(self):
-        from aperture import _measure_worker
+        from autophot.photometry.aperture import _measure_worker
 
         rng = np.random.RandomState(7)
         img = rng.normal(100.0, 10.0, (120, 120))
@@ -126,7 +126,7 @@ class TestApertureWorkerNoise:
         assert res["flux_AP_err"] > 1.2 * fallback
 
     def test_quantized_annulus_uses_biweight_fallback(self):
-        from aperture import _measure_worker
+        from autophot.photometry.aperture import _measure_worker
 
         rng = np.random.RandomState(11)
         # sigma=0.4 ADU quantized to integers: >50% of annulus pixels
