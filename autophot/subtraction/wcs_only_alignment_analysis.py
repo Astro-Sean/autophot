@@ -11,13 +11,13 @@ from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 class AlignmentMethodAnalyzer:
     """Analyze whether WCS-only alignment can replace resampling for specific use cases."""
     
     def __init__(self):
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         
     def analyze_alignment_requirements(self, sci_image_path: str, ref_image_path: str) -> dict:
         """
