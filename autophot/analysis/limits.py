@@ -4552,6 +4552,30 @@ class Limits:
                         transform=ax.get_yaxis_transform(), va="bottom",
                         ha="right", color="0.5")
 
+            # When every injection site was vetoed upstream, none of the data
+            # sources below have entries and the panel would save blank.
+            _drew_data = mags_sorted is not None and len(mags_sorted) > 0
+            if multi_snr_details is not None and len(multi_snr_details) > 1:
+                _drew_data = _drew_data or any(
+                    d.get("bracket_steps") or d.get("bisect_steps")
+                    for d in multi_snr_details
+                )
+            else:
+                _drew_data = (
+                    _drew_data or bool(bracket_steps) or bool(bisect_steps)
+                )
+            if not _drew_data:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "No valid injection sites - no recovery data",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="0.45",
+                )
+
             ax.set_xlabel("Injected Instrumental Magnitude [mag]", fontsize=9)
             ax.set_ylabel("Recovery fraction [%]", fontsize=9)
             
@@ -4579,17 +4603,18 @@ class Limits:
             # so that with ncol=3 column-major filling, each column holds one
             # role and each row one S/N threshold.
             _hh, _ll = ax.get_legend_handles_labels()
-            _role = {"Bracket": 0, "Bisection": 1, "m50": 2, "Adopted": 2}
-            _order = sorted(
-                range(len(_ll)),
-                key=lambda i: _role.get(_ll[i].split(" ")[0], 3),
-            )
-            ax.legend(
-                [_hh[i] for i in _order], [_ll[i] for i in _order],
-                loc="lower left",
-                fontsize=8, frameon=False, ncol=3,
-                handlelength=1.5, columnspacing=1.0,
-            )
+            if _ll:
+                _role = {"Bracket": 0, "Bisection": 1, "m50": 2, "Adopted": 2}
+                _order = sorted(
+                    range(len(_ll)),
+                    key=lambda i: _role.get(_ll[i].split(" ")[0], 3),
+                )
+                ax.legend(
+                    [_hh[i] for i in _order], [_ll[i] for i in _order],
+                    loc="lower left",
+                    fontsize=8, frameon=False, ncol=3,
+                    handlelength=1.5, columnspacing=1.0,
+                )
         
         # Injection cutout panels below the main plot, if data are available.
         if epsf_model is not None and cutout is not None and position is not None and \
