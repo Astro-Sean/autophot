@@ -142,10 +142,10 @@ ESO-NTT:
       r784: r
       z623: z
       i705: i
-      'g#782': g
-      'r#784': r
-      'z#623': z
-      'i#705': i
+      g#782: g
+      r#784: r
+      z#623: z
+      i#705: i
     SOFI:
       Name: ESO-NTT+SOFI
       pixel_scale: 0.292
