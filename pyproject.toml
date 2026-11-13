@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autophot"
-version = "1.4.6"
+version = "1.5.0"
 description = "AutoPHOT object photometry pipeline (CCD/NIR; calibrated aperture/PSF photometry; template subtraction)."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -77,10 +77,12 @@ Issues = "https://github.com/Astro-Sean/autophot/issues"
 Publication = "https://ui.adsabs.harvard.edu/abs/2022A&A...667A..62B"
 
 [project.scripts]
-autophot-main = "main:run_photometry"
-autophot-driver = "autophot:main"
-autophot-gaia-curves = "autophot_gaia_curves.cli:main"
-autophot-inspect-telescope = "inspect_telescope:main"
+autophot = "autophot.cli:main"
+autophot-main = "autophot.pipeline.main:run_photometry"
+autophot-driver = "autophot.driver:main"
+autophot-batch = "autophot.batch_main:main"
+autophot-gaia-curves = "autophot.gaia_curves.cli:main"
+autophot-inspect-telescope = "autophot.pipeline.telescope:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -100,39 +102,10 @@ filterwarnings = [
 
 [tool.setuptools]
 include-package-data = true
-py-modules = [
-  "additional_targets",
-  "aperture",
-  "autophot",
-  "background",
-  "batch_main",
-  "catalog",
-  "check",
-  "color_correction",
-  "cosmic",
-  "differential_photometry",
-  "filter_transformations",
-  "functions",
-  "inspect_telescope",
-  "fwhm",
-  "lightcurve",
-  "limits",
-  "main",
-  "mask",
-  "plot",
-  "plotting_utils",
-  "prepare",
-  "psf",
-  "templates",
-  "tns",
-  "wcs",
-  "zeropoint",
-]
 
 [tool.setuptools.packages.find]
-include = ["utils*", "databases*", "autophot_gaia_curves*"]
+include = ["autophot*"]
 
 [tool.setuptools.package-data]
-databases = ["*.yml", "*.mplstyle", "extinction/*.txt"]
-utils = ["*.py"]
+"autophot.data" = ["*.yml", "*.mplstyle", "extinction/*.txt"]
 
