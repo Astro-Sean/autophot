@@ -109,6 +109,7 @@ run_autophot_VIPER.py
 
 # Build artifacts
 dist/
-.github/
+.github/*
+!.github/workflows/
 conda/
 build/
