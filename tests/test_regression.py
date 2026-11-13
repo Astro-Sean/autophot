@@ -31,12 +31,12 @@ from tests.synthetic.images import (
 from tests.synthetic.catalogs import make_isolated_catalog
 from tests.synthetic.psf_models import gaussian_psf_2d, fwhm_to_sigma
 
-from utils.data_validation import validate_image, VAL_OK, VAL_NON_FINITE, VAL_SATURATED_PIXELS
-from utils.quality_flags import QualityFlag, from_snr, from_chi2
-from utils.psf_validation import validate_psf_loo, PSF_VAL_OK
-from utils.uncertainty_calibration import calibrate_uncertainties
-from utils.mcmc_diagnostics import assess_convergence, MCMC_FLAG_OK
-from utils.injection_catalog import InjectionCatalog
+from autophot.core.data_validation import validate_image, VAL_OK, VAL_NON_FINITE, VAL_SATURATED_PIXELS
+from autophot.core.quality_flags import QualityFlag, from_snr, from_chi2
+from autophot.analysis.psf_validation import validate_psf_loo, PSF_VAL_OK
+from autophot.analysis.uncertainty_calibration import calibrate_uncertainties
+from autophot.analysis.mcmc_diagnostics import assess_convergence, MCMC_FLAG_OK
+from autophot.analysis.injection_catalog import InjectionCatalog
 
 
 # ---------------------------------------------------------------------------
