@@ -3,7 +3,7 @@ input-file deduplication."""
 
 import pytest
 
-from prepare import Prepare, _dedupe_identical_files
+from autophot.pipeline.prepare import Prepare, _dedupe_identical_files
 
 
 def _prep(**overrides):
