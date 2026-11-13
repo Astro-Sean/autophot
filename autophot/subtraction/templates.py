@@ -7364,6 +7364,13 @@ class Templates:
         except Exception:
             fits_root = Path("")
 
+        # find_templates stages each discovered template into the output
+        # tree (<fits_dir>_<outdir_name>/...) as ready_template.fits so the
+        # input folders stay read-only.  Mirror the ancestry walk there and
+        # prefer the staged copy over the input original.
+        outdir_name = str(self.input_yaml.get("outdir_name") or "REDUCED")
+        out_root = fits_root.parent / f"{fits_root.name}_{outdir_name}"
+
         roots: List[Path] = []
         science_dir = self.input_yaml.get("science_dir")
         if science_dir:
@@ -7375,16 +7382,19 @@ class Templates:
                 cur == fits_root or fits_root in cur.parents
             ):
                 while True:
-                    cand = cur / "templates"
-                    if cand.is_dir() and cand not in roots:
-                        roots.append(cand)
+                    rel = Path(cur).relative_to(fits_root)
+                    for base in (out_root / rel, cur):
+                        cand = base / "templates"
+                        if cand.is_dir() and cand not in roots:
+                            roots.append(cand)
                     if cur == fits_root:
                         break
                     cur = cur.parent
 
-        default_root = fits_root / "templates"
-        if default_root not in roots:
-            roots.append(default_root)
+        for base in (out_root, fits_root):
+            default_root = base / "templates"
+            if default_root not in roots:
+                roots.append(default_root)
         return roots
 
     def get_template(self) -> Optional[str]:
@@ -7443,10 +7453,13 @@ class Templates:
                 continue
             
             # Prefer exact <f>_template.fits / <f>p_template.fits names over
-            # arbitrary .fits files sitting in the folder.
+            # arbitrary .fits files sitting in the folder; ready_template.fits
+            # is the staged input copy - preferred over processing products
+            # when no band-named output exists yet.
             preferred_names = [f"{use_filter}_template.fits"]
             if use_filter in {"u", "g", "r", "i", "z"}:
                 preferred_names.append(f"{use_filter}p_template.fits")
+            preferred_names.append("ready_template.fits")
             
             preferred_candidate = None
             for pref_name in preferred_names:
