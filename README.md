@@ -19,7 +19,7 @@
 
 AutoPhOT is a photometry pipeline for transients and variable sources, built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/). Feed it FITS images from any telescope, filter, or pixel scale and it will find your target in each frame, do the photometry, calibrate it against survey catalogs, and hand you one clean light curve.
 
-It has been used in <!-- citation-count -->84<!-- /citation-count --> papers so far (updated: <!-- citation-date -->11-11-2026<!-- /citation-date -->) - [see them on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc).
+It has been used in <!-- citation-count -->84<!-- /citation-count --> papers so far (updated: <!-- citation-date -->13-11-2026<!-- /citation-date -->) - [see them on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc).
 
 > [!NOTE]
 > AutoPhOT is developed and maintained by one person only. If you hit a problem, please open an issue on GitHub and I will get to it as soon as I can.
@@ -93,7 +93,7 @@ A few things worth knowing up front:
 - `from autophot import list_parameters; list_parameters()` prints every config key and its default.
 - FITS headers must carry `TELESCOP`, `INSTRUME`, and a bandpass keyword (e.g. `FILTER`); images without them are skipped.
 - `config["nCPU"] = 4` (or `AUTOPHOT_NCPU=4`, which takes precedence) processes images in parallel, each with its own log. Worker settings like `photometry.aperture_n_jobs` multiply `nCPU`, so keep the product at or below your core count. `nGPU` / `AUTOPHOT_NGPU` pins workers to GPUs round-robin.
-- `python batch_main.py -f im1.fits im2.fits -c config.yml --jobs 4` runs a file list without a driver script.
+- `python -m autophot.batch_main -f im1.fits im2.fits -c config.yml --jobs 4` (or `autophot-batch`) runs a file list without a driver script.
 
 <h2 align="center">Folder layout</h2>
 
@@ -165,10 +165,24 @@ photometry/
 
 | Command | Purpose |
 |---------|---------|
+| `autophot <sub>` | Unified CLI: `run`, `driver`, `batch`, `inspect-telescope`, `gaia-curves` |
 | `autophot-main` | Run the full photometry pipeline |
 | `autophot-driver` | Interactive driver with template setup |
+| `autophot-batch` | Batch driver over many images |
 | `autophot-gaia-curves` | Build a Gaia custom catalog from transmission curves |
 | `autophot-inspect-telescope` | Inspect telescope header keywords |
+
+<h2 align="center">Repository layout</h2>
+
+All pipeline code lives in the `autophot/` package: `pipeline/` (prepare,
+wcs, background, cosmic, fwhm, mask, telescope, main), `photometry/`
+(aperture, psf, differential, galfit_host), `calibration/` (catalog,
+zeropoint, color_correction, filter_transformations), `subtraction/`
+(templates, run_sfft, run_sex, run_IDC), `analysis/` (lightcurve, limits,
+plot, QA helpers), `services/` (tns, additional_targets, download_legacy),
+`core/` (functions, plotting_utils), `data/` (YAML configs + extinction),
+`gaia_curves/` (Gaia XP catalogs). Import from `autophot.<sub>.<module>`,
+e.g. `from autophot.analysis.lightcurve import plot_lightcurve`.
 
 <h2 align="center">Optional dependencies</h2>
 
@@ -213,7 +227,7 @@ Shared options under `template_subtraction`:
 
 Sources on masked pixels are dropped before the kernel fit, and variable sources and the target itself are excluded from scale and PSF estimation. Residual dipoles at bright static cores are caught by `residual_artifact_mask` (on by default): they are masked only when a subpixel misregistration model explains the paired positive/negative lobes, and protected positions (the target plus any variable or additional targets) are never masked. Every alignment attempt is recorded in an `Alignment_<base>.json` manifest next to the science image.
 
-Set `do_subtraction: True`, then place one template FITS per filter in `fits_dir/templates/<filter>_template/` (see Folder layout above for the full tree, including per-dataset `templates/` folders): `prepare_template_directory()` builds the layout for you, and `download_panstarrs_template()`, `download_sdss_template()`, `download_legacy_template()`, and `download_2mass_template()` in `templates.py` can fetch them for you.
+Set `do_subtraction: True`, then place one template FITS per filter in `fits_dir/templates/<filter>_template/` (see Folder layout above for the full tree, including per-dataset `templates/` folders): `prepare_template_directory()` builds the layout for you, and `download_panstarrs_template()`, `download_sdss_template()`, `download_legacy_template()`, and `download_2mass_template()` in `autophot.subtraction.templates` can fetch them for you.
 
 <h2 align="center">Photometry</h2>
 
@@ -298,10 +312,10 @@ Limiting magnitudes are measured by injecting artificial sources and checking re
 <h2 align="center">Post-processing</h2>
 
 ```python
-from lightcurve import (
+from autophot.analysis.lightcurve import (
     plot_lightcurve, generate_photometry_table, check_detection_plots,
 )
-from differential_photometry import differential_photometry
+from autophot.photometry.differential_photometry import differential_photometry
 
 plot_lightcurve(output_file, snr_limit=3, method="PSF")      # detections + limits
 differential_photometry(output_file, method="PSF")           # target vs reference ensemble
