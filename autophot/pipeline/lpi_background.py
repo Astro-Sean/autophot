@@ -14,7 +14,7 @@ import logging
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 def _extract_stamp_reflect(image: np.ndarray, x0: float, y0: float, half: int) -> np.ndarray:
@@ -160,7 +160,7 @@ def save_lpi_diagnostic_plot(
     """
     import matplotlib.pyplot as plt
 
-    from plotting_utils import apply_autophot_mplstyle, get_plot_color
+    from ..core.plotting_utils import apply_autophot_mplstyle, get_plot_color
 
     apply_autophot_mplstyle()
 
