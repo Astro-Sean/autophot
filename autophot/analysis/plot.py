@@ -8,12 +8,10 @@ import logging
 import os
 import sys
 
-logger = logging.getLogger(__name__)
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 try:
-    from plotting_utils import (
+    from ..core.plotting_utils import (
         apply_autophot_mplstyle,
         get_divergent_color,
         get_marker_size,
@@ -39,7 +37,7 @@ except ImportError:
     PLOT_COLORS = {}
 
 try:
-    from lightcurve import (
+    from .lightcurve import (
         _normalize_photometry_columns,
         _time_axis_transform,
         BAND_COLORS,
@@ -264,7 +262,7 @@ class Plot:
             transient positions to mark and keep inside the target inset.
         """
         import matplotlib.pyplot as plt
-        from functions import set_size
+        from ..core.functions import set_size
         from matplotlib.collections import LineCollection, PatchCollection
         from matplotlib.gridspec import GridSpec
         from mpl_toolkits.axes_grid1.inset_locator import inset_axes
@@ -1107,7 +1105,7 @@ class Plot:
         try:
             import matplotlib.pyplot as plt
             import numpy as np
-            from functions import set_size
+            from ..core.functions import set_size
             from astropy.visualization import (
                 ImageNormalize,
                 LinearStretch,
@@ -1691,7 +1689,7 @@ class Plot:
         import numpy as np
         import pandas as pd
         import matplotlib.pyplot as plt
-        from functions import set_size
+        from ..core.functions import set_size
 
         # Use the shared per-band palette from lightcurve.py (BAND_COLORS).
         # If BAND_COLORS is unavailable, fall back to a minimal built-in dict.
@@ -1799,7 +1797,7 @@ class Plot:
             loop_bands = list(bandlist)
 
         if redshift != 0:
-            from functions import get_distance_modulus
+            from ..core.functions import get_distance_modulus
 
             dm = get_distance_modulus(redshift)
         else:
@@ -2102,7 +2100,7 @@ class Plot:
         imageWCS (astropy.wcs.WCS, optional): WCS object for logging.
         """
         import matplotlib.pyplot as plt
-        from functions import set_size
+        from ..core.functions import set_size
         import numpy as np
         import pandas as pd
 
@@ -2428,7 +2426,7 @@ class Plot:
             Maximum sky separation for cross-matching (default 2 arcsec).
         """
         import matplotlib.pyplot as plt
-        from functions import set_size
+        from ..core.functions import set_size
         import numpy as np
         from astropy.io import fits
         from astropy.wcs import WCS
@@ -2448,7 +2446,7 @@ class Plot:
             # SExtractor is used consistently across the entire pipeline for
             # source detection, avoiding centroiding systematics between
             # different detectors.
-            from templates import _detect_sextractor_sources
+            from ..subtraction.templates import _detect_sextractor_sources
 
             fwhm_pix = float(self.input_yaml.get("fwhm", 3.0))
 
