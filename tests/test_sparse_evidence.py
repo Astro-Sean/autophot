@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from templates import _alignment_verification_tier, _classify_alignment_quality
+from autophot.subtraction.templates import _alignment_verification_tier, _classify_alignment_quality
 
 
 def _quad(n=10, coverage_ok=True, quadrants=4, coherent=False):
