@@ -40,6 +40,20 @@ the per-image Output_*.csv) and writes
 <reduced_dir>/LightCurve_Output_colorcorrected.csv.
 """
 
+if __package__ in (None, ""):
+    # Support "python <path>" execution: expose the repo root and
+    # anchor the package so relative imports resolve.
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(
+        0,
+        _os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        ),
+    )
+    __package__ = "autophot.calibration"
+
 import argparse
 import glob
 import logging
@@ -48,14 +62,14 @@ import os
 import numpy as np
 import pandas as pd
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 METHODS = ("psf", "ap")
 
 
 def _color_index_for_filter(filter_name):
     """Return (f1, f2) for the color index of *filter_name*, or None."""
-    from zeropoint import Zeropoint
+    from .zeropoint import Zeropoint
 
     try:
         return Zeropoint({"imageFilter": filter_name}).get_color_term_for_filter(
@@ -101,7 +115,7 @@ def _measure_term_for_dir(image_dir, use_filter, calib_path=None):
     Re-runs the gated fit_color_term on the image's Calib catalog, so
     the same acceptance rules apply as in the pipeline.
     """
-    from zeropoint import Zeropoint
+    from .zeropoint import Zeropoint
 
     if calib_path is None:
         cands = sorted(glob.glob(os.path.join(image_dir, "Calib_*.csv")))
@@ -369,7 +383,7 @@ def correct_lightcurve(
 
 
 def _print_summary(df):
-    from functions import ascii_table
+    from ..core.functions import ascii_table
 
     rows = []
     for m in METHODS:
@@ -420,7 +434,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    from functions import cap_console_lines
+    from ..core.functions import cap_console_lines
     cap_console_lines(logging.getLogger().handlers, prefix_fmt="{levelname} ")
 
     if os.path.isdir(args.path):
@@ -440,7 +454,7 @@ def main(argv=None):
             if not outs:
                 logger.error("No Output_*.csv under %s", reduced_dir)
                 return 1
-            from functions import read_output_csv
+            from ..core.functions import read_output_csv
             df = pd.concat(
                 [read_output_csv(f, comment="#") for f in outs],
                 ignore_index=True,
