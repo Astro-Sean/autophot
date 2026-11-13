@@ -5,6 +5,20 @@ Combines primary and extension headers when two are present, then fills
 TELESCOP, INSTRUME, FILTER, EXPTIME, GAIN, RDNOISE, OBSMJD from existing keywords.
 """
 
+if __package__ in (None, ""):
+    # Support "python <path>" execution: expose the repo root and
+    # anchor the package so relative imports resolve.
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(
+        0,
+        _os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        ),
+    )
+    __package__ = "autophot.subtraction"
+
 import sys
 from pathlib import Path
 
@@ -238,7 +252,7 @@ def main(root, recursive=False):
                         combined.remove(_k)
 
                 tmp_path = f.with_suffix(f.suffix + ".tmp")
-                from functions import safe_fits_write
+                from ..core.functions import safe_fits_write
                 safe_fits_write(str(tmp_path), primary_data, combined, output_verify="ignore")
             tmp_path.replace(f)
             print(f"  [OK]    {f.name}")
