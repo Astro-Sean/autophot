@@ -51,15 +51,15 @@ from scipy.ndimage import median_filter
 from matplotlib.gridspec import GridSpec
 from matplotlib.ticker import MaxNLocator
 
-from functions import set_size, border_msg
-from plotting_utils import (
+from ..core.functions import set_size, border_msg
+from ..core.plotting_utils import (
     apply_autophot_mplstyle,
     get_marker_size,
     get_plot_color,
     interactive_display_allowed,
 )
 
-from lightcurve import (
+from ..analysis.lightcurve import (
     BAND_COLORS,
     _filter_series_matches_band,
     _nearest_epoch,
@@ -646,7 +646,7 @@ def differential_photometry(
     str or None
         Path to the saved figure, or None when insufficient data.
     """
-    log = logging.getLogger(__name__)
+    log = logging.getLogger(__name__.rsplit(".", 1)[-1])
     log.info(border_msg("Differential photometry"))
     apply_autophot_mplstyle()
     if show and interactive_display_allowed():
