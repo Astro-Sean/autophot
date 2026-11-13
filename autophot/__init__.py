@@ -17,12 +17,32 @@ __all__ = [
     "prepare_template_directory",
 ]
 
-try:
-    from importlib.metadata import version as _pkg_version
+def _resolve_version() -> str:
+    # The pyproject.toml beside the code wins over install metadata:
+    # editable installs and PYTHONPATH runs keep __file__ in the source
+    # tree, where the checkout's declared version is newer than any
+    # install-time snapshot.
+    try:
+        import re
+        from pathlib import Path
 
-    __version__ = _pkg_version("autophot")
-except Exception:
-    __version__ = "0.0.0"
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        m = re.search(
+            r'^\s*version\s*=\s*"([^"]+)"', pyproject.read_text(), re.M
+        )
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        return _pkg_version("autophot")
+    except Exception:
+        return "0.0.0"
+
+
+__version__ = _resolve_version()
 
 
 def __getattr__(name: str):
