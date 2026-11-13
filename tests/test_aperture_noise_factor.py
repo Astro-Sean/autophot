@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
 
-from aperture import _empirical_noise_factor
+from autophot.photometry.aperture import _empirical_noise_factor
 
 
 NY = NX = 400
