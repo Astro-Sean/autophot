@@ -2670,30 +2670,22 @@ class AutomatedPhotometry:
                         combined_checked = prepare_db.check_files(
                             flist=combined, template_files=True
                         )
-                        # Any file under a `templates` dir is a template,
-                        # wherever that dir sits below fits_dir.  Roots
-                        # are re-scanned here rather than reusing the
-                        # download-guard list, which may predate newly
-                        # downloaded template folders.
-                        from .pipeline.prepare import template_roots_under
+                        # A `templates` path segment marks a template.  The
+                        # location is not fixed: find_templates returns
+                        # staged copies under the output tree while
+                        # downloaded templates stay under fits_dir.
+                        _tpl_segment = os.sep + "templates" + os.sep
 
-                        _tpl_prefixes = tuple(
-                            os.path.normpath(r) + os.sep
-                            for r in template_roots_under(
-                                default_input["fits_dir"]
+                        def _is_template(f):
+                            return _tpl_segment in (
+                                os.path.normpath(f) + os.sep
                             )
-                        )
+
                         file_list = [
-                            f
-                            for f in combined_checked
-                            if not os.path.normpath(f).startswith(
-                                _tpl_prefixes
-                            )
+                            f for f in combined_checked if not _is_template(f)
                         ]
                         template_file_list = [
-                            f
-                            for f in combined_checked
-                            if os.path.normpath(f).startswith(_tpl_prefixes)
+                            f for f in combined_checked if _is_template(f)
                         ]
 
                 # Prepare output directory and save input snapshot
