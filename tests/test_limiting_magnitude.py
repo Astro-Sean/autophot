@@ -751,24 +751,12 @@ class TestCompletenessPlotLayout:
     def test_no_figure_level_legend(self, tmp_path, monkeypatch):
         pytest.importorskip("photutils")
         import matplotlib.figure
-        import pandas as pd
 
         cfg = _lim_cfg(
             fpath=str(tmp_path / "x.fits"),
             write_dir=str(tmp_path),
         )
         lim = Limits(cfg)
-        epsf = _analytic_psf_for_injection(5.0, oversampling=1)
-        cutout = _noise_image(shape=(160, 160))
-        # Six injection sites on a 50 px ring around the (80, 80)
-        # target - inside bounds and beyond the 21 px min separation.
-        thetas = np.linspace(0, 2 * np.pi, 6, endpoint=False)
-        inj = pd.DataFrame(
-            {
-                "x_pix": 80.0 + 50.0 * np.cos(thetas),
-                "y_pix": 80.0 + 50.0 * np.sin(thetas),
-            }
-        )
         bracket = [
             (-4.0, 1.0, 10.0, 1.0),
             (-3.0, 0.9, 10.0, 1.0),
@@ -794,14 +782,8 @@ class TestCompletenessPlotLayout:
             -2.0,
             0.5,
             3.0,
-            None,
             "PSF",
-            epsf_model=epsf,
-            cutout=cutout,
             position=(80.0, 80.0),
-            background_rms=np.full((160, 160), 20.0),
-            flux_for_mag=lambda m: 10.0 ** (-0.4 * float(m)),
-            injection_df=inj,
         )
         assert saved, "completeness figure was never saved"
         fig = saved[0]
@@ -816,7 +798,7 @@ class TestCompletenessPlotLayout:
             if leg is not None
             for lbl in [t.get_text() for t in leg.get_texts()]
         ]
-        assert "Injection site" in labels
+        assert "Bracket search" in labels
 
 
 class TestLogisticEmceeGuards:
