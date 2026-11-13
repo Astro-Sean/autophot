@@ -10,12 +10,26 @@ Builds telescope.yml database with user interaction.
 Supports keyword aliases (DATE-OBS, FILTERS, etc.) and fuzzy matching.
 """
 
+if __package__ in (None, ""):
+    # Support "python <path>" execution: expose the repo root and
+    # anchor the package so relative imports resolve.
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(
+        0,
+        _os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        ),
+    )
+    __package__ = "autophot.pipeline"
+
 import os
 import sys
 import re
 import yaml
 import logging
-from functions import (
+from ..core.functions import (
     STATUS,
     log_step,
     AutophotYaml,
@@ -29,6 +43,7 @@ from functions import (
     NON_FILTER_VALUES,
     filter_value_usable,
     find_filter_header_key,
+    data_path,
 )
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -143,7 +158,7 @@ def get_header(filename):
                 return dict(hdul[0].header)
         # Custom fallback for original codebase compatibility
         try:
-            from functions import get_header as custom_get_header
+            from ..core.functions import get_header as custom_get_header
 
             return custom_get_header(filename)
         except ImportError:
@@ -210,9 +225,9 @@ class FitsInfo:
             level=logging.INFO, format="%(levelname)s - %(message)s"
         )
         cap_console_lines(logging.getLogger().handlers)
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger("check")
 
-        filters_path = Path(__file__).parent / "databases" / "filters.yml"
+        filters_path = Path(data_path("filters.yml"))
         loaded_filters = list(AutophotYaml(filters_path).load().get("W_eff", {}).keys())
         self.available_filters, dropped_filters = sanitize_photometric_filters(
             loaded_filters
@@ -252,7 +267,7 @@ class FitsInfo:
         # normalization so telescope-key handling cannot diverge (e.g.
         # I_BESS -> Cousins I, never Sloan i; R_SPECIAL -> R, not r).
         try:
-            from main import _heuristic_filter_mapping
+            from .main import _heuristic_filter_mapping
 
             cand = _heuristic_filter_mapping(t)
         except Exception:
@@ -583,7 +598,7 @@ class FitsInfo:
         if not sample_header:
             return None, None
         try:
-            from wcs import get_wcs as ap_get_wcs
+            from .wcs import get_wcs as ap_get_wcs
             import astropy.wcs as WCS_mod
             import numpy as np_mod
             wcs_obj = ap_get_wcs(sample_header)
@@ -1125,11 +1140,69 @@ class FitsInfo:
 
 
 # -----------------------------------------------------------------------------
-# USAGE EXAMPLE
+# CLI: scan a FITS folder and build/update wdir/telescope.yml.
+# Merged from the former top-level inspect_telescope.py wrapper.
 # -----------------------------------------------------------------------------
-if __name__ == "__main__":
-    input_yaml = {"wdir": "./working_dir/", "fits_dir": "./reduced_fits/"}
-    flist = None  # Auto-discover
+def _build_parser():
+    import argparse
 
-    fi = FitsInfo(input_yaml, flist)
-    correct_files = fi.check()
+    p = argparse.ArgumentParser(
+        description="Scan a FITS folder and build/update telescope.yml.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument("fits_dir", help="Folder containing FITS images.")
+    p.add_argument("--wdir", default=None, help="Output directory for telescope.yml (default: fits_dir).")
+    p.add_argument("--recursive", action="store_true", help="Also scan sub-folders.")
+    p.add_argument("--dry-run", action="store_true", help="Print YAML, do not write.")
+    p.add_argument("--verbose", action="store_true", help="Per-file diagnostics.")
+    p.add_argument("--filter-key", default=None, metavar="KEY", help="Preferred FITS filter header key.")
+    p.add_argument("--gain-key", default="GAIN", metavar="KEY")
+    p.add_argument("--rn-key", default="RDNOISE", metavar="KEY")
+    p.add_argument("--sat-key", default="SATURATE", metavar="KEY")
+    p.add_argument("--exptime-key", default="EXPTIME", metavar="KEY")
+    p.add_argument("--mjd-key", default="MJD-OBS", metavar="KEY")
+    p.add_argument("--date-key", default="DATE-OBS", metavar="KEY")
+    p.add_argument("--airmass-key", default="AIRMASS", metavar="KEY")
+    return p
+
+
+def main(argv=None):
+    args = _build_parser().parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)-8s %(message)s",
+        stream=sys.stdout,
+    )
+    try:
+        from ..core.functions import cap_console_lines
+    except ImportError:
+        pass
+    else:
+        cap_console_lines(
+            logging.getLogger().handlers, prefix_fmt="{levelname:<8} "
+        )
+
+    # Deferred: driver pulls in the pipeline graph, which imports this module.
+    from ..driver import inspect_telescope
+
+    inspect_telescope(
+        fits_dir=args.fits_dir,
+        wdir=args.wdir,
+        recursive=args.recursive,
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+        filter_key=args.filter_key,
+        gain_key=args.gain_key,
+        rn_key=args.rn_key,
+        sat_key=args.sat_key,
+        exptime_key=args.exptime_key,
+        mjd_key=args.mjd_key,
+        date_key=args.date_key,
+        airmass_key=args.airmass_key,
+    )
+
+
+if __name__ == "__main__":
+    main()
