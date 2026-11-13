@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from zeropoint import Zeropoint
+from autophot.calibration.zeropoint import Zeropoint
 
 
 def _yaml(tmp_path, enabled=True, order=1, **overrides):
