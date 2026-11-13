@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from utils.psf_validation import (
+from autophot.analysis.psf_validation import (
     validate_psf_loo,
     PSFValidationResult,
     _fit_gaussian_stamp,
