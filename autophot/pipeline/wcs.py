@@ -31,7 +31,7 @@ from astropy.table import Table
 
 # --- Local Imports (optional) ---
 try:
-    from functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, copy_wcs_from_header, cap_console_lines, which_exe, ascii_table, STATUS  # type: ignore
+    from ..core.functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, copy_wcs_from_header, cap_console_lines, which_exe, ascii_table, STATUS  # type: ignore
 except (ModuleNotFoundError, ImportError):
     # Minimal fallback for environments missing the full photometry stack.
     STATUS = logging.INFO  # degrade STATUS to INFO when functions is absent
@@ -76,10 +76,10 @@ except (ModuleNotFoundError, ImportError):
 def _resolve_sextractor_exe():
     """Lazy resolver for SExtractor executable to avoid circular import."""
     try:
-        from utils.run_sex import get_sextractor_executable
+        from ..subtraction.run_sex import get_sextractor_executable
         return get_sextractor_executable()
     except (ModuleNotFoundError, ImportError):
-        from functions import which_exe
+        from ..core.functions import which_exe
         return which_exe("sex") or which_exe("sextractor")
 
 # --- Configure Logging ---
@@ -89,7 +89,7 @@ logging.basicConfig(
 )
 if cap_console_lines is not None:
     cap_console_lines(logging.getLogger().handlers)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 # --- Suppress Astropy Warnings ---
 warnings.filterwarnings("ignore", category=AstropyWarning, append=True)
