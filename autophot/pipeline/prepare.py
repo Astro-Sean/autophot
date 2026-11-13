@@ -1759,12 +1759,15 @@ class Prepare:
                 )
 
                 if len(original_files) == 1:
-                    shutil.copyfile(
-                        original_files[0],
-                        original_files[0].replace(".original", ""),
-                    )
                     template_status[canonical_filter]["fpaths"].append(
-                        original_files[0].replace(".original", "")
+                        self._stage_template(
+                            src_fpath=original_files[0],
+                            canonical_fpath=original_files[0].replace(
+                                ".original", ""
+                            ),
+                            template_root=template_root,
+                            band_dir_name=os.path.basename(expected_template_dir),
+                        )
                     )
                 elif len(template_files) == 0:
                     incorrect_setup = True
@@ -1784,10 +1787,22 @@ class Prepare:
                         template_file_sizes,
                         key=template_file_sizes.get,
                     )
-                    template_status[canonical_filter]["fpaths"].append(best_guess)
+                    template_status[canonical_filter]["fpaths"].append(
+                        self._stage_template(
+                            src_fpath=best_guess,
+                            canonical_fpath=best_guess,
+                            template_root=template_root,
+                            band_dir_name=os.path.basename(expected_template_dir),
+                        )
+                    )
                 else:
                     template_status[canonical_filter]["fpaths"].append(
-                        template_files[0]
+                        self._stage_template(
+                            src_fpath=template_files[0],
+                            canonical_fpath=template_files[0],
+                            template_root=template_root,
+                            band_dir_name=os.path.basename(expected_template_dir),
+                        )
                     )
 
             fpaths = template_status[canonical_filter]["fpaths"]
@@ -1845,3 +1860,53 @@ class Prepare:
             for fpath in info.get("fpaths", [])
         ]
         return template_list
+
+    def _stage_template(
+        self,
+        src_fpath: str,
+        canonical_fpath: str,
+        template_root: str,
+        band_dir_name: str,
+    ) -> str:
+        """
+        Copy a discovered template into the output tree for processing.
+
+        Input ``templates`` folders are read-only: the chosen template (or
+        its ``.original`` backup when one exists) is copied to
+        ``<fits_dir>_<outdir_name>/<dataset>/templates/<band>_template/
+        ready_template.fits`` with any ``.weight`` sidecar, and every
+        downstream step works on that copy.  The dataset segment mirrors
+        nested ``<dataset>/templates`` layouts so same-band templates from
+        different datasets stay distinct.
+        """
+        fits_dir = os.path.abspath(self.input_yaml["fits_dir"])
+        out_root = os.path.join(
+            os.path.dirname(fits_dir),
+            f"{os.path.basename(fits_dir)}_{self.input_yaml['outdir_name']}",
+        )
+        rel = os.path.relpath(os.path.dirname(template_root), fits_dir)
+        stage_dir = os.path.normpath(
+            os.path.join(out_root, rel, "templates", band_dir_name)
+        )
+        os.makedirs(stage_dir, exist_ok=True)
+        # Clear leftovers from earlier runs so this folder only holds what
+        # the current run produced; a stale processed template would mask a
+        # failed preparation.
+        for old in os.listdir(stage_dir):
+            old_path = os.path.join(stage_dir, old)
+            if os.path.isfile(old_path):
+                os.remove(old_path)
+
+        dst = os.path.join(stage_dir, "ready_template.fits")
+        shutil.copyfile(src_fpath, dst)
+
+        # The weight map pairs by '<base>.weight<ext>'; keep that pairing
+        # under the ready_template name.
+        base, ext = os.path.splitext(canonical_fpath)
+        w_src = f"{base}.weight{ext}"
+        if os.path.exists(w_src):
+            shutil.copyfile(
+                w_src, os.path.join(stage_dir, f"ready_template.weight{ext}")
+            )
+        self.logger.info("Staged template for processing: %s", dst)
+        return dst
