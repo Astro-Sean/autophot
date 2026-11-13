@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 from astropy.io import fits
 
-from utils.run_sex import _nan_filled_copy
+from autophot.subtraction.run_sex import _nan_filled_copy
 
 
 def _write_fits(path, data, header=None):
