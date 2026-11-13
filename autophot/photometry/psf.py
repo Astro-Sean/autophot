@@ -360,6 +360,7 @@ from ..core.functions import (
 )
 from ..core.plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
 from .aperture import (
+    _empirical_noise_factor,
     gain_e_per_adu_from_header,
     resolve_exposure_time_seconds,
     resolve_gain_e_per_adu,
@@ -14695,12 +14696,60 @@ class PSF:
         # the error is inflated 4x.  The reduced_chi2 scaling above already
         # captures non-Gaussian residuals (chi2 > 1 when residuals exceed
         # the noise model), making the qfit scaling redundant and harmful.
-        _total_scale = _chi2_scale
+
+        # Empirical noise factor for correlated pixel noise.  The chi2
+        # scaling above only sees per-pixel residual scatter, which
+        # resampling correlation does not change, so it cannot correct
+        # the underestimated fit-region covariance.  The same empty-sky
+        # aperture test used by the aperture path measures it, evaluated
+        # at the matched-filter tophat scale (~0.6 FWHM, the noise-
+        # equivalent radius of a PSF-weighted sum).
+        _enf = 1.0
+        if phot_cfg.get("empirical_noise_factor", True):
+            try:
+                _err_e = (
+                    np.asarray(ndimage.uncertainty.array, dtype=float)
+                    if getattr(ndimage, "uncertainty", None) is not None
+                    else None
+                )
+                if _err_e is not None:
+                    _r_psf = max(1.5, 0.6 * fwhm)
+                    _an_in = float(np.ceil(_r_psf + 0.75 * fwhm))
+                    _an_out = float(np.ceil(_an_in + 2.0 * fwhm))
+                    _src_xy = np.c_[x_fit, y_fit]
+                    _src_xy = _src_xy[np.isfinite(_src_xy).all(axis=1)]
+                    _enf, _enf_n = _empirical_noise_factor(
+                        np.asarray(ndimage.data, dtype=float),
+                        _err_e,
+                        _r_psf,
+                        _an_in,
+                        _an_out,
+                        defects_mask=getattr(ndimage, "mask", None),
+                        source_xy=_src_xy if len(_src_xy) else None,
+                        seed=int(self.input_yaml.get("rng_seed") or 0),
+                    )
+                    if _enf > 1.0:
+                        log.info(
+                            "PSF errors: empirical noise factor %.3f "
+                            "from %d empty apertures (correlated/"
+                            "confusion noise).",
+                            _enf,
+                            _enf_n,
+                        )
+            except Exception as _enf_exc:
+                log.warning(
+                    "Empirical noise factor failed (%s); using 1.0.",
+                    _enf_exc,
+                )
+                _enf = 1.0
+        _total_scale = _chi2_scale * _enf
 
         _n_scaled = int(np.sum(_total_scale > 1.01))
         if _n_scaled > 0:
             _med_scale = float(np.median(_total_scale[_total_scale > 1.01]))
             _scale_label = "sqrt(reduced_chi2)"
+            if _enf > 1.0:
+                _scale_label += f" x {_enf:.2f} (empirical noise factor)"
             log.info(
                 "PSF flux errors scaled by %s: %d/%d sources "
                 "(median scale=%.1fx, max=%.1fx)",
@@ -14723,7 +14772,7 @@ class PSF:
             _snap_chi2_scale = np.sqrt(np.maximum(_snap_chi2, 1.0))
             _snap_chi2_scale = np.where(np.isfinite(_snap_chi2_scale) & (_snap_chi2_scale > 0), _snap_chi2_scale, 1.0)
             _snap_chi2_scale = np.clip(_snap_chi2_scale, 1.0, 10.0)
-            snap_flux_err_e = snap_flux_err_e * _snap_chi2_scale
+            snap_flux_err_e = snap_flux_err_e * _snap_chi2_scale * _enf
 
         df_out = pd.DataFrame(
             {
