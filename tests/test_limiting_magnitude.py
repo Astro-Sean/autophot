@@ -738,7 +738,9 @@ class TestBrightNeighbourSiteVeto:
         sites = det["injection_df"]
         assert sites is not None and len(sites) >= 20
         assert np.isfinite(det["inject_lmag"])
-        assert any("restoring" in r.message.lower() for r in caplog.records)
+        assert any(
+            "restoring" in r.getMessage().lower() for r in caplog.records
+        )
 
 
 class TestCompletenessPlotLayout:
