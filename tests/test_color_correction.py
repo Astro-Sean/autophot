@@ -9,7 +9,7 @@ index and which have a partner band within dt days are corrected.
 import numpy as np
 import pandas as pd
 
-from color_correction import apply_transient_color_correction
+from autophot.calibration.color_correction import apply_transient_color_correction
 
 
 def _row(fpath, mjd, filt, mag, err=0.02, tel="P48", inst="ZTF"):
