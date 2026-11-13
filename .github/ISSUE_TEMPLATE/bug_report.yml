@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a problem running AutoPhOT
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log output
+      description: Paste the relevant part of the console output or the LOG_<image>.log file.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: AutoPhOT version
+      description: Version or commit you ran, e.g. 1.4.6 or output of pip show autophot.
+  - type: input
+    id: telescope
+    attributes:
+      label: Telescope / instrument
+      description: Which telescope the FITS frames came from, if relevant.
+  - type: textarea
+    id: config
+    attributes:
+      label: Config overrides
+      description: Any keys you changed from autophot/data/default_input.yml. Do not paste credentials.
+      render: yaml
