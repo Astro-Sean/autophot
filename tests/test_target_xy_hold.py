@@ -18,7 +18,7 @@ import pytest
 photutils = pytest.importorskip("photutils", reason="photutils")
 from photutils.psf import CircularGaussianPRF
 
-import psf as psf_mod
+import autophot.photometry.psf as psf_mod
 
 FWHM = 3.0
 SIG = FWHM / 2.3548
