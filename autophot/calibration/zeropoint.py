@@ -46,9 +46,9 @@ from scipy.special import logsumexp
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import (calculate_bins, log_step,
+from ..core.functions import (calculate_bins, log_step,
                        normalize_photometric_filter_name, set_size, snr_err)
-from plotting_utils import (apply_autophot_mplstyle, get_alpha, get_color,
+from ..core.plotting_utils import (apply_autophot_mplstyle, get_alpha, get_color,
                             get_line_width, get_marker_size, get_plot_ext,
                             get_ransac_color, ransac_grid,
                             ransac_legend_top_outside, ransac_savefig,
@@ -57,7 +57,7 @@ from plotting_utils import (apply_autophot_mplstyle, get_alpha, get_color,
 # ---------------------------------------------------------------------------
 # Module-level logger
 # ---------------------------------------------------------------------------
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 # ===========================================================================
@@ -939,7 +939,7 @@ class Zeropoint:
             sat_peak_frac = float(zp_cfg.get("saturation_peak_frac", 0.99))
             # Fallback must match main.py's saturation handling.
             try:
-                from main import SATURATE_INTERNAL_FALLBACK
+                from ..pipeline.main import SATURATE_INTERNAL_FALLBACK
             except ImportError:
                 SATURATE_INTERNAL_FALLBACK = np.inf
             saturate_level = float(
@@ -1003,7 +1003,7 @@ class Zeropoint:
                 _fwhm_finite = np.isfinite(_fwhm_vals) & (_fwhm_vals > 0)
                 _n_fwhm = int(_fwhm_finite.sum())
                 if _n_fwhm >= fwhm_min_src:
-                    from functions import fwhm_outlier_clip
+                    from ..core.functions import fwhm_outlier_clip
 
                     fwhm_mask, _med_fwhm, _sig_eff = fwhm_outlier_clip(
                         _fwhm_vals.to_numpy(dtype=float), sigma=fwhm_sigma
@@ -3143,7 +3143,7 @@ class Zeropoint:
                 fit_params = self._fallback_zeropoint(catalog, use_filter)
                 return catalog, fit_params
 
-            from plotting_utils import (apply_autophot_mplstyle,
+            from ..core.plotting_utils import (apply_autophot_mplstyle,
                                         get_ransac_color, ransac_grid,
                                         ransac_savefig,
                                         set_mag_axes_inverted_xy)
