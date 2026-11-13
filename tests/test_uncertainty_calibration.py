@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from utils.uncertainty_calibration import (
+from autophot.analysis.uncertainty_calibration import (
     calibrate_uncertainties,
     apply_calibration,
     UncertaintyCalibrationResult,
@@ -214,7 +214,7 @@ class TestScaleErrorColumns:
         )
 
     def test_psf_scales_psf_columns_only(self):
-        from utils.uncertainty_calibration import scale_error_columns
+        from autophot.analysis.uncertainty_calibration import scale_error_columns
 
         df = self._row()
         scaled = scale_error_columns(df, 1.5, "PSF", "r")
@@ -235,7 +235,7 @@ class TestScaleErrorColumns:
         )
 
     def test_ap_scales_ap_columns_and_snr(self):
-        from utils.uncertainty_calibration import scale_error_columns
+        from autophot.analysis.uncertainty_calibration import scale_error_columns
 
         df = self._row()
         scale_error_columns(df, 2.0, "AP", "r")
@@ -251,7 +251,7 @@ class TestScaleErrorColumns:
         assert df["r_AP_err"].iloc[0] == pytest.approx(expected)
 
     def test_factor_one_is_noop(self):
-        from utils.uncertainty_calibration import scale_error_columns
+        from autophot.analysis.uncertainty_calibration import scale_error_columns
 
         df = self._row()
         scaled = scale_error_columns(df, 1.0, "PSF", "r")
@@ -259,7 +259,7 @@ class TestScaleErrorColumns:
         assert df["flux_PSF_err"].iloc[0] == pytest.approx(10.0)
 
     def test_invalid_factor_is_noop(self):
-        from utils.uncertainty_calibration import scale_error_columns
+        from autophot.analysis.uncertainty_calibration import scale_error_columns
 
         df = self._row()
         assert scale_error_columns(df, np.nan, "PSF", "r") == []
@@ -269,7 +269,7 @@ class TestScaleErrorColumns:
     def test_missing_columns_tolerated(self):
         import pandas as pd
 
-        from utils.uncertainty_calibration import scale_error_columns
+        from autophot.analysis.uncertainty_calibration import scale_error_columns
 
         df = pd.DataFrame({"flux_PSF_err": [5.0]})
         scaled = scale_error_columns(df, 1.5, "PSF", "r")
