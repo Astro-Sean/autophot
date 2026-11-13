@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from autophot_gaia_curves.gaia_archive import (
+from .gaia_archive import (
     _gaiaxpy_chunk_size,
     calibrate_source_ids_batched,
     gaia_xp_sql_top_n,
@@ -1158,7 +1158,7 @@ def build_custom_catalog(
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     try:
-        from functions import cap_console_lines
+        from ..core.functions import cap_console_lines
     except ImportError:
         pass
     else:
