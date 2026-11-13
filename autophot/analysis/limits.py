@@ -1608,6 +1608,200 @@ class Limits:
                         keep[i] = True
                 return df[keep].copy()
 
+            def _filter_bright_neighbours(
+                df: pd.DataFrame,
+                image: np.ndarray,
+                mask2d: np.ndarray | None,
+                *,
+                aperture_radius_pix: float,
+                annulus_in_pix: float,
+                annulus_out_pix: float,
+                fwhm_pix: float,
+                min_keep: int = 0,
+            ) -> pd.DataFrame:
+                """
+                Reject sites contaminated by a nearby bright source.
+
+                The masked-site and pixel-statistics filters only see the
+                aperture disk and its own pixels, so they miss two cases
+                that bias the recovered flux high on every trial:
+
+                1. Wing proximity - a detected star's PSF wings extend
+                past its masked footprint.  The wing's declining profile
+                is higher inside the aperture than in the background
+                annulus, so local background subtraction leaves a
+                positive residual and both AP and PSF recovery
+                over-measure.  Uses a Euclidean distance transform of the
+                masked map: the aperture edge must clear every bright
+                footprint by ``inject_bright_wing_fwhm`` FWHM.  Mask
+                components smaller than ``inject_bright_min_cluster_pix``
+                connected pixels are ignored first, so isolated defect
+                pixels (already handled by the NaN/aperture checks) do not
+                veto whole neighbourhoods.
+
+                2. Compact neighbours the source mask missed - a real
+                source inside the aperture plus
+                ``inject_neighbour_guard_fwhm`` FWHM guard ring shows a
+                peak exceeding ``inject_neighbour_peak_sigma`` times the
+                local annulus sigma above the annulus median.
+
+                If the veto would leave fewer than ``min_keep`` candidates
+                (``inject_bright_min_keep`` overrides), the least
+                contaminated sites are restored first so a crowded field
+                degrades to a warning instead of an empty completeness
+                fit.
+                """
+                if df is None or len(df) == 0:
+                    return df
+                if image is None or np.ndim(image) != 2:
+                    return df
+
+                n_before = int(len(df))
+                wing_fwhm = float(
+                    lim_cfg.get("inject_bright_wing_fwhm", 3.0)
+                )
+                peak_sigma = float(
+                    lim_cfg.get("inject_neighbour_peak_sigma", 6.0)
+                )
+                guard_fwhm = float(
+                    lim_cfg.get("inject_neighbour_guard_fwhm", 1.0)
+                )
+                min_cluster = int(
+                    lim_cfg.get("inject_bright_min_cluster_pix", 4)
+                )
+                min_keep_cfg = lim_cfg.get("inject_bright_min_keep", None)
+                if min_keep_cfg is not None:
+                    min_keep = max(0, int(min_keep_cfg))
+                min_keep = min(int(min_keep), n_before)
+
+                imgf = np.asarray(image, dtype=float)
+                Hn, Wn = imgf.shape
+                wing_px = max(0.0, wing_fwhm) * float(fwhm_pix)
+                guard_r = float(aperture_radius_pix) + max(
+                    0.0, guard_fwhm
+                ) * float(fwhm_pix)
+
+                dist_map = None
+                if (
+                    wing_px > 0.0
+                    and mask2d is not None
+                    and np.ndim(mask2d) == 2
+                    and tuple(mask2d.shape) == tuple(imgf.shape)
+                ):
+                    from scipy import ndimage
+
+                    bright = np.asarray(mask2d, dtype=bool)
+                    if min_cluster > 1 and np.any(bright):
+                        lab, _n_lab = ndimage.label(bright)
+                        sizes = np.bincount(lab.ravel())
+                        sizes[0] = 0
+                        bright = sizes[lab] >= min_cluster
+                    if np.any(bright):
+                        dist_map = ndimage.distance_transform_edt(~bright)
+
+                use_peak = peak_sigma > 0.0
+                if dist_map is None and not use_peak:
+                    return df
+
+                xs = np.asarray(df["x_pix"], dtype=float)
+                ys = np.asarray(df["y_pix"], dtype=float)
+                r_int = int(np.ceil(guard_r))
+
+                keep = np.zeros(len(df), dtype=bool)
+                # Worst fractional violation per candidate; 0 = clean,
+                # +inf = unmeasurable so it is restored last.  Drives the
+                # starvation-floor restore order below.
+                score = np.full(len(df), np.inf)
+                n_wing = 0
+                n_peak = 0
+                for i, (x, y) in enumerate(zip(xs, ys)):
+                    if not (np.isfinite(x) and np.isfinite(y)):
+                        continue
+                    xi = int(np.round(x))
+                    yi = int(np.round(y))
+                    if xi < 0 or yi < 0 or xi >= Wn or yi >= Hn:
+                        continue
+                    viol = 0.0
+                    wing_fail = False
+                    peak_fail = False
+                    if dist_map is not None:
+                        clear = float(dist_map[yi, xi]) - float(
+                            aperture_radius_pix
+                        )
+                        if clear < wing_px:
+                            wing_fail = True
+                            viol = max(
+                                viol,
+                                (wing_px - clear) / max(wing_px, 1e-6),
+                            )
+                    if use_peak:
+                        x0 = max(0, xi - r_int)
+                        x1 = min(Wn, xi + r_int + 1)
+                        y0 = max(0, yi - r_int)
+                        y1 = min(Hn, yi + r_int + 1)
+                        stamp = imgf[y0:y1, x0:x1]
+                        yy, xx = np.indices(stamp.shape)
+                        disk = (
+                            (xx + x0 - x) ** 2 + (yy + y0 - y) ** 2
+                        ) <= guard_r**2
+                        vals = stamp[disk]
+                        vals = vals[np.isfinite(vals)]
+                        if vals.size:
+                            mean_ann, sig_ann = _calculate_annulus_statistics(
+                                float(x),
+                                float(y),
+                                imgf,
+                                float(annulus_in_pix),
+                                float(annulus_out_pix),
+                            )
+                            if (
+                                np.isfinite(mean_ann)
+                                and np.isfinite(sig_ann)
+                                and sig_ann > 0
+                            ):
+                                excess = float(np.max(vals)) - mean_ann
+                                over = excess - peak_sigma * sig_ann
+                                if over > 0:
+                                    peak_fail = True
+                                    viol = max(
+                                        viol,
+                                        over / (peak_sigma * sig_ann),
+                                    )
+                    n_wing += int(wing_fail)
+                    n_peak += int(peak_fail)
+                    score[i] = viol
+                    keep[i] = not (wing_fail or peak_fail)
+
+                n_kept = int(np.count_nonzero(keep))
+                if n_kept < min_keep:
+                    dropped_idx = np.flatnonzero(~keep)
+                    order = dropped_idx[
+                        np.argsort(score[dropped_idx], kind="stable")
+                    ]
+                    need = min(min_keep - n_kept, len(order))
+                    if need > 0:
+                        logger.warning(
+                            "Bright-neighbour veto would leave %d of %d "
+                            "sites (< min_keep %d); restoring %d "
+                            "least-contaminated sites.",
+                            n_kept,
+                            n_before,
+                            min_keep,
+                            need,
+                        )
+                        keep[order[:need]] = True
+
+                if n_wing or n_peak:
+                    logger.info(
+                        "Bright-neighbour filter: flagged %d sites "
+                        "(wing proximity) + %d (compact peak) of %d "
+                        "candidates.",
+                        n_wing,
+                        n_peak,
+                        n_before,
+                    )
+                return df[keep].copy()
+
             def _filter_pixel_statistics(
                 df: pd.DataFrame,
                 image: np.ndarray,
@@ -2152,6 +2346,15 @@ class Limits:
                         cutout_mask,
                         aperture_radius_pix=float(aperture_radius_local),
                     )
+                    probe_df = _filter_bright_neighbours(
+                        probe_df,
+                        cutout,
+                        cutout_mask,
+                        aperture_radius_pix=float(aperture_radius_local),
+                        annulus_in_pix=float(annulus_in_local),
+                        annulus_out_pix=float(annulus_out_local),
+                        fwhm_pix=float(fwhm_px),
+                    )
                     probe_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
                     probe_meas = probe_ap.measure(
                         sources=probe_df,
@@ -2469,6 +2672,21 @@ class Limits:
             )
             n5 = int(len(cand_df))
 
+            # Drop sites sitting in a bright neighbour's PSF wings or
+            # hiding a compact unmasked source: its flux biases every
+            # injected recovery high, faking detections.
+            cand_df = _filter_bright_neighbours(
+                cand_df,
+                cutout,
+                cutout_mask,
+                aperture_radius_pix=float(aperture_radius_local),
+                annulus_in_pix=float(annulus_in_local),
+                annulus_out_pix=float(annulus_out_local),
+                fwhm_pix=float(fwhm_px),
+                min_keep=int(n_final),
+            )
+            n6 = int(len(cand_df))
+
             # Drop sites contaminated by bright-star subtraction residuals
             # (elevated local variance or biased mean).
             cand_df = _filter_pixel_statistics(
@@ -2477,7 +2695,7 @@ class Limits:
                 aperture_radius_pix=float(aperture_radius_local),
                 rms_map=cutout_rms,
             )
-            n6 = int(len(cand_df))
+            n7 = int(len(cand_df))
 
             logger.info(
                 ascii_kv(
@@ -2489,7 +2707,8 @@ class Limits:
                         ("aperture_validity", f"{n3}"),
                         ("annulus_support", f"{n4}"),
                         ("masked_sites", f"{n5}"),
-                        ("pixel_stats", f"{n6}"),
+                        ("bright_neighbour", f"{n6}"),
+                        ("pixel_stats", f"{n7}"),
                         ("cutout", f"{int(W)}x{int(H)}"),
                         ("center", f"{float(cutout_cx):.1f}, {float(cutout_cy):.1f}"),
                         ("r_min", f"{float(r_min_with_jitter):.1f}"),
