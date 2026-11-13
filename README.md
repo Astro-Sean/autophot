@@ -91,6 +91,7 @@ The [`examples/run_autophot.ipynb`](examples/run_autophot.ipynb) notebook builds
 A few things worth knowing up front:
 
 - `from autophot import list_parameters; list_parameters()` prints every config key and its default.
+- [`docs/autophot_methods.pdf`](docs/autophot_methods.pdf) is the full methods and configuration reference: every pipeline stage in order, the photometry and calibration maths, and all parameters in `default_input.yml` with defaults and usage notes.
 - FITS headers must carry `TELESCOP`, `INSTRUME`, and a bandpass keyword (e.g. `FILTER`); images without them are skipped.
 - `config["nCPU"] = 4` (or `AUTOPHOT_NCPU=4`, which takes precedence) processes images in parallel, each with its own log. Worker settings like `photometry.aperture_n_jobs` multiply `nCPU`, so keep the product at or below your core count. `nGPU` / `AUTOPHOT_NGPU` pins workers to GPUs round-robin.
 - `python -m autophot.batch_main -f im1.fits im2.fits -c config.yml --jobs 4` (or `autophot-batch`) runs a file list without a driver script.
