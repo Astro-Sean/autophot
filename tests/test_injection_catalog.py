@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from pathlib import Path
 
-from utils.injection_catalog import InjectionCatalog, InjectionRecord
+from autophot.analysis.injection_catalog import InjectionCatalog, InjectionRecord
 
 
 class TestInjectionCatalog:
