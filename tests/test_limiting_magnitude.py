@@ -5,6 +5,7 @@ convention, and the per-trial detection-flag reconstruction used to re-solve
 the completeness crossing without rerunning photometry.
 """
 
+import logging
 from types import SimpleNamespace
 
 import numpy as np
@@ -645,6 +646,99 @@ class TestInjectionSiteFloor:
             "inject_final_n_sites"
         ]
         assert int(n) >= 6
+
+
+class TestBrightNeighbourSiteVeto:
+    """Sites near a bright source must be rejected: masked-source PSF
+    wings (distance veto) and compact neighbours the mask missed (peak
+    veto) both bias every recovered flux high, faking detections."""
+
+    def _run(self, yaml, img, mask=None):
+        return Limits(yaml).get_injected_limit(
+            full_image=img,
+            position=(80.0, 80.0),
+            initialGuess=-3.5,
+            detection_limit=3.0,
+            plot=False,
+            background_rms=np.full((160, 160), 20.0),
+            n_jobs=1,
+            mask=mask,
+            _return_details=True,
+        )
+
+    def test_wing_veto_clears_masked_star(self):
+        # Bright masked star inside the injection annulus at (100, 80):
+        # sites must keep aperture edge + wing_fwhm*FWHM (= 8 + 3*5 = 23)
+        # clear of its masked footprint.
+        rng = np.random.default_rng(7)
+        img = rng.normal(0.0, 20.0, size=(160, 160))
+        yy, xx = np.mgrid[0:160, 0:160]
+        img = img + 5e4 * np.exp(
+            -((xx - 100.0) ** 2 + (yy - 80.0) ** 2) / (2 * (5.0 / 2.355) ** 2)
+        )
+        mask = (xx - 100.0) ** 2 + (yy - 80.0) ** 2 <= 8.0**2
+        det = self._run(_lim_cfg(), img, mask=mask)
+        sites = det["injection_df"]
+        assert sites is not None and len(sites) > 0
+        from scipy import ndimage
+
+        dist_map = ndimage.distance_transform_edt(~mask)
+        xs = np.round(sites["x_pix"].to_numpy()).astype(int)
+        ys = np.round(sites["y_pix"].to_numpy()).astype(int)
+        assert dist_map[ys, xs].min() >= 8.0 + 3.0 * 5.0
+
+    def test_compact_peak_veto_clears_unmasked_source(self):
+        # Same star but unmasked: the peak veto must reject sites whose
+        # aperture + 1-FWHM guard ring (r = 8 + 5 = 13) contains it.
+        rng = np.random.default_rng(7)
+        img = rng.normal(0.0, 20.0, size=(160, 160))
+        yy, xx = np.mgrid[0:160, 0:160]
+        img = img + 3e3 * np.exp(
+            -((xx - 100.0) ** 2 + (yy - 80.0) ** 2) / (2 * (5.0 / 2.355) ** 2)
+        )
+        det = self._run(_lim_cfg(), img, mask=None)
+        sites = det["injection_df"]
+        assert sites is not None and len(sites) > 0
+        d = np.hypot(sites["x_pix"] - 100.0, sites["y_pix"] - 80.0)
+        assert d.min() >= 13.0
+
+    def test_veto_disabled_allows_wing_sites(self):
+        # With both vetoes off, the same field must admit sites inside
+        # what the wing veto would have rejected (dist to star < 31,
+        # outside the masked-footprint zone at 16).
+        rng = np.random.default_rng(7)
+        img = rng.normal(0.0, 20.0, size=(160, 160))
+        yy, xx = np.mgrid[0:160, 0:160]
+        img = img + 5e4 * np.exp(
+            -((xx - 100.0) ** 2 + (yy - 80.0) ** 2) / (2 * (5.0 / 2.355) ** 2)
+        )
+        mask = (xx - 100.0) ** 2 + (yy - 80.0) ** 2 <= 8.0**2
+        yaml = _lim_cfg(
+            limiting_magnitude={
+                "inject_bright_wing_fwhm": 0.0,
+                "inject_neighbour_peak_sigma": 0.0,
+            }
+        )
+        det = self._run(yaml, img, mask=mask)
+        sites = det["injection_df"]
+        assert sites is not None and len(sites) > 0
+        d = np.hypot(sites["x_pix"] - 100.0, sites["y_pix"] - 80.0)
+        assert d.min() < 25.0
+
+    def test_starvation_floor_restores_least_contaminated(self, caplog):
+        # A large masked footprint in the annulus starves the vetoed
+        # pool below inject_final_n_sites: the floor must restore the
+        # least-contaminated sites rather than abort to NaN.
+        rng = np.random.default_rng(7)
+        img = rng.normal(0.0, 20.0, size=(160, 160))
+        yy, xx = np.mgrid[0:160, 0:160]
+        mask = (xx - 100.0) ** 2 + (yy - 80.0) ** 2 <= 25.0**2
+        with caplog.at_level(logging.WARNING, logger="limits"):
+            det = self._run(_lim_cfg(), img, mask=mask)
+        sites = det["injection_df"]
+        assert sites is not None and len(sites) >= 20
+        assert np.isfinite(det["inject_lmag"])
+        assert any("restoring" in r.message.lower() for r in caplog.records)
 
 
 class TestCompletenessPlotLayout:
