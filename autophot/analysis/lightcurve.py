@@ -24,8 +24,8 @@ import matplotlib.pyplot as plt
 import pathlib
 import glob
 import shutil
-from functions import set_size, get_distance_modulus, border_msg
-from plotting_utils import (
+from ..core.functions import set_size, get_distance_modulus, border_msg
+from ..core.plotting_utils import (
     apply_autophot_mplstyle,
     get_marker_size,
     get_plot_color,
@@ -113,12 +113,14 @@ cols = {
 
 def _load_filter_colors_from_db() -> dict:
     """
-    Load `filter_colors` from `databases/filters.yml` (project palette).
+    Load `filter_colors` from `autophot/data/filters.yml` (project palette).
 
     Returns {} on any failure so we can safely fall back to defaults.
     """
     try:
-        db_path = Path(__file__).resolve().parent / "databases" / "filters.yml"
+        from ..core.functions import data_path
+
+        db_path = Path(data_path("filters.yml"))
         if not db_path.is_file():
             return {}
         import yaml  # type: ignore
@@ -139,7 +141,7 @@ def _load_filter_colors_from_db() -> dict:
         return {}
 
 
-# Prefer the project palette from databases/filters.yml; fall back to built-ins above.
+# Prefer the project palette from autophot/data/filters.yml; fall back to built-ins above.
 _db_cols = _load_filter_colors_from_db()
 BAND_COLORS = {**cols, **_db_cols}
 
@@ -234,7 +236,7 @@ def filter_value_matches_band(band_char: str, raw_filter) -> bool:
     if _band_key(rs) == bc:
         return True
     try:
-        from main import _heuristic_filter_mapping
+        from ..pipeline.main import _heuristic_filter_mapping
 
         canon = _band_key(_heuristic_filter_mapping(rs))
         return canon == bc
@@ -264,7 +266,7 @@ def _filter_series_matches_band(band_char: str, fser: pd.Series) -> pd.Series:
         return direct_match.fillna(False)
 
     try:
-        from main import _heuristic_filter_mapping
+        from ..pipeline.main import _heuristic_filter_mapping
     except Exception:
         return direct_match.fillna(False)
 
@@ -309,7 +311,7 @@ def canonical_bands_from_filter_series(fser: pd.Series):
     seen = set()
     for raw in raw_unique:
         try:
-            from main import _heuristic_filter_mapping
+            from ..pipeline.main import _heuristic_filter_mapping
 
             c = str(_heuristic_filter_mapping(raw)).strip()
         except Exception:
@@ -343,7 +345,7 @@ def canonical_band_label_map_from_filter_series(fser: pd.Series) -> dict[str, st
 
     def _canon(s: str) -> str:
         try:
-            from main import _heuristic_filter_mapping
+            from ..pipeline.main import _heuristic_filter_mapping
 
             return _band_key(_heuristic_filter_mapping(s))
         except Exception:
@@ -827,7 +829,7 @@ def plot_lightcurve(
     str or None
         Path to detections CSV if return_detections and detections exist; else None.
     """
-    logging.getLogger(__name__).info(
+    logging.getLogger(__name__.rsplit(".", 1)[-1]).info(
         border_msg(
             f"Lightcurve plot - {target_name}" if target_name
             else "Lightcurve plot"
@@ -958,7 +960,7 @@ def plot_lightcurve(
                 bands_in_data.append(b)
                 used_triplets.add(triplet)
     if not bands_in_data:
-        logging.getLogger(__name__).info(
+        logging.getLogger(__name__.rsplit(".", 1)[-1]).info(
             "No valid photometric bands found in '%s' for method '%s'.",
             output_file,
             method,
@@ -1852,7 +1854,7 @@ def generate_photometry_table(
         color_match_days: Max separation (days) for same-night colour pairs.
         input_yaml: Configuration dictionary for reading S/N thresholds from config.
     """
-    logging.getLogger(__name__).info(border_msg("Photometry table"))
+    logging.getLogger(__name__.rsplit(".", 1)[-1]).info(border_msg("Photometry table"))
     complete_data = pd.read_csv(output_file)
     complete_data = _normalize_photometry_columns(complete_data)
     if complete_data.columns.duplicated().any():
@@ -1905,7 +1907,7 @@ def generate_photometry_table(
         else:
             band_label = label_map.get(_band_key(band), band)
 
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
         logger.info(
             border_msg(
                 f"Processing band: {band_label} "
@@ -2434,11 +2436,11 @@ def _nearest_epoch(query, epochs, tol):
 
 def plot_variability_check(*args, **kwargs):
     """Deprecated alias for :func:`differential_photometry.differential_photometry`."""
-    logging.getLogger(__name__).warning(
+    logging.getLogger(__name__.rsplit(".", 1)[-1]).warning(
         "plot_variability_check is deprecated; use "
         "differential_photometry.differential_photometry instead."
     )
-    from differential_photometry import differential_photometry
+    from ..photometry.differential_photometry import differential_photometry
 
     return differential_photometry(*args, **kwargs)
 
@@ -2457,7 +2459,7 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
     if output_file is None:
         return None
 
-    logging.getLogger(__name__).info(border_msg("Detection check plots"))
+    logging.getLogger(__name__.rsplit(".", 1)[-1]).info(border_msg("Detection check plots"))
 
     try:
         data = pd.read_csv(output_file)
@@ -2477,7 +2479,7 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
                 nd["is_detection"] = False
                 data = pd.concat([data, nd], ignore_index=True)
     except Exception as exc:
-        logging.getLogger(__name__).error(
+        logging.getLogger(__name__.rsplit(".", 1)[-1]).error(
             "Failed to read detections table '%s': %s", output_file, exc, exc_info=True
         )
         return None
@@ -2493,7 +2495,7 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
     prefix = prefix_map.get(method, "")
 
     band_counter = Counter()
-    log = logging.getLogger(__name__)
+    log = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
     def _row_detection_state(row_obj) -> bool:
         """
