@@ -1555,7 +1555,7 @@ def differential_photometry(
                     label=f"{band} target",
                     zorder=3,
                 )
-                ax_drift.set_ylabel("Delta Mag [mag]")
+                ax_drift.set_ylabel("Delta Mag [mag]", fontsize=8)
                 ax_drift.invert_yaxis()
                 ax_drift.grid(
                     True, which="major", alpha=0.35, linestyle="-", linewidth=0.5
@@ -1738,7 +1738,7 @@ def differential_photometry(
                         label=f"Binned x{n_bin}",
                         zorder=4,
                     )
-                ax.set_ylabel("Resid. Mag [mag]")
+                ax.set_ylabel("Resid. Mag [mag]", fontsize=8)
                 # Fit the y-limits to the used target residuals (+/- errors)
                 # with a small margin, extended to zero so the residual
                 # reference line stays in view.  Rejected epochs cannot
