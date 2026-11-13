@@ -81,6 +81,7 @@ docs/*.pdf
 !docs/*.tex
 !docs/*.bib
 !docs/autophot_methods.pdf
+docs/*.md
 docs/*.aux
 docs/*.bbl
 docs/*.blg
