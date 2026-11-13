@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 from astropy.visualization import ZScaleInterval
 from skimage.morphology import disk
 
-from functions import log_warning_from_exception
+from ..core.functions import log_warning_from_exception
 
 
 # --- Main Class ---
@@ -61,7 +61,7 @@ class RemoveCosmicRays:
         self.header = header
         self.use_lacosmic = use_lacosmic
         self.cr_backend = cr_backend
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self.logger = logging.getLogger(f"{__name__.rsplit('.', 1)[-1]}.{self.__class__.__name__}")
 
     # --- Mask Creation ---
     def _create_mask(self, image: np.ndarray, satlevel: float = np.inf) -> np.ndarray:
@@ -294,7 +294,7 @@ class RemoveCosmicRays:
         base = os.path.splitext(os.path.basename(fpath))[0]
         write_dir = os.path.dirname(fpath)
 
-        from plotting_utils import (
+        from ..core.plotting_utils import (
             apply_autophot_mplstyle,
             get_plot_color,
             get_plot_ext,
