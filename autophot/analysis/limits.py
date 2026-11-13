@@ -3636,28 +3636,15 @@ class Limits:
                             bisect_steps,
                             inject_lmag,
                             completeness_target,
-                            detection_cutoff,
                             zeropoint,
                             recovery_method,
-                            epsf_model=epsf_model,
-                            cutout=cutout,
                             position=position,
-                            background_rms=background_rms,
-                            flux_for_mag=flux_for_mag,
-                            image_zeropoint=image_zeropoint,
-                            injection_df=injection_df,
-                            F_ref=F_ref,
                             counts_ref=counts_ref,
                             exposure_time=exposure_time,
                             extended_steps=extended_steps,
-                            orig_position=_orig_position,
-                            target_name=self.input_yaml.get("target_name", None),
-                            cutout_cx=cutout_cx,
-                            cutout_cy=cutout_cy,
+                            image_zeropoint=image_zeropoint,
                             snr_limit=effective_snr_limit,
                             snr_gate_factor=_snr_gate_factor,
-                            avoid_positions=_avoid_positions_cutout(),
-                            fitted_position=_fitted_position_cutout(),
                         )
                     except Exception as exc:
                         logger.warning(
@@ -4526,42 +4513,22 @@ class Limits:
         bisect_steps,
         inject_lmag,
         completeness_target,
-        detection_cutoff,
         zeropoint,
         recovery_method,
-        epsf_model=None,
-        cutout=None,
         position=None,
-        background_rms=None,
-        flux_for_mag=None,
-        image_zeropoint=None,
-        injection_df=None,
-        F_ref=None,
         counts_ref=None,
-        extended_steps=None,
-        orig_position=None,
-        target_name=None,
         exposure_time=None,
-        cutout_cx=None,
-        cutout_cy=None,
+        extended_steps=None,
+        image_zeropoint=None,
         snr_limit=None,
         snr_gate_factor=None,
-        avoid_positions=None,
-        fitted_position=None,
         multi_snr_details=None,
-        fig=None,
-        gs=None,
-        inset_row=1,
-        draw_main_plot=True,
     ) -> None:
         """
-        Plot completeness curve with injection examples.
+        Plot the completeness curve.
         If sample_mags is None, only shows bracket/bisect trajectories (no bar chart).
         If multi_snr_details is provided, draws all S/N thresholds' trajectories
         with distinct colors on the same plot.
-        If fig/gs are provided, uses them instead of creating a new figure.
-        inset_row controls which GridSpec row to use for insets (default=1).
-        draw_main_plot=False skips the main completeness plot (for adding inset rows only).
         """
         logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
@@ -4604,1129 +4571,231 @@ class Limits:
 
         plt.ioff()
 
-        owns_figure = fig is None
-        if owns_figure:
-            apply_autophot_mplstyle()
-            # Main completeness plot on top, injection examples below.
-            fig = plt.figure(figsize=set_size(540, 1.35))
-            gs = GridSpec(2, 4, figure=fig, height_ratios=[1.5, 1], wspace=0.3, hspace=0.45)
-        else:
-            if gs is None:
-                raise ValueError("gs must be provided when fig is provided")
-
-        # Main completeness plot (spans all columns in row 0)
-        if draw_main_plot:
-            ax = fig.add_subplot(gs[0, :])
+        fig = plt.figure(figsize=set_size(540, 0.8))
+        ax = fig.add_subplot(111)
 
         # Trajectories are drawn as scatter + arrows, not a polyline: a single
         # line makes the bisection look like it "jumps" across large intervals.
 
-        if draw_main_plot:
-            if mags_sorted is not None:
-                widths = 0.15
-                n_trials = np.array([max(1, len(g)) for g in groups_sorted], dtype=float)
-                p = np.clip(medians_sorted, 0.0, 1.0)
-                p_percent = p * 100
-                # Binomial standard error (normal approx) for visual guidance.
-                p_err = np.sqrt(np.maximum(p * (1.0 - p) / n_trials, 0.0)) * 100
-
-                ax.bar(
-                    mags_sorted,
-                    p_percent,
-                    width=widths,
-                    color="#B0C4DE",
-                    edgecolor="#4D4D4D",
-                    linewidth=0.5,
-                    zorder=2,
-                )
-                ax.errorbar(
-                    mags_sorted,
-                    p_percent,
-                    yerr=p_err,
-                    fmt="none",
-                    ecolor="#4D4D4D",
-                    elinewidth=0.5,
-                    capsize=get_marker_size('medium') / 4,
-                    zorder=3,
-                )
-
-            # Adopted limit: use the interpolated m50 (inject_lmag) rather than the
-            # last evaluated step (which can be above/below 50%).
-            adopted_mag = float(inject_lmag) if np.isfinite(inject_lmag) else np.nan
-
-            # ---- Bracket/bisection search trajectories & adopted-limit lines ----
-            # Color palette for multi-S/N thresholds (up to 6 distinct)
-            _palette = [
-                ("#2196F3", "#1565C0"),  # blue / dark-blue
-                ("#F44336", "#B71C1C"),  # red / dark-red
-                ("#4CAF50", "#1B5E20"),  # green / dark-green
-                ("#FF9800", "#E65100"),  # orange / dark-orange
-                ("#9C27B0", "#4A148C"),  # purple / dark-purple
-                ("#17A2B8", "#0D6577"),  # muted teal / dark-teal (was neon cyan)
-            ]
-            _markers = ["o", "s", "^", "D", "v", "P"]
-
-            if multi_snr_details is not None and len(multi_snr_details) > 1:
-                # --- Multi-SNR: draw all thresholds with distinct colours ---
-                for idx, detail in enumerate(multi_snr_details):
-                    d_snr = detail.get("snr_limit")
-                    d_bracket = detail.get("bracket_steps", [])
-                    d_bisect = detail.get("bisect_steps", [])
-                    d_lmag = detail.get("inject_lmag", np.nan)
-                    d_ctarget = detail.get("completeness_target", 0.5)
-
-                    c_brk, c_bis = _palette[idx % len(_palette)]
-                    mk = _markers[idx % len(_markers)]
-                    tag = f"S/N$\\geq${d_snr:.0f}" if d_snr is not None else f"#{idx+1}"
-
-                    if d_bracket:
-                        bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in d_bracket])
-                        bc_pct = np.asarray(bc, float) * 100.0
-                        bm = np.asarray(bm, float)
-                        ax.scatter(bm, bc_pct, s=16, color=c_brk, alpha=0.85,
-                                   edgecolors="none", marker=mk,
-                                   label=f"Bracket ({tag})", zorder=4)
-                        for i in range(len(bm) - 1):
-                            ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
-                                        xytext=(bm[i], bc_pct[i]),
-                                        arrowprops=dict(arrowstyle="->", color=c_brk,
-                                                        lw=0.5, alpha=0.6))
-
-                    if d_bisect:
-                        bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in d_bisect])
-                        bc_pct = np.asarray(bc, float) * 100.0
-                        bm = np.asarray(bm, float)
-                        ax.scatter(bm, bc_pct, s=16, color=c_bis, alpha=0.85,
-                                   edgecolors="none", marker=mk,
-                                   label=f"Bisection ({tag})", zorder=5)
-                        for i in range(len(bm) - 1):
-                            ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
-                                        xytext=(bm[i], bc_pct[i]),
-                                        arrowprops=dict(arrowstyle="->", color=c_bis,
-                                                        lw=0.5, alpha=0.6))
-
-                    d_adopted = float(d_lmag) if np.isfinite(d_lmag) else np.nan
-                    if np.isfinite(d_adopted):
-                        ax.axvline(d_adopted, color=c_brk, lw=0.8, ls="--",
-                                   label=f"m50 = {d_adopted:.2f} ({tag})",
-                                   zorder=6, alpha=0.9)
-                        ax.scatter([d_adopted], [float(d_ctarget) * 100.0],
-                                   s=32, marker="D", c=c_brk,
-                                   edgecolors="white", linewidth=0.4, zorder=7)
-            else:
-                # --- Single-SNR: original behaviour ---
-                snr_label = ""
-                if snr_limit is not None:
-                    snr_label = f" (S/N $\\geq$ {snr_limit:.0f})"
-                    if (
-                        snr_gate_factor is not None
-                        and np.isfinite(snr_gate_factor)
-                        and not np.isclose(float(snr_gate_factor), 1.0)
-                    ):
-                        snr_label += f" cal $\\times${float(snr_gate_factor):.2f}"
-
-                if bracket_steps:
-                    bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in bracket_steps])
-                    bc_percent = np.asarray(bc, float) * 100.0
-                    bm = np.asarray(bm, float)
-                    ax.scatter(bm, bc_percent, s=14, color=PLOT_COLORS.get('reference', '#0072B2'), alpha=0.8,
-                               edgecolors="none", label=f"Bracket search{snr_label}", zorder=4)
-                    for i in range(len(bm) - 1):
-                        ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
-                                    xytext=(bm[i], bc_percent[i]),
-                                    arrowprops=dict(arrowstyle="->", color=PLOT_COLORS.get('reference', '#0072B2'),
-                                                    lw=0.5, alpha=0.7))
-
-                if bisect_steps:
-                    bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in bisect_steps])
-                    bc_percent = np.asarray(bc, float) * 100.0
-                    bm = np.asarray(bm, float)
-                    ax.scatter(bm, bc_percent, s=14, color=PLOT_COLORS.get('psf', '#00AA00'), alpha=0.8,
-                               edgecolors="none", label=f"Bisection{snr_label}", zorder=5)
-                    for i in range(len(bm) - 1):
-                        ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
-                                    xytext=(bm[i], bc_percent[i]),
-                                    arrowprops=dict(arrowstyle="->", color=PLOT_COLORS.get('psf', '#00AA00'),
-                                                    lw=0.5, alpha=0.7))
-
-                if np.isfinite(adopted_mag):
-                    ax.axvline(adopted_mag, color="k", lw=0.6, ls="--",
-                               label=f"Adopted limit m50 = {adopted_mag:.2f}{snr_label}",
-                               zorder=6)
-                    try:
-                        ax.scatter([adopted_mag], [float(completeness_target) * 100.0],
-                                   s=28, marker="D", c="k", edgecolors="white",
-                                   linewidth=0.4, zorder=7)
-                    except Exception:
-                        pass
-
-            ax.axhline(50, color="0.7", lw=0.5, ls="--", zorder=0)
-            ax.text(0.02, 50, "50%", transform=ax.get_yaxis_transform(),
-                    va="bottom", ha="left", color="0.5")
-
-            if completeness_target != 0.5:
-                target_percent = completeness_target * 100
-                ax.axhline(target_percent, color="0.7", lw=0.5, ls="-.", zorder=0)
-                ax.text(0.98, target_percent, f"{int(target_percent)}%",
-                        transform=ax.get_yaxis_transform(), va="bottom",
-                        ha="right", color="0.5")
-
-            # When every injection site was vetoed upstream, none of the data
-            # sources below have entries and the panel would save blank.
-            _drew_data = mags_sorted is not None and len(mags_sorted) > 0
-            if multi_snr_details is not None and len(multi_snr_details) > 1:
-                _drew_data = _drew_data or any(
-                    d.get("bracket_steps") or d.get("bisect_steps")
-                    for d in multi_snr_details
-                )
-            else:
-                _drew_data = (
-                    _drew_data or bool(bracket_steps) or bool(bisect_steps)
-                )
-            if not _drew_data:
-                ax.text(
-                    0.5,
-                    0.5,
-                    "No valid injection sites - no recovery data",
-                    transform=ax.transAxes,
-                    ha="center",
-                    va="center",
-                    fontsize=9,
-                    color="0.45",
-                )
-
-            ax.set_xlabel("Injected Instrumental Magnitude [mag]", fontsize=9)
-            ax.set_ylabel("Recovery fraction [%]", fontsize=9)
-            
-            # Apparent-magnitude secondary axis, if a zeropoint is available.
-            secax = None
-            if selected_zeropoint is not None and np.isfinite(
-                float(selected_zeropoint)
-            ):
-                # A non-finite zeropoint (fit failed on this field) would
-                # poison the transform and crash the draw with
-                # "Axis limits cannot be NaN or Inf".
-                _zp = float(selected_zeropoint)
-                secax = ax.secondary_xaxis(
-                    "top",
-                    functions=(
-                        lambda m, zp=_zp: m + zp,
-                        lambda m, zp=_zp: m - zp,
-                    ),
-                )
-                secax.set_xlabel("Apparent Magnitude [mag]")
-                # The monotonic transform already sets the direction;
-                # secax.invert_xaxis() would double-invert it.
-
-            # Legend entries are reordered by role (bracket / bisection / m50)
-            # so that with ncol=3 column-major filling, each column holds one
-            # role and each row one S/N threshold.
-            _hh, _ll = ax.get_legend_handles_labels()
-            if _ll:
-                _role = {"Bracket": 0, "Bisection": 1, "m50": 2, "Adopted": 2}
-                _order = sorted(
-                    range(len(_ll)),
-                    key=lambda i: _role.get(_ll[i].split(" ")[0], 3),
-                )
-                ax.legend(
-                    [_hh[i] for i in _order], [_ll[i] for i in _order],
-                    loc="lower left",
-                    fontsize=8, frameon=False, ncol=3,
-                    handlelength=1.5, columnspacing=1.0,
-                )
-        
-        # Injection cutout panels below the main plot, if data are available.
-        if epsf_model is not None and cutout is not None and position is not None and \
-           np.isfinite(inject_lmag) and flux_for_mag is not None:
-            ny_c, nx_c = cutout.shape
-            # get_cutout's true center handles partial cutouts; fall back to
-            # the geometric center when it was not recorded.
-            if cutout_cx is not None and cutout_cy is not None:
-                target_x = float(cutout_cx)
-                target_y = float(cutout_cy)
-                logger.info("Using true target center: (%.2f, %.2f)", target_x, target_y)
-            else:
-                target_x   = (nx_c - 1) / 2.0
-                target_y   = (ny_c - 1) / 2.0
-                logger.info("Using geometric center: (%.2f, %.2f)", target_x, target_y)
-
-            fwhm            = float(self.input_yaml.get("fwhm", 3.0))
-            phot_cfg        = self.input_yaml.get("photometry", {})
-            aperture_radius = float(phot_cfg.get("aperture_radius", fwhm))
-            lim_cfg         = self.input_yaml.get("limiting_magnitude") or {}
-
-            # ------------------------------------------------------------------
-            # Choose demo injection magnitudes based on *recovery fraction* so the
-            # 3 cutouts remain meaningful even when m50 lies near the search edge.
-            #
-            # Requested: show ~100%, 80%, and 50% recoverable injections.
-            # ------------------------------------------------------------------
-            zp_ok = selected_zeropoint is not None and np.isfinite(float(selected_zeropoint))
-            zp_val = float(selected_zeropoint) if zp_ok else 0.0
-
-            def _mag_at_recovery(p_target: float) -> float:
-                """Return instrumental magnitude at which completeness ~ p_target."""
-                steps = []
-                for s in (bracket_steps or []) + (bisect_steps or []):
-                    try:
-                        m0 = float(s[0])
-                        c0 = float(s[1])
-                        # s[2] is flux, s[3] is flux_err (not used here)
-                    except Exception:
-                        continue
-                    if np.isfinite(m0) and np.isfinite(c0):
-                        steps.append((m0, float(np.clip(c0, 0.0, 1.0))))
-                if len(steps) < 2:
-                    return float(inject_lmag)
-
-                # Sort bright -> faint (increasing mag). Enforce a monotone non-increasing
-                # completeness curve to make interpolation stable under Monte-Carlo noise.
-                steps.sort(key=lambda t: t[0])
-                m_arr = np.asarray([t[0] for t in steps], dtype=float)
-                c_arr = np.asarray([t[1] for t in steps], dtype=float)
-                c_mono = np.maximum.accumulate(c_arr[::-1])[::-1]  # non-increasing vs mag
-
-                # Find first crossing from above to below p_target.
-                for j in range(1, len(m_arr)):
-                    c0, c1 = c_mono[j - 1], c_mono[j]
-                    if (c0 >= p_target) and (c1 <= p_target) and (c0 != c1):
-                        w = float((p_target - c0) / (c1 - c0))
-                        w = float(np.clip(w, 0.0, 1.0))
-                        return float(m_arr[j - 1] + w * (m_arr[j] - m_arr[j - 1]))
-
-                # If we never cross, clamp to range end that is "closest" in probability.
-                # p high -> choose brightest; p low -> choose faintest.
-                if p_target >= float(np.nanmax(c_mono)):
-                    return float(m_arr[0])
-                return float(m_arr[-1])
-
-            m50_inst = float(inject_lmag)
-            m80_inst = float(_mag_at_recovery(0.80))
-            m100_inst = float(_mag_at_recovery(0.99))  # "100%" in practice
-
-            inst_targets = [m50_inst, m80_inst, m100_inst]
-            mag_targets = [m + zp_val for m in inst_targets] if zp_ok else inst_targets
-            
-            # Background RMS for S/N scaling of the demo injections.
-            if background_rms is not None:
-                # Median of the provided RMS map (already source-masked).
-                background_rms_scalar = float(np.nanmedian(background_rms))
-            else:
-                # Biweight scale so sources in the cutout do not bias the
-                # estimate and quantized data does not staircase it.
-                background_rms_scalar = biweight_sky_sigma(cutout)
-
-            raw_os_plot = getattr(epsf_model, "oversampling", 1)
-            if isinstance(raw_os_plot, (list, tuple, np.ndarray)):
-                oversampling_plot = int(raw_os_plot[0])
-            elif np.isscalar(raw_os_plot) and raw_os_plot > 1:
-                oversampling_plot = int(raw_os_plot)
-            else:
-                oversampling_plot = 1
-
-            # -- Demo injection site selection -----------------------------------------
-            #
-            # Priority:
-            #   1. Quietest valid site from injection_df (lowest |SNR|).
-            #   2. Random circumference point (never always index 0 = top-right).
-            #
-            # Valid = within cutout bounds (with fwhm margin) AND at least
-            #         (2*aperture_radius + fwhm) from the transient position.
-            # -------------------------------------------------------------------------
-            min_sep   = 2.0 * aperture_radius + fwhm
-            px_margin = float(np.ceil(fwhm))
-            inj_dist  = float(lim_cfg.get("inject_source_location", 3.0)) * fwhm
-            try:
-                _avoid_plot = np.asarray(avoid_positions, dtype=float).reshape(-1, 2)
-                _avoid_plot = _avoid_plot[np.isfinite(_avoid_plot).all(axis=1)]
-            except (TypeError, ValueError):
-                _avoid_plot = np.empty((0, 2), dtype=float)
-
-            # PSF-fitted target position in cutout coords (marker only).
-            _fitted_plot = None
-            if fitted_position is not None:
-                try:
-                    _fp = np.asarray(fitted_position, dtype=float).reshape(-1)
-                except (TypeError, ValueError):
-                    _fp = np.empty(0)
-                if (
-                    _fp.size >= 2
-                    and np.isfinite(_fp[0])
-                    and np.isfinite(_fp[1])
-                ):
-                    _fitted_plot = (float(_fp[0]), float(_fp[1]))
-
-            def _clear_of_transients(sx, sy):
-                if float(np.hypot(sx - target_x, sy - target_y)) < min_sep:
-                    return False
-                if _avoid_plot.size:
-                    _d = np.hypot(
-                        _avoid_plot[:, 0] - float(sx),
-                        _avoid_plot[:, 1] - float(sy),
-                    )
-                    if float(np.min(_d)) < min_sep:
-                        return False
-                return True
-
-            demo_x = demo_y = None
-
-            if injection_df is not None and len(injection_df) > 0:
-                snr_col = "SNR" if "SNR" in injection_df.columns else None
-                scored   = []
-                for _, site in injection_df.iterrows():
-                    sx, sy = float(site["x_pix"]), float(site["y_pix"])
-                    if not (
-                        px_margin <= sx <= nx_c - 1 - px_margin
-                        and px_margin <= sy <= ny_c - 1 - px_margin
-                    ):
-                        continue
-                    if not _clear_of_transients(sx, sy):
-                        continue
-                    # Skip sites on invalid/no-data pixels.
-                    xi = int(np.round(sx))
-                    yi = int(np.round(sy))
-                    if xi < 0 or yi < 0 or xi >= nx_c or yi >= ny_c:
-                        continue
-                    v0 = float(cutout[yi, xi])
-                    if not np.isfinite(v0):
-                        continue
-                    # Consistent with main injection-site selection: score by |SNR|.
-                    if snr_col is not None:
-                        try:
-                            score = float(abs(float(site[snr_col])))
-                        except Exception:
-                            score = float("inf")
-                    else:
-                        score = float("inf")
-                    scored.append((score, sx, sy))
-
-                if scored:
-                    scored.sort(key=lambda t: t[0])   # ascending -> quietest first
-                    _, demo_x, demo_y = scored[0]
-
-            if demo_x is None:
-                # Try each circumference point; pick first one with full annulus clearance
-                annulus_margin = aperture_radius + fwhm * 2.0  # must fit full annulus
-                pts = points_in_circum(inj_dist, center=[target_x, target_y], n=8)
-                for rng_idx in self._rng.permutation(len(pts)).tolist():
-                    cx_try = float(pts[rng_idx][0])
-                    cy_try = float(pts[rng_idx][1])
-                    if (
-                        annulus_margin <= cx_try <= nx_c - 1 - annulus_margin
-                        and annulus_margin <= cy_try <= ny_c - 1 - annulus_margin
-                        and _clear_of_transients(cx_try, cy_try)
-                    ):
-                        xi = int(np.round(cx_try))
-                        yi = int(np.round(cy_try))
-                        if 0 <= xi < nx_c and 0 <= yi < ny_c:
-                            v0 = float(cutout[yi, xi])
-                            if not np.isfinite(v0):
-                                continue
-                        demo_x = cx_try
-                        demo_y = cy_try
-                        break
-                if demo_x is None:
-                    # Last resort: choose the in-bounds circumference point with
-                    # the largest clearance to every transient.
-                    _best = None
-                    _best_sep = -np.inf
-                    for cx_try, cy_try in np.asarray(pts, dtype=float):
-                        if not (
-                            annulus_margin <= cx_try <= nx_c - 1 - annulus_margin
-                            and annulus_margin <= cy_try <= ny_c - 1 - annulus_margin
-                        ):
-                            continue
-                        _seps = [
-                            float(np.hypot(cx_try - target_x, cy_try - target_y))
-                        ]
-                        if _avoid_plot.size:
-                            _seps.append(
-                                float(
-                                    np.min(
-                                        np.hypot(
-                                            _avoid_plot[:, 0] - cx_try,
-                                            _avoid_plot[:, 1] - cy_try,
-                                        )
-                                    )
-                                )
-                            )
-                        _sep = min(_seps)
-                        if _sep > _best_sep:
-                            _best_sep = _sep
-                            _best = (cx_try, cy_try)
-                    if _best is None:
-                        _best = (target_x, target_y)
-                    demo_x, demo_y = float(_best[0]), float(_best[1])
-                    logger.warning(
-                        "Circumference demo sites constrained; using best-clearance "
-                        "site (%.1f, %.1f), nearest transient %.1f px",
-                        demo_x,
-                        demo_y,
-                        float(_best_sep),
-                    )
-
-            # Initialize per-panel locals before the loop so a failed panel
-            # cannot leak stale values into later panels or the site-map panel.
-            transient_label = "1"
-
-            def _confined(ax_, x_, y_, txt_, fs_, ha_, va_):
-                """Adjust anchor/alignment so a boxed label fits inside the axes."""
-                try:
-                    _fw, _fh = ax_.figure.get_size_inches()
-                    _pos = ax_.get_position()
-                    _xw0, _xw1 = ax_.get_xlim()
-                    _yw0, _yw1 = ax_.get_ylim()
-                    # Approx text extent in data units (0.6 em per char
-                    # plus a little room for the bbox padding).
-                    _w = (len(txt_) * 0.6 * fs_ / 72.0 + 0.10) \
-                        / max(_pos.width * _fw, 1e-6) * abs(_xw1 - _xw0)
-                    _h = (fs_ * 1.5 / 72.0 + 0.08) \
-                        / max(_pos.height * _fh, 1e-6) * abs(_yw1 - _yw0)
-                except Exception:
-                    return x_, y_, ha_, va_
-                _span_x, _span_y = abs(_xw1 - _xw0), abs(_yw1 - _yw0)
-                _xlo, _xhi = min(_xw0, _xw1), max(_xw0, _xw1)
-                _ylo, _yhi = min(_yw0, _yw1), max(_yw0, _yw1)
-                if _w >= _span_x:
-                    x_, ha_ = (_xlo + _xhi) / 2.0, 'center'
-                elif (ha_ == 'left' and x_ + _w > _xhi) or \
-                     (ha_ == 'center' and x_ + _w / 2 > _xhi) or \
-                     (ha_ == 'right' and x_ > _xhi):
-                    x_, ha_ = _xhi, 'right'
-                elif (ha_ == 'right' and x_ - _w < _xlo) or \
-                     (ha_ == 'center' and x_ - _w / 2 < _xlo) or \
-                     (ha_ == 'left' and x_ < _xlo):
-                    x_, ha_ = _xlo, 'left'
-                if _h >= _span_y:
-                    y_, va_ = (_ylo + _yhi) / 2.0, 'center'
-                elif (va_ == 'bottom' and y_ + _h > _yhi) or \
-                     (va_ == 'center' and y_ + _h / 2 > _yhi) or \
-                     (va_ == 'top' and y_ > _yhi):
-                    y_, va_ = _yhi, 'top'
-                elif (va_ == 'top' and y_ - _h < _ylo) or \
-                     (va_ == 'center' and y_ - _h / 2 < _ylo) or \
-                     (va_ == 'bottom' and y_ < _ylo):
-                    y_, va_ = _ylo, 'bottom'
-                return x_, y_, ha_, va_
-
-            # Gridspec columns are resized to the panel aspects once the
-            # first zoom window is known (see inside the loop).
-            _inset_geom_done = False
-
-            for i, mag_target in enumerate(mag_targets):
-                ax_inject = fig.add_subplot(gs[inset_row, i])
-                flux_hat = np.nan
-                snr_meas = None
-                recovered_apparent = np.nan
-
-                try:
-                    ny, nx = cutout.shape
-                    y_grid, x_grid = np.mgrid[0:ny, 0:nx]
-                    logger.debug("Subpanel: cutout shape=(%s,%s), grid shape=%s, %s", ny, nx, y_grid.shape, x_grid.shape)
-
-                    if cutout_cx is not None and cutout_cy is not None:
-                        x_center = float(cutout_cx)
-                        y_center = float(cutout_cy)
-                    else:
-                        # Partial cutout: geometric center is the fallback.
-                        x_center = (nx - 1) / 2.0
-                        y_center = (ny - 1) / 2.0
-
-                    injected = cutout.copy()
-                    # Mask only NaN/inf pixels: zero-valued pixels can be valid
-                    # bright sources after sky subtraction.
-                    invalid_mask = ~np.isfinite(injected)
-                    # No-data must stay NaN even after injection.
-                    injected = np.asarray(injected, dtype=float)
-                    injected[invalid_mask] = np.nan
-
-                    # flux_for_mag takes instrumental magnitudes.
-                    if selected_zeropoint is not None:
-                        inst_mag_target = mag_target - selected_zeropoint
-                    else:
-                        inst_mag_target = mag_target  # no zeropoint available
-                    flux_adu = flux_for_mag(inst_mag_target)
-
-                    inject_x = demo_x
-                    inject_y = demo_y
-                    # inject_x/inject_y are in cutout-local coordinates (from injection_df["x_pix"]/["y_pix"])
-
-                    ny, nx = cutout.shape
-                    psf_inject = _render_epsf_on_cutout(
-                        epsf_model,
-                        ny,
-                        nx,
-                        float(inject_x),
-                        float(inject_y),
-                        float(flux_adu),
-                        oversampling_plot,
-                    )
-                    # Do not inject into invalid pixels.
-                    try:
-                        psf_inject = np.asarray(psf_inject, dtype=float)
-                        psf_inject[invalid_mask] = 0.0
-                    except Exception:
-                        pass
-                    injected += psf_inject
-                    # Re-impose invalid mask for display (do not let injection fill no-data areas).
-                    injected_disp = np.asarray(injected, dtype=float).copy()
-                    injected_disp[invalid_mask] = np.nan
-                    
-                    # Zoom centred between target and injection site so both
-                    # appear in the panel; radius covers the site with margin.
-                    inject_distance = float(np.sqrt(
-                        (inject_x - x_center)**2 + (inject_y - y_center)**2
-                    ))
-                    mid_x = (x_center + inject_x) / 2.0
-                    mid_y = (y_center + inject_y) / 2.0
-                    half_dist = inject_distance / 2.0
-                    zoom_radius = half_dist + max(3.0 * fwhm, 2.0 * aperture_radius)
-
-                    x0_zoom = int(max(0, np.floor(mid_x - zoom_radius)))
-                    x1_zoom = int(min(nx, np.ceil(mid_x + zoom_radius)))
-                    y0_zoom = int(max(0, np.floor(mid_y - zoom_radius)))
-                    y1_zoom = int(min(ny, np.ceil(mid_y + zoom_radius)))
-
-                    if x1_zoom <= x0_zoom or y1_zoom <= y0_zoom:
-                        logger.warning("Zoom region has zero area; skipping subpanel.")
-                        raise ValueError("Zero-area zoom region")
-
-                    background_rms_zoom = None
-                    if background_rms is not None:
-                        background_rms_zoom = background_rms[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
-                        background_rms_zoom = np.abs(np.asarray(background_rms_zoom, dtype=float))
-
-                    x0_z, x1_z, y0_z, y1_z = x0_zoom, x1_zoom, y0_zoom, y1_zoom
-                    bkgrms_zoom = background_rms_zoom
-
-                    logger.debug(
-                        "Subpanel zoom: cutout=(%dx%d), target=(%.1f,%.1f), injection=(%.1f,%.1f), inject_distance=%.1f px, zoom_radius=%.1f px, "
-                        "zoom=[%d:%d, %d:%d]",
-                        nx, ny, x_center, y_center,
-                        inject_x, inject_y, inject_distance, zoom_radius,
-                        x0_zoom, x1_zoom, y0_zoom, y1_zoom,
-                    )
-
-                    # imshow the full cutout; the zoom is applied via set_xlim/ylim.
-                    from astropy.visualization import ZScaleInterval
-                    zscale = ZScaleInterval()
-                    finite = injected_disp[np.isfinite(injected_disp)]
-                    if finite.size:
-                        lower, upper = np.percentile(finite, [0.5, 99.5])
-                        vmin, vmax = zscale.get_limits(np.clip(injected_disp, lower, upper))
-                    else:
-                        vmin, vmax = np.nanmin(injected_disp), np.nanmax(injected_disp)
-                    cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                    cmap = cmap.with_extremes(bad="none")
-                    im = ax_inject.imshow(
-                        np.ma.array(injected_disp, mask=~np.isfinite(injected_disp)),
-                        origin="lower",
-                        cmap=cmap,
-                        vmin=vmin,
-                        vmax=vmax,
-                    )
-                    overlay_mask_hatch(ax_inject, ~np.isfinite(injected_disp))
-                    ax_inject.set_xlim(x0_zoom, x1_zoom)
-                    ax_inject.set_ylim(y0_zoom, y1_zoom)
-
-                    if not _inset_geom_done:
-                        _inset_geom_done = True
-                        try:
-                            # Equal-aspect thumbnails shrink inside cells that
-                            # do not match the data aspect. Give each column a
-                            # width proportional to its panel aspect (the three
-                            # zoom panels share one window; the sites panel
-                            # shows the full cutout) and resize the figure so
-                            # the inset row height matches too.
-                            az = (x1_zoom - x0_zoom) / max(
-                                float(y1_zoom - y0_zoom), 1.0
-                            )
-                            ac = float(nx) / max(float(ny), 1.0)
-                            col_aspects = [az, az, az, ac]
-                            if gs.ncols == len(col_aspects):
-                                gs.set_width_ratios(col_aspects)
-                            spp = gs.get_subplot_params(fig)
-                            ws = float(spp.wspace or 0.0)
-                            hs = float(spp.hspace or 0.0)
-                            hratios = [
-                                float(h)
-                                for h in (
-                                    gs.get_height_ratios()
-                                    or [1.0] * gs.nrows
-                                )
-                            ]
-                            fig_w = float(fig.get_size_inches()[0])
-                            # Margin estimates only; tight_layout refines the
-                            # actual margins at save time.
-                            margin_w, margin_h = 1.15, 1.35
-                            grid_w = max(fig_w - margin_w, 1.0)
-                            row_unit = grid_w / (
-                                sum(col_aspects)
-                                * (1.0 + ws * (gs.ncols - 1) / gs.ncols)
-                            )
-                            grid_h = row_unit * sum(hratios) * (
-                                1.0 + hs * (gs.nrows - 1) / gs.nrows
-                            )
-                            fig_h = float(
-                                np.clip(grid_h + margin_h, 3.0, 24.0)
-                            )
-                            fig.set_size_inches(fig_w, fig_h)
-                        except Exception:
-                            pass
-
-                    # Transient marker at the cutout centre.
-                    from matplotlib.patches import Circle
-                    transient_marker = Circle((x_center, y_center), radius=aperture_radius,
-                                            edgecolor=PLOT_COLORS.get('target', '#FF0000'), facecolor='none', linestyle='-', linewidth=0.5)
-                    ax_inject.add_patch(transient_marker)
-                    if _avoid_plot.size:
-                        for _ax0, _ay0 in _avoid_plot:
-                            ax_inject.add_patch(
-                                Circle(
-                                    (_ax0, _ay0),
-                                    radius=aperture_radius,
-                                    edgecolor="#17A2B8",
-                                    facecolor="none",
-                                    linestyle=":",
-                                    linewidth=0.5,
-                                )
-                            )
-                    if _fitted_plot is not None:
-                        ax_inject.plot(
-                            [_fitted_plot[0]],
-                            [_fitted_plot[1]],
-                            "x",
-                            color=PLOT_COLORS.get("transient_marker", "#FF00FF"),
-                            markersize=6,
-                            markeredgewidth=1.2,
-                        )
-                    # Label with target_name (TNS-prefixed) or '1' as fallback.
-                    if target_name and target_name.strip():
-                        name_prefix = self.input_yaml.get("name_prefix", "")
-                        objname = self.input_yaml.get("objname", target_name)
-                        # Guard against double-prefixing.
-                        if name_prefix and name_prefix.strip() and not target_name.startswith(name_prefix):
-                            transient_label = f"{name_prefix}{objname}"
-                        else:
-                            transient_label = target_name
-                    else:
-                        transient_label = '1'
-
-                    # Labels are placed on the outward side of each circle along
-                    # the target->injection axis, so the transient and S/N labels
-                    # can never overlap regardless of the demo-site geometry.
-                    # _confined() then slides each box back inside the axes so
-                    # text is never clipped by the panel boundary.
-                    _lbl_dx = float(inject_x - x_center)
-                    _lbl_dy = float(inject_y - y_center)
-                    _lbl_d = float(np.hypot(_lbl_dx, _lbl_dy))
-                    if _lbl_d < 1e-3:
-                        _lbl_ux, _lbl_uy = 0.0, 1.0
-                    else:
-                        _lbl_ux, _lbl_uy = _lbl_dx / _lbl_d, _lbl_dy / _lbl_d
-                    _lbl_pad = aperture_radius + 1.0
-
-                    _tx, _ty = (x_center - _lbl_ux * _lbl_pad,
-                                y_center - _lbl_uy * _lbl_pad)
-                    _tha = 'right' if _lbl_ux > 0.35 else ('left' if _lbl_ux < -0.35 else 'center')
-                    _tva = 'top' if _lbl_uy > 0.35 else ('bottom' if _lbl_uy < -0.35 else 'center')
-                    _tx, _ty, _tha, _tva = _confined(
-                        ax_inject, _tx, _ty, transient_label, 8, _tha, _tva)
-                    ax_inject.text(
-                        _tx, _ty, transient_label,
-                        color=PLOT_COLORS.get('target', '#FF0000'), fontsize=8,
-                        ha=_tha, va=_tva,
-                        bbox=dict(boxstyle="round,pad=0.15", facecolor="white", alpha=0.8, linewidth=0),
-                        clip_on=True,
-                    )
-
-                    # Injection-site circle in cutout-local coordinates.
-                    aperture_circle = Circle((inject_x, inject_y), radius=aperture_radius,
-                                           edgecolor='white', facecolor='none', linestyle='--', linewidth=0.5)
-                    ax_inject.add_patch(aperture_circle)
-                    
-                    try:
-                        recovery_method_upper = str(recovery_method).strip().upper()
-
-                        injected_zoom = injected[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
-                        inj_x_z = inject_x - x0_zoom
-                        inj_y_z = inject_y - y0_zoom
-
-                        if recovery_method_upper == "PSF":
-                            # Fast weighted-least-squares PSF S/N - same estimator as _injection_worker.
-                            phot_cfg_l = self.input_yaml.get("photometry") or {}
-                            scale_v    = float(phot_cfg_l.get("psf_fit_shape_vfaint_scale_fwhm", 2.0))
-                            half_s     = int(np.ceil(max(3.0, scale_v * fwhm)))
-                            nyiz, nxiz = injected_zoom.shape
-                            x0s = max(0, int(np.floor(inj_x_z)) - half_s)
-                            x1s = min(nxiz, int(np.floor(inj_x_z)) + half_s + 2)
-                            y0s = max(0, int(np.floor(inj_y_z)) - half_s)
-                            y1s = min(nyiz, int(np.floor(inj_y_z)) + half_s + 2)
-                            data_s   = np.asarray(injected_zoom[y0s:y1s, x0s:x1s], float)
-                            # Render the unit-flux PSF on the stamp via the same
-                            # flux-conserving path used for injection and for
-                            # counts_ref calibration.  A raw evaluate() on the
-                            # detector grid returns subpixel-density values for
-                            # oversampled models, biasing flux_hat ~osamp^2 too
-                            # high (Mag_out ~3 mag too bright at osamp=4).
-                            psf1 = _render_epsf_on_cutout(
-                                epsf_model,
-                                int(y1s - y0s),
-                                int(x1s - x0s),
-                                float(inj_x_z - x0s),
-                                float(inj_y_z - y0s),
-                                1.0,
-                                oversampling_plot,
-                            )
-                            if bkgrms_zoom is not None:
-                                var_s = np.maximum(bkgrms_zoom[y0s:y1s, x0s:x1s] ** 2, 1e-30)
-                            else:
-                                sig_s = biweight_sky_sigma(data_s)
-                                var_s = np.full_like(data_s, max(sig_s ** 2, 1e-30))
-                            ok_s = np.isfinite(data_s) & np.isfinite(psf1) & (var_s > 0)
-                            snr  = np.nan
-                            if int(np.count_nonzero(ok_s)) >= 10:
-                                w_s  = 1.0 / var_s[ok_s]
-                                a_s  = np.vstack([psf1[ok_s].ravel(),
-                                                  np.ones(int(np.count_nonzero(ok_s)))])
-                                aw_s = a_s * w_s
-                                m_s  = aw_s @ a_s.T
-                                b_s  = aw_s @ data_s[ok_s].ravel()
-                                try:
-                                    cov_s = np.linalg.inv(m_s)
-                                except Exception:
-                                    cov_s = None
-                                if cov_s is not None and np.all(np.isfinite(cov_s)):
-                                    theta_s  = cov_s @ b_s
-                                    flux_hat = float(theta_s[0])
-                                    flux_err = float(np.sqrt(max(cov_s[0, 0], 0.0)))
-                                    if np.isfinite(flux_err) and flux_err > 0:
-                                        snr = np.abs(flux_hat) / flux_err
-
-                        else:  # AP / EMCEE -> aperture photometry
-                            ap_obj   = Aperture(input_yaml=self.input_yaml, image=injected_zoom)
-                            snr_df   = pd.DataFrame({"x_pix": [inj_x_z], "y_pix": [inj_y_z]})
-                            snr_meas = ap_obj.measure(
-                                sources=snr_df, plot=False,
-                                background_rms=bkgrms_zoom, verbose=0,
-                            )
-                            snr = float(snr_meas["SNR"].iloc[0])
-                            if not np.isfinite(snr):
-                                fl  = float(snr_meas["flux_AP"].iloc[0])
-                                ns  = float(snr_meas["noiseSky"].iloc[0])
-                                snr = np.abs(fl) / ns if ns > 0 else 0.0
-
-                        if not np.isfinite(snr):
-                            raise ValueError("SNR not finite; using fallback")
-
-                    except Exception as snr_exc:
-                        logger.debug("Subpanel S/N fallback: %s", snr_exc)
-                        sig   = float(np.nansum(
-                            injected[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
-                            - cutout[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
-                        ))
-                        noise = background_rms_scalar * float(
-                            np.sqrt(np.pi * aperture_radius ** 2)
-                        )
-                        snr   = sig / noise if noise > 0 else 0.0
-
-                    _sx, _sy = (inject_x + _lbl_ux * _lbl_pad,
-                                inject_y + _lbl_uy * _lbl_pad)
-                    _sha = 'left' if _lbl_ux > 0.35 else ('right' if _lbl_ux < -0.35 else 'center')
-                    _sva = 'bottom' if _lbl_uy > 0.35 else ('top' if _lbl_uy < -0.35 else 'center')
-                    _snr_txt = f"S/N={snr:.1f}"
-                    _sx, _sy, _sha, _sva = _confined(
-                        ax_inject, _sx, _sy, _snr_txt, 8, _sha, _sva)
-                    ax_inject.text(
-                        _sx, _sy, _snr_txt,
-                        color='white', fontsize=8,
-                        ha=_sha, va=_sva,
-                        bbox=dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.7, linewidth=0),
-                        clip_on=True,
-                    )
-
-                    # Panel order matches mag_targets: 50%, 80%, ~100% recovery.
-                    try:
-                        _lbl = ["50%", "80%", "100%"][int(i)]
-                    except Exception:
-                        _lbl = ""
-                    ax_inject.set_title(
-                        f"Mag$_{{in}}$ = {mag_target:.2f}" + (f" ({_lbl})" if _lbl else ""),
-                        fontsize=9,
-                    )
-
-                    # Recovered apparent magnitude, lower-left corner.
-                    if selected_zeropoint is not None:
-                        # flux_hat/snr_meas were reset at the top of this
-                        # iteration, so no stale values leak across panels.
-                        if recovery_method_upper == "PSF" and np.isfinite(flux_hat):
-                            # flux_hat is the PSF flux parameter; scale by
-                            # counts_ref/exposure_time to get e-/s.
-                            if counts_ref is not None and exposure_time is not None and counts_ref > 0 and exposure_time > 0:
-                                recovered_flux_e_per_s = flux_hat * counts_ref / exposure_time
-                                _r = float(recovered_flux_e_per_s)
-                                recovered_inst = -2.5 * np.log10(_r) if _r > 0 else float("nan")
-                                recovered_apparent = recovered_inst + selected_zeropoint
-                        elif recovery_method_upper in ["AP", "EMCEE"]:
-                            # AP/EMCEE: aperture flux from snr_meas is already e-/s.
-                            try:
-                                recovered_flux = float(snr_meas["flux_AP"].iloc[0])
-                                recovered_inst = -2.5 * np.log10(recovered_flux) if recovered_flux > 0 else float("nan")
-                                recovered_apparent = (
-                                    recovered_inst
-                                    + selected_zeropoint
-                                    + _ap_diff_resid(self.input_yaml)
-                                )
-                            except Exception:
-                                pass
-
-                        if np.isfinite(recovered_apparent):
-                            ax_inject.text(
-                                0.05, 0.05,
-                                f"Mag$_{{out}}$: {recovered_apparent:.2f}",
-                                transform=ax_inject.transAxes,
-                                color="white", fontsize=7, ha="left", va="bottom",
-                                bbox=dict(boxstyle="round", facecolor="black", alpha=0.7),
-                                clip_on=True,
-                            )
-                    
-                    # No per-panel colorbar: at thumbnail size it is unreadable and
-                    # costs ~20% of the image width. The S/N and Mag_out labels carry
-                    # the quantitative information.
-                    ax_inject.set_xlabel('X [pixels]', fontsize=8)
-                    if i == 0:
-                        ax_inject.set_ylabel('Y [pixels]', fontsize=8)
-                        if snr_limit is not None:
-                            # Row label anchored to the leftmost panel so it
-                            # tracks the row regardless of GridSpec ratios or
-                            # tight_layout adjustments.
-                            ax_inject.text(
-                                -0.55, 0.5, f"S/N $\\geq$ {snr_limit:.0f}",
-                                transform=ax_inject.transAxes, rotation=90,
-                                ha='center', va='center',
-                                fontsize=9, fontweight='bold',
-                            )
-                    else:
-                        # All thumbnails share the same zoom window; the y-axis
-                        # only needs labelling on the first panel.
-                        ax_inject.set_ylabel('')
-                        ax_inject.tick_params(labelleft=False)
-                    ax_inject.tick_params(labelsize=8)
-                except Exception as e:
-                    # Show the original cutout when the demo injection fails.
-                    import traceback
-                    logger.warning("Subpanel injection failed for mag=%.2f: %s", mag_target, e)
-                    logger.debug("Subpanel injection traceback:\n%s", traceback.format_exc())
-                    ny, nx = cutout.shape
-                    from astropy.visualization import simple_norm
-                    norm = simple_norm(cutout, 'sqrt', percent=99.5)
-                    cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                    cmap = cmap.with_extremes(bad="none")
-                    # Mask NaN/inf only; zeros can be real sky-subtracted pixels.
-                    cut_disp = np.asarray(cutout, dtype=float).copy()
-                    ax_inject.imshow(
-                        np.ma.array(cut_disp, mask=~np.isfinite(cut_disp)),
-                        origin="lower",
-                        cmap=cmap,
-                        norm=norm,
-                    )
-                    overlay_mask_hatch(ax_inject, ~np.isfinite(cut_disp))
-                    ax_inject.set_xlim(0, nx)
-                    ax_inject.set_ylim(0, ny)
-                    ax_inject.set_title(f'Injection failed', fontsize=9)
-                    ax_inject.set_xlabel('X [pixels]', fontsize=8)
-                    if i == 0:
-                        ax_inject.set_ylabel('Y [pixels]', fontsize=8)
-                        if snr_limit is not None:
-                            ax_inject.text(
-                                -0.55, 0.5, f"S/N $\\geq$ {snr_limit:.0f}",
-                                transform=ax_inject.transAxes, rotation=90,
-                                ha='center', va='center',
-                                fontsize=9, fontweight='bold',
-                            )
-                    else:
-                        ax_inject.set_ylabel('')
-                        ax_inject.tick_params(axis='y', labelleft=False)
-                    ax_inject.tick_params(labelsize=8)
-
-            # Fourth panel: original cutout with all injection sites marked.
-            if cutout is not None and injection_df is not None and len(injection_df) > 0:
-                ax_sites = fig.add_subplot(gs[inset_row, 3])
-                ny, nx = cutout.shape
-
-                from astropy.visualization import simple_norm
-                norm = simple_norm(cutout, 'sqrt', percent=99.5)
-                cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
-                cmap = cmap.with_extremes(bad="none")
-                # Mask NaN/inf only; zeros can be real sky-subtracted pixels.
-                cut_disp = np.asarray(cutout, dtype=float).copy()
-                ax_sites.imshow(
-                    np.ma.array(cut_disp, mask=~np.isfinite(cut_disp)),
-                    origin="lower",
-                    cmap=cmap,
-                    norm=norm,
-                )
-                overlay_mask_hatch(ax_sites, ~np.isfinite(cut_disp))
-                ax_sites.set_xlim(0, nx)
-                ax_sites.set_ylim(0, ny)
-
-                from matplotlib.patches import Circle
-                target_marker = Circle((target_x, target_y), radius=aperture_radius,
-                                      edgecolor=PLOT_COLORS.get('target', '#FF0000'), facecolor='none', linestyle='-', linewidth=0.5)
-                ax_sites.add_patch(target_marker)
-                if _avoid_plot.size:
-                    for _ax0, _ay0 in _avoid_plot:
-                        ax_sites.add_patch(
-                            Circle(
-                                (_ax0, _ay0),
-                                radius=aperture_radius,
-                                edgecolor="#17A2B8",
-                                facecolor="none",
-                                linestyle=":",
-                                linewidth=0.8,
-                            )
-                        )
-                if _fitted_plot is not None:
-                    _fit_color = PLOT_COLORS.get("transient_marker", "#FF00FF")
-                    ax_sites.plot(
-                        [_fitted_plot[0]],
-                        [_fitted_plot[1]],
-                        "x",
-                        color=_fit_color,
-                        markersize=6,
-                        markeredgewidth=1.2,
-                    )
-                    _ftx, _fty, _ftha, _ftva = _confined(
-                        ax_sites,
-                        _fitted_plot[0],
-                        _fitted_plot[1] + aperture_radius,
-                        "fit",
-                        8,
-                        "center",
-                        "bottom",
-                    )
-                    ax_sites.text(
-                        _ftx,
-                        _fty,
-                        "fit",
-                        color=_fit_color,
-                        fontsize=8,
-                        ha=_ftha,
-                        va=_ftva,
-                        bbox=dict(
-                            boxstyle="round,pad=0.15",
-                            facecolor="white",
-                            alpha=0.8,
-                            linewidth=0,
-                        ),
-                        clip_on=True,
-                    )
-                _stx, _sty, _stha, _stva = _confined(
-                    ax_sites, target_x, target_y + aperture_radius,
-                    transient_label, 8, 'center', 'bottom')
-                ax_sites.text(_stx, _sty, transient_label,
-                             color=PLOT_COLORS.get('target', '#FF0000'), fontsize=8,
-                             ha=_stha, va=_stva,
-                             bbox=dict(boxstyle="round,pad=0.15", facecolor="white", alpha=0.8, linewidth=0),
-                             clip_on=True)
-
-                for _, site in injection_df.iterrows():
-                    sx, sy = float(site["x_pix"]), float(site["y_pix"])
-                    if not (np.isfinite(sx) and np.isfinite(sy)):
-                        continue
-                    site_circle = Circle((sx, sy), radius=aperture_radius,
-                                        edgecolor=PLOT_COLORS.get('injection_site', '#00E5FF'), facecolor='none', linestyle='--', linewidth=0.9)
-                    ax_sites.add_patch(site_circle)
-                    ax_sites.plot([sx], [sy], '+', color=PLOT_COLORS.get('injection_site', '#00E5FF'), markersize=5, markeredgewidth=0.9)
-
-                ax_sites.set_title("Injection sites", fontsize=9)
-                ax_sites.set_xlabel('X [pixels]', fontsize=8)
-                ax_sites.set_ylabel('Y [pixels]', fontsize=8)
-                ax_sites.tick_params(labelsize=8)
-
-                # Site markers have no other label; name them inside the
-                # main completeness panel (upper right stays empty on the
-                # descending recovery curve).  The former figure-level
-                # legend above the axes overlapped the top-axis label.
-                if draw_main_plot:
-                    import matplotlib.lines as mlines
-
-                    _site_color = PLOT_COLORS.get(
-                        'injection_site', '#00E5FF'
-                    )
-                    _prev_leg = ax.get_legend()
-                    if _prev_leg is not None:
-                        ax.add_artist(_prev_leg)
-                    ax.legend(
-                        handles=[
-                            mlines.Line2D(
-                                [], [], marker="+", linestyle="None",
-                                color=_site_color, markersize=6,
-                                markeredgewidth=0.9,
-                                label="Injection site",
-                            )
-                        ],
-                        loc="upper right",
-                        ncol=1,
-                        fontsize=8,
-                        frameon=True,
-                        framealpha=0.85,
-                        edgecolor="0.7",
-                    )
-
-            # Dashed lines at the top of the main plot marking the demo
-            # injection magnitudes.
-            if draw_main_plot:
-                from matplotlib.transforms import blended_transform_factory
-                ymin, ymax = ax.get_ylim()
-                y_bottom = ymax - 0.05 * (ymax - ymin)  # 5% from top in data coordinates
-                y_top = ymax
-                if secax is not None:
-                    xvals = list(mag_targets)  # already apparent mags
-                    xtrans = secax.transData
-                else:
-                    # Convert apparent targets back to instrumental for the primary axis.
-                    if selected_zeropoint is not None and np.isfinite(float(selected_zeropoint)):
-                        # The AP inst scale carries the rescaled-aperture
-                        # residual: inst = apparent - zp - resid.  EMCEE is
-                        # on the PSF total-flux scale and needs no residual.
-                        _x_resid = (
-                            _ap_diff_resid(self.input_yaml)
-                            if str(recovery_method).strip().upper() == "AP"
-                            else 0.0
-                        )
-                        xvals = [
-                            float(m) - float(selected_zeropoint) - _x_resid
-                            for m in mag_targets
-                        ]
-                    else:
-                        xvals = list(mag_targets)
-                    xtrans = ax.transData
-                transform = blended_transform_factory(xtrans, ax.transData)
-                for xv in xvals:
-                    if not np.isfinite(xv):
-                        continue
-                    ax.plot(
-                        [xv, xv],
-                        [y_bottom, y_top],
-                        color=PLOT_COLORS.get('target', '#FF0000'),
-                        alpha=0.55,
-                        linewidth=1.2,
-                        linestyle="--",
-                        marker=None,
-                        markevery=None,
-                        zorder=6,
-                        clip_on=False,
-                        transform=transform,
-                    )
-
-        if owns_figure:
-            safe_tight_layout(fig, pad=0.8, h_pad=0.6, w_pad=0.6)
-            save_loc_png = os.path.join(
-                write_dir, f"Completeness_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+        if mags_sorted is not None:
+            widths = 0.15
+            n_trials = np.array([max(1, len(g)) for g in groups_sorted], dtype=float)
+            p = np.clip(medians_sorted, 0.0, 1.0)
+            p_percent = p * 100
+            # Binomial standard error (normal approx) for visual guidance.
+            p_err = np.sqrt(np.maximum(p * (1.0 - p) / n_trials, 0.0)) * 100
+
+            ax.bar(
+                mags_sorted,
+                p_percent,
+                width=widths,
+                color="#B0C4DE",
+                edgecolor="#4D4D4D",
+                linewidth=0.5,
+                zorder=2,
             )
-            fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
-            plt.close(fig)
+            ax.errorbar(
+                mags_sorted,
+                p_percent,
+                yerr=p_err,
+                fmt="none",
+                ecolor="#4D4D4D",
+                elinewidth=0.5,
+                capsize=get_marker_size('medium') / 4,
+                zorder=3,
+            )
+
+        # Adopted limit: use the interpolated m50 (inject_lmag) rather than the
+        # last evaluated step (which can be above/below 50%).
+        adopted_mag = float(inject_lmag) if np.isfinite(inject_lmag) else np.nan
+
+        # ---- Bracket/bisection search trajectories & adopted-limit lines ----
+        # Color palette for multi-S/N thresholds (up to 6 distinct)
+        _palette = [
+            ("#2196F3", "#1565C0"),  # blue / dark-blue
+            ("#F44336", "#B71C1C"),  # red / dark-red
+            ("#4CAF50", "#1B5E20"),  # green / dark-green
+            ("#FF9800", "#E65100"),  # orange / dark-orange
+            ("#9C27B0", "#4A148C"),  # purple / dark-purple
+            ("#17A2B8", "#0D6577"),  # muted teal / dark-teal (was neon cyan)
+        ]
+        _markers = ["o", "s", "^", "D", "v", "P"]
+
+        if multi_snr_details is not None and len(multi_snr_details) > 1:
+            # --- Multi-SNR: draw all thresholds with distinct colours ---
+            for idx, detail in enumerate(multi_snr_details):
+                d_snr = detail.get("snr_limit")
+                d_bracket = detail.get("bracket_steps", [])
+                d_bisect = detail.get("bisect_steps", [])
+                d_lmag = detail.get("inject_lmag", np.nan)
+                d_ctarget = detail.get("completeness_target", 0.5)
+
+                c_brk, c_bis = _palette[idx % len(_palette)]
+                mk = _markers[idx % len(_markers)]
+                tag = f"S/N$\\geq${d_snr:.0f}" if d_snr is not None else f"#{idx+1}"
+
+                if d_bracket:
+                    bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in d_bracket])
+                    bc_pct = np.asarray(bc, float) * 100.0
+                    bm = np.asarray(bm, float)
+                    ax.scatter(bm, bc_pct, s=16, color=c_brk, alpha=0.85,
+                               edgecolors="none", marker=mk,
+                               label=f"Bracket ({tag})", zorder=4)
+                    for i in range(len(bm) - 1):
+                        ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
+                                    xytext=(bm[i], bc_pct[i]),
+                                    arrowprops=dict(arrowstyle="->", color=c_brk,
+                                                    lw=0.5, alpha=0.6))
+
+                if d_bisect:
+                    bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in d_bisect])
+                    bc_pct = np.asarray(bc, float) * 100.0
+                    bm = np.asarray(bm, float)
+                    ax.scatter(bm, bc_pct, s=16, color=c_bis, alpha=0.85,
+                               edgecolors="none", marker=mk,
+                               label=f"Bisection ({tag})", zorder=5)
+                    for i in range(len(bm) - 1):
+                        ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
+                                    xytext=(bm[i], bc_pct[i]),
+                                    arrowprops=dict(arrowstyle="->", color=c_bis,
+                                                    lw=0.5, alpha=0.6))
+
+                d_adopted = float(d_lmag) if np.isfinite(d_lmag) else np.nan
+                if np.isfinite(d_adopted):
+                    ax.axvline(d_adopted, color=c_brk, lw=0.8, ls="--",
+                               label=f"m50 = {d_adopted:.2f} ({tag})",
+                               zorder=6, alpha=0.9)
+                    ax.scatter([d_adopted], [float(d_ctarget) * 100.0],
+                               s=32, marker="D", c=c_brk,
+                               edgecolors="white", linewidth=0.4, zorder=7)
+        else:
+            # --- Single-SNR: original behaviour ---
+            snr_label = ""
+            if snr_limit is not None:
+                snr_label = f" (S/N $\\geq$ {snr_limit:.0f})"
+                if (
+                    snr_gate_factor is not None
+                    and np.isfinite(snr_gate_factor)
+                    and not np.isclose(float(snr_gate_factor), 1.0)
+                ):
+                    snr_label += f" cal $\\times${float(snr_gate_factor):.2f}"
+
+            if bracket_steps:
+                bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in bracket_steps])
+                bc_percent = np.asarray(bc, float) * 100.0
+                bm = np.asarray(bm, float)
+                ax.scatter(bm, bc_percent, s=14, color=PLOT_COLORS.get('reference', '#0072B2'), alpha=0.8,
+                           edgecolors="none", label=f"Bracket search{snr_label}", zorder=4)
+                for i in range(len(bm) - 1):
+                    ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
+                                xytext=(bm[i], bc_percent[i]),
+                                arrowprops=dict(arrowstyle="->", color=PLOT_COLORS.get('reference', '#0072B2'),
+                                                lw=0.5, alpha=0.7))
+
+            if bisect_steps:
+                bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in bisect_steps])
+                bc_percent = np.asarray(bc, float) * 100.0
+                bm = np.asarray(bm, float)
+                ax.scatter(bm, bc_percent, s=14, color=PLOT_COLORS.get('psf', '#00AA00'), alpha=0.8,
+                           edgecolors="none", label=f"Bisection{snr_label}", zorder=5)
+                for i in range(len(bm) - 1):
+                    ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
+                                xytext=(bm[i], bc_percent[i]),
+                                arrowprops=dict(arrowstyle="->", color=PLOT_COLORS.get('psf', '#00AA00'),
+                                                lw=0.5, alpha=0.7))
+
+            if np.isfinite(adopted_mag):
+                ax.axvline(adopted_mag, color="k", lw=0.6, ls="--",
+                           label=f"Adopted limit m50 = {adopted_mag:.2f}{snr_label}",
+                           zorder=6)
+                try:
+                    ax.scatter([adopted_mag], [float(completeness_target) * 100.0],
+                               s=28, marker="D", c="k", edgecolors="white",
+                               linewidth=0.4, zorder=7)
+                except Exception:
+                    pass
+
+        ax.axhline(50, color="0.7", lw=0.5, ls="--", zorder=0)
+        ax.text(0.02, 50, "50%", transform=ax.get_yaxis_transform(),
+                va="bottom", ha="left", color="0.5")
+
+        if completeness_target != 0.5:
+            target_percent = completeness_target * 100
+            ax.axhline(target_percent, color="0.7", lw=0.5, ls="-.", zorder=0)
+            ax.text(0.98, target_percent, f"{int(target_percent)}%",
+                    transform=ax.get_yaxis_transform(), va="bottom",
+                    ha="right", color="0.5")
+
+        # When every injection site was vetoed upstream, none of the data
+        # sources below have entries and the panel would save blank.
+        _drew_data = mags_sorted is not None and len(mags_sorted) > 0
+        if multi_snr_details is not None and len(multi_snr_details) > 1:
+            _drew_data = _drew_data or any(
+                d.get("bracket_steps") or d.get("bisect_steps")
+                for d in multi_snr_details
+            )
+        else:
+            _drew_data = (
+                _drew_data or bool(bracket_steps) or bool(bisect_steps)
+            )
+        if not _drew_data:
+            ax.text(
+                0.5,
+                0.5,
+                "No valid injection sites - no recovery data",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+                fontsize=9,
+                color="0.45",
+            )
+
+        ax.set_xlabel("Injected Instrumental Magnitude [mag]", fontsize=9)
+        ax.set_ylabel("Recovery fraction [%]", fontsize=9)
+            
+        # Apparent-magnitude secondary axis, if a zeropoint is available.
+        secax = None
+        if selected_zeropoint is not None and np.isfinite(
+            float(selected_zeropoint)
+        ):
+            # A non-finite zeropoint (fit failed on this field) would
+            # poison the transform and crash the draw with
+            # "Axis limits cannot be NaN or Inf".
+            _zp = float(selected_zeropoint)
+            secax = ax.secondary_xaxis(
+                "top",
+                functions=(
+                    lambda m, zp=_zp: m + zp,
+                    lambda m, zp=_zp: m - zp,
+                ),
+            )
+            secax.set_xlabel("Apparent Magnitude [mag]")
+            # The monotonic transform already sets the direction;
+            # secax.invert_xaxis() would double-invert it.
+
+        # Legend entries are reordered by role (bracket / bisection / m50)
+        # so that with ncol=3 column-major filling, each column holds one
+        # role and each row one S/N threshold.
+        _hh, _ll = ax.get_legend_handles_labels()
+        if _ll:
+            _role = {"Bracket": 0, "Bisection": 1, "m50": 2, "Adopted": 2}
+            _order = sorted(
+                range(len(_ll)),
+                key=lambda i: _role.get(_ll[i].split(" ")[0], 3),
+            )
+            ax.legend(
+                [_hh[i] for i in _order], [_ll[i] for i in _order],
+                loc="lower left",
+                fontsize=8, frameon=False, ncol=3,
+                handlelength=1.5, columnspacing=1.0,
+            )
+        
+        safe_tight_layout(fig, pad=0.8, h_pad=0.6, w_pad=0.6)
+        save_loc_png = os.path.join(
+            write_dir, f"Completeness_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
+        )
+        fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
+        plt.close(fig)
 
         # ---- Plot injection recovery vs magnitude (apparent vs instrumental) ----
         if bracket_steps or bisect_steps or extended_steps:
@@ -6091,8 +5160,7 @@ class Limits:
     def _plot_completeness_combined(self, all_details: list) -> None:
         """
         Draw a single completeness plot with bracket/bisect trajectories
-        from multiple S/N threshold runs overlaid in distinct colors,
-        plus injection cutout inset panels for EACH S/N threshold.
+        from multiple S/N threshold runs overlaid in distinct colors.
 
         Parameters
         ----------
@@ -6103,19 +5171,9 @@ class Limits:
         if not all_details:
             return
 
-        # Create figure with enough rows: 1 main plot + 1 row per threshold
-        n = len(all_details)
-        from matplotlib.gridspec import GridSpec
-        apply_autophot_mplstyle()
-        fig = plt.figure(figsize=set_size(540, 1 + 0.5 * n))
-        gs = GridSpec(1 + n, 4, figure=fig, height_ratios=[1.5] + [1] * n,
-                      wspace=0.3, hspace=0.4)
-
-        # Use the first (primary) threshold's detail to drive the main plot
-        # and first inset row, then add additional rows for remaining thresholds.
+        # The primary threshold drives the panel; multi_snr_details makes
+        # _plot_completeness draw every threshold's trajectory on it.
         primary = all_details[0]
-
-        # Main plot + first inset row (primary threshold)
         self._plot_completeness(
             None,  # No sample_mags
             None,  # No completeness_groups
@@ -6124,96 +5182,16 @@ class Limits:
             primary.get("bisect_steps", []),
             primary.get("inject_lmag", np.nan),
             primary.get("completeness_target", 0.5),
-            primary.get("detection_cutoff"),
             primary.get("zeropoint"),
             primary.get("recovery_method"),
-            epsf_model=primary.get("epsf_model"),
-            cutout=primary.get("cutout"),
             position=primary.get("position"),
-            background_rms=primary.get("background_rms"),
-            flux_for_mag=primary.get("flux_for_mag"),
-            image_zeropoint=primary.get("image_zeropoint"),
-            injection_df=primary.get("injection_df"),
-            F_ref=primary.get("F_ref"),
             counts_ref=primary.get("counts_ref"),
             exposure_time=primary.get("exposure_time"),
-            extended_steps=[],
-            orig_position=None,
-            target_name=self.input_yaml.get("target_name", None),
-            cutout_cx=primary.get("cutout_cx"),
-            cutout_cy=primary.get("cutout_cy"),
+            image_zeropoint=primary.get("image_zeropoint"),
             snr_limit=primary.get("snr_limit"),
-            avoid_positions=primary.get("avoid_positions"),
-            fitted_position=primary.get("fitted_position"),
             multi_snr_details=all_details,
-            fig=fig,
-            gs=gs,
-            inset_row=1,
-            draw_main_plot=True,
         )
-
-        # Inset rows for the remaining thresholds: per-threshold values come
-        # from `detail`; image/PSF objects are shared across thresholds and
-        # come from `primary`.
-        for idx, detail in enumerate(all_details[1:], start=2):
-            self._plot_completeness(
-                None, None, None,
-                detail.get("bracket_steps", []),
-                detail.get("bisect_steps", []),
-                detail.get("inject_lmag", np.nan),
-                detail.get("completeness_target", 0.5),
-                detail.get("detection_cutoff"),
-                detail.get("zeropoint"),
-                detail.get("recovery_method"),
-                epsf_model=primary.get("epsf_model"),
-                cutout=primary.get("cutout"),
-                position=primary.get("position"),
-                background_rms=primary.get("background_rms"),
-                flux_for_mag=primary.get("flux_for_mag"),
-                image_zeropoint=primary.get("image_zeropoint"),
-                injection_df=primary.get("injection_df"),
-                F_ref=primary.get("F_ref"),
-                counts_ref=primary.get("counts_ref"),
-                exposure_time=primary.get("exposure_time"),
-                extended_steps=[],
-                orig_position=None,
-                target_name=self.input_yaml.get("target_name", None),
-                cutout_cx=primary.get("cutout_cx"),
-                cutout_cy=primary.get("cutout_cy"),
-                snr_limit=detail.get("snr_limit"),
-                avoid_positions=detail.get(
-                    "avoid_positions", primary.get("avoid_positions")
-                ),
-                fitted_position=detail.get(
-                    "fitted_position", primary.get("fitted_position")
-                ),
-                multi_snr_details=None,
-                fig=fig,
-                gs=gs,
-                inset_row=idx,
-                draw_main_plot=False,
-            )
-
-        # S/N row labels are drawn by _plot_completeness on the leftmost panel
-        # of each inset row (axis-anchored, so they track the row).
-
-        safe_tight_layout(fig)
-        fpath = str(self.input_yaml.get("fpath", "frame"))
-        base = os.path.splitext(os.path.basename(fpath))[0]
-        write_dir = (
-            str(self.input_yaml.get("write_dir"))
-            if self.input_yaml.get("write_dir") not in (None, "", "None")
-            else os.path.dirname(fpath)
-        )
-        if not write_dir:
-            write_dir = "."
-        os.makedirs(write_dir, exist_ok=True)
-        save_loc_png = os.path.join(
-            write_dir, f"Completeness_{base}{get_plot_ext(getattr(self, 'input_yaml', None))}"
-        )
-        fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
-        plt.close(fig)
-        logger.debug("Combined completeness plot saved: %s", save_loc_png)
+        logger.debug("Combined completeness plot saved for %d threshold(s).", len(all_details))
 
     # -----------------------------------------------------------------------
     # Multi-S/N injection limiting magnitude
