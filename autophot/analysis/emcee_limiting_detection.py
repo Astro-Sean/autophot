@@ -26,6 +26,20 @@ Notes
 
 from __future__ import annotations
 
+if __package__ in (None, ""):
+    # Support "python <path>" execution: expose the repo root and
+    # anchor the package so relative imports resolve.
+    import os as _os
+    import sys as _sys
+
+    _sys.path.insert(
+        0,
+        _os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        ),
+    )
+    __package__ = "autophot.analysis"
+
 import argparse
 import logging
 import os
@@ -36,12 +50,12 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 
-from aperture import Aperture
-from functions import beta_aperture, cap_console_lines, mag, points_in_circum
-from psf import MCMCFitter
+from ..photometry.aperture import Aperture
+from ..core.functions import beta_aperture, cap_console_lines, mag, points_in_circum
+from ..photometry.psf import MCMCFitter
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 def _read_fits_2d(path: str) -> np.ndarray:
