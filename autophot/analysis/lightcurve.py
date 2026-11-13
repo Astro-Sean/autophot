@@ -1833,6 +1833,41 @@ def plot_lightcurve(
 # =============================================================================
 
 
+# Canonical survey abbreviations for the Instrument column. Values are the
+# joined "<TELESCOP>+<INSTRUME>" labels exactly as they appear in the output
+# CSV; users can extend or override via postprocessing.lightcurve_instrument_aliases.
+_INSTRUMENT_LABEL_ALIASES = {
+    "Palomar 48-inch+ZTF/MOSAIC": "P48+ZTF",
+    "Palomar 48-inch+ZTF": "P48+ZTF",
+    "P48+ZTF/MOSAIC": "P48+ZTF",
+}
+
+
+def _instrument_label_series(df, aliases=None):
+    """Per-row "<TELESCOP>+<INSTRUME>" label for the photometry table.
+
+    The fields come straight from the FITS header via the output CSV.
+    Header-fallback tokens (unknown/nan/empty) are dropped from the join,
+    and a row where nothing survives writes "-".
+    """
+    n = len(df)
+    _missing = {"", "unknown", "unknown_reference", "unknown_instrument", "nan", "none"}
+
+    def _clean(col):
+        if col not in df.columns:
+            return pd.Series([""] * n, index=df.index)
+        # astype(str) still yields NaN (not the string "nan") on the str
+        # dtype, so fill before matching the header-fallback tokens.
+        s = df[col].astype(str).str.strip().fillna("")
+        return s.mask(s.str.lower().isin(_missing), "")
+
+    label = (_clean("telescope") + "+" + _clean("instrument")).str.strip("+")
+    label = label.fillna("-").where(label != "", "-")
+    if aliases:
+        label = label.replace(aliases)
+    return label
+
+
 def generate_photometry_table(
     output_file,
     snr_limit=3,
@@ -1865,6 +1900,13 @@ def generate_photometry_table(
     if complete_data.columns.duplicated().any():
         complete_data = complete_data.loc[:, ~complete_data.columns.duplicated()].copy()
     phot_table = []
+
+    # Instrument column: "<TELESCOP>+<INSTRUME>" per row, on unless the
+    # config turns it off; user aliases layer over the canonical survey set.
+    _pp = (input_yaml or {}).get("postprocessing") or {}
+    _include_instrument = bool(_pp.get("lightcurve_instrument_column", True))
+    _inst_aliases = dict(_INSTRUMENT_LABEL_ALIASES)
+    _inst_aliases.update(_pp.get("lightcurve_instrument_aliases") or {})
     # Prefer using the per-row filter column if present. Map raw names (gp, Sloan_g, ...)
     # to canonical bands so `_resolve_band_triplet` matches the uniform mag/zp schema.
     fser_all = photometry_filter_series(complete_data)
@@ -2017,6 +2059,8 @@ def generate_photometry_table(
                 'Mag': mag_values.round(3),
                 'Error': detects[err_col].round(3),
             }
+            if _include_instrument:
+                row_data['Instrument'] = _instrument_label_series(detects, _inst_aliases)
 
             for limit_key, limit_values in limiting_mags.items():
                 row_data[limit_key] = limit_values
@@ -2026,7 +2070,9 @@ def generate_photometry_table(
             # Column order: base columns first, then all Limit_* columns.
             base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
             limit_cols = sorted([k for k in limiting_mags.keys() if k.startswith('Limit')])
-            all_cols = base_cols + limit_cols
+            all_cols = base_cols + limit_cols + (
+                ["Instrument"] if _include_instrument else []
+            )
 
             detects = detects[all_cols]
             phot_table.append(detects)
@@ -2096,6 +2142,10 @@ def generate_photometry_table(
                     'Mag': mag_value.round(3),
                     'Error': _err_s,
                 }
+                if _include_instrument:
+                    inv_row_data['Instrument'] = _instrument_label_series(
+                        inv_detects, _inst_aliases
+                    )
 
                 for limit_key, limit_values in limiting_mags_inv.items():
                     inv_row_data[limit_key] = limit_values
@@ -2105,7 +2155,9 @@ def generate_photometry_table(
                 # Column order: base columns first, then all Limit_* columns.
                 base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
                 limit_cols = sorted([k for k in limiting_mags_inv.keys() if k.startswith('Limit')])
-                all_cols = base_cols + limit_cols
+                all_cols = base_cols + limit_cols + (
+                    ["Instrument"] if _include_instrument else []
+                )
 
                 inv_detects = inv_detects[all_cols]
                 phot_table.append(inv_detects)
@@ -2128,6 +2180,10 @@ def generate_photometry_table(
                 'Mag': pd.Series(np.nan, index=nondetects.index, dtype=float),
                 'Error': pd.Series(np.nan, index=nondetects.index, dtype=float),
             }
+            if _include_instrument:
+                nd_row_data['Instrument'] = _instrument_label_series(
+                    nondetects, _inst_aliases
+                )
 
             for limit_key, limit_values in limiting_mags_nd.items():
                 nd_row_data[limit_key] = limit_values
@@ -2137,7 +2193,9 @@ def generate_photometry_table(
             # Column order: base columns first, then all Limit_* columns.
             base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
             limit_cols = sorted([k for k in limiting_mags_nd.keys() if k.startswith('Limit')])
-            all_cols = base_cols + limit_cols
+            all_cols = base_cols + limit_cols + (
+                ["Instrument"] if _include_instrument else []
+            )
 
             nondetects = nondetects[all_cols]
             phot_table.append(nondetects)
@@ -2151,7 +2209,9 @@ def generate_photometry_table(
             snr_thresholds = [3.0, 5.0]
 
         limit_cols = [f'Limit_{snr:.1f}S2N'.replace('.', 'p') for snr in snr_thresholds]
-        default_cols = ["MJD", "Date", "Mag", "Error", "Filter"] + limit_cols
+        default_cols = ["MJD", "Date", "Mag", "Error", "Filter"] + limit_cols + (
+            ["Instrument"] if _include_instrument else []
+        )
         out_phot = pd.DataFrame(columns=default_cols)
     else:
         out_phot = pd.concat(phot_table, ignore_index=True)
