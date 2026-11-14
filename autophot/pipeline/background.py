@@ -1907,17 +1907,7 @@ class BackgroundSubtractor:
         )
         fast_mode = bool(cfg_bkg.get("fast_mode", False))
         # photutils>=3 deprecated the Background2D interpolator kwarg and
-        # always resizes the mesh with a cubic spline zoom; the
-        # global_interpolator config key no longer has an effect.
-        global_interpolator = (
-            str(cfg_bkg.get("global_interpolator", "zoom")).strip().lower()
-        )
-        if global_interpolator != "zoom":
-            self.logger.debug(
-                "Background: global_interpolator=%r ignored - photutils>=3 "
-                "always uses cubic zoom.",
-                global_interpolator,
-            )
+        # always resizes the mesh with a cubic spline zoom.
         clip_maxiters = int(cfg_bkg.get("global_sigma_clip_maxiters", 10))
         if fast_mode:
             clip_maxiters = min(clip_maxiters, 5)
@@ -2759,13 +2749,6 @@ class BackgroundSubtractor:
             )
         local_filter_size_max = bcfg.get("local_filter_size_max", 3)
         # photutils>=3 ignores the interpolator kwarg (always cubic zoom).
-        local_interpolator = str(bcfg.get("local_interpolator", "zoom")).strip().lower()
-        if local_interpolator != "zoom":
-            self.logger.debug(
-                "Local background: local_interpolator=%r ignored - "
-                "photutils>=3 always uses cubic zoom.",
-                local_interpolator,
-            )
         # Allow background mesh override directly (finest control).
         local_box_size_override = bcfg.get("local_box_size", None)
         local_filter_size_override = bcfg.get("local_filter_size", None)
