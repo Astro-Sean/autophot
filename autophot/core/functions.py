@@ -3018,6 +3018,14 @@ _CONFIG_REMOVED_KEYS = frozenset(
         "photometry.psf_adaptive_smoothing_kernel",
         "background.local_interp_order",
         "background.global_interp_order",
+        # 2026-11 audit follow-up: no-op compat flags and a parameter that
+        # was documented but never read (upper_limit_snr; the limiting-mag
+        # snr_thresholds list supplies the SNU convention instead).
+        "photometry.upper_limit_snr",
+        "photometry.apply_aperture_correction",
+        "photometry.oversample_psf_fwhm",
+        "background.global_interpolator",
+        "background.local_interpolator",
     }
 )
 
@@ -3034,6 +3042,8 @@ _CONFIG_DEPRECATED_KEYS = {
     "template_subtraction.alignment_max_p95_px": (
         "template_subtraction.alignment_max_p90_px"
     ),
+    "template_subtraction.skip_resampling": "template_subtraction.resample_mode",
+    "cosmic_rays.use_lacosmic": "cosmic_rays.cr_backend",
 }
 
 # Options whose values come from a fixed dispatch set.  Comparisons are
