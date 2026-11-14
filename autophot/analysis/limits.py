@@ -441,6 +441,11 @@ def _compute_p_det(df: pd.DataFrame, beta_n: float) -> pd.Series:
             flux_aperture=flux_ap[valid],
             sigma=noise[valid],
             npix=area[valid],
+            noise_factor=(
+                np.asarray(df["noise_factor"].values, dtype=float)[valid]
+                if "noise_factor" in df.columns
+                else 1.0
+            ),
         )
     return pd.Series(result, index=df.index)
 
@@ -668,6 +673,11 @@ def _injection_worker(args):
             flux_aperture=flux_ap,
             sigma=noise_sky,
             npix=area_px,
+            noise_factor=(
+                float(mres["noise_factor"].iloc[0])
+                if "noise_factor" in mres.columns
+                else 1.0
+            ),
         )
 
         # Recovery decision is S/N-only. Beta is still returned for optional
