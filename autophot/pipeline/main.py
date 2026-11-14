@@ -15135,15 +15135,9 @@ def run_photometry():
                             np.hypot(_fs_old, 1.0857 * _fscal_frac)
                         )
             try:
-                # Calibrated magnitude: inst_mag + ZP. For AP, optionally subtract
-                # aperture correction (only when apply_aperture_correction is True;
-                # otherwise aperture correction is stored for use later).
-                ap_corr = float(input_yaml.get("aperture_correction", 0.0) or 0.0)
-                apply_ap_corr = bool(
-                    (input_yaml.get("photometry") or {}).get(
-                        "apply_aperture_correction", False
-                    )
-                )
+                # Calibrated magnitude: inst_mag + ZP. ZP_AP is fitted on raw
+                # flux_AP and already embeds the aperture loss; the measured
+                # aperture correction is stored for AP/PSF scale bridging.
 
                 # BUG 155: Color term correction for the target.
                 # The ZP was computed after subtracting slope * color_diff from
@@ -15223,20 +15217,8 @@ def run_photometry():
 
                 # ZP_AP is fitted on raw flux_AP (finite aperture), so it
                 # already absorbs the aperture loss: inst_AP + ZP_AP is the
-                # total-scale magnitude.  Adding ap_corr again double-counts
-                # the correction (inst + ZP_AP + ap_corr is too bright by
-                # |ap_corr|).  apply_aperture_correction requests the
-                # total-flux scale explicitly, which is what ZP_AP already
-                # delivers - the flag is retained for backwards
-                # compatibility but adds nothing to the value or error.
-                if method == "AP" and apply_ap_corr and np.isfinite(ap_corr):
-                    logging.info(
-                        "%s: apply_aperture_correction set; ZP_AP already "
-                        "embeds the %.4f mag aperture correction, so no "
-                        "further term is added.",
-                        method,
-                        ap_corr,
-                    )
+                # total-scale magnitude.  Adding ap_corr again would
+                # double-count the correction (too bright by |ap_corr|).
                 cal_mag = (
                     TargetPosition.at[idx, inst_col]
                     + image_zeropoint[method]["zeropoint"]
