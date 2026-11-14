@@ -732,7 +732,17 @@ forced photometry. Below \code{fitting\_xy\_bounds\_detect\_snr}
 \code{fitting\_xy\_bounds\_hold\_px} of the catalogue seed (widened by the
 measured astrometric uncertainty when
 \code{fitting\_xy\_bounds\_astrometric}), i.e.\ the measurement degrades
-gracefully to forced photometry. Between that floor and
+gracefully to forced photometry. The in-window detection S/N is an
+aperture statistic measured on the image: flux inside
+\code{aperture\_radius} at the peak found within the search disk, minus
+the median of window pixels outside that disk, over an aperture-sum
+noise of local \code{background\_rms} scaled by
+$\sqrt{A + (1.2533\,A)^{2}/N_{\rm sky}}$ -- the same pixel-plus-annulus
+budget as aperture photometry -- multiplied by the empirical noise
+factor $\eta$ to cover resampled-pixel correlation. A bright peak found
+beyond $\sim$0.5\,FWHM of the seed is treated as a neighbour rather
+than the target, and its Gaussian wing contribution is subtracted from
+the seed aperture before the S/N is evaluated. Between that floor and
 \code{fitting\_xy\_bounds\_full\_snr} the bound grows linearly to the
 free window (\code{fitting\_xy\_bounds} arcsec, additionally floored and
 capped by \code{fitting\_xy\_bounds\_target\_*}). A fit that latches onto
