@@ -18,6 +18,29 @@
 \usepackage{caption}
 \captionsetup{font=small,labelfont=bf}
 \usepackage{enumitem}
+\usepackage{listings}
+\usepackage{upquote}
+% Code examples: tt on a light ground, breakable lines, straight quotes
+% so pasted snippets stay valid Python/YAML/shell.
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!8},
+  frame=single,
+  framerule=0.2pt,
+  rulecolor=\color{black!40},
+  framesep=3pt,
+  xleftmargin=6pt,
+  xrightmargin=6pt,
+  breaklines=true,
+  breakatwhitespace=true,
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  upquote=true,
+  commentstyle=\color{black!55}\itshape,
+  keywordstyle=\bfseries,
+  morecomment=[l]{\#},
+}
 \usepackage{microtype}
 \usepackage{hyperref}
 \hypersetup{colorlinks=true,linkcolor=black,citecolor=blue!60!black,urlcolor=blue!60!black}
@@ -91,7 +114,8 @@ AutoPhOT (the AUTOmated Photometry Of Transients pipeline;
 of point-like transients to calibrated light curves with minimal user
 intervention. Its defining feature is that it is \emph{target-centric}: the
 user supplies a sky position (or an object name resolvable through the
-Transient Name Server or SIMBAD) and a directory of science frames, and the
+Transient Name Server \citep{tns} or SIMBAD \citep{wenger2000simbad}) and
+a directory of science frames, and the
 pipeline returns, per image, forced or free aperture and PSF photometry at
 that position, calibrated against survey catalogues, together with
 detection diagnostics and local limiting magnitudes.
@@ -120,10 +144,17 @@ through SFFT \citep{russell2022sfft,hu2022sfft}, HOTPANTS
 \citep{zackay2016proper}, a matched-filter detection statistic with an
 empirical false-alarm veto, multi-threshold injection-recovery limiting
 magnitudes with logistic completeness fits, and optional host-galaxy
-surface-photometry subtraction. This document describes that implementation.
+surface-photometry subtraction. This document describes that
+implementation. The pipeline is written in Python on Astropy
+\citep{astropy2022}, NumPy \citep{harris2020numpy}, SciPy
+\citep{virtanen2020scipy}, Matplotlib \citep{hunter2007matplotlib}, and
+pandas \citep{mckinney2010pandas}, with catalogue and archive access
+through \code{astroquery} \citep{ginsburg2019astroquery}.
 
 Section~\ref{sec:architecture} gives the execution model and the order of
-processing stages. Sections~\ref{sec:ingestion}--\ref{sec:hostmodel}
+processing stages, and Section~\ref{sec:running} is a worked guide to
+configuring and starting a run.
+Sections~\ref{sec:ingestion}--\ref{sec:hostmodel}
 describe each stage and its algorithm. Section~\ref{sec:errors} summarises
 the error budget, Section~\ref{sec:repro} covers reproducibility and
 parallelism, and Appendix~\ref{app:params} tabulates every configuration
@@ -148,9 +179,10 @@ Table~\ref{tab:cli}, plus the historical console scripts
 \code{autophot-driver}, \code{autophot-main}, \code{autophot-batch}, and
 \code{autophot-inspect-telescope}. Programmatic use goes through the
 \code{AutomatedPhotometry} class in \code{autophot/driver.py}:
-\code{AutomatedPhotometry.load()} merges the bundled default configuration
-with a user YAML file, and \code{AutomatedPhotometry.run\_photometry()}
-executes the full run.
+\code{AutomatedPhotometry.load()} returns the bundled defaults as one
+nested dictionary that the caller edits in place, and
+\code{AutomatedPhotometry.run\_photometry()} executes the run
+(Section~\ref{sec:running}).
 
 \begin{table}[ht]
 \centering\small
@@ -314,9 +346,12 @@ The single source of truth for configuration is
 \code{autophot/data/default\_input.yml}. Every key carries an inline
 \code{\# type -{}- description} comment, which is what the tables in
 Appendix~\ref{app:params} are generated from (by
-\code{scripts/generate\_parameter\_appendix.py}). A user YAML file is
-deep-merged over the defaults by \code{AutomatedPhotometry.load()}.
-Unrecognised keys are logged (they do not hard-fail), contradictory
+\code{scripts/generate\_parameter\_appendix.py}). Users edit the loaded
+dictionary in place (Section~\ref{sec:running}) or write the same
+structure to a YAML file for the \code{-c} command-line option; keys
+left unset fall back to their defaults at point of use. Unrecognised
+keys abort the run with a close-match suggestion (downgradable to a
+warning via \code{AUTOPHOT\_STRICT\_CONFIG=0}), contradictory
 settings (\eg \code{forceconv: AUTO} with SFFT) produce warnings, and
 \code{-}-prefixed or documented runtime keys (\code{fpath},
 \code{write\_dir}, \code{imageFilter}, \code{science\_fwhm},
@@ -330,6 +365,161 @@ CLI flags \code{-v}, \code{-q}, and \code{-{}-verbose-level} override
 records DEBUG. Environment overrides include \code{AUTOPHOT\_NCPU},
 \code{AUTOPHOT\_NGPU}, and the TNS credentials, which may also live in the
 YAML (\code{wcs.TNS\_BOT\_*}) or in \code{autophot\_tokens.py}.
+
+%======================================================================
+\section{Running the pipeline}
+\label{sec:running}
+%======================================================================
+
+This section shows how a run is configured and started in practice; the
+worked notebook \code{examples/run\_autophot.ipynb} walks through the
+same steps on real data. Everything reduces to editing one nested
+dictionary -- the individual keys are tabulated in
+Appendix~\ref{app:params} and discussed in the stage they control
+(Sections~\ref{sec:ingestion}--\ref{sec:hostmodel}), where short Python
+snippets also reproduce the key idea of each stage as a figure.
+
+\subsection{A minimal run}
+
+\code{AutomatedPhotometry.load()} returns the complete default
+configuration as a nested dictionary; the run is configured by editing
+it in place and started by passing it to \code{run\_photometry}:
+
+\begin{lstlisting}[language=Python]
+from autophot import AutomatedPhotometry
+
+config = AutomatedPhotometry.load()
+
+config["fits_dir"]    = "/data/SN2026abc/images"  # scanned recursively
+config["target_name"] = "SN2026abc"   # resolved to RA/Dec via TNS/SIMBAD
+# Or set the position directly (degrees, FK5/J2000); a real name
+# together with explicit coordinates is a configuration error:
+# config["target_ra"]  = 123.456789
+# config["target_dec"] = -12.345678
+
+config["catalog"]["use_catalog"] = "auto"  # pick the best survey per band
+
+output_csv = AutomatedPhotometry.run_photometry(default_input=config)
+\end{lstlisting}
+
+The call returns the path of the aggregated light-curve CSV. Products
+land under \code{<fits\_dir>\_<outdir\_name>} (default suffix
+\code{REDUCED}), one directory per image, each carrying a DEBUG-level
+log (\code{LOG\_<base>.log}) and the configuration that image was
+processed with (\code{input.yaml}); \code{wdir} (default: the current
+directory) holds the telescope database and the catalogue caches. A
+first run needs only three further decisions: the catalogue
+(\code{catalog.use\_catalog}, Section~\ref{sec:catalog}), whether to
+subtract a template (\code{template\_subtraction.do\_subtraction},
+Section~\ref{sec:subtraction}), and \code{nCPU} when reducing more than
+a few images.
+
+\subsection{Finding and changing parameters}
+
+Keys are addressed as \code{config["section"]["key"]}; run-level options
+(\code{fits\_dir}, \code{target\_name}, \code{nCPU}, \dots) sit at the
+top level. To find a key without opening the YAML file,
+
+\begin{lstlisting}[language=Python]
+from autophot import list_parameters
+list_parameters(contains="aperture")  # matching keys and their defaults
+\end{lstlisting}
+
+\noindent or, from the shell, \code{autophot run -{}-config-help} prints
+every accepted key with its inline description. Unrecognised or
+misspelled keys abort the run before processing, with a close-match
+suggestion (\code{AUTOPHOT\_STRICT\_CONFIG=0} demotes that to a
+warning). The edits most often needed:
+
+\begin{lstlisting}[language=Python]
+config["catalog"]["use_catalog"] = "panstarrs"  # one survey, all bands
+# ...or a per-band mapping; band names are case-significant (r != R):
+config["catalog"]["use_catalog"] = {
+    "griz": "refcat", "UBVRI": "apass", "default": "gaia",
+}
+
+config["wcs"]["redo_wcs"] = False           # trust the existing header WCS
+config["zeropoint"]["fit_method"] = "odr"   # mcmc (default) | odr | ransac
+
+config["photometry"]["use_poisson_likelihood_fitter"] = True
+config["photometry"]["perform_emcee_fitting_s2n"] = 10  # MCMC below S/N 10
+config["photometry"]["check_inverted_image"] = True   # fading dips on diffs
+config["photometry"]["force_photometry"] = True  # pin to catalogue coords
+
+config["limiting_magnitude"]["snr_thresholds"] = [3.0, 5.0]
+
+config["selected_filters"] = ["g", "r"]  # restrict the run to these bands
+config["nCPU"] = 8          # image-level workers; keep nCPU x the
+                            # per-image n_jobs under the core count
+config["restart"] = False   # reuse finished outputs (True reprocesses)
+config["rng_seed"] = 42     # reproducible injection draws for limits
+\end{lstlisting}
+
+\subsection{How much tuning is needed}
+
+The shipped values are the tuned defaults: for a typical run the only
+keys that must change are the run-defining ones -- where the frames
+are, where to work, which target, whether to subtract. The rest of the
+schema is exposed for experimentation: crowded fields, saturated
+stars, nonstandard filters, faint hosts, and borderline detections
+each have a gate or threshold to match, so a problematic image can be
+coaxed rather than re-coded. Experimenting is expected, and the
+strict-key check and contradictory-setting warnings of
+Section~\ref{sec:config} catch mistakes early. Two cautions: record
+the overrides behind any published result (a saved YAML file doubles
+as that record), and set \code{rng\_seed} when comparing
+configurations so the injection draws stay fixed.
+
+\subsection{A run file for the command line}
+
+The single-image and batch entry points read the same dictionary as a
+YAML file, so an edited configuration can be saved once and reused:
+
+\begin{lstlisting}[language=Python]
+import yaml
+with open("my_run.yml", "w") as f:
+    yaml.safe_dump(config, f, sort_keys=False)
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash]
+autophot run -f image.fits -c my_run.yml             # a single frame
+autophot batch --file-list files.txt -c my_run.yml --jobs 8
+autophot inspect-telescope /data/images --recursive  # rebuild telescope.yml
+autophot gaia-curves --ra 123.45 --dec -12.34 \
+    --curve myband=myband.dat --out-csv calib.csv    # custom-band catalogue
+\end{lstlisting}
+
+The historical scripts \code{autophot-main}, \code{autophot-batch},
+\code{autophot-inspect-telescope}, and \code{autophot-gaia-curves} take
+the same arguments. Console verbosity follows
+\code{-v}\slash\code{-q}\slash\code{-{}-verbose-level} over the YAML
+value; the per-image log always records DEBUG.
+
+\subsection{Template subtraction}
+\label{sec:running-sub}
+
+Subtraction is off by default; enabling it takes one flag plus one
+template per band. A template is picked up from
+\code{fits\_dir/templates/<band>\_template/} -- an adjacent
+\code{.weight} FITS serves as its noise map, and a \code{templates/}
+folder inside a nested dataset overrides the top-level one -- or fetched
+automatically:
+
+\begin{lstlisting}[language=Python]
+ts = config["template_subtraction"]
+ts["do_subtraction"]     = True
+ts["download_templates"] = "panstarrs"  # "legacy" | "sdss"; omit when
+                                        # supplying your own templates
+ts["method"]             = "auto"       # sfft | hotpants | zogy | auto
+ts["alignment_method"]   = "spalipy"    # cascade falls through on failure
+\end{lstlisting}
+
+\code{download\_templates} stops the run rather than overwrite when
+user templates already exist anywhere under \code{fits\_dir}; remove
+them or leave it \code{False}. Leave \code{forceconv} at its \code{REF}
+default unless the difference-image PSF has been re-derived -- it is the
+only direction under which the science ePSF applies directly to the
+difference image (Section~\ref{sec:subtraction}).
 
 %======================================================================
 \section{Ingestion and image metadata}
@@ -384,7 +574,8 @@ deduplication of inputs was already applied at driver level
 %======================================================================
 
 Astrometry is handled by \code{pipeline/wcs.py::WCSSolver}. The design is
-verify-first: when \code{wcs.verify\_input\_wcs} is set, the input WCS is
+verify-first: when \code{wcs.verify\_input\_wcs} is set, the input world
+coordinate system (WCS; \citealp{calabretta2002wcs}) is
 validated by matching detected sources to a Gaia DR3 cone search
 \citep{gaia2023dr3} under configurable tolerances
 (\code{verify\_max\_median\_arcsec}, \code{verify\_max\_p95\_arcsec},
@@ -467,10 +658,12 @@ candidate-cut strictness.
 
 When \code{cosmic\_rays.remove\_cmrays} is enabled,
 \code{pipeline/cosmic.py::RemoveCosmicRays} flags and repairs cosmic-ray
-hits. The default backend is the pipeline's Laplacian-edge detector in the
-spirit of \citet{vandokkum2001lacosmic}; \code{use\_lacosmic} switches to
-the \code{astroscrappy} implementation \citep{mccully2018astroscrappy}
-with the \code{cr\_sigclip}, \code{cr\_sigfrac}, and \code{cr\_objlim}
+hits. \code{cr\_backend} selects the detector: \code{astroscrappy}
+(default; the fast Cython L.A.Cosmic variant of
+\citet{vandokkum2001lacosmic}, \citealp{mccully2018astroscrappy}),
+\code{lacosmic} (the \code{ccdproc} implementation), or \code{dfcosmic}
+(Dragonfly's PyTorch port of the original algorithm), with the
+\code{cr\_sigclip}, \code{cr\_sigfrac}, and \code{cr\_objlim}
 detection parameters. Detected hits are interpolated over and also added
 to a separate, dilated defect mask
 (\code{cr\_dilate\_factor}, \code{cr\_dilate\_iterations},
@@ -485,6 +678,7 @@ Hough-transform line search (\code{fwhm.py::hough\_transform\_streak\_mask})
 and folded into the same defect mask; defective column segments are
 detected separately (\code{background.mask\_defect\_columns} family).
 Optionally the MaxiMask convolutional classifier
+\citep{paillassa2020maximask}
 (\code{background.use\_maximask}) labels hot pixels, diffraction spikes,
 satellite trails, saturation, and persistence
 (\code{maximask\_classes}), which feed both the PSF-star vetoes
@@ -504,10 +698,10 @@ dilation by \code{source\_mask\_dilate\_factor}, two iterations,
 \code{source\_mask\_max\_fraction} bounds the maskable fraction of the
 frame), (ii) the frame is binned into meshes of a few to ten FWHM
 (\code{mesh\_scale\_min/max}), (iii) sigma-clipped statistics per mesh
-cell (median background, biweight RMS) are evaluated, (iv) the mesh map
-is median-filtered and interpolated back to full resolution with a
-configurable interpolator (\code{global\_interpolator: zoom},
-\code{global\_interp\_order: 3}), and (v) masked edges are flattened
+cell (median background, biweight RMS; \citealp{beers1990biweight}) are
+evaluated, (iv) the mesh map
+is median-filtered and interpolated back to full resolution with a cubic
+spline zoom (fixed under photutils\,$\ge$\,3), and (v) masked edges are flattened
 (\code{global\_mask\_edge\_flatten}). The returned products are the
 background surface, a per-pixel RMS map, a defects mask, and a
 hardware-defects mask; near-zero pixels (below \code{zero\_threshold})
@@ -525,6 +719,23 @@ weight map exists (\code{science\_extweight}), it is reprojected onto the
 current grid and folded in. Because resampling correlates pixel noise,
 summed variances under-count the true scatter; the empirical noise factor
 of Section~\ref{sec:aperture} compensates.
+
+The idea in miniature is Figure~\ref{fig:toy_background}: a toy frame
+with a smooth sky gradient and a handful of sources is divided into
+mesh cells, and inside one cell the source flux shows up only as a
+bright tail that the sigma clip removes.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_background.pdf}
+\caption{Left: a toy frame (smooth gradient, noise, four sources) divided
+into background meshes; one cell is highlighted. Right: the pixel
+histogram of that cell. The sky is the narrow Gaussian body; the
+sources contribute only the bright tail past the $3\sigma$ clip.}
+\label{fig:toy_background}
+\end{figure}
+
+\lstinputlisting[language=Python]{examples/background_mesh.py}
 
 %======================================================================
 \section{Aperture photometry}
@@ -551,7 +762,8 @@ PSF fluxes.
 \textbf{Noise model.} The propagated variance sums the source Poisson
 term and the sky term over the effective (fractional-pixel) aperture area
 $A_{\rm eff}$, preferring photutils' \code{aperture\_sum\_err} evaluated
-on the error map, with an annulus-estimator term added in quadrature:
+on the error map, with an annulus-estimator term added in quadrature
+\citep{stetson1987daophot}:
 \begin{equation}
 \sigma_F^2 \;=\; \underbrace{F_{\rm src}}_{\rm source}
 \;+\; \underbrace{A_{\rm eff}\,\max\!\big(\sigma_{\rm ann}^2,\,R^2\big)}_{\rm sky+read\;noise}
@@ -573,8 +785,9 @@ Magnitude errors use the linear approximation
 consistent between AP and PSF outputs.
 
 \textbf{Optimum radius.} \code{measure\_optimum\_radius} selects the
-aperture from the curve of growth (CoG) of isolated stars: per-source
-SNR-optimal radii are combined into a sigma-clipped median after a
+aperture from the curve of growth (CoG; \citealp{stetson1990growth}) of
+isolated stars: per-source SNR-optimal radii \citep{howell1989snr} are
+combined into a sigma-clipped median after a
 concentration gate on the enclosed-flux fraction inside
 $1.7\times$FWHM and a tail-stability screen
 (\code{optimum\_radius\_*}), with a minimum kept-source count before the
@@ -589,6 +802,25 @@ therefore already contains the aperture loss, while the measured
 correction is stored for the AP/PSF scale cross-check of
 Section~\ref{sec:zeropoint}.
 
+The mechanism is small enough to fit in a snippet
+(Figure~\ref{fig:toy_aperture}): the net flux is the aperture sum minus
+the annulus sky per pixel times the aperture area, and the S/N peaks at
+an intermediate radius -- too small an aperture throws away signal, too
+large an aperture admits more sky noise than signal.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_aperture.pdf}
+\caption{Left: the source aperture (solid) and the sky annulus (dashed).
+Centre: the curve of growth of a Moffat-profile star. Right: the
+aperture S/N, which peaks at $\approx1.5$~FWHM -- the per-image optimum
+the pipeline derives from its own stars (its default is
+$1.7\times$FWHM).}
+\label{fig:toy_aperture}
+\end{figure}
+
+\lstinputlisting[language=Python]{examples/aperture_photometry.py}
+
 %======================================================================
 \section{Empirical PSF construction}
 \label{sec:epsf}
@@ -597,7 +829,8 @@ Section~\ref{sec:zeropoint}.
 \code{photometry/psf.py::PSF.build} constructs the point-spread model in
 three tiers: a vetted empirical ePSF through photutils'
 \code{EPSFBuilder} \citep{bradley2022photutils,anderson2000epsf}, a fitted
-composite-Moffat analytic model used as build seed and as fallback, and
+composite-Moffat analytic model \citep{moffat1969} used as build seed and
+as fallback, and
 an optional spatially varying \code{GriddedPSFModel}.
 
 \subsection{Candidate pool and vetoes}
@@ -707,6 +940,24 @@ target at the centre of its own populated cell, and
 shared oversampling factor is picked for the whole grid and can descend
 when too few cells build (\code{psf\_grid\_osamp\_descent}).
 
+The reason an empirical model is needed at all is visible in
+Figure~\ref{fig:toy_epsf}: on the detector's native pixels a star is a
+handful of noisy squares, but stars land at different sub-pixel phases,
+so stacking many of them on a finer grid recovers the smooth
+profile -- that stacked model is the ePSF.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_epsf.pdf}
+\caption{Left: one star on the native pixel grid. Right: the same
+profile on a grid four times finer (the white lines mark the native
+pixel boundaries) -- the super-resolution the ePSF build recovers by
+stacking cutouts at different sub-pixel phases.}
+\label{fig:toy_epsf}
+\end{figure}
+
+\lstinputlisting[language=Python]{examples/epsf_oversampling.py}
+
 %======================================================================
 \section{PSF photometry}
 \label{sec:psfphot}
@@ -788,7 +1039,9 @@ evaluates the same statistic at $\sim$60 blank annulus sites
 %======================================================================
 
 \code{calibration/catalog.py::Catalog} downloads the field sequence once
-per (catalogue, band, footprint region) via \code{build\_complete\_catalog}
+per (catalogue, band, footprint region) via \code{build\_complete\_catalog},
+querying through \code{astroquery} \citep{ginsburg2019astroquery},
+including VizieR \citep{ochsenbein2000vizier},
 and serves it to every image of the run. Supported backends:
 \code{gaia} (Gaia DR3, including synthetic photometry from XP spectra via
 GaiaXPy \citep{weiler2023gaiaxpy} and SVO filter transmission curves
@@ -810,7 +1063,9 @@ saturation/nonlinearity against the image's own linearity curve
 (\code{reject\_nonlinear\_sources}, \code{nonlinear\_peak\_frac},
 \code{saturation\_peak\_frac}), SExtractor flags
 (\code{zeropoint.max\_flags}), FWHM-outlier and defect rejection, blends
-(\code{blend\_neighbor\_*}), known-variable matching, and a minimum
+(\code{blend\_neighbor\_*}), star-galaxy separation on catalogue Kron
+magnitudes \citep{kron1980} where the backend provides them,
+known-variable matching, and a minimum
 surviving count (\code{min\_source\_no}, \code{clean\_min\_keep}).
 
 \textbf{Photometric systems.} Band names are case-significant
@@ -850,7 +1105,8 @@ intercept (no colour term) is fitted when
 default; affine-invariant sampling of the locus with errors in both
 coordinates, \code{mcmc\_n\_walkers/burn/steps} with an autocorrelation
 stop at \code{mcmc\_tau\_factor}), \code{odr} (orthogonal distance
-regression), and \code{ransac} (robust inlier search). Calibrator
+regression; \citealp{boggs1987odr}), and \code{ransac} (robust inlier
+search; \citealp{fischler1981ransac}). Calibrator
 outliers are rejected by iterative sigma clipping capped at
 \code{sigma\_clip\_max} seeded at a robust mode; a fast path accepts a
 clean fit early (\code{fast\_path\_max\_mad}); a PSF-vs-AP disagreement
@@ -887,6 +1143,23 @@ applies; for a transient with unknown colour the median calibrator colour
 is adopted and both $|c|\,\sigma_{\rm colour}$ and
 $|c_{\rm err}|\,|\bar{C}|$ are added as systematics
 (Section~\ref{sec:errors}).
+
+At its simplest the fit is one number
+(Figure~\ref{fig:toy_zeropoint}): the offset between catalogue and
+instrumental magnitudes over the surviving calibrators, with the
+handful of discrepant points clipped away first.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.74\textwidth]{figures/fig_zeropoint.pdf}
+\caption{Catalogue minus instrumental magnitude versus instrumental
+magnitude for toy calibrators. The flat locus is the zero point; the
+marked outliers are what iterative sigma clipping removes before the
+offset is taken.}
+\label{fig:toy_zeropoint}
+\end{figure}
+
+\lstinputlisting[language=Python]{examples/zeropoint_fit.py}
 
 %======================================================================
 \section{Template subtraction}
@@ -955,7 +1228,8 @@ match):
 \item \textbf{SFFT} \citep{hu2022sfft,russell2022sfft} (default,
   \code{sfft}): the matching kernel $K$ in
   $\mathrm{SCI}=\mathrm{REF}\otimes K$ is solved in a delta-function
-  (or B-spline) basis over stamp regions centred on the vetted kernel
+  (or B-spline) basis \citep{alard1998method} over stamp regions centred
+  on the vetted kernel
   prior sources, via the \code{Easy\_SparsePacket}\slash\code{Easy\_CrowdedPacket}
   APIs in a \code{run\_sfft.py} subprocess (numpy or CUDA backend,
   \code{sfft\_backend}, \code{sfft\_num\_threads}). The convolution
@@ -1002,6 +1276,23 @@ on the difference image). The SFFT kernel's spatial model contributes a
 fractional flux error folded into PSF photometry
 (\code{psf\_kernel\_model\_err\_frac}), and the difference image carries
 $\mathrm{Var}\approx\sigma_{\rm sci}^2+\sigma_{\rm tpl}^2$ noise.
+
+The end result is the familiar three-panel picture of
+Figure~\ref{fig:toy_subtraction}: once the template is aligned,
+flux-matched, and PSF-matched, the difference carries only what
+changed.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_subtraction.pdf}
+\caption{Toy subtraction. (a) Science frame: sky, two static sources,
+and a transient (marked). (b) The aligned template. (c) The difference
+image: sky and static sources cancel, leaving the transient's PSF --
+and doubled pixel noise.}
+\label{fig:toy_subtraction}
+\end{figure}
+
+\lstinputlisting[language=Python]{examples/template_subtraction.py}
 
 %======================================================================
 \section{Target photometry and detection}
@@ -1054,7 +1345,8 @@ sensitive to PSF-model mismatch on faint sources) and a matched-filter
 rescue (\code{detection\_mf\_snr\_min} with
 \code{prob\_detect}$\ge$\code{detection\_mf\_prob\_min} and positive flux;
 the empirical-FAP and centroid vetoes still apply). Non-detections report
-an upper limit at \code{upper\_limit\_snr} (SNU convention, default 5):
+an upper limit at the second entry of
+\code{limiting\_magnitude.snr\_thresholds} (SNU convention, default 5):
 the multi-threshold limiting magnitude machinery of
 Section~\ref{sec:limits} when available, else the 50\%-completeness
 limit. Every epoch also carries the \code{quality\_flags} bitmask
@@ -1094,6 +1386,23 @@ $m_{50}$. Finally, an uncertainty calibration
 their measured scatter and rescales the reported errors when they
 systematically under- or over-estimate the true noise
 (\code{uncal\_apply}, clipped to \code{uncal\_factor\_clip}).
+
+The recipe in miniature is Figure~\ref{fig:toy_limits}: injected
+sources fade through the detection threshold, the recovered fraction
+as a function of magnitude is the completeness curve, and its 50\%
+point is the reported limit.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_limiting.pdf}
+\caption{Left: recovery S/N of injected toy sources versus their true
+magnitude, with the detection threshold dashed. Right: the fraction
+recovered per magnitude bin and the fitted logistic completeness
+curve; the limit is the 50\% point, $m_{50}$.}
+\label{fig:toy_limits}
+\end{figure}
+
+\lstinputlisting[language=Python]{examples/limiting_magnitude.py}
 
 %======================================================================
 \section{Host-galaxy modelling}
@@ -1173,6 +1482,22 @@ an RGB composite from the per-band products
 percentile clipping, gamma), and a Lomb-Scargle periodogram
 \citep{lomb1976,scargle1982} of the light curve
 (\code{periodogram\_*}), in PSF or AP flavour.
+
+The light-curve CSV is long-form (one row per image, a \code{filter}
+column). The usual next steps are one-liners:
+
+\begin{lstlisting}[language=Python]
+from autophot.analysis.lightcurve import (
+    plot_lightcurve, generate_photometry_table,
+)
+from autophot.photometry.differential_photometry import (
+    differential_photometry,
+)
+
+plot_lightcurve(output_csv, snr_limit=3, method="PSF")  # detections + limits
+generate_photometry_table(output_csv, snr_limit=3, method="PSF")  # ASCII table
+differential_photometry(output_csv, method="PSF")      # vs reference ensemble
+\end{lstlisting}
 
 %======================================================================
 \section{Error-budget summary}
@@ -1265,12 +1590,13 @@ Every leaf key in \code{default\_input.yml} was traced to a code
 reference: \code{scripts/audit\_config\_usage.py} searches the package
 source for each key name, and misses are checked by hand against dynamic
 key construction (formatted names, \code{startswith} iteration, whole-dict
-pass-through to external tools). The audit found seven keys with no
-consumer (Table~\ref{tab:dead-params}); they have been removed from the
+pass-through to external tools). The audit found twelve keys that were
+either never read or read only as compatibility shims with no effect on
+the result (Table~\ref{tab:dead-params}); they have been removed from the
 schema and registered in
 \code{functions.py::\_CONFIG\_REMOVED\_KEYS}, so user configs that still
 carry them print a ``no longer used'' warning rather than an unknown-key
-error. All 907 remaining leaf parameters are consumed directly.
+error. All 900 remaining leaf parameters are consumed directly.
 
 \begin{table}[ht]
 \centering\small
@@ -1287,6 +1613,17 @@ Key & Finding \\
 \code{photometry.psf\_adaptive\_smoothing\_kernel} & deprecated no-op \\
 \code{background.local\_interp\_order} & deprecated no-op (photutils\,$\ge$\,3) \\
 \code{background.global\_interp\_order} & deprecated no-op (photutils\,$\ge$\,3) \\
+\code{photometry.upper\_limit\_snr} & documented but never read; the
+  \code{limiting\_magnitude.snr\_thresholds} list supplies the SNU
+  convention \\
+\code{photometry.apply\_aperture\_correction} & read only to log a note;
+  \code{ZP\_AP} already embeds the aperture loss \\
+\code{photometry.oversample\_psf\_fwhm} & read into a variable that was
+  never used; \code{undersampled\_fwhm\_threshold} decides \\
+\code{background.global\_interpolator} & logged and ignored
+  (photutils\,$\ge$\,3 always uses cubic zoom) \\
+\code{background.local\_interpolator} & logged and ignored
+  (photutils\,$\ge$\,3 always uses cubic zoom) \\
 \bottomrule
 \end{tabular}
 \caption{Former parameters of \code{default\_input.yml} with no consumer
@@ -1307,22 +1644,16 @@ host-fitting backends; galfit is currently the only engine, so the key is
 never dispatched. \code{wcs.code\_tolerance} predates the current solver
 verification path.
 
-Five further keys are still read but only as compatibility shims --
-\code{local\_interpolator} and \code{global\_interpolator} (logged and
-ignored under photutils\,$\ge$\,3), \code{oversample\_psf\_fwhm}
-(superseded by \code{undersampled\_fwhm\_threshold}),
-\code{apply\_aperture\_correction} (logs a note; the correction is already
-embedded in \code{ZP\_AP}), and \code{skip\_resampling} (mapped onto
-\code{resample\_mode}). Renamed keys from older configs are still
+Renamed keys from older configs are still
 honoured with a deprecation warning via
 \code{functions.py::\_CONFIG\_DEPRECATED\_KEYS}
 (\code{psf\_contam\_asymmetry\_frac}$\to$\code{psf\_contam\_asymmetry\_sigma},
 \code{psf\_contam\_radial\_reversal\_frac}$\to$\code{psf\_contam\_radial\_reversal\_sigma},
 \code{sfft\_sky\_subtract}/\code{zogy\_sky\_subtract}$\to$\code{sky\_subtract},
 \code{sfft\_forceconv}/\code{zogy\_forceconv}$\to$\code{forceconv},
-\code{alignment\_max\_p95\_px}$\to$\code{alignment\_max\_p90\_px});
-\code{template\_subtraction.zogy\_update} is dropped from the schema and
-ignored with a warning rather than rejected.
+\code{alignment\_max\_p95\_px}$\to$\code{alignment\_max\_p90\_px},
+\code{skip\_resampling}$\to$\code{resample\_mode},
+\code{use\_lacosmic}$\to$\code{cr\_backend}).
 
 \input{autophot_parameters}
 
