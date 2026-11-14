@@ -1928,7 +1928,7 @@ class SuppressStdout:
         sys.stdout = self._original_stdout
 
 
-def beta_aperture(n, flux_aperture, npix, sigma, noise=0):
+def beta_aperture(n, flux_aperture, npix, sigma, noise=0, noise_factor=1.0):
     """
     Detection confidence (beta) for a source using aperture flux.
 
@@ -1951,6 +1951,12 @@ def beta_aperture(n, flux_aperture, npix, sigma, noise=0):
         matching ``noiseSky`` from ``Aperture.measure``.
     noise : float, optional
         Mean background offset if not background-subtracted (default 0).
+    noise_factor : float or np.ndarray, optional
+        Empirical correlated-noise factor (``noise_factor`` column from
+        ``Aperture.measure``).  ``sigma*sqrt(npix)`` assumes independent
+        pixels and under-predicts the aperture-sum scatter on resampled
+        frames; the factor corrects for that.  Non-finite or sub-unity
+        values fall back to 1 (inflate only).  Default 1.
 
     Returns
     -------
@@ -1965,7 +1971,9 @@ def beta_aperture(n, flux_aperture, npix, sigma, noise=0):
     # the confidence value, not the detection decision.
     source_flux = np.abs(flux_aperture - noise * npix)
 
-    sigma_aperture = sigma * np.sqrt(npix)
+    _nf = np.asarray(noise_factor, dtype=float)
+    _nf = np.where(np.isfinite(_nf) & (_nf > 1.0), _nf, 1.0)
+    sigma_aperture = sigma * np.sqrt(npix) * _nf
     # Guard against division by zero.
     sigma_aperture = np.maximum(sigma_aperture, np.finfo(float).tiny)
 
