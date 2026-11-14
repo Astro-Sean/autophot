@@ -15139,9 +15139,6 @@ def run_photometry():
                 # aperture correction (only when apply_aperture_correction is True;
                 # otherwise aperture correction is stored for use later).
                 ap_corr = float(input_yaml.get("aperture_correction", 0.0) or 0.0)
-                ap_corr_err = float(
-                    input_yaml.get("aperture_correction_err", 0.0) or 0.0
-                )
                 apply_ap_corr = bool(
                     (input_yaml.get("photometry") or {}).get(
                         "apply_aperture_correction", False
