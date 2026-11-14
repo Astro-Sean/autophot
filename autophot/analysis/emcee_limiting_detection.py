@@ -285,7 +285,7 @@ def main() -> int:
     ini_ap = Aperture(input_yaml=ap_input_yaml, image=cut)
     df_meas = ini_ap.measure(sources=df_sites, plot=False, background_rms=rms_cut, verbose=0)
     p_det = df_meas.apply(
-        lambda row: beta_aperture(n=3.0, flux_aperture=row["flux_AP"], sigma=row["noiseSky"], npix=row["area"]),
+        lambda row: beta_aperture(n=3.0, flux_aperture=row["flux_AP"], sigma=row["noiseSky"], npix=row["area"], noise_factor=row.get("noise_factor", 1.0)),
         axis=1,
     )
     quiet = df_meas[p_det < float(args.beta_limit)].copy()
@@ -339,6 +339,11 @@ def main() -> int:
                     flux_aperture=float(mres["flux_AP"].iloc[0]),
                     sigma=float(mres["noiseSky"].iloc[0]),
                     npix=float(mres["area"].iloc[0]),
+                    noise_factor=(
+                        float(mres["noise_factor"].iloc[0])
+                        if "noise_factor" in mres.columns
+                        else 1.0
+                    ),
                 )
                 if not (np.isfinite(beta_p) and beta_p >= float(args.beta_limit)):
                     det.append(False)
