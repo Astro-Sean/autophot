@@ -13156,10 +13156,67 @@ class PSF:
         elif _detect_on:
             _data_e = np.asarray(ndimage.data, float)
             _fit_mask_full = getattr(ndimage, "mask", None)
-            _rms_e = bkgrmsval * _gain_for_bkg
-            _ap_noise = max(
-                float(_rms_e) * np.sqrt(np.pi * aperture_radius ** 2), 1e-10
-            )
+            # Per-pixel noise map in electrons when the 2-D background_rms
+            # map is available; the frame median bkgrmsval cannot see
+            # depth variations from resampling, vignetting, or chip gaps.
+            _rms_map_e = None
+            if background_rms is not None:
+                _rms_arr = np.asarray(background_rms, dtype=float)
+                if _rms_arr.shape == _data_e.shape:
+                    _rms_map_e = _rms_arr * _gain_for_bkg
+            _rms_e = bkgrmsval * _gain_for_bkg  # global fallback, e-/pix
+            _ap_area = np.pi * aperture_radius ** 2
+            # Correlated-noise factor for the in-window detection S/N.
+            # Resampling shares noise between neighbouring pixels, so
+            # rms*sqrt(A) under-predicts an aperture sum's scatter; the
+            # same empty-aperture test used for the flux errors measures
+            # the deficit here at the detection-aperture scale, and the
+            # factor is floored at 1 (inflate only).
+            _enf_ap = 1.0
+            if phot_cfg.get("empirical_noise_factor", True):
+                _err_e_ap = (
+                    np.asarray(ndimage.uncertainty.array, dtype=float)
+                    if getattr(ndimage, "uncertainty", None) is not None
+                    else None
+                )
+                if _err_e_ap is not None:
+                    try:
+                        _an_in_ap = float(
+                            np.ceil(aperture_radius + 0.75 * fwhm)
+                        )
+                        _an_out_ap = float(
+                            np.ceil(_an_in_ap + 2.0 * fwhm)
+                        )
+                        _src_xy_ap = np.c_[x, y]
+                        _src_xy_ap = _src_xy_ap[
+                            np.isfinite(_src_xy_ap).all(axis=1)
+                        ]
+                        _enf_ap, _enf_ap_n = _empirical_noise_factor(
+                            _data_e,
+                            _err_e_ap,
+                            float(aperture_radius),
+                            _an_in_ap,
+                            _an_out_ap,
+                            defects_mask=_fit_mask_full,
+                            source_xy=(
+                                _src_xy_ap if len(_src_xy_ap) else None
+                            ),
+                            seed=int(self.input_yaml.get("rng_seed") or 0),
+                        )
+                        if _enf_ap > 1.0:
+                            log.info(
+                                "Detection S/N: empirical noise factor "
+                                "%.3f at r=%.1f px (%d empty apertures).",
+                                _enf_ap,
+                                float(aperture_radius),
+                                _enf_ap_n,
+                            )
+                    except Exception as _enf_ap_exc:
+                        log.debug(
+                            "Detection-aperture noise factor failed: %s",
+                            _enf_ap_exc,
+                        )
+                        _enf_ap = 1.0
             _win = max(1, int(np.ceil(xy_bounds_eff)))
             _half = _win + int(np.ceil(aperture_radius)) + 1
             _yy, _xx = np.ogrid[: _data_e.shape[0], : _data_e.shape[1]]
@@ -13188,7 +13245,30 @@ class PSF:
                 if not np.any(_cand):
                     xy_hold_arr[_si] = True
                     continue
-                _bkg = float(np.median(_sub[_ok]))
+                # Sky level from window pixels OUTSIDE the detection disk:
+                # a real source's wings inside the search radius belong to
+                # the signal being tested, so counting them inflates the
+                # background and shrinks the measured S/N.
+                _sky = _ok & (_d2 > _win ** 2)
+                if np.count_nonzero(_sky) < 10:
+                    _sky = _ok
+                _n_sky = int(np.count_nonzero(_sky))
+                _bkg = float(np.median(_sub[_sky]))
+                # Local per-pixel rms over the same sky pixels when the
+                # noise map covers the window; otherwise the frame median.
+                _rms_loc = _rms_e
+                if _rms_map_e is not None:
+                    _rl = _rms_map_e[_y0:_y1, _x0:_x1][_sky]
+                    _rl = _rl[np.isfinite(_rl) & (_rl > 0)]
+                    if _rl.size >= 10:
+                        _rms_loc = float(np.median(_rl))
+                # Aperture-sum noise: per-pixel variance over the aperture
+                # area plus the sky-estimator term (median SE times area),
+                # matching the aperture-photometry error budget.
+                _ap_noise = float(_rms_loc) * np.sqrt(
+                    _ap_area + (_ap_area * 1.2533) ** 2 / max(_n_sky, 1)
+                )
+                _ap_noise = max(_ap_noise * _enf_ap, 1e-10)
                 _resid = np.where(_cand, _sub - _bkg, 0.0)
                 if is_difference_image:
                     # Rising and fading sources both count as detections.
