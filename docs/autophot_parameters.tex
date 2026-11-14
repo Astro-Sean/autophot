@@ -2,6 +2,19 @@
 % Source: autophot/data/default_input.yml
 % Do not edit by hand; regenerate after changing default_input.yml.
 
+\subsection{General and run-control parameters}
+
+Run definition and control: input and output locations, the target specification, filter selection, image-level parallelism, and console verbosity. The tail of the table holds runtime placeholders that are filled internally per image; they exist in the schema so every \code{.get()} has a declared type (Section~\ref{sec:config}) -- leave them alone. A typical run edits only this table plus whichever stage tables it is tuning.
+
+\begin{lstlisting}[language=Python]
+autophot_input["fits_dir"] = "/data/SN2026abc/images"
+autophot_input["wdir"] = "/data/SN2026abc/work"
+autophot_input["target_name"] = "SN2026abc"
+autophot_input["selected_filters"] = ["g", "r"]
+autophot_input["nCPU"] = 8
+autophot_input["rng_seed"] = 42
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{General and run-control parameters --- configuration reference.} \label{tab:default_input}\\
@@ -54,6 +67,15 @@
 \texttt{aperture\_{\allowbreak}correction\_{\allowbreak}err} & \texttt{0.\allowbreak{}0} {\scriptsize(float)} & \emph{(runtime)} Runtime: aperture correction uncertainty (mag) (set internally). \\
 \end{longtable}}
 
+\subsection{Pre-processing}
+
+Frame cleanup applied before any measurement: trimming edge rows and columns, and dropping duplicate exposures so the same data are not reduced twice.
+
+\begin{lstlisting}[language=Python]
+autophot_input["preprocessing"]["trim_image"] = 5  # px off every edge
+autophot_input["preprocessing"]["deduplicate_input_files"] = True
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Pre-processing --- configuration reference.} \label{tab:preprocessing}\\
@@ -71,6 +93,19 @@
 \texttt{trim\_{\allowbreak}image} & \texttt{0} {\scriptsize(float)} & If \textgreater{}0, trim to a (2*trim\_{\allowbreak}image) arcmin box centred on the target. \\
 \texttt{deduplicate\_{\allowbreak}input\_{\allowbreak}files} & \texttt{True} {\scriptsize(bool)} & If True, skip input FITS files that are byte-identical copies of another queued file (same exposure under a different filename). Prevents doubled processing and duplicate lightcurve epochs. \\
 \end{longtable}}
+
+\subsection{Photometry}
+
+The largest section: it decides which sources get measured, how the aperture radius and local sky are chosen, how the empirical PSF is built and vetted, which fitter measures the target, and what counts as a detection at all. The sub-tables below follow that order; most runs touch only the detection and aperture groups.
+\subsubsection{Detection and forced-photometry decision}
+
+Whether the measured target flux counts as a detection: the S/N threshold, fit-quality and sign-consistency vetoes, the empirical false-alarm annulus test, the matched-filter and aperture-fallback rescue channels, and the SNU upper limit reported for non-detections.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["detection_limit"] = 5.0
+autophot_input["photometry"]["force_photometry"] = True  # pin to catalogue coords
+autophot_input["limiting_magnitude"]["snr_thresholds"] = [3.0, 5.0]  # SNU = 2nd entry
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -99,9 +134,18 @@
 \texttt{detection\_{\allowbreak}mf\_{\allowbreak}snr\_{\allowbreak}min} & \texttt{5.\allowbreak{}0} {\scriptsize(float)} & Matched-filter rescue floor: when the photometric SNR fails the detection gate but mf\_{\allowbreak}snr (the PSF-matched detection statistic, insensitive to multiplicative scale systematics like FSCAL\_{\allowbreak}DISC) reaches this value with prob\_{\allowbreak}detect \textgreater{}= detection\_{\allowbreak}mf\_{\allowbreak}prob\_{\allowbreak}min and positive flux, flag as detection anyway. The empirical-FAP and centroid vetoes still apply to rescued detections. Set very high to disable. \\
 \texttt{detection\_{\allowbreak}mf\_{\allowbreak}prob\_{\allowbreak}min} & \texttt{0.\allowbreak{}9} {\scriptsize(float)} & Minimum prob\_{\allowbreak}detect required for the matched-filter rescue (see detection\_{\allowbreak}mf\_{\allowbreak}snr\_{\allowbreak}min). \\
 \texttt{detection\_{\allowbreak}max\_{\allowbreak}offset\_{\allowbreak}arcsec} & \texttt{2.\allowbreak{}0} {\scriptsize(float)} & Reject a detection whose fitted centroid lies farther than this from the target position (arcsec). The PSF fit may recentre to absorb small WCS/\allowbreak{}centroid errors, but a large offset means it locked onto an offset source or subtraction artifact rather than the target. Set 0 to disable. \\
-\texttt{upper\_{\allowbreak}limit\_{\allowbreak}snr} & \texttt{5.\allowbreak{}0} {\scriptsize(float)} & S/\allowbreak{}N threshold for reporting upper limits for non-detections (SNU in ZTF terminology). If the multi-SNR limiting-magnitude machinery includes this threshold, the corresponding limit is used for non-detection upper limits; otherwise the 50\% completeness limit is used. \\
 \texttt{force\_{\allowbreak}photometry} & \texttt{False} {\scriptsize(bool)} & If True, hold every target X/\allowbreak{}Y position at the catalog coordinate during the PSF fit (forced photometry) regardless of detection S/\allowbreak{}N. The default adaptive mode only holds targets below fitting\_{\allowbreak}xy\_{\allowbreak}bounds\_{\allowbreak}detect\_{\allowbreak}snr. \\
 \end{longtable}}
+
+\subsubsection{Centroid window of the PSF fit}
+
+How far a fitted centroid may move from its seed position, and when neighbouring sources are solved as one blended group.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["fitting_xy_bounds"] = 4.0  # px
+autophot_input["photometry"]["psf_group_separation_fwhm"] = 2.5
+autophot_input["photometry"]["centroid_max_wander_fwhm"] = 0.5
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -129,6 +173,17 @@
 \texttt{centroid\_{\allowbreak}max\_{\allowbreak}wander\_{\allowbreak}fwhm} & \texttt{0.\allowbreak{}5} {\scriptsize(float)} & Maximum drift (in FWHM units, floored at 2.5 px) accepted for a re-centroid during template-subtraction source matching. A centroid landing further from its seed position latched onto a neighbour or a mask edge rather than the source; it is treated as a failed fit (NaN) so the source is kept at its SExtractor position instead of being rejected as a centroid mismatch or moved off-source. \\
 \end{longtable}}
 
+\subsubsection{Aperture photometry}
+
+The radius (a fixed FWHM multiple, explicit pixels, or the per-image curve-of-growth optimum), the sky annulus, and the noise bookkeeping -- including the empirical factor that rescales the propagated variance against measured sky-aperture scatter.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["aperture_size"] = 1.7  # radius in FWHM
+autophot_input["photometry"]["find_optimum_radius"] = True
+autophot_input["photometry"]["annulus_min_pixels"] = 20
+autophot_input["photometry"]["empirical_noise_factor"] = True
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Photometry: Aperture photometry --- configuration reference.} \label{tab:photometry-Aperture-photometry}\\
@@ -145,7 +200,6 @@
 \endlastfoot
 \texttt{aperture\_{\allowbreak}size} & \texttt{1.\allowbreak{}7} {\scriptsize(float)} & Aperture radius in units of FWHM (pixels = \texttt{aperture\_{\allowbreak}size * fwhm}). Used directly when \texttt{find\_{\allowbreak}optimum\_{\allowbreak}{\allowbreak}radius} is False or the optimum-radius search cannot run or fails; in crowded fields \texttt{crowded\_{\allowbreak}optimum\_{\allowbreak}{\allowbreak}radius\_{\allowbreak}{\allowbreak}fwhm} still takes precedence. Ignored when \texttt{aperture\_{\allowbreak}radius} is set. \\
 \texttt{enforce\_{\allowbreak}nonnegative\_{\allowbreak}local\_{\allowbreak}background} & \texttt{False} {\scriptsize(bool)} & If True, clamp annulus-estimated local background to \textgreater{}=0 before subtraction (prevents flux inflation when local sky is negative from over-subtraction/\allowbreak{}miscalibration). \\
-\texttt{apply\_{\allowbreak}aperture\_{\allowbreak}correction} & \texttt{False} {\scriptsize(bool)} & \emph{(deprecated)} DEPRECATED no-op, kept for backward compatibility. ZP\_{\allowbreak}AP is fitted on raw flux\_{\allowbreak}AP and already embeds the aperture loss, so calibrated aperture mags always carry the correction; setting this only logs a note. The measured correction is still stored and used for AP/\allowbreak{}PSF scale bridging. \\
 \texttt{plot\_{\allowbreak}aperture\_{\allowbreak}correction} & \texttt{False} {\scriptsize(bool)} & If True, save the aperture-correction diagnostic plot (curve of growth). \\
 \texttt{aperture\_{\allowbreak}radius} & \emph{null} {\scriptsize(float\textbar{}\allowbreak{}null)} & Explicit aperture radius (pixels). When set, the data-driven optimum-radius search is skipped entirely and this value is used as-is. If null, the radius is the optimum-radius result when \texttt{find\_{\allowbreak}optimum\_{\allowbreak}{\allowbreak}radius} succeeds, else \texttt{aperture\_{\allowbreak}size * fwhm}. \\
 \texttt{find\_{\allowbreak}optimum\_{\allowbreak}radius} & \texttt{True} {\scriptsize(bool)} & If True, derive the aperture radius from a curve-of-growth optimisation over isolated stars. If False, use the fixed \texttt{aperture\_{\allowbreak}size} FWHM multiplier instead (or \texttt{aperture\_{\allowbreak}radius} /\allowbreak{} \texttt{crowded\_{\allowbreak}optimum\_{\allowbreak}{\allowbreak}radius\_{\allowbreak}{\allowbreak}fwhm} when those apply). \\
@@ -167,6 +221,15 @@
 \texttt{optimum\_{\allowbreak}radius\_{\allowbreak}max\_{\allowbreak}sources} & \texttt{250} {\scriptsize(int)} & Cap on sources fed to the optimum-radius CoG search (the result is a sigma-clipped median, so extra stars add runtime not information). When the pool exceeds this, keep the highest-SNR stars per grid cell so the median still samples the whole field. \\
 \end{longtable}}
 
+\subsubsection{Instrumental colour terms}
+
+An optional colour term between the instrumental and catalogue magnitudes, fitted as a polynomial or a piecewise line.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["apply_colorterms"] = True
+autophot_input["photometry"]["color_term_poly_order"] = 2  # 1 = linear
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Photometry: Instrumental colour terms --- configuration reference.} \label{tab:photometry-Instrumental-colour-terms}\\
@@ -185,6 +248,15 @@
 \texttt{color\_{\allowbreak}term\_{\allowbreak}poly\_{\allowbreak}order} & \texttt{1} {\scriptsize(int)} & Polynomial order for color term fitting: 1 for linear, 2 for quadratic. \\
 \texttt{color\_{\allowbreak}term\_{\allowbreak}n\_{\allowbreak}segments} & \texttt{1} {\scriptsize(int)} & Number of segments for piecewise linear fitting: 1 for single line, 2 for two segments with breakpoint, etc. Overrides poly\_{\allowbreak}order if \textgreater{} 1. \\
 \end{longtable}}
+
+\subsubsection{Local background infill (LPI)}
+
+(In development) An LPI-style local background infill behind the target, for structured backgrounds that defeat the global mesh.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["lpi_background_for_target"] = True
+autophot_input["photometry"]["lpi_n_samples"] = 250
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -211,6 +283,15 @@
 \texttt{lpi\_{\allowbreak}save\_{\allowbreak}diagnostic\_{\allowbreak}plot} & \texttt{True} {\scriptsize(bool)} & (In development) If True and lpi\_{\allowbreak}background\_{\allowbreak}for\_{\allowbreak}target=True, save an LPI diagnostic plot next to per-image outputs. \\
 \end{longtable}}
 
+\subsubsection{Sampling regime}
+
+The FWHM thresholds that classify each frame as undersampled, critically sampled, or oversampled; detection, aperture, and PSF behaviour adapt to the regime.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["undersampled_fwhm_threshold"] = 2.5  # px
+autophot_input["photometry"]["oversampled_fwhm_threshold"] = 5.0  # px
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Photometry: Sampling regime --- configuration reference.} \label{tab:photometry-Sampling-regime}\\
@@ -229,6 +310,15 @@
 \texttt{critical\_{\allowbreak}fwhm\_{\allowbreak}threshold} & \texttt{3.\allowbreak{}0} {\scriptsize(float)} & FWHM \textless{}= this (and \textgreater{} undersampled threshold) is critically sampled. Affects detection params and aperture sizing. \\
 \texttt{oversampled\_{\allowbreak}fwhm\_{\allowbreak}threshold} & \texttt{5.\allowbreak{}0} {\scriptsize(float)} & FWHM \textgreater{} this value is oversampled (SNR inefficient); triggers a warning and larger apertures. \\
 \end{longtable}}
+
+\subsubsection{Field FWHM estimation}
+
+Robustness guards on the per-image seeing measurement itself: clipping iterations, how far the fitted FWHM may inflate past the robust estimate, and which sources may vote.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["fwhm_inflation_max_factor"] = 1.5
+autophot_input["photometry"]["fwhm_sigma_clip_maxiters"] = 15
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -249,6 +339,15 @@
 \texttt{fwhm\_{\allowbreak}flux\_{\allowbreak}radius\_{\allowbreak}max\_{\allowbreak}frac} & \texttt{1.\allowbreak{}3} {\scriptsize(float)} & Maximum FLUX\_{\allowbreak}RADIUS/\allowbreak{}FWHM ratio for sources used in the image-FWHM estimate. A point source's half-light radius is \textasciitilde{}0.5-0.7x its FWHM; the generous bound removes only obvious galaxies and extended defects that would pull the median high. Sources with missing/\allowbreak{}NaN values are kept. Set 0 to disable. \\
 \end{longtable}}
 
+\subsubsection{ePSF construction}
+
+Everything about building the empirical PSF: the candidate pool and its vetoes, cutout size, recentering, the oversampling-factor pick, smoothing kernels, the iterative build loop, and the linearity/saturation screens applied to the pool.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["oversample_psf"] = True  # force adaptive oversampling
+autophot_input["photometry"]["sextractor_reject_constant_regions"] = True
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Photometry: ePSF construction --- configuration reference.} \label{tab:photometry-ePSF-construction}\\
@@ -265,7 +364,6 @@
 \endlastfoot
 \texttt{psf\_{\allowbreak}oversample} & \texttt{1} {\scriptsize(int)} & Oversampling factor for PSF modelling/\allowbreak{}fitting grids. \\
 \texttt{oversample\_{\allowbreak}psf} & \texttt{False} {\scriptsize(bool)} & If True, enable adaptive PSF oversampling based on FWHM threshold. If False, use fixed psf\_{\allowbreak}oversample value. \\
-\texttt{oversample\_{\allowbreak}psf\_{\allowbreak}fwhm} & \texttt{2.\allowbreak{}5} {\scriptsize(float)} & \emph{(deprecated)} DEPRECATED: oversampling now uses undersampled\_{\allowbreak}fwhm\_{\allowbreak}threshold. Kept for backward compatibility. \\
 \texttt{psf\_{\allowbreak}smoothing\_{\allowbreak}kernel} & \texttt{quartic} {\scriptsize(str)} & ePSFBuilder smoothing kernel type: "quartic" (recommended -- the Anderson \& King 2000 polynomial kernel; its negative sidelobes preserve sharp ePSF structure), "quadratic" (same fit with a 2nd-order basis; used automatically for kernels smaller than 5x5 where a quartic is underdetermined), "auto" (mirrors the photutils 3.1 'auto' option: a quartic kernel sized to 0.7x the FWHM on the oversampled grid, skipped entirely when that footprint spans fewer than 5 grid points), "gaussian", or "none" to disable smoothing. \\
 \texttt{psf\_{\allowbreak}smoothing\_{\allowbreak}kernel\_{\allowbreak}size} & \emph{null} {\scriptsize(int\textbar{}\allowbreak{}null)} & Optional explicit smoothing-kernel size (pixels, on the oversampled grid). If null, auto-sized to \textasciitilde{}psf\_{\allowbreak}smoothing\_{\allowbreak}kernel\_{\allowbreak}size\_{\allowbreak}scale\_{\allowbreak}px native pixels. \\
 \texttt{psf\_{\allowbreak}smoothing\_{\allowbreak}kernel\_{\allowbreak}size\_{\allowbreak}scale\_{\allowbreak}px} & \texttt{1.\allowbreak{}0} {\scriptsize(float)} & Auto kernel footprint in NATIVE pixels: kernel size \textasciitilde{}= scale * oversampling. \textasciitilde{}1.0 reproduces the canonical Anderson \& King kernel (osamp=4 -\textgreater{} 5x5); larger values over-smooth and erase ePSF structure (Godden \& Blundell 2025). Kernels smaller than 5x5 use a quadratic basis (a 3x3 quartic fit is underdetermined and degenerates to an identity kernel); at oversampling=1 the kernel is \textasciitilde{}1x1 i.\allowbreak e. effectively no smoothing. \\
@@ -362,6 +460,15 @@
 \texttt{psf\_{\allowbreak}build\_{\allowbreak}sigma\_{\allowbreak}clip\_{\allowbreak}maxiters} & \texttt{15} {\scriptsize(int)} & Maximum SigmaClip iterations for EPSFBuilder stacking. \\
 \end{longtable}}
 
+\subsubsection{ePSF star vetoes: cutout contamination}
+
+Pixel-level vetoes on the candidate cutouts: quadrant asymmetry, edge and border excess, radial reversals, secondary peaks, and streak tests that catch what catalogue-level isolation misses.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["psf_cutout_contamination_check"] = True
+autophot_input["photometry"]["psf_contam_asymmetry_sigma"] = 3.0
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Photometry: ePSF star vetoes: cutout contamination --- configuration reference.} \label{tab:photometry-ePSF-star-vetoes-cutout-contamination}\\
@@ -399,6 +506,15 @@
 \texttt{psf\_{\allowbreak}contam\_{\allowbreak}cog\_{\allowbreak}always\_{\allowbreak}reject} & \texttt{True} {\scriptsize(bool)} & Treat curve-of-growth failures as unrepairable (always rejected like hardware defects): the defect is the core profile itself, so annulus masking cannot fix it. Set False to let them fall back into the keep-floor flux class. \\
 \end{longtable}}
 
+\subsubsection{ePSF star vetoes: ensemble shape outliers}
+
+Rejects cutouts whose flux-normalised shape disagrees with the ensemble median stack -- miscentred, contaminated, or deviant morphologies that would stop the build converging.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["psf_shape_outlier_rejection"] = True
+autophot_input["photometry"]["psf_shape_outlier_nsigma"] = 4.0
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Photometry: ePSF star vetoes: ensemble shape outliers --- configuration reference.} \label{tab:photometry-ePSF-star-vetoes-ensemble-shape-outliers}\\
@@ -420,6 +536,15 @@
 \texttt{psf\_{\allowbreak}shape\_{\allowbreak}outlier\_{\allowbreak}min\_{\allowbreak}keep} & \texttt{4} {\scriptsize(int)} & Never drop below this many PSF stars regardless of the outlier scores. \\
 \texttt{psf\_{\allowbreak}shape\_{\allowbreak}outlier\_{\allowbreak}abs\_{\allowbreak}fwhm\_{\allowbreak}floor} & \texttt{0.\allowbreak{}3} {\scriptsize(float)} & Absolute size floor on the measured per-cutout FWHM, as a fraction of the image FWHM. The ensemble-relative outlier test fails when the pool itself is defect-dominated (the median template becomes defect-shaped and real stars look like outliers); this floor drops hot-pixel/\allowbreak{}CR clusters regardless of the ensemble norm. Absolute-floor rejects bypass psf\_{\allowbreak}shape\_{\allowbreak}outlier\_{\allowbreak}max\_{\allowbreak}frac but still respect psf\_{\allowbreak}shape\_{\allowbreak}outlier\_{\allowbreak}min\_{\allowbreak}keep. Set to 0 to disable. \\
 \end{longtable}}
+
+\subsubsection{ePSF star vetoes: Fourier-domain outliers}
+
+Fourier-domain outlier rejection on the cutouts; it catches artifacts (hot pixels, cosmic-ray clusters) whose near-flat azimuthal power spectrum the image-domain tests miss.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["psf_fft_rejection"] = True
+autophot_input["photometry"]["psf_fft_n_sigma"] = 4.0
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -444,6 +569,14 @@
 \texttt{psf\_{\allowbreak}fft\_{\allowbreak}use\_{\allowbreak}median\_{\allowbreak}deviation} & \texttt{True} {\scriptsize(bool)} & Use median absolute deviation around the median (outlier-resistant). \\
 \end{longtable}}
 
+\subsubsection{ePSF star vetoes: normalisation mask}
+
+How many masked or non-finite pixels may sit inside the flux-normalisation circle of a candidate before it is rejected.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["psf_norm_radius_mask_frac_max"] = 0.02
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Photometry: ePSF star vetoes: normalisation mask --- configuration reference.} \label{tab:photometry-ePSF-star-vetoes-normalisation-mask}\\
@@ -461,6 +594,16 @@
 \texttt{psf\_{\allowbreak}norm\_{\allowbreak}radius\_{\allowbreak}mask\_{\allowbreak}frac\_{\allowbreak}max} & \texttt{0.\allowbreak{}0} {\scriptsize(float)} & Maximum fraction of masked/\allowbreak{}non-finite pixels allowed inside the flux-normalisation circle (radius = aperture\_{\allowbreak}radius) of a PSF-star cutout. The ePSF build normalises each star within that radius, so a masked pixel there silently shrinks the normalised area and biases the star's flux scale relative to the ensemble. 0.0 (default) rejects any star with a masked pixel inside the radius; raise slightly (e.\allowbreak g. 0.02) to tolerate isolated bad pixels on heavily masked fields. \\
 \texttt{psf\_{\allowbreak}norm\_{\allowbreak}radius\_{\allowbreak}mask\_{\allowbreak}frac\_{\allowbreak}rescue\_{\allowbreak}max} & \texttt{0.\allowbreak{}25} {\scriptsize(float)} & Keep-floor rescue for the normalisation-radius mask gate: when a strict cut would leave fewer than psf\_{\allowbreak}min\_{\allowbreak}candidates stars, the least-bad rejected cutouts are kept while their masked fraction inside the circle stays under this cap (masked pixels carry weight 0, so a partially masked star still contributes valid samples). \\
 \end{longtable}}
+
+\subsubsection{Analytic composite-Moffat PSF}
+
+The fitted composite-Moffat model that seeds the iterative ePSF build, serves as the residual diagnostic, and is delivered as a fallback when too few vetted stars survive.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["psf_use_analytic_init"] = True
+autophot_input["photometry"]["psf_analytic_components"] = 3
+autophot_input["photometry"]["psf_analytic_fallback"] = True
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -485,6 +628,15 @@
 \texttt{psf\_{\allowbreak}analytic\_{\allowbreak}offset\_{\allowbreak}max\_{\allowbreak}fwhm} & \texttt{0.\allowbreak{}5} {\scriptsize(float)} & Maximum component centre offset in FWHM units for psf\_{\allowbreak}analytic\_{\allowbreak}component\_{\allowbreak}offsets. Bounded so an offset term cannot wander onto a neighbour or duplicate the core at a displaced position. \\
 \texttt{psf\_{\allowbreak}analytic\_{\allowbreak}min\_{\allowbreak}snr} & \texttt{5.\allowbreak{}0} {\scriptsize(float)} & Minimum peak detection significance (peak above sky /\allowbreak{} sky sigma, both measured inside the star cutout) for a PSF-star cutout to enter the joint analytic fit and its diagnostic plot. Noise clumps and faint contaminants that reach the pool drag the shared profile rather than constrain it. 0 disables the gate. \\
 \end{longtable}}
+
+\subsubsection{Spatially varying (gridded) ePSF}
+
+An optional spatially varying model: the field is split into detector grid cells, each running the full vet-and-build pipeline, and the per-cell ePSFs are combined into a \code{GriddedPSFModel}.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["psf_spatial_grid"] = "auto"  # 3x3 then 2x2, else single ePSF
+autophot_input["photometry"]["psf_grid_min_stars_per_cell"] = 25
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -516,6 +668,16 @@
 \texttt{psf\_{\allowbreak}grid\_{\allowbreak}cell\_{\allowbreak}consistency\_{\allowbreak}max} & \texttt{1.\allowbreak{}6} {\scriptsize(float)} & Maximum allowed ratio between a cell ePSF and the ensemble median, checked on sharpness (peak/\allowbreak{}sum - normalisation-invariant) and FWHM. Cells on one field share one PSF to within modest spatial variation; an outlier cell is a failed build that passed the per-cell gates (e.\allowbreak g. a collapsed-sharp stack) and is filled from a neighbour instead. Only applied when \textgreater{}= 3 cells built. \\
 \texttt{psf\_{\allowbreak}grid\_{\allowbreak}require\_{\allowbreak}target\_{\allowbreak}cell} & \texttt{True} {\scriptsize(bool)} & When the target position is known in the build image's detector frame, require the grid cell containing the target to be a real ePSF build. The grid exists to put a local PSF at the target; if that cell failed its build it would be filled with a copy of a distant cell, giving no locality benefit at the position that matters most (observed: filled target cell gave chi2 4.3 and PSF flux 35\% above the aperture flux where the single ePSF gave chi2 2.2 and flux parity). A rejected grid falls back to the single field-wide ePSF; set False to keep the grid anyway (a warning is still logged). \\
 \end{longtable}}
+
+\subsubsection{PSF fit and fitters}
+
+The fit itself: box sizes and shape priors, the non-negativity bound, and which of the three fitters runs -- least-squares, Poisson likelihood, or MCMC below a chosen S/N.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["use_poisson_likelihood_fitter"] = True
+autophot_input["photometry"]["perform_emcee_fitting_s2n"] = 10  # MCMC below this S/N
+autophot_input["photometry"]["check_inverted_image"] = True  # fading dips on diffs
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -563,6 +725,15 @@
 \texttt{emcee\_{\allowbreak}store\_{\allowbreak}samples} & \texttt{False} {\scriptsize(bool)} & If True, store full MCMC chains in fit\_{\allowbreak}info for corner-plot diagnostics (uses \textasciitilde{}2MB per source). \\
 \end{longtable}}
 
+\subsubsection{Diagnostics}
+
+Warning thresholds only -- they flag suspicious conditions (astrometric offset, target on a defect) without changing any measurement.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["wcs_offset_min_snr"] = 5.0
+autophot_input["photometry"]["target_defect_warning_fwhm"] = 3.0
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Photometry: Diagnostics --- configuration reference.} \label{tab:photometry-Diagnostics}\\
@@ -581,6 +752,14 @@
 \texttt{target\_{\allowbreak}defect\_{\allowbreak}warning\_{\allowbreak}fwhm} & \texttt{3.\allowbreak{}0} {\scriptsize(float)} & When the target (or an additional target) sits within this distance (in FWHM units) of hardware\_{\allowbreak}defects\_{\allowbreak}mask pixels, a defect\_{\allowbreak}flag is set on TargetPosition and a warning is logged that the epoch photometry may be biased. Wider than the calibrator cut because the local fit region plus sky annulus extends further than an aperture. Set to 0 to disable. \\
 \end{longtable}}
 
+\subsubsection{Parallelism}
+
+Per-image thread count for photutils calls; multiply by \code{nCPU} (Table~\ref{tab:default_input}) and keep the product under the core count.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["photutils_n_threads"] = 4
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Photometry: Parallelism --- configuration reference.} \label{tab:photometry-Parallelism}\\
@@ -598,6 +777,14 @@
 \texttt{photutils\_{\allowbreak}n\_{\allowbreak}threads} & \texttt{1} {\scriptsize(int)} & Threads for photutils compiled paths (AperturePhotometry, LocalBackground, Background2D, SourceCatalog, deblend\_{\allowbreak}sources; PSFPhotometry only benefits on free-threaded CPython). 1 = serial. \\
 \end{longtable}}
 
+\subsubsection{Other}
+
+Keys that fit nowhere else.
+
+\begin{lstlisting}[language=Python]
+autophot_input["photometry"]["redo_sources"] = True  # rebuild the source list
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Photometry: Other --- configuration reference.} \label{tab:photometry-Other}\\
@@ -614,6 +801,16 @@
 \endlastfoot
 \texttt{redo\_{\allowbreak}sources} & \texttt{False} {\scriptsize(bool)} & If True, redo source detection/\allowbreak{}photometry even if intermediate outputs exist. \\
 \end{longtable}}
+
+\subsection{World coordinate system}
+
+Verify-first astrometry: the existing WCS is validated against Gaia and a full astrometry.net solve -- guided by header hints, tweak orders, and CPU budgets -- runs only when verification fails or \code{redo\_wcs} is set.
+
+\begin{lstlisting}[language=Python]
+autophot_input["wcs"]["redo_wcs"] = False  # trust the header WCS
+autophot_input["wcs"]["verify_input_wcs"] = True
+autophot_input["wcs"]["projection_type"] = "SIP"  # or "TPV"
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -745,6 +942,16 @@
 \texttt{TNS\_{\allowbreak}BOT\_{\allowbreak}API} & \emph{null} {\scriptsize(str\textbar{}\allowbreak{}null)} & Optional TNS API key/\allowbreak{}token (if querying TNS). \\
 \end{longtable}}
 
+\subsection{Reference catalogues}
+
+Which survey supplies the calibrator sequence and how the field is queried: backend selection (a single survey, a per-band mapping, or a user CSV), query geometry, retries, and published band transformations for bands the survey does not natively carry.
+
+\begin{lstlisting}[language=Python]
+autophot_input["catalog"]["use_catalog"] = "panstarrs"
+autophot_input["catalog"]["allow_filter_transformations"] = True
+autophot_input["catalog"]["include_IR_sequence_data"] = True  # add 2MASS JHK
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Reference catalogues --- configuration reference.} \label{tab:catalog}\\
@@ -803,6 +1010,16 @@
 \texttt{MASTcasjobs\_{\allowbreak}wsid} & \emph{null} {\scriptsize(str\textbar{}\allowbreak{}null)} & Optional MAST CasJobs workspace ID for refcat/\allowbreak{}casjobs-backed catalog queries. \\
 \texttt{MASTcasjobs\_{\allowbreak}pwd} & \emph{null} {\scriptsize(str\textbar{}\allowbreak{}null)} & Optional MAST CasJobs password/\allowbreak{}token for refcat/\allowbreak{}casjobs-backed catalog queries. \\
 \end{longtable}}
+
+\subsection{Photometric zero-point}
+
+The calibrator vetoes and the fit that turns them into a zero point: magnitude range, saturation and linearity gates, blend and defect rejection, the fit method, and the colour/spatial correction terms.
+
+\begin{lstlisting}[language=Python]
+autophot_input["zeropoint"]["fit_method"] = "odr"  # mcmc | odr | ransac
+autophot_input["zeropoint"]["faint_mag_limit"] = 21.0
+autophot_input["zeropoint"]["min_source_no"] = 5
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -868,6 +1085,16 @@
 \texttt{max\_{\allowbreak}zp\_{\allowbreak}trend\_{\allowbreak}mag} & \texttt{0.\allowbreak{}05} {\scriptsize(float)} & Maximum allowed \textbar{}ZP trend\textbar{} per \\
 \end{longtable}}
 
+\subsection{Cosmic rays and defects}
+
+Cosmic-ray rejection and defect masking: the LA.Cosmic-style clip or the astroscrappy backend, mask dilation, and the guards that stop a cosmic ray being carved out of the target itself.
+
+\begin{lstlisting}[language=Python]
+autophot_input["cosmic_rays"]["remove_cmrays"] = True
+autophot_input["cosmic_rays"]["cr_backend"] = "lacosmic"  # ccdproc instead of astroscrappy
+autophot_input["cosmic_rays"]["cr_sigclip"] = 4.5
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Cosmic rays and defects --- configuration reference.} \label{tab:cosmic_rays}\\
@@ -883,8 +1110,7 @@
 \bottomrule
 \endlastfoot
 \texttt{remove\_{\allowbreak}cmrays} & \texttt{False} {\scriptsize(bool)} & Enable cosmic-ray removal (astroscrappy) in preprocessing. Astroscrappy is the single CR detector: it interpolates CR pixels and its detection mask (plus cr\_{\allowbreak}defect\_{\allowbreak}margin\_{\allowbreak}px) is unioned into the defect mask (an interpolated pixel is not real data). MaxiMask's default classes exclude CR for this reason. \\
-\texttt{use\_{\allowbreak}lacosmic} & \texttt{False} {\scriptsize(bool)} & Use L.\allowbreak A.\allowbreak Cosmic-style algorithm (ccdproc.\allowbreak cosmicray\_{\allowbreak}lacosmic). Kept for backward compatibility; cr\_{\allowbreak}backend takes precedence when set. \\
-\texttt{cr\_{\allowbreak}backend} & \emph{null} {\scriptsize(str\textbar{}\allowbreak{}null)} & CR removal backend: 'astroscrappy' (fast Cython L.\allowbreak A.\allowbreak Cosmic variant), 'lacosmic' (ccdproc.\allowbreak cosmicray\_{\allowbreak}lacosmic; equivalent to use\_{\allowbreak}lacosmic: True), or 'dfcosmic' (Dragonfly's faithful PyTorch port of the original van Dokkum 2001 algorithm - true non-separable median filter, better CR/\allowbreak{}star-core separation). null keeps the legacy use\_{\allowbreak}lacosmic flag behaviour (astroscrappy unless use\_{\allowbreak}lacosmic is True). dfcosmic is an optional CPU dependency: lazy-imported only on this path; if it is not installed the run logs a warning and falls back to astroscrappy. \\
+\texttt{cr\_{\allowbreak}backend} & \emph{null} {\scriptsize(str\textbar{}\allowbreak{}null)} & CR removal backend: 'astroscrappy' (fast Cython L.\allowbreak A.\allowbreak Cosmic variant), 'lacosmic' (ccdproc.\allowbreak cosmicray\_{\allowbreak}lacosmic), or 'dfcosmic' (Dragonfly's faithful PyTorch port of the original van Dokkum 2001 algorithm - true non-separable median filter, better CR/\allowbreak{}star-core separation). null selects astroscrappy. dfcosmic is an optional CPU dependency: lazy-imported only on this path; if it is not installed the run logs a warning and falls back to astroscrappy. \\
 \texttt{cr\_{\allowbreak}sigclip} & \texttt{4.\allowbreak{}5} {\scriptsize(float)} & Detection threshold (sigma) for cosmic ray pixels in astroscrappy/\allowbreak{}LACosmic. \\
 \texttt{cr\_{\allowbreak}sigfrac} & \texttt{0.\allowbreak{}3} {\scriptsize(float)} & Fraction of neighboring pixels required for detection (LACosmic/\allowbreak{}astroscrappy). \\
 \texttt{cr\_{\allowbreak}objlim} & \texttt{10.\allowbreak{}0} {\scriptsize(float)} & Object detection limit - rejects CRs that look like real objects (higher = more aggressive CR removal, may clip star cores). \\
@@ -897,6 +1123,16 @@
 \texttt{cr\_{\allowbreak}defect\_{\allowbreak}target\_{\allowbreak}component\_{\allowbreak}max\_{\allowbreak}px} & \texttt{150} {\scriptsize(int)} & Floor of the area cap (pixels) for the target-rescue pass. After CR detection, and again when the defects mask enters the subtraction universal mask, a component containing a target position is dropped when it is within both the extent limit and the area cap AND the science pixel under the target is finite - a suspect flag over real data, not a hole. The effective cap scales up with FWHM as pi*extent\textasciicircum{}2 since a mis-flagged source footprint grows with the PSF; this value is only the small-FWHM floor. \\
 \texttt{cr\_{\allowbreak}plot} & \texttt{False} {\scriptsize(bool)} & Save side-by-side before/\allowbreak{}after CR removal plot. \\
 \end{longtable}}
+
+\subsection{Source detection and FWHM}
+
+How the source list is found and measured: the finder and its threshold, the FWHM estimation set, and the shape cuts (elongation, $\chi^2$, segment size) that separate stars from artifacts.
+
+\begin{lstlisting}[language=Python]
+autophot_input["source_detection"]["dao_nsigma"] = 4.0
+autophot_input["source_detection"]["elongation_max"] = 1.6
+autophot_input["source_detection"]["min_segment_npixels"] = 3
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -930,6 +1166,16 @@
 \texttt{scale\_{\allowbreak}max\_{\allowbreak}px} & \texttt{300} {\scriptsize(int)} & Maximum allowed runtime \texttt{scale} (pixels) after FWHM-based scaling/\allowbreak{}clamping. \\
 \texttt{use\_{\allowbreak}catalog} & \emph{null} {\scriptsize(str\textbar{}\allowbreak{}null)} & Optional catalog to seed/\allowbreak{}guide source detection (if supported). \\
 \end{longtable}}
+
+\subsection{Limiting magnitudes}
+
+Injection/recovery limiting magnitudes: how many artificial sources are drawn and where they are placed, the S/N threshold(s) each limit is reported against, and the completeness-fit machinery that turns recoveries into $m_{50}$.
+
+\begin{lstlisting}[language=Python]
+autophot_input["limiting_magnitude"]["snr_thresholds"] = [3.0, 5.0]
+autophot_input["limiting_magnitude"]["inject_final_n_sites"] = 30
+autophot_input["limiting_magnitude"]["completeness_solver"] = "bisect"  # or the emcee logistic fit
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -1000,6 +1246,16 @@
 \texttt{recovery\_{\allowbreak}calibrate\_{\allowbreak}snr} & \texttt{True} {\scriptsize(bool)} & If true (and uncal\_{\allowbreak}apply is on), re-evaluate the injection detection flags under errors scaled by the empirical calibration factor and re-solve the limiting magnitude. The real detection flag is decided on calibrated S/\allowbreak{}N, so an uncalibrated gate would report a limit \textasciitilde{}2.5*log10(factor) mag deeper than the pipeline's own detection threshold. The pre-calibration limit is kept in result details as inject\_{\allowbreak}lmag\_{\allowbreak}raw; a failed re-solve reverts to the raw gate. \\
 \end{longtable}}
 
+\subsection{Host-galaxy modelling}
+
+Optional parametric host-galaxy subtraction: an external GALFIT call fits S\'ersic (and optional point-source) components around the target before photometry.
+
+\begin{lstlisting}[language=Python]
+autophot_input["host_model"]["enabled"] = True
+autophot_input["host_model"]["galfit_path"] = "/usr/local/bin/galfit"
+autophot_input["host_model"]["n_sersic"] = 1
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Host-galaxy modelling --- configuration reference.} \label{tab:host_model}\\
@@ -1024,6 +1280,16 @@
 \texttt{seed\_{\allowbreak}exclude\_{\allowbreak}target\_{\allowbreak}fwhm} & \texttt{1.\allowbreak{}5} {\scriptsize(float)} & Radius (FWHM units) around the target excluded when seeding the host centroid, so target flux cannot steer the Sersic centre. \\
 \texttt{timeout\_{\allowbreak}s} & \texttt{120} {\scriptsize(float)} & Wall-clock limit for the galfit subprocess. \\
 \end{longtable}}
+
+\subsection{Image reprojection}
+
+Reprojection settings used whenever one frame is resampled onto another (template to science, diagnostic checks): method, interpolation order, and flux conservation.
+
+\begin{lstlisting}[language=Python]
+autophot_input["alignment"]["reproject_method"] = "adaptive"  # exact | adaptive | interp
+autophot_input["alignment"]["reproject_interp_order"] = "bicubic"
+autophot_input["alignment"]["reproject_adaptive_conserve_flux"] = True
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -1052,6 +1318,17 @@
 \texttt{plot\_{\allowbreak}source\_{\allowbreak}check\_{\allowbreak}max\_{\allowbreak}vectors} & \texttt{300} {\scriptsize(int)} & Max vectors to draw on Sourcecheck plot (for readability). \\
 \texttt{plot\_{\allowbreak}source\_{\allowbreak}check\_{\allowbreak}min\_{\allowbreak}vectors} & \texttt{10} {\scriptsize(int)} & Minimum matched vectors required before drawing overlay. \\
 \end{longtable}}
+
+\subsection{Template subtraction}
+
+Reference-template discovery, the alignment cascade, flux matching, and the three subtraction backends with their vetoes and quality gates. Disabled by default; enabling the stage is one flag, the rest is tuning.
+
+\begin{lstlisting}[language=Python]
+autophot_input["template_subtraction"]["do_subtraction"] = True
+autophot_input["template_subtraction"]["method"] = "sfft"  # sfft | hotpants | zogy | auto
+autophot_input["template_subtraction"]["alignment_method"] = "reproject"
+autophot_input["template_subtraction"]["forceconv"] = "REF"
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
@@ -1127,7 +1404,6 @@
 \texttt{tweakwcs\_{\allowbreak}tolerance\_{\allowbreak}px} & \texttt{2.\allowbreak{}5} {\scriptsize(float)} & tweakwcs matching tolerance (pixels).  Relaxed in sparse-field mode to tolerate subpixel centroid noise. \\
 \texttt{reproject\_{\allowbreak}target\_{\allowbreak}validate} & \texttt{True} {\scriptsize(bool)} & For WCS-based reproject alignment, validate that the WCS agreement is good near the target position (not just globally).  Rejects reproject when the target-region offset exceeds alignment\_{\allowbreak}max\_{\allowbreak}offset\_{\allowbreak}px, preventing subtraction on a globally-good but locally-wrong WCS. \\
 \texttt{reproject\_{\allowbreak}target\_{\allowbreak}radius\_{\allowbreak}px} & \emph{null} {\scriptsize(float\textbar{}\allowbreak{}null)} & Radius (pixels) around the target for reproject target-region validation.  null = auto (max(3*FWHM, min(frame\_{\allowbreak}dim)/\allowbreak{}4)). \\
-\texttt{skip\_{\allowbreak}resampling} & \texttt{True} {\scriptsize(bool)} & \emph{(deprecated)} DEPRECATED: use resample\_{\allowbreak}mode instead. If True, maps to resample\_{\allowbreak}mode="wcs\_{\allowbreak}only". \\
 \texttt{resample\_{\allowbreak}mode} & \texttt{common\_{\allowbreak}grid} {\scriptsize(str)} & SWarp resampling mode: "common\_{\allowbreak}grid" (both to science grid), "native\_{\allowbreak}scale" (each keeps own pixel scale), "wcs\_{\allowbreak}only" (no resampling). \\
 \texttt{science\_{\allowbreak}first\_{\allowbreak}astrometry} & \texttt{False} {\scriptsize(bool)} & If True, distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then use the corrected catalog as astrometric reference for the reference image. Disabled: science-first astrometry adds an extra SCAMP+SWarp step that can introduce overfitting on sparse fields. Direct reference-to-science alignment is more reliable. \\
 \texttt{gaia\_{\allowbreak}cache\_{\allowbreak}dir} & \emph{null} {\scriptsize(str\textbar{}\allowbreak{}null)} & Directory to cache downloaded GAIA-DR3 reference catalogs for SCAMP. If null, uses \textasciitilde{}/\allowbreak{}.\allowbreak autophot/\allowbreak{}scamp\_{\allowbreak}gaia\_{\allowbreak}cache. Caching avoids repeated Vizier downloads for the same field. \\
@@ -1306,6 +1582,16 @@
 \texttt{inpaint\_{\allowbreak}max\_{\allowbreak}mask\_{\allowbreak}fraction} & \texttt{0.\allowbreak{}01} {\scriptsize(float)} & Safety limit: skip inpainting if mask covers more than this fraction of the image. \\
 \end{longtable}}
 
+\subsection{Background estimation}
+
+The two-pass sky estimate: the iterative source mask, the mesh-binning statistics, the clipped interpolation back to the grid, the optional MaxiMask defect classifier, and the target-local \code{local\_*} fit.
+
+\begin{lstlisting}[language=Python]
+autophot_input["background"]["use_maximask"] = True  # needs tensorflow
+autophot_input["background"]["mesh_scale_min"] = 4.0  # mesh size in FWHM
+autophot_input["background"]["mesh_scale_max"] = 10.0
+\end{lstlisting}
+
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
 \caption{Background estimation --- configuration reference.} \label{tab:background}\\
@@ -1326,7 +1612,6 @@
 \texttt{mesh\_{\allowbreak}scale\_{\allowbreak}min} & \texttt{4.\allowbreak{}0} {\scriptsize(float)} & Minimum background mesh scale (in FWHM units unless otherwise specified). \\
 \texttt{mesh\_{\allowbreak}scale\_{\allowbreak}max} & \texttt{10.\allowbreak{}0} {\scriptsize(float)} & Maximum background mesh scale (in FWHM units unless otherwise specified). \\
 \texttt{mesh\_{\allowbreak}filter\_{\allowbreak}size\_{\allowbreak}mesh\_{\allowbreak}units} & \texttt{3} {\scriptsize(int)} & Background smoothing filter size expressed in mesh-cell units. \\
-\texttt{global\_{\allowbreak}interpolator} & \texttt{zoom} {\scriptsize(str)} & \emph{(deprecated)} Deprecated/\allowbreak{}no-op under photutils\textgreater{}=3, which always resizes the mesh with a cubic spline zoom. \\
 \texttt{global\_{\allowbreak}sigma\_{\allowbreak}clip\_{\allowbreak}maxiters} & \texttt{6} {\scriptsize(int)} & SigmaClip max iterations per mesh cell (lower = faster; use 10+ if noisy). \\
 \texttt{global\_{\allowbreak}mask\_{\allowbreak}edge\_{\allowbreak}flatten} & \texttt{True} {\scriptsize(bool)} & If True, damp Background2D interpolation overshoot near masked regions by replacing a thin band around mask edges with a smooth estimate from nearby unmasked pixels. \\
 \texttt{global\_{\allowbreak}mask\_{\allowbreak}edge\_{\allowbreak}flatten\_{\allowbreak}radius\_{\allowbreak}px} & \emph{null} {\scriptsize(float\textbar{}\allowbreak{}null)} & Flatten band radius (pixels). If null, defaults to max(2, \textasciitilde{}1*FWHM). \\
@@ -1358,7 +1643,6 @@
 \texttt{local\_{\allowbreak}box\_{\allowbreak}size} & \emph{null} {\scriptsize(int\textbar{}\allowbreak{}null)} & Optional explicit local background box size (pixels). If null, use adaptive sizing. \\
 \texttt{local\_{\allowbreak}filter\_{\allowbreak}size} & \emph{null} {\scriptsize(int\textbar{}\allowbreak{}null)} & Optional explicit local Background2D filter size (pixels). If null, use computed value (capped by local\_{\allowbreak}filter\_{\allowbreak}size\_{\allowbreak}max). \\
 \texttt{local\_{\allowbreak}filter\_{\allowbreak}size\_{\allowbreak}max} & \texttt{3} {\scriptsize(int)} & Maximum allowed filter size when adaptively increasing filter size. \\
-\texttt{local\_{\allowbreak}interpolator} & \texttt{zoom} {\scriptsize(str)} & \emph{(deprecated)} Deprecated/\allowbreak{}no-op under photutils\textgreater{}=3, which always resizes the mesh with a cubic spline zoom. \\
 \texttt{local\_{\allowbreak}source\_{\allowbreak}mask\_{\allowbreak}nsigma} & \texttt{5.\allowbreak{}0} {\scriptsize(float)} & Sigma threshold for masking sources during local background estimation. \\
 \texttt{local\_{\allowbreak}source\_{\allowbreak}mask\_{\allowbreak}npixels} & \texttt{7} {\scriptsize(int)} & Minimum connected pixels for source mask creation. \\
 \texttt{local\_{\allowbreak}source\_{\allowbreak}mask\_{\allowbreak}iterations} & \texttt{2} {\scriptsize(int)} & Number of mask/\allowbreak{}estimate iterations for local background. \\
@@ -1372,6 +1656,16 @@
 \texttt{local\_{\allowbreak}cutout\_{\allowbreak}annulus\_{\allowbreak}in\_{\allowbreak}scale\_{\allowbreak}fwhm} & \texttt{3.\allowbreak{}0} {\scriptsize(float)} & Inner radius for the annulus\_{\allowbreak}std estimate, in units of FWHM (pixels). The effective inner radius is max(exclude\_{\allowbreak}inner\_{\allowbreak}radius, this*FWHM). \\
 \texttt{local\_{\allowbreak}cutout\_{\allowbreak}annulus\_{\allowbreak}width\_{\allowbreak}scale\_{\allowbreak}fwhm} & \texttt{2.\allowbreak{}0} {\scriptsize(float)} & Width of the annulus used for annulus\_{\allowbreak}std estimate, in units of FWHM (pixels). \\
 \end{longtable}}
+
+\subsection{Post-processing}
+
+What happens after the per-image pipeline: light-curve colour-term correction, RGB composite images, the Lomb--Scargle periodogram, and instrument-alias handling in the aggregated table.
+
+\begin{lstlisting}[language=Python]
+autophot_input["postprocessing"]["color_image"] = True
+autophot_input["postprocessing"]["periodogram"] = True
+autophot_input["postprocessing"]["transient_color_correction"] = True
+\end{lstlisting}
 
 {\footnotesize
 \begin{longtable}{@{}p{5.6cm}p{2.2cm}p{7.4cm}@{}}
