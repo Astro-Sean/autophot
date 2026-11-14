@@ -3858,7 +3858,7 @@ def snr(maxPixel, noiseBkg):
 
 def snr_err(snr_value):
     """
-     Error associated with signal to noise ratio (S/N). Equation taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.png>`_. The error on the instrumental magnitude of a source is:
+     Magnitude error derived from signal to noise ratio (S/N). Equation taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.png>`_. The error on the instrumental magnitude of a source is:
 
 
     .. math ::
@@ -3871,9 +3871,12 @@ def snr_err(snr_value):
 
         \\delta m = \\mp 2.5\\times \\log_{10} (1 + \\frac{1}{S/N}) \\approx \\mp 1.0875 (N / S)
 
+     Despite the name this returns the *magnitude* uncertainty
+     ``1.0857/SNR``, not an uncertainty on the S/N value itself.
+
      :param snr_value: Signal-to-noise ratio of a point-like source.
      :type snr_value: float
-     :return: Error associated with that source's S / N
+     :return: Instrumental magnitude error associated with that S / N
      :rtype: float
 
     """
