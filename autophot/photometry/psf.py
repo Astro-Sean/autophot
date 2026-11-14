@@ -8159,11 +8159,6 @@ class PSF:
                     "psf_auto_oversample_undersampled", True
                 )
             )
-            # oversample_psf_fwhm is deprecated; oversampling now uses
-            # undersampled_fwhm_threshold (default 2.5 px) for consistency
-            # with the rest of the codebase. Kept for backward compatibility.
-            oversample_psf_fwhm = float(self.input_yaml["photometry"].get("oversample_psf_fwhm", 2.5))
-
             if make_template_psf:
                 # Template header may lack APER/FWHM; gain must be present (e-/ADU).
                 _fwhm_h = float(self.header.get("FWHM", self.header.get("fwhm", 3.0)))
