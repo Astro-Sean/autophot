@@ -1213,8 +1213,19 @@ class Zeropoint:
                         logger.info("Removed %s qfit outliers", before - len(src))
 
                 inst_mag = src[f"inst_{image_filter}_{method}"]
-                snr = src["SNR"]
-                error_snr = snr_err(snr)
+                # Per-method instrumental magnitude error.  The aperture
+                # SNR column only describes AP photometry; for PSF the
+                # correct error is 1.0857 * flux_PSF_err / |flux_PSF|.
+                if method == "PSF" and "flux_PSF_err" in src.columns:
+                    _fpsf = src["flux_PSF"].to_numpy(dtype=float)
+                    _fpsf_err = src["flux_PSF_err"].to_numpy(dtype=float)
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        error_snr = (2.5 / np.log(10.0)) * np.abs(
+                            _fpsf_err / _fpsf
+                        )
+                else:
+                    snr = src["SNR"]
+                    error_snr = snr_err(snr)
 
                 zp = (mag_col.loc[src.index] - inst_mag).values
                 zp_err = np.sqrt(error_snr**2 + mag_err_col.loc[src.index].values ** 2)
