@@ -14809,6 +14809,11 @@ def run_photometry():
                         flux_aperture=float(TargetPosition[flux_col].iloc[0]),
                         sigma=float(TargetPosition["noiseSky"].iloc[0]),
                         npix=float(TargetPosition["area"].iloc[0]),
+                        noise_factor=(
+                            float(TargetPosition["noise_factor"].iloc[0])
+                            if "noise_factor" in TargetPosition.columns
+                            else 1.0
+                        ),
                     )
             else:
                 flux_col = (
@@ -14819,6 +14824,11 @@ def run_photometry():
                     flux_aperture=float(TargetPosition[flux_col].iloc[0]),
                     sigma=float(TargetPosition["noiseSky"].iloc[0]),
                     npix=float(TargetPosition["area"].iloc[0]),
+                    noise_factor=(
+                        float(TargetPosition["noise_factor"].iloc[0])
+                        if "noise_factor" in TargetPosition.columns
+                        else 1.0
+                    ),
                 )
         except Exception:
             target_beta = np.nan
@@ -16197,6 +16207,11 @@ def run_photometry():
                                         ),
                                         sigma=float(TargetPosition["noiseSky"].iloc[0]),
                                         npix=float(TargetPosition["area"].iloc[0]),
+                                        noise_factor=(
+                                            float(TargetPosition["noise_factor"].iloc[0])
+                                            if "noise_factor" in TargetPosition.columns
+                                            else 1.0
+                                        ),
                                     )
                                 )
                             except Exception:
