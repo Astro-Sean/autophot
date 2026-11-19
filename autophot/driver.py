@@ -2716,10 +2716,10 @@ class AutomatedPhotometry:
                 Path(new_output_dir).mkdir(parents=True, exist_ok=True)
 
                 # Resolve wdir to an absolute path so the catalog cache
-                # directory is stable across the os.chdir() that main.py does
-                # per-image.  Without this, wdir='.' resolves to different
-                # directories before/after chdir, causing cache misses and
-                # redundant Gaia archive downloads.
+                # directory is stable regardless of the worker's launch
+                # directory.  Without this, wdir='.' resolves differently
+                # for the driver and per-image workers, causing cache
+                # misses and redundant Gaia archive downloads.
                 _raw_wdir = backup_yaml.get("wdir", ".")
                 backup_yaml["wdir"] = os.path.abspath(_raw_wdir)
                 # Fresh run: clear the per-image noise-factor ledger so
