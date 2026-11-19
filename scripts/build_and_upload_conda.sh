@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build and upload the AutoPHOT conda package to Anaconda.org.
+# Build and upload the AutoPhOT conda package to Anaconda.org.
 #
 # Usage examples:
 #   ./scripts/build_and_upload_conda.sh
@@ -43,7 +43,7 @@ TEST_ONLY=0
 
 usage() {
   cat <<'EOF'
-Build and upload AutoPHOT conda package.
+Build and upload AutoPhOT conda package.
 
 Options:
   --channel-username NAME   Optional. Anaconda.org username/channel (default: astro-sean).
