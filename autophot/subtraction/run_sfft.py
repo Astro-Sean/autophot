@@ -980,12 +980,7 @@ def run_sfft() -> Optional[int]:
         out_base = args.out_base
     else:
         fits_sci_stem = os.path.splitext(os.path.basename(FITS_SCI))[0]
-        out_base = (
-            fits_sci_stem.replace(" ", "_")
-            .replace(".", "_")
-            .replace("_APT", "")
-            .replace("_ERROR", "")
-        )
+        out_base = fits_sci_stem.replace(" ", "_").replace(".", "_")
     FITS_DIFF = args.diff or os.path.join(out_dir, f"diff_{os.path.basename(FITS_SCI)}")
 
     # --- Load Headers (Once) ---
