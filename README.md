@@ -17,21 +17,21 @@
 
 ---
 
-AutoPhOT is a photometry pipeline for transients and variable sources, built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/). Feed it FITS images from any telescope, filter, or pixel scale and it will find your target in each frame, do the photometry, calibrate it against survey catalogs, and hand you one clean light curve.
+AutoPhOT processes FITS images of transients and variable sources. Built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/), it locates a target in each frame, measures its flux, calibrates the measurements against survey catalogs, and builds a light curve. It supports different telescopes, filters, and pixel scales.
 
 It has been used in <!-- citation-count -->84<!-- /citation-count --> papers so far (updated: <!-- citation-date -->19-11-2026<!-- /citation-date -->; [full list on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)).
 
 > [!NOTE]
-> AutoPhOT is developed and maintained by one person only. If you hit a problem, please open an issue on GitHub and I will get to it as soon as I can.
+> One person maintains AutoPhOT. If you find a problem, open an issue on GitHub and I will look into it.
 
 <h2 align="center">What it does</h2>
 
-1. Sorts your frames by telescope, instrument, and filter, then checks or re-solves the WCS with astrometry.net and Gaia DR3. SIP and TPV distortion are handled.
-2. Cleans each image: cosmic-ray rejection, satellite-trail detection, background estimation, FWHM measurement.
-3. Runs aperture and PSF photometry at the target position, using an empirical PSF built from stars in the frame itself.
-4. Calibrates against Gaia DR3, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and more, with per-filter routing and Gaia XP synthetic photometry.
-5. Optionally subtracts a template (SFFT, HOTPANTS, or ZOGY) and scores every difference image for quality.
-6. Measures limiting magnitudes by injecting and recovering artificial sources.
+1. Sorts frames by telescope, instrument, and filter. Checks the WCS or solves it with astrometry.net and Gaia DR3, including SIP and TPV distortion.
+2. Rejects cosmic rays and detects satellite trails. Estimates the background and FWHM.
+3. Measures the target with aperture and PSF photometry. The PSF is built from stars in the frame.
+4. Calibrates against Gaia DR3, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and other catalogs. Catalog selection can vary by filter, and Gaia XP supplies synthetic photometry.
+5. Can subtract a template with SFFT, HOTPANTS, or ZOGY, then check the difference image quality.
+6. Estimates limiting magnitudes by injecting artificial sources and checking which ones are recovered.
 
 <h2 align="center">Installation</h2>
 
@@ -47,7 +47,7 @@ conda activate autophot
 pip install sfft==1.7.3 sip_tpv==1.1  # not on conda channels
 ```
 
-AutoPhOT needs Python 3.12 and photutils>=3.1, which the conda package and pip installs pull in automatically. To check everything is working:
+AutoPhOT requires Python 3.12 and photutils>=3.1. Conda and pip install these dependencies. Check the installation with:
 
 ```bash
 python -c "from autophot import AutomatedPhotometry; print('OK')"
@@ -74,9 +74,9 @@ pip install -e .
 
 <h2 align="center">Documentation</h2>
 
-The full pipeline reference is [`docs/autophot_methods.pdf`](docs/autophot_methods.pdf). It walks through every processing stage in order, gives the photometry, calibration, and detection maths, and documents all parameters in `default_input.yml` with defaults and usage notes. The LaTeX source (`docs/autophot_methods.tex`, with tables generated from `default_input.yml`) sits in the same folder if you need to rebuild it.
+[`docs/autophot_methods.pdf`](docs/autophot_methods.pdf) describes the pipeline stages and the photometry, calibration, and detection methods. It also lists every `default_input.yml` parameter with its default and usage notes. The LaTeX source is `docs/autophot_methods.tex`; its tables are generated from `default_input.yml`.
 
-The [`examples/run_autophot.ipynb`](examples/run_autophot.ipynb) notebook runs a real subtraction end to end and includes a reference appendix covering folder layouts, catalog routing, alignment and subtraction options, photometry settings, and post-processing.
+The [`examples/run_autophot.ipynb`](examples/run_autophot.ipynb) notebook runs template subtraction on real data. Its appendix covers folder layouts, catalog choices, alignment and subtraction options, photometry, and post-processing.
 
 <h2 align="center">Quick start</h2>
 
@@ -92,8 +92,8 @@ config["target_dec"] = -12.345678
 output_file = AutomatedPhotometry.run_photometry(default_input=config)
 ```
 
-- `from autophot import list_parameters; list_parameters()` prints every config key and its default.
-- FITS headers must carry `TELESCOP`, `INSTRUME`, and a bandpass keyword (e.g. `FILTER`); images without them are skipped.
+- `from autophot import list_parameters; list_parameters()` prints each config key and its default.
+- Include `TELESCOP`, `INSTRUME`, and a bandpass keyword such as `FILTER` in each FITS header. AutoPhOT skips images without these keywords.
 - `config["nCPU"] = 4` (or `AUTOPHOT_NCPU=4`, which takes precedence) processes images in parallel, each with its own log. Worker settings like `photometry.aperture_n_jobs` multiply `nCPU`, so keep the product at or below your core count. `nGPU` / `AUTOPHOT_NGPU` pins workers to GPUs round-robin.
 - `python -m autophot.batch_main -f im1.fits im2.fits -c config.yml --jobs 4` (or `autophot-batch`) runs a file list without a driver script.
 
