@@ -2535,6 +2535,76 @@ class TestFscalApCardScale:
         assert not np.isfinite(_fscal_ap_card_scale(np.nan, "REF"))
 
 
+class TestRefDifferenceRescale:
+    def test_preserves_transient_flux_and_updates_noise_scale(self):
+        from autophot.subtraction.templates import _rescale_ref_difference
+
+        rng = np.random.default_rng(31)
+        science_noise = rng.normal(0.0, 2.0, (256, 256))
+        reference_noise = rng.normal(0.0, 3.0, science_noise.shape)
+        static_source = np.zeros(science_noise.shape, dtype=float)
+        static_source[128, 128] = 100.0
+        transient = np.zeros(science_noise.shape, dtype=float)
+        transient[80, 80] = 25.0
+
+        applied_scale = 1.10
+        aperture_scale = 0.95
+        science = applied_scale * static_source + transient + science_noise
+        convolved_reference = static_source + reference_noise
+        difference = science - applied_scale * convolved_reference
+
+        corrected, vscale = _rescale_ref_difference(
+            science,
+            difference,
+            aperture_scale / applied_scale,
+        )
+
+        expected = science - aperture_scale * convolved_reference
+        np.testing.assert_allclose(corrected, expected, rtol=1e-12, atol=1e-12)
+        science_without_transient = science - transient
+        diff_without_transient = (
+            science_without_transient - applied_scale * convolved_reference
+        )
+        baseline, _ = _rescale_ref_difference(
+            science_without_transient,
+            diff_without_transient,
+            aperture_scale / applied_scale,
+        )
+        assert corrected[80, 80] - baseline[80, 80] == pytest.approx(25.0)
+        assert vscale is not None
+        expected_vscale = np.sqrt(2.0**2 + (aperture_scale**2) * 3.0**2) / 2.0
+        assert vscale == pytest.approx(expected_vscale, rel=0.06)
+
+    def test_noise_scale_floor_and_masked_pixels(self):
+        from autophot.subtraction.templates import _rescale_ref_difference
+
+        rng = np.random.default_rng(32)
+        science = rng.normal(0.0, 2.0, (64, 64))
+        difference = science + rng.normal(0.0, 0.05, science.shape)
+        science[:4] = np.nan
+        difference[:4] = np.nan
+
+        corrected, vscale = _rescale_ref_difference(
+            science,
+            difference,
+            1.0,
+        )
+
+        assert np.isnan(corrected[:4]).all()
+        assert vscale >= 1.0
+
+    def test_invalid_scale_and_shape_are_rejected(self):
+        from autophot.subtraction.templates import _rescale_ref_difference
+
+        image = np.ones((8, 8), dtype=float)
+        with pytest.raises(ValueError, match="shape"):
+            _rescale_ref_difference(image, image[:4], 1.0)
+        with pytest.raises(ValueError, match="finite and positive"):
+            _rescale_ref_difference(image, image, np.nan)
+        with pytest.raises(ValueError, match="finite and positive"):
+            _rescale_ref_difference(image, image, 0.0)
+
+
 class TestSuppliedNoiseMap:
     """_supplied_noise_map loads a validated RMS map for ZOGY's sn_map /
     sr_map.  The map supplies per-pixel structure; the caller's measured
