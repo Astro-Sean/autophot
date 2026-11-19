@@ -53,7 +53,7 @@ from scipy.optimize import minimize
 from concurrent.futures import ThreadPoolExecutor
 import astropy.units as u
 
-from ..core.functions import remove_wcs_from_header, log_warning_from_exception, resolve_verbose_level, clean_subprocess_log, refresh_sibling_weight_map, invalidate_fits_cache
+from ..core.functions import remove_wcs_from_header, log_warning_from_exception, resolve_verbose_level, clean_subprocess_log, refresh_sibling_weight_map, invalidate_fits_cache, stat_block
 from ..pipeline.wcs import get_wcs, _normalize_projection_codes
 from .run_sex import SExtractorWrapper
 
@@ -3705,14 +3705,17 @@ class ImageDistortionCorrector:
 
                         total_offset = np.sqrt(med_dx**2 + med_dy**2)
                         self.logger.info(
-                            "Alignment verification: offset=(%.3f, %.3f) px\n"
-                            "                        RMS=(%.3f, %.3f) px total=%.3f px\n"
-                            "                        P95=%.3f px max=%.3f px "
-                            "local-P95/max=%.3f/%.3f px\n"
-                            "                        %d matches",
-                            med_dx, med_dy, rms_dx, rms_dy, total_offset,
-                            _p95_offset, _max_offset, _local_offset_p95,
-                            _local_offset_max, n_matched_verify,
+                            stat_block(
+                                "Alignment verification:",
+                                f"offset=({med_dx:.3f}, {med_dy:.3f}) px",
+                                f"RMS=({rms_dx:.3f}, {rms_dy:.3f}) px "
+                                f"total={total_offset:.3f} px",
+                                f"P95={_p95_offset:.3f} px "
+                                f"max={_max_offset:.3f} px "
+                                f"local-P95/max={_local_offset_p95:.3f}/"
+                                f"{_local_offset_max:.3f} px",
+                                f"{n_matched_verify} matches",
+                            )
                         )
 
                         alignment_metadata = {
@@ -4199,10 +4202,12 @@ class ImageDistortionCorrector:
                         return _best
                 else:
                     self.logger.info(
-                        "Post-SWarp alignment accepted: offset=%.2f px\n"
-                        "                               RMS=%.2f px P95=%.2f px\n"
-                        "                               %d matches, FWHM=%.1f px",
-                        _off, _rms, _p95, _n_match, _gate_fwhm,
+                        stat_block(
+                            "Post-SWarp alignment accepted:",
+                            f"offset={_off:.2f} px",
+                            f"RMS={_rms:.2f} px P95={_p95:.2f} px",
+                            f"{_n_match} matches, FWHM={_gate_fwhm:.1f} px",
+                        )
                     )
             elif _post_swarp_verify and resample_mode == "common_grid" and bool(
                 align_cfg.get("alignment_require_post_swarp_verification", True)
@@ -5224,12 +5229,14 @@ class ImageDistortionCorrector:
                             )
 
                         self.logger.info(
-                            "Post-reproject alignment: offset=(%.3f, %.3f) px\n"
-                            "                          RMS=(%.3f, %.3f) px "
-                            "total=%.3f px rms=%.3f px\n"
-                            "                          P95=%.3f px (%d matches)",
-                            _med_dx, _med_dy, _rms_dx, _rms_dy, _total, _rms,
-                            _p95_reproj, _n_match_reproj,
+                            stat_block(
+                                "Post-reproject alignment:",
+                                f"offset=({_med_dx:.3f}, {_med_dy:.3f}) px",
+                                f"RMS=({_rms_dx:.3f}, {_rms_dy:.3f}) px "
+                                f"total={_total:.3f} px rms={_rms:.3f} px",
+                                f"P95={_p95_reproj:.3f} px "
+                                f"({_n_match_reproj} matches)",
+                            )
                         )
 
                         _max_off = float(
