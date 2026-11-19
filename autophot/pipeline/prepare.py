@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Input preparation for AutoPHOT: load configuration, clean and validate the
+Input preparation for AutoPhOT: load configuration, clean and validate the
 FITS file list, check catalogs/TNS/filters, and discover template files.
 """
 
@@ -126,7 +126,7 @@ def template_roots_under(fits_dir: str) -> List[str]:
 
 class Prepare:
     """
-    Prepares and validates input data for the AutoPHOT pipeline.
+    Prepares and validates input data for the AutoPhOT pipeline.
     Handles configuration, file cleaning, catalog checks, TNS lookups, filter validation, and template discovery.
     """
 
@@ -135,7 +135,7 @@ class Prepare:
         Initialize the prepare class with the input configuration.
 
         Args:
-            default_input (Dict): Configuration dictionary for the AutoPHOT pipeline.
+            default_input (Dict): Configuration dictionary for the AutoPhOT pipeline.
         """
         self.input_yaml = default_input
         # Absolute path -> resolved band for every file that passed
@@ -189,7 +189,13 @@ class Prepare:
         files_removed = 0
         total_candidates = 0
         valid_files = []
-        self.input_yaml["fits_dir"] = self.input_yaml["fits_dir"].rstrip("/")
+        # Absolute so path math below fits_dir is cwd-independent: main.py
+        # os.chdir()es into the output tree before template lookup resolves
+        # fits_dir, and a relative path would resolve inside
+        # <fits_dir>_REDUCED and hide the staged ready_templates.
+        self.input_yaml["fits_dir"] = os.path.abspath(
+            self.input_yaml["fits_dir"].rstrip("/")
+        )
         # Output root must mirror main.py's layout:
         # dirname(fits_dir) / (basename(fits_dir) + "_" + outdir_name)
         fits_dir = self.input_yaml["fits_dir"]
@@ -1340,7 +1346,7 @@ class Prepare:
         ):
             msg = (
                 "catalog.use_catalog is not set (null/None). "
-                "AutoPHOT requires a catalog to map filters and perform calibration. "
+                "AutoPhOT requires a catalog to map filters and perform calibration. "
                 "Set `default_input.catalog.use_catalog` (e.g. gaia, pan_starrs, sdss, legacy, apass, 2mass, refcat, custom)."
             )
             self.logger.warning(msg)
