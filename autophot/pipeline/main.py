@@ -1420,6 +1420,486 @@ def _decide_detection(
     return is_det
 
 
+def _print_default_yaml_help() -> None:
+    """
+    Print available YAML options and their inline explanations.
+
+    This reads `autophot/data/default_input.yml` and uses indentation to infer
+    nested key paths. Explanations are taken from trailing `# ...` comments.
+    """
+    from ..core.functions import data_path
+
+    yml_path = Path(data_path("default_input.yml"))
+    if not yml_path.exists():
+        print(f"[ERROR] Default YAML not found at: {yml_path}", file=sys.stderr)
+        return
+
+    lines = yml_path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    # Parse mapping keys using indentation; keep comments as help text.
+    key_stack: list[tuple[int, str]] = []
+    out: list[tuple[str, str]] = []
+    key_re = re.compile(
+        r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_\-]+)\s*:\s*(?P<rest>.*)$"
+    )
+
+    for raw in lines:
+        if not raw.strip():
+            continue
+        if raw.lstrip().startswith("#"):
+            continue
+
+        m = key_re.match(raw)
+        if not m:
+            continue
+
+        indent = len(m.group("indent").replace("\t", "    "))
+        key = m.group("key")
+        rest = m.group("rest") or ""
+
+        while key_stack and indent <= key_stack[-1][0]:
+            key_stack.pop()
+        key_stack.append((indent, key))
+
+        expl = ""
+        if "#" in rest:
+            expl = rest.split("#", 1)[1].strip()
+        else:
+            if "#" in raw:
+                expl = raw.split("#", 1)[1].strip()
+
+        path = ".".join(k for _, k in key_stack)
+        out.append((path, expl))
+
+    if not out:
+        print(f"[WARNING] No keys parsed from: {yml_path}", file=sys.stderr)
+        return
+
+    key_w = max(len(k) for k, _ in out)
+    try:
+        print(
+            border_msg(f"AutoPhOT YAML options from: {yml_path}").lstrip(
+                "\n"
+            )
+        )
+        for k, expl in out:
+            if expl:
+                print(f"{k:<{key_w}}  {expl}")
+            else:
+                print(f"{k:<{key_w}}")
+    except BrokenPipeError:
+        # Allows piping to `head`/`less` without noisy tracebacks.
+        return
+
+
+# Nested helper so every WCS update re-syncs target pixel coords;
+# origin=0 (0-based) matches numpy array convention.
+def update_target_pixel_coords(input_yaml, imageWCS, wcs_origin=0):
+    """Update target pixel coordinates after WCS changes. wcs_origin is WCS origin (0=0-based)."""
+    target_x_pix, target_y_pix = imageWCS.all_world2pix(
+        input_yaml["target_ra"],
+        input_yaml["target_dec"],
+        wcs_origin,
+    )
+    input_yaml["target_x_pix"] = target_x_pix
+    input_yaml["target_y_pix"] = target_y_pix
+    return target_x_pix, target_y_pix
+
+
+def _remove_catalog_duplicates(catalog_df, method="pandas", sep_threshold=0.1):
+    """
+    Remove duplicate catalog entries using specified method.
+
+    Parameters
+    ----------
+    catalog_df : pd.DataFrame
+        Catalog with potential duplicates
+    method : str
+        'pandas' for RA/DEC based removal, 'astropy' for angular separation
+    sep_threshold : float
+        Separation threshold in arcsec for 'astropy' method
+
+    Returns
+    -------
+    pd.DataFrame
+        Deduplicated catalog
+    """
+    if catalog_df is None or len(catalog_df) == 0:
+        return catalog_df
+
+    n_pre = len(catalog_df)
+
+    if method == "pandas" and {"RA", "DEC"}.issubset(catalog_df.columns):
+        # Fast pandas method for exact duplicates
+        catalog_df = (
+            catalog_df.sort_values(["RA", "DEC"])
+            .drop_duplicates(subset=["RA", "DEC"], keep="first")
+            .reset_index(drop=True)
+        )
+    elif method == "pandas":
+        # Pixel-space fallback
+        if {"x_pix", "y_pix"}.issubset(catalog_df.columns):
+            _rx = np.round(catalog_df["x_pix"].to_numpy(dtype=float), 2)
+            _ry = np.round(catalog_df["y_pix"].to_numpy(dtype=float), 2)
+            catalog_df = (
+                catalog_df.assign(_rx=_rx, _ry=_ry)
+                .sort_values(["_rx", "_ry"])
+                .drop_duplicates(subset=["_rx", "_ry"], keep="first")
+                .drop(columns=["_rx", "_ry"])
+                .reset_index(drop=True)
+            )
+    elif method == "astropy" and {"RA", "DEC"}.issubset(catalog_df.columns):
+        # Astropy method with angular separation.
+        # nthneighbor=2 finds the nearest *other* source for each entry.
+        # For each close pair (sep < threshold) we keep the lower-index member
+        # and drop the higher-index one - this guarantees exactly one copy
+        # survives rather than both being dropped.
+        coords = SkyCoord(
+            ra=catalog_df["RA"].values * u.degree,
+            dec=catalog_df["DEC"].values * u.degree,
+        )
+
+        if len(coords) >= 2:
+            idx_match, sep2, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
+            thr = sep_threshold * u.arcsec
+            # Vectorized: drop source i if its nearest neighbour j is closer
+            # than the threshold AND has a lower index (j is the kept copy).
+            drop = (sep2 <= thr) & (idx_match < np.arange(len(catalog_df)))
+            catalog_df = catalog_df[~drop].reset_index(drop=True)
+    else:
+        # Astropy path not applicable; exact pandas dedupe.
+        if {"RA", "DEC"}.issubset(catalog_df.columns):
+            catalog_df = (
+                catalog_df.sort_values(["RA", "DEC"])
+                .drop_duplicates(subset=["RA", "DEC"], keep="first")
+                .reset_index(drop=True)
+            )
+        elif {"x_pix", "y_pix"}.issubset(catalog_df.columns):
+            _rx = np.round(catalog_df["x_pix"].to_numpy(dtype=float), 2)
+            _ry = np.round(catalog_df["y_pix"].to_numpy(dtype=float), 2)
+            catalog_df = (
+                catalog_df.assign(_rx=_rx, _ry=_ry)
+                .sort_values(["_rx", "_ry"])
+                .drop_duplicates(subset=["_rx", "_ry"], keep="first")
+                .drop(columns=["_rx", "_ry"])
+                .reset_index(drop=True)
+            )
+
+    n_post = len(catalog_df)
+    if n_post < n_pre:
+        logging.info(
+            f"Removed {n_pre - n_post} duplicate sources using {method} method"
+        )
+
+    return catalog_df
+
+
+# =============================================================================
+# Helper Function: Shorten Filename if Needed
+# =============================================================================
+
+def shorten_filename_if_needed(original_path, max_length=255):
+    """
+    Copy the file to a short random name when the full path exceeds
+    max_length; return the (possibly unchanged) path and a flag.
+
+    Returns:
+        short_path (Path): Path to the shortened file (or original if no change)
+        was_shortened (bool): Whether the file was shortened
+    """
+    original_path = Path(original_path).resolve()
+    if len(str(original_path)) <= max_length:
+        return original_path, False
+
+    parent_dir = original_path.parent
+    short_name = f"image_{uuid.uuid4().hex[:8]}{original_path.suffix}"
+    short_path = parent_dir / short_name
+
+    shutil.copy2(original_path, short_path)
+    return short_path, True
+
+
+def _run_sextractor_two_pass(config, fpath, **kwargs):
+    """Run SExtractor with optional FWHM refinement pass."""
+    fwhm, sources, scale = SExtractorWrapper(config=config).run(fpath, **kwargs)
+    if np.isfinite(fwhm):
+        fwhm, sources, scale = SExtractorWrapper(config=config).run(
+            fpath, use_FWHM=fwhm, **kwargs
+        )
+    return fwhm, sources, scale
+
+
+def _fwhm_mag_xy(_frame):
+    """(inst_mag, fwhm) arrays for rows with usable measurements."""
+    if (
+        _frame is None
+        or len(_frame) == 0
+        or "fwhm" not in _frame.columns
+        or "flux_AP" not in _frame.columns
+    ):
+        return None
+    _fw = np.asarray(_frame["fwhm"], dtype=float)
+    _fl = np.asarray(_frame["flux_AP"], dtype=float)
+    # flux_AP is measured through different apertures per frame
+    # (optimum radius for the catalog, 1.7xFWHM for the pool), so
+    # the same star sits at different magnitudes in each.  flux_SEx
+    # carries SExtractor FLUX_AUTO for both populations; prefer it
+    # per row so they share one flux scale.
+    if "flux_SEx" in _frame.columns:
+        _fs = np.asarray(_frame["flux_SEx"], dtype=float)
+        _fl = np.where(np.isfinite(_fs) & (_fs > 0), _fs, _fl)
+    _ok = np.isfinite(_fw) & np.isfinite(_fl) & (_fl > 0) & (_fw > 0)
+    if np.count_nonzero(_ok) < 3:
+        return None
+    return -2.5 * np.log10(_fl[_ok]), _fw[_ok]
+
+
+def _coalesce_snr(f):
+    s = None
+    for _sc in ("SNR", "snr", "signal_to_noise", "flux_snr"):
+        if _sc in f.columns:
+            _v = pd.to_numeric(f[_sc], errors="coerce")
+            s = _v if s is None else s.fillna(_v)
+    return s
+
+
+# Treat non-finite coefficients as "no color correction".
+# Handle piecewise linear format: ((breakpoint,), (slope1, slope2), intercept)
+def has_non_finite(coeffs):
+    """Check if any coefficient value is non-finite, handling nested tuples."""
+    if coeffs is None:
+        return True
+
+    # Flatten nested tuples and check each value
+    def flatten(t):
+        if isinstance(t, tuple):
+            for item in t:
+                yield from flatten(item)
+        else:
+            yield t
+
+    return any(not np.isfinite(v) for v in flatten(coeffs))
+
+
+def _fmt3(v):
+    try:
+        return f"{float(v):.3f}" if np.isfinite(float(v)) else "-"
+    except (TypeError, ValueError):
+        return "-"
+
+
+# Helper: extract and validate a single cutout
+def _extract_fft_cutout(img_arr, cx, cy, radius):
+    """Extract cutout, validate, return (valid, cutout_clean)."""
+    ny, nx = img_arr.shape
+    y0 = max(0, int(cy) - radius)
+    y1 = min(ny, int(cy) + radius + 1)
+    x0 = max(0, int(cx) - radius)
+    x1 = min(nx, int(cx) + radius + 1)
+    cutout = img_arr[y0:y1, x0:x1]
+    full = 2 * radius + 1
+    if cutout.shape != (full, full):
+        # Edge-truncated cutout: pad with NaN to
+        # a fixed shape so the per-source stack
+        # in _compute_fft_metrics stays uniform.
+        padded = np.full(
+            (full, full), np.nan
+        )
+        py0 = y0 - (int(cy) - radius)
+        px0 = x0 - (int(cx) - radius)
+        padded[
+            py0 : py0 + cutout.shape[0],
+            px0 : px0 + cutout.shape[1],
+        ] = cutout
+        cutout = padded
+    if (
+        cutout.shape[0] < 5
+        or cutout.shape[1] < 5
+        or np.isfinite(cutout).sum() < cutout.size * 0.8
+    ):
+        return False, None
+    med = np.nanmedian(cutout[np.isfinite(cutout)])
+    clean = np.where(np.isfinite(cutout), cutout, med)
+    # Check source is roughly centred
+    cy_c = (cutout.shape[0] - 1) / 2.0
+    cx_c = (cutout.shape[1] - 1) / 2.0
+    peak_idx = np.unravel_index(
+        np.nanargmax(clean), cutout.shape
+    )
+    peak_offset = np.hypot(
+        peak_idx[1] - cx_c, peak_idx[0] - cy_c
+    )
+    if peak_offset > 0.3 * radius:
+        return False, None
+    # Normalize: subtract min, clip negatives
+    c_min = np.nanmin(clean)
+    c_norm = clean - c_min
+    c_norm = np.where(c_norm < 0, 0, c_norm)
+    return True, c_norm.astype(np.float64)
+
+
+# Helper: compute per-source FFT deviation metrics
+def _compute_fft_metrics(cutouts_list):
+    """Given list of 2D arrays, return per-source
+    median FFT deviation from the median spectrum."""
+    valid_idxs = [
+        i
+        for i, c in enumerate(cutouts_list)
+        if c is not None
+    ]
+    if len(valid_idxs) < 4:
+        return None, valid_idxs
+    stacked = np.stack(
+        [cutouts_list[i] for i in valid_idxs]
+    )
+    spectra = np.array(
+        [np.abs(np.fft.fft2(c)) ** 2 for c in stacked]
+    )
+    spectra = np.fft.fftshift(spectra, axes=(1, 2))
+    med_spec = np.nanmedian(spectra, axis=0)
+    mad_spec = 1.4826 * np.nanmedian(
+        np.abs(spectra - med_spec), axis=0
+    )
+    mad_spec = np.where(
+        mad_spec > 1e-12, mad_spec, 1e-12
+    )
+    deviations = np.abs(spectra - med_spec) / mad_spec
+    metrics = np.nanmedian(deviations, axis=(1, 2))
+    return metrics, valid_idxs
+
+
+def _finite_or(v, default):
+    # fit_params may carry None for unfitted terms; keep the
+    # arithmetic below free of None comparisons.
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if np.isfinite(f) else default
+
+
+def _fmt6(v):
+    # fit_params values may be None rather than NaN; a bare
+    # f"{None:.6f}" raises TypeError and aborts the CALIB write
+    # after the output CSV was already produced.
+    try:
+        f = float(v)
+        return f"{f:.6f}"
+    except (TypeError, ValueError):
+        return "nan"
+
+
+def _fnum(v, p=3):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "-"
+    return f"{f:.{p}f}" if np.isfinite(f) else "-"
+
+
+def _pm(v, e, p=3):
+    # value +/- err, or the bare value when err is missing
+    if _fnum(e, p) == "-":
+        return _fnum(v, p)
+    return f"{_fnum(v, p)} +/- {_fnum(e, p)}"
+
+
+def _fixed_radius_fwhm(
+    image_fwhm,
+    ap_size_fwhm,
+    explicit_ap_px,
+    crowded_field,
+    optimum_radius_crowded,
+):
+    if explicit_ap_px is not None:
+        return float(explicit_ap_px) / float(image_fwhm)
+    if crowded_field:
+        return float(optimum_radius_crowded)
+    return ap_size_fwhm
+
+
+def _psf_quality_cut(mask, min_keep, bad, metric, label):
+    """Apply one PSF-quality cut bounded by the floor."""
+    mask, n_removed, n_flagged = _keep_floor_cut(mask, bad, metric, min_keep)
+    if n_flagged == 0:
+        return mask
+    if n_removed == n_flagged:
+        logging.info(f"PSF {label} cut: removed {n_removed} sources")
+    elif n_removed > 0:
+        logging.info(
+            f"PSF {label} cut: removed {n_removed} of "
+            f"{n_flagged} flagged (min_keep={min_keep} "
+            f"kept the best-ranked {n_flagged - n_removed})."
+        )
+    else:
+        logging.info(
+            f"PSF {label} cut skipped: {n_flagged} flagged "
+            f"but pool is at min_keep={min_keep}."
+        )
+    return mask
+
+
+def _science_psf_models_on_disk(write_dir, psf_base):
+    roots = (Path(write_dir), Path(write_dir) / "PSF_MODELS")
+    return [
+        path
+        for root in roots
+        for path in root.glob("PSF_model_image*.fits")
+        if path.stem.endswith("_" + psf_base) and "_cellx" not in path.name
+    ]
+
+
+def _write_sci_analytic_stamp(
+    out_path,
+    image_fwhm,
+    phot_analytic,
+    epsf_model,
+    input_yaml,
+    image,
+    psf_source_pool,
+    df_zogy_science,
+    hardware_defects_mask,
+):
+    # Serialize the photometry analytic model verbatim
+    # when it is already a native-resolution stamp;
+    # otherwise fit the composite Moffat to the vetted
+    # science pool (or the matched ZOGY stars).
+    fwhm = _zogy_fwhm_fallback(image_fwhm)
+    reuse = (
+        phot_analytic
+        and np.ndim(getattr(epsf_model, "data", None)) == 2
+        and int(np.atleast_1d(getattr(epsf_model, "oversampling", 1))[0]) == 1
+    )
+    if reuse:
+        _write_analytic_psf_stamp(
+            out_path,
+            fwhm,
+            input_yaml,
+            n_stars=len(getattr(epsf_model, "_autophot_star_fits", None) or []),
+            stamp=epsf_model,
+        )
+        return fwhm, "photometry model reuse"
+    pool = (
+        psf_source_pool
+        if psf_source_pool is not None and len(psf_source_pool) > 0
+        else df_zogy_science
+    )
+    stars = _analytic_star_cutouts(
+        image,
+        pool,
+        int(2 * np.ceil(6.0 * fwhm) + 1),
+        mask=hardware_defects_mask,
+    )
+    _write_analytic_psf_stamp(
+        out_path,
+        fwhm,
+        input_yaml,
+        n_stars=len(stars),
+        stars=stars or None,
+    )
+    return fwhm, "%d star cutouts" % len(stars)
+
+
 # =============================================================================
 # Main Function: run_photometry
 # =============================================================================
@@ -1483,76 +1963,6 @@ def run_photometry():
     # CLI parsing (must happen before heavy imports)
     # ---------------------------------------------------------------------
 
-    def _print_default_yaml_help() -> None:
-        """
-        Print available YAML options and their inline explanations.
-
-        This reads `autophot/data/default_input.yml` and uses indentation to infer
-        nested key paths. Explanations are taken from trailing `# ...` comments.
-        """
-        from ..core.functions import data_path
-
-        yml_path = Path(data_path("default_input.yml"))
-        if not yml_path.exists():
-            print(f"[ERROR] Default YAML not found at: {yml_path}", file=sys.stderr)
-            return
-
-        lines = yml_path.read_text(encoding="utf-8", errors="replace").splitlines()
-
-        # Parse mapping keys using indentation; keep comments as help text.
-        key_stack: list[tuple[int, str]] = []
-        out: list[tuple[str, str]] = []
-        key_re = re.compile(
-            r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_\-]+)\s*:\s*(?P<rest>.*)$"
-        )
-
-        for raw in lines:
-            if not raw.strip():
-                continue
-            if raw.lstrip().startswith("#"):
-                continue
-
-            m = key_re.match(raw)
-            if not m:
-                continue
-
-            indent = len(m.group("indent").replace("\t", "    "))
-            key = m.group("key")
-            rest = m.group("rest") or ""
-
-            while key_stack and indent <= key_stack[-1][0]:
-                key_stack.pop()
-            key_stack.append((indent, key))
-
-            expl = ""
-            if "#" in rest:
-                expl = rest.split("#", 1)[1].strip()
-            else:
-                if "#" in raw:
-                    expl = raw.split("#", 1)[1].strip()
-
-            path = ".".join(k for _, k in key_stack)
-            out.append((path, expl))
-
-        if not out:
-            print(f"[WARNING] No keys parsed from: {yml_path}", file=sys.stderr)
-            return
-
-        key_w = max(len(k) for k, _ in out)
-        try:
-            print(
-                border_msg(f"AutoPhOT YAML options from: {yml_path}").lstrip(
-                    "\n"
-                )
-            )
-            for k, expl in out:
-                if expl:
-                    print(f"{k:<{key_w}}  {expl}")
-                else:
-                    print(f"{k:<{key_w}}")
-        except BrokenPipeError:
-            # Allows piping to `head`/`less` without noisy tracebacks.
-            return
 
     parser = argparse.ArgumentParser(description="Perform photometry operations.")
     parser.add_argument(
@@ -1723,122 +2133,24 @@ def run_photometry():
             "Please set at least one of: target_name, target_ra, or target_dec in your configuration."
         )
 
-    # Nested helper so every WCS update re-syncs target pixel coords;
-    # origin=0 (0-based) matches numpy array convention.
-    def update_target_pixel_coords(input_yaml, imageWCS, wcs_origin=0):
-        """Update target pixel coordinates after WCS changes. wcs_origin is WCS origin (0=0-based)."""
-        target_x_pix, target_y_pix = imageWCS.all_world2pix(
-            input_yaml["target_ra"],
-            input_yaml["target_dec"],
-            wcs_origin,
-        )
-        input_yaml["target_x_pix"] = target_x_pix
-        input_yaml["target_y_pix"] = target_y_pix
-        return target_x_pix, target_y_pix
-
-    def _remove_catalog_duplicates(catalog_df, method="pandas", sep_threshold=0.1):
-        """
-        Remove duplicate catalog entries using specified method.
-
-        Parameters
-        ----------
-        catalog_df : pd.DataFrame
-            Catalog with potential duplicates
-        method : str
-            'pandas' for RA/DEC based removal, 'astropy' for angular separation
-        sep_threshold : float
-            Separation threshold in arcsec for 'astropy' method
-
-        Returns
-        -------
-        pd.DataFrame
-            Deduplicated catalog
-        """
-        if catalog_df is None or len(catalog_df) == 0:
-            return catalog_df
-
-        n_pre = len(catalog_df)
-
-        if method == "pandas" and {"RA", "DEC"}.issubset(catalog_df.columns):
-            # Fast pandas method for exact duplicates
-            catalog_df = (
-                catalog_df.sort_values(["RA", "DEC"])
-                .drop_duplicates(subset=["RA", "DEC"], keep="first")
-                .reset_index(drop=True)
-            )
-        elif method == "pandas":
-            # Pixel-space fallback
-            if {"x_pix", "y_pix"}.issubset(catalog_df.columns):
-                _rx = np.round(catalog_df["x_pix"].to_numpy(dtype=float), 2)
-                _ry = np.round(catalog_df["y_pix"].to_numpy(dtype=float), 2)
-                catalog_df = (
-                    catalog_df.assign(_rx=_rx, _ry=_ry)
-                    .sort_values(["_rx", "_ry"])
-                    .drop_duplicates(subset=["_rx", "_ry"], keep="first")
-                    .drop(columns=["_rx", "_ry"])
-                    .reset_index(drop=True)
-                )
-        elif method == "astropy" and {"RA", "DEC"}.issubset(catalog_df.columns):
-            # Astropy method with angular separation.
-            # nthneighbor=2 finds the nearest *other* source for each entry.
-            # For each close pair (sep < threshold) we keep the lower-index member
-            # and drop the higher-index one - this guarantees exactly one copy
-            # survives rather than both being dropped.
-            coords = SkyCoord(
-                ra=catalog_df["RA"].values * u.degree,
-                dec=catalog_df["DEC"].values * u.degree,
-            )
-
-            if len(coords) >= 2:
-                idx_match, sep2, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
-                thr = sep_threshold * u.arcsec
-                # Vectorized: drop source i if its nearest neighbour j is closer
-                # than the threshold AND has a lower index (j is the kept copy).
-                drop = (sep2 <= thr) & (idx_match < np.arange(len(catalog_df)))
-                catalog_df = catalog_df[~drop].reset_index(drop=True)
-        else:
-            # Astropy path not applicable; exact pandas dedupe.
-            if {"RA", "DEC"}.issubset(catalog_df.columns):
-                catalog_df = (
-                    catalog_df.sort_values(["RA", "DEC"])
-                    .drop_duplicates(subset=["RA", "DEC"], keep="first")
-                    .reset_index(drop=True)
-                )
-            elif {"x_pix", "y_pix"}.issubset(catalog_df.columns):
-                _rx = np.round(catalog_df["x_pix"].to_numpy(dtype=float), 2)
-                _ry = np.round(catalog_df["y_pix"].to_numpy(dtype=float), 2)
-                catalog_df = (
-                    catalog_df.assign(_rx=_rx, _ry=_ry)
-                    .sort_values(["_rx", "_ry"])
-                    .drop_duplicates(subset=["_rx", "_ry"], keep="first")
-                    .drop(columns=["_rx", "_ry"])
-                    .reset_index(drop=True)
-                )
-
-        n_post = len(catalog_df)
-        if n_post < n_pre:
-            logging.info(
-                f"Removed {n_pre - n_post} duplicate sources using {method} method"
-            )
-
-        return catalog_df
 
     try:
         #  Set Up Working Directory and Output
-        # Resolve before the os.chdir below: fits_dir/science_file can be
-        # relative when main runs directly on a hand-written or snapshot
-        # YAML, and anything resolved later would land inside
-        # <fits_dir>_REDUCED and hide the staged ready_templates.
-        wdir = os.path.abspath(input_yaml["fits_dir"])
-        input_yaml["fits_dir"] = wdir
+        # Resolve all working roots to absolute up front: fits_dir,
+        # science_file, and the wdir scratch root can be relative when main
+        # runs directly on a hand-written or snapshot YAML.
+        fits_root = os.path.abspath(input_yaml["fits_dir"])
+        input_yaml["fits_dir"] = fits_root
         if not os.path.isabs(str(input_yaml.get("wdir") or ".")):
             input_yaml["wdir"] = os.path.abspath(input_yaml.get("wdir") or ".")
         science_file = os.path.abspath(science_file)
         output_dir_suffix = "_" + input_yaml["outdir_name"]
 
-        fits_basename = os.path.basename(wdir)
+        fits_basename = os.path.basename(fits_root)
         reduced_dir_name = fits_basename + output_dir_suffix
-        new_output_dir = os.path.join(os.path.dirname(wdir), reduced_dir_name)
+        new_output_dir = os.path.join(
+            os.path.dirname(fits_root), reduced_dir_name
+        )
 
         # Keep the original science location: get_template resolves
         # per-dataset <dataset>/templates folders from it, while fpath is
@@ -1852,20 +2164,11 @@ def run_photometry():
         # be left empty).  Only create it for normal photometry runs.
         if not prepare_template:
             Path(new_output_dir).mkdir(parents=True, exist_ok=True)
-            os.chdir(new_output_dir)
-        else:
-            # Still chdir to the parent so relative paths behave sensibly.
-            os.chdir(os.path.dirname(wdir))
 
         #  Check for Existing Output
         filename_with_ext = os.path.basename(science_file)
         base, file_extension = os.path.splitext(filename_with_ext)
-        base = (
-            base.replace(" ", "_")
-            .replace(".", "_")
-            .replace("_APT", "")
-            .replace("_ERROR", "")
-        )
+        base = base.replace(" ", "_").replace(".", "_")
         if prepare_template:
             # In template-preparation mode, cur_dir is the science file's
             # original directory; do NOT create a per-image subdirectory
@@ -1875,16 +2178,14 @@ def run_photometry():
             # Mirror the input layout under the output root so nested science
             # directories produce nested output directories:
             #   fits_dir/<dataset>/science/x.fits
-            #     -> <fits_dir>_REDUCED/<dataset>_APT/science_APT/<base>/
+            #     -> <fits_dir>_REDUCED/<dataset>/science/<base>/
             root = os.path.dirname(science_file)
-            sub_dirs = root.replace(wdir, "").split("/")
-            sub_dirs = [
-                i.replace("_APT", "").replace(" ", "_") for i in sub_dirs
-            ]
+            sub_dirs = root.replace(fits_root, "").split("/")
+            sub_dirs = [i.replace(" ", "_") for i in sub_dirs]
             cur_dir = new_output_dir
             for i in range(len(sub_dirs)):
                 if i:  # Skip the empty leading element from the leading "/".
-                    subdir_path = os.path.join(cur_dir, sub_dirs[i] + "_APT")
+                    subdir_path = os.path.join(cur_dir, sub_dirs[i])
                     Path(subdir_path).mkdir(parents=True, exist_ok=True)
                     cur_dir = subdir_path
             cur_dir = os.path.join(cur_dir, base)
@@ -2020,29 +2321,6 @@ def run_photometry():
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start)),
         )
 
-        # =============================================================================
-        # Helper Function: Shorten Filename if Needed
-        # =============================================================================
-
-        def shorten_filename_if_needed(original_path, max_length=255):
-            """
-            Copy the file to a short random name when the full path exceeds
-            max_length; return the (possibly unchanged) path and a flag.
-
-            Returns:
-                short_path (Path): Path to the shortened file (or original if no change)
-                was_shortened (bool): Whether the file was shortened
-            """
-            original_path = Path(original_path).resolve()
-            if len(str(original_path)) <= max_length:
-                return original_path, False
-
-            parent_dir = original_path.parent
-            short_name = f"image_{uuid.uuid4().hex[:8]}{original_path.suffix}"
-            short_path = parent_dir / short_name
-
-            shutil.copy2(original_path, short_path)
-            return short_path, True
 
         #  Handle Template or Science File
         replaced = False
@@ -2066,7 +2344,7 @@ def run_photometry():
                 logging.info("Copying template for recovery.")
                 shutil.copyfile(fpath, fpath + ".original")
         else:
-            fpath = os.path.join(cur_dir, base + "_APT" + file_extension).replace(
+            fpath = os.path.join(cur_dir, base + file_extension).replace(
                 " ", "_"
             )
             shutil.copyfile(science_file, fpath)
@@ -4854,14 +5132,6 @@ def run_photometry():
         # =============================================================================
         log_status(border_msg("Source detection on calibrated image"))
 
-        def _run_sextractor_two_pass(config, fpath, **kwargs):
-            """Run SExtractor with optional FWHM refinement pass."""
-            fwhm, sources, scale = SExtractorWrapper(config=config).run(fpath, **kwargs)
-            if np.isfinite(fwhm):
-                fwhm, sources, scale = SExtractorWrapper(config=config).run(
-                    fpath, use_FWHM=fwhm, **kwargs
-                )
-            return fwhm, sources, scale
 
         _pre_remeasure_fwhm = (
             _initial_measured_fwhm  # use measured FWHM, not config default
@@ -5361,20 +5631,19 @@ def run_photometry():
             input_yaml["photometry"].get("aperture_size", 1.7) or 1.7
         )
 
-        def _fixed_radius_fwhm():
-            if _explicit_ap_px is not None:
-                return float(_explicit_ap_px) / float(ImageFWHM)
-            if crowded_field:
-                return float(optimum_radius_crowded)
-            return _ap_size_fwhm
-
         if len(IsolatedSources) < min_sources_for_psf:
             logging.warning(
                 "Too few isolated sources (%d) to build PSF or measure optimum radius; continuing with aperture-only photometry.",
                 len(IsolatedSources),
             )
             do_aperture_ONLY = True
-            optimum_radius = _fixed_radius_fwhm()
+            optimum_radius = _fixed_radius_fwhm(
+                ImageFWHM,
+                _ap_size_fwhm,
+                _explicit_ap_px,
+                crowded_field,
+                optimum_radius_crowded,
+            )
         elif (
             input_yaml["photometry"].get("find_optimum_radius", True)
             and _explicit_ap_px is None
@@ -5429,16 +5698,34 @@ def run_photometry():
                 if optimum_radius < 5:
                     input_yaml["scale"] = odd(scale)
                 else:
-                    optimum_radius = _fixed_radius_fwhm()
+                    optimum_radius = _fixed_radius_fwhm(
+                        ImageFWHM,
+                        _ap_size_fwhm,
+                        _explicit_ap_px,
+                        crowded_field,
+                        optimum_radius_crowded,
+                    )
                 if crowded_field:
                     optimum_radius = min(optimum_radius, optimum_radius_crowded)
             except Exception as e:
                 log_exception(
                     e, "measure_optimum_radius failed; using default aperture radius."
                 )
-                optimum_radius = _fixed_radius_fwhm()
+                optimum_radius = _fixed_radius_fwhm(
+                    ImageFWHM,
+                    _ap_size_fwhm,
+                    _explicit_ap_px,
+                    crowded_field,
+                    optimum_radius_crowded,
+                )
         else:
-            optimum_radius = _fixed_radius_fwhm()
+            optimum_radius = _fixed_radius_fwhm(
+                ImageFWHM,
+                _ap_size_fwhm,
+                _explicit_ap_px,
+                crowded_field,
+                optimum_radius_crowded,
+            )
 
         # If optimum-radius filtering left a small set, keep using the
         # broader pre-optimum pool for PSF modelling while retaining the
@@ -5723,29 +6010,6 @@ def run_photometry():
         # calibrator catalog in green with the PSF source pool overlaid, so
         # outliers in either population are visible against the same sigma
         # band (one merged figure; previously two separate files).
-        def _fwhm_mag_xy(_frame):
-            """(inst_mag, fwhm) arrays for rows with usable measurements."""
-            if (
-                _frame is None
-                or len(_frame) == 0
-                or "fwhm" not in _frame.columns
-                or "flux_AP" not in _frame.columns
-            ):
-                return None
-            _fw = np.asarray(_frame["fwhm"], dtype=float)
-            _fl = np.asarray(_frame["flux_AP"], dtype=float)
-            # flux_AP is measured through different apertures per frame
-            # (optimum radius for the catalog, 1.7xFWHM for the pool), so
-            # the same star sits at different magnitudes in each.  flux_SEx
-            # carries SExtractor FLUX_AUTO for both populations; prefer it
-            # per row so they share one flux scale.
-            if "flux_SEx" in _frame.columns:
-                _fs = np.asarray(_frame["flux_SEx"], dtype=float)
-                _fl = np.where(np.isfinite(_fs) & (_fs > 0), _fs, _fl)
-            _ok = np.isfinite(_fw) & np.isfinite(_fl) & (_fl > 0) & (_fw > 0)
-            if np.count_nonzero(_ok) < 3:
-                return None
-            return -2.5 * np.log10(_fl[_ok]), _fw[_ok]
 
         try:
             _cat_xy = _fwhm_mag_xy(CatalogSources)
@@ -6001,13 +6265,6 @@ def run_photometry():
             # aperture S/N) preferred, "snr" (SExtractor SNR_WIN) filling
             # gaps.  A first-match column pick can grab a NaN-heavy column
             # while a valid alias sits alongside.
-            def _coalesce_snr(f):
-                s = None
-                for _sc in ("SNR", "snr", "signal_to_noise", "flux_snr"):
-                    if _sc in f.columns:
-                        _v = pd.to_numeric(f[_sc], errors="coerce")
-                        s = _v if s is None else s.fillna(_v)
-                return s
 
             _nb_rows = []
             for _f in _supp_frames:
@@ -7123,22 +7380,6 @@ def run_photometry():
                 catalog=CatalogSources
             )
 
-            # Treat non-finite coefficients as "no color correction".
-            # Handle piecewise linear format: ((breakpoint,), (slope1, slope2), intercept)
-            def has_non_finite(coeffs):
-                """Check if any coefficient value is non-finite, handling nested tuples."""
-                if coeffs is None:
-                    return True
-
-                # Flatten nested tuples and check each value
-                def flatten(t):
-                    if isinstance(t, tuple):
-                        for item in t:
-                            yield from flatten(item)
-                    else:
-                        yield t
-
-                return any(not np.isfinite(v) for v in flatten(coeffs))
 
             if has_non_finite(color_coeffs):
                 color_coeffs, color_coeff_errors = None, None
@@ -7201,11 +7442,6 @@ def run_photometry():
             n_segments=n_segments,
         )
 
-        def _fmt3(v):
-            try:
-                return f"{float(v):.3f}" if np.isfinite(float(v)) else "-"
-            except (TypeError, ValueError):
-                return "-"
 
         _zp_rows = []
         for _m in ("AP", "PSF"):
@@ -9686,30 +9922,6 @@ def run_photometry():
                             int(_ts_cfg_refine.get("sfft_psf_quality_min_keep", 5)),
                         )
 
-                        def _psf_quality_cut(bad, metric, label):
-                            """Apply one PSF-quality cut bounded by the floor."""
-                            nonlocal _psf_quality_mask
-                            _psf_quality_mask, n_removed, n_flagged = _keep_floor_cut(
-                                _psf_quality_mask, bad, metric, _psq_min_keep
-                            )
-                            if n_flagged == 0:
-                                return
-                            if n_removed == n_flagged:
-                                logging.info(
-                                    f"PSF {label} cut: removed {n_removed} sources"
-                                )
-                            elif n_removed > 0:
-                                logging.info(
-                                    f"PSF {label} cut: removed {n_removed} of "
-                                    f"{n_flagged} flagged (min_keep={_psq_min_keep} "
-                                    f"kept the best-ranked {n_flagged - n_removed})."
-                                )
-                            else:
-                                logging.info(
-                                    f"PSF {label} cut skipped: {n_flagged} flagged "
-                                    f"but pool is at min_keep={_psq_min_keep}."
-                                )
-
                         # cfit cut (concentration/shape)
                         # cfit measures how well the source profile matches the
                         # PSF model.  High cfit = extended or blended.  Default
@@ -9719,7 +9931,9 @@ def run_photometry():
                             _cfit = pd.to_numeric(ms["cfit"], errors="coerce").values
                             _cfit_max = float(_ts_cfg_refine.get("sfft_max_cfit", 5.0))
                             if _cfit_max > 0:
-                                _psf_quality_cut(
+                                _psf_quality_mask = _psf_quality_cut(
+                                    _psf_quality_mask,
+                                    _psq_min_keep,
                                     np.isfinite(_cfit) & (_cfit > _cfit_max),
                                     _cfit,
                                     f"cfit (>{_cfit_max})",
@@ -9734,7 +9948,9 @@ def run_photometry():
                             _qfit = pd.to_numeric(ms["qfit"], errors="coerce").values
                             _qfit_max = float(_ts_cfg_refine.get("sfft_max_qfit", 1.0))
                             if _qfit_max > 0:
-                                _psf_quality_cut(
+                                _psf_quality_mask = _psf_quality_cut(
+                                    _psf_quality_mask,
+                                    _psq_min_keep,
                                     np.isfinite(_qfit) & (_qfit > _qfit_max),
                                     _qfit,
                                     f"qfit (>{_qfit_max})",
@@ -9749,7 +9965,9 @@ def run_photometry():
                                 _ts_cfg_refine.get("sfft_max_reduced_chi2", 10.0)
                             )
                             if _chi2_max > 0:
-                                _psf_quality_cut(
+                                _psf_quality_mask = _psf_quality_cut(
+                                    _psf_quality_mask,
+                                    _psq_min_keep,
                                     np.isfinite(_chi2) & (_chi2 > _chi2_max),
                                     _chi2,
                                     f"chi2 (>{_chi2_max})",
@@ -9767,7 +9985,9 @@ def run_photometry():
                                 _ts_cfg_refine.get("sfft_max_psf_flags", -1)
                             )
                             if _flags_max >= 0:
-                                _psf_quality_cut(
+                                _psf_quality_mask = _psf_quality_cut(
+                                    _psf_quality_mask,
+                                    _psq_min_keep,
                                     _flags > _flags_max,
                                     _flags,
                                     f"flags (>{_flags_max})",
@@ -9951,83 +10171,6 @@ def run_photometry():
                                     )
                                 )
 
-                                # Helper: extract and validate a single cutout
-                                def _extract_fft_cutout(img_arr, cx, cy, radius):
-                                    """Extract cutout, validate, return (valid, cutout_clean)."""
-                                    ny, nx = img_arr.shape
-                                    y0 = max(0, int(cy) - radius)
-                                    y1 = min(ny, int(cy) + radius + 1)
-                                    x0 = max(0, int(cx) - radius)
-                                    x1 = min(nx, int(cx) + radius + 1)
-                                    cutout = img_arr[y0:y1, x0:x1]
-                                    full = 2 * radius + 1
-                                    if cutout.shape != (full, full):
-                                        # Edge-truncated cutout: pad with NaN to
-                                        # a fixed shape so the per-source stack
-                                        # in _compute_fft_metrics stays uniform.
-                                        padded = np.full(
-                                            (full, full), np.nan
-                                        )
-                                        py0 = y0 - (int(cy) - radius)
-                                        px0 = x0 - (int(cx) - radius)
-                                        padded[
-                                            py0 : py0 + cutout.shape[0],
-                                            px0 : px0 + cutout.shape[1],
-                                        ] = cutout
-                                        cutout = padded
-                                    if (
-                                        cutout.shape[0] < 5
-                                        or cutout.shape[1] < 5
-                                        or np.isfinite(cutout).sum() < cutout.size * 0.8
-                                    ):
-                                        return False, None
-                                    med = np.nanmedian(cutout[np.isfinite(cutout)])
-                                    clean = np.where(np.isfinite(cutout), cutout, med)
-                                    # Check source is roughly centred
-                                    cy_c = (cutout.shape[0] - 1) / 2.0
-                                    cx_c = (cutout.shape[1] - 1) / 2.0
-                                    peak_idx = np.unravel_index(
-                                        np.nanargmax(clean), cutout.shape
-                                    )
-                                    peak_offset = np.hypot(
-                                        peak_idx[1] - cx_c, peak_idx[0] - cy_c
-                                    )
-                                    if peak_offset > 0.3 * radius:
-                                        return False, None
-                                    # Normalize: subtract min, clip negatives
-                                    c_min = np.nanmin(clean)
-                                    c_norm = clean - c_min
-                                    c_norm = np.where(c_norm < 0, 0, c_norm)
-                                    return True, c_norm.astype(np.float64)
-
-                                # Helper: compute per-source FFT deviation metrics
-                                def _compute_fft_metrics(cutouts_list):
-                                    """Given list of 2D arrays, return per-source
-                                    median FFT deviation from the median spectrum."""
-                                    valid_idxs = [
-                                        i
-                                        for i, c in enumerate(cutouts_list)
-                                        if c is not None
-                                    ]
-                                    if len(valid_idxs) < 4:
-                                        return None, valid_idxs
-                                    stacked = np.stack(
-                                        [cutouts_list[i] for i in valid_idxs]
-                                    )
-                                    spectra = np.array(
-                                        [np.abs(np.fft.fft2(c)) ** 2 for c in stacked]
-                                    )
-                                    spectra = np.fft.fftshift(spectra, axes=(1, 2))
-                                    med_spec = np.nanmedian(spectra, axis=0)
-                                    mad_spec = 1.4826 * np.nanmedian(
-                                        np.abs(spectra - med_spec), axis=0
-                                    )
-                                    mad_spec = np.where(
-                                        mad_spec > 1e-12, mad_spec, 1e-12
-                                    )
-                                    deviations = np.abs(spectra - med_spec) / mad_spec
-                                    metrics = np.nanmedian(deviations, axis=(1, 2))
-                                    return metrics, valid_idxs
 
                                 _fft_cutouts_by_img = (
                                     {}
@@ -10691,7 +10834,7 @@ def run_photometry():
                         n_matched_t,
                     )
                 # PSF.build names its output from the image fpath base
-                # (the preprocessed *_APT name), not input_yaml["base"].
+                # (the staged copy name), not input_yaml["base"].
                 _psf_base = str(
                     input_yaml.get("_psf_base_override")
                     or os.path.basename(input_yaml["fpath"]).split(".")[0]
@@ -10819,72 +10962,13 @@ def run_photometry():
                     f"PSF_model_image_{_psf_base}.fits",
                 )
 
-                def _science_psf_models_on_disk():
-                    roots = (Path(write_dir), Path(write_dir) / "PSF_MODELS")
-                    return [
-                        path
-                        for root in roots
-                        for path in root.glob("PSF_model_image*.fits")
-                        if path.stem.endswith("_" + _psf_base)
-                        and "_cellx" not in path.name
-                    ]
-
-                _epsf_on_disk = _science_psf_models_on_disk()
+                _epsf_on_disk = _science_psf_models_on_disk(
+                    write_dir, _psf_base
+                )
                 _phot_analytic = (
                     epsf_model is not None
                     and str(psf_model_kind).lower().startswith("analytic")
                 )
-
-                def _write_sci_analytic_stamp(out_path):
-                    # Serialize the photometry analytic model verbatim
-                    # when it is already a native-resolution stamp;
-                    # otherwise fit the composite Moffat to the vetted
-                    # science pool (or the matched ZOGY stars).
-                    fwhm = _zogy_fwhm_fallback(ImageFWHM)
-                    reuse = (
-                        _phot_analytic
-                        and np.ndim(getattr(epsf_model, "data", None)) == 2
-                        and int(
-                            np.atleast_1d(
-                                getattr(epsf_model, "oversampling", 1)
-                            )[0]
-                        )
-                        == 1
-                    )
-                    if reuse:
-                        _write_analytic_psf_stamp(
-                            out_path,
-                            fwhm,
-                            input_yaml,
-                            n_stars=len(
-                                getattr(
-                                    epsf_model, "_autophot_star_fits", None
-                                )
-                                or []
-                            ),
-                            stamp=epsf_model,
-                        )
-                        return fwhm, "photometry model reuse"
-                    pool = (
-                        psf_source_pool
-                        if psf_source_pool is not None
-                        and len(psf_source_pool) > 0
-                        else df_zogy_science
-                    )
-                    stars = _analytic_star_cutouts(
-                        image,
-                        pool,
-                        int(2 * np.ceil(6.0 * fwhm) + 1),
-                        mask=hardware_defects_mask,
-                    )
-                    _write_analytic_psf_stamp(
-                        out_path,
-                        fwhm,
-                        input_yaml,
-                        n_stars=len(stars),
-                        stars=stars or None,
-                    )
-                    return fwhm, "%d star cutouts" % len(stars)
 
                 if _zogy_psf_mode == "analytic":
                     _zogy_sci_psf = os.path.join(
@@ -10892,7 +10976,15 @@ def run_photometry():
                     )
                     try:
                         _fwhm, _how = _write_sci_analytic_stamp(
-                            _zogy_sci_psf
+                            _zogy_sci_psf,
+                            ImageFWHM,
+                            _phot_analytic,
+                            epsf_model,
+                            input_yaml,
+                            image,
+                            psf_source_pool,
+                            df_zogy_science,
+                            hardware_defects_mask,
                         )
                         logging.info(
                             "ZOGY: analytic science PSF stamp "
@@ -10937,7 +11029,9 @@ def run_photometry():
                             "ZOGY science PSF build failed",
                             e,
                         )
-                _epsf_on_disk = _science_psf_models_on_disk()
+                _epsf_on_disk = _science_psf_models_on_disk(
+                    write_dir, _psf_base
+                )
                 if (
                     _zogy_psf_mode != "analytic"
                     and not _epsf_on_disk
@@ -10945,7 +11039,15 @@ def run_photometry():
                 ):
                     try:
                         _fwhm, _how = _write_sci_analytic_stamp(
-                            _sci_psf_file
+                            _sci_psf_file,
+                            ImageFWHM,
+                            _phot_analytic,
+                            epsf_model,
+                            input_yaml,
+                            image,
+                            psf_source_pool,
+                            df_zogy_science,
+                            hardware_defects_mask,
                         )
                         logging.warning(
                             "ZOGY: no science ePSF available; wrote "
@@ -14996,14 +15098,6 @@ def run_photometry():
         # available, since downstream code (limits, output dict) uses it.
         idx = TargetPosition.index[0]
 
-        def _finite_or(v, default):
-            # fit_params may carry None for unfitted terms; keep the
-            # arithmetic below free of None comparisons.
-            try:
-                f = float(v)
-            except (TypeError, ValueError):
-                return default
-            return f if np.isfinite(f) else default
 
         _cal_applied = []
         for method in ["AP", "PSF"]:
@@ -17569,15 +17663,6 @@ def run_photometry():
             pass
         site_lines.append(f"# mjd_keyword: {mjd_key_used or mjd_key or ''}")
 
-        def _fmt6(v):
-            # fit_params values may be None rather than NaN; a bare
-            # f"{None:.6f}" raises TypeError and aborts the CALIB write
-            # after the output CSV was already produced.
-            try:
-                f = float(v)
-                return f"{f:.6f}"
-            except (TypeError, ValueError):
-                return "nan"
 
         zp_lines = ["# Zeropoint and calibration information"]
         for method in image_zeropoint.keys():
@@ -17832,18 +17917,6 @@ def run_photometry():
 
         end = time.time()
 
-        def _fnum(v, p=3):
-            try:
-                f = float(v)
-            except (TypeError, ValueError):
-                return "-"
-            return f"{f:.{p}f}" if np.isfinite(f) else "-"
-
-        def _pm(v, e, p=3):
-            # value +/- err, or the bare value when err is missing
-            if _fnum(e, p) == "-":
-                return _fnum(v, p)
-            return f"{_fnum(v, p)} +/- {_fnum(e, p)}"
 
         _res_pairs = [
             ("Target", str(input_yaml.get("target_name") or "-")),
