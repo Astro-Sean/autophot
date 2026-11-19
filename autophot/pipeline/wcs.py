@@ -29,54 +29,8 @@ import astropy.units as u
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
 
-# --- Local Imports (optional) ---
-try:
-    from ..core.functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, copy_wcs_from_header, cap_console_lines, which_exe, ascii_table, STATUS  # type: ignore
-except (ModuleNotFoundError, ImportError):
-    # Minimal fallback for environments missing the full photometry stack.
-    STATUS = logging.INFO  # degrade STATUS to INFO when functions is absent
-    cap_console_lines = None
-
-    def ascii_table(title, headers, rows, width=70):
-        # Framed layout matching core.functions.ascii_table, minus the
-        # numeric alignment and cell wrapping; lines are clipped to
-        # `width` so the rules keep the block aligned.
-        width = int(width)
-        rule = "-" * width
-        lines = [rule, str(title), rule]
-        lines.append("  " + "  ".join(str(h) for h in headers))
-        lines += [
-            "  " + "  ".join(str(c) for c in row) for row in rows
-        ]
-        lines.append(rule)
-        return "\n" + "\n".join(ln[:width] for ln in lines)
-
-    def log_step(message: str, *args, **kwargs) -> str:
-        m = str(message).strip()
-        if not m:
-            return ""
-        rule = "-" * 70
-        return f"\n{rule}\n{m}\n{rule}"
-
-    def log_warning_from_exception(logger, message, exc, *, exc_info=False):
-        logger.warning("%s: %s", message, exc, exc_info=exc_info)
-
-    def safe_fits_write(*args, **kwargs):
-        raise RuntimeError("safe_fits_write not available: functions module not found")
-
-    def remove_wcs_from_header(header):
-        raise RuntimeError("remove_wcs_from_header not available: functions module not found")
-
-    def copy_wcs_from_header(src_header, dst_header):
-        raise RuntimeError("copy_wcs_from_header not available: functions module not found")
-
-    def clean_subprocess_log(path):
-        return None
-
-    def strip_subprocess_noise(text):
-        return str(text)
-
-    which_exe = shutil.which
+# --- Local Imports ---
+from ..core.functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, copy_wcs_from_header, cap_console_lines, which_exe, ascii_table, STATUS  # type: ignore
 
 
 def _resolve_sextractor_exe():
@@ -93,8 +47,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(levelname)s - %(message)s",
 )
-if cap_console_lines is not None:
-    cap_console_lines(logging.getLogger().handlers)
+cap_console_lines(logging.getLogger().handlers)
 logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 # --- Suppress Astropy Warnings ---
