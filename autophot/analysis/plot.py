@@ -190,7 +190,7 @@ def _resolve_plot_limit(data, band, method, snr_limit, adaptive_limit_col, mag_c
 
 
 class Plot:
-    """Diagnostic plotting utilities for AutoPHOT.
+    """Diagnostic plotting utilities for AutoPhOT.
 
     Provides methods for subtraction checks, source overlays, crowding
     diagnostics, light-curve plotting, and WCS-vs-PSF offset visualisation.
