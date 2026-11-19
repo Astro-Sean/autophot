@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Transient Name Server (TNS) query helpers for AutoPHOT.
+"""Transient Name Server (TNS) query helpers for AutoPhOT.
 
 Provides functions to query the `TNS API <https://www.wis-tns.org/api/get>`_
 for transient coordinates, type, redshift, and discovery metadata.
