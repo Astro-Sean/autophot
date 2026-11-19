@@ -23,7 +23,7 @@ import sys
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="autophot",
-        description="AutoPHOT photometry pipeline.",
+        description="AutoPhOT photometry pipeline.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run", help="Per-image pipeline (autophot.pipeline.main)")
