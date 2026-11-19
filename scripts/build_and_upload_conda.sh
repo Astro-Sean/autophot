@@ -929,6 +929,35 @@ run_in_env anaconda upload --force "${UPLOAD_ARGS[@]}"
 # cleanup trap does not restore the old files.
 VERSION_BUMPED=0
 
+# Record which release passed the example run. This changes notebook metadata
+# only; the executable cells were tested in the fresh environment above.
+log "Recording the tested package version in the example notebook..."
+if ! python - "${REPO_ROOT}/examples/run_autophot.ipynb" "${SELECTED_VERSION}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+notebook_path = Path(sys.argv[1])
+version = sys.argv[2]
+notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+metadata = notebook.setdefault("metadata", {})
+if not isinstance(metadata, dict):
+    raise SystemExit("Notebook metadata must be a JSON object")
+autophot_metadata = metadata.setdefault("autophot", {})
+if not isinstance(autophot_metadata, dict):
+    raise SystemExit("Notebook AutoPhOT metadata must be a JSON object")
+
+if autophot_metadata.get("tested_package_version") != version:
+    autophot_metadata["tested_package_version"] = version
+    notebook_path.write_text(
+        json.dumps(notebook, indent=1, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+PY
+then
+  die "Could not record the tested version in the example notebook."
+fi
+
 # -----------------------------------------------------------------------------
 # Remove stale installed copies and old artifacts only AFTER the new package
 # is uploaded: if the build or upload fails, existing installs stay untouched.
@@ -938,12 +967,19 @@ log "Removing stale autophot installs and old build artifacts..."
 remove_stale_autophot_code
 
 # -----------------------------------------------------------------------------
-# Commit and push the release changes: README citation refresh plus the
-# version bump and requirements sync done above.  Warn-only: a git failure
-# must not fail a build that already uploaded successfully.
+# Commit and push the release changes: README citation refresh, version bump,
+# requirements sync, and the notebook's tested package version. Warn-only: a
+# git failure must not fail a build that already uploaded successfully.
 # -----------------------------------------------------------------------------
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git add README.md figures/citations_over_time.png pyproject.toml conda/recipe/meta.yaml requirements.txt CITATION.cff
+  git add \
+    README.md \
+    figures/citations_over_time.png \
+    pyproject.toml \
+    conda/recipe/meta.yaml \
+    requirements.txt \
+    CITATION.cff \
+    examples/run_autophot.ipynb
   if git diff --cached --quiet; then
     log "No staged changes; nothing to commit."
   else
