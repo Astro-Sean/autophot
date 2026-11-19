@@ -972,11 +972,11 @@ remove_stale_autophot_code
 # git failure must not fail a build that already uploaded successfully.
 # -----------------------------------------------------------------------------
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # conda/recipe/ is gitignored (local build recipe), so it is not staged.
   git add \
     README.md \
     figures/citations_over_time.png \
     pyproject.toml \
-    conda/recipe/meta.yaml \
     requirements.txt \
     CITATION.cff \
     examples/run_autophot.ipynb
