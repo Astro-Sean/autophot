@@ -19,7 +19,7 @@
 
 AutoPhOT is a photometry pipeline for transients and variable sources, built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/). Feed it FITS images from any telescope, filter, or pixel scale and it will find your target in each frame, do the photometry, calibrate it against survey catalogs, and hand you one clean light curve.
 
-It has been used in <!-- citation-count -->84<!-- /citation-count --> papers so far (updated: <!-- citation-date -->14-11-2026<!-- /citation-date -->; [full list on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)).
+It has been used in <!-- citation-count -->84<!-- /citation-count --> papers so far (updated: <!-- citation-date -->19-11-2026<!-- /citation-date -->; [full list on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)).
 
 > [!NOTE]
 > AutoPhOT is developed and maintained by one person only. If you hit a problem, please open an issue on GitHub and I will get to it as soon as I can.
@@ -76,7 +76,7 @@ pip install -e .
 
 The full pipeline reference is [`docs/autophot_methods.pdf`](docs/autophot_methods.pdf). It walks through every processing stage in order, gives the photometry, calibration, and detection maths, and documents all parameters in `default_input.yml` with defaults and usage notes. The LaTeX source (`docs/autophot_methods.tex`, with tables generated from `default_input.yml`) sits in the same folder if you need to rebuild it.
 
-The [`examples/run_autophot.ipynb`](examples/run_autophot.ipynb) notebook runs a real subtraction end to end and carries a reference appendix covering folder layouts, catalog routing, alignment and subtraction options, photometry settings, and post-processing.
+The [`examples/run_autophot.ipynb`](examples/run_autophot.ipynb) notebook runs a real subtraction end to end and includes a reference appendix covering folder layouts, catalog routing, alignment and subtraction options, photometry settings, and post-processing.
 
 <h2 align="center">Quick start</h2>
 
@@ -91,8 +91,6 @@ config["target_dec"] = -12.345678
 
 output_file = AutomatedPhotometry.run_photometry(default_input=config)
 ```
-
-A few things worth knowing up front:
 
 - `from autophot import list_parameters; list_parameters()` prints every config key and its default.
 - FITS headers must carry `TELESCOP`, `INSTRUME`, and a bandpass keyword (e.g. `FILTER`); images without them are skipped.
