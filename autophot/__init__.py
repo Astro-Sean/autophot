@@ -1,4 +1,4 @@
-"""AutoPHOT - target-centric photometric pipeline for CCD/NIR imaging.
+"""AutoPhOT - target-centric photometric pipeline for CCD/NIR imaging.
 
 The public API is re-exported from :mod:`autophot.driver` so that
 ``from autophot import AutomatedPhotometry`` keeps working for existing
