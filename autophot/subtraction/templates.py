@@ -4857,6 +4857,59 @@ def _fscal_ap_card_scale(ap_scale: float, convd) -> float:
     return 1.0 / ap if str(convd).strip().upper() == "SCI" else ap
 
 
+def _rescale_ref_difference(
+    science: np.ndarray,
+    difference: np.ndarray,
+    reference_scale_ratio: float,
+    min_noise_pixels: int = 1000,
+) -> Tuple[np.ndarray, Optional[float]]:
+    """Re-express a CONVD=REF difference at a revised reference scale.
+
+    For ``D = SCI - CONV(REF)``, the corrected image is
+    ``SCI - r * (SCI - D)``. This preserves the transient's science-image
+    flux while changing only the static reference contribution. The returned
+    noise factor is measured from the corrected difference relative to the
+    science image using the same IQR estimator as the SFFT post-processing.
+    """
+    sci = np.asarray(science, dtype=np.float64)
+    diff = np.asarray(difference, dtype=np.float64)
+    if sci.shape != diff.shape:
+        raise ValueError(
+            f"science shape {sci.shape} does not match difference shape "
+            f"{diff.shape}"
+        )
+    try:
+        ratio = float(reference_scale_ratio)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("reference scale ratio must be finite and positive") from exc
+    if not np.isfinite(ratio) or ratio <= 0:
+        raise ValueError("reference scale ratio must be finite and positive")
+
+    corrected = diff.copy()
+    corrected *= ratio
+    corrected += (1.0 - ratio) * sci
+
+    valid = np.isfinite(sci) & np.isfinite(diff) & np.isfinite(corrected)
+    if np.count_nonzero(valid) < int(min_noise_pixels):
+        return corrected, None
+
+    q25_sci, q75_sci = np.percentile(sci[valid], [25.0, 75.0])
+    q25_diff, q75_diff = np.percentile(corrected[valid], [25.0, 75.0])
+    scale_factor = 1.0 / 1.3489795003921634
+    sigma_sci = float((q75_sci - q25_sci) * scale_factor)
+    sigma_diff = float((q75_diff - q25_diff) * scale_factor)
+    if not (
+        np.isfinite(sigma_sci)
+        and sigma_sci > 0
+        and np.isfinite(sigma_diff)
+        and sigma_diff > 0
+    ):
+        return corrected, None
+
+    # Subtraction cannot justify lowering the science-image noise model.
+    return corrected, max(1.0, sigma_diff / sigma_sci)
+
+
 def _fscal_phot_needs_repair(
     phot_scale: float,
     ap_scale: float,
@@ -17971,10 +18024,10 @@ class Templates:
                 _fscal_ap_min = 5
             try:
                 _diff_rescale_min_frac = float(
-                    ts_sub.get("sfft_diff_rescale_min_frac", 0.10)
+                    ts_sub.get("sfft_diff_rescale_min_frac", 0.03)
                 )
             except (TypeError, ValueError):
-                _diff_rescale_min_frac = 0.10
+                _diff_rescale_min_frac = 0.03
 
             def _stamp_fscal_cards(diff_path) -> None:
                 """Record the aperture scale, repair FSCAL_PHOT, and
@@ -18103,11 +18156,26 @@ class Templates:
                                     )
                                     if _sci_arr.shape == _hdul[0].data.shape:
                                         _r_phot = _s_ap_cmp / _conv_val
-                                        _hdul[0].data = (
-                                            _sci_arr
-                                            - _r_phot
-                                            * (_sci_arr - _hdul[0].data)
+                                        _corrected_diff, _vscale_new = (
+                                            _rescale_ref_difference(
+                                                _sci_arr,
+                                                _hdul[0].data,
+                                                _r_phot,
+                                            )
                                         )
+                                        _hdul[0].data = _corrected_diff
+                                        if _vscale_new is not None:
+                                            _h["VSCALE"] = (
+                                                round(float(_vscale_new), 6),
+                                                "Noise-model factor after flux rescale",
+                                            )
+                                        else:
+                                            logger.warning(
+                                                "SFFT diff was photometrically "
+                                                "rescaled, but VSCALE could not "
+                                                "be remeasured; retaining the "
+                                                "previous noise-model factor."
+                                            )
                                         _h["HIERARCH FSCAL_CV2"] = (
                                             _conv_val,
                                             "Original SFFT convolution "
