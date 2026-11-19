@@ -189,10 +189,9 @@ class Prepare:
         files_removed = 0
         total_candidates = 0
         valid_files = []
-        # Absolute so path math below fits_dir is cwd-independent: main.py
-        # os.chdir()es into the output tree before template lookup resolves
-        # fits_dir, and a relative path would resolve inside
-        # <fits_dir>_REDUCED and hide the staged ready_templates.
+        # Absolute so path math below fits_dir is cwd-independent: the yaml
+        # snapshot is read by per-image workers whose launch directory is
+        # not guaranteed to match the driver's.
         self.input_yaml["fits_dir"] = os.path.abspath(
             self.input_yaml["fits_dir"].rstrip("/")
         )
@@ -257,15 +256,10 @@ class Prepare:
         for search_root in search_roots:
             for root, dirs, files in os.walk(search_root):
                 # Pipeline output trees nested under the scan root (*_REDUCED
-                # output dirs or per-dataset *_APT dirs) must not be
-                # re-ingested: their _APT.fits copies carry valid
-                # TELESCOP/INSTRUME headers and would be processed again as
-                # new science frames.
-                dirs[:] = [
-                    d
-                    for d in dirs
-                    if not (d.endswith(new_dir) or d.endswith("_APT"))
-                ]
+                # output dirs) must not be re-ingested: their processed .fits
+                # copies carry valid TELESCOP/INSTRUME headers and would be
+                # processed again as new science frames.
+                dirs[:] = [d for d in dirs if not d.endswith(new_dir)]
                 for filename in files:
                     if _is_valid_file(filename, root):
                         filepath = os.path.join(root, filename)
@@ -277,8 +271,6 @@ class Prepare:
                             os.path.splitext(filename)[0]
                             .replace(" ", "_")
                             .replace(".", "_")
-                            .replace("_APT", "")
-                            .replace("_ERROR", "")
                         )
 
                         if prepare_templates:
@@ -286,17 +278,17 @@ class Prepare:
                             cur_dir = os.path.join(work_root, base)
                         else:
                             # Science mode: reproduce the nested subdirectory layout
-                            wdir = self.input_yaml["fits_dir"]
+                            fits_root = self.input_yaml["fits_dir"]
                             root_dir = os.path.dirname(filepath)
-                            rel = root_dir.replace(wdir, "")
+                            rel = root_dir.replace(fits_root, "")
                             sub_dirs = [
-                                part.replace("_APT", "").replace(" ", "_")
+                                part.replace(" ", "_")
                                 for part in rel.split("/")
                                 if part
                             ]
                             cur_dir = work_root
                             for sub in sub_dirs:
-                                cur_dir = os.path.join(cur_dir, f"{sub}_APT")
+                                cur_dir = os.path.join(cur_dir, sub)
                             cur_dir = os.path.join(cur_dir, base)
 
                         if prepare_templates:
@@ -811,14 +803,7 @@ class Prepare:
         )
         if name_given and coords_given:
             self.logger.error(
-                "Conflicting target identification: target_name='%s' set "
-                "alongside explicit coordinates (target_ra=%s, "
-                "target_dec=%s).",
-                name,
-                self.input_yaml.get("target_ra"),
-                self.input_yaml.get("target_dec"),
-            )
-            print(
+                "\n%s",
                 ascii_card(
                     "Error: target_name and explicit coordinates conflict",
                     [
@@ -835,7 +820,6 @@ class Prepare:
                         "  b) Remove target_name to use the manual coordinates.",
                     ],
                 ),
-                file=sys.stderr,
             )
             sys.exit(
                 "Stopped: target_name conflicts with explicit "
@@ -1018,10 +1002,7 @@ class Prepare:
                     }
                 else:
                     self.logger.error(
-                        "TNS and SIMBAD both failed for target '%s' and no RA/Dec coordinates provided.",
-                        target_name,
-                    )
-                    print(
+                        "\n%s",
                         ascii_card(
                             f"Error: target '{target_name}' not found on TNS or SIMBAD",
                             [
@@ -1044,7 +1025,6 @@ class Prepare:
                                 "  c) Remove target_name to run without a specific target",
                             ],
                         ),
-                        file=sys.stderr,
                     )
                     sys.exit("Stopped: TNS and SIMBAD both failed and no RA/Dec provided for target_name.")
             
