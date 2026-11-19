@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Image masking utilities for AutoPHOT.
+"""Image masking utilities for AutoPhOT.
 
 Wraps the ``maximask`` external tool to generate pixel-quality masks
 (cosmic rays, hot/dead columns, saturated pixels, etc.) and provides
