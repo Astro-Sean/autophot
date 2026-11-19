@@ -1424,7 +1424,7 @@ def _decide_detection(
 # Main Function: run_photometry
 # =============================================================================
 def run_photometry():
-    """Main entry point for the AutoPHOT photometry pipeline.
+    """Main entry point for the AutoPhOT photometry pipeline.
 
     Checks for required Astromatic tools (SExtractor, SCAMP, SWarp), loads
     configuration, and orchestrates the full reduction workflow: header
@@ -1825,7 +1825,15 @@ def run_photometry():
 
     try:
         #  Set Up Working Directory and Output
-        wdir = input_yaml["fits_dir"]
+        # Resolve before the os.chdir below: fits_dir/science_file can be
+        # relative when main runs directly on a hand-written or snapshot
+        # YAML, and anything resolved later would land inside
+        # <fits_dir>_REDUCED and hide the staged ready_templates.
+        wdir = os.path.abspath(input_yaml["fits_dir"])
+        input_yaml["fits_dir"] = wdir
+        if not os.path.isabs(str(input_yaml.get("wdir") or ".")):
+            input_yaml["wdir"] = os.path.abspath(input_yaml.get("wdir") or ".")
+        science_file = os.path.abspath(science_file)
         output_dir_suffix = "_" + input_yaml["outdir_name"]
 
         fits_basename = os.path.basename(wdir)
