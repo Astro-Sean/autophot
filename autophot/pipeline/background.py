@@ -1,4 +1,4 @@
-"""Sky-background estimation and subtraction for AutoPHOT.
+"""Sky-background estimation and subtraction for AutoPhOT.
 
 Provides :class:`BackgroundSubtractor`, which estimates and removes the sky
 background from astronomical FITS images using iterative source masking,
@@ -260,7 +260,7 @@ class BackgroundSubtractor:
         Parameters
         ----------
         config : dict
-            AutoPHOT configuration dictionary (``input_yaml``).
+            AutoPhOT configuration dictionary (``input_yaml``).
         """
         self.config = config
 
