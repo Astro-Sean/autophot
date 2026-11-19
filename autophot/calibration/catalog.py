@@ -64,6 +64,7 @@ from ..core.functions import (
     mag,
     snr,
     set_size,
+    stat_block,
     normalize_photometric_filter_name,
     parse_supported_filter_group_key,
     log_warning_from_exception,
@@ -6378,15 +6379,17 @@ class Catalog:
                             n_selected = np.sum(final_linear_mask)
                             
                             logger.info(
-                                f"Robust linear selection:\n"
-                                f"    flux range {min_linear_flux:.1f} - "
-                                f"{max_linear_flux:.1f}, residual thresh "
-                                f"{residual_threshold:.3f} mag\n"
-                                f"    cut {n_bright_cut} bright + {n_faint_cut} "
-                                f"faint + {n_outlier_cut} outlier, would keep "
-                                f"{n_selected} sources\n"
-                                f"    (keeping all {len(inlier_catalog)} inliers "
-                                f"for ZP fit)"
+                                stat_block(
+                                    "Robust linear selection:",
+                                    f"flux range {min_linear_flux:.1f} - "
+                                    f"{max_linear_flux:.1f}, residual thresh "
+                                    f"{residual_threshold:.3f} mag",
+                                    f"cut {n_bright_cut} bright + "
+                                    f"{n_faint_cut} faint + {n_outlier_cut} "
+                                    f"outlier, would keep {n_selected} sources",
+                                    f"(keeping all {len(inlier_catalog)} "
+                                    f"inliers for ZP fit)",
+                                )
                             )
                             
                             if n_selected > 0:
