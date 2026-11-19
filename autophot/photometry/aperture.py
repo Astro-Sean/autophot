@@ -253,7 +253,8 @@ def gain_e_per_adu_from_header(header, preferred_keys=None):
     ValueError
         If no usable gain keyword is found.
     """
-    # Pan-STARRS / PS1 hierarchy cards (see utils/fix_panstarrs_headers.py).
+    # Pan-STARRS / PS1 hierarchy cards (see
+    # scripts/fix_panstarrs_headers.py).
     return _positive_scalar_from_header(
         header,
         preferred_keys,
