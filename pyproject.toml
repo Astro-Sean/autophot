@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autophot"
-version = "1.5.2"
-description = "AutoPHOT object photometry pipeline (CCD/NIR; calibrated aperture/PSF photometry; template subtraction)."
+version = "1.5.3"
+description = "AutoPhOT object photometry pipeline (CCD/NIR; calibrated aperture/PSF photometry; template subtraction)."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{name = "AutoPHOT contributors"}]
+authors = [{name = "AutoPhOT contributors"}]
 keywords = ["astronomy", "photometry", "transients", "image subtraction", "lightcurve"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
