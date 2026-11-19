@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared utility functions for the AutoPHOT pipeline.
+"""Shared utility functions for the AutoPhOT pipeline.
 
 This module provides:
 
@@ -1746,7 +1746,7 @@ def drop_mask_components_at_positions(
 
 def set_size(width, aspect=1, fraction=1):
     """
-     Function to generate size of figures produced by AutoPhot. To specify the dimensions of a figure in matplotlib we use the figsize argument. However, the figsize argument takes inputs in inches and we have the width of our document in pts. To set the figure size we construct a function to convert from pts to inches and to determine an aesthetic figure height using the golden ratio. The golden ratio is given by:
+     Function to generate size of figures produced by AutoPhOT. To specify the dimensions of a figure in matplotlib we use the figsize argument. However, the figsize argument takes inputs in inches and we have the width of our document in pts. To set the figure size we construct a function to convert from pts to inches and to determine an aesthetic figure height using the golden ratio. The golden ratio is given by:
 
      .. math ::
 
@@ -2049,9 +2049,19 @@ def log_step(msg: str) -> str:
     return border_msg(msg, body="-")
 
 
+def _cell_text(c) -> str:
+    """Cell text as it will be emitted: ASCII-folded, tabs as spaces.
+
+    ``normalize_log_message`` applies the same folding downstream, so
+    measuring this form keeps computed column widths equal to the
+    rendered ones.
+    """
+    return _to_ascii(str(c)).replace("\t", "    ")
+
+
 def _framed_lines(title: str, char: str, width: int) -> list[str]:
     """Rule / title / rule lines for a framed heading."""
-    t = str(title).strip()
+    t = _cell_text(str(title).strip())
     if len(t) > width:
         t = t[: width - 3] + "..."
     return [char * width, t, char * width]
@@ -2094,7 +2104,18 @@ def border_msg(msg: str, body: str = "=", corner: str = "+",
         width = LOG_HEADER_WIDTH if rule == "=" else LOG_SUBHEADER_WIDTH
     lines = _framed_lines(text, rule, int(width))
     if metadata:
-        lines.insert(-1, str(metadata).strip())
+        meta_lines = []
+        for seg in _cell_text(str(metadata).strip()).splitlines() or [""]:
+            meta_lines.extend(
+                textwrap.wrap(
+                    seg,
+                    width=max(1, int(width)),
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+                or [""]
+            )
+        lines[-1:-1] = meta_lines
     # Leading newline separates the banner from dense output above it.
     return "\n" + "\n".join(lines)
 
@@ -2137,7 +2158,7 @@ def autophot_logo(
 
         ================================================================================
 
-                                    A U T O P H O T
+                                    A u t o P h O T
                                       v1.5.0
 
         ================================================================================
@@ -2156,11 +2177,11 @@ def autophot_logo(
     lines = [
         "=" * w,
         "",
-        "A U T O P H O T".center(w).rstrip(),
-        f"v{version}".center(w).rstrip(),
+        "A u t o P h O T".center(w).rstrip(),
+        f"v{version}".center(w).rstrip()[:w],
     ]
     if title:
-        lines.append(str(title).center(w).rstrip())
+        lines.append(str(title).center(w).rstrip()[:w])
     lines += ["", "=" * w]
     return "\n" + "\n".join(lines)
 
@@ -2170,11 +2191,13 @@ def ascii_kv(title: str, pairs, width: int = LOG_SUBHEADER_WIDTH,
     """
     Key/value block with dotted leaders.
 
-    pairs : iterable of (label, value) tuples; values are pre-formatted
-    strings.  With ``framed=False`` the block is a plain labelled group:
+    Every value starts on the same column and wraps back to that column
+    instead of being cut at the frame edge:
 
         Title:
           label ........... value
+          longer label .... long value that keeps
+                            its column
 
     With ``framed=True`` it is boxed in '=' rules for major blocks:
 
@@ -2184,21 +2207,42 @@ def ascii_kv(title: str, pairs, width: int = LOG_SUBHEADER_WIDTH,
           label ........... value
         ========================================================================
     """
-    rows = [(str(k), str(v)) for k, v in pairs]
+    rows = [(_cell_text(k).rstrip(), _cell_text(v)) for k, v in pairs]
     if not rows:
         return ""
-    label_w = max(len(k) for k, _ in rows)
-    label_w = max(label_w, 8)
-    val_x = label_w + 8  # indent + label + ' ... ' gap
+    width = int(width)
+    label_w = max(max(len(k) for k, _ in rows), 8)
+    # One value column for every row; the longest label keeps a 3-dot
+    # leader.  Clamp so a few value characters remain before the edge.
+    val_col = label_w + len(LOG_INDENT) + 5
+    val_col = min(val_col, max(len(LOG_INDENT) + 4, width - 8))
     lines = []
     if framed:
         lines.extend(_framed_lines(str(title).strip(), "=", width))
     else:
-        lines.append(f"{str(title).strip()}:")
+        lines.append(f"{_cell_text(str(title).strip())}:")
     for k, v in rows:
-        dots = "." * max(3, val_x - 2 - len(k) - 4)
-        line = f"{LOG_INDENT}{k} {dots} {v}"
-        lines.append(line[:width] if len(line) > width else line)
+        dots = "." * max(3, val_col - len(LOG_INDENT) - len(k) - 2)
+        lead = f"{LOG_INDENT}{k} {dots}"
+        val_x = len(lead) + 1
+        avail = max(1, width - val_x)
+        segs = []
+        for piece in v.splitlines() or [""]:
+            segs.extend(
+                textwrap.wrap(
+                    piece,
+                    width=avail,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+                or [""]
+            )
+        if segs == [""]:
+            lines.append(lead.rstrip())
+            continue
+        lines.append(f"{lead} {segs[0]}".rstrip())
+        cont = " " * val_x
+        lines.extend(cont + s for s in segs[1:])
     if framed:
         lines.append("=" * width)
     return "\n" + "\n".join(lines)
@@ -2206,7 +2250,14 @@ def ascii_kv(title: str, pairs, width: int = LOG_SUBHEADER_WIDTH,
 
 def ascii_table(title: str, headers, rows, width: int = LOG_SUBHEADER_WIDTH) -> str:
     """
-    Column table framed in '-' rules; numeric columns right-align:
+    Column table framed in '-' rules.
+
+    Columns whose cells are mostly numbers right-align so digits compare
+    by column; missing-value markers (``nan``, ``inf``, ``n/a``, ``-``)
+    count as numeric so they do not flip the alignment.  Cells and
+    headers that do not fit ``width`` wrap onto aligned continuation
+    lines - no emitted line exceeds ``width``, so the downstream log
+    wrapper can never break the columns:
 
         ----------------------------------------------------------------------
         Title
@@ -2215,11 +2266,18 @@ def ascii_table(title: str, headers, rows, width: int = LOG_SUBHEADER_WIDTH) -> 
           ------  ------  -----  ---
           AP      24.547  0.003  159
         ----------------------------------------------------------------------
+
+    Rows shorter than ``headers`` pad with empty cells; extra cells are
+    dropped.
     """
+    _NUM_MISSING = frozenset(
+        {"", "-", "nan", "inf", "+inf", "-inf", "n/a", "na", "none", "null"}
+    )
+
     def _is_numeric_cell(c: str) -> bool:
         c = c.strip()
-        if not c or c == "-":
-            # Empty/missing cells keep the column's alignment.
+        if c.lower() in _NUM_MISSING:
+            # Missing-value markers keep the column's numeric alignment.
             return True
         if "+/-" in c:
             parts = [p.strip() for p in c.split("+/-")]
@@ -2230,61 +2288,64 @@ def ascii_table(title: str, headers, rows, width: int = LOG_SUBHEADER_WIDTH) -> 
         except ValueError:
             return False
 
-    headers = [str(h) for h in headers]
-    rows = [[str(c) for c in r] for r in rows]
+    headers = [_cell_text(h) for h in headers]
+    rows = [[_cell_text(c) for c in r] for r in rows]
     if not headers or not rows:
         return ""
+    width = int(width)
     ncols = len(headers)
-    # Numbers right-align so magnitudes/errors compare by digit column.
-    num_col = [
-        all(_is_numeric_cell(r[i]) for r in rows if i < len(r))
-        for i in range(ncols)
-    ]
-    col_w = [len(h) for h in headers]
+
+    def _segs(c: str) -> list[str]:
+        # Explicit newlines are cell structure, not prose to reflow.
+        return c.splitlines() or [""]
+
+    num_col = []
+    for i in range(ncols):
+        vals = [r[i] for r in rows if i < len(r)]
+        n_num = sum(1 for v in vals if _is_numeric_cell(v))
+        num_col.append(2 * n_num >= max(1, len(vals)))
+
+    # Column width is driven by the longest unbroken segment; explicit
+    # cell newlines do not inflate the column.
+    col_w = [max(len(s) for s in _segs(h)) for h in headers]
     for r in rows:
         for i in range(min(ncols, len(r))):
-            col_w[i] = max(col_w[i], len(r[i]))
-    # A free-text cell (e.g. a reliability flag) can be far wider than
-    # the log line budget; emitted raw it gets hard-wrapped mid-rule by
-    # the console formatter.  Shrink the widest columns until the body
-    # fits `width` (never below a header) and wrap cell text onto
-    # aligned continuation lines instead.
+            for seg in _segs(r[i]):
+                col_w[i] = max(col_w[i], len(seg))
+
+    # Shrink the widest columns until the body fits `width`.  Headers get
+    # no floor - they wrap like cells - so over-wide headers cannot push
+    # the table past its frame.
     pad_w = len(LOG_INDENT) + len(LOG_COL_GAP) * (ncols - 1)
     budget = width - pad_w
     while sum(col_w) > budget:
-        wide = [k for k in range(ncols) if col_w[k] > len(headers[k])]
+        wide = [k for k in range(ncols) if col_w[k] > 1]
         if not wide:
             break
         col_w[max(wide, key=lambda k: col_w[k])] -= 1
-    lines = []
-    if title:
-        lines.extend(_framed_lines(str(title), "-", width))
-    else:
-        lines.append("-" * width)
-    lines.append(
-        LOG_INDENT
-        + LOG_COL_GAP.join(
-            h.rjust(col_w[i]) if num_col[i] else h.ljust(col_w[i])
-            for i, h in enumerate(headers)
-        ).rstrip()
-    )
-    lines.append(
-        LOG_INDENT + LOG_COL_GAP.join("-" * col_w[i] for i in range(ncols))
-    )
-    for r in rows:
-        cells = [r[i] if i < len(r) else "" for i in range(ncols)]
-        wrapped = [
-            textwrap.wrap(
-                c,
-                width=max(col_w[i], 1),
-                break_long_words=True,
-                break_on_hyphens=False,
+
+    def _wrap(c: str, i: int) -> list[str]:
+        out = []
+        for seg in _segs(c):
+            out.extend(
+                textwrap.wrap(
+                    seg,
+                    width=max(col_w[i], 1),
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+                or [""]
             )
-            or [""]
-            for i, c in enumerate(cells)
+        return out or [""]
+
+    def _emit(cells) -> list[str]:
+        wrapped = [
+            _wrap(cells[i] if i < len(cells) else "", i)
+            for i in range(ncols)
         ]
+        out = []
         for k in range(max(len(w) for w in wrapped)):
-            lines.append(
+            out.append(
                 LOG_INDENT
                 + LOG_COL_GAP.join(
                     (
@@ -2295,6 +2356,19 @@ def ascii_table(title: str, headers, rows, width: int = LOG_SUBHEADER_WIDTH) -> 
                     for i, w in enumerate(wrapped)
                 ).rstrip()
             )
+        return out
+
+    lines = []
+    if title:
+        lines.extend(_framed_lines(str(title), "-", width))
+    else:
+        lines.append("-" * width)
+    lines.extend(_emit(headers))
+    lines.append(
+        LOG_INDENT + LOG_COL_GAP.join("-" * col_w[i] for i in range(ncols))
+    )
+    for r in rows:
+        lines.extend(_emit(r))
     lines.append("-" * width)
     return "\n" + "\n".join(lines)
 
@@ -2314,17 +2388,31 @@ def ascii_card(title: str, lines, width: int = LOG_SUBHEADER_WIDTH) -> str:
     if not any(l.strip() for l in body):
         return ""
     out = _framed_lines(str(title).strip(), "=", width)
-    out.extend(
-        f"{LOG_INDENT}{l[: width - 4]}" if l.strip() else "" for l in body
-    )
+    for l in body:
+        if not l.strip():
+            out.append("")
+            continue
+        for seg in _cell_text(l).splitlines() or [""]:
+            for wseg in (
+                textwrap.wrap(
+                    seg,
+                    width=max(1, width - 4),
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+                or [""]
+            ):
+                out.append(f"{LOG_INDENT}{wseg}")
     out.append("=" * width)
     return "\n" + "\n".join(out)
 
 
-def stat_block(label: str, *lines: str) -> str:
+def stat_block(label: str, *lines: str,
+               width: int = LOG_SUBHEADER_WIDTH) -> str:
     """
     Labeled stats block: the first value follows ``Label:`` and continuation
-    lines align under the value column::
+    lines align under the value column.  Entries longer than ``width``
+    wrap back to that column::
 
         Label:    first
                   second
@@ -2332,26 +2420,70 @@ def stat_block(label: str, *lines: str) -> str:
 
     ``lines`` are pre-formatted strings; blank entries are dropped.
     """
-    label = str(label).rstrip()
-    rows = [str(ln) for ln in lines if str(ln).strip()]
+    label = _cell_text(str(label).rstrip())
+    rows = [
+        _cell_text(ln) for ln in lines if str(ln).strip()
+    ]
     if not rows:
         return label
-    pad = " " * (len(label) + 4)
-    return "\n".join([f"{label}    {rows[0]}"] + [pad + r for r in rows[1:]])
+    val_col = len(label) + 4
+    avail = max(1, int(width) - val_col)
+    pad = " " * val_col
+    out = []
+    for i, r in enumerate(rows):
+        segs = []
+        for piece in r.splitlines() or [""]:
+            segs.extend(
+                textwrap.wrap(
+                    piece,
+                    width=avail,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+                or [""]
+            )
+        if i == 0:
+            out.append(f"{label}    {segs[0]}")
+        else:
+            out.append(pad + segs[0])
+        out.extend(pad + s for s in segs[1:])
+    return "\n".join(out)
 
 
-def stat_pairs(pairs) -> str:
+def stat_pairs(pairs, width: int = LOG_SUBHEADER_WIDTH) -> str:
     """
-    ``Label:``/value pairs, one per line, values sharing one column::
+    ``Label:``/value pairs, one per line, values sharing one column.
+    Values longer than ``width`` wrap back under the value column::
 
         Image FWHM:    3.42 px
         Image seeing:  1.37 arcsec
     """
-    rows = [(str(k).rstrip(), str(v)) for k, v in pairs if str(v).strip()]
+    rows = [
+        (_cell_text(k).rstrip(), _cell_text(v))
+        for k, v in pairs
+        if str(v).strip()
+    ]
     if not rows:
         return ""
-    width = max(len(k) for k, _ in rows)
-    return "\n".join(f"{k.ljust(width)}  {v}" for k, v in rows)
+    label_w = max(len(k) for k, _ in rows)
+    val_col = label_w + 2
+    avail = max(1, int(width) - val_col)
+    out = []
+    for k, v in rows:
+        segs = []
+        for piece in v.splitlines() or [""]:
+            segs.extend(
+                textwrap.wrap(
+                    piece,
+                    width=avail,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+                or [""]
+            )
+        out.append(f"{k.ljust(label_w)}  {segs[0]}".rstrip())
+        out.extend(" " * val_col + s for s in segs[1:])
+    return "\n".join(out)
 
 
 def metrics_table(metrics: dict[str, tuple], title: str | None = None,
@@ -2908,7 +3040,7 @@ def compute_target_crowding(
 
 
 class AutophotYaml:
-    """Load and update YAML configuration files for AutoPHOT."""
+    """Load and update YAML configuration files for AutoPhOT."""
 
     def __init__(self, filepath=None, dict_name=None, wdir=None):
         """Store path, optional sub-key, and working directory for later load/update."""
