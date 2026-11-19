@@ -37,13 +37,19 @@ except (ModuleNotFoundError, ImportError):
     STATUS = logging.INFO  # degrade STATUS to INFO when functions is absent
     cap_console_lines = None
 
-    def ascii_table(title, headers, rows):
-        # Plain two-column-space layout; no frame rules in fallback mode.
-        lines = [str(title), "  " + "  ".join(str(h) for h in headers)]
+    def ascii_table(title, headers, rows, width=70):
+        # Framed layout matching core.functions.ascii_table, minus the
+        # numeric alignment and cell wrapping; lines are clipped to
+        # `width` so the rules keep the block aligned.
+        width = int(width)
+        rule = "-" * width
+        lines = [rule, str(title), rule]
+        lines.append("  " + "  ".join(str(h) for h in headers))
         lines += [
             "  " + "  ".join(str(c) for c in row) for row in rows
         ]
-        return "\n".join(lines)
+        lines.append(rule)
+        return "\n" + "\n".join(ln[:width] for ln in lines)
 
     def log_step(message: str, *args, **kwargs) -> str:
         m = str(message).strip()
