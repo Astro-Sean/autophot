@@ -591,6 +591,118 @@ class TestAsciiOutputFormat:
 
         assert ascii_table("T", ["a"], []) == ""
 
+    def test_ascii_table_never_exceeds_width(self):
+        # Pathological content must still respect the frame: giant
+        # headers, unbreakable tokens, ragged rows, wide cells.
+        from autophot.core.functions import ascii_table
+
+        out = ascii_table(
+            "Wide",
+            ["A very long header name indeed", "AnotherExtremelyLongHeader", "X"],
+            [
+                ["short", "1.5", "a" * 90],
+                ["b" * 60, "nan", "-"],
+                ["only-one-cell"],
+                ["a", "1", "2", "extra-cell"],
+            ],
+            width=70,
+        )
+        lines = out.split("\n")
+        assert all(len(ln) <= 70 for ln in lines)
+        assert lines[1] == "-" * 70
+        assert lines[-1] == "-" * 70
+        # Column underline row present after the (possibly wrapped) header.
+        dash_rows = [
+            ln for ln in lines
+            if ln.strip() and set(ln.strip()) <= {"-", " "}
+        ]
+        assert len(dash_rows) >= 1
+
+    def test_ascii_table_missing_markers_keep_right_edge(self):
+        # nan/- placeholders must not flip a numeric column to left
+        # alignment: every row's last character shares the right edge.
+        from autophot.core.functions import ascii_table
+
+        out = ascii_table(
+            "T",
+            ["S", "V"],
+            [["in", "0.662"], ["sv", "0.356"], ["sv2", "nan"]],
+            width=40,
+        )
+        rows = [
+            ln for ln in out.split("\n")
+            if ln.lstrip().startswith(("in", "sv"))
+        ]
+        assert len(rows) == 3
+        assert len({len(ln) for ln in rows}) == 1
+
+    def test_ascii_table_numeric_majority_right_aligns(self):
+        # A mostly-numeric column right-aligns even with a text cell.
+        from autophot.core.functions import ascii_table
+
+        out = ascii_table(
+            "T",
+            ["Metric", "Value"],
+            [["a", "1.0"], ["b", "2.0"], ["c", "3.0"], ["flag", "False"]],
+            width=40,
+        )
+        rows = [
+            ln for ln in out.split("\n")
+            if ln.lstrip().startswith(("a", "b", "c", "flag"))
+        ]
+        assert len({len(ln) for ln in rows}) == 1
+
+    def test_ascii_kv_value_column_uniform(self):
+        # The longest label must not push its value one column right of
+        # the rest: all rows share one value column.
+        from autophot.core.functions import ascii_kv
+
+        out = ascii_kv(
+            "T",
+            [("Longest label here", "a"), ("short", "b"), ("mid label", "c")],
+            width=60,
+        )
+        kv_lines = [
+            ln for ln in out.split("\n")
+            if ln.strip() and ln.strip() != "T:"
+        ]
+        # Each line ends with its single-char value; uniform length means
+        # a uniform value column.
+        assert len({len(ln) for ln in kv_lines}) == 1
+
+    def test_ascii_kv_long_value_wraps_to_column(self):
+        # Long values wrap under the value column; nothing is truncated.
+        from autophot.core.functions import ascii_kv
+
+        v = "expected (487.358, 475.297) -> fitted (487.905, 475.913) px"
+        out = ascii_kv("T", [("Position offset", v)], width=70)
+        assert "475.913" in out
+        lines = [ln for ln in out.split("\n") if ln.strip()]
+        assert all(len(ln) <= 70 for ln in lines)
+        val_x = lines[1].index("expected")
+        assert lines[2].startswith(" " * val_x)
+
+    def test_stat_pairs_wraps_long_value(self):
+        from autophot.core.functions import stat_pairs
+
+        out = stat_pairs(
+            [("Sky:", "RA " + "1" * 40 + ", Dec " + "2" * 40)],
+            width=60,
+        )
+        lines = out.split("\n")
+        assert all(len(ln) <= 60 for ln in lines)
+        assert lines[1].startswith(" " * len("Sky:") + " " * 2)
+
+    def test_ascii_card_wraps_long_lines(self):
+        from autophot.core.functions import ascii_card
+
+        long_line = "x " * 60
+        out = ascii_card("Error", [long_line], width=50)
+        lines = out.split("\n")
+        assert all(len(ln) <= 50 for ln in lines)
+        assert out.count("x") == 60  # content preserved, not truncated
+        assert ascii_card("Empty", ["", ""]) == ""
+
     def test_ascii_card(self):
         from autophot.core.functions import ascii_card
 
