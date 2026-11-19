@@ -1833,17 +1833,17 @@ def plot_lightcurve(
 # =============================================================================
 
 
-# Canonical survey abbreviations for the Instrument column. Values are the
+# Canonical survey abbreviations for the Telescope column. Values are the
 # joined "<TELESCOP>+<INSTRUME>" labels exactly as they appear in the output
-# CSV; users can extend or override via postprocessing.lightcurve_instrument_aliases.
-_INSTRUMENT_LABEL_ALIASES = {
+# CSV; users can extend or override via postprocessing.lightcurve_telescope_aliases.
+_TELESCOPE_LABEL_ALIASES = {
     "Palomar 48-inch+ZTF/MOSAIC": "P48+ZTF",
     "Palomar 48-inch+ZTF": "P48+ZTF",
     "P48+ZTF/MOSAIC": "P48+ZTF",
 }
 
 
-def _instrument_label_series(df, aliases=None):
+def _telescope_label_series(df, aliases=None):
     """Per-row "<TELESCOP>+<INSTRUME>" label for the photometry table.
 
     The fields come straight from the FITS header via the output CSV.
@@ -1901,12 +1901,21 @@ def generate_photometry_table(
         complete_data = complete_data.loc[:, ~complete_data.columns.duplicated()].copy()
     phot_table = []
 
-    # Instrument column: "<TELESCOP>+<INSTRUME>" per row, on unless the
+    # Telescope column: "<TELESCOP>+<INSTRUME>" per row, on unless the
     # config turns it off; user aliases layer over the canonical survey set.
     _pp = (input_yaml or {}).get("postprocessing") or {}
-    _include_instrument = bool(_pp.get("lightcurve_instrument_column", True))
-    _inst_aliases = dict(_INSTRUMENT_LABEL_ALIASES)
-    _inst_aliases.update(_pp.get("lightcurve_instrument_aliases") or {})
+    _include_telescope = bool(
+        _pp.get(
+            "lightcurve_telescope_column",
+            _pp.get("lightcurve_instrument_column", True),
+        )
+    )
+    _tel_aliases = dict(_TELESCOPE_LABEL_ALIASES)
+    _tel_aliases.update(
+        _pp.get("lightcurve_telescope_aliases")
+        or _pp.get("lightcurve_instrument_aliases")
+        or {}
+    )
     # Prefer using the per-row filter column if present. Map raw names (gp, Sloan_g, ...)
     # to canonical bands so `_resolve_band_triplet` matches the uniform mag/zp schema.
     fser_all = photometry_filter_series(complete_data)
@@ -2059,8 +2068,8 @@ def generate_photometry_table(
                 'Mag': mag_values.round(3),
                 'Error': detects[err_col].round(3),
             }
-            if _include_instrument:
-                row_data['Instrument'] = _instrument_label_series(detects, _inst_aliases)
+            if _include_telescope:
+                row_data['Telescope'] = _telescope_label_series(detects, _tel_aliases)
 
             for limit_key, limit_values in limiting_mags.items():
                 row_data[limit_key] = limit_values
@@ -2071,7 +2080,7 @@ def generate_photometry_table(
             base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
             limit_cols = sorted([k for k in limiting_mags.keys() if k.startswith('Limit')])
             all_cols = base_cols + limit_cols + (
-                ["Instrument"] if _include_instrument else []
+                ["Telescope"] if _include_telescope else []
             )
 
             detects = detects[all_cols]
@@ -2142,9 +2151,9 @@ def generate_photometry_table(
                     'Mag': mag_value.round(3),
                     'Error': _err_s,
                 }
-                if _include_instrument:
-                    inv_row_data['Instrument'] = _instrument_label_series(
-                        inv_detects, _inst_aliases
+                if _include_telescope:
+                    inv_row_data['Telescope'] = _telescope_label_series(
+                        inv_detects, _tel_aliases
                     )
 
                 for limit_key, limit_values in limiting_mags_inv.items():
@@ -2156,7 +2165,7 @@ def generate_photometry_table(
                 base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
                 limit_cols = sorted([k for k in limiting_mags_inv.keys() if k.startswith('Limit')])
                 all_cols = base_cols + limit_cols + (
-                    ["Instrument"] if _include_instrument else []
+                    ["Telescope"] if _include_telescope else []
                 )
 
                 inv_detects = inv_detects[all_cols]
@@ -2180,9 +2189,9 @@ def generate_photometry_table(
                 'Mag': pd.Series(np.nan, index=nondetects.index, dtype=float),
                 'Error': pd.Series(np.nan, index=nondetects.index, dtype=float),
             }
-            if _include_instrument:
-                nd_row_data['Instrument'] = _instrument_label_series(
-                    nondetects, _inst_aliases
+            if _include_telescope:
+                nd_row_data['Telescope'] = _telescope_label_series(
+                    nondetects, _tel_aliases
                 )
 
             for limit_key, limit_values in limiting_mags_nd.items():
@@ -2194,7 +2203,7 @@ def generate_photometry_table(
             base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
             limit_cols = sorted([k for k in limiting_mags_nd.keys() if k.startswith('Limit')])
             all_cols = base_cols + limit_cols + (
-                ["Instrument"] if _include_instrument else []
+                ["Telescope"] if _include_telescope else []
             )
 
             nondetects = nondetects[all_cols]
@@ -2210,7 +2219,7 @@ def generate_photometry_table(
 
         limit_cols = [f'Limit_{snr:.1f}S2N'.replace('.', 'p') for snr in snr_thresholds]
         default_cols = ["MJD", "Date", "Mag", "Error", "Filter"] + limit_cols + (
-            ["Instrument"] if _include_instrument else []
+            ["Telescope"] if _include_telescope else []
         )
         out_phot = pd.DataFrame(columns=default_cols)
     else:
