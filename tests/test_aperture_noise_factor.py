@@ -159,7 +159,7 @@ def _minimal_input_yaml(tmp_path, wdir=True):
         "read_noise": 0.0,
         "global_verbose_level": 0,
         "wdir": str(tmp_path) if wdir else None,
-        "fpath": str(tmp_path / "TEST_0001_APT.fits"),
+        "fpath": str(tmp_path / "TEST_0001.fits"),
         "photometry": {
             "aperture_radius": RADIUS,
             "empirical_noise_factor": True,
@@ -191,7 +191,7 @@ def test_measure_writes_ledger_once_per_file(tmp_path):
         lines = [ln for ln in fh if ln.strip()]
     assert len(lines) == 1
     tag, _, val = lines[0].rpartition(",")
-    assert tag == "TEST_0001_APT.fits"
+    assert tag == "TEST_0001.fits"
     assert float(val) > 1.5
 
 
@@ -230,8 +230,8 @@ def test_summary_emits_one_aggregated_warning(tmp_path):
     ledger = _noise_factor_ledger_path(tmp_path)
     with open(ledger, "a") as fh:
         for i, f in enumerate((2.1, 2.4, 3.0, 1.6)):
-            fh.write(f"FILE_{i:03d}_APT.fits,{f:.3f}\n")
-        fh.write("FILE_001_APT.fits,2.9\n")  # duplicate tag dedupes
+            fh.write(f"FILE_{i:03d}.fits,{f:.3f}\n")
+        fh.write("FILE_001.fits,2.9\n")  # duplicate tag dedupes
 
     lines = []
     _report_noise_factor_summary(tmp_path, lines.append)
