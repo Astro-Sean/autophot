@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""High-level AutoPHOT driver: orchestrates per-image photometry runs."""
+"""High-level AutoPhOT driver: orchestrates per-image photometry runs."""
 
 # Force BLAS/OpenMP to 1 thread before any scientific imports (avoids exhausting
 # process/thread limits on HPC when using multiprocessing; OpenBLAS defaults to 128).
@@ -1894,11 +1894,15 @@ class AutomatedPhotometry:
                     "limits - lower nCPU or the per-image n_jobs settings."
                 )
 
-        # Normalise paths and close open figures
+        # Normalise paths and close open figures.  fits_dir must be
+        # absolute: per-image main.py chdirs into the output tree before
+        # resolving it, and a relative path would land inside
+        # <fits_dir>_REDUCED and hide the staged ready_templates.
         fits_dir = default_input.get("fits_dir") or ""
         if isinstance(fits_dir, str) and fits_dir.endswith("/"):
             fits_dir = fits_dir[:-1]
-            default_input["fits_dir"] = fits_dir
+        if isinstance(fits_dir, str) and fits_dir:
+            default_input["fits_dir"] = os.path.abspath(fits_dir)
 
         # Clear module-level caches to ensure independence between image runs
         # This prevents state contamination when processing multiple images
@@ -1953,7 +1957,7 @@ class AutomatedPhotometry:
             if unknown_paths:
                 unique_sorted = sorted(set(unknown_paths))
                 raise KeyError(
-                    "Unknown AutoPHOT config keys detected. "
+                    "Unknown AutoPhOT config keys detected. "
                     "These were found in the driver-provided configuration but "
                     "do not exist in `autophot/data/default_input.yml`:\n  - "
                     + "\n  - ".join(unique_sorted)
