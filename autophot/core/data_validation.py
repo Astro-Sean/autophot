@@ -33,7 +33,7 @@ log = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 # ---------------------------------------------------------------------------
-# Quality flags (bitmask) - kept in sync with utils/quality_flags.py
+# Quality flags (bitmask) - kept in sync with autophot/core/quality_flags.py
 # ---------------------------------------------------------------------------
 
 # Data-validation flags (bits 0-15)
