@@ -9240,8 +9240,18 @@ class Templates:
                             }
                             with quiet_root_logger():
                                 sp = Spalipy(_tpl_fill, **_sp_kwargs)
+                            def _is_knot_warn(_w):
+                                return issubclass(
+                                    _w.category, UserWarning
+                                ) and ("storage space" in str(_w.message))
+
+                            _sp_knot_warn = False
+                            _wrec = []
                             try:
-                                with quiet_root_logger():
+                                with quiet_root_logger(), warnings.catch_warnings(
+                                    record=True
+                                ) as _wrec:
+                                    warnings.simplefilter("always")
                                     if _paired_affine is not None:
                                         sp._alignment_failed[0] = False
                                         sp._affine_transform = [_paired_affine]
@@ -9294,6 +9304,25 @@ class Templates:
                                     sp._aligned_data = None
                                     _aligned_ok = True  # break outer while too
                                     break
+                            else:
+                                # scipy's FITPACK spline warns raw when the
+                                # matched pool cannot support the requested
+                                # order ("storage space exceeds ... or s too
+                                # small"); flag it so the fallback is logged
+                                # once instead of leaking six lines to the
+                                # console.
+                                _sp_knot_warn = any(
+                                    _is_knot_warn(_w) for _w in _wrec
+                                )
+                            finally:
+                                for _w in _wrec:
+                                    if not _is_knot_warn(_w):
+                                        warnings.warn_explicit(
+                                            _w.message,
+                                            _w.category,
+                                            _w.filename,
+                                            _w.lineno,
+                                        )
                             # A converged spline is not necessarily a
                             # supported one: a cubic warp fit to too few
                             # matched sources interpolates between anchors
@@ -9325,6 +9354,19 @@ class Templates:
                                 )
                                 sp._aligned_data = None
                                 continue
+                            if _sp_knot_warn:
+                                # scipy returned a least-squares spline on the
+                                # knots it could place rather than the
+                                # requested smoothing fit; the transform is
+                                # still valid - the count gate above already
+                                # demotes genuinely under-supported orders.
+                                logger.info(
+                                    "spalipy: order=%d spline could not meet "
+                                    "the smoothing target for %d matched "
+                                    "sources; using the least-squares knots "
+                                    "scipy returned.",
+                                    _try_order, _n_match_now,
+                                )
                             _aligned_ok = True
                             break  # success
                         else:
