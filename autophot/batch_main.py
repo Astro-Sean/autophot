@@ -24,6 +24,11 @@ Typical usage:
 On an HPC system, you would usually run this inside a single job that
 requests enough cores (e.g. --cpus-per-task) to cover the requested
 number of parallel images times the per-image threads.
+
+For the standard workflow - scan a fits_dir for images and run the full
+pipeline end to end - use autophot-driver with nCPU>1 instead; it
+dispatches the same per-image workers and also handles templates,
+reporting, and restarts.
 """
 
 from __future__ import annotations
