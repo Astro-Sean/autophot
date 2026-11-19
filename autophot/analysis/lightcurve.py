@@ -1,4 +1,4 @@
-"""Light-curve plotting and photometry table generation for AutoPHOT.
+"""Light-curve plotting and photometry table generation for AutoPhOT.
 
 Provides functions to:
 
