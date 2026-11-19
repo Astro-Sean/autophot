@@ -159,47 +159,35 @@ from typing import NamedTuple
 # =============================================================================
 # Custom / Local Module Imports
 # =============================================================================
-try:
-    from ..calibration.catalog import Catalog
-except ModuleNotFoundError:
-    Catalog = None
-try:
-    from ..core.functions import (
-        log_step,
-        distance_to_uniform_row_col,
-        get_header,
-        get_image,
-        get_image_stats,
-        save_to_fits,
-        remove_wcs_from_header,
-    )
-except (ModuleNotFoundError, ImportError):
-    # Download-only use does not require the full photometry stack.
-    def log_step(message: Any, *args: Any, **kwargs: Any) -> str:
-        m = str(message).strip()
-        if not m:
-            return ""
-        rule = "-" * 70
-        return f"\n{rule}\n{m}\n{rule}"
-
-    distance_to_uniform_row_col = None
-    get_header = None
-    get_image = None
-    get_image_stats = None
-    save_to_fits = None
-    remove_wcs_from_header = None
+from ..calibration.catalog import Catalog
+from ..core.functions import (
+    log_step,
+    distance_to_uniform_row_col,
+    get_header,
+    get_image,
+    get_image_stats,
+    save_to_fits,
+    remove_wcs_from_header,
+    clean_subprocess_log,
+    log_result,
+    log_warning_from_exception,
+    safe_fits_write,
+    cap_console_lines,
+    photutils_n_threads,
+    stat_block,
+    which_exe,
+    STATUS,
+    _sfft_post_anomaly_retry_viable,
+    invalidate_fits_cache,
+)
 from ..pipeline.wcs import get_wcs
 try:
     from ..subtraction import run_IDC
 except (ModuleNotFoundError, ImportError):
+    # run_IDC drives the external SCAMP/SWarp toolchain; its import can
+    # legitimately fail where those binaries are absent, and callers check
+    # for None before using it.
     run_IDC = None
-
-from ..core.functions import clean_subprocess_log, log_result, log_warning_from_exception, safe_fits_write, cap_console_lines, photutils_n_threads, stat_block, which_exe, STATUS, _sfft_post_anomaly_retry_viable
-try:
-    from ..core.functions import invalidate_fits_cache
-except ImportError:
-    def invalidate_fits_cache(fpath=None):
-        return None
 # =============================================================================
 # External Tool Imports
 # =============================================================================
@@ -4988,7 +4976,7 @@ def _sfft_peak_mem_gb(
     workspace, the (L0+L1) complex128 kernel-component planes used to
     apply the solved kernel, and a dozen image-sized buffers held by
     the prep/masked-image path.  Kept in agreement with the copy in
-    utils/run_sfft.py, which re-checks the same budget in-process.
+    autophot/subtraction/run_sfft.py, which re-checks the same budget in-process.
     """
     hw = max(int(ker_hw), 1)
     fab = (2 * hw + 1) ** 2
@@ -17906,12 +17894,7 @@ class Templates:
                     cmd_local.append("-crowded")
                 return cmd_local
 
-            out_base = (
-                Path(base_name).stem.replace(" ", "_")
-                .replace(".", "_")
-                .replace("_APT", "")
-                .replace("_ERROR", "")
-            )
+            out_base = Path(base_name).stem.replace(" ", "_").replace(".", "_")
             post_anomaly_csv = scienceDir / f"SFFT_PostAnomaly_Sources_{out_base}.csv"
             matching_sources_csv = scienceDir / f"SFFT_Matching_Sources_{out_base}.csv"
             log_path = scienceDir / f"SFFT_{Path(base_name).stem}.txt"
