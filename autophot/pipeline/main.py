@@ -1900,6 +1900,167 @@ def _write_sci_analytic_stamp(
     return fwhm, "%d star cutouts" % len(stars)
 
 
+def _merge_target_source_mask(
+    hw_mask,
+    src_mask,
+    positions_xy,
+    *,
+    r_keep,
+    r_self,
+    r_fit,
+    ann_in,
+    ann_out,
+    r_meas,
+    image=None,
+):
+    """Merge the detected-source mask into the target mask.
+
+    The union ``hw_mask | src_mask`` keeps residual light from detected
+    host/neighbour footprints out of the aperture annulus and the PSF
+    local background.  A detected component that touches a measured
+    position, however, is part of what the fit is meant to measure - the
+    transient itself on a difference image, or the host galaxy it is
+    embedded in.  Masked inside the fit window it carves out the target's
+    own wings; masked across the annulus it leaves no usable background
+    pixels, and a host-embedded target then collapses to ~zero flux.
+    This reopens only the target-associated component, inside the fit
+    region first and - when the annulus or fit region would still be
+    unusable - out to the measurement edge.  Components not touching a
+    measured position stay masked throughout.
+
+    ``positions_xy`` are (x, y) pixel positions in mask coordinates.
+    ``r_keep`` is the always-unmasked disk radius, ``r_self`` the small
+    disk used to identify the target's own component, ``r_fit`` the PSF
+    fit-window radius, ``ann_in``/``ann_out`` the local-background annulus
+    radii and ``r_meas`` the measurement-region edge.  ``image`` supplies
+    non-finite/zero-pixel information for the unusable-fraction triggers;
+    when absent or shape-mismatched the fractions come from the mask
+    alone.
+
+    Returns ``(mask, flags)`` where ``flags`` lists relaxation tokens
+    (e.g. "target_srcmask_relaxed") for the output CSV.
+    """
+    flags = []
+    hw = np.asarray(hw_mask, dtype=bool)
+    src = np.asarray(src_mask, dtype=bool)
+    merged = hw | src
+    # Fully unmask a disk around each measured position: no mask may
+    # overlap the target location.  Non-finite image values are still
+    # vetoed by the aperture worker's own isfinite check, so this only
+    # admits finite data.
+    yy_m, xx_m = np.ogrid[: merged.shape[0], : merged.shape[1]]
+    self_or = np.zeros(merged.shape, dtype=bool)
+    fitreg_or = np.zeros(merged.shape, dtype=bool)
+    annring_or = np.zeros(merged.shape, dtype=bool)
+    meas_or = np.zeros(merged.shape, dtype=bool)
+    for mx, my in positions_xy:
+        d2_m = (xx_m - mx) ** 2 + (yy_m - my) ** 2
+        merged[d2_m <= r_keep**2] = False
+        self_or |= d2_m <= r_self**2
+        fitreg_or |= d2_m <= r_fit**2
+        annring_or |= (d2_m >= ann_in**2) & (d2_m < ann_out**2)
+        meas_or |= d2_m <= r_meas**2
+    n_added = int(np.count_nonzero(merged & ~hw))
+    if n_added:
+        logging.info(
+            "Target mask: excluded %d detected-source pixel(s) "
+            "(host/neighbour footprints) from the target "
+            "aperture annulus and PSF fit.",
+            n_added,
+        )
+    src_only = src & ~hw
+    if not np.any(src_only):
+        return merged, flags
+    tgt_comp = np.zeros(merged.shape, dtype=bool)
+    try:
+        from scipy.ndimage import label as _ndi_label
+
+        lab_t, _ = _ndi_label(src_only, structure=np.ones((3, 3), int))
+        tl = np.unique(lab_t[self_or])
+        tl = tl[tl > 0]
+        if tl.size:
+            tgt_comp = np.isin(lab_t, tl)
+    except Exception as _lab_exc:
+        logging.debug("Target-component labelling failed: %s", _lab_exc)
+    if np.any(tgt_comp):
+        reopen = tgt_comp & fitreg_or & merged
+        if np.any(reopen):
+            merged[reopen] = False
+            flags.append("target_srcmask_relaxed")
+            logging.info(
+                "Target mask: reopened %d pixel(s) of the "
+                "target's own detected footprint inside the "
+                "fit region (r<%.1f px); unrelated detected "
+                "sources stay masked.",
+                int(np.count_nonzero(reopen)),
+                r_fit,
+            )
+    # Fallback for a cannibalised measurement region: if the annulus
+    # would fail (>50% unusable) or the fit region is gutted (>90%
+    # unusable), first extend the target's own component out to the
+    # annulus edge, then - as a last resort - drop every detected
+    # footprint inside the measurement disk.  A flagged local estimate
+    # is better than no measurement; masking outside the region is
+    # untouched either way.
+    if image is not None and np.shape(image) == merged.shape:
+        image = np.asarray(image)
+        unusable = merged | ~np.isfinite(image)
+        # The aperture worker's annulus also rejects exact zeros
+        # (SWarp padding), so count them too.
+        ann_bad = unusable | (image == 0.0)
+        frac_ann = float(
+            np.count_nonzero(ann_bad & annring_or)
+            / max(1, np.count_nonzero(annring_or))
+        )
+        frac_fit = float(
+            np.count_nonzero(unusable & fitreg_or)
+            / max(1, np.count_nonzero(fitreg_or))
+        )
+        if frac_ann > 0.5 or frac_fit > 0.9:
+            reopen = tgt_comp & meas_or & merged
+            n_reopen = int(np.count_nonzero(reopen))
+            merged[reopen] = False
+            unusable = merged | ~np.isfinite(image)
+            ann_bad = unusable | (image == 0.0)
+            frac_ann2 = float(
+                np.count_nonzero(ann_bad & annring_or)
+                / max(1, np.count_nonzero(annring_or))
+            )
+            frac_fit2 = float(
+                np.count_nonzero(unusable & fitreg_or)
+                / max(1, np.count_nonzero(fitreg_or))
+            )
+            dropped = 0
+            if frac_ann2 > 0.5 or frac_fit2 > 0.9:
+                src_still = merged & src_only & meas_or
+                dropped = int(np.count_nonzero(src_still))
+                merged[src_still] = False
+            if n_reopen:
+                flags.append("target_annulus_relaxed")
+            if dropped:
+                flags.append("target_neighbour_relaxed")
+            logging.warning(
+                "Target mask: %.0f%% of the annulus and %.0f%% "
+                "of the fit region were still masked around "
+                "the keep-disk; reopened %d pixel(s) of the "
+                "target's own detected footprint to the "
+                "annulus edge (r<%.0f px)%s. Flagged in "
+                "output.",
+                100.0 * frac_ann,
+                100.0 * frac_fit,
+                n_reopen,
+                ann_out,
+                (
+                    f" and dropped {dropped} remaining "
+                    "detected-source pixel(s) inside the "
+                    "measurement region"
+                    if dropped
+                    else ""
+                ),
+            )
+    return merged, flags
+
+
 # =============================================================================
 # Main Function: run_photometry
 # =============================================================================
@@ -13539,6 +13700,12 @@ def run_photometry():
         cutout_y0 = 0
         cutout_target_x = float(bg_target_x_pix)
         cutout_target_y = float(bg_target_y_pix)
+        # Target-mask diagnostics surfaced in the output CSV.  Bound here so
+        # the output section stays valid if the source-mask merge below is
+        # skipped (no defects mask, cutout discarded, or early failure).
+        _target_phot_flags = []
+        _target_mask_frac = np.nan
+        _target_annulus_mask_frac = np.nan
 
         # defects_mask already unions detected sources (host galaxy,
         # neighbours) with hardware defects; fold in the post-pass
@@ -13717,6 +13884,40 @@ def run_photometry():
             max(_ap_rad_eff, float(ImageFWHM)),
             _ap_rad_eff + 0.5 * float(ImageFWHM),
         )
+        # Local-background annulus radii, matching the recipe used by both
+        # aperture.measure and the target PSF fit (inner edge = aperture +
+        # gap*FWHM, outer = inner + width*FWHM).  Used to size the
+        # measurement region the detected-source mask must not cannibalise
+        # and for the mask-fraction diagnostics written to the output CSV.
+        try:
+            _fwhm_ann = float(input_yaml.get("fwhm", ImageFWHM))
+        except (TypeError, ValueError):
+            _fwhm_ann = np.nan
+        if not np.isfinite(_fwhm_ann) or _fwhm_ann <= 0:
+            _fwhm_ann = _ap_rad_eff
+        _crowded_ann = bool(
+            (input_yaml.get("photometry") or {}).get("crowded_field", False)
+        )
+        _ann_gap = float(
+            (input_yaml.get("photometry") or {}).get(
+                "annulus_gap_fwhm", 0.5 if _crowded_ann else 0.75
+            )
+        )
+        _ann_wid = float(
+            (input_yaml.get("photometry") or {}).get(
+                "annulus_width_fwhm", 1.5 if _crowded_ann else 2.0
+            )
+        )
+        _ann_in = float(np.ceil(_ap_rad_eff + _ann_gap * _fwhm_ann))
+        _ann_out = float(np.ceil(_ann_in + _ann_wid * _fwhm_ann))
+        # _r_fit approximates the PSF fit-window radius (the target fit box
+        # grows to ~3-6 FWHM across, half-width ~1.5-3 FWHM) so the target's
+        # own wings are never masked inside the fitted region.  _r_self is
+        # the small disk used to identify the detected-source component the
+        # target itself sits on.
+        _r_fit = max(_ann_in, 3.0 * _fwhm_ann)
+        _r_meas = max(_ann_out, _r_fit)
+        _r_self = min(_r_keep, max(1.5, 0.5 * _fwhm_ann))
         _srcmask_for_target = (
             target_cutout_srcmask
             if target_cutout is not None and target_cutout_srcmask is not None
@@ -13784,25 +13985,19 @@ def run_photometry():
                 else np.zeros(_src.shape, dtype=bool)
             )
             if _src.shape == _hw.shape:
-                _merged = _hw | _src
-                # Fully unmask a disk around each measured position: no
-                # mask may overlap the target location.  Non-finite image
-                # values are still vetoed by the aperture worker's own
-                # isfinite check, so this only admits finite data.
-                _yy_m, _xx_m = np.ogrid[: _merged.shape[0], : _merged.shape[1]]
-                for _mx, _my in zip(
-                    TargetPosition["x_pix"], TargetPosition["y_pix"]
-                ):
-                    _disk = (_xx_m - _mx) ** 2 + (_yy_m - _my) ** 2 <= _r_keep**2
-                    _merged[_disk] = False
-                _n_added = int(np.count_nonzero(_merged & ~_hw))
-                if _n_added:
-                    logging.info(
-                        "Target mask: excluded %d detected-source pixel(s) "
-                        "(host/neighbour footprints) from the target "
-                        "aperture annulus and PSF fit.",
-                        _n_added,
-                    )
+                _merged, _tflags = _merge_target_source_mask(
+                    _hw,
+                    _src,
+                    zip(TargetPosition["x_pix"], TargetPosition["y_pix"]),
+                    r_keep=_r_keep,
+                    r_self=_r_self,
+                    r_fit=_r_fit,
+                    ann_in=_ann_in,
+                    ann_out=_ann_out,
+                    r_meas=_r_meas,
+                    image=image_for_target,
+                )
+                _target_phot_flags.extend(_tflags)
                 mask_for_target = _merged
 
         # ---------------------------------------------------------------------
@@ -14145,6 +14340,88 @@ def run_photometry():
                 logging.warning(
                     "GALFIT host modelling failed (%s); using unsubtracted cutout.",
                     _hm_exc,
+                )
+
+        # ---------------------------------------------------------------------
+        # Target-region mask diagnostics.  Fraction of each measured
+        # position's measurement region (out to ``_r_meas``, covering the
+        # aperture, the PSF fit window and the background annulus) and of the
+        # annulus ring itself that is unusable - masked by the delivered
+        # target mask or non-finite in the data.  Written to the output CSV
+        # so a target photometered through a mostly-masked region is not
+        # mistaken for a clean non-detection.
+        # ---------------------------------------------------------------------
+        if (
+            mask_for_target is not None
+            and np.ndim(mask_for_target) == 2
+            and np.shape(mask_for_target) == np.shape(image_for_target)
+            and {"x_pix", "y_pix"}.issubset(TargetPosition.columns)
+        ):
+            try:
+                _unusable_t = np.asarray(
+                    mask_for_target, dtype=bool
+                ) | ~np.isfinite(image_for_target)
+                # Annulus validity matches the aperture worker: finite,
+                # unmasked and non-zero (zero marks SWarp padding there).
+                _ann_bad_t = _unusable_t | (
+                    np.asarray(image_for_target) == 0.0
+                )
+                _yy_d, _xx_d = np.ogrid[
+                    : _unusable_t.shape[0], : _unusable_t.shape[1]
+                ]
+                _frac_ann_l = []
+                _frac_meas_l = []
+                # Row 0 only: the output row describes the primary target, so
+                # an additional target's masked region must not flag it.
+                _mx = float(TargetPosition["x_pix"].iloc[0])
+                _my = float(TargetPosition["y_pix"].iloc[0])
+                _d2 = (_xx_d - _mx) ** 2 + (_yy_d - _my) ** 2
+                _ann = (_d2 >= _ann_in**2) & (_d2 < _ann_out**2)
+                _meas = _d2 <= _r_meas**2
+                if np.any(_ann):
+                    _frac_ann_l.append(
+                        float(np.count_nonzero(_ann_bad_t & _ann))
+                        / np.count_nonzero(_ann)
+                    )
+                if np.any(_meas):
+                    _frac_meas_l.append(
+                        float(np.count_nonzero(_unusable_t & _meas))
+                        / np.count_nonzero(_meas)
+                    )
+                if _frac_ann_l:
+                    _target_annulus_mask_frac = max(_frac_ann_l)
+                if _frac_meas_l:
+                    _target_mask_frac = max(_frac_meas_l)
+                if (
+                    np.isfinite(_target_mask_frac)
+                    and _target_mask_frac > 0.9
+                ):
+                    _target_phot_flags.append("target_mask_gt90")
+                    logging.warning(
+                        "Target mask: %.0f%% of the measurement region "
+                        "(r<%.0f px) is masked or non-finite; target "
+                        "photometry this epoch is unreliable "
+                        "(flagged in output).",
+                        100.0 * _target_mask_frac,
+                        _r_meas,
+                    )
+                if (
+                    np.isfinite(_target_annulus_mask_frac)
+                    and _target_annulus_mask_frac > 0.5
+                ):
+                    _target_phot_flags.append("target_annulus_mask_gt50")
+                    logging.warning(
+                        "Target mask: %.0f%% of the background annulus "
+                        "(r=%.0f-%.0f px) is masked or non-finite; the "
+                        "local background may fail or be unrepresentative "
+                        "(flagged in output).",
+                        100.0 * _target_annulus_mask_frac,
+                        _ann_in,
+                        _ann_out,
+                    )
+            except Exception as _tmd_exc:
+                logging.warning(
+                    "Target mask diagnostics failed: %s", _tmd_exc
                 )
 
         # Centroid-refinement box: ~1xFWHM, forced odd for a central pixel.
@@ -16384,6 +16661,18 @@ def run_photometry():
         # Save Output
         # =============================================================================
 
+        # Pull the aperture worker's failure reason into the flag list so the
+        # reported failure mode is visible in the CSV (e.g.
+        # "annulus_too_many_nans") and not only in the log.
+        if "fail_reason" in TargetPosition.columns:
+            _fr = str(TargetPosition.at[idx, "fail_reason"] or "")
+            if (
+                _fr
+                and _fr.lower() not in ("nan", "none")
+                and _fr not in _target_phot_flags
+            ):
+                _target_phot_flags.append(_fr)
+
         #  Initialize Output Dictionary
         output = {
             # More descriptive than the full FITS path:
@@ -16456,6 +16745,16 @@ def run_photometry():
                 PreformSubtraction if "PreformSubtraction" in locals() else False
             ),
             "etime": time.time() - start,
+            # Fraction of the target measurement region (and of the
+            # background annulus) excluded by the delivered target mask or
+            # non-finite data.  Near-unity values mean the fit ran on almost
+            # no usable pixels and the photometry is unreliable.
+            "target_mask_frac": _target_mask_frac,
+            "target_annulus_mask_frac": _target_annulus_mask_frac,
+            # Semicolon-separated quality tokens (mask relaxations, aperture
+            # fail reasons) so a compromised epoch is visible without
+            # parsing the log.
+            "photometry_flags": "; ".join(_target_phot_flags),
         }
         output.update(
             {
@@ -17247,6 +17546,9 @@ def run_photometry():
             "delta_chi2",
             "empirical_p_false",
             "empirical_n_sites",
+            "target_mask_frac",
+            "target_annulus_mask_frac",
+            "photometry_flags",
             # fluxes
             "flux_psf",
             "flux_psf_err",
