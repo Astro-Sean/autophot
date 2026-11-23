@@ -168,6 +168,8 @@ from ..core.functions import (STATUS, SATURATE_SENTINEL_MIN, VERBOSE_LEVELS,
                        verbose_to_console_level, which_exe, write_output_csv,
                        FILTER_HEADER_CANDIDATES, NON_FILTER_VALUES,
                        find_filter_header_key)
+from ..core.log_format import (begin_stage, end_stage, final_summary,
+                       install_warning_tagger, reset_run_state, run_header)
 from .fwhm import Find_FWHM
 from ..analysis.limits import BETA_APERTURE_SIGMA_N, Limits, _analytic_psf_for_injection
 from ..analysis.plot import Plot
@@ -2436,21 +2438,25 @@ def run_photometry():
 
         # Global verbosity control (0=quiet, 1=normal, 2=verbose, 3=debug).
         # The console handler is level-gated by the tier; the per-image log
-        # file always records DEBUG+ so the full diagnostic record is kept
-        # regardless of how quiet the console is.
+        # file keeps INFO+ by default so a run reads top to bottom.  The
+        # full DEBUG diagnostic record (per-bin, per-star, per-trial lines)
+        # is written only on an explicit debug run (verbosity >= 3); bulk
+        # coordinate/column dumps go to *_debug_dump.log instead.
         vlevel = resolve_verbose_level(input_yaml.get("global_verbose_level", 1))
         console_level = verbose_to_console_level(vlevel)
 
         # Plain formatter for the file log (no ANSI codes).
         log_file = os.path.join(cur_dir, f"LOG_{input_yaml['base']}.log")
         file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(
+            logging.DEBUG if vlevel >= 3 else logging.INFO
+        )
         # No per-line timestamp: the run's wall-clock start/end are logged
         # explicitly, so the level tag is the only prefix kept in the file.
         plain_formatter = PlainFormatter(
             fmt="%(levelname)s - %(message)s",
         )
-        # PlainFormatter wraps file lines itself (max_width=150).
+        # PlainFormatter wraps file lines itself (max_width=100).
         file_handler.setFormatter(plain_formatter)
 
         root_logger = logging.getLogger("")
@@ -2467,6 +2473,11 @@ def run_photometry():
         console.setFormatter(formatter)
 
         logging.getLogger("").addHandler(console)
+
+        # WARNING records get a stable [TAG] prefix and are registered
+        # for the end-of-run warnings recap.
+        install_warning_tagger()
+        reset_run_state()
 
         # Library DEBUG output (matplotlib findfont alone emits ~50k lines
         # per image) would flood the DEBUG-level log file.
@@ -2527,7 +2538,25 @@ def run_photometry():
         base_filename = os.path.basename(fpath)
         write_dir = (cur_dir + "/").replace(" ", "_")
         input_yaml["write_dir"] = write_dir
-        logging.info("Running AutoPhOT v%s on %s", AUTOPHOT_VERSION, base_filename)
+        # Run-opening block: version, input, start time, key config -
+        # the RUN header that pairs with the RUN SUMMARY at the end.
+        _cat_cfg = input_yaml.get("catalog", {}) or {}
+        _ts_cfg_hdr = input_yaml.get("template_subtraction", {}) or {}
+        _run_cfg = [
+            ("Verbosity", "debug" if vlevel >= 3 else vlevel),
+            ("nCPU", input_yaml.get("nCPU")),
+            ("Catalog", _cat_cfg.get("use_catalog")),
+            ("ForceConv", _ts_cfg_hdr.get("forceconv")),
+        ]
+        _run_cfg = [(k, v) for k, v in _run_cfg if v is not None]
+        log_status(
+            run_header(
+                AUTOPHOT_VERSION,
+                base_filename,
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start)),
+                _run_cfg,
+            )
+        )
         logging.info(
             "Report any issues at: https://github.com/Astro-Sean/autophot/issues"
         )
@@ -3387,7 +3416,7 @@ def run_photometry():
         # =============================================================================
         # Image Preprocessing
         # =============================================================================
-        log_status(border_msg("Image preprocessing"))
+        begin_stage("Image preprocessing")
 
         # -------------------------------------------------------------------------
         # Trim NaN boundaries (chip gaps / no-coverage edges)
@@ -3708,8 +3737,8 @@ def run_photometry():
                 logging.warning("Could not check target pixel value: %s", check_exc)
 
         # Stage-closing summary: what the preprocessing pass produced.
-        log_result(
-            "[OK] %dx%d px, trim %.1f arcmin, NaN-edge-trim %s",
+        end_stage(
+            "%dx%d px, trim %.1f arcmin, NaN-edge-trim %s",
             image.shape[1],
             image.shape[0],
             float(input_yaml["preprocessing"].get("trim_image", 0) or 0),
@@ -3724,7 +3753,7 @@ def run_photometry():
         # undistorted pixel grid. Requires a header WCS (SCAMP seed) and
         # scamp+swarp executables; any failure keeps the original image.
         if (input_yaml.get("wcs") or {}).get("correct_distortion", False):
-            log_status(border_msg("Distortion correction: SCAMP + SWarp"))
+            begin_stage("Distortion correction: SCAMP + SWarp")
             try:
                 _dc_wcs = get_wcs(header)
                 if _dc_wcs is None or not getattr(_dc_wcs, "has_celestial", False):
@@ -3792,7 +3821,7 @@ def run_photometry():
         # =============================================================================
         #   Run SExtractor
         # =============================================================================
-        log_status(border_msg("Source detection and FWHM"))
+        begin_stage("Source detection and FWHM")
         _fwhm_err = np.nan
         try:
             _sex_wrapper = SExtractorWrapper(config=input_yaml)
@@ -3856,7 +3885,7 @@ def run_photometry():
         # =============================================================================
         # Measuring the background statistics (don't remove it)
         # =============================================================================
-        log_status(border_msg("Background: initial pass"))
+        begin_stage("Background: initial pass")
 
         bg_remover = BackgroundSubtractor(input_yaml)
         result = bg_remover.remove(image, plot=False, fwhm=ImageFWHM)
@@ -4139,7 +4168,7 @@ def run_photometry():
         # =============================================================================
         #          Check for Existing WCS
         # =============================================================================
-        log_status(border_msg("WCS: check header and plate solve"))
+        begin_stage("WCS: check header and plate solve")
 
         existingWCS = False
         updated_header = None
@@ -4300,8 +4329,8 @@ def run_photometry():
                 pixel_scale,
             )
         else:
-            log_result(
-                "[OK] %s WCS, pixel scale %.3f arcsec/px",
+            end_stage(
+                "%s WCS, pixel scale %.3f arcsec/px",
                 _wcs_state,
                 pixel_scale,
             )
@@ -4435,7 +4464,7 @@ def run_photometry():
         # =============================================================================
         # Remove the background
         # =============================================================================
-        log_status(border_msg("Background: masked pass (variable sources, SIMBAD)"))
+        begin_stage("Background: masked pass (variable sources, SIMBAD)")
 
         result = bg_remover.remove(
             image,
@@ -4523,8 +4552,8 @@ def run_photometry():
         )
         safe_fits_write(weight_fpath, background_rms, weight_header)
         # Stage-closing summary for the masked background pass.
-        log_result(
-            "[OK] sky %.3e ADU, RMS %.3e ADU (%.1f%% of pixels masked)",
+        end_stage(
+            "sky %.3e ADU, RMS %.3e ADU (%.1f%% of pixels masked)",
             float(np.nanmedian(background_surface)),
             float(np.nanmedian(background_rms)),
             100.0
@@ -4549,7 +4578,7 @@ def run_photometry():
             if (tname and str(tname).strip() != "Transient")
             else "Target position"
         )
-        log_status(border_msg(section_title))
+        begin_stage(section_title)
 
         if (input_yaml["target_name"] is None) or (
             input_yaml["target_name"] == "Transient"
@@ -4706,7 +4735,7 @@ def run_photometry():
             input_yaml["template_subtraction"].get("do_subtraction", False)
             and not prepare_template
         ):
-            log_status(border_msg("Template: locate, align, and match"))
+            begin_stage("Template: locate, align, and match")
             try:
                 templateFpath = template_functions.get_template()
                 try:
@@ -4971,7 +5000,7 @@ def run_photometry():
         # =============================================================================
         # Get background statistics after subtraction
         # =============================================================================
-        log_status(border_msg("Calibration stage: image, background, and weight"))
+        begin_stage("Calibration stage: image, background, and weight")
 
         # Reuse cached background results if fpath hasn't changed
         if fpath == fpath_before_subtraction:
@@ -5037,8 +5066,8 @@ def run_photometry():
         )
         safe_fits_write(weight_fpath, background_rms, weight_header)
         # Stage-closing summary for the calibration stage.
-        log_result(
-            "[OK] sky %.3e ADU, RMS %.3e ADU; weight map %s",
+        end_stage(
+            "sky %.3e ADU, RMS %.3e ADU; weight map %s",
             float(np.nanmedian(background_surface)),
             float(np.nanmedian(background_rms)),
             os.path.basename(weight_fpath),
@@ -5047,7 +5076,7 @@ def run_photometry():
         # =============================================================================
         #     Get a Reference catalog
         # =============================================================================
-        log_status(border_msg("Reference photometric catalog"))
+        begin_stage("Reference photometric catalog")
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
 
         selected_catalog_name = Calibrate_Catalog._require_catalog_selected(
@@ -5072,6 +5101,23 @@ def run_photometry():
         # catalog) or the scalar catalog_query_radius_arcmin from the
         # footprint union; otherwise size it from this image's WCS, or its
         # pixel scale when the image carries no WCS.
+        # The query bounds honor the same region_min/max_arcmin config
+        # the driver applies when it sizes footprint regions, so a tuned
+        # bound is not silently re-clamped here.
+        _cat_cfg_rb = input_yaml.get("catalog", {}) or {}
+        try:
+            _cat_rmin = float(_cat_cfg_rb.get("region_min_arcmin", 2.0))
+        except (TypeError, ValueError):
+            _cat_rmin = 2.0
+        try:
+            _cat_rmax = float(_cat_cfg_rb.get("region_max_arcmin", 60.0))
+        except (TypeError, ValueError):
+            _cat_rmax = 60.0
+        if not (np.isfinite(_cat_rmin) and _cat_rmin > 0):
+            _cat_rmin = 2.0
+        if not (np.isfinite(_cat_rmax) and _cat_rmax >= _cat_rmin):
+            _cat_rmax = 60.0
+
         _cat_radius_arcmin = input_yaml.get("catalog", {}).get(
             "catalog_query_radius_arcmin"
         )
@@ -5095,7 +5141,7 @@ def run_photometry():
             if not np.isfinite(_cat_radius_arcmin):
                 _cat_radius_arcmin = 10.0
             else:
-                _cat_radius_arcmin = min(max(_cat_radius_arcmin, 2.0), 60.0)
+                _cat_radius_arcmin = min(max(_cat_radius_arcmin, _cat_rmin), _cat_rmax)
 
         # Per-catalog query region persisted by the driver; the selected
         # catalog's name is normalized so "panstarrs"/"pan_starrs" aliases
@@ -5115,7 +5161,7 @@ def run_photometry():
                 try:
                     _rr = float(_cat_region.get("radius_arcmin"))
                     if np.isfinite(_rr) and _rr > 0:
-                        _cat_radius_arcmin = min(max(_rr, 2.0), 60.0)
+                        _cat_radius_arcmin = min(max(_rr, _cat_rmin), _cat_rmax)
                 except (TypeError, ValueError):
                     pass
             else:
@@ -5291,7 +5337,7 @@ def run_photometry():
         # =============================================================================
         # Run source detection on final calibrated image
         # =============================================================================
-        log_status(border_msg("Source detection on calibrated image"))
+        begin_stage("Source detection on calibrated image")
 
 
         _pre_remeasure_fwhm = (
@@ -5710,7 +5756,7 @@ def run_photometry():
         # =============================================================================
         # PSF Model Building
         # =============================================================================
-        log_status(border_msg("Aperture, optimum radius, and PSF on sequence stars"))
+        begin_stage("Aperture, optimum radius, and PSF on sequence stars")
 
         if input_yaml["photometry"].get("do_AperturePhotometry", False):
             do_aperture_ONLY = True
@@ -7379,7 +7425,7 @@ def run_photometry():
         # =============================================================================
         # Zeropoint Calculation
         # =============================================================================
-        log_status(border_msg("Zeropoint and color terms"))
+        begin_stage("Zeropoint and color terms")
 
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
         GetZeropoint = Zeropoint(input_yaml=input_yaml)
@@ -7847,7 +7893,7 @@ def run_photometry():
                 )
 
             safe_fits_write(os.path.join(cur_dir, newBasename), image, header)
-            log_result("[OK] %s template calibration complete", imageFilter)
+            end_stage("%s template calibration complete", imageFilter)
             return 0
 
         # =============================================================================
@@ -7866,7 +7912,7 @@ def run_photometry():
             and template_available
             and not prepare_template
         ):
-            log_status(border_msg("Difference image (template subtraction)"))
+            begin_stage("Difference image (template subtraction)")
             science_image = get_image(fpath)
             template_image = get_image(templateFpath)
             if science_image.shape != template_image.shape:
@@ -11657,8 +11703,8 @@ def run_photometry():
                                 _convd_rep = _convd_hdr
                         except Exception:
                             pass
-                        log_result(
-                            "[OK] %s subtraction (forceconv=%s, kernel=%s); "
+                        end_stage(
+                            "%s subtraction (forceconv=%s, kernel=%s); "
                             "matched %d sources; diff med %.2f, std %.2f ADU; "
                             "%.1f%% masked",
                             _ts_cfg.get("method", "?"),
@@ -15369,7 +15415,7 @@ def run_photometry():
         # =============================================================================
         # Calibration and Output
         # =============================================================================
-        log_status(border_msg("Calibrated magnitudes (AP and PSF on target)"))
+        begin_stage("Calibrated magnitudes (AP and PSF on target)")
         #  Calibrate Magnitudes
         # Primary-target row label; must be bound even when no zeropoint is
         # available, since downstream code (limits, output dict) uses it.
@@ -15864,8 +15910,8 @@ def run_photometry():
         # Close the section with an outcome line so the header always has a
         # result under it even when every method lacked a zeropoint.
         if _cal_applied:
-            log_result(
-                "[OK] zero point applied to %s",
+            end_stage(
+                "zero point applied to %s",
                 ", ".join(f"{m} {z:.3f} mag" for m, z in _cal_applied),
             )
         else:
@@ -16130,7 +16176,7 @@ def run_photometry():
             or get_LimitingMagnitude
         ):
             snr_val = TargetPosition.at[idx, "SNR"]
-            log_status(border_msg("Limiting magnitude (injection) near target"))
+            begin_stage("Limiting magnitude (injection) near target")
             # Limits instance already created earlier for get_cutout
             try:
                 # Use the full image for PSF calibration to avoid coordinate conversion issues
@@ -18242,21 +18288,22 @@ def run_photometry():
         log_status(ascii_kv("PHOTOMETRY", _res_pairs, framed=True), ui=True)
 
         end_mem = _process_memory_gb()
-        _finish_body = f"Time Taken: {end - start:.1f} s"
         if end_mem is not None and start_mem is not None:
-            _finish_body += (
-                f"\nUsage: {end_mem[1]:.2f} GB peak RAM "
+            _usage = (
+                f"{end_mem[1]:.2f} GB peak RAM "
                 f"({end_mem[0] - start_mem[0]:+.2f} GB during image)"
             )
         elif end_mem is not None:
-            _finish_body += f"\nUsage: {end_mem[1]:.2f} GB peak RAM"
+            _usage = f"{end_mem[1]:.2f} GB peak RAM"
+        else:
+            _usage = ""
         log_status(
-            border_msg(
-                "Photometry finished - "
-                + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end)),
-                body="-",
-                metadata=_finish_body,
-            )
+            final_summary(
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end)),
+                end - start,
+                _usage,
+            ),
+            ui=True,
         )
 
     except Exception as e:
