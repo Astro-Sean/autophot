@@ -537,6 +537,7 @@ try:
         border_msg,
         cap_console_lines,
         ConsoleLevelFilter,
+        SecretScrubFilter,
         STATUS,
         log_status,
         verbose_to_console_level,
@@ -568,6 +569,7 @@ except Exception as _exc:  # pragma: no cover
             border_msg,
             cap_console_lines,
             ConsoleLevelFilter,
+            SecretScrubFilter,
             STATUS,
             log_status,
             verbose_to_console_level,
@@ -588,6 +590,7 @@ except Exception as _exc:  # pragma: no cover
         log_step = None  # type: ignore
         border_msg = None  # type: ignore
         ConsoleLevelFilter = None  # type: ignore
+        SecretScrubFilter = None  # type: ignore
         cap_console_lines = None  # type: ignore
         STATUS = 25  # type: ignore
         log_status = None  # type: ignore
@@ -4174,6 +4177,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         _handler.addFilter(ConsoleLevelFilter(console_level))
     else:
         _handler.setLevel(console_level)
+    if SecretScrubFilter is not None:
+        _handler.addFilter(SecretScrubFilter())
     if ColoredLevelFormatter is not None:
         _handler.setFormatter(ColoredLevelFormatter(use_color=True))
     else:
