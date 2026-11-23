@@ -35,12 +35,12 @@ Requires the `astro` conda environment (`MaxiMask` + `tensorflow`).
 
 `background.use_maximask: true` in `autophot/data/default_input.yml`
 enables the stage inside `BackgroundSubtractor.remove()`: detections
-from `background.maximask_classes` (default CR/HCL/DCL/HP/DP/P/TRL/
-SAT/SP/OV; BG/BBG/FR/NEB excluded) are unioned into
-`hardware_defects_mask` and seeded into the source mask. CPU-only by
-default (`maximask_allow_gpu: false` hides GPUs from TensorFlow). If
-the optional dependencies or inference fail, the stage warns and the
-heuristic masks are used unchanged.
+from `background.maximask_classes` (default HCL/DCL/HP/DP/P/TRL/
+SAT/SP/OV; BG/BBG/FR/NEB mark scene content and CR is left to
+astroscrappy) are unioned into `hardware_defects_mask` and seeded into
+the source mask. CPU-only by default (`maximask_allow_gpu: false`
+hides GPUs from TensorFlow). If the optional dependencies or inference
+fail, the stage warns and the heuristic masks are used unchanged.
 
 ## Running
 
