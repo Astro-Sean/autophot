@@ -358,6 +358,7 @@ from ..core.functions import (
     psf_photometry_threads,
     STATUS,
 )
+from ..core.log_format import table as _log_table, write_debug_dump
 from ..core.plotting_utils import apply_autophot_mplstyle, get_marker_size, get_plot_ext, overlay_mask_hatch, safe_tight_layout, PLOT_COLORS
 from .aperture import (
     _empirical_noise_factor,
@@ -6680,11 +6681,14 @@ class PSF:
                 "annulus_peak": flag_ann_peak, "flux_excess": flag_flux,
                 "core_ellipticity": flag_ellip, "cog": flag_cog,
             }
-            log.debug(
-                "[contamination] mask-keep flag breakdown: %s",
+            log.info(
+                "Star-quality flags: %s (per-star detail at DEBUG)",
                 ", ".join(
-                    f"{k}={int(v.sum())}" for k, v in _breakdown.items()
-                ),
+                    f"{int(v.sum())} {k}"
+                    for k, v in _breakdown.items()
+                    if int(v.sum()) > 0
+                )
+                or "none",
             )
             for r in reject_reasons:
                 log.debug(r)
@@ -6995,10 +6999,22 @@ class PSF:
             log.info("Building ePSF from %s sources", len(df))
             _xy_in = _locate_columns(df)[:2]
             if _xy_in[0] is not None and _xy_in[1] is not None:
-                log.debug(
-                    "PSF pool coordinates:\n%s",
+                # Hundreds of bare coordinates would swamp the log: they go
+                # to the debug-dump file, with one pointer line here.
+                _dump = write_debug_dump(
+                    "PSF pool coordinates",
                     df[[_xy_in[0], _xy_in[1]]].to_string(index=False),
                 )
+                if _dump:
+                    log.info(
+                        "PSF pool coordinates (%d rows) written to %s",
+                        len(df), _dump,
+                    )
+                else:
+                    log.debug(
+                        "PSF pool coordinates:\n%s",
+                        df[[_xy_in[0], _xy_in[1]]].to_string(index=False),
+                    )
 
             # Exclude saturated and streaky/elongated sources from PSF building.
             # For small candidate pools, apply these cuts adaptively so we do not
@@ -7953,10 +7969,20 @@ class PSF:
                     _keep_dbg["strike_names"] = (
                         df["_psf_veto_names"].str.rstrip(";").values
                     )
-                    log.debug(
-                        "PSF candidates surviving quality cuts:\n%s",
+                    _dump = write_debug_dump(
+                        "PSF candidates surviving quality cuts",
                         _keep_dbg.to_string(index=False),
                     )
+                    if _dump:
+                        log.info(
+                            "PSF candidates (%d rows) written to %s",
+                            len(_keep_dbg), _dump,
+                        )
+                    else:
+                        log.debug(
+                            "PSF candidates surviving quality cuts:\n%s",
+                            _keep_dbg.to_string(index=False),
+                        )
             df = df.drop(
                 columns=["_psf_veto", "_psf_veto_names"], errors="ignore"
             )
@@ -9510,7 +9536,7 @@ class PSF:
                     )
                     _conv_frac = getattr(res, "final_converged_fraction", None)
                     _asym = getattr(res, "center_asymmetry", None)
-                    log.info(
+                    log.debug(
                         "ePSF build (oversample=x%d): converged=%s, "
                         "iterations=%d, final_center_accuracy=%.4g px"
                         "%s%s",
@@ -9899,6 +9925,9 @@ class PSF:
             # attempt, which may differ from the kept one).
             _kept_acc_bad = False
             _kept_neg_bad = False
+            # Retry history for the attempts table; per-rung warnings are
+            # consolidated into the single outcome warning after the loop.
+            _epsf_attempts = []
             for _osamp_c in _osamp_ladder:
                 epsf_c, fitted_c, acc_c, init_c, meas_c, conv_c = (
                     _attempt_epsf_build(_osamp_c)
@@ -9949,6 +9978,14 @@ class PSF:
                     and not _neg_bad
                 )
                 if _good:
+                    _epsf_attempts.append(
+                        (
+                            f"x{_osamp_c}",
+                            "yes" if conv_c else "no",
+                            f"{meas_c:.2f}",
+                            "accepted",
+                        )
+                    )
                     epsf, fitted_stars = epsf_c, fitted_c
                     _final_acc = acc_c
                     _epsf_fwhm_meas = meas_c
@@ -9961,30 +9998,39 @@ class PSF:
                             _osamp_c, oversample, meas_c, fwhm,
                         )
                     break
-                if len(_osamp_ladder) > 1 and _osamp_c != _osamp_ladder[-1]:
-                    _why = (
-                        "no usable model"
-                        if epsf_c is None or not _epsf_usable(epsf_c)
+                # Rejection reason for the attempts table; identical to the
+                # old per-rung cascade text, now emitted once at INFO rather
+                # than one WARNING per rung.
+                # Terse verdict cells; the full reason text is carried by
+                # the consolidated quality-gate WARNING below.
+                _why = (
+                    "no usable model"
+                    if epsf_c is None or not _epsf_usable(epsf_c)
+                    else (
+                        f"centre fit {acc_c:.3g} px"
+                        if _acc_bad
                         else (
-                            "degenerate centre fit "
-                            f"(final_center_accuracy={acc_c:.3g} px)"
-                            if _acc_bad
+                            "degenerate profile"
+                            if not np.isfinite(meas_c)
                             else (
-                                "degenerate profile (no half-max crossing)"
-                                if not np.isfinite(meas_c)
-                                else (
-                                    f"measured FWHM {meas_c:.2f} px outside "
-                                    f"[{_fwhm_lo:.2f}, {_fwhm_hi:.2f}]x image "
-                                    f"FWHM {fwhm:.2f} px"
-                                    if _fwhm_bad
-                                    else "noise-dominated wings "
-                                    f"(negative-flux fraction > "
-                                    f"{_negfrac_max:.2f})"
-                                )
+                                f"FWHM outside [{_fwhm_lo:.2f},"
+                                f"{_fwhm_hi:.2f}]x"
+                                if _fwhm_bad
+                                else "noise-dominated wings"
                             )
                         )
                     )
-                    log.warning(
+                )
+                _epsf_attempts.append(
+                    (
+                        f"x{_osamp_c}",
+                        "yes" if conv_c else "no",
+                        f"{meas_c:.2f}" if np.isfinite(meas_c) else "-",
+                        _why,
+                    )
+                )
+                if len(_osamp_ladder) > 1 and _osamp_c != _osamp_ladder[-1]:
+                    log.debug(
                         "ePSF at oversample=x%d degraded: %s; retrying at "
                         "lower oversampling.",
                         _osamp_c, _why,
@@ -10002,6 +10048,18 @@ class PSF:
                     _kept_acc_bad = _acc_bad
                     _kept_neg_bad = _neg_bad
             oversample = _kept_osamp
+
+            # One table carries the whole retry history; the single
+            # outcome WARNING (if the kept model is degraded) comes from
+            # the quality gates below.
+            if len(_epsf_attempts) > 1:
+                log.info(
+                    "ePSF oversampling attempts:\n%s",
+                    _log_table(
+                        ("oversample", "converged", "FWHM px", "verdict"),
+                        _epsf_attempts,
+                    ),
+                )
 
             # Starved-ensemble bookkeeping must precede the quality-gate
             # discards below: on < psf_empirical_min_stars the fitted
