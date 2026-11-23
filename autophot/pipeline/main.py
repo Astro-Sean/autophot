@@ -5360,9 +5360,12 @@ def run_photometry():
             log_exception(e, "Issue with SExtractor")
 
             _find_fwhm_2 = Find_FWHM(input_yaml=input_yaml)
+            # Exclude pixel defects only: masking detected-source footprints
+            # here would prevent the fallback finder from re-detecting real
+            # sources and starve the FWHM sample.
             ImageFWHM, FWHMSources, scale = _find_fwhm_2.measure_image(
                 image=image,
-                mask=defects_mask,
+                mask=hardware_defects_mask,
             )
             _fwhm_err = getattr(_find_fwhm_2, "fwhm_err", _fwhm_err)
             input_yaml["fwhm_err"] = (
@@ -11095,13 +11098,41 @@ def run_photometry():
                 else:
                     if df_zogy_template_build is not None:
                         try:
+                            # Give the build the same template-side bad-pixel
+                            # map used for prior-source vetting above
+                            # (non-finite pixels plus zero/non-finite weight),
+                            # so candidates on dead coverage are excluded
+                            # rather than only NaN-flagged ones.
+                            _tpl_build_mask = ~np.isfinite(
+                                np.asarray(template_image)
+                            )
+                            try:
+                                if (
+                                    "template_weight_path" in dir()
+                                    and template_weight_path is not None
+                                    and os.path.isfile(template_weight_path)
+                                ):
+                                    _tpl_wt_b = get_image(template_weight_path)
+                                    if np.shape(
+                                        _tpl_wt_b
+                                    ) == template_image.shape:
+                                        _tpl_build_mask |= ~np.isfinite(
+                                            _tpl_wt_b
+                                        ) | (_tpl_wt_b <= 0)
+                            except Exception as _wt_exc:
+                                logging.debug(
+                                    "Template weight-map read failed; "
+                                    "ePSF build mask uses NaN pixels "
+                                    "only: %s",
+                                    _wt_exc,
+                                )
                             PSF(
                                 image=template_image,
                                 input_yaml=input_yaml,
                                 header=template_header,
                             ).build(
                                 psfSources=df_zogy_template_build,
-                                mask=None,
+                                mask=_tpl_build_mask,
                                 make_template_psf=True,
                                 filename_prefix="PSF_model_template",
                             )
@@ -13915,6 +13946,41 @@ def run_photometry():
             if target_cutout_mask is not None
             else hardware_defects_mask
         )
+        # The image cutout can succeed while the mask or RMS cutout fails
+        # (different get_cutout outcome), leaving image/mask/rms on mixed
+        # grids; Aperture.measure raises on the shape mismatch rather than
+        # degrading.  Reset to the full frame so all three share one grid.
+        if (
+            (
+                mask_for_target is not None
+                and np.shape(mask_for_target) != np.shape(image_for_target)
+            )
+            or (
+                background_rms_for_target is not None
+                and np.ndim(background_rms_for_target) == 2
+                and np.shape(background_rms_for_target)
+                != np.shape(image_for_target)
+            )
+        ):
+            logging.warning(
+                "Target cutout/mask/RMS geometry mismatch "
+                "(image %s, mask %s, rms %s); falling back to "
+                "full-frame target photometry.",
+                np.shape(image_for_target),
+                getattr(mask_for_target, "shape", None),
+                getattr(background_rms_for_target, "shape", None),
+            )
+            target_cutout = None
+            target_cutout_rms = None
+            target_cutout_mask = None
+            target_cutout_srcmask = None
+            image_for_target = image
+            background_rms_for_target = background_rms
+            mask_for_target = hardware_defects_mask
+            cutout_x0 = 0
+            cutout_y0 = 0
+            cutout_target_x = float(bg_target_x_pix)
+            cutout_target_y = float(bg_target_y_pix)
         # Source footprints (host galaxy, neighbours) also belong in the
         # target mask: smooth residual light is not caught by the annulus
         # sigma-clip and would bias both the aperture background and the
@@ -13956,6 +14022,20 @@ def run_photometry():
         )
         _ann_in = float(np.ceil(_ap_rad_eff + _ann_gap * _fwhm_ann))
         _ann_out = float(np.ceil(_ann_in + _ann_wid * _fwhm_ann))
+        # Mirror the worker's annulus minimum-pixel widening (aperture.py
+        # annulus_min_pixels check) so the unusable-fraction triggers below
+        # test the same ring the measurement actually uses; on undersampled
+        # frames the worker widens past the configured width.
+        _ann_min_pix = int(
+            (input_yaml.get("photometry") or {}).get("annulus_min_pixels", 20)
+        )
+        if (
+            int(np.floor(np.pi * (_ann_out**2 - _ann_in**2)))
+            < _ann_min_pix
+        ):
+            _ann_out = float(
+                np.ceil(np.sqrt(_ann_in**2 + _ann_min_pix / np.pi) + 1)
+            )
         # _r_fit approximates the PSF fit-window radius (the target fit box
         # grows to ~3-6 FWHM across, half-width ~1.5-3 FWHM) so the target's
         # own wings are never masked inside the fitted region.  _r_self is
