@@ -1136,6 +1136,9 @@ class TestRefcatNsourcesScaling:
     def _cat(self, tmp_path, nsources=None):
         cat_cfg = {
             "use_catalog": "refcat",
+            # pin the casjobs rung so the ladder never reaches the
+            # network; fetch_refcat2_field itself is mocked per test
+            "refcat_backend": "casjobs",
             "max_distance": 30,
             "MASTcasjobs_wsid": "dummy",
             "MASTcasjobs_pwd": "dummy",
