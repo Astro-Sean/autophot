@@ -1397,6 +1397,16 @@ def _coverage_optimal_center(ra_deg, dec_deg, region):
     )
 
 
+# VizieR mirrors that carry J/ApJ/867/105/refcat2, tried in order.
+# The unistra primary has served 404s; the CfA mirror is reliable.
+_REFCAT_VIZIER_SERVERS = (
+    "vizier.cfa.harvard.edu",
+    "vizier.cds.unistra.fr",
+    "vizier.nao.ac.jp",
+    "vizier.iucaa.in",
+)
+
+
 def _refcat_nsources_cap(cat_cfg, radius_arcmin):
     """RefCat2's effective per-query row cap for a region.
 
@@ -1413,6 +1423,26 @@ def _refcat_nsources_cap(cat_cfg, radius_arcmin):
     return int(
         np.clip(3.0 * np.pi * float(radius_arcmin) ** 2, 500, 10000)
     )
+
+
+def _refcat_finalize(tab, nsources, ra):
+    """Apply the RefCat2 row cap as a spatially uniform subsample.
+
+    Shared by every fetch transport (CasJobs, VizieR, local files) so
+    the delivered catalog is bounded and field-covering regardless of
+    where the rows came from.
+    """
+    if tab is not None and len(tab) > nsources:
+        logger.info(
+            "RefCat2: %d rows exceed the %d-source cap; "
+            "subsampling spatially to keep coverage uniform.",
+            len(tab),
+            nsources,
+        )
+        tab = _sky_uniform_subsample(
+            tab, int(nsources), center_ra=ra
+        ).reset_index(drop=True)
+    return tab
 
 
 def _query_rows_capped(name, n_rows, cat_cfg, region):
@@ -2505,6 +2535,38 @@ class Catalog:
 
                 job = MastCasJobs(context="HLSP_ATLAS_REFCAT2", **credentials)
 
+                # Non-queued quick endpoint: the same cone in ~seconds vs
+                # minutes-to-hours in the shared job queue.  Quick mode
+                # rejects the INTO MyDB clause and bounds runtime/rows,
+                # so a failure falls through to the queued submit below.
+                try:
+                    q_quick = q.replace(
+                        f"\n                INTO MyDB.{name}", ""
+                    )
+                    _quick_res = job.quick(
+                        q_quick,
+                        context="HLSP_ATLAS_REFCAT2",
+                        task_name=f"refcat quick {ra:.5f} {dec:.5f}",
+                    )
+                    _qt = (
+                        _quick_res.to_pandas()
+                        if hasattr(_quick_res, "to_pandas")
+                        else _quick_res
+                    )
+                    _qt = _qt[~(_qt == 0).any(axis=1)].reset_index(
+                        drop=True
+                    )
+                    if len(_qt) > 0:
+                        logger.info(
+                            "RefCat2 quick-mode returned %d rows", len(_qt)
+                        )
+                        return _refcat_finalize(_qt, nsources, ra)
+                    logger.debug("RefCat2 quick-mode returned no rows; queueing")
+                except Exception as qe:
+                    logger.debug(
+                        "RefCat2 quick-mode failed (%s); queueing", qe
+                    )
+
                 # drop_table_if_exists can fail with transient MAST SQL errors;
                 # since we use random table names, the table almost never exists.
                 # Make this non-fatal so the actual query can still proceed.
@@ -2535,18 +2597,7 @@ class Catalog:
                 tab = tab[~(tab == 0).any(axis=1)]
                 tab.reset_index(drop=True, inplace=True)
 
-                if len(tab) > nsources:
-                    logger.info(
-                        "RefCat2: %d rows exceed the %d-source cap; "
-                        "subsampling spatially to keep coverage uniform.",
-                        len(tab),
-                        nsources,
-                    )
-                    tab = _sky_uniform_subsample(
-                        tab, int(nsources), center_ra=ra
-                    ).reset_index(drop=True)
-
-                return tab
+                return _refcat_finalize(tab, nsources, ra)
 
             except Exception as e:
                 last_error = e
@@ -2561,6 +2612,164 @@ class Catalog:
         logger.error("Catalog retrieval failed after %d attempts", max_retries)
         logger.error("Last error: %s: %s", type(last_error).__name__, last_error)
         return None
+
+    def _refcat2_schema(self, df):
+        """Normalize a refcat2-like frame to the pipeline's 16-column schema.
+
+        MAST CasJobs emits ``RA, Dec, g, dg, ...``; the VizieR mirror
+        (``J/ApJ/867/105/refcat2``) uses ``RA_ICRS, DE_ICRS, gmag,
+        e_gmag, ...`` and masks missing photometry.  Matching is
+        case-insensitive so a local CSV with either convention works.
+        """
+        aliases = {
+            "RA": ("ra", "ra_icrs", "raj2000", "ra_deg"),
+            "Dec": ("dec", "de_icrs", "dec_icrs", "dej2000", "dec_deg"),
+            "g": ("g", "gmag"),
+            "dg": ("dg", "e_gmag", "gerr"),
+            "r": ("r", "rmag"),
+            "dr": ("dr", "e_rmag", "rerr"),
+            "i": ("i", "imag"),
+            "di": ("di", "e_imag", "ierr"),
+            "z": ("z", "zmag"),
+            "dz": ("dz", "e_zmag", "zerr"),
+            "J": ("j", "jmag"),
+            "dJ": ("dj", "e_jmag", "jerr"),
+            "H": ("h", "hmag"),
+            "dH": ("dh", "e_hmag", "herr"),
+            "K": ("k", "kmag", "ksmag"),
+            "dK": ("dk", "e_kmag", "kerr"),
+        }
+        lower = {str(c).lower(): c for c in df.columns}
+        out = {}
+        for canon, names in aliases.items():
+            for n in names:
+                if n in lower:
+                    out[canon] = df[lower[n]]
+                    break
+            else:
+                out[canon] = np.nan
+        res = pd.DataFrame(out)
+        # The CasJobs SQL applies ``r.dr < 0.1`` server-side and then
+        # drops every row holding a 0 sentinel (missing photometry);
+        # keep the same cuts so the cached catalog is equivalent
+        # whichever transport produced it.
+        res = res.replace([np.inf, -np.inf], np.nan)
+        res = res.loc[res["dr"] < 0.1]
+        res = res[~(res == 0).any(axis=1)]
+        res = res.dropna(axis=0, how="any").reset_index(drop=True)
+        return res
+
+    def fetch_refcat2_vizier(
+        self, ra, dec, sr, nsources=1000, servers=None, row_limit=100000
+    ):
+        """Fetch ATLAS-RefCat2 through the VizieR mirror (no credentials).
+
+        ``J/ApJ/867/105/refcat2`` is the same ~1e9-row catalog CasJobs
+        serves, cone-searchable without a MAST account.  Mirrors are
+        tried in order; a mirror that is down or does not carry the
+        catalog just yields the next one.  ``row_limit`` must be finite -
+        VizieR silently returns nothing for an unrestricted query.
+        """
+        servers = list(servers) if servers else list(_REFCAT_VIZIER_SERVERS)
+        # Request every column: VizieR returns an empty table when an
+        # explicit column name does not exist on that mirror, and
+        # names differ between mirrors.  The schema map below selects
+        # what the pipeline needs from whatever comes back.
+        coords = SkyCoord(float(ra), float(dec), unit="deg")
+        last_error = None
+        for srv in servers:
+            try:
+                logger.info(
+                    "Fetching ATLAS-RefCat2 from VizieR (%s) over "
+                    "%.3f deg cone at ra=%.4f dec=%.4f",
+                    srv,
+                    sr,
+                    ra,
+                    dec,
+                )
+                v = Vizier(
+                    columns=["**"],
+                    row_limit=int(row_limit),
+                    vizier_server=srv,
+                )
+                res = v.query_region(
+                    coords,
+                    radius=Angle(float(sr), unit="deg"),
+                    catalog="J/ApJ/867/105/refcat2",
+                )
+                if not res:
+                    raise RuntimeError("empty result")
+                tab = res[0].to_pandas()
+                if len(tab) >= int(row_limit):
+                    logger.warning(
+                        "RefCat2 VizieR hit the %d-row limit at %s; "
+                        "the cone is centre-biased - try the CasJobs "
+                        "backend for the full field.",
+                        len(tab),
+                        srv,
+                    )
+                tab = self._refcat2_schema(tab)
+                if len(tab) == 0:
+                    raise RuntimeError("no rows after schema mapping")
+                logger.info("RefCat2 (VizieR/%s): %d rows", srv, len(tab))
+                return _refcat_finalize(tab, nsources, ra)
+            except Exception as e:
+                last_error = e
+                logger.warning("RefCat2 VizieR mirror %s failed: %s", srv, e)
+        logger.error(
+            "RefCat2 VizieR path failed on all mirrors. Last error: %s",
+            f"{type(last_error).__name__}: {last_error}",
+        )
+        return None
+
+    def fetch_refcat2_local(
+        self, directory, ra, dec, sr, nsources=1000, pattern="*.csv*"
+    ):
+        """Fetch RefCat2 from a local copy (MAST dec-zone CSVs or any
+        CSV holding the refcat2 columns).  Rows are streamed in chunks
+        and filtered to the cone so large zone files do not need to
+        fit in memory.  No network access."""
+        import glob as _glob
+
+        files = sorted(_glob.glob(os.path.join(str(directory), pattern)))
+        if not files:
+            logger.warning(
+                "RefCat2 local: no files matching %r in %s",
+                pattern,
+                directory,
+            )
+            return None
+        cosd = np.cos(np.deg2rad(dec))
+        parts = []
+        for fpath in files:
+            try:
+                for chunk in pd.read_csv(fpath, chunksize=200_000):
+                    sch = self._refcat2_schema(chunk)
+                    if len(sch) == 0:
+                        continue
+                    d = np.hypot(
+                        (sch["RA"].to_numpy() - ra) * cosd,
+                        sch["Dec"].to_numpy() - dec,
+                    )
+                    sel = sch.loc[d <= sr]
+                    if len(sel):
+                        parts.append(sel)
+            except Exception as e:
+                logger.warning("RefCat2 local: skipping %s (%s)", fpath, e)
+        if not parts:
+            logger.warning(
+                "RefCat2 local: no sources inside the cone in %d file(s)",
+                len(files),
+            )
+            return None
+        tab = pd.concat(parts, ignore_index=True)
+        logger.info(
+            "RefCat2 (local): %d rows within %.3f deg from %d file(s)",
+            len(tab),
+            sr,
+            len(files),
+        )
+        return _refcat_finalize(tab, nsources, ra)
 
     # =============================================================================
     # =============================================================================
@@ -2967,44 +3176,113 @@ class Catalog:
                     logger.info(
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
-                    logger.warning(
-                        "REFCAT requires MAST CasJobs credentials. Set\n"
-                        "    `default_input.catalog.MASTcasjobs_wsid` and\n"
-                        "    `default_input.catalog.MASTcasjobs_pwd` (or\n"
-                        "    provide them via environment/local overrides)."
-                    )
-                    # Some auth backends reject non-str; cast and strip here.
-                    userid = self.input_yaml["catalog"].get("MASTcasjobs_wsid")
-                    password = self.input_yaml["catalog"].get("MASTcasjobs_pwd")
-                    if userid is not None:
-                        userid = str(userid).strip()
-                    if password is not None:
-                        password = str(password).strip()
 
-                    credentials = {"userid": userid, "password": password}
-                    userid_ok = (
-                        credentials["userid"] is not None
-                        and str(credentials["userid"]).strip() != ""
+                    _rcfg = self.input_yaml.get("catalog", {}) or {}
+                    _refcat_backend = (
+                        str(_rcfg.get("refcat_backend", "auto")).strip().lower()
                     )
-                    pwd_ok = (
-                        credentials["password"] is not None
-                        and str(credentials["password"]).strip() != ""
-                    )
-                    if not userid_ok or not pwd_ok:
-                        raise RuntimeError(
-                            "Refcat selected but MAST CasJobs credentials are missing/empty. "
-                            f"MASTcasjobs_wsid set: {userid_ok}, MASTcasjobs_pwd set: {pwd_ok}. "
-                            "Set `default_input.catalog.MASTcasjobs_wsid` and `default_input.catalog.MASTcasjobs_pwd` "
-                            "(or export MASTCASJOBS_WSID/MASTCASJOBS_PWD)."
+                    _refcat_nsw = _refcat_ns or 500
+                    selectedCatalog = None
+                    _refcat_errors = []
+                    if _refcat_backend not in (
+                        "auto",
+                        "local",
+                        "vizier",
+                        "casjobs",
+                    ):
+                        logger.warning(
+                            "Unknown catalog.refcat_backend %r - "
+                            "falling back to 'auto'",
+                            _refcat_backend,
                         )
+                        _refcat_backend = "auto"
 
-                    selectedCatalog = self.fetch_refcat2_field(
-                        ra=q_ra,
-                        dec=q_dec,
-                        credentials=credentials,
-                        nsources=_refcat_ns or 500,
-                        sr=radius_deg,
-                    )
+                    # Path 1: local copy - no network, no credentials.
+                    if _refcat_backend in ("auto", "local"):
+                        _ldir = _rcfg.get("refcat_local_dir")
+                        if _ldir:
+                            try:
+                                selectedCatalog = self.fetch_refcat2_local(
+                                    _ldir,
+                                    q_ra,
+                                    q_dec,
+                                    radius_deg,
+                                    nsources=_refcat_nsw,
+                                    pattern=_rcfg.get("refcat_local_glob") or "*.csv*",
+                                )
+                            except Exception as e:
+                                _refcat_errors.append(f"local: {e}")
+                                logger.warning("RefCat2 local backend failed: %s", e)
+                        elif _refcat_backend == "local":
+                            logger.warning(
+                                "refcat_backend='local' but "
+                                "catalog.refcat_local_dir is not set"
+                            )
+
+                    # Path 2: VizieR mirror - no credentials needed.
+                    if selectedCatalog is None and _refcat_backend in (
+                        "auto",
+                        "vizier",
+                    ):
+                        try:
+                            selectedCatalog = self.fetch_refcat2_vizier(
+                                q_ra,
+                                q_dec,
+                                radius_deg,
+                                nsources=_refcat_nsw,
+                                servers=_rcfg.get("refcat_vizier_servers"),
+                                row_limit=_rcfg.get("refcat_vizier_row_limit")
+                                or 100000,
+                            )
+                        except Exception as e:
+                            _refcat_errors.append(f"vizier: {e}")
+                            logger.warning("RefCat2 VizieR backend failed: %s", e)
+
+                    # Path 3: MAST CasJobs (quick, then queued) - the only
+                    # path that needs credentials; required for huge caps
+                    # beyond what quick/VizieR can serve.
+                    if selectedCatalog is None and _refcat_backend in (
+                        "auto",
+                        "casjobs",
+                    ):
+                        userid = _rcfg.get("MASTcasjobs_wsid")
+                        password = _rcfg.get("MASTcasjobs_pwd")
+                        if userid is not None:
+                            userid = str(userid).strip()
+                        if password is not None:
+                            password = str(password).strip()
+
+                        credentials = {"userid": userid, "password": password}
+                        userid_ok = (
+                            credentials["userid"] is not None
+                            and str(credentials["userid"]).strip() != ""
+                        )
+                        pwd_ok = (
+                            credentials["password"] is not None
+                            and str(credentials["password"]).strip() != ""
+                        )
+                        if not userid_ok or not pwd_ok:
+                            _refcat_errors.append("casjobs: credentials missing")
+                            logger.warning(
+                                "REFCAT CasJobs fallback needs credentials. "
+                                "Set `default_input.catalog.MASTcasjobs_wsid` "
+                                "and `default_input.catalog.MASTcasjobs_pwd` "
+                                "(or export MASTCASJOBS_WSID/MASTCASJOBS_PWD)."
+                            )
+                        else:
+                            selectedCatalog = self.fetch_refcat2_field(
+                                ra=q_ra,
+                                dec=q_dec,
+                                credentials=credentials,
+                                nsources=_refcat_nsw,
+                                sr=radius_deg,
+                            )
+
+                    if selectedCatalog is None and _refcat_errors:
+                        logger.error(
+                            "RefCat2: all backends failed -> %s",
+                            "; ".join(_refcat_errors),
+                        )
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, query_coords, q_radius_arcmin
                     )
@@ -3237,6 +3515,12 @@ class Catalog:
                         )
                         or 5.0
                     )
+                    _ps_max_rows = int(
+                        self.input_yaml.get("catalog", {}).get(
+                            "pan_starrs_max_rows", 200000
+                        )
+                        or 200000
+                    )
                     selectedCatalog = None
                     _ps_exc = None
                     for _ps_try in range(1, _ps_attempts + 1):
@@ -3286,10 +3570,18 @@ class Catalog:
                                 rows.extend(page_rows)
                                 if (
                                     len(page_rows) < params["pagesize"]
-                                    or len(rows) >= 200000
+                                    or len(rows) >= _ps_max_rows
                                 ):
                                     break
                                 page += 1
+
+                            if len(rows) >= _ps_max_rows:
+                                logger.warning(
+                                    "Pan-STARRS query hit the %d-row page "
+                                    "cap; the cone is likely truncated "
+                                    "toward the query centre.",
+                                    _ps_max_rows,
+                                )
 
                             if not rows:
                                 selectedCatalog = pd.DataFrame()
@@ -3492,16 +3784,39 @@ class Catalog:
             # should not proceed without a valid catalog.
             raise
 
-        if max_sources is not None and selectedCatalog is not None and len(selectedCatalog) > max_sources:
+        # An explicit max_sources wins; otherwise the configured
+        # safety cap keeps uncapped backends (VizieR ROW_LIMIT=-1,
+        # SkyMapper, the 200k-row Pan-STARRS page limit) bounded on
+        # crowded fields - a Galactic-plane cone can return >1e5 rows
+        # where the zeropoint needs only a fraction of them.
+        _row_cap = max_sources
+        if _row_cap is None:
+            try:
+                _row_cap = int(
+                    (self.input_yaml.get("catalog", {}) or {}).get(
+                        "max_download_rows", 0
+                    )
+                    or 0
+                )
+            except (TypeError, ValueError):
+                _row_cap = 0
+            if _row_cap <= 0:
+                _row_cap = None
+        if (
+            _row_cap is not None
+            and selectedCatalog is not None
+            and len(selectedCatalog) > _row_cap
+        ):
             logger.info(
                 "Limiting catalog from %s to %s sources",
-                len(selectedCatalog), max_sources,
+                len(selectedCatalog),
+                _row_cap,
             )
             # Spatially uniform subsample: keeping the N nearest to the
             # target would concentrate calibrators at the field centre and
             # leave the edges empty.
             selectedCatalog = _sky_uniform_subsample(
-                selectedCatalog, max_sources, center_ra=q_ra
+                selectedCatalog, _row_cap, center_ra=q_ra
             )
             logger.info("Catalog limited to %s sources", len(selectedCatalog))
 
@@ -4404,7 +4719,36 @@ class Catalog:
         # reused (N in the ZP legend then exceeds the real source count).
         target_ra = target_coords.ra.degree
         target_dec = target_coords.dec.degree
-        fname = f"{target_name}_r_{radius}arcmins_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}_CUSTOM.csv"
+        # The member catalogs download over their own per-catalog query
+        # regions; the combined CSV must key on those too, or a changed
+        # footprint/band->catalog assignment reuses a stale build.
+        try:
+            _reg_key = "|".join(
+                f"{_cn}:{_reg_part}"
+                for _cn in catalog_list
+                for _reg_part in (
+                    ",".join(
+                        str(
+                            (
+                                (regions or {}).get(_cn)
+                                or (regions or {}).get("default")
+                                or {}
+                            ).get(k)
+                        )
+                        for k in (
+                            "ra",
+                            "dec",
+                            "radius_arcmin",
+                            "width_deg",
+                            "height_deg",
+                        )
+                    ),
+                )
+            )
+            _reg_tag = hashlib.md5(_reg_key.encode()).hexdigest()[:8]
+        except (TypeError, ValueError, AttributeError):
+            _reg_tag = "noregion"
+        fname = f"{target_name}_r_{radius}arcmins_{_reg_tag}_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}_CUSTOM.csv"
         wdir = self.input_yaml.get("wdir")
         if not wdir:
             raise ValueError("Working directory (wdir) is not set in input YAML.")
@@ -6528,7 +6872,6 @@ class Catalog:
         selected_indices = []
         bin_stats = []  # Track bin statistics for logging
 
-        logger.info("Processing spatial bins...")
         for i in range(n_bins):
             for j in range(n_bins):
                 in_xbin = (df[x_col] >= x_bins[i]) & (df[x_col] < x_bins[i + 1])
@@ -6550,13 +6893,8 @@ class Catalog:
 
                     selected_indices.extend(bin_indices[:sources_per_bin])
 
-        logger.info(
-            f"Bin statistics: min={min(bin_stats)}, max={max(bin_stats)}, "
-            f"avg={np.mean(bin_stats):.1f} sources per bin"
-        )
-        logger.info("Selected %s sources from spatial bins", len(selected_indices))
-
         # Under-filled bins: top up with the highest-SNR remaining sources.
+        n_fill = 0
         if len(selected_indices) < nmax:
             logger.warning(
                 f"Only {len(selected_indices)} sources selected from bins, "
@@ -6575,17 +6913,26 @@ class Catalog:
 
             additional_count = nmax - len(selected_indices)
             selected_indices.extend(remaining_indices[:additional_count])
-            logger.info(
-                f"Added {additional_count} additional sources from remaining pool"
-            )
+            n_fill = additional_count
 
         final_count = len(selected_indices)
         if final_count > nmax:
             logger.warning("Selected %s sources (exceeds target %s)", final_count, nmax)
-        else:
-            logger.info("Final selection: %s sources", final_count)
 
-        logger.info("Downsampling complete")
+        # One aggregate line replaces the per-bin detail (kept at DEBUG).
+        _pop = [s for s in bin_stats if s > 0]
+        _fill_txt = f" (+{n_fill} fill)" if n_fill else ""
+        logger.info(
+            "Spatial bins: %d populated of %dx%d, %d-%d sources/bin, "
+            "%d sources selected%s",
+            len(_pop),
+            n_bins,
+            n_bins,
+            min(_pop) if _pop else 0,
+            max(_pop) if _pop else 0,
+            final_count,
+            _fill_txt,
+        )
         return df.iloc[selected_indices].copy()
 
     # =============================================================================
