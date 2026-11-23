@@ -426,6 +426,7 @@ default_input:
     scamp_match_nmax: 0 # int --- Max detections used for SCAMP pattern matching (quad matching). 0=auto (use all). Lower values speed up matching on dense fields.
     scamp_pixscale_maxerr: 1.2 # float --- Max scale-factor uncertainty for SCAMP quad matching (default 1.2=20%).
     scamp_posangle_maxerr: 5.0 # float --- Max position-angle uncertainty (degrees) for SCAMP quad matching.
+    scamp_timeout_sec: 180 # int --- Base SCAMP subprocess timeout (s). Scales up automatically with catalog size (factor max(1, n_rows/50000)); raise for very dense fields or slow network GAIA downloads.
 
     # Pixel-level distortion correction (e.g. telescope flexure). Runs once per
     # image after preprocessing, before source detection: SExtractor detections
@@ -817,12 +818,14 @@ default_input:
     alignment_allow_non_scamp_fallback: False
     post_swarp_verify: True # bool --- If True, run SExtractor cross-match on SWarp output images to measure post-alignment offsets. When False, SCAMP+SWarp is trusted without independent verification. Enable for diagnostics or when alignment quality is uncertain.
     alignment_sparse_field_retry_count: 15 # int --- If SExtractor detects fewer than this many sources in either image, re-run with maximum sensitivity (DETECT_THRESH=0.5, smaller BACK_SIZE, CLEAN=N). Set to 0 to disable sparse-field retry.
+    swarp_timeout_sec: 300 # int --- Base SWarp subprocess timeout (s). Scales up automatically with total input pixels (factor max(1, npix/16e6)); raise for very large mosaics on slow storage.
     # --- spalipy parameters (alignment_method=spalipy) ---
     spalipy_match_radius_arcsec: null # float|null --- RA/DEC cross-match radius (arcsec) for source pre-matching before spalipy quad matching. null=adaptive (3x FWHM, floored at 10").
     spalipy_detect_thresh: 2.0 # float --- SExtractor detection threshold (sigma) for spalipy source detection. Detections always use ellipticity<0.9 so extended sources serve as alignment anchors; when the pool has fewer than spalipy_detect_min_sources sources a second pass at thresh*0.5 (floor 0.5) is run and merged into the pool.  Deep-pass detections are tagged (det_tier=1) as lower-confidence candidates.
     spalipy_detect_min_sources: 20 # int --- Detection-pool size below which the deeper second SExtractor pass is run for spalipy alignment.
+    spalipy_sep_fallback: true # bool --- When SExtractor produces no detections at all (binary missing or failed run), fall back to sep.extract for the spalipy anchor pool so alignment can proceed without the external binary.
     spalipy_deep_match_frac_warn: 0.5 # float --- When more than this fraction of the matched source pool comes from the deep low-threshold pass, a "pass" alignment is demoted to "warn": low-significance anchors are weaker evidence than their count suggests.
-    spalipy_n_quad_det: null # int|null --- Number of detections used for quad matching. null=auto (all sources if <=25, else 25).
+    spalipy_n_quad_det: null # int|null --- Number of detections used for quad matching. null=auto (all sources if <=20, else 20; the quad-hash cross-match allocates an N-by-N distance matrix that grows steeply beyond this).
     spalipy_min_n_match: null # int|null --- Minimum matched sources for spalipy alignment. null=auto (max(6, min(n//3, 20))).
     spalipy_max_quad_hash_dist: null # float|null --- Max hash distance for quad matching. null=auto (scaled by FWHM).
     spalipy_min_sep: null # float|null --- Minimum detection separation (pixels). null=auto (max(FWHM, 2*max_match_dist)). Removes crowded/blended sources.
@@ -840,6 +843,7 @@ default_input:
     spalipy_pair_clip_px: null # float|null --- Maximum residual under the paired affine transform for a mutual RA/DEC pair to remain an alignment anchor. null=auto (max(1 px, median FWHM)).
     spalipy_quad_target_frac: 0.35 # float --- Total fraction of the quad-anchor pool reserved for sources near requested targets when no paired list is available; the quota is split across targets and remaining anchors are chosen globally by flux. Set 0 to disable target-aware quad ranking.
     spalipy_quad_target_exclude_fwhm: 2.0 # float --- Radius around the transient excluded from target-near quad anchor selection, in units of median detection FWHM, so the variable source itself cannot become an alignment anchor.
+    spalipy_quality_from_residuals: false # bool --- Score the spalipy result on its own matched-anchor residuals instead of re-detecting sources in the aligned template.  Faster (skips two SExtractor runs) but blind to warp ringing between anchors; when false the residual metrics are only a fallback used when re-detection returns nothing.
     # --- Target-prioritized alignment (few-source fields) ---
     # When matched sources are scarce, alignment quality should be optimized
     # near the transient position rather than globally.  A source-based method
