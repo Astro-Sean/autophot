@@ -38,6 +38,7 @@ from ..core.functions import (
     log_step,
     log_warning_from_exception,
 )
+from ..core.log_format import dedup, end_stage
 from ..pipeline.wcs import get_wcs
 
 logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
@@ -358,9 +359,13 @@ class SExtractorWrapper:
             Path: Path to the created convolution file.
         """
 
-        logger.debug(
-            "Creating convolution kernel with FWHM: %.1f pixels", fwhm_pixels
-        )
+        # Once per distinct kernel config - the same FWHM is logged again
+        # for every call in a run otherwise.
+        if dedup(("sex_kernel", round(float(fwhm_pixels), 3)), "sex"):
+            logger.debug(
+                "Creating convolution kernel with FWHM: %.1f pixels",
+                fwhm_pixels,
+            )
 
         if fwhm_pixels > 0:
             # FWHM bounds 1.0-15 px. The 1.0 px floor (was 2.5) keeps the
@@ -1268,9 +1273,19 @@ class SExtractorWrapper:
             if sextractor_bin is None:
                 raise RuntimeError("SExtractor is not installed.")
             mode_label = "crowded" if crowded else "default"
-            logger.info(
-                log_step(f"SExtractor: {fits_path.name} ({mode_label})")
-            )
+            # The subheader identifies the file+mode, so identical repeat
+            # calls in one run print it once and later calls note that the
+            # setup is unchanged.
+            if dedup(("sex_hdr", fits_path.name, mode_label), "sex"):
+                logger.info(
+                    log_step(f"SExtractor: {fits_path.name} ({mode_label})")
+                )
+            else:
+                logger.info(
+                    "SExtractor: %s (%s) -- same setup as earlier call",
+                    fits_path.name,
+                    mode_label,
+                )
             # Single open: one mmap/read pass for header + data (bad-region mask).
             with fits.open(fits_path, memmap=True) as hdul:
                 hdu0 = hdul[0]
@@ -1324,10 +1339,17 @@ class SExtractorWrapper:
             # Format as integer string if whole number (SExtractor prefers this)
             if float(saturation).is_integer():
                 saturation = int(saturation)
-            logger.debug(
-                "SExtractor saturation: raw=%r, parsed=%s, satur_key=%s",
-                saturation_raw, saturation, satur_key,
-            )
+            # Once per distinct saturation config, not once per call.
+            if dedup(
+                ("sex_sat", repr(saturation_raw), str(saturation), str(satur_key)),
+                "sex",
+            ):
+                logger.debug(
+                    "SExtractor saturation: raw=%r, parsed=%s, satur_key=%s",
+                    saturation_raw,
+                    saturation,
+                    satur_key,
+                )
 
             if _SEXTRACTOR_VERSION < (2, 25, 0):
                 # Chip gaps / masked borders stored as NaN make old
@@ -1354,10 +1376,11 @@ class SExtractorWrapper:
                         fwhm_for_kernel = vv
                         break
             if fwhm_for_kernel > 0:
-                logger.debug(
-                    "Using FWHM = %.1f pixels to construct the SExtractor convolution kernel",
-                    fwhm_for_kernel,
-                )
+                if dedup(("sex_fwhm", round(fwhm_for_kernel, 3)), "sex"):
+                    logger.debug(
+                        "Using FWHM = %.1f pixels to construct the SExtractor convolution kernel",
+                        fwhm_for_kernel,
+                    )
                 phot_apertures = 1.7 * fwhm_for_kernel
 
                 # Reduce DETECT_MINAREA for undersampled images.
@@ -1809,8 +1832,8 @@ class SExtractorWrapper:
             # FWHM-based scale is too small.
             raw_scale = max(float(scale_multiplier) * float(fwhm), float(default_scale))
             scale = clamp_scale_from_config(self.config, raw_scale)
-            log_result(
-                "[OK] %d/%d point sources detected; robust FWHM %.2f px; "
+            end_stage(
+                "%d/%d point sources detected; robust FWHM %.2f px; "
                 "scale %.1f px (FWHM x %.2f)",
                 final_count,
                 initial_count,
