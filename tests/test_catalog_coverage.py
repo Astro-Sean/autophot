@@ -515,6 +515,124 @@ class TestDownloadCoverageWarning:
         assert (out_r > 0.15).sum() > 0
 
 
+class TestDownloadRowCap:
+    """max_download_rows bounds crowded-field catalogs for every caller."""
+
+    def _cat(self, tmp_path, cap):
+        return Catalog(
+            input_yaml={
+                "wdir": str(tmp_path),
+                "target_name": "T1",
+                "target_ra": CENTER.ra.deg,
+                "target_dec": CENTER.dec.deg,
+                "catalog": {
+                    "use_catalog": "sdss",
+                    "max_distance": 30,
+                    "max_download_rows": cap,
+                },
+            }
+        )
+
+    def _fake_vizier(self, ra, dec):
+        t = Table({"RA_ICRS": ra, "DE_ICRS": dec, "cl": np.full(len(ra), 6)})
+        t.meta["name"] = "V/139/sdss9"
+        return [t]
+
+    def _patch(self, monkeypatch, n=2000):
+        ra, dec = _disk_sources(n)
+        monkeypatch.setattr(
+            catalog_mod.Vizier,
+            "query_region",
+            lambda *a, **k: self._fake_vizier(ra, dec),
+        )
+
+    def test_config_cap_applies_without_kwarg(self, tmp_path, monkeypatch):
+        """A Galactic-field-sized download is trimmed to the config cap."""
+        self._patch(monkeypatch, n=2000)
+        out = self._cat(tmp_path, cap=200).download(
+            CENTER, catalogName="sdss", radius=12.0
+        )
+        assert len(out) == 200
+
+    def test_explicit_max_sources_beats_config(self, tmp_path, monkeypatch):
+        self._patch(monkeypatch, n=2000)
+        out = self._cat(tmp_path, cap=200).download(
+            CENTER, catalogName="sdss", radius=12.0, max_sources=50
+        )
+        assert len(out) == 50
+
+    def test_zero_cap_disables(self, tmp_path, monkeypatch):
+        self._patch(monkeypatch, n=2000)
+        out = self._cat(tmp_path, cap=0).download(
+            CENTER, catalogName="sdss", radius=12.0
+        )
+        assert len(out) == 2000
+
+    def test_cap_keeps_edge_coverage(self, tmp_path, monkeypatch):
+        """The cap is a spatial subsample, not a nearest-N truncation."""
+        self._patch(monkeypatch, n=2000)
+        out = self._cat(tmp_path, cap=200).download(
+            CENTER, catalogName="sdss", radius=12.0
+        )
+        out_r = np.hypot(
+            (out["RA_ICRS"].to_numpy() - CENTER.ra.deg)
+            * np.cos(np.radians(CENTER.dec.deg)),
+            out["DE_ICRS"].to_numpy() - CENTER.dec.deg,
+        )
+        # A centre-truncated catalog would drop the outer annulus entirely.
+        assert (out_r > 0.15).sum() > 0
+
+
+class TestBuildCatalogRegionCacheKey:
+    """The combined-catalog CSV must key on the per-catalog regions."""
+
+    def test_region_change_invalidates_cache(self, tmp_path, monkeypatch):
+        calls = []
+
+        def fake_download(self, target_coords, catalogName=None, **kw):
+            calls.append(catalogName)
+            ra, dec = _disk_sources(20)
+            return pd.DataFrame({"raMean": ra, "decMean": dec})
+
+        monkeypatch.setattr(Catalog, "download", fake_download)
+        cat = Catalog(
+            input_yaml={
+                "wdir": str(tmp_path),
+                "target_name": "T1",
+                "target_ra": CENTER.ra.deg,
+                "target_dec": CENTER.dec.deg,
+                "imageFilter": "r",
+                "catalog": {"use_catalog": "pan_starrs"},
+            }
+        )
+        region_a = {"ra": 150.0, "dec": 30.0, "radius_arcmin": 10.0}
+        region_b = {"ra": 150.2, "dec": 30.0, "radius_arcmin": 15.0}
+
+        cat.build_complete_catalog(
+            CENTER,
+            target_name="T1",
+            catalog_list=["pan_starrs"],
+            regions={"pan_starrs": region_a},
+        )
+        assert len(calls) == 1
+        # Same regions -> the cached combined CSV is reused.
+        cat.build_complete_catalog(
+            CENTER,
+            target_name="T1",
+            catalog_list=["pan_starrs"],
+            regions={"pan_starrs": region_a},
+        )
+        assert len(calls) == 1
+        # A different footprint region must not reuse the stale build.
+        cat.build_complete_catalog(
+            CENTER,
+            target_name="T1",
+            catalog_list=["pan_starrs"],
+            regions={"pan_starrs": region_b},
+        )
+        assert len(calls) == 2
+
+
 class TestOptimizerCoverageRadius:
     def test_radius_enlarged_and_report_has_coverage(
         self, tmp_path, monkeypatch
@@ -560,3 +678,157 @@ class TestOptimizerCoverageRadius:
         )
         assert captured["radius"] > 10.0
         assert "coverage" in out["report"].columns
+
+
+def _refcat_frame(n=200, seed=3, complete=True):
+    rng = np.random.default_rng(seed)
+    df = pd.DataFrame(
+        {
+            "RA": CENTER.ra.deg + (rng.random(n) - 0.5) * 0.3,
+            "Dec": CENTER.dec.deg + (rng.random(n) - 0.5) * 0.3,
+            "g": rng.uniform(15, 21, n),
+            "dg": rng.uniform(0.001, 0.09, n),
+            "r": rng.uniform(15, 21, n),
+            "dr": rng.uniform(0.001, 0.09, n),
+            "i": rng.uniform(15, 21, n),
+            "di": rng.uniform(0.01, 0.09, n),
+            "z": rng.uniform(15, 21, n),
+            "dz": rng.uniform(0.01, 0.09, n),
+            "J": rng.uniform(14, 19, n),
+            "dJ": rng.uniform(0.01, 0.09, n),
+            "H": rng.uniform(14, 19, n),
+            "dH": rng.uniform(0.01, 0.09, n),
+            "K": rng.uniform(14, 19, n),
+            "dK": rng.uniform(0.01, 0.09, n),
+        }
+    )
+    if not complete:
+        df.loc[0, "g"] = 0.0
+        df.loc[1, "dr"] = 0.5
+    return df
+
+
+class TestRefcatBackends:
+    def test_schema_maps_vizier_names(self):
+        df = _refcat_frame(20).rename(
+            columns={
+                "RA": "RA_ICRS", "Dec": "DE_ICRS",
+                "g": "gmag", "dg": "e_gmag", "r": "rmag",
+                "dr": "e_rmag", "i": "imag", "di": "e_imag",
+                "z": "zmag", "dz": "e_zmag", "J": "Jmag",
+                "dJ": "e_Jmag", "H": "Hmag", "dH": "e_Hmag",
+                "K": "Kmag", "dK": "e_Kmag",
+            }
+        )
+        sch = Catalog({})._refcat2_schema(df)
+        assert list(sch.columns)[:2] == ["RA", "Dec"]
+        assert len(sch) == 20
+        assert np.isfinite(sch["g"]).all()
+
+    def test_schema_drops_incomplete_and_high_derr(self):
+        df = _refcat_frame(20, complete=False)
+        sch = Catalog({})._refcat2_schema(df)
+        # row 0 carries a 0 sentinel, row 1 fails dr<0.1
+        assert len(sch) == 18
+
+    def test_local_backend_cone_filter(self, tmp_path):
+        zone_dir = tmp_path / "zones"
+        zone_dir.mkdir()
+        df = _refcat_frame(50)
+        df.loc[0, "RA"] = CENTER.ra.deg
+        df.loc[0, "Dec"] = CENTER.dec.deg
+        df.loc[1:, "Dec"] = 41.5  # far outside the cone
+        df.to_csv(zone_dir / "refcat2_dec+40.csv", index=False)
+        cat = Catalog({})
+        out = cat.fetch_refcat2_local(
+            str(zone_dir), CENTER.ra.deg, CENTER.dec.deg, 0.05
+        )
+        assert out is not None and len(out) == 1
+        assert abs(out["RA"].iloc[0] - CENTER.ra.deg) < 1e-4
+
+    def test_local_backend_missing_dir(self, tmp_path):
+        cat = Catalog({})
+        assert (
+            cat.fetch_refcat2_local(str(tmp_path / "none"), 0.0, 0.0, 0.1)
+            is None
+        )
+
+    def test_vizier_mirror_fallback(self, monkeypatch):
+        cat = Catalog({})
+        calls = []
+
+        class _FakeVizier:
+            def __init__(self, **kw):
+                self.server = kw["vizier_server"]
+
+            def query_region(self, coords, radius, catalog):
+                calls.append(self.server)
+                if "harvard" not in self.server:
+                    raise RuntimeError("mirror down")
+                tbl = Table.from_pandas(_refcat_frame(30))
+                return [tbl]
+
+        monkeypatch.setattr(catalog_mod, "Vizier", _FakeVizier)
+        out = cat.fetch_refcat2_vizier(
+            CENTER.ra.deg, CENTER.dec.deg, 0.1,
+            servers=["vizier.dead.example", "vizier.cfa.harvard.edu"],
+        )
+        assert calls == [
+            "vizier.dead.example",
+            "vizier.cfa.harvard.edu",
+        ]
+        assert out is not None and len(out) == 30
+
+    def test_download_ladder_vizier_then_csv_cache(
+        self, tmp_path, monkeypatch
+    ):
+        cfg = {
+            "wdir": str(tmp_path),
+            "target_name": "T1",
+            "imageFilter": "g",
+            "catalog": {
+                "use_catalog": "refcat",
+                "refcat_backend": "vizier",
+                "refcat_nsources": 25,
+            },
+        }
+        cat = Catalog(input_yaml=cfg)
+
+        class _FakeVizier:
+            def __init__(self, **kw):
+                pass
+
+            def query_region(self, coords, radius, catalog):
+                return [Table.from_pandas(_refcat_frame(300))]
+
+        monkeypatch.setattr(catalog_mod, "Vizier", _FakeVizier)
+        out = cat.download(CENTER, "refcat", radius=10)
+        # 300 rows fetched -> capped + spatially subsampled to 25
+        assert len(out) == 25
+        cached = list(tmp_path.rglob("*refcat_n25*.csv"))
+        assert len(cached) == 1
+
+    def test_download_ladder_local_first(self, tmp_path, monkeypatch):
+        zone_dir = tmp_path / "zones"
+        zone_dir.mkdir()
+        _refcat_frame(50).to_csv(zone_dir / "z.csv", index=False)
+        cfg = {
+            "wdir": str(tmp_path),
+            "target_name": "T1",
+            "imageFilter": "g",
+            "catalog": {
+                "use_catalog": "refcat",
+                "refcat_backend": "auto",
+                "refcat_local_dir": str(zone_dir),
+                "refcat_nsources": 100,
+            },
+        }
+        cat = Catalog(input_yaml=cfg)
+
+        def _boom(*a, **k):
+            raise AssertionError("network path must not run")
+
+        monkeypatch.setattr(cat, "fetch_refcat2_vizier", _boom)
+        monkeypatch.setattr(cat, "fetch_refcat2_field", _boom)
+        out = cat.download(CENTER, "refcat", radius=10)
+        assert out is not None and len(out) <= 100
