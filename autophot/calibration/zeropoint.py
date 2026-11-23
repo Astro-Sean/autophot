@@ -4265,9 +4265,7 @@ class Zeropoint:
                         f"{_dz_resid:+.3f} mag (tolerance {_dz_tol:.3f}); "
                         "one of the two flux scales is inconsistent"
                     )
-                    logger.warning(
-                        "AP/PSF zeropoint disagreement: %s", _dz_flag
-                    )
+                    logger.warning("%s", _dz_flag)
                     for _m in ("AP", "PSF"):
                         _fp_dz = fit_params.get(_m) or {}
                         if "zeropoint" not in _fp_dz:
