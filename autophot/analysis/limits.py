@@ -272,6 +272,7 @@ from ..core.functions import (
     STATUS,
     biweight_sky_sigma,
 )
+from ..core.log_format import table as _log_table
 from ..photometry.aperture import (
     Aperture,
     resolve_exposure_time_seconds,
@@ -3068,7 +3069,13 @@ class Limits:
                 _n_tot = len(det_flags)
                 logger.debug(
                     "inject m=%+7.3f -> %5.1f%%  (%d/%d detected)",
-                    m, 100.0 * _rate, _n_det, _n_tot,
+                    m,
+                    100.0 * _rate,
+                    _n_det,
+                    _n_tot,
+                )
+                _inject_probe_rows.append(
+                    (f"{m:+.3f}", str(_n_tot), f"{100.0 * _rate:.1f}")
                 )
 
                 det_rate = float(det_flags.mean()) if len(det_flags) else 0.0
@@ -3096,6 +3103,9 @@ class Limits:
             _snr_gate_factor = 1.0    # empirical error-scale applied to the detection gate
             bracket_steps: list[tuple] = []
             bisect_steps: list[tuple] = []
+            # Per-magnitude probe history for the INFO-level injection
+            # table; the per-trial lines themselves stay at DEBUG.
+            _inject_probe_rows: list[tuple] = []
             _trial_cache: dict[str, tuple] = {}
             _flag_cache: dict[str, np.ndarray] = {}
             # Per-magnitude raw trial results so the detection gate can be
@@ -3310,6 +3320,14 @@ class Limits:
                                     inject_lmag_err = abs(hi_m - lo_m) * sigma_w
                     except Exception:
                         pass
+                    if _inject_probe_rows:
+                        logger.info(
+                            "Injection trials:\n%s",
+                            _log_table(
+                                ("m", "trials", "detected %"),
+                                _inject_probe_rows,
+                            ),
+                        )
                     logger.info(
                         "    Bisection converged: m50=%.4f +/- %.4f (bracket width=%.4f mag)",
                         float(inject_lmag), float(inject_lmag_err) if np.isfinite(inject_lmag_err) else np.nan, abs(hi_m - lo_m),
