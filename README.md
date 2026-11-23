@@ -19,7 +19,7 @@
 
 AutoPhOT processes FITS images of transients and variable sources. Built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/), it locates a target in each frame, measures its flux, calibrates the measurements against survey catalogs, and builds a light curve. It supports different telescopes, filters, and pixel scales.
 
-It has been used in <!-- citation-count -->84<!-- /citation-count --> papers so far (updated: <!-- citation-date -->20-11-2026<!-- /citation-date -->; [full list on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)).
+It has been used in <!-- citation-count -->84<!-- /citation-count --> papers so far (updated: <!-- citation-date -->23-11-2026<!-- /citation-date -->; [full list on SciX](https://scixplorer.org/search?q=citations%28bibcode%3A2022A%26A...667A..62B%29&sort=date%20desc)).
 
 > [!NOTE]
 > One person maintains AutoPhOT. If you find a problem, open an issue on GitHub and I will look into it.
