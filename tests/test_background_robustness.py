@@ -777,21 +777,28 @@ class TestMaxiMaskIntegration:
         with pytest.raises(ValueError, match="DP"):
             _read_mm_class_table(table, ["CR", "SAT", "DP"])
 
-    def test_maximask_num_threads_auto(self, base_config):
+    def test_maximask_num_threads_auto(self, base_config, monkeypatch):
         """auto mode: 1 thread under image-level parallelism (nCPU>1),
         up to 4 serial; explicit values are honoured and capped."""
+        import os
+
         from autophot.pipeline.background import _maximask_num_threads
+
+        # pin the visible cpu count so assertions hold on any runner
+        monkeypatch.setattr(
+            os, "sched_getaffinity", lambda pid: set(range(32))
+        )
 
         cfg = dict(base_config)
         cfg["nCPU"] = 8
         assert _maximask_num_threads(cfg) == 1
 
         cfg["nCPU"] = 1
-        assert 1 < _maximask_num_threads(cfg) <= 4
+        assert _maximask_num_threads(cfg) == 4
 
         cfg["background"] = {"maximask_num_threads": 6}
         cfg["nCPU"] = 8
-        assert _maximask_num_threads(cfg) == min(6, 16)
+        assert _maximask_num_threads(cfg) == 6
 
         cfg["background"] = {"maximask_num_threads": 999}
-        assert _maximask_num_threads(cfg) <= 16
+        assert _maximask_num_threads(cfg) == 16
