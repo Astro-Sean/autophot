@@ -696,3 +696,102 @@ class TestMaxiMaskIntegration:
         sub.remove(flat_image, plot=False)
         sub.remove((flat_image - 99.0) * 1.3, plot=False)
         assert len(calls) == 1
+
+    def test_maximask_active_exposed_in_result(
+        self, flat_image, base_config, monkeypatch
+    ):
+        """result["maximask_active"] lets callers tell a covered frame
+        from a merely configured or failed stage."""
+        fake = self._fake_probs(flat_image.shape, {"CR": np.s_[0:5, 0:5]})
+        self._patch_probs(monkeypatch, fake)
+        cfg = self._cfg(base_config, use_maximask=True)
+        res = BackgroundSubtractor(cfg).remove(flat_image, plot=False)
+        assert res["maximask_active"] is True
+
+        self._patch_probs(monkeypatch, None)
+        res = BackgroundSubtractor(cfg).remove(flat_image, plot=False)
+        assert res["maximask_active"] is False
+
+        res = BackgroundSubtractor(base_config).remove(flat_image, plot=False)
+        assert res["maximask_active"] is False
+
+    def test_active_flag_reset_on_later_failure(
+        self, flat_image, base_config, monkeypatch
+    ):
+        """A failed pass after a successful one must not leave
+        maximask_active claiming coverage for the new pixels."""
+        fake = self._fake_probs(flat_image.shape, {"CR": np.s_[0:5, 0:5]})
+        monkeypatch.setattr(
+            BackgroundSubtractor,
+            "_maximask_probabilities",
+            lambda self, image, batch_size, allow_gpu: (
+                fake if image.shape == flat_image.shape else None
+            ),
+        )
+        cfg = self._cfg(base_config, use_maximask=True)
+        sub = BackgroundSubtractor(cfg)
+        res = sub.remove(flat_image, plot=False)
+        assert res["maximask_active"] is True
+        # A different shape misses the mask signature cache and forces a
+        # fresh (failing) attempt.
+        bigger = np.ones((flat_image.shape[0] + 8, flat_image.shape[1] + 8))
+        res = sub.remove(bigger, plot=False)
+        assert res["maximask_active"] is False
+        assert sub.maximask_active is False
+
+    def test_spike_mask_extracted_without_sp_class(
+        self, flat_image, base_config, monkeypatch
+    ):
+        """The SP channel feeds the PSF stamp veto even when "SP" is not
+        in maximask_classes - the network computes it regardless."""
+        fake = self._fake_probs(
+            flat_image.shape,
+            {"SP": np.s_[10:40, 10:40], "SAT": np.s_[50:60, 50:60]},
+        )
+        self._patch_probs(monkeypatch, fake)
+        cfg = self._cfg(
+            base_config,
+            use_maximask=True,
+            maximask_classes=["SAT"],
+            maximask_dilate_iterations=0,
+        )
+        sub = BackgroundSubtractor(cfg)
+        res = sub.remove(flat_image, plot=False)
+        # SAT remains a defect; SP is not one but still feeds the veto.
+        assert res["hardware_defects_mask"][50:60, 50:60].all()
+        assert not res["hardware_defects_mask"][10:40, 10:40].any()
+        assert res["maximask_spike_mask"] is not None
+        assert res["maximask_spike_mask"][10:40, 10:40].all()
+        # And "SP" must not appear in the requested-class diagnostics.
+        assert "SP" not in sub._maximask_class_masks
+
+    def test_read_mm_class_table_maps_by_name(self, tmp_path):
+        """Class tables are keyed by abbreviation, not row position."""
+        from autophot.pipeline.background import _read_mm_class_table
+
+        table = tmp_path / "classes.thresh"
+        table.write_text("SAT 0.81\nCR 0.43\nHCL 0.60\n")
+        vals = _read_mm_class_table(table, ["CR", "HCL", "SAT"])
+        np.testing.assert_allclose(vals, [0.43, 0.60, 0.81])
+
+        with pytest.raises(ValueError, match="DP"):
+            _read_mm_class_table(table, ["CR", "SAT", "DP"])
+
+    def test_maximask_num_threads_auto(self, base_config):
+        """auto mode: 1 thread under image-level parallelism (nCPU>1),
+        up to 4 serial; explicit values are honoured and capped."""
+        from autophot.pipeline.background import _maximask_num_threads
+
+        cfg = dict(base_config)
+        cfg["nCPU"] = 8
+        assert _maximask_num_threads(cfg) == 1
+
+        cfg["nCPU"] = 1
+        assert 1 < _maximask_num_threads(cfg) <= 4
+
+        cfg["background"] = {"maximask_num_threads": 6}
+        cfg["nCPU"] = 8
+        assert _maximask_num_threads(cfg) == min(6, 16)
+
+        cfg["background"] = {"maximask_num_threads": 999}
+        assert _maximask_num_threads(cfg) <= 16
