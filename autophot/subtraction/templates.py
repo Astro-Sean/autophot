@@ -2812,6 +2812,64 @@ def _detect_sextractor_sources(data_or_path, input_yaml=None, fwhm_pix=3.0,
                 pass
 
 
+def _detect_sep_sources(data_or_path, thresh=2.0, fwhm_pix=3.0,
+                        fwhm_min=None, ell_max=0.9, return_errors=False):
+    """SEP-based fallback detection matching ``_detect_sextractor_sources``.
+
+    Used when the SExtractor binary is unavailable or fails so source-based
+    alignment still gets anchors.  sep is a hard dependency of spalipy, so
+    it is always present on paths that need this.  Returns the same tuple
+    contract as ``_detect_sextractor_sources``; centroid errors fall back
+    to the FWHM-based estimate.
+    """
+    _n_err = 5 if return_errors else 3
+    _none = (None,) * _n_err
+    try:
+        import sep
+    except ImportError:
+        return _none
+    if fwhm_min is None:
+        fwhm_min = 0.8 if (fwhm_pix and fwhm_pix < 2.0) else 1.5
+    try:
+        if isinstance(data_or_path, (str, os.PathLike)):
+            data = np.asarray(fits.getdata(data_or_path), dtype=np.float64)
+        else:
+            data = np.asarray(data_or_path, dtype=np.float64)
+        if data.ndim != 2:
+            return _none
+        data = np.ascontiguousarray(data)
+        nan_mask = ~np.isfinite(data)
+        if nan_mask.any():
+            data = np.where(nan_mask, float(np.nanmedian(data)), data)
+        bkg = sep.Background(data)
+        sources = sep.extract(data - bkg.back(), thresh, err=bkg.rms())
+        if sources is None or len(sources) == 0:
+            return _none
+        x = np.asarray(sources["x"], float)
+        y = np.asarray(sources["y"], float)
+        flux = np.asarray(sources["flux"], float)
+        a = np.asarray(sources["a"], float)
+        b = np.asarray(sources["b"], float)
+        fwhm = 2.0 * (np.log(2.0) * (a**2.0 + b**2.0)) ** 0.5
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ell = 1.0 - b / a
+        good = (
+            (fwhm >= fwhm_min) & (fwhm <= 30) & (ell < ell_max)
+            & np.isfinite(x) & np.isfinite(y)
+        )
+        if not good.any():
+            return _none
+        xy = np.column_stack([x[good], y[good]])
+        flux = flux[good]
+        fwhm = fwhm[good]
+        if return_errors:
+            _pos_err = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+            return xy, flux, fwhm, _pos_err, _pos_err.copy()
+        return xy, flux, fwhm
+    except Exception:
+        return _none
+
+
 def compute_alignment_rms(
     sci_data: np.ndarray,
     ref_data: np.ndarray,
@@ -3910,6 +3968,10 @@ def _check_spalipy_sub_tile_feasibility(
     frame edge are excluded, matching spalipy's edge mask.
 
     ``det`` must expose ``det["x"]`` / ``det["y"]`` pixel coordinates.
+    When a ``flux`` column is present the rows are re-ordered by
+    descending flux first, matching the sort spalipy's
+    ``_prep_detection_table`` applies before taking the first
+    ``n_quad_det`` rows per tile.
 
     Returns ``sub_tile`` when every tile supports a quad, else 1.
     """
@@ -3921,10 +3983,19 @@ def _check_spalipy_sub_tile_feasibility(
 
         from scipy.spatial import distance as _sp_dist
 
+        try:
+            _flux = np.asarray(det["flux"], float)
+            _order = (
+                np.argsort(-_flux)
+                if len(_flux) == len(det["x"])
+                else np.arange(len(det["x"]))
+            )
+        except (TypeError, KeyError):
+            _order = np.arange(len(det["x"]))
         coo = np.column_stack(
             [
-                np.asarray(det["x"], float),
-                np.asarray(det["y"], float),
+                np.asarray(det["x"], float)[_order],
+                np.asarray(det["y"], float)[_order],
             ]
         )
         width = shape[1]
@@ -3953,18 +4024,27 @@ def _check_spalipy_sub_tile_feasibility(
                 )
                 tile_coo = coo[mask]
                 counts.append(int(tile_coo.shape[0]))
-                if len(tile_coo) < 4:
-                    feasible = False
-                    continue
                 _tc = tile_coo[: max(int(n_quad_det), 1)]
                 if len(_tc) < 4:
                     feasible = False
                     continue
-                _has_quad = any(
-                    np.min(_sp_dist.pdist(_tc[list(idx)])) > min_quad_sep
-                    for idx in itertools.combinations(range(len(_tc)), 4)
+                # One distance matrix per tile; each 4-source combination
+                # is valid only when its closest pair exceeds min_quad_sep.
+                # Diagonal entries are 0, so only the six off-diagonal
+                # pairs of each combination may be minimized over.
+                _d = _sp_dist.cdist(_tc, _tc)
+                _cidx = np.asarray(
+                    list(itertools.combinations(range(len(_tc)), 4)),
+                    dtype=int,
                 )
-                if not _has_quad:
+                if _cidx.size == 0:
+                    feasible = False
+                    continue
+                _ti, _tj = np.triu_indices(4, k=1)
+                _min_pair = _d[
+                    _cidx[:, _ti], _cidx[:, _tj]
+                ].min(axis=1)
+                if not bool((_min_pair > min_quad_sep).any()):
                     feasible = False
         if feasible:
             log.info(
@@ -3985,13 +4065,78 @@ def _check_spalipy_sub_tile_feasibility(
         return sub_tile
 
 
+def _prefilter_spalipy_template_quads(
+    quadlist,
+    src_wcs,
+    sci_wcs,
+    src_shape,
+    margin_px,
+    log=None,
+):
+    """Drop science-side quads outside the source image footprint.
+
+    spalipy flattens every template quad (science-side detections) into one
+    list and matches each source sub-tile against all of it, because without
+    WCS it cannot know which region a tile corresponds to.  With both image
+    WCS in hand the source footprint on the science frame is known: quads
+    whose centroid lies outside it can never match a source quad, so dropping
+    them shrinks every per-tile cdist proportionally.
+
+    ``margin_px`` absorbs the measured WCS-vs-truth scatter (the RA/DEC
+    pre-match residual p90 is the right scale) plus resampling uncertainty.
+    Returns a filtered list, or ``None`` when the filter cannot be trusted:
+    the WCS map fails, everything is inside anyway, or too little survives
+    (which itself signals the WCS box is unreliable).  A ``None`` return
+    means "keep the full list", never "match nothing".
+    """
+    try:
+        ny, nx = src_shape
+        corners = np.array(
+            [[0.0, 0.0], [nx - 1, 0.0], [nx - 1, ny - 1], [0.0, ny - 1]]
+        )
+        radec = src_wcs.all_pix2world(corners, 0)
+        box = sci_wcs.all_world2pix(radec, 0)
+        if not np.all(np.isfinite(box)):
+            return None
+        x0 = float(box[:, 0].min()) - margin_px
+        x1 = float(box[:, 0].max()) + margin_px
+        y0 = float(box[:, 1].min()) - margin_px
+        y1 = float(box[:, 1].max()) + margin_px
+        cent = np.array(
+            [np.asarray(q[0])[:, :2].mean(axis=0) for q in quadlist]
+        )
+        inside = (
+            (cent[:, 0] >= x0) & (cent[:, 0] <= x1)
+            & (cent[:, 1] >= y0) & (cent[:, 1] <= y1)
+        )
+        n_in = int(inside.sum())
+        if n_in == len(quadlist):
+            return None
+        # Under ~10% survival the footprint box is more likely wrong than
+        # the field is empty - keep everything rather than starve matching.
+        if n_in < max(4, 0.1 * len(quadlist)):
+            return None
+        if log is not None:
+            log.info(
+                "spalipy: template quadlist footprint prefilter kept %d/%d "
+                "quads (science box x=[%.0f,%.0f] y=[%.0f,%.0f]).",
+                n_in, len(quadlist), x0, x1, y0, y1,
+            )
+        return [q for q, m in zip(quadlist, inside) if m]
+    except Exception:
+        return None
+
+
 def _merge_detection_lists(
-    xy_a, flux_a, fwhm_a, xy_b, flux_b, fwhm_b, radius=1.5
+    xy_a, flux_a, fwhm_a, xy_b, flux_b, fwhm_b, radius=1.5, new_rows=None
 ):
     """Union two detection lists, deduplicated at ``radius`` px.
 
     The first list wins on overlap so a deeper detection pass only adds
-    sources, never replaces shallower-pass centroids.
+    sources, never replaces shallower-pass centroids.  ``new_rows`` may
+    supply a precomputed boolean mask of rows in the second list that are
+    farther than ``radius`` from every first-list source - it is computed
+    here when omitted.
     """
     if xy_a is None or len(xy_a) == 0:
         return xy_b, flux_b, fwhm_b
@@ -3999,9 +4144,10 @@ def _merge_detection_lists(
         return xy_a, flux_a, fwhm_a
     from scipy.spatial import cKDTree
 
-    dists, _ = cKDTree(xy_a).query(xy_b, k=1, distance_upper_bound=radius)
-    new_rows = np.isinf(dists)
-    if not new_rows.any():
+    if new_rows is None:
+        dists, _ = cKDTree(xy_a).query(xy_b, k=1, distance_upper_bound=radius)
+        new_rows = np.isinf(dists)
+    if not np.any(new_rows):
         return xy_a, flux_a, fwhm_a
     return (
         np.vstack([xy_a, xy_b[new_rows]]),
@@ -4271,6 +4417,81 @@ def _target_region_alignment_stats(dxy, anchor_xy, target_xy, radius_px):
         ),
     )
     return {"per_target": per_target, "worst": worst, "radius_px": float(radius_px)}
+
+
+def _residual_alignment_stats(dxy, anchor_xy, shape):
+    """Alignment metrics derived from post-fit matched residuals.
+
+    Produces the same ``(median_offset, rms, p90, quadrant_stats)`` tuple
+    contract as ``compute_alignment_rms`` without re-detecting sources in
+    the aligned image - the residuals already encode the transform's
+    accuracy at every matched anchor.  Used as fallback when the
+    independent re-detection fails, or as the primary metric when
+    ``spalipy_quality_from_residuals`` is enabled.
+
+    ``dxy`` is the (N, 2) post-spline residual per anchor and
+    ``anchor_xy`` the (N, 2) anchor position in the science frame.
+    """
+    dxy = np.asarray(dxy, dtype=float)
+    anchor_xy = np.asarray(anchor_xy, dtype=float)
+    mag = np.hypot(dxy[:, 0], dxy[:, 1])
+    median_offset = float(
+        np.hypot(np.median(dxy[:, 0]), np.median(dxy[:, 1]))
+    )
+    rms = float(np.sqrt(np.mean(mag**2)))
+    p90 = float(np.percentile(mag, 90.0))
+
+    _ny, _nx = shape[:2]
+    _qx = anchor_xy[:, 0] < _nx / 2.0
+    _qy = anchor_xy[:, 1] < _ny / 2.0
+    _q_labels = np.where(
+        _qx & _qy, "q1",
+        np.where(~_qx & _qy, "q2",
+                 np.where(_qx & ~_qy, "q3", "q4")),
+    )
+    quad = {}
+    _max_rms = 0.0
+    _max_quad = "none"
+    for _ql in ("q1", "q2", "q3", "q4"):
+        _sel = _q_labels == _ql
+        _n = int(np.sum(_sel))
+        _qrms = (
+            float(np.sqrt(np.mean(mag[_sel] ** 2))) if _n >= 3
+            else float("nan")
+        )
+        quad[f"{_ql}_rms"] = _qrms
+        quad[f"{_ql}_n"] = _n
+        if np.isfinite(_qrms) and _qrms > _max_rms:
+            _max_rms = _qrms
+            _max_quad = _ql
+    quad["max_rms"] = _max_rms if _max_rms > 0 else float("nan")
+    quad["max_quadrant"] = _max_quad
+    quad["n_matched"] = int(len(mag))
+    if len(mag) >= 2:
+        _span_x = (
+            float(anchor_xy[:, 0].max() - anchor_xy[:, 0].min())
+            / max(float(_nx), 1.0)
+        )
+        _span_y = (
+            float(anchor_xy[:, 1].max() - anchor_xy[:, 1].min())
+            / max(float(_ny), 1.0)
+        )
+        _n_q = sum(
+            1 for _ql in ("q1", "q2", "q3", "q4")
+            if quad.get(f"{_ql}_n", 0) >= 1
+        )
+    else:
+        _span_x = _span_y = 0.0
+        _n_q = 0
+    quad["n_quadrants"] = int(_n_q)
+    quad["span_x"] = _span_x
+    quad["span_y"] = _span_y
+    quad["coverage_ok"] = bool(
+        _span_x >= 0.25 and _span_y >= 0.25 and _n_q >= 2
+    )
+    quad["coherent_cluster"] = False
+    quad["from_postfit_residuals"] = True
+    return median_offset, rms, p90, quad
 
 
 def _finite_coverage_floor(cfg_min_ff, src_finite_px, out_size, area_scale=1.0):
@@ -7965,26 +8186,71 @@ class Templates:
                     else:
                         _smed, _srms, _sp90 = _swarp_align[:3] if _swarp_align else (None, None, None)
                         _squad_rms = None
+                    if _squad_rms is None and _smed is None:
+                        # Independent re-measurement produced nothing
+                        # (e.g. SExtractor unavailable for the aligned
+                        # products).  Reuse run_IDC's own post-SWarp
+                        # centroid verification so the quality gate still
+                        # has metrics to judge.
+                        _idc_ver = (
+                            res.get("alignment_verification")
+                            if isinstance(res, dict) else None
+                        )
+                        if isinstance(_idc_ver, dict) and _idc_ver.get(
+                            "coherent_misregistration"
+                        ):
+                            logger.warning(
+                                "SCAMP+SWarp post-verification detected a "
+                                "coherent misregistration - rejecting."
+                            )
+                            _squality = "fail"
+                            _sreasons = [
+                                "coherent misregistration in post-SWarp verification"
+                            ]
+                            _swarp_ok = False
+                        elif isinstance(_idc_ver, dict) and "offset_x" in _idc_ver:
+                            _smed = float(np.hypot(
+                                float(_idc_ver.get("offset_x", 0.0)),
+                                float(_idc_ver.get("offset_y", 0.0)),
+                            ))
+                            _srms = float(np.hypot(
+                                float(_idc_ver.get("rms_x", 0.0)),
+                                float(_idc_ver.get("rms_y", 0.0)),
+                            ))
+                            _p95v = _idc_ver.get("p95_offset")
+                            if _p95v is not None and np.isfinite(_p95v):
+                                _sp90 = float(_p95v)
+                            _squad_rms = {
+                                "n_matched": _idc_ver.get("n_matched"),
+                                "coverage_ok": _idc_ver.get("coverage_ok"),
+                            }
+                            logger.info(
+                                "swarp: independent re-measurement unavailable; "
+                                "using run_IDC post-SWarp verification "
+                                "(offset=%.3f px, n=%s).",
+                                _smed, str(_squad_rms["n_matched"]),
+                            )
                     # Uniform quality gate (backup to post_swarp_verify in
                     # run_IDC): same thresholds and pass/warn/fail policy for
                     # every backend.
-                    _squality, _sreasons = _classify_alignment_quality(
-                        _smed, _srms, _sp90,
-                        _squad_rms.get("coverage_ok") if _squad_rms else None,
-                        *_gates,
-                        n_matched=(
-                            _squad_rms.get("n_matched") if _squad_rms else None
-                        ),
-                        min_n_field_gate=_gate_min_n,
-                        translation_only=bool(
-                            _squad_rms.get("coherent_cluster")
-                        ) if _squad_rms else False,
-                        wrms_norm=(
-                            _squad_rms.get("wrms_norm")
-                            if _squad_rms else None
-                        ),
-                        max_wrms_norm=_gate_max_wrms,
-                    )
+                    if _swarp_ok:
+                        _squality, _sreasons = _classify_alignment_quality(
+                            _smed, _srms, _sp90,
+                            _squad_rms.get("coverage_ok") if _squad_rms else None,
+                            *_gates,
+                            n_matched=(
+                                _squad_rms.get("n_matched") if _squad_rms else None
+                            ),
+                            min_n_field_gate=_gate_min_n,
+                            translation_only=bool(
+                                _squad_rms.get("coherent_cluster")
+                            ) if _squad_rms else False,
+                            wrms_norm=(
+                                _squad_rms.get("wrms_norm")
+                                if _squad_rms else None
+                            ),
+                            max_wrms_norm=_gate_max_wrms,
+                        )
                     if _squality == "fail":
                         logger.warning(
                             "SCAMP+SWarp alignment rejected: %s. "
@@ -8308,6 +8574,10 @@ class Templates:
                     _pair_resid_p90 = None
                     _paired_catalog_match = False
 
+                    _sep_fallback = bool(
+                        _sp_cfg.get("spalipy_sep_fallback", True)
+                    )
+
                     def _detect_for_spalipy(data, min_sources=20):
                         """Detect sources via SExtractor, return spalipy-format Table.
 
@@ -8330,6 +8600,21 @@ class Templates:
                             thresh=_sp_detect_thresh, ell_max=0.9,
                             return_errors=True,
                         )
+                        if (
+                            _sep_fallback
+                            and (_det is None or _det[0] is None or len(_det[0]) == 0)
+                        ):
+                            # SExtractor missing/failed -> sep fallback keeps
+                            # spalipy usable without the binary.
+                            logger.info(
+                                "spalipy: SExtractor returned no sources; "
+                                "trying sep.extract fallback detection."
+                            )
+                            _det = _detect_sep_sources(
+                                data, thresh=_sp_detect_thresh,
+                                fwhm_pix=fwhm_pix, ell_max=0.9,
+                                return_errors=True,
+                            )
                         xy, flux, fwhm = _det[0], _det[1], _det[2]
                         errx = _det[3] if len(_det) >= 5 else None
                         erry = _det[4] if len(_det) >= 5 else None
@@ -8347,6 +8632,19 @@ class Templates:
                                 thresh=_low_thresh, ell_max=0.9,
                                 return_errors=True,
                             )
+                            if (
+                                _sep_fallback
+                                and (
+                                    _det_low is None
+                                    or _det_low[0] is None
+                                    or len(_det_low[0]) == 0
+                                )
+                            ):
+                                _det_low = _detect_sep_sources(
+                                    data, thresh=_low_thresh,
+                                    fwhm_pix=fwhm_pix, ell_max=0.9,
+                                    return_errors=True,
+                                )
                             xy_low, flux_low, fwhm_low = (
                                 _det_low[0], _det_low[1], _det_low[2]
                             )
@@ -8365,23 +8663,45 @@ class Templates:
                                     xy_low, k=1, distance_upper_bound=1.5
                                 )
                                 _new_rows = np.isinf(_dd)
+                            elif (
+                                (xy is None or len(xy) == 0)
+                                and xy_low is not None and len(xy_low)
+                            ):
+                                # Primary pass empty - every deep-pass row
+                                # is new.  Recording it lets the centroid
+                                # errors concatenate below.
+                                _new_rows = np.ones(len(xy_low), dtype=bool)
                             xy, flux, fwhm = _merge_detection_lists(
                                 xy, flux, fwhm, xy_low, flux_low, fwhm_low,
+                                new_rows=_new_rows,
                             )
                             # Keep the centroid errors aligned with the
                             # merged positions (None-safe: errors are
-                            # auxiliary and may be unavailable).
+                            # auxiliary and may be unavailable).  An empty
+                            # primary pass contributes zero error rows.
                             if (
-                                errx is not None and erry is not None
-                                and ex_low is not None and ey_low is not None
+                                ex_low is not None and ey_low is not None
                                 and _new_rows is not None
                             ):
-                                errx = np.concatenate(
-                                    [errx, np.asarray(ex_low)[_new_rows]]
+                                _ex0 = (
+                                    errx if errx is not None else np.array([])
                                 )
-                                erry = np.concatenate(
-                                    [erry, np.asarray(ey_low)[_new_rows]]
+                                _ey0 = (
+                                    erry if erry is not None else np.array([])
                                 )
+                                _errx_cat = np.concatenate(
+                                    [_ex0, np.asarray(ex_low)[_new_rows]]
+                                )
+                                _erry_cat = np.concatenate(
+                                    [_ey0, np.asarray(ey_low)[_new_rows]]
+                                )
+                                _n_merged = len(xy) if xy is not None else 0
+                                if (
+                                    len(_errx_cat) == _n_merged
+                                    and len(_erry_cat) == _n_merged
+                                ):
+                                    errx = _errx_cat
+                                    erry = _erry_cat
                             _xy_len = len(xy) if xy is not None else 0
                             logger.info(
                                 "spalipy: low-threshold pass found %d sources; "
@@ -8479,14 +8799,26 @@ class Templates:
                             np.asarray(tpl_det["x"], float) - _tx,
                             np.asarray(tpl_det["y"], float) - _ty,
                         )
-                        _sci_order = np.lexsort((_sci_d,))
-                        _tpl_order = np.lexsort((_tpl_d,))
+                        _sci_order = np.argsort(_sci_d)
+                        _tpl_order = np.argsort(_tpl_d)
                         sci_det = sci_det[_sci_order]
                         tpl_det = tpl_det[_tpl_order]
                         logger.debug(
                             "spalipy: re-ranked %d sci / %d tpl detections by "
                             "distance to target (%.1f, %.1f) px.",
                             len(sci_det), len(tpl_det), _tx, _ty,
+                        )
+
+                    # WCS objects shared by sky matching, the reflection
+                    # check, the partial-overlap edge-buffer probe and the
+                    # target-position mapping below.
+                    _sci_wcs = _tpl_wcs = None
+                    try:
+                        _sci_wcs = WCS(scienceHeader)
+                        _tpl_wcs = WCS(templateHeader)
+                    except Exception as _wcs_exc:
+                        logger.debug(
+                            "spalipy: WCS construction failed: %s", _wcs_exc
                         )
 
                     # --- RA/DEC source matching ---
@@ -8499,15 +8831,10 @@ class Templates:
                     # matches between unrelated sources in non-overlapping
                     # sky regions.
                     try:
-                        import astropy.units as u
-                        from astropy.coordinates import (
-                            SkyCoord,
-                            match_coordinates_sky,
-                        )
-                        from astropy.wcs import WCS as _WCS
+                        from astropy.coordinates import match_coordinates_sky
 
-                        _sci_wcs = _WCS(scienceHeader)
-                        _tpl_wcs = _WCS(templateHeader)
+                        if _sci_wcs is None or _tpl_wcs is None:
+                            raise ValueError("science/template WCS unavailable")
 
                         _sci_ra, _sci_dec = _sci_wcs.all_pix2world(
                             sci_det["x"], sci_det["y"], 0,
@@ -8706,33 +9033,39 @@ class Templates:
                     _tpl_img = templateImage
                     _tpl_det = tpl_det
                     _tpl_reflected = False
-                    try:
-                        from astropy.wcs import WCS as _WCS2
-                        _sw = _WCS2(scienceHeader)
-                        _tw = _WCS2(templateHeader)
-                        _A = np.linalg.inv(_sw.pixel_scale_matrix) @ _tw.pixel_scale_matrix
-                        if np.linalg.det(_A) < 0:
-                            logger.info(
-                                "spalipy: template is REFLECTED relative to science "
-                                "(det(A)=%.3f). Flipping template in x.",
-                                np.linalg.det(_A),
+                    if _sci_wcs is not None and _tpl_wcs is not None:
+                        try:
+                            _A = (
+                                np.linalg.inv(_sci_wcs.pixel_scale_matrix)
+                                @ _tpl_wcs.pixel_scale_matrix
                             )
-                            _tpl_img = np.fliplr(templateImage).copy()
-                            _tpl_det = tpl_det.copy()
-                            _tpl_det["x"] = (templateImage.shape[1] - 1) - tpl_det["x"]
-                            _tpl_reflected = True
-                    except Exception as _refl_exc:
-                        # Reflection check is best-effort, but a broken
-                        # WCS read should still be diagnosable.
-                        logger.debug(
-                            "spalipy: reflection check skipped: %s", _refl_exc
-                        )
+                            if np.linalg.det(_A) < 0:
+                                logger.info(
+                                    "spalipy: template is REFLECTED relative to science "
+                                    "(det(A)=%.3f). Flipping template in x.",
+                                    np.linalg.det(_A),
+                                )
+                                _tpl_img = np.fliplr(templateImage).copy()
+                                _tpl_det = tpl_det.copy()
+                                _tpl_det["x"] = (templateImage.shape[1] - 1) - tpl_det["x"]
+                                _tpl_reflected = True
+                        except Exception as _refl_exc:
+                            # Reflection check is best-effort, but a broken
+                            # WCS read should still be diagnosable.
+                            logger.debug(
+                                "spalipy: reflection check skipped: %s", _refl_exc
+                            )
 
                     # Replace NaNs with median - spalipy can't handle NaNs.
+                    # float64 from the start: spalipy converts to float64
+                    # internally and copy=False below then avoids a second
+                    # full-image buffer.  The science image is never passed
+                    # to spalipy - with template_det supplied, template_data
+                    # is unread (preserve_footprints is off).
                     _tpl_nan = ~np.isfinite(_tpl_img)
-                    _sci_nan = ~np.isfinite(scienceImage)
-                    _tpl_fill = np.where(_tpl_nan, float(np.nanmedian(_tpl_img)), _tpl_img).astype(np.float32)
-                    _sci_fill = np.where(_sci_nan, float(np.nanmedian(scienceImage)), scienceImage).astype(np.float32)
+                    _tpl_fill = np.where(
+                        _tpl_nan, float(np.nanmedian(_tpl_img)), _tpl_img
+                    ).astype(np.float64)
 
                     _med_fwhm = float(np.median(
                         np.concatenate([sci_det["fwhm"], _tpl_det["fwhm"]])
@@ -8877,6 +9210,27 @@ class Templates:
                                     "spalipy: trusted pair fit retained too few "
                                     "anchors; using quad matching instead."
                                 )
+                    if _paired_affine is None and _pair_resid_p90 is not None:
+                        # Quad matching decides the correspondence itself, so
+                        # the pair-residual-sized match window no longer
+                        # applies: a wide window lets spalipy's second-
+                        # neighbour ambiguity test reject most true inliers,
+                        # starving the match count.  Revert to the
+                        # FWHM-sized unknown-correspondence values.
+                        if _yaml_max_match_dist is None:
+                            _max_match_dist = float(
+                                np.clip(0.5 * _med_fwhm, 2.0, 5.0)
+                            )
+                        if _yaml_min_sep is None:
+                            _det_sep = max(
+                                float(_med_fwhm), 2.0 * _max_match_dist
+                            )
+                            _sp_source_det = _dedup_close_pairs(
+                                _sp_source_det, _det_sep
+                            )
+                            _sp_template_det = _dedup_close_pairs(
+                                _sp_template_det, _det_sep
+                            )
                     _n_sources = min(len(_sp_template_det), len(_sp_source_det))
 
                     # Fraction of the usable science pool found only in the
@@ -8920,18 +9274,17 @@ class Templates:
 
                     # n_quad_det: number of detections used for quad construction.
                     # C(n_quad_det, 4) quads are made per sub-tile, so this has
-                    # O(n^4) performance impact.  For sparse fields, use all
-                    # sources (more quads = more chances to find a match).
-                    # For moderate and dense fields, 25 gives C(25,4)=12650
-                    # quads - a dense hash space so the correct quad is
-                    # rarely missed.
+                    # O(n^4) cost in both time and memory: spalipy matches
+                    # source-by-template quad hashes with one cdist, which
+                    # allocates ~1.3 GB at n_quad_det=25 (C(25,4)=12650) per
+                    # sub-tile versus ~190 MB at 20 (C(20,4)=4845) - still a
+                    # dense hash space where the correct quad is rarely
+                    # missed.  For sparse fields use all sources (more quads
+                    # = more chances to find a match).
                     if _yaml_n_quad is not None:
                         _n_quad = int(_yaml_n_quad)
                     else:
-                        if _n_sources <= 25:
-                            _n_quad = _n_sources
-                        else:
-                            _n_quad = 25
+                        _n_quad = min(_n_sources, 20)
 
                     # min_n_match: minimum matched sources for alignment.
                     # Lower for sparse fields so spalipy doesn't reject valid
@@ -8942,7 +9295,7 @@ class Templates:
                     # instead of failing immediately.
                     if _yaml_min_match is not None:
                         _min_match = int(_yaml_min_match)
-                    elif _pair_resid_p90 is not None:
+                    elif _paired_affine is not None:
                         # Known pairs: require most - not all - to inlier so a
                         # single distorted anchor cannot veto the affine seed.
                         _pair_frac = float(
@@ -8990,52 +9343,47 @@ class Templates:
                         _quad_edge_buffer = int(_yaml_quad_edge_buffer)
                     else:
                         _quad_edge_buffer = 0
-                        try:
-                            _tpl_wcs_area = _tpl_w * _tpl_h
-                            # Partial-overlap check via WCS footprints.
-                            from astropy.wcs import WCS as _WCS3
-                            _sw3 = _WCS3(scienceHeader)
-                            _tw3 = _WCS3(templateHeader)
-                            _sci_corners = _sw3.calc_footprint()
-                            _tpl_corners = _tw3.calc_footprint()
-                            # quiet=True: distorted SIP inverses return NaN at
-                            # non-converging corners instead of raising.
+                        if _sci_wcs is not None and _tpl_wcs is not None:
                             try:
-                                _tpl_in_sci = _sw3.all_world2pix(
-                                    _tpl_corners[:, 0],
-                                    _tpl_corners[:, 1],
-                                    0,
-                                    quiet=True,
+                                _tpl_corners = _tpl_wcs.calc_footprint()
+                                # quiet=True: distorted SIP inverses return NaN at
+                                # non-converging corners instead of raising.
+                                try:
+                                    _tpl_in_sci = _sci_wcs.all_world2pix(
+                                        _tpl_corners[:, 0],
+                                        _tpl_corners[:, 1],
+                                        0,
+                                        quiet=True,
+                                    )
+                                except TypeError:
+                                    _tpl_in_sci = _sci_wcs.all_world2pix(
+                                        _tpl_corners[:, 0], _tpl_corners[:, 1], 0
+                                    )
+                                if not np.all(np.isfinite(_tpl_in_sci)):
+                                    raise ValueError(
+                                        "template corner world2pix did not converge"
+                                    )
+                                _tpl_x_min = float(np.min(_tpl_in_sci[0]))
+                                _tpl_x_max = float(np.max(_tpl_in_sci[0]))
+                                _tpl_y_min = float(np.min(_tpl_in_sci[1]))
+                                _tpl_y_max = float(np.max(_tpl_in_sci[1]))
+                                _covers_x = (_tpl_x_min <= 0) and (_tpl_x_max >= _sci_w)
+                                _covers_y = (_tpl_y_min <= 0) and (_tpl_y_max >= _sci_h)
+                                if not (_covers_x and _covers_y):
+                                    _quad_edge_buffer = max(1, int(_med_fwhm))
+                                    logger.info(
+                                        "spalipy: partial overlap detected "
+                                        "(tpl covers sci x:[%.0f,%.0f]/%d, y:[%.0f,%.0f]/%d); "
+                                        "setting quad_edge_buffer=%d px.",
+                                        _tpl_x_min, _tpl_x_max, _sci_w,
+                                        _tpl_y_min, _tpl_y_max, _sci_h,
+                                        _quad_edge_buffer,
+                                    )
+                            except Exception as _qeb_exc:
+                                logger.debug(
+                                    "spalipy: quad_edge_buffer skipped: %s",
+                                    _qeb_exc,
                                 )
-                            except TypeError:
-                                _tpl_in_sci = _sw3.all_world2pix(
-                                    _tpl_corners[:, 0], _tpl_corners[:, 1], 0
-                                )
-                            if not np.all(np.isfinite(_tpl_in_sci)):
-                                raise ValueError(
-                                    "template corner world2pix did not converge"
-                                )
-                            _tpl_x_min = float(np.min(_tpl_in_sci[0]))
-                            _tpl_x_max = float(np.max(_tpl_in_sci[0]))
-                            _tpl_y_min = float(np.min(_tpl_in_sci[1]))
-                            _tpl_y_max = float(np.max(_tpl_in_sci[1]))
-                            _covers_x = (_tpl_x_min <= 0) and (_tpl_x_max >= _sci_w)
-                            _covers_y = (_tpl_y_min <= 0) and (_tpl_y_max >= _sci_h)
-                            if not (_covers_x and _covers_y):
-                                _quad_edge_buffer = max(1, int(_med_fwhm))
-                                logger.info(
-                                    "spalipy: partial overlap detected "
-                                    "(tpl covers sci x:[%.0f,%.0f]/%d, y:[%.0f,%.0f]/%d); "
-                                    "setting quad_edge_buffer=%d px.",
-                                    _tpl_x_min, _tpl_x_max, _sci_w,
-                                    _tpl_y_min, _tpl_y_max, _sci_h,
-                                    _quad_edge_buffer,
-                                )
-                        except Exception as _qeb_exc:
-                            logger.debug(
-                                "spalipy: quad_edge_buffer skipped: %s",
-                                _qeb_exc,
-                            )
 
                     # max_quad_cand: maximum quad candidates to try for the
                     # affine transform.  Each candidate is one cross-match
@@ -9060,54 +9408,19 @@ class Templates:
                     else:
                         _interp_order = 2 if _med_fwhm < 3.0 else 3
 
-                    # sub_tile: number of sub-tiles for affine fitting.
-                    # Higher values model spatially-varying distortion better
-                    # but need enough sources per tile.  spalipy splits the
-                    # *source* image (template) into sub_tile x sub_tile grid
-                    # and requires >=4 sources per sub-tile for quad construction.
-                    # When the template only partially overlaps the science
-                    # image, matched sources cluster in the overlap region and
-                    # some sub-tiles may be empty.
-                    #
-                    # We simulate spalipy's sub-tile splitting on the template
-                    # image to check that each sub-tile has enough sources.
-                    if _yaml_sub_tile is not None:
-                        _sub_tile = int(_yaml_sub_tile)
-                    else:
-                        _sub_tile = 2 if _n_sources >= 200 else 1
-                        if _sub_tile > 1:
-                            # spalipy tiles over the source shape it is
-                            # given - the template padded up to the science
-                            # frame - not the raw template shape.
-                            _sp_tile_shape = tuple(
-                                max(int(a), int(b))
-                                for a, b in zip(
-                                    _tpl_fill.shape, scienceImage.shape
-                                )
-                            )
-                            _sub_tile = _check_spalipy_sub_tile_feasibility(
-                                _tpl_det,
-                                _sp_tile_shape,
-                                _sub_tile,
-                                edge_buffer=_quad_edge_buffer,
-                                min_quad_sep=_min_quad_sep,
-                                n_quad_det=_n_quad,
-                                log=logger,
-                            )
-
                     # Spline order: SmoothBivariateSpline requires at least
                     # (kx+1)*(ky+1) matched sources (not detected sources).
-                    # After quad matching, typically only ~70-85% of detected
-                    # sources are matched.  We use a conservative estimate:
-                    # require 1.5x the minimum to account for unmatched
-                    # sources.  If the initial order fails at runtime, the
-                    # retry loop below progressively reduces it.
+                    # The post-fit gate demotes orders supported by fewer
+                    # than ~2x that minimum in *matched* sources; use the
+                    # same thresholds up front on the detected pool so an
+                    # attempt certain to demote is never made.  For paired
+                    # lists matched == detected, so the gate is exact.
                     #
-                    #   spline_order=3 -> needs 16 matched -> require 24 detected
-                    #   spline_order=2 -> needs  9 matched -> require 14 detected
-                    #   spline_order=1 -> needs  4 matched -> require  6 detected
+                    #   spline_order=3 -> needs 16 matched -> require 32 detected
+                    #   spline_order=2 -> needs  9 matched -> require 18 detected
+                    #   spline_order=1 -> needs  4 matched -> require  8 detected
                     #   spline_order=0 -> affine only, no minimum
-                    _min_detected_for_order = {3: 24, 2: 14, 1: 6}
+                    _min_detected_for_order = {3: 32, 2: 18, 1: 8}
                     _spline_order = 0
                     if _yaml_spline is not None:
                         _spline_order = max(0, min(3, int(_yaml_spline)))
@@ -9135,18 +9448,9 @@ class Templates:
                             _n_sources, _sparse_threshold, _spline_order,
                         )
 
-                    logger.debug(
-                        "spalipy: hash_dist=%.4f match_dist=%.2f min_quad_sep=%.1f "
-                        "edge_buf=%d max_cand=%d min_match=%d n_quad=%d "
-                        "sub_tile=%d spline_order=%d (FWHM=%.1f, n_sources=%d).",
-                        _hash_dist, _max_match_dist, _min_quad_sep,
-                        _quad_edge_buffer, _max_quad_cand, _min_match, _n_quad,
-                        _sub_tile, _spline_order, _med_fwhm, _n_sources,
-                    )
-
-                    # Try align with progressively lower spline orders.
-                    # spalipy only catches dfitpackError internally, not
-                    # ValueError, so we catch it here and retry.
+                    # Attempt the highest usable spline order first; the loop
+                    # below demotes on failure, reusing the solved quad match
+                    # and affine so only the spline stage is re-fit.
                     _spalipy_orders_to_try = [o for o in (3, 2, 1, 0) if o <= _spline_order]
 
                     # Quad seeding only runs for unmatched lists. Keep most
@@ -9158,14 +9462,14 @@ class Templates:
                         _sp_cfg.get("spalipy_quad_target_frac", 0.35) or 0.0
                     )
                     _tpl_target_points = np.empty((0, 2), dtype=float)
-                    if len(_target_points):
+                    if (
+                        len(_target_points)
+                        and _sci_wcs is not None
+                        and _tpl_wcs is not None
+                    ):
                         try:
-                            from astropy.wcs import WCS as _WCS4
-
-                            _sw4 = _WCS4(scienceHeader)
-                            _tw4 = _WCS4(templateHeader)
-                            _trd = _sw4.all_pix2world(_target_points, 0)
-                            _ttp = _tw4.all_world2pix(_trd, 0)
+                            _trd = _sci_wcs.all_pix2world(_target_points, 0)
+                            _ttp = _tpl_wcs.all_world2pix(_trd, 0)
                             _ttp = np.asarray(_ttp, dtype=float).reshape(-1, 2)
                             if _tpl_reflected:
                                 _ttp[:, 0] = (
@@ -9219,9 +9523,59 @@ class Templates:
                             _quad_target_exclude,
                         )
 
+                    # sub_tile: number of sub-tiles for affine fitting.
+                    # Higher values model spatially-varying distortion better
+                    # but need enough sources per tile.  spalipy splits the
+                    # *source* image (template) into sub_tile x sub_tile grid
+                    # and requires >=4 sources per sub-tile for quad
+                    # construction - only meaningful for the quad path; the
+                    # paired transform never builds quads.  Simulate the
+                    # split on the exact table spalipy will quad-match
+                    # (post-dedup, post target-ranking, flux order applied
+                    # inside the check) over the padded source shape.
+                    if _yaml_sub_tile is not None:
+                        _sub_tile = int(_yaml_sub_tile)
+                    elif _paired_affine is not None:
+                        _sub_tile = 1
+                    else:
+                        _sub_tile = 2 if _n_sources >= 200 else 1
+                        if _sub_tile > 1:
+                            # spalipy tiles over the source shape it is
+                            # given - the template padded up to the science
+                            # frame - not the raw template shape.
+                            _sp_tile_shape = tuple(
+                                max(int(a), int(b))
+                                for a, b in zip(
+                                    _tpl_fill.shape, scienceImage.shape
+                                )
+                            )
+                            _sub_tile = _check_spalipy_sub_tile_feasibility(
+                                _sp_source_det,
+                                _sp_tile_shape,
+                                _sub_tile,
+                                edge_buffer=_quad_edge_buffer,
+                                min_quad_sep=_min_quad_sep,
+                                n_quad_det=_n_quad,
+                                log=logger,
+                            )
+
+                    logger.debug(
+                        "spalipy: hash_dist=%.4f match_dist=%.2f min_quad_sep=%.1f "
+                        "edge_buf=%d max_cand=%d min_match=%d n_quad=%d "
+                        "sub_tile=%d spline_order=%d (FWHM=%.1f, n_sources=%d).",
+                        _hash_dist, _max_match_dist, _min_quad_sep,
+                        _quad_edge_buffer, _max_quad_cand, _min_match, _n_quad,
+                        _sub_tile, _spline_order, _med_fwhm, _n_sources,
+                    )
+
                     sp = None
                     _try_sub_tile = _sub_tile
-                    _aligned_ok = False
+                    _try_min_quad_sep = _min_quad_sep
+                    _use_paired = _paired_affine is not None
+                    _quad_fallback_done = False
+                    _msep_halved = False
+                    _order_idx = 0
+                    _sp_t0 = time.monotonic()
                     # spalipy tiles the template-role (science) detections for
                     # quad construction using the *source* image's shape.  When
                     # the source image is smaller than the science frame,
@@ -9251,11 +9605,11 @@ class Templates:
                     from ..core.functions import quiet_root_logger
                     import inspect as _inspect
                     _spalipy_sig = _inspect.signature(Spalipy.__init__).parameters
-                    while not _aligned_ok:
-                        for _try_order in _spalipy_orders_to_try:
+                    while True:
+                        _try_order = _spalipy_orders_to_try[_order_idx]
+                        if sp is None:
                             _sp_kwargs = {
                                 "source_mask": _tpl_nan if _tpl_nan.any() else None,
-                                "template_data": _sci_fill,
                                 "source_det": _sp_source_det,
                                 "template_det": _sp_template_det,
                                 "output_shape": scienceImage.shape,
@@ -9263,15 +9617,22 @@ class Templates:
                                 "n_quad_det": _n_quad,
                                 "max_quad_hash_dist": _hash_dist,
                                 "max_match_dist": _max_match_dist,
-                                "min_quad_sep": _min_quad_sep,
+                                "min_quad_sep": _try_min_quad_sep,
                                 "quad_edge_buffer": _quad_edge_buffer,
                                 "max_quad_cand": _max_quad_cand,
                                 "patience_quad_cand": _patience,
                                 "min_sep": _det_sep,
+                                # Detection already applied its own fwhm_min
+                                # (lowered for undersampled data); a second
+                                # cut here would silently drop those anchors.
+                                "min_fwhm": 0,
                                 "interp_order": _interp_order,
                                 "sub_tile": _try_sub_tile,
                                 "spline_order": _try_order,
                                 "cval": np.nan,
+                                # _tpl_fill is already float64 and is only
+                                # read downstream; copying is dead work.
+                                "copy": False,
                             }
                             # pyproject pins spalipy>=3.5; drop kwargs the
                             # installed version predates.
@@ -9281,138 +9642,243 @@ class Templates:
                             }
                             with quiet_root_logger():
                                 sp = Spalipy(_tpl_fill, **_sp_kwargs)
-                            def _is_knot_warn(_w):
-                                return issubclass(
-                                    _w.category, UserWarning
-                                ) and ("storage space" in str(_w.message))
-
-                            _sp_knot_warn = False
-                            _wrec = []
-                            try:
-                                with quiet_root_logger(), warnings.catch_warnings(
-                                    record=True
-                                ) as _wrec:
-                                    warnings.simplefilter("always")
-                                    if _paired_affine is not None:
-                                        sp._alignment_failed[0] = False
-                                        sp._affine_transform = [_paired_affine]
-                                        sp._source_det_matched = [
-                                            _sp_source_det
-                                        ]
-                                        sp._template_det_matched = [
-                                            _sp_template_det
-                                        ]
-                                        sp.fit_spline_transform()
-                                        sp.transform_data()
-                                    else:
-                                        sp.align()
-                            except Exception as _spalipy_err:
-                                _err_msg = str(_spalipy_err)
-                                if (
-                                    "length of x, y and z" in _err_msg
-                                    or "spline transform" in _err_msg
-                                ) and _try_order > 0:
-                                    logger.info(
-                                        "spalipy: spline_order=%d failed (not enough "
-                                        "matched sources); retrying with order=%d.",
-                                        _try_order, _try_order - 1,
-                                    )
-                                    sp._aligned_data = None
-                                    continue
-                                elif _try_sub_tile > 1 and (
-                                    "Not enough detections" in _err_msg
-                                    or "2-dimensional array" in _err_msg
-                                ):
-                                    # "2-dimensional array" is scipy's cdist
-                                    # error when a sub-tile quadlist is empty
-                                    # (>=4 detections but every 4-source
-                                    # combination has a pair closer than
-                                    # min_quad_sep).
-                                    logger.info(
-                                        "spalipy: sub_tile=%d failed (not enough "
-                                        "detections/quads in sub-tile); retrying with sub_tile=1.",
-                                        _try_sub_tile,
-                                    )
-                                    _try_sub_tile = 1
-                                    sp._aligned_data = None
-                                    break  # break inner for, restart with sub_tile=1
-                                else:
-                                    logger.warning(
-                                        "spalipy: align() raised %s: %s",
-                                        type(_spalipy_err).__name__, _spalipy_err,
-                                        exc_info=True,
-                                    )
-                                    sp._aligned_data = None
-                                    _aligned_ok = True  # break outer while too
-                                    break
-                            else:
-                                # scipy's FITPACK spline warns raw when the
-                                # matched pool cannot support the requested
-                                # order ("storage space exceeds ... or s too
-                                # small"); flag it so the fallback is logged
-                                # once instead of leaking six lines to the
-                                # console.
-                                _sp_knot_warn = any(
-                                    _is_knot_warn(_w) for _w in _wrec
-                                )
-                            finally:
-                                for _w in _wrec:
-                                    if not _is_knot_warn(_w):
-                                        warnings.warn_explicit(
-                                            _w.message,
-                                            _w.category,
-                                            _w.filename,
-                                            _w.lineno,
-                                        )
-                            # A converged spline is not necessarily a
-                            # supported one: a cubic warp fit to too few
-                            # matched sources interpolates between anchors
-                            # it invented.  Require ~2x the (order+1)^2
-                            # matched-source minimum before keeping the
-                            # order; demote and retry otherwise.
-                            _n_match_now = 0
-                            try:
-                                _sdm = getattr(sp, "_source_det_matched", None)
-                                if _sdm is not None:
-                                    for _e in _sdm:
-                                        if (
-                                            _e is not None
-                                            and hasattr(_e, "__len__")
-                                        ):
-                                            _n_match_now += len(_e)
-                            except Exception:
-                                _n_match_now = 0
-                            _min_match_for_order = {3: 32, 2: 18, 1: 8}
-                            if (
-                                _try_order > 0
-                                and _n_match_now > 0
-                                and _n_match_now < _min_match_for_order[_try_order]
-                            ):
-                                logger.info(
-                                    "spalipy: %d matched sources cannot support "
-                                    "spline_order=%d; retrying with order=%d.",
-                                    _n_match_now, _try_order, _try_order - 1,
-                                )
-                                sp._aligned_data = None
-                                continue
-                            if _sp_knot_warn:
-                                # scipy returned a least-squares spline on the
-                                # knots it could place rather than the
-                                # requested smoothing fit; the transform is
-                                # still valid - the count gate above already
-                                # demotes genuinely under-supported orders.
-                                logger.info(
-                                    "spalipy: order=%d spline could not meet "
-                                    "the smoothing target for %d matched "
-                                    "sources; using the least-squares knots "
-                                    "scipy returned.",
-                                    _try_order, _n_match_now,
-                                )
-                            _aligned_ok = True
-                            break  # success
                         else:
-                            # All spline orders exhausted without success
-                            _aligned_ok = True
+                            # Reuse the solved quad match and affine; only the
+                            # spline stage is re-fit at the new order.  Clear
+                            # stale spline state first - at order 0
+                            # fit_spline_transform returns early and
+                            # transform_data would otherwise still apply the
+                            # previous spline.  _aligned_data is stale until
+                            # transform_data rewrites it.
+                            sp.spline_order = _try_order
+                            sp._alignment_failed[0] = False
+                            sp._sbs_x = sp._sbs_y = sp._spline_transform = None
+                            sp._aligned_data = sp._aligned_mask = None
+                        def _is_knot_warn(_w):
+                            return issubclass(
+                                _w.category, UserWarning
+                            ) and ("storage space" in str(_w.message))
+
+                        _sp_knot_warn = False
+                        _wrec = []
+                        try:
+                            with quiet_root_logger(), warnings.catch_warnings(
+                                record=True
+                            ) as _wrec:
+                                warnings.simplefilter("always")
+                                if _use_paired:
+                                    sp._affine_transform = [_paired_affine]
+                                    sp._source_det_matched = [_sp_source_det]
+                                    sp._template_det_matched = [
+                                        _sp_template_det
+                                    ]
+                                    sp.fit_spline_transform()
+                                    sp.transform_data()
+                                elif sp._affine_transform is not None:
+                                    # Affine stage already ran on this object;
+                                    # re-fit only the stages below it.
+                                    sp.fit_spline_transform()
+                                    sp.transform_data()
+                                else:
+                                    # align() decomposed: make_*_quadlist,
+                                    # fit_affine_transform, fit_spline_transform,
+                                    # transform_data.  Between quadlist and the
+                                    # fit, drop science-side quads outside the
+                                    # source footprint - every source sub-tile
+                                    # cdist-matches the flattened template list,
+                                    # so unreachable quads are pure cost.  Only
+                                    # safe when the WCS scatter was measured;
+                                    # with no p90 the footprint box may be off
+                                    # by more than the margin and the filter
+                                    # could starve the match.
+                                    sp.make_source_quadlist()
+                                    sp.make_template_quadlist()
+                                    if _pair_resid_p90 is not None:
+                                        _fq = _prefilter_spalipy_template_quads(
+                                            sp.template_quadlist,
+                                            _tpl_wcs,
+                                            _sci_wcs,
+                                            _sp_src_shape,
+                                            margin_px=max(
+                                                30.0, 3.0 * _pair_resid_p90
+                                            ),
+                                            log=logger,
+                                        )
+                                        if _fq is not None:
+                                            sp.template_quadlist = _fq
+                                    sp.fit_affine_transform()
+                                    sp.fit_spline_transform()
+                                    sp.transform_data()
+                        except Exception as _spalipy_err:
+                            # Classify by object state, not error text: the
+                            # affine stage assigns _affine_transform only
+                            # after it succeeds, so a populated transform
+                            # means the failure was in the spline or
+                            # resampling stage (demote the order).  A missing
+                            # transform means the quad match itself failed,
+                            # where a cheaper quad-space retry is the only
+                            # useful move.
+                            _aff_now = getattr(sp, "_affine_transform", None)
+                            _sdm_now = getattr(
+                                sp, "_source_det_matched", None
+                            )
+                            _affine_ok = bool(
+                                _aff_now is not None
+                                and _aff_now[0] is not None
+                                and _sdm_now is not None
+                                and _sdm_now[0] is not None
+                                and len(_sdm_now[0])
+                            )
+                            sp._aligned_data = sp._aligned_mask = None
+                            if _affine_ok:
+                                if _order_idx + 1 < len(_spalipy_orders_to_try):
+                                    _order_idx += 1
+                                    logger.info(
+                                        "spalipy: spline_order=%d failed "
+                                        "(%s); retrying with order=%d.",
+                                        _try_order,
+                                        type(_spalipy_err).__name__,
+                                        _spalipy_orders_to_try[_order_idx],
+                                    )
+                                    continue
+                                if _use_paired and not _quad_fallback_done:
+                                    # The paired transform exists but every
+                                    # spline order plus the pure-affine
+                                    # resample failed.  Quad matching on the
+                                    # same detection tables is the last
+                                    # in-method option before the cascade.
+                                    # Rebuild: _affine_transform still holds
+                                    # the paired transform and would short-
+                                    # circuit the quad stage on reuse.
+                                    logger.info(
+                                        "spalipy: paired transform failed at "
+                                        "every order (%s); falling back to "
+                                        "quad matching.",
+                                        _spalipy_err,
+                                    )
+                                    _use_paired = False
+                                    _quad_fallback_done = True
+                                    _order_idx = 0
+                                    sp = None
+                                    # Size to unknown-correspondence matching:
+                                    # the paired window would starve the
+                                    # quad stage's inlier count.
+                                    if _yaml_max_match_dist is None:
+                                        _max_match_dist = float(
+                                            np.clip(
+                                                0.5 * _med_fwhm, 2.0, 5.0
+                                            )
+                                        )
+                                    if _yaml_min_match is None:
+                                        _min_match = max(
+                                            6, min(_n_sources // 3, 20)
+                                        )
+                                    continue
+                            elif _try_sub_tile > 1:
+                                logger.info(
+                                    "spalipy: sub_tile=%d quad match failed "
+                                    "(%s); retrying with sub_tile=1.",
+                                    _try_sub_tile,
+                                    _spalipy_err,
+                                )
+                                _try_sub_tile = 1
+                                sp = None
+                                continue
+                            elif not _msep_halved and _try_min_quad_sep > 5.0:
+                                # An empty quadlist (every candidate has a
+                                # pair closer than min_quad_sep) also fails
+                                # at sub_tile=1 - halving the floor once is
+                                # a bounded recovery for compact fields.
+                                _try_min_quad_sep = max(
+                                    5.0, 0.5 * _try_min_quad_sep
+                                )
+                                _msep_halved = True
+                                logger.info(
+                                    "spalipy: quad match failed (%s); "
+                                    "halving min_quad_sep to %.1f.",
+                                    _spalipy_err, _try_min_quad_sep,
+                                )
+                                sp = None
+                                continue
+                            logger.warning(
+                                "spalipy: align() raised %s: %s",
+                                type(_spalipy_err).__name__, _spalipy_err,
+                                exc_info=True,
+                            )
+                            break
+                        else:
+                            # scipy's FITPACK spline warns raw when the
+                            # matched pool cannot support the requested
+                            # order ("storage space exceeds ... or s too
+                            # small"); flag it so the fallback is logged
+                            # once instead of leaking six lines to the
+                            # console.
+                            _sp_knot_warn = any(
+                                _is_knot_warn(_w) for _w in _wrec
+                            )
+                        finally:
+                            for _w in _wrec:
+                                if not _is_knot_warn(_w):
+                                    warnings.warn_explicit(
+                                        _w.message,
+                                        _w.category,
+                                        _w.filename,
+                                        _w.lineno,
+                                    )
+                        # A converged spline is not necessarily a
+                        # supported one: a cubic warp fit to too few
+                        # matched sources interpolates between anchors
+                        # it invented.  Require ~2x the (order+1)^2
+                        # matched-source minimum before keeping the
+                        # order; demote and retry otherwise.
+                        _n_match_now = 0
+                        try:
+                            _sdm = getattr(sp, "_source_det_matched", None)
+                            if _sdm is not None:
+                                for _e in _sdm:
+                                    if (
+                                        _e is not None
+                                        and hasattr(_e, "__len__")
+                                    ):
+                                        _n_match_now += len(_e)
+                        except Exception:
+                            _n_match_now = 0
+                        _min_match_for_order = {3: 32, 2: 18, 1: 8}
+                        if (
+                            _try_order > 0
+                            and _n_match_now > 0
+                            and _order_idx + 1 < len(_spalipy_orders_to_try)
+                            and _n_match_now < _min_match_for_order[_try_order]
+                        ):
+                            _order_idx += 1
+                            logger.info(
+                                "spalipy: %d matched sources cannot support "
+                                "spline_order=%d; retrying with order=%d.",
+                                _n_match_now, _try_order,
+                                _spalipy_orders_to_try[_order_idx],
+                            )
+                            sp._aligned_data = sp._aligned_mask = None
+                            continue
+                        if _sp_knot_warn:
+                            # scipy returned a least-squares spline on the
+                            # knots it could place rather than the
+                            # requested smoothing fit; the transform is
+                            # still valid - the count gate above already
+                            # demotes genuinely under-supported orders.
+                            logger.info(
+                                "spalipy: order=%d spline could not meet "
+                                "the smoothing target for %d matched "
+                                "sources; using the least-squares knots "
+                                "scipy returned.",
+                                _try_order, _n_match_now,
+                            )
+                        logger.info(
+                            "spalipy: alignment attempt finished in %.1f s "
+                            "(order=%d, sub_tile=%d, paired=%s).",
+                            time.monotonic() - _sp_t0,
+                            _try_order, _try_sub_tile, _use_paired,
+                        )
+                        break  # success
 
                     if sp.aligned_data is None:
                         logger.info("spalipy did not produce aligned output.")
@@ -9595,22 +10061,83 @@ class Templates:
                     _quad_rms = None
                     _sp_quality = "unverified"
                     _sp_reasons: List[str] = []
+                    # Residual metrics need enough anchors to say anything
+                    # spatial; below that the independent re-detection is the
+                    # only usable evidence.
+                    _resid_ok = (
+                        _postfit_dxy is not None
+                        and _postfit_anchor_xy is not None
+                        and len(_postfit_dxy) >= 4
+                    )
+                    _sp_fast_metrics = bool(
+                        _sp_cfg.get("spalipy_quality_from_residuals", False)
+                    )
                     try:
-                        _sci_xy_for_rms = np.column_stack([
-                            np.asarray(sci_det["x"], float),
-                            np.asarray(sci_det["y"], float),
-                        ])
-                        _align_result = compute_alignment_rms(
-                            scienceImage, aligned_template, fwhm_pix,
-                            input_yaml=self.input_yaml,
-                            sci_xy_override=_sci_xy_for_rms,
-                            return_per_quadrant=True,
-                        )
-                        if _align_result is not None and len(_align_result) == 4:
-                            _med_off, _rms_off, _p90_off, _quad_rms = _align_result
+                        if _sp_fast_metrics and _resid_ok:
+                            # Opt-in fast path: skip the re-detection and
+                            # score the transform on its own anchor
+                            # residuals.  Spline ringing between anchors is
+                            # invisible to this metric, hence opt-in.
+                            (
+                                _med_off,
+                                _rms_off,
+                                _p90_off,
+                                _quad_rms,
+                            ) = _residual_alignment_stats(
+                                _postfit_dxy,
+                                _postfit_anchor_xy,
+                                scienceImage.shape,
+                            )
                         else:
-                            _med_off, _rms_off, _p90_off = _align_result[:3] if _align_result else (None, None, None)
-                            _quad_rms = None
+                            _sci_xy_for_rms = np.column_stack([
+                                np.asarray(sci_det["x"], float),
+                                np.asarray(sci_det["y"], float),
+                            ])
+                            _align_result = compute_alignment_rms(
+                                scienceImage, aligned_template, fwhm_pix,
+                                input_yaml=self.input_yaml,
+                                sci_xy_override=_sci_xy_for_rms,
+                                return_per_quadrant=True,
+                            )
+                            if (
+                                _align_result is not None
+                                and len(_align_result) == 4
+                            ):
+                                (
+                                    _med_off,
+                                    _rms_off,
+                                    _p90_off,
+                                    _quad_rms,
+                                ) = _align_result
+                            else:
+                                _med_off, _rms_off, _p90_off = (
+                                    _align_result[:3]
+                                    if _align_result
+                                    else (None, None, None)
+                                )
+                                _quad_rms = None
+                            if _quad_rms is None and _resid_ok:
+                                # Re-detection produced nothing (faint
+                                # field, few recovered anchors); score the
+                                # transform on its anchor residuals so the
+                                # result is measured rather than
+                                # "unverified".
+                                (
+                                    _med_off,
+                                    _rms_off,
+                                    _p90_off,
+                                    _quad_rms,
+                                ) = _residual_alignment_stats(
+                                    _postfit_dxy,
+                                    _postfit_anchor_xy,
+                                    scienceImage.shape,
+                                )
+                                logger.info(
+                                    "spalipy: re-detection produced no "
+                                    "metrics; quality derived from %d "
+                                    "post-fit anchor residuals.",
+                                    len(_postfit_dxy),
+                                )
                         logger.info(
                             "spalipy: alignment RMS median=%.3f px rms=%.3f px.",
                             _med_off, _rms_off,
