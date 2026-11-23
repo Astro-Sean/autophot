@@ -684,6 +684,49 @@ class ImageDistortionCorrector:
             self.logger.error("Error plotting sources: %s", e)
             raise
 
+    @staticmethod
+    def _probe_executable(name: str) -> Optional[str]:
+        """Return a runnable command for *name*, or None if unavailable.
+
+        Tries ``cmd --version`` first.  Some astromatic builds (SCAMP,
+        SWarp) print their version banner yet exit nonzero on an
+        unrecognized flag, so a failing return code does not always mean
+        the binary is absent.  Fall back to a bare invocation and accept
+        the tool when its output carries a name or version banner.
+        stdin is DEVNULL so a probe can never block on input.
+        """
+        for cmd in (name, f"{name}.exe"):
+            try:
+                _r = subprocess.run(
+                    [cmd, "--version"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
+                    text=True,
+                    timeout=10,
+                )
+                if _r.returncode == 0:
+                    return cmd
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            try:
+                _r2 = subprocess.run(
+                    [cmd],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
+                    text=True,
+                    timeout=10,
+                )
+                _out = (_r2.stdout or "")[:2000].lower()
+                if name.lower() in _out or "version" in _out:
+                    return cmd
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+        return None
+
     def _check_executable(self, name: str) -> str:
         """Resolve tool path or raise. Cached for speed."""
         if name in self._executables:
@@ -696,20 +739,10 @@ class ImageDistortionCorrector:
             if _sx:
                 self._executables[name] = _sx
                 return _sx
-        for cmd in (name, f"{name}.exe"):
-            try:
-                subprocess.run(
-                    [cmd, "--version"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=True,
-                    text=True,
-                    timeout=10,
-                )
-                self._executables[name] = cmd
-                return cmd
-            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                continue
+        cmd = self._probe_executable(name)
+        if cmd:
+            self._executables[name] = cmd
+            return cmd
         raise FileNotFoundError(f"Executable not found: {name}")
 
     @staticmethod
@@ -769,20 +802,10 @@ class ImageDistortionCorrector:
             if _sx:
                 self._executables[name] = _sx
                 return True
-        for cmd in (name, f"{name}.exe"):
-            try:
-                subprocess.run(
-                    [cmd, "--version"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=True,
-                    text=True,
-                    timeout=10,
-                )
-                self._executables[name] = cmd
-                return True
-            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                continue
+        cmd = self._probe_executable(name)
+        if cmd:
+            self._executables[name] = cmd
+            return True
         return False
 
     @staticmethod
@@ -1556,8 +1579,27 @@ class ImageDistortionCorrector:
                 )
 
             # If SCAMP is not installed, we can't do astrometric refinement.
+            # Exception: a reference whose header already carries a
+            # SCAMP-refined WCS (pre-aligned template) needs no new SCAMP
+            # run - SWarp resamples it directly, so only the SWarp
+            # requirement applies.
+            _ref_pre_scamped = False
+            if not scamp_available and resample_mode != "wcs_only":
+                try:
+                    _ref_pre_scamped = self._header_indicates_scamp(
+                        fits.getheader(str(reference_image))
+                    )
+                except Exception:
+                    _ref_pre_scamped = False
+                if _ref_pre_scamped:
+                    self.logger.info(
+                        "SCAMP unavailable but reference already has a "
+                        "SCAMP-refined WCS - proceeding to SWarp resampling "
+                        "with the existing WCS."
+                    )
+
             # Fall back to WCS-based reproject which only needs valid WCS headers.
-            if not scamp_available or (
+            if (not scamp_available and not _ref_pre_scamped) or (
                 not swarp_available and resample_mode != "wcs_only"
             ):
                 self.logger.info(
@@ -1769,9 +1811,6 @@ class ImageDistortionCorrector:
                             "Failed to convert science SIP to PV (%s). "
                             "SWarp will ignore the distortion.", _e
                         )
-            sci_w = self._guess_map_weight_path(str(sci_image_copy))
-            if sci_w:
-                self.logger.info("Alignment SExtractor: using science MAP_WEIGHT %s", sci_w)
             with (
                 fits.open(sci_image_copy) as hdul,
                 fits.open(ref_image_copy) as hdul_ref,
@@ -3453,10 +3492,18 @@ class ImageDistortionCorrector:
             # native_scale, images are on different pixel grids - pixel coordinates
             # don't correspond, so matching produces meaningless offsets.
             alignment_metadata = {}
+            # post_swarp_verify is the current key; the older
+            # alignment_require_post_swarp_verification name is honoured when
+            # the new one is unset.  An explicit False on either disables
+            # verification - a plain `or` of both defaults would make
+            # post_swarp_verify=False ineffective.
             _post_swarp_verify = bool(
-                align_cfg.get("post_swarp_verify", True)
-            ) or bool(
-                align_cfg.get("alignment_require_post_swarp_verification", True)
+                align_cfg.get(
+                    "post_swarp_verify",
+                    align_cfg.get(
+                        "alignment_require_post_swarp_verification", True
+                    ),
+                )
             )
             if not _post_swarp_verify:
                 self.logger.info(
@@ -7300,6 +7347,24 @@ class ImageDistortionCorrector:
                 )
 
         # --- Execute SWarp ---
+        # Timeout scales with total input pixels: LANCZOS3 resampling of
+        # large mosaics can exceed the base timeout on slow storage.
+        # template_subtraction.swarp_timeout_sec overrides the base.
+        _iy = getattr(self, "input_yaml", None) or {}
+        _ts = _iy.get("template_subtraction", {}) if isinstance(_iy, dict) else {}
+        try:
+            _base_timeout = float(_ts.get("swarp_timeout_sec", 300) or 300)
+        except (TypeError, ValueError):
+            _base_timeout = 300.0
+        _npix = 0
+        for _img in input_images:
+            try:
+                _npix += int(fits.getval(_img, "NAXIS1", 0)) * int(
+                    fits.getval(_img, "NAXIS2", 0)
+                )
+            except Exception:
+                pass
+        swarp_timeout = int(_base_timeout * max(1.0, _npix / 16.0e6))
         result = None
         try:
             with open(log_file, "w") as f:
@@ -7309,13 +7374,18 @@ class ImageDistortionCorrector:
                     stderr=subprocess.STDOUT,
                     text=True,
                     check=False,
-                    timeout=300,
+                    timeout=swarp_timeout,
                 )
             self.clean_log(log_file)
         except subprocess.TimeoutExpired:
             with open(log_file, "a") as f:
-                f.write("\nERROR: SWarp execution timed out after 300 seconds\n")
-            self.logger.warning("SWarp timed out (300 s). See %s", log_file)
+                f.write(
+                    f"\nERROR: SWarp execution timed out after "
+                    f"{swarp_timeout} seconds\n"
+                )
+            self.logger.warning(
+                "SWarp timed out (%d s). See %s", swarp_timeout, log_file
+            )
             _cleanup_swarp_outputs()
             return None
         except Exception as e:
@@ -7619,6 +7689,26 @@ class ImageDistortionCorrector:
                 except OSError as e:
                     self.logger.debug("Could not remove GAIA temp dir %s: %s", gaia_temp_dir, e)
 
+        # Timeout scales with catalog size: quad matching cost grows with
+        # the number of detections, and a GAIA download adds network
+        # latency.  wcs.scamp_timeout_sec overrides the 180 s base.
+        try:
+            _scamp_base_timeout = float(
+                wcs_cfg.get("scamp_timeout_sec", 180) or 180
+            )
+        except (TypeError, ValueError):
+            _scamp_base_timeout = 180.0
+        _nrows = 0
+        for _cat in catalog_paths:
+            try:
+                _nrows += int(fits.getval(_cat, "NAXIS2", 2))
+            except Exception:
+                try:
+                    _nrows += int(fits.getval(_cat, "NAXIS2", 1))
+                except Exception:
+                    pass
+        scamp_timeout = int(_scamp_base_timeout * max(1.0, _nrows / 50000.0))
+
         try:
             with open(log_file, "w") as log_f:
                 result = subprocess.run(
@@ -7627,11 +7717,13 @@ class ImageDistortionCorrector:
                     stderr=subprocess.STDOUT,
                     text=True,
                     check=False,
-                    timeout=180,
+                    timeout=scamp_timeout,
                 )
             self.clean_log(log_file)
         except subprocess.TimeoutExpired:
-            self.logger.error("SCAMP execution timed out after 180 seconds")
+            self.logger.error(
+                "SCAMP execution timed out after %d seconds", scamp_timeout
+            )
             _clean_scamp_outputs()
             raise
 
