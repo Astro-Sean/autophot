@@ -58,6 +58,8 @@ from photutils.background import Background2D, MedianBackground
 from photutils.centroids import centroid_2dg, centroid_com, centroid_sources
 from photutils.segmentation import detect_sources, SourceCatalog, make_2dgaussian_kernel
 
+from .log_format import scrub_secrets
+
 logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 # Sentinel floor for SATURATE placeholders: real detectors saturate below
@@ -362,7 +364,7 @@ class PlainFormatter(logging.Formatter):
     """
     ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
-    def __init__(self, *args, max_width: int = 150, **kwargs):
+    def __init__(self, *args, max_width: int = 100, **kwargs):
         super().__init__(*args, **kwargs)
         self._max_width = int(max_width)
         self._last_kind = None     # last emitted message kind ("banner" | "step" | "msg")
@@ -371,7 +373,7 @@ class PlainFormatter(logging.Formatter):
         # A leading newline in the message is spacing, not content: move it
         # in front of the record so the level prefix labels the first real
         # line instead of dangling on a blank one.
-        raw = record.getMessage()
+        raw = scrub_secrets(record.getMessage())
         kind = _message_kind(raw)
         leading_blank = str(raw).startswith("\n")
         # Columns the level prefix ("INFO - ", timestamps) will occupy on
@@ -389,7 +391,9 @@ class PlainFormatter(logging.Formatter):
             msg = super().format(record)
         finally:
             record.msg, record.args = old_msg, old_args
-        msg = self.ANSI_ESCAPE.sub('', msg)
+        # Rendered output is scrubbed again so exc_text tracebacks, which
+        # getMessage() never sees, cannot leak credential values either.
+        msg = scrub_secrets(self.ANSI_ESCAPE.sub('', msg))
         first_ever = self._last_kind is None
         if first_ever:
             # No blank line at the top of the log file either.
@@ -521,7 +525,7 @@ class ColoredLevelFormatter(logging.Formatter):
         return base
 
     def format(self, record: logging.LogRecord) -> str:
-        msg_raw = record.getMessage()
+        msg_raw = scrub_secrets(record.getMessage())
         # Reserve room for the "[LEVEL] " tag _format_leveled prepends so
         # tagged lines stay within max_width as well.
         tag_len = 0
@@ -543,6 +547,7 @@ class ColoredLevelFormatter(logging.Formatter):
             base = self._format_leveled(record, msg_clean)
 
         record.msg, record.args = old_msg, old_args
+        base = scrub_secrets(base)
 
         if not self._use_color:
             return base
@@ -812,6 +817,21 @@ def clean_subprocess_log(path) -> None:
             f.write("\n".join(kept) + "\n")
 
 
+class SecretScrubFilter(logging.Filter):
+    """Mask credential-looking values before a record is emitted.
+
+    Formatter-independent backstop for handlers whose formatter is not
+    one of the in-house wrapping formatters (which already scrub).
+    The rendered message is rebuilt from ``record.getMessage()`` so the
+    %-args cannot re-inject a masked value downstream.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = scrub_secrets(record.getMessage())
+        record.args = ()
+        return True
+
+
 class LogMessageNormalizeFilter(logging.Filter):
     """Filter that normalizes message text before emission.
 
@@ -935,6 +955,9 @@ def configure_console_logging(
         # Stock/plain formatters do not wrap; reserve the "LEVEL - " prefix.
         # The two custom formatters normalize internally - running the
         # filter on top would double-indent wrapped continuations.
+        # The in-house formatters already scrub secrets; stock ones need
+        # the filter for the same protection.
+        handler.addFilter(SecretScrubFilter())
         handler.addFilter(
             LogMessageNormalizeFilter(
                 width=90, prefix_fmt="{levelname} - ", prefix_min_level=0
@@ -1063,16 +1086,23 @@ def set_verbose_level(value) -> int:
     """
     Apply a verbosity setting to the root logger and console handlers.
 
-    Only stream (console) handlers are re-levelled -- FileHandlers stay at
-    DEBUG so the log file always keeps the complete diagnostic record.
-    Returns the normalized 0-3 verbosity tier.
+    Console handlers keep their ConsoleLevelFilter threshold; FileHandlers
+    are set to DEBUG only on an explicit debug run (tier 3) so the default
+    log file stays at INFO+.  Returns the normalized 0-3 verbosity tier.
     """
     level = verbose_to_console_level(value)
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
     for handler in root.handlers:
         if isinstance(handler, logging.FileHandler):
-            handler.setLevel(logging.DEBUG)
+            # The log file follows the verbosity tier too: per-item DEBUG
+            # detail is kept only on an explicit debug run so the default
+            # file stays readable end to end.
+            handler.setLevel(
+                logging.DEBUG
+                if resolve_verbose_level(value) >= 3
+                else logging.INFO
+            )
             continue
         # Console handlers stay at DEBUG; ConsoleLevelFilter owns the
         # effective threshold so ui-tagged records always pass.
