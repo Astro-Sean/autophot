@@ -169,6 +169,68 @@ def _disk_structuring_element(r: int) -> np.ndarray:
     return (x * x + y * y) <= r * r
 
 
+def _read_mm_class_table(path, class_abbr, logger=None) -> np.ndarray:
+    """Read a MaxiMask per-class config file keyed by class abbreviation.
+
+    The shipped ``config/classes.*`` files hold ``ABBR value`` rows.
+    Rows are matched by name rather than position so a locally reordered
+    file cannot silently assign another class's prior/threshold -
+    ``utils.read_config_file`` reads positionally and would not notice.
+    """
+    values = {}
+    with open(path) as fd:
+        for line in fd:
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            try:
+                values[parts[0]] = float(parts[1])
+            except ValueError:
+                continue
+    missing = [c for c in class_abbr if c not in values]
+    if missing:
+        raise ValueError(
+            f"{path}: no value for MaxiMask class(es) {missing}"
+        )
+    extra = [k for k in values if k not in class_abbr]
+    if extra and logger is not None:
+        logger.warning(
+            "%s: unknown MaxiMask class row(s) %s ignored", path, extra
+        )
+    return np.array([values[c] for c in class_abbr], dtype=np.float32)
+
+
+def _maximask_num_threads(config) -> int:
+    """TensorFlow CPU threads for MaxiMask inference.
+
+    ``background.maximask_num_threads`` > 0 is explicit; 0/auto gives
+    min(4, cpus) when the pipeline runs images serially (nCPU<=1) and 1
+    when several image workers would otherwise each spawn a
+    whole-machine thread pool - TF ignores the OMP/BLAS pins applied at
+    interpreter start.
+    """
+    cfg_bkg = (
+        (config.get("background", {}) or {}) if isinstance(config, dict) else {}
+    )
+    try:
+        n = int(cfg_bkg.get("maximask_num_threads", 0) or 0)
+    except (TypeError, ValueError):
+        n = 0
+    try:
+        n_cpu = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n_cpu = os.cpu_count() or 1
+    if n <= 0:
+        try:
+            n_workers = (
+                int(config.get("nCPU", 1) or 1) if isinstance(config, dict) else 1
+            )
+        except (TypeError, ValueError):
+            n_workers = 1
+        n = 1 if n_workers > 1 else min(4, n_cpu)
+    return max(1, min(n, n_cpu, 16))
+
+
 def _smooth_for_detection(
     data: np.ndarray, sigma: float, fallback_kernel=None
 ) -> np.ndarray:
@@ -271,6 +333,10 @@ class BackgroundSubtractor:
         # Per-class masks from the last successful inference; None when
         # MaxiMask is off or has not run yet.
         self._maximask_class_masks = None
+        # Raw (pre-dilation) SP-class mask for the PSF stamp veto;
+        # extracted even when "SP" is not among the requested defect
+        # classes since the channel is computed regardless.
+        self._maximask_spike_mask = None
         # Reason the last MaxiMask attempt could not run (missing
         # dependency, image too small, inference failure); annotated on
         # the diagnostic figure.  None when inference ran or has not run.
@@ -1446,18 +1512,29 @@ class BackgroundSubtractor:
             self.logger.warning("use_maximask: image is all zeros; skipping")
             return None
 
-        _cvd_prev = None
+        _hidden_prev = None
         if not allow_gpu:
             # CPU-only default: hide GPUs before TensorFlow initialises so
             # the stage is safe on machines without drivers or with a GPU
             # reserved for other work.  Assign (not setdefault): a shell
-            # CUDA_VISIBLE_DEVICES must not leak GPUs into a CPU-only
-            # stage.  The variable is restored in `finally` once TF's
-            # device list is pinned - leaving it cleared would hide the
-            # GPU from later GPU consumers in this process (e.g. the SFFT
-            # Cupy-backend subprocess).
-            _cvd_prev = os.environ.get("CUDA_VISIBLE_DEVICES")
-            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            # device mask must not leak GPUs into a CPU-only stage.  All
+            # three runtime vars are cleared - CUDA_VISIBLE_DEVICES alone
+            # leaves ROCm hosts (which read HIP_/ROCR_VISIBLE_DEVICES)
+            # exposed, and these are the vars the nGPU round-robin pins.
+            # They are restored in `finally` once TF's device list is
+            # pinned - leaving them cleared would hide the GPU from later
+            # GPU consumers in this process (e.g. the SFFT Cupy-backend
+            # subprocess).
+            _hidden_prev = {
+                _v: os.environ.get(_v)
+                for _v in (
+                    "CUDA_VISIBLE_DEVICES",
+                    "HIP_VISIBLE_DEVICES",
+                    "ROCR_VISIBLE_DEVICES",
+                )
+            }
+            for _v in _hidden_prev:
+                os.environ[_v] = ""
         # TensorFlow's C++/absl logging (oneDNN notes, cuInit probes, the
         # "before absl::InitializeLog" warnings) is informational noise for
         # a library call.  Level 3 keeps only errors; the fd-level redirect
@@ -1466,6 +1543,21 @@ class BackgroundSubtractor:
         try:
             with _suppress_native_stderr():
                 import tensorflow as tf
+
+                # TF spawns intra/inter-op pools sized to the whole machine
+                # and ignores the OMP/BLAS pins set at interpreter start;
+                # cap them before the runtime initialises so parallel image
+                # workers do not oversubscribe the host.
+                _n_threads = _maximask_num_threads(self.config)
+                try:
+                    tf.config.threading.set_intra_op_parallelism_threads(_n_threads)
+                    tf.config.threading.set_inter_op_parallelism_threads(_n_threads)
+                except (RuntimeError, AttributeError):
+                    # Pools already initialised earlier in this process
+                    # (RuntimeError) or a TF too old to expose the
+                    # threading API (AttributeError); in both cases the
+                    # pools keep whatever they were first set to.
+                    pass
 
                 if not allow_gpu:
                     try:
@@ -1510,32 +1602,38 @@ class BackgroundSubtractor:
             )
             return None
         finally:
-            if not allow_gpu:
+            if _hidden_prev is not None:
                 # TF's visible-device list is already pinned (or the import
-                # failed entirely); restore the shell value so other GPU
+                # failed entirely); restore the shell values so other GPU
                 # consumers keep working.
-                if _cvd_prev is None:
-                    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-                else:
-                    os.environ["CUDA_VISIBLE_DEVICES"] = _cvd_prev
+                for _v, _prev in _hidden_prev.items():
+                    if _prev is None:
+                        os.environ.pop(_v, None)
+                    else:
+                        os.environ[_v] = _prev
 
         try:
             mm_dir = Path(utils.__file__).resolve().parent / "maximask"
             nb = mm_inf_mod.MaxiMask_inference.nb_classes
-            class_flags = utils.read_config_file(
-                str(mm_dir / "config" / "classes.flags"), nb, self.logger
+            class_abbr = list(mm_inf_mod.MaxiMask_inference.class_abbr)
+            if allow_gpu and not tf.config.list_physical_devices("GPU"):
+                self.logger.info(
+                    "use_maximask: maximask_allow_gpu set but no GPU is "
+                    "visible to TensorFlow - running on CPU"
+                )
+            # Every class channel is requested and the per-class selection
+            # happens in numpy below: the SavedModel emits only
+            # sum(class_flags) channels, so honouring a locally edited
+            # classes.flags file would shrink the predictions under the
+            # (ny, nx, nb) buffer allocated here.  Forcing all flags keeps
+            # the channel count and order (``class_abbr``) invariant
+            # whatever the shipped config says.
+            class_flags = np.ones(nb, dtype=bool)
+            priors = _read_mm_class_table(
+                mm_dir / "config" / "classes.priors", class_abbr, self.logger
             )
-            priors = utils.read_config_file(
-                str(mm_dir / "config" / "classes.priors"),
-                nb,
-                self.logger,
-                to_float=True,
-            )
-            thresholds = utils.read_config_file(
-                str(mm_dir / "config" / "classes.thresh"),
-                nb,
-                self.logger,
-                to_float=True,
+            thresholds = _read_mm_class_table(
+                mm_dir / "config" / "classes.thresh", class_abbr, self.logger
             )
             mm_inf = mm_inf_mod.MaxiMask_inference(
                 None,
@@ -1553,6 +1651,18 @@ class BackgroundSubtractor:
                     tf_model = tf.saved_model.load(model_key)
                 _MM_TF_MODEL_CACHE[model_key] = tf_model
             normed, _ = utils.image_norm(np.asarray(image, dtype=np.float32))
+            # image_norm divides by its mesh sigma map; a ~0 sigma node
+            # (flat overscan/painted regions, spline overshoot) yields
+            # inf/NaN, which the convolution then smears across the whole
+            # tile as NaN probabilities.  Neutralise them so one bad node
+            # costs at most its own tile rather than the full batch.
+            if not np.isfinite(normed).all():
+                self.logger.debug(
+                    "use_maximask: %d non-finite pixels after image_norm; "
+                    "replacing with 0",
+                    int((~np.isfinite(normed)).sum()),
+                )
+                normed = np.nan_to_num(normed, nan=0.0, posinf=0.0, neginf=0.0)
             preds = np.zeros(normed.shape + (nb,), dtype=np.float32)
             self.logger.info(
                 "Running MaxiMask inference (%s) - this takes ~1 min per "
@@ -1568,7 +1678,7 @@ class BackgroundSubtractor:
                 mm_inf.process_image(normed, preds, tf_model)
             return (
                 np.transpose(preds, (2, 0, 1)),
-                mm_inf_mod.MaxiMask_inference.class_abbr,
+                class_abbr,
                 thresholds,
             )
         except Exception as exc:
@@ -1594,8 +1704,9 @@ class BackgroundSubtractor:
         # Batch-size effect is strongly non-monotonic on CPU: measured
         # (14-core, TF 2.21, 64-tile frame) bs=4: 22 s, bs=8: 36 s,
         # bs=16: 72 s, bs=32: 175 s.  Larger batches lose to memory traffic
-        # and serial post-ops inside the SavedModel graph.
-        batch_size = int(cfg_bkg.get("maximask_batch_size", 4))
+        # and serial post-ops inside the SavedModel graph.  Clamp >=1: a
+        # zero/negative value divides by zero inside process_image.
+        batch_size = max(1, int(cfg_bkg.get("maximask_batch_size", 4) or 4))
         dilate_iterations = int(cfg_bkg.get("maximask_dilate_iterations", 1))
         allow_gpu = bool(cfg_bkg.get("maximask_allow_gpu", False))
 
@@ -1618,6 +1729,29 @@ class BackgroundSubtractor:
             return self._mm_mask
         self._maximask_class_masks = None
         self._maximask_error = None
+        self._maximask_spike_mask = None
+        # Cleared before every fresh attempt and re-set only on a completed
+        # inference - a failure after an earlier success must not leave the
+        # flag claiming MaxiMask still covers the frame.
+        self.maximask_active = False
+        if not classes:
+            self.logger.warning(
+                "use_maximask: maximask_classes is empty - inference runs "
+                "but flags nothing (SP still feeds the PSF stamp veto)"
+            )
+        elif "CR" not in classes:
+            cr_cfg = (
+                (self.config.get("cosmic_rays", {}) or {})
+                if isinstance(self.config, dict)
+                else {}
+            )
+            if not cr_cfg.get("remove_cmrays", False):
+                self.logger.info(
+                    "use_maximask: 'CR' not in maximask_classes and "
+                    "cosmic_rays.remove_cmrays is off - cosmic rays get no "
+                    "dedicated flagging; add 'CR' to maximask_classes to "
+                    "cover them"
+                )
         self.logger.info(
             "Using MaxiMask (Paillassa et al. 2020) to detect %s",
             ", ".join(_MAXIMASK_CLASS_NAMES.get(c, c) for c in classes),
@@ -1656,13 +1790,23 @@ class BackgroundSubtractor:
         # so the plot shows the network's raw per-class detections.
         self._maximask_class_masks = class_masks
 
+        # SP pixels also feed the PSF stamp veto downstream; extract them
+        # even when "SP" is absent from the requested defect classes - the
+        # channel is computed regardless, so the veto is free.
+        if "SP" in class_abbr:
+            i = class_abbr.index("SP")
+            spike_mask = probs[i] >= thresholds[i]
+            self._maximask_spike_mask = spike_mask if spike_mask.any() else None
+        # Drop the (nb, ny, nx) probability cube before dilation - on
+        # megapixel frames it is by far the largest array this stage holds.
+        del probs
+
         if dilate_iterations > 0 and np.any(mask):
             mask = binary_dilation(
                 mask,
                 structure=np.ones((3, 3), dtype=int),
                 iterations=dilate_iterations,
             )
-        self._maximask_mask = mask
         self._mm_sig, self._mm_mask = sig, mask
         self._mm_error = None
         self.logger.info(
@@ -2116,7 +2260,20 @@ class BackgroundSubtractor:
         if galaxies is None:
             galaxies = []
 
-        self.logger.info(log_step("Background: sky & RMS"))
+        # The diagnostics below (regime, mesh, mask sizes) re-log on every
+        # pass with mostly-identical values.  Keep the full block under the
+        # first pass's header; later passes get one reference line at INFO
+        # and the details stay available at DEBUG.
+        _bg_pass = getattr(self, "_bg_pass_count", 0)
+        self._bg_pass_count = _bg_pass + 1
+        if _bg_pass == 0:
+            self.logger.info(log_step("Background: sky & RMS"))
+        else:
+            self.logger.info(
+                "Background pass %d: sky & RMS diagnostics as in first "
+                "pass; differences noted below",
+                _bg_pass + 1,
+            )
 
         fast_mode = bool(cfg_bkg.get("fast_mode", False))
 
@@ -2605,8 +2762,14 @@ class BackgroundSubtractor:
             "source_mask": source_mask,
             # Raw (pre-dilation) SP-class pixels for source-level spike
             # flagging in PSF selection; None when MaxiMask is off or
-            # found no spikes.
-            "maximask_spike_mask": (self._maximask_class_masks or {}).get("SP"),
+            # found no spikes.  Extracted even when "SP" is absent from
+            # maximask_classes - the channel is computed anyway.
+            "maximask_spike_mask": self._maximask_spike_mask,
+            # True only when inference actually ran on this image; False
+            # when the stage is disabled, unavailable, or failed, so
+            # callers can tell "MaxiMask covers this frame" from merely
+            # being configured.
+            "maximask_active": self.maximask_active,
         }
 
     # =========================================================================
