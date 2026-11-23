@@ -7210,11 +7210,28 @@ class Templates:
             except Exception:
                 pass
 
+            # Reuse the driver's persisted footprint region when present:
+            # the query then covers the same sky patch as the calibration
+            # download and can hit its CSV cache instead of paying for a
+            # second, differently-centred cone.
+            _fbs_region = None
+            try:
+                _regs = (self.input_yaml.get("catalog", {}) or {}).get(
+                    "catalog_query_regions"
+                ) or {}
+                if isinstance(_regs, dict):
+                    _fbs_region = _regs.get(
+                        Catalog._normalize_catalog_name(str(catalogName))
+                    ) or _regs.get("default")
+            except (TypeError, ValueError, AttributeError):
+                _fbs_region = None
+
             sequenceData = Catalog(input_yaml=self.input_yaml)
             bright_sources_catalog = sequenceData.download(
                 target,
                 catalogName=catalogName,
                 radius=_fbs_radius,
+                region=_fbs_region,
             )
             if bright_sources_catalog is None:
                 return None
