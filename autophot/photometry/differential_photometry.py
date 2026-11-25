@@ -92,9 +92,7 @@ class _ignore_nan_warnings(warnings.catch_warnings):
 def _star_matrix(cat_all, star_ids, column, epochs):
     """Pivot per-epoch per-star ``column`` values into an (E x N) matrix."""
     sub = cat_all[cat_all["star_id"].isin(star_ids)]
-    pt = sub.pivot_table(
-        index="mjd", columns="star_id", values=column, aggfunc="first"
-    )
+    pt = sub.pivot_table(index="mjd", columns="star_id", values=column, aggfunc="first")
     pt = pt.reindex(index=list(epochs), columns=list(star_ids))
     return pt.to_numpy(dtype=float)
 
@@ -158,9 +156,7 @@ def _leave_one_out_veto(dm, wts, err_med, factor=2.0, min_keep=3):
             with _ignore_nan_warnings():
                 rms_med = np.nanmedian(rms[np.isfinite(rms)])
             exp = np.where(np.isfinite(exp), exp, rms_med)
-        score = np.divide(
-            rms, exp, out=np.full_like(rms, np.nan), where=exp > 0
-        )
+        score = np.divide(rms, exp, out=np.full_like(rms, np.nan), where=exp > 0)
         finite = np.isfinite(score)
         if not finite.any():
             break
@@ -198,19 +194,14 @@ def _ensemble_epoch_stats(dm, wts, err, sigma_clip=5.0, min_members=3):
             # W is zeroed wherever dm is invalid, so masking with W > 0
             # keeps NaN measurements out of the epoch scatter.
             resid = np.where(W > 0, dm - c[:, None], 0.0)
-            var = (W * resid**2).sum(axis=1) / np.where(
-                wtot > 0, wtot, np.nan
-            )
+            var = (W * resid**2).sum(axis=1) / np.where(wtot > 0, wtot, np.nan)
             scatter = np.sqrt(var)
             n_mem = (W > 0).sum(axis=1)
-            c_err = np.maximum(
-                se_formal, scatter / np.sqrt(np.clip(n_mem, 1, None))
-            )
+            c_err = np.maximum(se_formal, scatter / np.sqrt(np.clip(n_mem, 1, None)))
         if sigma_clip is None or sigma_clip <= 0:
             break
         sig = np.sqrt(
-            np.where(np.isfinite(err), err, np.nan) ** 2
-            + c_err[:, None] ** 2
+            np.where(np.isfinite(err), err, np.nan) ** 2 + c_err[:, None] ** 2
         )
         # A member with no error estimate is clipped against the pooled
         # epoch scatter so it cannot silently dominate the mean.
@@ -231,9 +222,7 @@ def _ensemble_epoch_stats(dm, wts, err, sigma_clip=5.0, min_members=3):
         transp, _ = _weighted_mean_nan(rel_flux, W)
     with _ignore_nan_warnings():
         med_t = np.nanmedian(transp[np.isfinite(transp)])
-    transp_norm = (
-        transp / med_t if np.isfinite(med_t) and med_t > 0 else transp
-    )
+    transp_norm = transp / med_t if np.isfinite(med_t) and med_t > 0 else transp
 
     return {
         "c": c,
@@ -360,14 +349,13 @@ def _comparison_systematics(resid, usable, bin_size=10):
         if n_bins < 3 or not np.isfinite(p2p):
             continue
         binned = r[: n_bins * b].reshape(n_bins, b).mean(axis=1)
-        excess.append(
-            np.sqrt(max(float(np.std(binned)) ** 2 - p2p**2 / b, 0.0))
-        )
+        excess.append(np.sqrt(max(float(np.std(binned)) ** 2 - p2p**2 / b, 0.0)))
     return float(np.median(excess)) if excess else np.nan
 
 
-def _sysrem(resid, errs, n_components, star_weights, epoch_weights=None,
-            iterations=15, clip=4.0):
+def _sysrem(
+    resid, errs, n_components, star_weights, epoch_weights=None, iterations=15, clip=4.0
+):
     """SysRem (Tamuz, Mazeh & Zucker 2005) on an (E x S) residual matrix.
 
     Removes effects common to many stars, each modelled as c_star x
@@ -384,15 +372,14 @@ def _sysrem(resid, errs, n_components, star_weights, epoch_weights=None,
         weights = weights * np.asarray(epoch_weights, dtype=float)[:, None]
     cleaned = np.where(finite, resid, 0.0)
     with _ignore_nan_warnings():
-        col_med = np.nanmedian(
-            np.where(finite, resid, np.nan), axis=0, keepdims=True
-        )
+        col_med = np.nanmedian(np.where(finite, resid, np.nan), axis=0, keepdims=True)
         star_scatter = 1.4826 * np.nanmedian(
             np.abs(np.where(finite, resid, np.nan) - col_med), axis=0
         )
-    inliers = np.abs(cleaned) < clip * np.where(
-        np.isfinite(star_scatter), star_scatter, np.inf
-    )[None, :]
+    inliers = (
+        np.abs(cleaned)
+        < clip * np.where(np.isfinite(star_scatter), star_scatter, np.inf)[None, :]
+    )
     frame_weights = weights * np.asarray(star_weights, dtype=float)[None, :] * inliers
     components = []
     for _ in range(int(n_components)):
@@ -665,17 +652,13 @@ def differential_photometry(
     try:
         data = pd.read_csv(output_file)
     except Exception as exc:
-        log.error(
-            "differential_photometry: cannot read '%s': %s", output_file, exc
-        )
+        log.error("differential_photometry: cannot read '%s': %s", output_file, exc)
         return None
     data = _normalize_photometry_columns(data)
     if data.columns.duplicated().any():
         data = data.loc[:, ~data.columns.duplicated()].copy()
     if "mjd" not in data.columns:
-        log.warning(
-            "differential_photometry: no 'mjd' column in '%s'", output_file
-        )
+        log.warning("differential_photometry: no 'mjd' column in '%s'", output_file)
         return None
 
     save_path = os.path.dirname(os.path.abspath(output_file))
@@ -684,9 +667,7 @@ def differential_photometry(
 
     # Discover bands, mirroring plot_lightcurve (long-form via `filter`
     # column, else wide-format per-band triplets).
-    long_form = (
-        f"mag_{m_low}" in data.columns and f"mag_{m_low}_err" in data.columns
-    )
+    long_form = f"mag_{m_low}" in data.columns and f"mag_{m_low}_err" in data.columns
     fser = photometry_filter_series(data)
     bands = []
     if long_form and fser is not None and fser.notna().any():
@@ -944,16 +925,12 @@ def differential_photometry(
         # contaminate the common-mode estimate.
         dm_raw = _star_matrix(cat_all, cand_ids, "inst", epochs)
         err_raw = _star_matrix(cat_all, cand_ids, "inst_err", epochs)
-        err_floor = np.where(
-            np.isfinite(err_raw) & (err_raw > 1e-3), err_raw, np.nan
-        )
+        err_floor = np.where(np.isfinite(err_raw) & (err_raw > 1e-3), err_raw, np.nan)
         with _ignore_nan_warnings():
             col_med_err = np.nanmedian(err_floor, axis=0)
             global_med_err = np.nanmedian(err_floor)
         err_filled = np.where(np.isfinite(err_floor), err_floor, col_med_err)
-        err_filled = np.where(
-            np.isfinite(err_filled), err_filled, global_med_err
-        )
+        err_filled = np.where(np.isfinite(err_filled), err_filled, global_med_err)
         if not np.isfinite(err_filled).any():
             # No measurement errors at all: uniform weights, and the veto
             # falls back to a relative-scatter comparison.
@@ -963,9 +940,7 @@ def differential_photometry(
         else:
             err_use = np.where(np.isfinite(err_filled), err_filled, np.nan)
             wts = np.where(np.isfinite(err_use), 1.0 / err_use**2, 0.0)
-            err_med = np.where(
-                np.isfinite(col_med_err), col_med_err, global_med_err
-            )
+            err_med = np.where(np.isfinite(col_med_err), col_med_err, global_med_err)
 
         valid0 = np.isfinite(dm_raw)
         w0 = np.where(valid0, wts, 0.0)
@@ -999,9 +974,7 @@ def differential_photometry(
             )
         # Cap at the brightest n_ensemble survivors (cand_ids is already
         # sorted by mean flux descending).
-        ensemble_ids = [
-            sid for sid, k in zip(cand_ids, keep_mask) if k
-        ][:n_ensemble]
+        ensemble_ids = [sid for sid, k in zip(cand_ids, keep_mask) if k][:n_ensemble]
         if len(ensemble_ids) < 3:
             log.info(
                 "differential_photometry: band %s - fewer than 3 ensemble "
@@ -1091,9 +1064,7 @@ def differential_photometry(
             with _ignore_nan_warnings():
                 cover = np.mean(np.isfinite(resid_all[used_epoch]), axis=0)
                 col_med = np.nanmedian(resid_all, axis=0, keepdims=True)
-                init_scat = 1.4826 * np.nanmedian(
-                    np.abs(resid_all - col_med), axis=0
-                )
+                init_scat = 1.4826 * np.nanmedian(np.abs(resid_all - col_med), axis=0)
                 exp_err = np.nanmedian(err_use, axis=0)
             star_ok = (
                 keep_mask
@@ -1145,9 +1116,7 @@ def differential_photometry(
         ens_epoch["airmass"] = [
             meta_by_mjd.get(m, {}).get("airmass", np.nan) for m in epochs
         ]
-        ens_epoch["fwhm"] = [
-            meta_by_mjd.get(m, {}).get("fwhm", np.nan) for m in epochs
-        ]
+        ens_epoch["fwhm"] = [meta_by_mjd.get(m, {}).get("fwhm", np.nan) for m in epochs]
 
         # Optional mid-exposure / barycentric timestamps for the CSV.  The
         # stored MJD is taken as start-of-exposure unless the Calib header
@@ -1156,10 +1125,7 @@ def differential_photometry(
         mjd_mid = bjd_tdb = None
         if ts_mode in ("mid", "bjd", "bjd_tdb"):
             exp_arr = np.array(
-                [
-                    meta_by_mjd.get(m, {}).get("exposure_time", np.nan)
-                    for m in epochs
-                ]
+                [meta_by_mjd.get(m, {}).get("exposure_time", np.nan) for m in epochs]
             )
             mjd_kw = next(
                 (m["mjd_keyword"] for m in band_files if m.get("mjd_keyword")),
@@ -1195,8 +1161,7 @@ def differential_photometry(
         # Brightest qualifying stars not in the ensemble form the plotted
         # reference cloud (independent of the common-mode correction).
         plot_ids = set(
-            sel[~sel["star_id"].isin(ensemble_ids)]
-            .head(n_ref_plot)["star_id"]
+            sel[~sel["star_id"].isin(ensemble_ids)].head(n_ref_plot)["star_id"]
         )
         if not plot_ids:
             # Fall back to plotting ensemble members themselves: their
@@ -1223,9 +1188,7 @@ def differential_photometry(
                 ]
                 for col, idx in enumerate(plot_idx):
                     if idx is not None:
-                        ref_delta[:, col] = (
-                            ref_delta[:, col] - sysrem_model[:, idx]
-                        )
+                        ref_delta[:, col] = ref_delta[:, col] - sysrem_model[:, idx]
             ref_delta = ref_delta - np.nanmean(ref_delta, axis=0)
         ref = pd.DataFrame(
             {
@@ -1255,17 +1218,16 @@ def differential_photometry(
         tgt["ens_mean"] = ens_mean_inst[tgt["ep_i"].to_numpy(dtype=int)]
         tgt["ens_std"] = ens["c_err"][tgt["ep_i"].to_numpy(dtype=int)]
         tgt["ens_n"] = ens["n_mem"][tgt["ep_i"].to_numpy(dtype=int)]
-        tgt["transparency"] = ens["transparency"][
-            tgt["ep_i"].to_numpy(dtype=int)
-        ]
+        tgt["transparency"] = ens["transparency"][tgt["ep_i"].to_numpy(dtype=int)]
         tgt["used"] = used_epoch[tgt["ep_i"].to_numpy(dtype=int)]
         tgt["diff"] = tgt["inst"] - tgt["ens_mean"]
         # A NaN instrumental error means the uncertainty is unknown, not
         # zero - propagate it so the max_plot_err gate drops the point
-        # instead of treating it as perfectly measured.
-        tgt["delta_err"] = np.sqrt(
-            tgt["inst_err"] ** 2 + tgt["ens_std"].fillna(0.0) ** 2
-        )
+        # instead of treating it as perfectly measured.  The same applies
+        # to an unavailable ensemble term (no/too-few members, degenerate
+        # weighted mean): ens_std is NaN there, so keep delta_err NaN
+        # rather than substituting zero and under-reporting the error.
+        tgt["delta_err"] = np.sqrt(tgt["inst_err"] ** 2 + tgt["ens_std"] ** 2)
         if max_plot_err is not None and max_plot_err > 0:
             n_before = len(tgt)
             tgt = tgt[tgt["delta_err"] <= max_plot_err]
@@ -1327,9 +1289,7 @@ def differential_photometry(
         tgt["delta"] = tgt["diff"] - diff_ref
         # Normalized relative flux, unity at the median of the used epochs.
         tgt["rel_flux"] = 10.0 ** (-0.4 * tgt["delta"])
-        tgt["rel_flux_err"] = (
-            np.log(10.0) / 2.5 * tgt["rel_flux"] * tgt["delta_err"]
-        )
+        tgt["rel_flux_err"] = np.log(10.0) / 2.5 * tgt["rel_flux"] * tgt["delta_err"]
 
         ref_rms = (
             float(np.nanstd(ref_delta[used_epoch, :]))
@@ -1337,13 +1297,9 @@ def differential_photometry(
             else np.nan
         )
         tgt_used = tgt[tgt["used"]]
-        tgt_rms = (
-            float(np.nanstd(tgt_used["delta"])) if len(tgt_used) else np.nan
-        )
+        tgt_rms = float(np.nanstd(tgt_used["delta"])) if len(tgt_used) else np.nan
         var_ratio = (
-            tgt_rms / ref_rms
-            if np.isfinite(ref_rms) and ref_rms > 0
-            else np.nan
+            tgt_rms / ref_rms if np.isfinite(ref_rms) and ref_rms > 0 else np.nan
         )
         p2p = _p2p_scatter(tgt_used["delta"].to_numpy())
         n_per_bin = max(2, int(np.sqrt(max(len(tgt_used), 1))))
@@ -1374,12 +1330,8 @@ def differential_photometry(
             csv_rows.append(
                 {
                     "mjd": row.mjd,
-                    "mjd_mid": (
-                        mjd_mid[ei] if mjd_mid is not None else np.nan
-                    ),
-                    "bjd_tdb": (
-                        bjd_tdb[ei] if bjd_tdb is not None else np.nan
-                    ),
+                    "mjd_mid": (mjd_mid[ei] if mjd_mid is not None else np.nan),
+                    "bjd_tdb": (bjd_tdb[ei] if bjd_tdb is not None else np.nan),
                     "filter": band,
                     "inst_mag": row.inst,
                     "inst_mag_err": row.inst_err,
@@ -1649,9 +1601,7 @@ def differential_photometry(
                         label="FWHM [pix]",
                         zorder=1,
                     )
-                    ax_fw.set_ylabel(
-                        "FWHM [pix]", color="darkorchid", fontsize=8
-                    )
+                    ax_fw.set_ylabel("FWHM [pix]", color="darkorchid", fontsize=8)
                     ax_fw.tick_params(axis="y", colors="darkorchid", labelsize=7)
 
             else:  # resid
@@ -1755,15 +1705,11 @@ def differential_photometry(
                 _y_hi = max(_y_hi, 0.0)
                 _pad = max(0.08 * (_y_hi - _y_lo), 0.02)
                 ax.set_ylim(_y_hi + _pad, _y_lo - _pad)
-                ax.grid(
-                    True, which="major", alpha=0.35, linestyle="-", linewidth=0.5
-                )
+                ax.grid(True, which="major", alpha=0.35, linestyle="-", linewidth=0.5)
                 ax.minorticks_on()
                 note_lines = []
                 if np.isfinite(payload["var_ratio"]):
-                    note_lines.append(
-                        f"target/ref RMS = {payload['var_ratio']:.2f}"
-                    )
+                    note_lines.append(f"target/ref RMS = {payload['var_ratio']:.2f}")
                 if np.isfinite(payload["p2p"]):
                     note_lines.append(f"p2p = {payload['p2p'] * 1e3:.0f} mmag")
                 if np.isfinite(payload["beta"]):
