@@ -76,9 +76,9 @@ SATURATE_SENTINEL_MIN = 1e8
 import threading as _threading
 
 _FITS_CACHE_LOCK = _threading.Lock()
-_FITS_HEADER_CACHE = {}   # key -> header
-_FITS_IMAGE_CACHE = {}    # key -> (image, header)
-_FITS_CACHE_MAX = 64      # max entries per cache
+_FITS_HEADER_CACHE = {}  # key -> header
+_FITS_IMAGE_CACHE = {}  # key -> (image, header)
+_FITS_CACHE_MAX = 64  # max entries per cache
 
 # photutils 3.1 exposes n_threads on its compiled paths (aperture sums,
 # annulus stats, source catalogs, deblend groups, Background2D tiles).
@@ -237,7 +237,9 @@ def vizier_query_region(*args, **kwargs):
             result = Vizier.query_region(*args, **kwargs)
         except Exception as exc:
             last_exc = exc
-            logger.warning("VizieR query via %s failed (%s); trying next mirror", host, exc)
+            logger.warning(
+                "VizieR query via %s failed (%s); trying next mirror", host, exc
+            )
             continue
         Vizier._autophot_vizier_host = host
         return result
@@ -355,19 +357,20 @@ def _message_kind(msg: str) -> str:
 class PlainFormatter(logging.Formatter):
     """
     Plain text formatter for log files - strips ANSI escape codes.
-    
+
     Ensures log files contain clean, readable text without terminal
     formatting codes (bold, color, etc.) that are added by border_msg
     and other formatting functions.  Multi-line messages (e.g. border
     banners) are indented so continuation lines align with the first
     line's prefix.
     """
-    ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+    ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
     def __init__(self, *args, max_width: int = 100, **kwargs):
         super().__init__(*args, **kwargs)
         self._max_width = int(max_width)
-        self._last_kind = None     # last emitted message kind ("banner" | "step" | "msg")
+        self._last_kind = None  # last emitted message kind ("banner" | "step" | "msg")
 
     def format(self, record: logging.LogRecord) -> str:
         # A leading newline in the message is spacing, not content: move it
@@ -380,20 +383,23 @@ class PlainFormatter(logging.Formatter):
         # line 1: reserve them from the wrap budget and reuse them to hang
         # continuation lines under the message body.
         dummy = copy.copy(record)
-        dummy.msg, dummy.args = '', ()
+        dummy.msg, dummy.args = "", ()
         prefix_len = len(super().format(dummy))
         old_msg, old_args = record.msg, record.args
-        record.msg, record.args = normalize_log_message(
-            str(raw).lstrip("\n") if leading_blank else str(raw),
-            width=max(40, self._max_width - prefix_len),
-        ), ()
+        record.msg, record.args = (
+            normalize_log_message(
+                str(raw).lstrip("\n") if leading_blank else str(raw),
+                width=max(40, self._max_width - prefix_len),
+            ),
+            (),
+        )
         try:
             msg = super().format(record)
         finally:
             record.msg, record.args = old_msg, old_args
         # Rendered output is scrubbed again so exc_text tracebacks, which
         # getMessage() never sees, cannot leak credential values either.
-        msg = scrub_secrets(self.ANSI_ESCAPE.sub('', msg))
+        msg = scrub_secrets(self.ANSI_ESCAPE.sub("", msg))
         first_ever = self._last_kind is None
         if first_ever:
             # No blank line at the top of the log file either.
@@ -416,10 +422,10 @@ class PlainFormatter(logging.Formatter):
         self._last_kind = kind
         # Indent continuation lines so border banners and other multi-line
         # output align under the first line's timestamp/level prefix.
-        if '\n' in msg:
-            lines = msg.split('\n')
-            lines = [lines[0]] + [' ' * prefix_len + ln for ln in lines[1:]]
-            msg = '\n'.join(lines)
+        if "\n" in msg:
+            lines = msg.split("\n")
+            lines = [lines[0]] + [" " * prefix_len + ln for ln in lines[1:]]
+            msg = "\n".join(lines)
         if result_lead or leading_blank or block_gap:
             msg = "\n" + msg
         return msg
@@ -456,15 +462,21 @@ class ColoredLevelFormatter(logging.Formatter):
     RED = "\033[31m"
     YELLOW = "\033[33m"
 
-    def __init__(self, *args, use_color: bool = True, compact: bool = True,
-                 max_width: int = 90, **kwargs):
+    def __init__(
+        self,
+        *args,
+        use_color: bool = True,
+        compact: bool = True,
+        max_width: int = 90,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._use_color = use_color
         self._compact = compact
         self._max_width = int(max_width)
         self._msg_count = 0
-        self._in_section = False   # a banner has opened a pipeline section
-        self._last_kind = None     # "banner" | "step" | "msg"
+        self._in_section = False  # a banner has opened a pipeline section
+        self._last_kind = None  # "banner" | "step" | "msg"
 
     @staticmethod
     def _align_continuation(msg: str, col: int) -> str:
@@ -512,9 +524,7 @@ class ColoredLevelFormatter(logging.Formatter):
     def _format_leveled(self, record: logging.LogRecord, msg_clean: str) -> str:
         label = f"[{record.levelname}]"
         # A leading blank belongs before the level tag, not after it.
-        msg_clean = self._align_continuation(
-            msg_clean.lstrip("\n"), len(label) + 1
-        )
+        msg_clean = self._align_continuation(msg_clean.lstrip("\n"), len(label) + 1)
         base = f"{label} {msg_clean}"
         self._msg_count += 1
         # Warnings and errors get a leading blank line so they stand out from
@@ -580,11 +590,11 @@ class ColoredLevelFormatter(logging.Formatter):
 # Common non-ASCII symbols mapped to plain-ASCII equivalents so log output
 # stays readable in any terminal and grep-friendly in log files.
 _ASCII_TRANSLATE = {
-    ord("\u00b1"): "+/-",   # plus-minus
-    ord("\u00d7"): "x",     # multiplication sign
-    ord("\u00b0"): "deg",   # degree sign
-    ord("\u00b5"): "u",     # micro sign
-    ord("\u03bc"): "u",     # greek mu
+    ord("\u00b1"): "+/-",  # plus-minus
+    ord("\u00d7"): "x",  # multiplication sign
+    ord("\u00b0"): "deg",  # degree sign
+    ord("\u00b5"): "u",  # micro sign
+    ord("\u03bc"): "u",  # greek mu
     ord("\u03c3"): "sigma",
     ord("\u0394"): "Delta",
     ord("\u03b4"): "delta",
@@ -598,25 +608,25 @@ _ASCII_TRANSLATE = {
     ord("\u03c7"): "chi",
     ord("\u03c0"): "pi",
     ord("\u03a3"): "Sigma",
-    ord("\u2192"): "->",    # rightwards arrow
-    ord("\u2190"): "<-",    # leftwards arrow
-    ord("\u2194"): "<->",   # left right arrow
-    ord("\u2212"): "-",     # minus sign
+    ord("\u2192"): "->",  # rightwards arrow
+    ord("\u2190"): "<-",  # leftwards arrow
+    ord("\u2194"): "<->",  # left right arrow
+    ord("\u2212"): "-",  # minus sign
     ord("\u2265"): ">=",
     ord("\u2264"): "<=",
     ord("\u2260"): "!=",
     ord("\u2248"): "~=",
     ord("\u221e"): "inf",
     ord("\u221a"): "sqrt",
-    ord("\u2013"): "-",     # en dash
-    ord("\u2014"): "-",     # em dash
-    ord("\u2026"): "...",   # ellipsis
+    ord("\u2013"): "-",  # en dash
+    ord("\u2014"): "-",  # em dash
+    ord("\u2026"): "...",  # ellipsis
     ord("\u2018"): "'",
     ord("\u2019"): "'",
     ord("\u201c"): '"',
     ord("\u201d"): '"',
-    ord("\u2022"): "-",     # bullet
-    ord("\u00b7"): ".",     # middle dot
+    ord("\u2022"): "-",  # bullet
+    ord("\u00b7"): ".",  # middle dot
 }
 
 
@@ -673,8 +683,9 @@ def _metric_atoms(s: str):
     return atoms
 
 
-def _wrap_metric_line(ln: str, width: int, indent: str,
-                      hang: int = 0) -> list[str] | None:
+def _wrap_metric_line(
+    ln: str, width: int, indent: str, hang: int = 0
+) -> list[str] | None:
     """Wrap a stat-dump line at metric boundaries, packing whole atoms
     per line.  Continuation lines hang under the first body character
     (after any 'Label:'/'[tag]' prefix and the *hang* columns a rendered
@@ -719,8 +730,7 @@ def _wrap_metric_line(ln: str, width: int, indent: str,
     return out
 
 
-def normalize_log_message(message: str, width: int = 150,
-                          hang: int = 0) -> str:
+def normalize_log_message(message: str, width: int = 150, hang: int = 0) -> str:
     """
     Normalize log message formatting for readability and consistency.
 
@@ -795,7 +805,8 @@ _SUBPROCESS_LOG_NOISE = (
 def strip_subprocess_noise(text: str) -> str:
     """Remove known-benign noise lines from captured subprocess output."""
     kept = [
-        ln for ln in str(text).splitlines()
+        ln
+        for ln in str(text).splitlines()
         if ln.strip() and not any(noise in ln for noise in _SUBPROCESS_LOG_NOISE)
     ]
     return "\n".join(kept)
@@ -809,8 +820,7 @@ def clean_subprocess_log(path) -> None:
     except OSError:
         return
     kept = [
-        ln for ln in lines
-        if not any(noise in ln for noise in _SUBPROCESS_LOG_NOISE)
+        ln for ln in lines if not any(noise in ln for noise in _SUBPROCESS_LOG_NOISE)
     ]
     if len(kept) != len(lines):
         with open(path, "w") as f:
@@ -874,9 +884,7 @@ class LogMessageNormalizeFilter(logging.Filter):
             # under the message body, not at column 0.
             hang = 0
             if self.prefix_fmt and record.levelno >= self.prefix_min_level:
-                hang = len(
-                    self.prefix_fmt.format(levelname=record.levelname)
-                )
+                hang = len(self.prefix_fmt.format(levelname=record.levelname))
             normalized = normalize_log_message(
                 record.getMessage(),
                 width=self._line_budget(record),
@@ -949,9 +957,7 @@ def configure_console_logging(
     if formatter is None:
         # ColoredLevelFormatter wraps lines itself (max_width=90).
         formatter = ColoredLevelFormatter(use_color=use_color)
-    elif not isinstance(
-        formatter, (ColoredLevelFormatter, PlainFormatter)
-    ):
+    elif not isinstance(formatter, (ColoredLevelFormatter, PlainFormatter)):
         # Stock/plain formatters do not wrap; reserve the "LEVEL - " prefix.
         # The two custom formatters normalize internally - running the
         # filter on top would double-indent wrapped continuations.
@@ -999,7 +1005,9 @@ def log_status(msg: str, *args, ui: bool = False, **kwargs) -> None:
     extra = kwargs.pop("extra", None) or {}
     if ui:
         extra = {**extra, "ui": True}
-    logging.getLogger(__name__.rsplit(".", 1)[-1]).log(STATUS, msg, *args, extra=extra, **kwargs)
+    logging.getLogger(__name__.rsplit(".", 1)[-1]).log(
+        STATUS, msg, *args, extra=extra, **kwargs
+    )
 
 
 def log_result(msg: str, *args, **kwargs) -> None:
@@ -1034,9 +1042,7 @@ class ConsoleLevelFilter(logging.Filter):
         self.min_level = min_level
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return record.levelno >= self.min_level or bool(
-            getattr(record, "ui", False)
-        )
+        return record.levelno >= self.min_level or bool(getattr(record, "ui", False))
 
 
 def resolve_verbose_level(value) -> int:
@@ -1099,9 +1105,7 @@ def set_verbose_level(value) -> int:
             # detail is kept only on an explicit debug run so the default
             # file stays readable end to end.
             handler.setLevel(
-                logging.DEBUG
-                if resolve_verbose_level(value) >= 3
-                else logging.INFO
+                logging.DEBUG if resolve_verbose_level(value) >= 3 else logging.INFO
             )
             continue
         # Console handlers stay at DEBUG; ConsoleLevelFilter owns the
@@ -1231,9 +1235,7 @@ def find_filter_header_key(header, extra_keys=()):
             and filter_value_usable(header[k])
         ):
             filt_keys.append(k)
-    filt_keys.sort(
-        key=lambda k: ("name" not in k.lower() and "nm" not in k.lower(), k)
-    )
+    filt_keys.sort(key=lambda k: ("name" not in k.lower() and "nm" not in k.lower(), k))
     return filt_keys[0] if filt_keys else None
 
 
@@ -1252,7 +1254,9 @@ def get_supported_photometric_filters() -> tuple:
 # per-character path below, but the lowercased lookup additionally accepts
 # case variants such as "GRIZJHK" or "grizjhk".
 _COMPOSITE_FILTER_GROUP_KEYS = {
-    "grizjhk": tuple("grizJHK"),  # g,r,i,z,J,H,K (matches common refcat / Pan-STARRS+2MASS style maps)
+    "grizjhk": tuple(
+        "grizJHK"
+    ),  # g,r,i,z,J,H,K (matches common refcat / Pan-STARRS+2MASS style maps)
     "ugrizjhk": tuple("ugrizJHK"),  # u,g,r,i,z,J,H,K
     "grizjhkYw": tuple("grizJHKYw"),  # g,r,i,z,J,H,K,Y,w (extended filter set)
     "ugrizjhkYw": tuple("ugrizJHKYw"),  # u,g,r,i,z,J,H,K,Y,w (extended filter set)
@@ -1363,14 +1367,14 @@ def invalid_use_catalog_keys(use_catalog):
 def normalize_photometric_filter_name(filter_name, available_filters=None):
     """
     Normalize a filter token to a supported photometric band.
-    
+
     This function is now dynamic and accepts any filter name that is either:
     1. A standard photometric filter (UBVRI, ugriz, JHK families)
     2. Present in the available_filters list (from custom catalogs)
     3. A common alias of standard filters
-    
+
     Non-photometric fields (RA/DEC/name and *_err columns) return None.
-    
+
     Parameters
     ----------
     filter_name : str
@@ -1378,7 +1382,7 @@ def normalize_photometric_filter_name(filter_name, available_filters=None):
     available_filters : list or tuple, optional
         List of available filters from catalogs. If provided, allows any filter
         name present in this list, enabling completely dynamic filter support.
-    
+
     Returns
     -------
     str or None
@@ -1409,7 +1413,7 @@ def normalize_photometric_filter_name(filter_name, available_filters=None):
             for f in available_set:
                 if f.lower() == token.lower():
                     return f
-    
+
     if token in SUPPORTED_PHOTOMETRIC_FILTERS:
         return token
 
@@ -1432,23 +1436,26 @@ def normalize_photometric_filter_name(filter_name, available_filters=None):
         "luminance": None,
         "white": None,
     }
-    
+
     result = aliases.get(token_l)
     if result is not None:
         return result
-    
+
     # available_filters also enables fuzzy matching, then a final exact
     # check - the exact check is what lets custom catalogs use arbitrary
     # filter names.
     if available_filters is not None:
         import difflib
-        close_matches = difflib.get_close_matches(token, list(available_set), n=1, cutoff=0.8)
+
+        close_matches = difflib.get_close_matches(
+            token, list(available_set), n=1, cutoff=0.8
+        )
         if close_matches:
             return close_matches[0]
 
         if token in available_set:
             return token
-    
+
     return None
 
 
@@ -1476,7 +1483,9 @@ def sanitize_photometric_filters(filters, available_filters=None):
     seen = set()
     dropped = []
     for raw in filters or []:
-        norm = normalize_photometric_filter_name(raw, available_filters=available_filters)
+        norm = normalize_photometric_filter_name(
+            raw, available_filters=available_filters
+        )
         if norm is None:
             dropped.append(str(raw))
             continue
@@ -1754,9 +1763,7 @@ def drop_mask_components_at_positions(
             continue
         if max_extent_px is not None:
             ys, xs = np.nonzero(lab == comp)
-            furthest = np.sqrt(
-                np.max((xs - px) ** 2 + (ys - py) ** 2)
-            )
+            furthest = np.sqrt(np.max((xs - px) ** 2 + (ys - py) ** 2))
             if furthest > max_extent_px:
                 continue
         if reference_image is not None and not np.isfinite(
@@ -1878,7 +1885,6 @@ def get_image_stats(image, sigma=3, maxiters=None):
 def calculate_bins(x, percentiles=[25, 75]):
     """Compute a Freedman-Diaconis-style bin width for *x*."""
     try:
-
         if not np.any(np.isfinite(x)):
             return "auto"  # default bins when there is no finite data
         q25, q75 = np.nanpercentile(x, percentiles)
@@ -1901,7 +1907,7 @@ def save_to_fits(data, output_filename):
     """Write *data* to a FITS file as float32 (preserves NaNs)."""
     try:
         # float32 preserves NaNs (chip gaps); integer dtypes cannot.
-        data_to_write = data.astype(np.float32) if data.dtype.kind != 'f' else data
+        data_to_write = data.astype(np.float32) if data.dtype.kind != "f" else data
         hdu = fits.PrimaryHDU(data_to_write)
 
         hdulist = fits.HDUList([hdu])
@@ -2097,9 +2103,14 @@ def _framed_lines(title: str, char: str, width: int) -> list[str]:
     return [char * width, t, char * width]
 
 
-def border_msg(msg: str, body: str = "=", corner: str = "+",
-               metadata: str | None = None, width: int | None = None,
-               use_ansi: bool | None = None) -> str:
+def border_msg(
+    msg: str,
+    body: str = "=",
+    corner: str = "+",
+    metadata: str | None = None,
+    width: int | None = None,
+    use_ansi: bool | None = None,
+) -> str:
     """
     Section banner for major log sections::
 
@@ -2163,9 +2174,7 @@ def _autophot_version() -> str:
         from pathlib import Path
 
         pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
-        m = re.search(
-            r'^\s*version\s*=\s*"([^"]+)"', pyproject.read_text(), re.M
-        )
+        m = re.search(r'^\s*version\s*=\s*"([^"]+)"', pyproject.read_text(), re.M)
         if m:
             return m.group(1)
     except Exception:
@@ -2216,8 +2225,9 @@ def autophot_logo(
     return "\n" + "\n".join(lines)
 
 
-def ascii_kv(title: str, pairs, width: int = LOG_SUBHEADER_WIDTH,
-             framed: bool = False) -> str:
+def ascii_kv(
+    title: str, pairs, width: int = LOG_SUBHEADER_WIDTH, framed: bool = False
+) -> str:
     """
     Key/value block with dotted leaders.
 
@@ -2369,10 +2379,7 @@ def ascii_table(title: str, headers, rows, width: int = LOG_SUBHEADER_WIDTH) -> 
         return out or [""]
 
     def _emit(cells) -> list[str]:
-        wrapped = [
-            _wrap(cells[i] if i < len(cells) else "", i)
-            for i in range(ncols)
-        ]
+        wrapped = [_wrap(cells[i] if i < len(cells) else "", i) for i in range(ncols)]
         out = []
         for k in range(max(len(w) for w in wrapped)):
             out.append(
@@ -2394,9 +2401,7 @@ def ascii_table(title: str, headers, rows, width: int = LOG_SUBHEADER_WIDTH) -> 
     else:
         lines.append("-" * width)
     lines.extend(_emit(headers))
-    lines.append(
-        LOG_INDENT + LOG_COL_GAP.join("-" * col_w[i] for i in range(ncols))
-    )
+    lines.append(LOG_INDENT + LOG_COL_GAP.join("-" * col_w[i] for i in range(ncols)))
     for r in rows:
         lines.extend(_emit(r))
     lines.append("-" * width)
@@ -2423,22 +2428,18 @@ def ascii_card(title: str, lines, width: int = LOG_SUBHEADER_WIDTH) -> str:
             out.append("")
             continue
         for seg in _cell_text(l).splitlines() or [""]:
-            for wseg in (
-                textwrap.wrap(
-                    seg,
-                    width=max(1, width - 4),
-                    break_long_words=True,
-                    break_on_hyphens=False,
-                )
-                or [""]
-            ):
+            for wseg in textwrap.wrap(
+                seg,
+                width=max(1, width - 4),
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [""]:
                 out.append(f"{LOG_INDENT}{wseg}")
     out.append("=" * width)
     return "\n" + "\n".join(out)
 
 
-def stat_block(label: str, *lines: str,
-               width: int = LOG_SUBHEADER_WIDTH) -> str:
+def stat_block(label: str, *lines: str, width: int = LOG_SUBHEADER_WIDTH) -> str:
     """
     Labeled stats block: the first value follows ``Label:`` and continuation
     lines align under the value column.  Entries longer than ``width``
@@ -2451,9 +2452,7 @@ def stat_block(label: str, *lines: str,
     ``lines`` are pre-formatted strings; blank entries are dropped.
     """
     label = _cell_text(str(label).rstrip())
-    rows = [
-        _cell_text(ln) for ln in lines if str(ln).strip()
-    ]
+    rows = [_cell_text(ln) for ln in lines if str(ln).strip()]
     if not rows:
         return label
     val_col = len(label) + 4
@@ -2488,11 +2487,7 @@ def stat_pairs(pairs, width: int = LOG_SUBHEADER_WIDTH) -> str:
         Image FWHM:    3.42 px
         Image seeing:  1.37 arcsec
     """
-    rows = [
-        (_cell_text(k).rstrip(), _cell_text(v))
-        for k, v in pairs
-        if str(v).strip()
-    ]
+    rows = [(_cell_text(k).rstrip(), _cell_text(v)) for k, v in pairs if str(v).strip()]
     if not rows:
         return ""
     label_w = max(len(k) for k, _ in rows)
@@ -2516,8 +2511,11 @@ def stat_pairs(pairs, width: int = LOG_SUBHEADER_WIDTH) -> str:
     return "\n".join(out)
 
 
-def metrics_table(metrics: dict[str, tuple], title: str | None = None,
-                  width: int = LOG_SUBHEADER_WIDTH) -> str:
+def metrics_table(
+    metrics: dict[str, tuple],
+    title: str | None = None,
+    width: int = LOG_SUBHEADER_WIDTH,
+) -> str:
     """
     Format a compact two-column metrics table.
 
@@ -2539,8 +2537,7 @@ def metrics_table(metrics: dict[str, tuple], title: str | None = None,
     if not metrics:
         return ""
     pairs = [
-        (label, f"{value} {unit}".strip())
-        for label, (value, unit) in metrics.items()
+        (label, f"{value} {unit}".strip()) for label, (value, unit) in metrics.items()
     ]
     return ascii_kv(title or "Metrics", pairs, width=width, framed=True)
 
@@ -2564,12 +2561,12 @@ def compact_status(filename: str, results: dict) -> str:
     if len(base) > 30:
         base = "..." + base[-27:]
 
-    mag = results.get('mag', float('nan'))
-    mag_err = results.get('mag_err', float('nan'))
-    snr = results.get('snr', float('nan'))
-    detected = results.get('detected', False)
-    zp = results.get('zp')
-    n_cal = results.get('n_cal')
+    mag = results.get("mag", float("nan"))
+    mag_err = results.get("mag_err", float("nan"))
+    snr = results.get("snr", float("nan"))
+    detected = results.get("detected", False)
+    zp = results.get("zp")
+    n_cal = results.get("n_cal")
 
     parts = [f"{'OK' if detected else 'o'} {base:>30}"]
 
@@ -2908,9 +2905,7 @@ def compute_target_crowding(
     except Exception as exc:
         return {"ok": False, "reason": f"photutils.segmentation unavailable: {exc}"}
 
-    threshold = detect_threshold(
-        cut, n_sigma=nsigma, background=med, error=sigma
-    )
+    threshold = detect_threshold(cut, n_sigma=nsigma, background=med, error=sigma)
     segm = detect_sources(cut, threshold, n_pixels=npixels)
     if segm is None:
         return {
@@ -2965,8 +2960,12 @@ def compute_target_crowding(
             error=np.full(cut.shape, sigma),
             n_threads=photutils_n_threads(),
         )
-        xcen = np.asarray(cat.x_centroid if hasattr(cat, 'x_centroid') else cat.xcentroid)
-        ycen = np.asarray(cat.y_centroid if hasattr(cat, 'y_centroid') else cat.ycentroid)
+        xcen = np.asarray(
+            cat.x_centroid if hasattr(cat, "x_centroid") else cat.xcentroid
+        )
+        ycen = np.asarray(
+            cat.y_centroid if hasattr(cat, "y_centroid") else cat.ycentroid
+        )
         labels = np.atleast_1d(cat.label)
         try:
             cen_err = np.hypot(
@@ -3020,9 +3019,7 @@ def compute_target_crowding(
                     "cen_err_pix": (
                         float(cen_err[idx]) if idx < len(cen_err) else np.nan
                     ),
-                    "seg_flags": (
-                        int(seg_flags[idx]) if idx < len(seg_flags) else 0
-                    ),
+                    "seg_flags": (int(seg_flags[idx]) if idx < len(seg_flags) else 0),
                 }
             )
         # Keep only within neighbor radius for metrics/list
@@ -3100,18 +3097,15 @@ class AutophotYaml:
         doc = {key: new_val}
 
         with open(self.filepath, "r") as yamlfile:
-
             cur_yaml = yaml.safe_load(yamlfile)
             cur_yaml_backup = copy.deepcopy(cur_yaml)
 
             try:
-
                 cur_yaml[tele][inst_key][inst].update(doc)
             except Exception:
                 cur_yaml = cur_yaml_backup
 
         with open(self.filepath, "w+") as yamlfile:
-
             yaml.safe_dump(cur_yaml, yamlfile, default_flow_style=False)
 
     def create(fname, data):
@@ -3412,8 +3406,7 @@ def format_config_errors(report: dict, source: str = "configuration") -> str:
     lines = []
     for path, value, allowed in report.get("bad_values", []):
         lines.append(
-            f"  - {path}: invalid value {value!r} "
-            f"(accepted: {', '.join(allowed)})"
+            f"  - {path}: invalid value {value!r} (accepted: {', '.join(allowed)})"
         )
     schema_paths = None
     for path in report.get("unknown", []):
@@ -3450,6 +3443,7 @@ def get_header(fpath):
 
     from astropy.io.fits import getheader
     from astropy.io import fits
+
     try:
         # 'ignore_missing_end' tolerates truncated files.
         with fits.open(fpath, ignore_missing_end=True) as hdul:
@@ -3521,20 +3515,28 @@ def get_image_and_header(fpath):
             # Pick the best image HDU across FITS layout conventions.
             image = None
             best_hdu_idx = None
-            
+
             # Strategy 1: Try 'sci' extension first (Hubble convention)
             try:
                 sci_data = hdul["sci"].data
-                if sci_data is not None and hasattr(sci_data, 'shape') and len(sci_data.shape) >= 2:
+                if (
+                    sci_data is not None
+                    and hasattr(sci_data, "shape")
+                    and len(sci_data.shape) >= 2
+                ):
                     image = np.asarray(sci_data).copy()
                     # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
-                    if image.dtype.kind != 'f':
+                    if image.dtype.kind != "f":
                         image = image.astype(np.float32)
                     best_hdu_idx = hdul.index_of("sci")
-                    logger.info("Using 'sci' extension (HDU %s) with shape %s", best_hdu_idx, image.shape)
+                    logger.info(
+                        "Using 'sci' extension (HDU %s) with shape %s",
+                        best_hdu_idx,
+                        image.shape,
+                    )
             except (KeyError, TypeError):
                 pass
-            
+
             # Strategy 2: If no 'sci' extension, find best HDU with 2D+ data
             if image is None:
                 candidates = []
@@ -3542,65 +3544,96 @@ def get_image_and_header(fpath):
                     if hdu.data is not None:
                         try:
                             test_image = np.asarray(hdu.data)
-                            if hasattr(test_image, 'shape') and len(test_image.shape) >= 2:
+                            if (
+                                hasattr(test_image, "shape")
+                                and len(test_image.shape) >= 2
+                            ):
                                 # Prefer larger images and Primary/Image HDUs
                                 score = 0
                                 if isinstance(hdu, fits.PrimaryHDU):
                                     score += 10
                                 elif isinstance(hdu, fits.ImageHDU):
                                     score += 5
-                                score += np.log10(test_image.size) if test_image.size > 0 else 0
+                                score += (
+                                    np.log10(test_image.size)
+                                    if test_image.size > 0
+                                    else 0
+                                )
                                 candidates.append((score, i, test_image))
                         except Exception:
                             continue
-                
+
                 if candidates:
                     # Sort by score and take the best candidate
                     candidates.sort(reverse=True)
                     best_score, best_idx, best_image = candidates[0]
                     image = best_image.copy()
                     # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
-                    if image.dtype.kind != 'f':
+                    if image.dtype.kind != "f":
                         image = image.astype(np.float32)
                     best_hdu_idx = best_idx
-                    logger.debug("Selected HDU %s (score=%.1f) with shape %s", best_idx, best_score, image.shape)
-            
+                    logger.debug(
+                        "Selected HDU %s (score=%.1f) with shape %s",
+                        best_idx,
+                        best_score,
+                        image.shape,
+                    )
+
             # Strategy 3: Last resort - try primary HDU
             if image is None and len(hdul) > 0:
                 primary_data = hdul[0].data
                 if primary_data is not None:
                     try:
                         test_image = np.asarray(primary_data)
-                        if hasattr(test_image, 'shape'):
-                            logger.debug("Using primary HDU as fallback with shape %s", getattr(test_image, 'shape', 'no shape'))
+                        if hasattr(test_image, "shape"):
+                            logger.debug(
+                                "Using primary HDU as fallback with shape %s",
+                                getattr(test_image, "shape", "no shape"),
+                            )
                             image = test_image.copy()
                             # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
-                            if image.dtype.kind != 'f':
+                            if image.dtype.kind != "f":
                                 image = image.astype(np.float32)
                             best_hdu_idx = 0
                     except Exception as e:
                         logger.debug("Error with primary HDU: %s", e)
-            
+
             if image is None:
                 # Dump HDU structure to help debug exotic FITS layouts.
                 logger.debug("HDU structure analysis:")
                 for i, hdu in enumerate(hdul):
-                    data_info = f"shape={getattr(hdu.data, 'shape', 'None')}" if hdu.data is not None else "None"
-                    logger.debug("  HDU %s: %s, name='%s', data=%s", i, hdu.__class__.__name__, hdu.name, data_info)
-                raise Exception(f"No valid 2D+ image data found in FITS file: {os.path.basename(fpath)}")
-            
+                    data_info = (
+                        f"shape={getattr(hdu.data, 'shape', 'None')}"
+                        if hdu.data is not None
+                        else "None"
+                    )
+                    logger.debug(
+                        "  HDU %s: %s, name='%s', data=%s",
+                        i,
+                        hdu.__class__.__name__,
+                        hdu.name,
+                        data_info,
+                    )
+                raise Exception(
+                    f"No valid 2D+ image data found in FITS file: {os.path.basename(fpath)}"
+                )
+
             # Cube data (e.g. data+error planes) collapses to its first 2D slice.
-            if hasattr(image, 'shape') and len(image.shape) > 2:
+            if hasattr(image, "shape") and len(image.shape) > 2:
                 base = os.path.basename(fpath)
-                logger.warning("%s has %sD data, taking first 2D slice", base, len(image.shape))
+                logger.warning(
+                    "%s has %sD data, taking first 2D slice", base, len(image.shape)
+                )
                 original_shape = image.shape
                 while len(image.shape) > 2:
                     image = image[0]
                 image = image.copy()
                 logger.info("  Reshaped from %s to %s", original_shape, image.shape)
-            elif not hasattr(image, 'shape') or len(image.shape) < 2:
+            elif not hasattr(image, "shape") or len(image.shape) < 2:
                 base = os.path.basename(fpath)
-                raise Exception(f"Warning: {base} is not a 2D array (found {getattr(image, 'shape', 'no shape')} data).")
+                raise Exception(
+                    f"Warning: {base} is not a 2D array (found {getattr(image, 'shape', 'no shape')} data)."
+                )
 
             # Normalize big-endian FITS payloads to native byte order once:
             # every downstream ufunc on a '>f4'/'>f8' array otherwise pays a
@@ -3623,9 +3656,18 @@ def get_image_and_header(fpath):
                         telescop_header = hdul[i].header
                         for key in telescop_header.keys():
                             if key not in headinfo and (
-                                key.upper() in ['TELESCOP', 'INSTRUME', 'FILTER',
-                                               'EXPTIME', 'MJD-OBS', 'DATE-OBS',
-                                               'GAIN', 'RDNOISE', 'SATURATE']
+                                key.upper()
+                                in [
+                                    "TELESCOP",
+                                    "INSTRUME",
+                                    "FILTER",
+                                    "EXPTIME",
+                                    "MJD-OBS",
+                                    "DATE-OBS",
+                                    "GAIN",
+                                    "RDNOISE",
+                                    "SATURATE",
+                                ]
                             ):
                                 headinfo[key] = telescop_header[key]
                         break
@@ -3657,7 +3699,9 @@ def get_image_and_header(fpath):
                                 "    SATURATE and flux scales may be in stored\n"
                                 "    units; re-export the file with scaling\n"
                                 "    applied.",
-                                os.path.basename(fpath), _bitpix, _med,
+                                os.path.basename(fpath),
+                                _bitpix,
+                                _med,
                             )
             except Exception:
                 pass
@@ -3681,6 +3725,7 @@ def get_image(fpath):
     """
     import os
     from astropy.io import fits
+
     try:
         image = fits.getdata(fpath, extname="sci")
 
@@ -3688,7 +3733,7 @@ def get_image(fpath):
         image = fits.getdata(fpath)
 
     # float32 preserves NaNs (chip gaps); integer dtypes cannot.
-    if image.dtype.kind != 'f':
+    if image.dtype.kind != "f":
         image = image.astype(np.float32)
 
     if len(image.shape) != 2:
@@ -3836,11 +3881,7 @@ def read_output_csv(file_path, **kwargs):
     is layout-agnostic.
     """
     df = pd.read_csv(file_path, **kwargs)
-    if (
-        df.shape[1] == 2
-        and df.columns[0] == "field"
-        and df.columns[1] == "value"
-    ):
+    if df.shape[1] == 2 and df.columns[0] == "field" and df.columns[1] == "value":
         df = (
             df.set_index("field")["value"]
             .to_frame()
@@ -4041,7 +4082,7 @@ def snr_err(snr_value):
 
         m \\pm \\delta m = -2.5 \\times \\log_{10} ( S )   - 2.5 \\times \\log_{10}(1 \\pm N / S ) )
 
-        \\delta m = \\mp 2.5\\times \\log_{10} (1 + \\frac{1}{S/N}) \\approx \\mp 1.0875 (N / S)
+        \\delta m = \\mp 2.5\\times \\log_{10} (1 + \\frac{1}{S/N}) \\approx \\mp 1.0857 (N / S)
 
      Despite the name this returns the *magnitude* uncertainty
      ``1.0857/SNR``, not an uncertainty on the S/N value itself.
@@ -4053,13 +4094,20 @@ def snr_err(snr_value):
 
     """
 
+    scalar_in = isinstance(snr_value, (int, float))
+    snr_arr = np.asarray(snr_value, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
         # Standard linear approximation: dm = (2.5/ln(10)) / SNR = 1.0857/SNR.
         # This is the upper bound of the exact 2.5*log10(1 + 1/SNR) formula and
         # is the convention used by aperture.py and zeropoint._compute_delta_mag.
-        snr_err_value = (2.5 / np.log(10.0)) / snr_value
-
-    return snr_err_value
+        #
+        # Non-positive or non-finite SNR has no meaningful magnitude error
+        # (mirroring the flux <= 0 -> mag = NaN convention): return NaN rather
+        # than inf (claimed infinite precision when SNR -> 0) or a negative
+        # "error" for SNR < 0.
+        base = (2.5 / np.log(10.0)) / snr_arr
+    out = np.where(np.isfinite(snr_arr) & (snr_arr > 0), base, np.nan)
+    return float(out) if scalar_in else out
 
 
 def quadrature_add(values):
@@ -4073,7 +4121,7 @@ def quadrature_add(values):
     finite = [v for v in values if np.isfinite(v)]
     if not finite:
         return np.nan
-    return float(np.sqrt(sum(v ** 2 for v in finite)))
+    return float(np.sqrt(sum(v**2 for v in finite)))
 
 
 # ---------------------------------------------------------------------------
@@ -4325,11 +4373,9 @@ def scale_roll(x, xc, m):
     dx = x - xc
 
     if m != 1:
-
         shift = int(round(dx * m))
 
     else:
-
         shift = int(dx * m)
 
     return shift
@@ -4433,10 +4479,29 @@ def copy_wcs_from_header(src_header, dst_header):
         The modified dst_header.
     """
     wcs_prefixes = [
-        "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT", "CROTA",
-        "PV", "LONPOLE", "LATPOLE", "EQUINOX", "WCSNAME", "CUNIT",
-        "WCSAXES", "PROJP", "LTV", "LTM", "RADECSYS", "RADESYS",
-        "RADYSYS", "LONGPOLE", "TNX", "SIP_",
+        "CRPIX",
+        "CRVAL",
+        "CTYPE",
+        "CD",
+        "PC",
+        "CDELT",
+        "CROTA",
+        "PV",
+        "LONPOLE",
+        "LATPOLE",
+        "EQUINOX",
+        "WCSNAME",
+        "CUNIT",
+        "WCSAXES",
+        "PROJP",
+        "LTV",
+        "LTM",
+        "RADECSYS",
+        "RADESYS",
+        "RADYSYS",
+        "LONGPOLE",
+        "TNX",
+        "SIP_",
     ]
     wcs_stem_underscore = ["A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_"]
 
@@ -4489,14 +4554,14 @@ def update_header_from_wcs(header, wcs_obj):
     wcs_hdr = wcs_obj.to_header(relax=True)
     header.update(wcs_hdr)
     # Preserve CD matrix from the WCS if to_header dropped it
-    if not any(k.startswith('CD') for k in wcs_hdr):
-        cd = getattr(wcs_obj.wcs, 'cd', None)
+    if not any(k.startswith("CD") for k in wcs_hdr):
+        cd = getattr(wcs_obj.wcs, "cd", None)
         if cd is not None and wcs_obj.wcs.has_cd():
-            header['CD1_1'] = cd[0, 0]
-            header['CD1_2'] = cd[0, 1]
-            header['CD2_1'] = cd[1, 0]
-            header['CD2_2'] = cd[1, 1]
-            for k in ['CDELT1', 'CDELT2']:
+            header["CD1_1"] = cd[0, 0]
+            header["CD1_2"] = cd[0, 1]
+            header["CD2_1"] = cd[1, 0]
+            header["CD2_2"] = cd[1, 1]
+            for k in ["CDELT1", "CDELT2"]:
                 header.pop(k, None)
     return header
 
@@ -4529,9 +4594,7 @@ def nan_crop(data, header, cx, cy, ny, nx):
 
     # Output array, filled with NaN.  Integer input cannot represent NaN, so
     # promote to float (keeping float32 sources as float32).
-    _out_dtype = (
-        data.dtype if np.issubdtype(data.dtype, np.floating) else np.float32
-    )
+    _out_dtype = data.dtype if np.issubdtype(data.dtype, np.floating) else np.float32
     out = np.full((ny, nx), np.nan, dtype=_out_dtype)
 
     # Source slice that maps into the output.
@@ -4859,7 +4922,7 @@ def create_ds9_region_file(
     region_content = ""
     for x, y in zip(x_list, y_list):
         region_content += (
-            f"circle({x+cor}, {y+cor}, {radius}) # color={color} text={text}\n"
+            f"circle({x + cor}, {y + cor}, {radius}) # color={color} text={text}\n"
         )
 
     if overwrite:
@@ -4868,7 +4931,6 @@ def create_ds9_region_file(
         n = "a+"
 
     with open(filename, n) as file:
-
         file.write(region_content)
     return 1
 
@@ -4972,7 +5034,6 @@ def get_normalized_histogram(data, bins="auto"):
 def dict_to_string_with_hashtag(dictionary, float_format="%.6f"):
     result = ""
     for key, value in dictionary.items():
-
         if isinstance(value, list):
             if len(value) == 1:
                 value = value[0]
@@ -4983,7 +5044,13 @@ def dict_to_string_with_hashtag(dictionary, float_format="%.6f"):
     return result
 
 
-def safe_fits_write(fpath: str, image: np.ndarray, header: fits.Header, overwrite: bool = True, output_verify: str = "silentfix+ignore") -> None:
+def safe_fits_write(
+    fpath: str,
+    image: np.ndarray,
+    header: fits.Header,
+    overwrite: bool = True,
+    output_verify: str = "silentfix+ignore",
+) -> None:
     """
     Write image and header to FITS file, preserving NaNs (chip gaps) by using float32 dtype.
 
@@ -5009,14 +5076,18 @@ def safe_fits_write(fpath: str, image: np.ndarray, header: fits.Header, overwrit
         try:
             if isinstance(value, str):
                 # Remove non-ASCII characters from string values
-                sanitized_value = ''.join(char if ord(char) < 128 else '?' for char in str(value))
+                sanitized_value = "".join(
+                    char if ord(char) < 128 else "?" for char in str(value)
+                )
                 sanitized_header[key] = sanitized_value
             elif isinstance(value, (list, tuple)):
                 # Handle list values (e.g., HISTORY comments)
                 sanitized_list = []
                 for item in value:
                     if isinstance(item, str):
-                        sanitized_list.append(''.join(char if ord(char) < 128 else '?' for char in item))
+                        sanitized_list.append(
+                            "".join(char if ord(char) < 128 else "?" for char in item)
+                        )
                     else:
                         sanitized_list.append(item)
                 sanitized_header[key] = sanitized_list
@@ -5027,14 +5098,26 @@ def safe_fits_write(fpath: str, image: np.ndarray, header: fits.Header, overwrit
             continue
 
     # Use float32 to preserve NaNs (chip gaps) - integer dtypes cannot represent NaN
-    image_to_write = image.astype(np.float32) if image.dtype.kind != 'f' else image
+    image_to_write = image.astype(np.float32) if image.dtype.kind != "f" else image
 
     # Try writing with sanitized header, fall back to more lenient mode if it fails
     try:
-        fits.writeto(fpath, image_to_write, sanitized_header, overwrite=overwrite, output_verify=output_verify)
+        fits.writeto(
+            fpath,
+            image_to_write,
+            sanitized_header,
+            overwrite=overwrite,
+            output_verify=output_verify,
+        )
     except (UnicodeEncodeError, ValueError) as e:
         # If sanitization failed, try with even more lenient verification
-        fits.writeto(fpath, image_to_write, sanitized_header, overwrite=overwrite, output_verify="fix")
+        fits.writeto(
+            fpath,
+            image_to_write,
+            sanitized_header,
+            overwrite=overwrite,
+            output_verify="fix",
+        )
 
     # Invalidate any cached entry for this path so subsequent reads see the new file
     invalidate_fits_cache(fpath)
@@ -5066,7 +5149,9 @@ def refresh_sibling_weight_map(
     sibling at all, are left untouched - no new convention is created.
     All failures are non-fatal.
     """
-    _log = logger if logger is not None else logging.getLogger(__name__.rsplit(".", 1)[-1])
+    _log = (
+        logger if logger is not None else logging.getLogger(__name__.rsplit(".", 1)[-1])
+    )
     try:
         p = Path(str(image_fpath))
         candidates = [
@@ -5103,7 +5188,11 @@ def refresh_sibling_weight_map(
             if replaced is None and weight_fpath:
                 try:
                     wp = Path(str(weight_fpath))
-                    if wp.is_file() and wp.resolve() != sibling.resolve() and _shape_of(wp) == img_shape:
+                    if (
+                        wp.is_file()
+                        and wp.resolve() != sibling.resolve()
+                        and _shape_of(wp) == img_shape
+                    ):
                         shutil.copyfile(str(wp), str(sibling))
                         invalidate_fits_cache(str(sibling))
                         replaced = "resampled weight %s" % wp.name
@@ -5121,7 +5210,11 @@ def refresh_sibling_weight_map(
             _log.warning(
                 "Weight map %s was on the pre-resampling grid; replaced with %s "
                 "to match %s (%dx%d).",
-                sibling.name, replaced, p.name, img_shape[1], img_shape[0],
+                sibling.name,
+                replaced,
+                p.name,
+                img_shape[1],
+                img_shape[0],
             )
     except Exception:
         return
@@ -5388,11 +5481,7 @@ def fwhm_outlier_clip(values, sigma=3.0, rel_floor=0.10):
     """
     vals = np.asarray(values, dtype=float)
     finite = np.isfinite(vals) & (vals > 0)
-    if (
-        int(finite.sum()) == 0
-        or not np.isfinite(sigma)
-        or sigma <= 0
-    ):
+    if int(finite.sum()) == 0 or not np.isfinite(sigma) or sigma <= 0:
         return np.zeros(len(vals), dtype=bool), np.nan, np.nan
     med = float(np.median(vals[finite]))
     mad = float(np.median(np.abs(vals[finite] - med))) * 1.4826
