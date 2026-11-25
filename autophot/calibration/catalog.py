@@ -10,6 +10,7 @@ Created on Fri Oct  7 12:47:32 2022
 # =============================================================================
 # Standard library imports
 import contextlib
+import io
 import os
 import sys
 import logging
@@ -3534,48 +3535,53 @@ class Catalog:
                                 "dec": dec,
                                 "radius": radius_deg,
                                 "pagesize": 50000,
-                                "format": "json"
+                                "format": "csv"
                             }
 
                             # Paginate: a single page silently truncates the cone
                             # at pagesize rows, biasing coverage toward whatever
-                            # order the endpoint happens to return.
-                            rows = []
-                            col_names = None
+                            # order the endpoint happens to return.  CSV is used
+                            # rather than JSON: the JSON path accumulated every
+                            # page as Python objects (row lists) before building
+                            # the DataFrame, which held several GB transiently
+                            # on wide cones approaching the row cap.  read_csv
+                            # types columns directly as each page arrives.
+                            page_frames = []
                             first_row = None
+                            n_rows = 0
                             page = 1
                             while True:
                                 params["page"] = page
                                 response = requests.get(url, params=params, timeout=120)
                                 response.raise_for_status()
-                                data = response.json()
-                                page_rows = (
-                                    data.get("data")
-                                    if isinstance(data, dict)
-                                    else None
+                                if not response.text.strip():
+                                    break
+                                page_frame = pd.read_csv(
+                                    io.StringIO(response.text)
                                 )
-                                if col_names is None:
-                                    col_names = [
-                                        c["name"] for c in data.get("info", [])
-                                    ]
-                                if not page_rows:
+                                if page_frame.empty:
                                     break
                                 # If the endpoint ignores 'page', every request
                                 # returns page 1 - detect repeats and stop rather
                                 # than accumulating duplicates.
-                                if page > 1 and page_rows[0] == first_row:
+                                if (
+                                    page > 1
+                                    and first_row is not None
+                                    and page_frame.iloc[0].equals(first_row)
+                                ):
                                     break
                                 if first_row is None:
-                                    first_row = page_rows[0]
-                                rows.extend(page_rows)
+                                    first_row = page_frame.iloc[0]
+                                page_frames.append(page_frame)
+                                n_rows += len(page_frame)
                                 if (
-                                    len(page_rows) < params["pagesize"]
-                                    or len(rows) >= _ps_max_rows
+                                    len(page_frame) < params["pagesize"]
+                                    or n_rows >= _ps_max_rows
                                 ):
                                     break
                                 page += 1
 
-                            if len(rows) >= _ps_max_rows:
+                            if n_rows >= _ps_max_rows:
                                 logger.warning(
                                     "Pan-STARRS query hit the %d-row page "
                                     "cap; the cone is likely truncated "
@@ -3583,21 +3589,16 @@ class Catalog:
                                     _ps_max_rows,
                                 )
 
-                            if not rows:
+                            if not page_frames:
                                 selectedCatalog = pd.DataFrame()
                             else:
-                                selectedCatalog = pd.DataFrame(rows, columns=col_names)
-                                # Normalize null-like strings to NaN.
-                                selectedCatalog = selectedCatalog.replace(
-                                    ['None', 'none', 'NONE', 'null', 'NULL', 'nan', 'NaN'], np.nan
+                                selectedCatalog = (
+                                    page_frames[0]
+                                    if len(page_frames) == 1
+                                    else pd.concat(
+                                        page_frames, ignore_index=True
+                                    )
                                 )
-                                # Coerce numeric columns; name columns stay strings.
-                                for col in selectedCatalog.columns:
-                                    if col not in ['objName', 'objAltName1', 'objAltName2', 'objAltName3']:
-                                        try:
-                                            selectedCatalog[col] = pd.to_numeric(selectedCatalog[col], errors='coerce')
-                                        except Exception:
-                                            pass
 
                             logger.info("Retrieved %s Pan-STARRS sources", len(selectedCatalog))
                             break
