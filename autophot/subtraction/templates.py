@@ -5189,13 +5189,16 @@ def _host_mem_available_gb() -> Optional[float]:
     return None
 
 
-def _sfft_memory_budget_gb(cfg: Any) -> float:
+def _sfft_memory_budget_gb(cfg: Any, n_workers: int = 1) -> float:
     """Peak-RAM budget (GB) for a single SFFT subprocess.
 
     ``sfft_max_memory_gb`` > 0 gives an explicit budget; 0/auto resolves
     to 80% of MemAvailable (capped 24 GB) so the dense SFFT allocations
-    can never push the host into swap.  Undetectable host RAM falls
-    back to a conservative 6 GB.
+    can never push the host into swap.  With ``nCPU`` > 1 several image
+    workers run SFFT subprocesses concurrently and all see the same
+    MemAvailable at launch, so the auto budget is divided across
+    ``n_workers`` to keep the aggregate under the host limit.
+    Undetectable host RAM falls back to a conservative 6 GB per worker.
     """
     try:
         val = float(cfg.get("sfft_max_memory_gb", 0) or 0)
@@ -5206,7 +5209,11 @@ def _sfft_memory_budget_gb(cfg: Any) -> float:
     avail = _host_mem_available_gb()
     if avail is None or avail <= 0:
         return 6.0
-    return max(2.0, min(0.8 * avail, 24.0))
+    try:
+        n_workers = max(1, int(n_workers))
+    except (TypeError, ValueError):
+        n_workers = 1
+    return max(2.0, min(0.8 * avail / n_workers, 24.0))
 
 
 def _sfft_num_threads(input_yaml: Any, cfg: Any) -> int:
@@ -5466,8 +5473,10 @@ def read_fits(
     fpath : str
         Path to the FITS file.
     as_float : bool
-        If True, cast data to float64 (avoids integer-overflow issues
-        in later arithmetic).
+        If True, cast data to float32 (avoids integer-overflow issues
+        in later arithmetic).  float32 halves resident memory versus
+        float64 for full-frame images; precision-critical consumers
+        upcast locally where they need it.
 
     Returns
     -------
@@ -5491,7 +5500,7 @@ def read_fits(
         if data is None:
             raise ValueError(f"No image data found in {fpath} (primary and extensions)")
         if as_float:
-            data = data.astype(np.float64)
+            data = data.astype(np.float32)
     return data, header
 
 
@@ -18241,7 +18250,10 @@ class Templates:
             if np.isfinite(template_saturate)
             else _saturate_fallback
         )
-        _sfft_budget_gb = _sfft_memory_budget_gb(ts_sub)
+        _sfft_budget_gb = _sfft_memory_budget_gb(
+            ts_sub,
+            n_workers=int((self.input_yaml or {}).get("nCPU", 1) or 1),
+        )
         _sfft_threads = _sfft_num_threads(self.input_yaml, ts_sub)
         _sfft_mem_policy = (
             str(ts_sub.get("sfft_memory_policy", "shrink") or "shrink").strip().lower()
