@@ -79,6 +79,11 @@ _FITS_CACHE_LOCK = _threading.Lock()
 _FITS_HEADER_CACHE = {}  # key -> header
 _FITS_IMAGE_CACHE = {}  # key -> (image, header)
 _FITS_CACHE_MAX = 64  # max entries per cache
+# Byte cap on the image cache: a count cap alone lets ~64 large frames
+# pile up (e.g. 64 x 64 MB = 4 GB for 4k x 4k float32).  512 MB keeps
+# small-frame caching intact while bounding retention on big frames.
+_FITS_CACHE_MAX_BYTES = 512 * 1024 * 1024
+_FITS_IMAGE_CACHE_BYTES = 0
 
 # photutils 3.1 exposes n_threads on its compiled paths (aperture sums,
 # annulus stats, source catalogs, deblend groups, Background2D tiles).
@@ -305,21 +310,36 @@ def invalidate_fits_cache(fpath=None):
     Call this after an external tool (SWarp, SFFT, SCAMP, ...) modifies a
     FITS file on disk so the next read picks up the new content.
     """
+    global _FITS_IMAGE_CACHE_BYTES
     with _FITS_CACHE_LOCK:
         if fpath is None:
             _FITS_HEADER_CACHE.clear()
             _FITS_IMAGE_CACHE.clear()
+            _FITS_IMAGE_CACHE_BYTES = 0
             return
         abspath = os.path.abspath(fpath)
         # Drop all keys for this path (any mtime/size variant)
         for cache in (_FITS_HEADER_CACHE, _FITS_IMAGE_CACHE):
             stale = [k for k in cache if k[0] == abspath]
             for k in stale:
+                if cache is _FITS_IMAGE_CACHE:
+                    _FITS_IMAGE_CACHE_BYTES -= getattr(
+                        cache[k][0], "nbytes", 0
+                    )
                 del cache[k]
 
 
 def _cache_evict(cache):
     """Evict oldest entries if cache exceeds the max size (FIFO)."""
+    global _FITS_IMAGE_CACHE_BYTES
+    if cache is _FITS_IMAGE_CACHE:
+        while (
+            len(cache) > _FITS_CACHE_MAX
+            or _FITS_IMAGE_CACHE_BYTES > _FITS_CACHE_MAX_BYTES
+        ):
+            _img, _ = cache.pop(next(iter(cache)))
+            _FITS_IMAGE_CACHE_BYTES -= getattr(_img, "nbytes", 0)
+        return
     while len(cache) > _FITS_CACHE_MAX:
         cache.pop(next(iter(cache)))
 
@@ -3498,6 +3518,7 @@ def get_image_and_header(fpath):
     :param fpath: Path to the FITS file.
     :return: (image, header) where image is a 2D numpy array copy and header is a copy.
     """
+    global _FITS_IMAGE_CACHE_BYTES
     key = _fits_cache_key(fpath)
     if key is not None:
         with _FITS_CACHE_LOCK:
@@ -3709,6 +3730,7 @@ def get_image_and_header(fpath):
             if key is not None:
                 with _FITS_CACHE_LOCK:
                     _FITS_IMAGE_CACHE[key] = (image, headinfo)
+                    _FITS_IMAGE_CACHE_BYTES += image.nbytes
                     _cache_evict(_FITS_IMAGE_CACHE)
             return image, headinfo
     except KeyError as e:
