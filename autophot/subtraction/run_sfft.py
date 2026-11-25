@@ -26,26 +26,30 @@ if __package__ in (None, ""):
     # repo root and anchor the package so relative imports resolve.
     sys.path.insert(
         0,
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        ),
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     )
     __package__ = "autophot.subtraction"
 
-from ..core.functions import ColoredLevelFormatter, set_size, safe_fits_write, border_msg
-
 # Limit BLAS/OpenMP threads before any scientific imports (avoids libgomp
 # "Resource temporarily unavailable" when this script is run as a subprocess
-# or alongside other parallel jobs).
+# or alongside other parallel jobs).  This must happen before the package
+# import below, which pulls in numpy and initialises the BLAS backend.
 for _env in (
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "OMP_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 ):
-    os.environ.setdefault(_env, "1")
+    os.environ[_env] = "1"
 # Thread-count limits are applied via env vars above; affinity pinning is left
 # to the scheduler / HPC job manager.
+
+from ..core.functions import (
+    ColoredLevelFormatter,
+    set_size,
+    safe_fits_write,
+    border_msg,
+)
 
 import numpy as np
 import pandas as pd
@@ -56,14 +60,55 @@ from sfft.EasyCrowdedPacket import Easy_CrowdedPacket
 from sfft.utils.SkyLevelEstimator import SkyLevel_Estimator
 from typing import Optional, Tuple
 
+
 # Simple logging function for early use (before main logger setup)
 def _early_log(msg: str) -> None:
     """Print *msg* before the main logger is configured."""
     print(msg)
 
+
+# ---------------------------------------------------------------------------
+# Temp-file lifecycle.  Temp FITS are created before the main try block; any
+# config error raised in between would otherwise leak full-frame files.  A
+# module-level registry + atexit hook guarantees cleanup at process exit (the
+# common subprocess mode) even if an exception bypasses the function-level
+# finally.
+# ---------------------------------------------------------------------------
+_TEMP_FILES = set()
+
+
+def _register_temp_file(path: str) -> None:
+    _TEMP_FILES.add(path)
+    if not getattr(_register_temp_file, "_registered", False):
+        import atexit
+
+        atexit.register(_cleanup_temp_files)
+        _register_temp_file._registered = True
+
+
+def _cleanup_temp_files() -> None:
+    for _p in tuple(_TEMP_FILES):
+        try:
+            if os.path.isfile(_p):
+                os.remove(_p)
+        except Exception:
+            pass
+        _TEMP_FILES.discard(_p)
+
+
+def _sidecar_path(path: str, suffix: str) -> str:
+    """Return *path* with *suffix* inserted before the extension.
+
+    ``"x.fits".replace(\".fits\", ...)`` is a no-op for inputs without a
+    ``.fits`` extension (e.g. ``x.fit``) and can silently overwrite the input.
+    """
+    root, ext = os.path.splitext(path)
+    return f"{root}{suffix}{ext}"
+
+
 # NumPy 2.0 compatibility: handle removed functions
 # numpy.in1d was removed in NumPy 2.0, but SFFT still uses it
-if not hasattr(np, 'in1d'):
+if not hasattr(np, "in1d"):
     # Add compatibility shim for numpy.in1d (removed in NumPy 2.0)
     def in1d(ar1, ar2, assume_unique=False, invert=False):
         """Compatibility shim for numpy.in1d (removed in NumPy 2.0)."""
@@ -73,6 +118,7 @@ if not hasattr(np, 'in1d'):
             ar2 = np.unique(ar2)
         mask = np.isin(ar1, ar2, assume_unique=assume_unique, invert=invert)
         return mask
+
     np.in1d = in1d
     _early_log("Added numpy.in1d compatibility shim for NumPy 2.x")
 
@@ -85,13 +131,21 @@ except (ImportError, AttributeError):
 
 # Import new SFFT features (v1.5.0+)
 try:
-    from sfft.BSplineSFFT import BSpline_Packet, BSpline_MatchingKernel, BSpline_DeCorrelation
+    from sfft.BSplineSFFT import (
+        BSpline_Packet,
+        BSpline_MatchingKernel,
+        BSpline_DeCorrelation,
+    )
+
     _HAS_BSPLINE = True
 except ImportError:
     _HAS_BSPLINE = False
 
 try:
-    from sfft.utils.DeCorrelationCalculator import DeCorrelation_Calculator as DeCorrelationCalculator
+    from sfft.utils.DeCorrelationCalculator import (
+        DeCorrelation_Calculator as DeCorrelationCalculator,
+    )
+
     _HAS_DECORRELATION = True
 except ImportError:
     _HAS_DECORRELATION = False
@@ -129,9 +183,7 @@ def _combine_output_masks(
     return out
 
 
-def _remask_diff_fits(
-    fits_path: str, invalid_mask: np.ndarray
-) -> Tuple[int, int]:
+def _remask_diff_fits(fits_path: str, invalid_mask: np.ndarray) -> Tuple[int, int]:
     """NaN out ``invalid_mask`` pixels in a FITS image, in place.
 
     Returns ``(n_newly_masked, n_invalid_total)``: how many previously
@@ -168,11 +220,7 @@ def _resolve_kernel_regularization(
     sources in FITS 1-based pixel coordinates.
     """
     mode = str(mode).strip().lower()
-    enable = (
-        n_matched < int(sparse_threshold)
-        if mode == "auto"
-        else mode == "true"
-    )
+    enable = n_matched < int(sparse_threshold) if mode == "auto" else mode == "true"
     if not enable or xy is None:
         return None
     xy = np.asarray(xy, dtype=float)
@@ -279,11 +327,13 @@ def _adopt_prior_free_retry(
 ) -> bool:
     """Return True when a prior-free retry has enough evidence to adopt it."""
     if int(n_second) >= int(min_sources):
-        return (
-            resid_first is None
-            or resid_second is None
-            or resid_second <= 1.10 * resid_first
-        )
+        # Without a residual metric the retry is not evidence of a *better*
+        # fit, only of more sources.  Require a strict source-count gain so a
+        # larger-but-worse prior-free match cannot silently replace a valid
+        # vetted fit.
+        if resid_first is None or resid_second is None:
+            return int(n_second) > int(n_first)
+        return resid_second <= 1.10 * resid_first
     if int(n_second) > int(n_first):
         return (
             resid_first is not None
@@ -293,30 +343,70 @@ def _adopt_prior_free_retry(
     return False
 
 
+def _cgroup_mem_available_gb() -> Optional[float]:
+    """Free RAM inside the current cgroup (v2 or v1), in GB.
+
+    Host ``/proc/meminfo`` overstates what a Slurm/Docker allocation may use;
+    a budget based on it can trigger the OOM killer instead of shrinking the
+    kernel.  Returns ``None`` when no cgroup limit is readable.
+    """
+    for max_path, cur_path in (
+        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+        (
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+        ),
+    ):
+        try:
+            with open(max_path, "r") as fh:
+                _max = fh.read().strip()
+            if not _max or _max == "max":
+                continue
+            _limit = float(_max)
+            if _limit <= 0 or _limit >= 1e18:
+                continue
+            _used = 0.0
+            try:
+                with open(cur_path, "r") as fh:
+                    _used = float(fh.read().strip())
+            except (OSError, ValueError):
+                pass
+            return max(0.0, (_limit - _used) / (1024.0**3))
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def _host_mem_available_gb() -> Optional[float]:
     """Free host RAM in GB, or None when it cannot be read."""
     try:
         with open("/proc/meminfo", "r") as fh:
             for line in fh:
                 if line.startswith("MemAvailable:"):
-                    return float(line.split()[1]) / (1024.0 ** 2)
+                    return float(line.split()[1]) / (1024.0**2)
     except (OSError, ValueError, IndexError):
         pass
     return None
 
 
 def _resolve_max_mem_gb(raw: object) -> float:
-    """SFFT RAM budget in GB. 0/invalid means auto: 80% of MemAvailable,
-    capped at 24 GB (6 GB when host RAM cannot be read)."""
+    """SFFT RAM budget in GB. 0/invalid means auto: 80% of the smallest of
+    the cgroup and host available memory, capped at 24 GB (6 GB when neither
+    can be read)."""
     try:
         val = float(raw)
     except (TypeError, ValueError):
         val = 0.0
     if val > 0:
         return val
-    avail = _host_mem_available_gb()
-    if avail is None or avail <= 0:
+    candidates = [
+        v
+        for v in (_cgroup_mem_available_gb(), _host_mem_available_gb())
+        if v is not None and v > 0
+    ]
+    if not candidates:
         return 6.0
+    avail = min(candidates)
     return max(2.0, min(0.8 * avail, 24.0))
 
 
@@ -412,7 +502,9 @@ def _sfft_n_threads(raw: object) -> int:
 
 
 def _flag_mask_from_columns(
-    df: pd.DataFrame, include_tokens: Tuple[str, ...], exclude_tokens: Tuple[str, ...] = ()
+    df: pd.DataFrame,
+    include_tokens: Tuple[str, ...],
+    exclude_tokens: Tuple[str, ...] = (),
 ) -> np.ndarray:
     """
     Build a boolean mask from likely flag columns.
@@ -466,14 +558,19 @@ def _coords_from_prep_data(prep_data_obj) -> np.ndarray:
 
 
 def _write_post_anomaly_sources_csv(
-    prep_data_obj, matched_df: Optional[pd.DataFrame], out_dir_path: str, out_base_name: str
+    prep_data_obj,
+    matched_df: Optional[pd.DataFrame],
+    out_dir_path: str,
+    out_base_name: str,
 ) -> int:
     """
     Export post-anomaly source coordinates for optional retry feedback.
 
     Output: SFFT_PostAnomaly_Sources_<base>.csv with x/y columns in SCI/REF mean frame.
     """
-    out_csv = os.path.join(out_dir_path, f"SFFT_PostAnomaly_Sources_{out_base_name}.csv")
+    out_csv = os.path.join(
+        out_dir_path, f"SFFT_PostAnomaly_Sources_{out_base_name}.csv"
+    )
     anomaly_xy = _coords_from_prep_data(prep_data_obj)
 
     # Fallback: derive from SubSource catalog flags.
@@ -516,7 +613,9 @@ def _write_post_anomaly_sources_csv(
         return 0
 
     # Deduplicate and write standardized columns.
-    df_anom = pd.DataFrame(anomaly_xy, columns=["X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"])
+    df_anom = pd.DataFrame(
+        anomaly_xy, columns=["X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"]
+    )
     df_anom = df_anom.replace([np.inf, -np.inf], np.nan).dropna()
     if df_anom.empty:
         return 0
@@ -608,7 +707,7 @@ def run_sfft() -> Optional[int]:
         type=float,
         default=2.0,
         help="Multiplier for physics-based kernel sizing: kernel_hw = ceil(mult * sqrt(FWHM_broad^2 - FWHM_narrow^2)). "
-             "Higher values give larger kernels (more fitting freedom, slower). Default 2.0.",
+        "Higher values give larger kernels (more fitting freedom, slower). Default 2.0.",
     )
     parser.add_argument(
         "-masked_sources",
@@ -640,8 +739,8 @@ def run_sfft() -> Optional[int]:
         type=str,
         default="REF",
         help="Which image to convolve: REF (convolve reference, DIFF=SCI-conv(REF)), "
-             "SCI (convolve science, DIFF=conv(SCI)-REF), or AUTO (SFFT chooses by FWHM). "
-             "REF is correct when science PSF is broader; SCI when reference is broader.",
+        "SCI (convolve science, DIFF=conv(SCI)-REF), or AUTO (SFFT chooses by FWHM). "
+        "REF is correct when science PSF is broader; SCI when reference is broader.",
     )
 
     # Pass gain/saturate values so SFFT does not depend on headers (avoids KeyError when SATURATE missing).
@@ -689,19 +788,19 @@ def run_sfft() -> Optional[int]:
         type=str,
         default="false",
         help="SFFT ConstPhotRatio: 'true' uses a spatially-constant solved flux "
-             "scaling (SFFT default); 'false' fits a spatially-varying scaling "
-             "polynomial (like HOTPANTS). The kernel scale comes from the "
-             "least-squares fit in both modes -- it is NOT pinned to the "
-             "SExtractor photometric ratio.",
+        "scaling (SFFT default); 'false' fits a spatially-varying scaling "
+        "polynomial (like HOTPANTS). The kernel scale comes from the "
+        "least-squares fit in both modes -- it is NOT pinned to the "
+        "SExtractor photometric ratio.",
     )
     parser.add_argument(
         "-only_flags",
         type=str,
         default="0,1,16,17",
         help="Comma-separated SExtractor FLAGS values to keep (e.g. '0,1'); use 'none' to disable. "
-             "Default excludes blended sources (FLAGS & 2) which bias flux scaling. "
-             "FLAGS=1 (near edge) and FLAGS=16 (near NaN) kept for masked/resampled images. "
-             "Fallback to permissive '0,1,2,3,16,17,18,19' is handled by templates.py on failure.",
+        "Default excludes blended sources (FLAGS & 2) which bias flux scaling. "
+        "FLAGS=1 (near edge) and FLAGS=16 (near NaN) kept for masked/resampled images. "
+        "Fallback to permissive '0,1,2,3,16,17,18,19' is handled by templates.py on failure.",
     )
     parser.add_argument(
         "-cvrej_magd_thresh",
@@ -967,8 +1066,14 @@ def run_sfft() -> Optional[int]:
             raise FileNotFoundError(f"{name} FITS not found: {path}")
         try:
             with fits.open(path) as hdul:
-                if len(hdul) == 0:
-                    raise ValueError(f"{name} FITS has no HDUs.")
+                if len(hdul) == 0 or hdul[0].data is None:
+                    raise ValueError(f"{name} FITS has no primary image data.")
+                _d = np.asarray(hdul[0].data)
+                if _d.ndim != 2 or _d.size == 0:
+                    raise ValueError(
+                        f"{name} FITS primary data is not a non-empty 2-D image "
+                        f"(shape={_d.shape})."
+                    )
         except Exception as e:
             raise ValueError(f"Invalid {name} FITS: {e}")
 
@@ -1003,6 +1108,54 @@ def run_sfft() -> Optional[int]:
     hdr_sci, data_sci = get_fits_info(FITS_SCI)
     hdr_ref, data_ref = get_fits_info(FITS_REF)
 
+    # --- Astrometric validation ---
+    # SFFT assumes the two inputs already share a pixel grid.  A WCS offset
+    # or scale error produces a "successful" subtraction with a garbage
+    # difference image, so reject it here rather than downstream.
+    try:
+        from ..pipeline.wcs import _pixel_scales_deg
+        from astropy.wcs import WCS
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _w_sci = WCS(hdr_sci, relax=True)
+            _w_ref = WCS(hdr_ref, relax=True)
+        if _w_sci.has_celestial and _w_ref.has_celestial:
+            _sc_sci = np.asarray(_pixel_scales_deg(_w_sci))[:2]
+            _sc_ref = np.asarray(_pixel_scales_deg(_w_ref))[:2]
+            _ratio = _sc_sci / np.where(_sc_ref == 0, np.nan, _sc_ref)
+            if not np.all(np.isfinite(_ratio)) or np.any(
+                (_ratio < 0.99) | (_ratio > 1.01)
+            ):
+                raise RuntimeError(
+                    "Science and reference pixel scales differ "
+                    f"(ratios={_ratio}); SFFT requires a common grid."
+                )
+            # Map the reference CRPIX through the science WCS.  On a common
+            # grid this is an identity to well below a pixel.
+            _rc = _w_ref.wcs.crpix
+            _ra, _dec = _w_ref.all_pix2world(_rc[0] - 1.0, _rc[1] - 1.0, 0)
+            _xs, _ys = _w_sci.all_world2pix(_ra, _dec, 0)
+            _off_px = float(np.hypot(_xs - (_rc[0] - 1.0), _ys - (_rc[1] - 1.0)))
+            if not np.isfinite(_off_px) or _off_px > 0.5:
+                raise RuntimeError(
+                    "Science and reference WCS are not on a common grid "
+                    f"(CRPIX maps {_off_px:.2f} px away); align them before SFFT."
+                )
+            log_info(
+                f"WCS grid check passed: scale ratio={_sc_ratio:.5f}, "
+                f"CRPIX offset={_off_px:.3f} px."
+            )
+        else:
+            log_warning(
+                "One or both inputs lack a celestial WCS; assuming the caller "
+                "already placed them on a common pixel grid."
+            )
+    except RuntimeError:
+        raise
+    except Exception as _wcs_e:
+        log_warning(f"WCS grid validation could not run ({_wcs_e}); continuing.")
+
     # --- Per-image shape validation ---
     if data_sci.shape != data_ref.shape:
         raise ValueError(
@@ -1013,20 +1166,64 @@ def run_sfft() -> Optional[int]:
 
     # --- Per-image NaN/invalid fraction warning ---
     _n_pixels = float(data_sci.size)
-    _frac_invalid_sci = float(np.count_nonzero(~np.isfinite(data_sci) | (data_sci == 0))) / _n_pixels
-    _frac_invalid_ref = float(np.count_nonzero(~np.isfinite(data_ref) | (data_ref == 0))) / _n_pixels
+    _frac_invalid_sci = (
+        float(np.count_nonzero(~np.isfinite(data_sci) | (data_sci == 0))) / _n_pixels
+    )
+    _frac_invalid_ref = (
+        float(np.count_nonzero(~np.isfinite(data_ref) | (data_ref == 0))) / _n_pixels
+    )
     _frac_invalid_max = max(_frac_invalid_sci, _frac_invalid_ref)
     if _frac_invalid_max > 0.50:
         log_warning(
-            f"High invalid-pixel fraction: sci={_frac_invalid_sci*100:.1f}%, "
-            f"ref={_frac_invalid_ref*100:.1f}%. SFFT kernel fitting may fail or "
+            f"High invalid-pixel fraction: sci={_frac_invalid_sci * 100:.1f}%, "
+            f"ref={_frac_invalid_ref * 100:.1f}%. SFFT kernel fitting may fail or "
             f"produce poor results with >50% invalid pixels."
         )
     elif _frac_invalid_max > 0.25:
         log_info(
-            f"Moderate invalid-pixel fraction: sci={_frac_invalid_sci*100:.1f}%, "
-            f"ref={_frac_invalid_ref*100:.1f}%."
+            f"Moderate invalid-pixel fraction: sci={_frac_invalid_sci * 100:.1f}%, "
+            f"ref={_frac_invalid_ref * 100:.1f}%."
         )
+
+    def _validate_diff_product(
+        path: Optional[str],
+        expected_shape: Tuple[int, int],
+        frac_invalid_input: float,
+    ) -> float:
+        """Raise when a produced difference image is absent or degenerate.
+
+        The difference may legitimately be NaN where the inputs were invalid,
+        so the finite-fraction floor is derived from the input invalid
+        fraction rather than a hard 100%.
+        """
+        if not path or not os.path.isfile(path):
+            raise RuntimeError("SFFT returned without writing the difference image.")
+        with fits.open(path, memmap=False) as _hdl:
+            _d = np.asarray(_hdl[0].data, dtype=float)
+        if _d.shape != expected_shape:
+            raise RuntimeError(
+                f"Difference image shape {_d.shape} does not match the input "
+                f"grid {expected_shape}."
+            )
+        _fin = np.isfinite(_d)
+        _n_fin = int(_fin.sum())
+        if _n_fin < 100:
+            raise RuntimeError(
+                "Difference image has fewer than 100 finite pixels; subtraction failed."
+            )
+        _fin_frac = float(_n_fin) / float(_d.size)
+        _floor = max(0.25, 1.0 - frac_invalid_input - 0.05)
+        if _fin_frac < _floor:
+            raise RuntimeError(
+                f"Difference image is only {_fin_frac * 100:.1f}% finite "
+                f"(floor {_floor * 100:.1f}%); subtraction failed."
+            )
+        _std = float(np.std(_d[_fin]))
+        if not (np.isfinite(_std) and _std > 0.0):
+            raise RuntimeError(
+                "Difference image is constant or all-NaN; subtraction failed."
+            )
+        return _fin_frac
 
     # Build a combined invalid-pixel mask from both inputs so that no-data regions
     # (NaN or exactly zero, e.g. from SWarp padding) in either image are masked in
@@ -1039,13 +1236,14 @@ def run_sfft() -> Optional[int]:
     if np.any(combined_invalid_mask):
         log_info(
             f"Combined invalid mask: {int(np.count_nonzero(combined_invalid_mask))} pixels "
-            f"({float(np.count_nonzero(combined_invalid_mask))/_n_pixels*100:.1f}%) "
+            f"({float(np.count_nonzero(combined_invalid_mask)) / _n_pixels * 100:.1f}%) "
             "will be forced to NaN in both images before SFFT."
         )
 
-    # Create temporary FITS files with synchronized NaN masks for SFFT input.
-    # We do NOT mutate the original science / template files (they may be reused on
-    # retry paths such as post-anomaly feedback).
+    # Create temporary FITS files for SFFT input.  We do NOT mutate the
+    # original science / template files (they may be reused on retry paths such
+    # as post-anomaly feedback); the temps also receive the GAIN/SATURATE
+    # header injection from _ensure_gain_saturate below.
     _temp_sci_path = os.path.join(out_dir, f"._sfft_sci_sync_{os.getpid()}.fits")
     _temp_ref_path = os.path.join(out_dir, f"._sfft_ref_sync_{os.getpid()}.fits")
     _temp_paths_created = []
@@ -1056,18 +1254,29 @@ def run_sfft() -> Optional[int]:
             # arrays avoids a second pair of full-frame copies.
             data_sci[combined_invalid_mask] = np.nan
             data_ref[combined_invalid_mask] = np.nan
-            safe_fits_write(_temp_sci_path, data_sci, hdr_sci, overwrite=True)
-            safe_fits_write(_temp_ref_path, data_ref, hdr_ref, overwrite=True)
-            _temp_paths_created = [_temp_sci_path, _temp_ref_path]
-            FITS_SCI = _temp_sci_path
-            FITS_REF = _temp_ref_path
-            log_info(f"Synchronized NaN masks written to temporary FITS for SFFT input.")
+        safe_fits_write(_temp_sci_path, data_sci, hdr_sci, overwrite=True)
+        safe_fits_write(_temp_ref_path, data_ref, hdr_ref, overwrite=True)
+        _temp_paths_created = [_temp_sci_path, _temp_ref_path]
+        for _t in _temp_paths_created:
+            _register_temp_file(_t)
+        FITS_SCI = _temp_sci_path
+        FITS_REF = _temp_ref_path
+        log_info(
+            "Synchronized FITS written to temporary files for SFFT input "
+            "(originals are never modified)."
+        )
     except Exception as e:
-        log_warning(f"Failed to write synchronized-mask temp FITS: {e}. Using original files.")
+        log_warning(
+            f"Failed to write temp FITS: {e}. Using original files (may mutate "
+            "GAIN/SATURATE headers)."
+        )
         # If temp write fails, fall back to original paths (FITS_SCI/FITS_REF unchanged)
 
     def _sanitize_xy_sources(
-        xy: Optional[np.ndarray], label: str, width: int, height: int,
+        xy: Optional[np.ndarray],
+        label: str,
+        width: int,
+        height: int,
         invalid_mask: Optional[np.ndarray] = None,
     ) -> Optional[np.ndarray]:
         """
@@ -1149,7 +1358,7 @@ def run_sfft() -> Optional[int]:
         log_info(
             f"Converted {len(matching_sources)} matching sources from 0-based to 1-based FITS coordinates."
         )
-    
+
     # Prior source validation: if fewer than MIN_PRIOR_SOURCES are available,
     # we still keep the priors (SFFT's XY_PriorSelect prefers these sources
     # over its own detections).  Our pipeline-vetted sources have been filtered
@@ -1212,7 +1421,11 @@ def run_sfft() -> Optional[int]:
                     log_info(f"{label}: set GAIN = {gval}")
                 if saturate is not None:
                     # Use FITS-compatible fallback for infinite values
-                    sval = float(saturate) if np.isfinite(saturate) else SATURATE_FITS_FALLBACK
+                    sval = (
+                        float(saturate)
+                        if np.isfinite(saturate)
+                        else SATURATE_FITS_FALLBACK
+                    )
                     h["SATURATE"] = sval
                     h.comments["SATURATE"] = (
                         "Effective saturation (ADU) after autophot background handling for SFFT"
@@ -1271,10 +1484,24 @@ def run_sfft() -> Optional[int]:
     # FWHM is read from headers.  Guard against missing/zero/NaN/negative
     # values which would break kernel sizing and detect_minarea.
     _FWHM_FALLBACK = 3.0
+    _fwhm_missing = []
+    for _label, _hdr in (("science", hdr_sci), ("template", hdr_ref)):
+        if _hdr.get("FWHM") is None:
+            _fwhm_missing.append(_label)
+    if _fwhm_missing:
+        log_warning(
+            "Missing FWHM header keyword for "
+            + ", ".join(_fwhm_missing)
+            + f"; using fallback {_FWHM_FALLBACK:.1f} px.  Kernel sizing and "
+            "detection area may be wrong."
+        )
     template_fwhm = float(hdr_ref.get("FWHM", _FWHM_FALLBACK))
     science_fwhm = float(hdr_sci.get("FWHM", _FWHM_FALLBACK))
     _fwhm_corrected = False
-    for _fwhm_label, _fwhm_val in [("science", science_fwhm), ("template", template_fwhm)]:
+    for _fwhm_label, _fwhm_val in [
+        ("science", science_fwhm),
+        ("template", template_fwhm),
+    ]:
         if not np.isfinite(_fwhm_val) or _fwhm_val <= 0:
             log_warning(
                 f"{_fwhm_label} FWHM from header is invalid ({_fwhm_val}); "
@@ -1369,7 +1596,7 @@ def run_sfft() -> Optional[int]:
         fwhm_narrow = min(template_fwhm, science_fwhm)
 
         # PSF-difference FWHM (quadrature subtraction of Gaussians).
-        fwhm_conv = np.sqrt(max(fwhm_broad ** 2 - fwhm_narrow ** 2, 0.0))
+        fwhm_conv = np.sqrt(max(fwhm_broad**2 - fwhm_narrow**2, 0.0))
 
         # --- multiplier on fwhm_broad (primary sizing term) ---
         _mult = float(getattr(args, "kernel_hw_fwhm_multiplier", 2.0) or 2.0)
@@ -1392,8 +1619,18 @@ def run_sfft() -> Optional[int]:
 
         # hw_conv: must enclose the PSF-difference lobe to 3-sigma (Israel 2007).
         # sigma_conv = fwhm_conv / 2.355; 3*sigma_conv = 3*fwhm_conv/2.355 ~ 1.274*fwhm_conv.
-        SIGMA_FWHM = 2.3548200450309493   # 2*sqrt(2*ln2)
+        SIGMA_FWHM = 2.3548200450309493  # 2*sqrt(2*ln2)
         hw_conv = int(np.ceil(3.0 * fwhm_conv / SIGMA_FWHM)) if fwhm_conv > 0 else 0
+
+        if fwhm_conv < 0.5:
+            # Near-identical PSFs: the matching kernel is essentially a delta
+            # function.  Anchoring its size to FWHM_broad (SFFT's default) then
+            # over-parameterises the fit and rings on sparse fields.
+            hw_broad = max(KER_HW_LIMIT_MIN, hw_conv + 2)
+            log_info(
+                f"Near-identical PSFs (FWHM_conv={fwhm_conv:.2f}px): "
+                f"reducing kernel half-width to {hw_broad} px."
+            )
 
         if fwhm_conv > 10.0:
             log_info(
@@ -1443,6 +1680,11 @@ def run_sfft() -> Optional[int]:
             f"BoundarySIZE {boundary} px exceeds 20% of the smaller image axis "
             f"({_boundary_cap} px); capping to avoid excluding all sources."
         )
+        log_warning(
+            f"Kernel half-width {kernel_half_width} px exceeds BoundarySIZE "
+            f"{_boundary_cap} px; some source stamps will be truncated at the "
+            "edge.  Consider reducing kernel_hw_fwhm_multiplier."
+        )
         boundary = _boundary_cap
 
     # --- SFFT Parameters ---
@@ -1484,9 +1726,7 @@ def run_sfft() -> Optional[int]:
 
     CUDA_DEVICE_4SUBTRACT = str(getattr(args, "cuda_device", "0") or "0")
     _dev_note = (
-        f" (CUDA device {CUDA_DEVICE_4SUBTRACT})"
-        if BACKEND_4SUBTRACT == "Cupy"
-        else ""
+        f" (CUDA device {CUDA_DEVICE_4SUBTRACT})" if BACKEND_4SUBTRACT == "Cupy" else ""
     )
     log_info(f"SFFT compute backend: {BACKEND_4SUBTRACT}{_dev_note}")
 
@@ -1508,6 +1748,26 @@ def run_sfft() -> Optional[int]:
         ForceConv = _fc_arg
     else:
         ForceConv = "REF"
+    # Resolve AUTO ourselves: SFFT's AUTO can pick the wrong side after SWarp
+    # resampling flips the PSF ordering (BUG 122).  REF is only valid when the
+    # reference is the narrower PSF; otherwise the kernel would deconvolve.
+    if ForceConv == "AUTO":
+        ForceConv = "REF" if template_fwhm >= science_fwhm else "SCI"
+        log_info(f"Resolved ForceConv=AUTO -> {ForceConv} from measured FWHMs.")
+    elif ForceConv == "REF" and template_fwhm > science_fwhm + 0.1:
+        log_warning(
+            f"ForceConv=REF would sharpen the broader template "
+            f"(template FWHM {template_fwhm:.2f} > science {science_fwhm:.2f}); "
+            "switching to SCI to avoid a deconvolution kernel."
+        )
+        ForceConv = "SCI"
+    elif ForceConv == "SCI" and science_fwhm > template_fwhm + 0.1:
+        log_warning(
+            f"ForceConv=SCI would sharpen the broader science image "
+            f"(science FWHM {science_fwhm:.2f} > template {template_fwhm:.2f}); "
+            "switching to REF to avoid a deconvolution kernel."
+        )
+        ForceConv = "REF"
     log_info(f"ForceConv={ForceConv}.")
     GAIN_KEY = "GAIN"
     SATUR_KEY = "SATURATE"
@@ -1521,7 +1781,23 @@ def run_sfft() -> Optional[int]:
             return False
         raise ValueError(f"Invalid -{name}='{value}'; expected true/false.")
 
-    kernel_poly_order = args.kernel_order
+    try:
+        kernel_poly_order = int(args.kernel_order)
+    except (TypeError, ValueError) as _kpo_e:
+        raise ValueError(
+            f"Invalid kernel_order={args.kernel_order!r}; expected an integer."
+        ) from _kpo_e
+    if kernel_poly_order < 0:
+        raise ValueError(
+            f"kernel_order={kernel_poly_order} is negative; use 0 for a "
+            "constant kernel."
+        )
+    if kernel_poly_order > 4:
+        log_warning(
+            f"kernel_order={kernel_poly_order} is unusually high; clamping to 4 "
+            "to avoid an under-constrained kernel fit."
+        )
+        kernel_poly_order = 4
     bg_poly_order = max(0, int(args.bg_order))
     allow_crowded_bg_order_override = _parse_bool_str(
         "allow_crowded_bg_order_override",
@@ -1644,9 +1920,7 @@ def run_sfft() -> Optional[int]:
     _max_mem_gb = _resolve_max_mem_gb(getattr(args, "max_memory_gb", 0.0))
     _fwhm_broad_g = max(float(template_fwhm), float(science_fwhm))
     _fwhm_narrow_g = min(float(template_fwhm), float(science_fwhm))
-    _fwhm_conv_g = float(
-        np.sqrt(max(_fwhm_broad_g ** 2 - _fwhm_narrow_g ** 2, 0.0))
-    )
+    _fwhm_conv_g = float(np.sqrt(max(_fwhm_broad_g**2 - _fwhm_narrow_g**2, 0.0)))
     _hw_floor = max(
         int(KER_HW_LIMIT_MIN),
         int(np.ceil(3.0 * _fwhm_conv_g / 2.3548200450309493)),
@@ -1667,9 +1941,9 @@ def run_sfft() -> Optional[int]:
             f"order={kernel_poly_order})."
         )
     elif _est_gb > _max_mem_gb:
-        _mem_policy = str(
-            getattr(args, "memory_policy", "shrink") or "shrink"
-        ).strip().lower()
+        _mem_policy = (
+            str(getattr(args, "memory_policy", "shrink") or "shrink").strip().lower()
+        )
         if _mem_policy == "ignore":
             # User accepted the memory risk: the estimate is a
             # conservative upper bound, and the full kernel is what the
@@ -1752,11 +2026,15 @@ def run_sfft() -> Optional[int]:
     regularize_sparse_threshold = int(args.regularize_sparse_threshold)
 
     if use_bspline_kernel and not _HAS_BSPLINE:
-        log_warning("B-Spline kernel requested but not available (SFFT v1.5.0+ required). Using standard kernel.")
+        log_warning(
+            "B-Spline kernel requested but not available (SFFT v1.5.0+ required). Using standard kernel."
+        )
         use_bspline_kernel = False
 
     if decorrelate_noise and not _HAS_DECORRELATION:
-        log_warning("Noise decorrelation requested but not available (SFFT v1.5.0+ required). Skipping decorrelation.")
+        log_warning(
+            "Noise decorrelation requested but not available (SFFT v1.5.0+ required). Skipping decorrelation."
+        )
         decorrelate_noise = False
 
     if use_bspline_kernel:
@@ -1791,7 +2069,13 @@ def run_sfft() -> Optional[int]:
                     "the science image (no transposition is applied)."
                 )
         except Exception as e:
-            log_warning(f"Could not load mask '{args.mask}': {e}")
+            # The universal mask is the only saturation/defect defence when
+            # MaskSatContam is disabled.  Silently dropping an explicitly
+            # supplied mask reintroduces false transients, so make it fatal.
+            raise RuntimeError(
+                f"Could not load mask '{args.mask}': {e}.  Refusing to run "
+                "without an explicitly supplied mask."
+            ) from e
 
     # Output invalid mask: no-data inputs plus the universal source mask
     # (saturated footprints, defects).  SFFT only masks pixels it detects
@@ -1799,9 +2083,7 @@ def run_sfft() -> Optional[int]:
     # flux in the diff and read as a transient, so the full mask is
     # re-imposed on every output product below.
     output_invalid_mask = _combine_output_masks(combined_invalid_mask, prior_ban_mask)
-    n_src_only = int(
-        np.count_nonzero(output_invalid_mask & ~combined_invalid_mask)
-    )
+    n_src_only = int(np.count_nonzero(output_invalid_mask & ~combined_invalid_mask))
     if n_src_only:
         log_info(
             f"Output invalid mask: {int(np.count_nonzero(output_invalid_mask))} pixels "
@@ -1851,7 +2133,7 @@ def run_sfft() -> Optional[int]:
                 KerPolyOrder=kernel_poly_order,
                 BGPolyOrder=bg_poly_order,
                 ConstPhotRatio=constant_phot_ratio,
-                MaskSatContam=False,
+                MaskSatContam=True,
                 GAIN_KEY=GAIN_KEY,
                 SATUR_KEY=SATUR_KEY,
                 BACK_TYPE=BACK_TYPE,
@@ -1876,7 +2158,9 @@ def run_sfft() -> Optional[int]:
             )
             # ECP returns (PixA_DIFF, SFFTPrepDict, Solution, SFFT_FSCAL_MEAN, SFFT_FSCAL_SIG)
             if not result:
-                raise RuntimeError("Easy_CrowdedPacket.ECP returned None or empty result.")
+                raise RuntimeError(
+                    "Easy_CrowdedPacket.ECP returned None or empty result."
+                )
             diff_image = result[0]
             prep_data = result[1] if len(result) > 1 else {}
             # ECP may write FITS_DIFF itself; if we have diff_image and file missing, write it
@@ -1901,6 +2185,8 @@ def run_sfft() -> Optional[int]:
                         safe_fits_write(FITS_DIFF, hdu.data, hdu.header)
                 except Exception as e:
                     log_warning(f"Could not write ECP diff to {FITS_DIFF}: {e}")
+            # A missing/constant/NaN diff must not be reported as success.
+            _validate_diff_product(FITS_DIFF, (ny, nx), _frac_invalid_max)
             # ECP catalogs expose the matched list under "SExCatalog-SubSource".
             cat_key = "SExCatalog-SubSource"
             if isinstance(prep_data, dict) and cat_key in prep_data:
@@ -1911,7 +2197,7 @@ def run_sfft() -> Optional[int]:
                 )
                 # Same under-constrained-kernel gate as the sparse path: too
                 # few matched sources cannot determine the kernel + scaling.
-                _min_matched_ecp = 2 if constant_phot_ratio else 3
+                _min_matched_ecp = 3
                 if len(matched_sources) < _min_matched_ecp:
                     raise RuntimeError(
                         f"SFFT kernel fitting failed: only {len(matched_sources)} "
@@ -1920,23 +2206,31 @@ def run_sfft() -> Optional[int]:
                         "reliable SFFT subtraction."
                     )
                 xcol, ycol = _pick_xy_columns(matched_sources)
-                out_csv = os.path.join(
-                    out_dir, f"SFFT_Matching_Sources_{out_base}.csv"
-                )
+                out_csv = os.path.join(out_dir, f"SFFT_Matching_Sources_{out_base}.csv")
                 if xcol and ycol:
                     if (
                         xcol == "X_IMAGE_REF"
                         and "X_IMAGE_SCI" in matched_sources.columns
                         and "Y_IMAGE_SCI" in matched_sources.columns
                     ):
-                        _xr = pd.to_numeric(matched_sources["X_IMAGE_REF"], errors="coerce")
-                        _yr = pd.to_numeric(matched_sources["Y_IMAGE_REF"], errors="coerce")
-                        _xs = pd.to_numeric(matched_sources["X_IMAGE_SCI"], errors="coerce")
-                        _ys = pd.to_numeric(matched_sources["Y_IMAGE_SCI"], errors="coerce")
-                        df_out = pd.DataFrame({
-                            "X_IMAGE_REF_SCI_MEAN": (_xr + _xs) / 2.0,
-                            "Y_IMAGE_REF_SCI_MEAN": (_yr + _ys) / 2.0,
-                        })
+                        _xr = pd.to_numeric(
+                            matched_sources["X_IMAGE_REF"], errors="coerce"
+                        )
+                        _yr = pd.to_numeric(
+                            matched_sources["Y_IMAGE_REF"], errors="coerce"
+                        )
+                        _xs = pd.to_numeric(
+                            matched_sources["X_IMAGE_SCI"], errors="coerce"
+                        )
+                        _ys = pd.to_numeric(
+                            matched_sources["Y_IMAGE_SCI"], errors="coerce"
+                        )
+                        df_out = pd.DataFrame(
+                            {
+                                "X_IMAGE_REF_SCI_MEAN": (_xr + _xs) / 2.0,
+                                "Y_IMAGE_REF_SCI_MEAN": (_yr + _ys) / 2.0,
+                            }
+                        )
                     else:
                         df_out = matched_sources[[xcol, ycol]].rename(
                             columns={
@@ -1993,7 +2287,7 @@ def run_sfft() -> Optional[int]:
                 DETECT_MINAREA=detect_minarea,
                 DETECT_MAXAREA=detect_maxarea,
                 DEBLEND_MINCONT=DEBLEND_MINCON,
-                MaskSatContam=False,
+                MaskSatContam=True,
                 ConstPhotRatio=constant_phot_ratio,
                 GAIN_KEY=GAIN_KEY,
                 SATUR_KEY=SATUR_KEY,
@@ -2005,7 +2299,9 @@ def run_sfft() -> Optional[int]:
                 # off-center stamps and dipole residuals.
                 MatchTolFactor=float(getattr(args, "match_tol_factor", 2.0)),
                 BeltHW=0.2,
-                PointSource_MINELLIP=float(getattr(args, "point_source_min_ellip", 0.3)),
+                PointSource_MINELLIP=float(
+                    getattr(args, "point_source_min_ellip", 0.3)
+                ),
                 ANALYSIS_THRESH=DETECT_THRESH,
                 COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
                 CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
@@ -2035,6 +2331,16 @@ def run_sfft() -> Optional[int]:
             try:
                 # First attempt: honour prior matching/ban lists from the pipeline.
                 result = _run_esp(True)
+            except MemoryError:
+                # An OOM is not "too few priors"; retrying with the same or a
+                # larger peak is likely to OOM again and hides the real cause.
+                raise
+            except (KeyError, AttributeError, ImportError) as e:
+                # SFFT API/schema mismatch: a prior-free retry cannot fix it.
+                raise RuntimeError(
+                    f"SFFT ESP failed with an API/schema error "
+                    f"({type(e).__name__}): {e}"
+                ) from e
             except Exception as e:
                 log_info(
                     f"SFFT ESP failed with {type(e).__name__} when using vetted priors: {e}"
@@ -2060,6 +2366,9 @@ def run_sfft() -> Optional[int]:
                 )
             diff_image, prep_data = result[0], result[1]
 
+            # A missing/constant/NaN diff must not be reported as success.
+            _validate_diff_product(FITS_DIFF, (ny, nx), _frac_invalid_max)
+
             # --- Extract matched-source catalog and gate on source count ---
             # Do this BEFORE the B-Spline refinement so an under-constrained
             # first pass can still fall back to SFFT's own source matching.
@@ -2079,7 +2388,7 @@ def run_sfft() -> Optional[int]:
             # SExtractor detection may still find enough -- compare one prior-free
             # retry before accepting it.  The first output is backed up because a
             # larger but worse source set should not replace a valid vetted fit.
-            _min_matched = 2 if constant_phot_ratio else 3
+            _min_matched = 3
             _self_match_min = max(
                 _min_matched,
                 int(getattr(args, "self_match_min_sources", 20) or 20),
@@ -2224,13 +2533,14 @@ def run_sfft() -> Optional[int]:
                     # - No background estimation params (BSP models background internally)
                     # - FITS_mREF/FITS_mSCI are required mask file paths (not None)
                     from astropy.io import fits as _fits_bsp
+
                     # BSP only needs the image *shape* for its mask files, not
                     # the pixel data.  Read the header (NAXIS) instead of
                     # decoding the full image via getdata.
                     _ref_hdr = _fits_bsp.getheader(FITS_REF)
                     _ref_shape = (int(_ref_hdr["NAXIS2"]), int(_ref_hdr["NAXIS1"]))
-                    _bsp_mref = FITS_REF.replace(".fits", "_bsp_mask.fits")
-                    _bsp_msci = FITS_SCI.replace(".fits", "_bsp_mask.fits")
+                    _bsp_mref = _sidecar_path(FITS_REF, "_bsp_mask")
+                    _bsp_msci = _sidecar_path(FITS_SCI, "_bsp_mask")
                     _ones_mask = np.ones(_ref_shape, dtype=np.float32)
                     _fits_bsp.writeto(_bsp_mref, _ones_mask, overwrite=True)
                     _sci_hdr = _fits_bsp.getheader(FITS_SCI)
@@ -2301,7 +2611,9 @@ def run_sfft() -> Optional[int]:
                     # difference image.
                     if bspline_result is not None and len(bspline_result) >= 2:
                         _bsp_solution, diff_image = bspline_result[0], bspline_result[1]
-                        result = (result[0], result[1], _bsp_solution) + tuple(result[3:])
+                        result = (result[0], result[1], _bsp_solution) + tuple(
+                            result[3:]
+                        )
                         log_info("B-Spline kernel refinement completed successfully")
                     # Clean up mask files
                     for _mf in [_bsp_mref, _bsp_msci]:
@@ -2310,7 +2622,9 @@ def run_sfft() -> Optional[int]:
                         except Exception:
                             pass
                 except Exception as e:
-                    log_warning(f"B-Spline kernel refinement failed: {e}. Using standard kernel result.")
+                    log_warning(
+                        f"B-Spline kernel refinement failed: {e}. Using standard kernel result."
+                    )
 
             # main.py expects columns X_IMAGE_REF_SCI_MEAN, Y_IMAGE_REF_SCI_MEAN
             xcol, ycol = _pick_xy_columns(matched_sources)
@@ -2330,6 +2644,7 @@ def run_sfft() -> Optional[int]:
                 prior_xy = np.asarray(matching_sources, dtype=float)  # 1-based FITS
                 sfft_xy = matched_sources[[xcol, ycol]].values.astype(float)
                 from scipy.spatial import cKDTree
+
                 tree = cKDTree(prior_xy)
                 dists, _ = tree.query(sfft_xy, k=1)
                 _far_threshold = 5.0  # px (1-based, so ~5px in image space)
@@ -2345,9 +2660,7 @@ def run_sfft() -> Optional[int]:
                         f"Position consistency: all {len(sfft_xy)} SFFT-matched "
                         f"sources are within {_far_threshold:.0f}px of a pipeline prior."
                     )
-            out_csv = os.path.join(
-                out_dir, f"SFFT_Matching_Sources_{out_base}.csv"
-            )
+            out_csv = os.path.join(out_dir, f"SFFT_Matching_Sources_{out_base}.csv")
             if xcol and ycol:
                 if (
                     xcol == "X_IMAGE_REF"
@@ -2360,13 +2673,18 @@ def run_sfft() -> Optional[int]:
                     _yr = pd.to_numeric(matched_sources["Y_IMAGE_REF"], errors="coerce")
                     _xs = pd.to_numeric(matched_sources["X_IMAGE_SCI"], errors="coerce")
                     _ys = pd.to_numeric(matched_sources["Y_IMAGE_SCI"], errors="coerce")
-                    df_out = pd.DataFrame({
-                        "X_IMAGE_REF_SCI_MEAN": (_xr + _xs) / 2.0,
-                        "Y_IMAGE_REF_SCI_MEAN": (_yr + _ys) / 2.0,
-                    })
+                    df_out = pd.DataFrame(
+                        {
+                            "X_IMAGE_REF_SCI_MEAN": (_xr + _xs) / 2.0,
+                            "Y_IMAGE_REF_SCI_MEAN": (_yr + _ys) / 2.0,
+                        }
+                    )
                 else:
                     df_out = matched_sources[[xcol, ycol]].rename(
-                        columns={xcol: "X_IMAGE_REF_SCI_MEAN", ycol: "Y_IMAGE_REF_SCI_MEAN"}
+                        columns={
+                            xcol: "X_IMAGE_REF_SCI_MEAN",
+                            ycol: "Y_IMAGE_REF_SCI_MEAN",
+                        }
                     )
                 df_out.to_csv(out_csv, index=False, float_format="%.6f")
             else:
@@ -2410,21 +2728,29 @@ def run_sfft() -> Optional[int]:
                         _phot_fscal = 10.0 ** (float(_mag_off) / -2.5)
                         if str(convd).strip().upper() == "SCI":
                             _phot_fscal = 1.0 / _phot_fscal
-                except Exception:
-                    pass
+                    else:
+                        log_warning(
+                            "FSCAL_PHOT unavailable: MAG_OFFSET missing or "
+                            "non-finite in SFFT prep-data."
+                        )
+                except Exception as _fscal_e:
+                    log_warning(f"FSCAL_PHOT computation failed: {_fscal_e}")
                 with fits.open(FITS_DIFF, mode="update", memmap=False) as _hd:
                     _fhdr = _hd[0].header
                     if np.isfinite(_fscal_conv):
                         _fhdr["HIERARCH FSCAL_CONV"] = (
-                            _fscal_conv, "SFFT convolution flux scaling (mean)"
+                            _fscal_conv,
+                            "SFFT convolution flux scaling (mean)",
                         )
                     if np.isfinite(_fscal_sig):
                         _fhdr["HIERARCH FSCAL_SIG"] = (
-                            _fscal_sig, "SFFT convolution flux scaling (std)"
+                            _fscal_sig,
+                            "SFFT convolution flux scaling (std)",
                         )
                     if np.isfinite(_phot_fscal):
                         _fhdr["HIERARCH FSCAL_PHOT"] = (
-                            _phot_fscal, "SFFT photometric flux scaling"
+                            _phot_fscal,
+                            "SFFT photometric flux scaling",
                         )
                     if np.isfinite(_fscal_conv) and np.isfinite(_phot_fscal):
                         _fhdr["HIERARCH FSCAL_DISC"] = (
@@ -2432,6 +2758,23 @@ def run_sfft() -> Optional[int]:
                             / max(abs(_fscal_conv), abs(_phot_fscal), 1e-10)
                             * 100.0,
                             "FSCAL conv-vs-phot discrepancy (percent)",
+                        )
+                    # Sanity gate on the realised convolution scale.  SFFT has
+                    # been observed to return fscal=-24 for under-constrained
+                    # kernels; a scale near 0/negative/very large is not a
+                    # photometric scale and must be flagged for the caller.
+                    _fscal_ok = bool(
+                        np.isfinite(_fscal_conv) and 0.1 <= abs(_fscal_conv) <= 10.0
+                    )
+                    _fhdr["HIERARCH FSCAL_OK"] = (
+                        _fscal_ok,
+                        "Flux scale within a plausible bound",
+                    )
+                    if not _fscal_ok:
+                        log_warning(
+                            f"FSCAL_CONV={_fscal_conv:.4g} is outside the "
+                            "plausible [0.1, 10] bound - the kernel is likely "
+                            "under-constrained (poor subtraction)."
                         )
                     _hd.flush()
                 if np.isfinite(_fscal_conv) and np.isfinite(_phot_fscal):
@@ -2479,10 +2822,20 @@ def run_sfft() -> Optional[int]:
         #    would bias all measured fluxes.  This is the DMTN-021 semantics --
         #    ScaleVarianceTask rescales the VARIANCE model, not the image.
         # ------------------------------------------------------------------
-        log_info(border_msg("Post-subtraction quality improvements", metadata="ip_diffim-inspired + SFFT v1.5.0+", use_ansi=False))
+        log_info(
+            border_msg(
+                "Post-subtraction quality improvements",
+                metadata="ip_diffim-inspired + SFFT v1.5.0+",
+                use_ansi=False,
+            )
+        )
         if decorrelate_noise or save_decorrelated:
-            log_info("  Decorrelation kernel (DMTN-021) - whitens A&L convolution noise (detection side product)")
-        log_info("  Variance calibration (ScaleVarianceTask) - VSCALE noise-model factor")
+            log_info(
+                "  Decorrelation kernel (DMTN-021) - whitens A&L convolution noise (detection side product)"
+            )
+        log_info(
+            "  Variance calibration (ScaleVarianceTask) - VSCALE noise-model factor"
+        )
 
         # Apply noise decorrelation if requested
         # Note: SFFT's DeCorrelation_Calculator requires kernel information from the SFFT solution
@@ -2490,7 +2843,9 @@ def run_sfft() -> Optional[int]:
         # provides equivalent noise whitening and is used as the primary method.
         if decorrelate_noise:
             if _HAS_DECORRELATION:
-                log_info("SFFT decorrelation available but requires kernel information from SFFT solution.")
+                log_info(
+                    "SFFT decorrelation available but requires kernel information from SFFT solution."
+                )
                 log_info("Using DMTN-021 decorrelation as equivalent alternative.")
             else:
                 log_info("SFFT decorrelation not available (SFFT v1.5.0+ required).")
@@ -2548,8 +2903,8 @@ def run_sfft() -> Optional[int]:
                 # rfft2 convention).
                 ker_full = np.zeros((H, W), dtype=np.float64)
                 ker_full[:kH, :kW] = kernel
-                K_f = np.fft.rfft2(np.fft.ifftshift(ker_full))   # (H, W//2+1)
-                K2  = np.real(K_f * np.conj(K_f))                 # |kappa(k)|^2
+                K_f = np.fft.rfft2(np.fft.ifftshift(ker_full))  # (H, W//2+1)
+                K2 = np.real(K_f * np.conj(K_f))  # |kappa(k)|^2
 
                 denom = var_sci + K2 * var_ref
                 # Guard against near-zero denominator (numerical safety)
@@ -2558,7 +2913,7 @@ def run_sfft() -> Optional[int]:
                     denom,
                     var_sci + var_ref,
                 )
-                psi_f = np.sqrt((var_sci + var_ref) / denom)      # (H, W//2+1)
+                psi_f = np.sqrt((var_sci + var_ref) / denom)  # (H, W//2+1)
 
                 # --- Extract compact real-space psi kernel ---
                 # IRFFT2 back to image size then FFT-shift to centre.
@@ -2613,7 +2968,7 @@ def run_sfft() -> Optional[int]:
                 if valid.sum() < 1000:
                     return float("nan")
                 q25, q75 = np.percentile(diff[valid], [25.0, 75.0])
-                iqr_sigma = (q75 - q25) / 1.3489795003921634   # 1/Phi^-1(0.75)
+                iqr_sigma = (q75 - q25) / 1.3489795003921634  # 1/Phi^-1(0.75)
                 if iqr_sigma < 1e-10 or not np.isfinite(iqr_sigma):
                     return float("nan")
                 return float(iqr_sigma)
@@ -2658,23 +3013,56 @@ def run_sfft() -> Optional[int]:
                 # masked images.  Exclude them alongside the non-finite.
                 _sci_var = None
                 _ref_var = None
+
+                def _frame_var(path: str, label: str) -> Optional[float]:
+                    """Per-image variance from a noise/RMS extension, if present.
+
+                    Returns None when no usable sigma map exists so the caller
+                    can fall back to an IQR estimate.
+                    """
+                    try:
+                        with fits.open(path, memmap=False) as _hd:
+                            for prefix in ("NOISE", "RMS", "ERR", "SIG", "STD"):
+                                try:
+                                    _im = _hd[prefix, 1].data
+                                except Exception:
+                                    continue
+                                if _im is None:
+                                    continue
+                                _d = np.asarray(_im, dtype=float)
+                                _f = _d[np.isfinite(_d) & (_d > 0)]
+                                if _f.size > 1000:
+                                    _q25, _q75 = np.percentile(_f, [25.0, 75.0])
+                                    _var = ((_q75 - _q25) / 1.3489795003921634) ** 2
+                                    log_info(
+                                        f"{label} variance from '{prefix}' extension."
+                                    )
+                                    return float(_var)
+                    except Exception as _ve:
+                        log_warning(f"Failed to read {label} noise extension: {_ve}")
+                    return None
+
+                _sci_var = _frame_var(FITS_SCI, "science")
+                _ref_var = _frame_var(FITS_REF, "template")
                 try:
-                    # Reload the FITS actually fed to SFFT (the NaN-synced temp
-                    # files when they exist): the in-memory copies were freed
-                    # before the SFFT call to keep its peak memory down.
-                    with fits.open(FITS_SCI, memmap=True) as _hd:
-                        _d = _hd[0].data
-                        _sci_vals = _d[np.isfinite(_d) & (_d != 0.0)].ravel()
-                    with fits.open(FITS_REF, memmap=True) as _hd:
-                        _d = _hd[0].data
-                        _ref_vals = _d[np.isfinite(_d) & (_d != 0.0)].ravel()
-                    if len(_sci_vals) > 1000 and len(_ref_vals) > 1000:
-                        _q25s, _q75s = np.percentile(_sci_vals, [25.0, 75.0])
-                        _q25r, _q75r = np.percentile(_ref_vals, [25.0, 75.0])
-                        _sci_var = ((_q75s - _q25s) / 1.3489795003921634) ** 2
-                        _ref_var = ((_q75r - _q25r) / 1.3489795003921634) ** 2
-                except Exception:
-                    pass
+                    if _sci_var is None or _ref_var is None:
+                        # Fall back to an IQR of the pixel values.  clean_fits_nans
+                        # writes the 0.0 sentinel for invalid pixels - those are
+                        # finite, so they would drag the IQR toward zero on heavily
+                        # masked images.  Exclude them alongside the non-finite.
+                        with fits.open(FITS_SCI, memmap=True) as _hd:
+                            _d = _hd[0].data
+                            _sci_vals = _d[np.isfinite(_d) & (_d != 0.0)].ravel()
+                        with fits.open(FITS_REF, memmap=True) as _hd:
+                            _d = _hd[0].data
+                            _ref_vals = _d[np.isfinite(_d) & (_d != 0.0)].ravel()
+                        if len(_sci_vals) > 1000 and len(_ref_vals) > 1000:
+                            _q25s, _q75s = np.percentile(_sci_vals, [25.0, 75.0])
+                            _q25r, _q75r = np.percentile(_ref_vals, [25.0, 75.0])
+                            _sci_var = ((_q75s - _q25s) / 1.3489795003921634) ** 2
+                            _ref_var = ((_q75r - _q25r) / 1.3489795003921634) ** 2
+                except Exception as _ve:
+                    log_warning(f"Variance estimation from inputs failed: {_ve}")
 
                 # --- Realize the SFFT matching kernel at the image centre ---
                 # Shared by the decorrelation step and by the expected-variance
@@ -2683,6 +3071,7 @@ def run_sfft() -> Optional[int]:
                 try:
                     if len(result) >= 3:
                         from sfft.utils.SFFTSolutionReader import Realize_MatchingKernel
+
                         _solution = result[2]
                         _kerhw = int(diff_hdr.get("KERHW", 0))
                         if _kerhw > 0 and _solution is not None:
@@ -2691,8 +3080,12 @@ def run_sfft() -> Optional[int]:
                             # so its internal N0 = nx (columns), N1 = ny (rows).
                             # image shape is (ny, nx), so swap for FromArray.
                             _ny_img, _nx_img = ny, nx
-                            _DK = int(diff_hdr.get("KERORDER", diff_hdr.get("KERPOLY", 0)))
-                            _Fpq_raw = diff_hdr.get("BGORDER", diff_hdr.get("BGPOLY", 0))
+                            _DK = int(
+                                diff_hdr.get("KERORDER", diff_hdr.get("KERPOLY", 0))
+                            )
+                            _Fpq_raw = diff_hdr.get(
+                                "BGORDER", diff_hdr.get("BGPOLY", 0)
+                            )
                             _Fpq = int((_Fpq_raw + 1) * (_Fpq_raw + 2) // 2)
                             # Realize the kernel at the image centre.
                             # Realize_MatchingKernel takes XY_q in [X, Y] = [col, row]
@@ -2702,16 +3095,23 @@ def run_sfft() -> Optional[int]:
                             _XY_q = np.array([[_cx, _cy]])
                             _ker_stack = Realize_MatchingKernel(_XY_q).FromArray(
                                 Solution=_solution,
-                                N0=_nx_img, N1=_ny_img,  # SFFT: N0=nx, N1=ny
-                                L0=_L, L1=_L,
-                                DK=_DK, Fpq=_Fpq,
+                                N0=_nx_img,
+                                N1=_ny_img,  # SFFT: N0=nx, N1=ny
+                                L0=_L,
+                                L1=_L,
+                                DK=_DK,
+                                Fpq=_Fpq,
                             )
                             # KerStack[0] is the kernel at the requested coordinate.
                             # SFFT stores the kernel in transposed (X, Y) = (col, row)
                             # order.  Transpose to numpy (Y, X) = (row, col) for
                             # fftconvolve with non-transposed images.
                             _cand = np.asarray(_ker_stack[0]).squeeze().T
-                            if _cand.ndim == 2 and _cand.shape[0] == _L:
+                            if (
+                                _cand.ndim == 2
+                                and _cand.shape[0] == _L
+                                and _cand.shape[1] == _L
+                            ):
                                 _ker_2d = _cand
                 except Exception as _e:
                     log_warning(f"Could not realize SFFT matching kernel: {_e}")
@@ -2719,7 +3119,7 @@ def run_sfft() -> Optional[int]:
                 _ker_l2 = None
                 _ker_noise = _ker_negfrac = _ker_conc = None
                 if _ker_2d is not None:
-                    _ker_l2 = float(np.sqrt(np.nansum(_ker_2d ** 2)))
+                    _ker_l2 = float(np.sqrt(np.nansum(_ker_2d**2)))
                     if not np.isfinite(_ker_l2) or _ker_l2 <= 0:
                         _ker_l2 = None
 
@@ -2744,11 +3144,10 @@ def run_sfft() -> Optional[int]:
                         _kout = _ker_2d[_kr > 0.8 * _khalf]
                         _kout = _kout[np.isfinite(_kout)]
                         _ker_noise = None
-                        if _kpeak > 0 and _kout.size >= 20:
+                        if _kpeak > 0 and _kout.size >= 8:
                             _kmed = float(np.median(_kout))
                             _ker_noise = float(
-                                1.4826 * np.median(np.abs(_kout - _kmed))
-                                / _kpeak
+                                1.4826 * np.median(np.abs(_kout - _kmed)) / _kpeak
                             )
                         _kabs = float(np.nansum(np.abs(_ker_2d)))
                         _ker_negfrac = (
@@ -2768,20 +3167,19 @@ def run_sfft() -> Optional[int]:
                         try:
                             _fs = float(diff_hdr.get("FWHM_SCI", 0) or 0)
                             _fr = float(diff_hdr.get("FWHM_REF", 0) or 0)
-                            _fconv = float(np.sqrt(max(
-                                max(_fs, _fr) ** 2 - min(_fs, _fr) ** 2, 0.0
-                            )))
-                            _rc = max(3.0, _fconv) if _fconv > 0 else (
-                                0.4 * _khalf
+                            _fconv = float(
+                                np.sqrt(
+                                    max(max(_fs, _fr) ** 2 - min(_fs, _fr) ** 2, 0.0)
+                                )
                             )
+                            _rc = max(3.0, _fconv) if _fconv > 0 else (0.4 * _khalf)
                             _kin = np.abs(_ker_2d[_kr <= _rc])
                             _kin = _kin[np.isfinite(_kin)]
                             _n_in = int(np.count_nonzero(_kr <= _rc))
                             _n_tot = int(np.count_nonzero(np.isfinite(_kr)))
                             if _kabs > 0 and _kin.size and _n_tot > 0:
                                 _ker_conc = float(
-                                    (np.nansum(_kin) / _kabs)
-                                    / (_n_in / _n_tot)
+                                    (np.nansum(_kin) / _kabs) / (_n_in / _n_tot)
                                 )
                         except Exception:
                             _ker_conc = None
@@ -2795,10 +3193,7 @@ def run_sfft() -> Optional[int]:
                                 round(_ker_noise, 4),
                                 "Kernel wing MAD / peak (solve noise level)",
                             )
-                            _kmsg = (
-                                f"Kernel quality: wing noise/peak="
-                                f"{_ker_noise:.3f}"
-                            )
+                            _kmsg = f"Kernel quality: wing noise/peak={_ker_noise:.3f}"
                             if _ker_negfrac is not None:
                                 diff_hdr["KERNEG"] = (
                                     round(_ker_negfrac, 4),
@@ -2811,16 +3206,17 @@ def run_sfft() -> Optional[int]:
                             else:
                                 log_info(_kmsg)
                 except Exception as _kq_e:
-                    log_warning(
-                        f"Kernel-quality audit failed ({_kq_e}); skipping."
-                    )
+                    log_warning(f"Kernel-quality audit failed ({_kq_e}); skipping.")
 
                 # Diagnostic-plot format shared by the kernel and matching
                 # plots; resolved once so a skipped kernel block cannot leave
                 # the name undefined for generate_plot().
-                _plot_fmt = str(
-                    getattr(args, "plot_format", "png") or "png"
-                ).strip().lower().lstrip(".")
+                _plot_fmt = (
+                    str(getattr(args, "plot_format", "png") or "png")
+                    .strip()
+                    .lower()
+                    .lstrip(".")
+                )
                 if _plot_fmt not in ("png", "svg"):
                     _plot_fmt = "png"
 
@@ -2858,17 +3254,13 @@ def run_sfft() -> Optional[int]:
                         _Lk = _ker_2d.shape[0]
                         _khalf = (_Lk - 1) / 2.0
                         _finite_kernel = _ker_2d[np.isfinite(_ker_2d)]
-                        _kzmin, _kzmax = ZScaleInterval().get_limits(
-                            _finite_kernel
-                        )
+                        _kzmin, _kzmax = ZScaleInterval().get_limits(_finite_kernel)
                         _kvlim = max(abs(_kzmin), abs(_kzmax))
                         if not np.isfinite(_kvlim) or _kvlim <= 0:
                             _kvlim = float(np.nanmax(np.abs(_finite_kernel)))
                         if not np.isfinite(_kvlim) or _kvlim <= 0:
                             _kvlim = 1.0
-                        _norm = TwoSlopeNorm(
-                            vcenter=0.0, vmin=-_kvlim, vmax=_kvlim
-                        )
+                        _norm = TwoSlopeNorm(vcenter=0.0, vmin=-_kvlim, vmax=_kvlim)
                         _div_cmap = LinearSegmentedColormap.from_list(
                             "autophot_divergent",
                             [
@@ -2965,9 +3357,7 @@ def run_sfft() -> Optional[int]:
                                 zorder=3,
                             )
                         _tick_mid = max(1, int(round(_c / 2.0)))
-                        _xticks = np.array(
-                            [-_c, -_tick_mid, 0, _tick_mid, _c]
-                        )
+                        _xticks = np.array([-_c, -_tick_mid, 0, _tick_mid, _c])
                         _kax[1].set_xlim(-_c - 0.5, _c + 0.5)
                         _kax[1].set_xticks(_xticks)
                         _kax[1].set_box_aspect(1)
@@ -2981,9 +3371,7 @@ def run_sfft() -> Optional[int]:
                             linewidth=0.5,
                             alpha=0.7,
                         )
-                        _kax[1].legend(
-                            loc="best", frameon=False, fontsize=8, ncol=2
-                        )
+                        _kax[1].legend(loc="best", frameon=False, fontsize=8, ncol=2)
 
                         safe_tight_layout(_kfig)
                         _kfig.savefig(
@@ -3020,29 +3408,112 @@ def run_sfft() -> Optional[int]:
                 if _convd_side not in ("REF", "SCI"):
                     _convd_side = ForceConv if ForceConv in ("REF", "SCI") else "REF"
 
+                # Kernel-implied noise autocorrelation for the quality gate.
+                # Convolving white noise with K correlates it with profile
+                # corr(K, K); the difference image inherits that correlation
+                # in proportion to the convolved side's variance fraction.
+                # Positive lag correlation from a broadening match is expected
+                # physics, not a subtraction defect - record the level so the
+                # gate can score measured-vs-expected instead of penalising
+                # the convolution itself.  EXPACN covers the rarer case of
+                # kernel-implied negative correlation (sidelobe kernels).
+                try:
+                    if (
+                        _ker_2d is not None
+                        and _sci_var is not None
+                        and _ref_var is not None
+                    ):
+                        from scipy.signal import correlate as _sig_corr
+
+                        _kk = _sig_corr(_ker_2d, _ker_2d, mode="full")
+                        _kc = _kk.shape[0] // 2
+                        _ac0 = _kk[_kc, _kc]
+                        if np.isfinite(_ac0) and _ac0 > 0:
+                            # 1-D row/column profile matching the gate's
+                            # measurement convention, normalised to lag 0.
+                            _lag_max = min(20, _kc)
+                            _ac_prof = np.concatenate(
+                                [
+                                    _kk[_kc, _kc + 1 : _kc + _lag_max + 1],
+                                    _kk[_kc + 1 : _kc + _lag_max + 1, _kc],
+                                ]
+                            ) / _ac0
+                            _ac_prof = _ac_prof[np.isfinite(_ac_prof)]
+                            if _ac_prof.size:
+                                _k2 = float(np.nansum(_ker_2d**2))
+                                _var_conv = (
+                                    float(_sci_var)
+                                    if _convd_side == "SCI"
+                                    else float(_ref_var)
+                                ) * _k2
+                                _var_other = (
+                                    float(_ref_var)
+                                    if _convd_side == "SCI"
+                                    else float(_sci_var)
+                                )
+                                _f_conv = _var_conv / max(
+                                    _var_conv + _var_other, 1e-30
+                                )
+                                _exp_pos = _f_conv * max(
+                                    float(np.max(_ac_prof)), 0.0
+                                )
+                                _exp_neg = _f_conv * min(
+                                    float(np.min(_ac_prof)), 0.0
+                                )
+                                diff_hdr["EXPAC"] = (
+                                    round(float(_exp_pos), 4),
+                                    "Expected +noise autocorr (kernel-implied)",
+                                )
+                                diff_hdr["EXPACN"] = (
+                                    round(float(_exp_neg), 4),
+                                    "Expected -noise autocorr (kernel-implied)",
+                                )
+                                log_info(
+                                    f"Expected kernel-implied noise autocorr: "
+                                    f"+{_exp_pos:.3f} / {_exp_neg:.3f} "
+                                    f"(convolved-side fraction {_f_conv:.2f})."
+                                )
+                except Exception as _expac_e:
+                    log_warning(
+                        f"Expected-autocorr estimate failed ({_expac_e}); skipping."
+                    )
+
                 # --- Step 1: Noise decorrelation (detection-only product) ---
                 # Runs only when explicitly requested (decorrelate_noise /
                 # save_decorrelated).  The decorrelated image is written to
                 # *_decorr.fits; diff_arr for photometry is left untouched.
                 _applied_decorr = False
                 if decorrelate_noise or save_decorrelated:
-                    if _ker_2d is not None and _sci_var is not None and _ref_var is not None:
+                    if (
+                        _ker_2d is not None
+                        and _sci_var is not None
+                        and _ref_var is not None
+                    ):
                         try:
                             # _decorrelate_diffim(diff, kernel, var_unconv, var_conv, mask):
                             # the convolved side's variance is multiplied by |kappa|^2.
                             if _convd_side == "SCI":
                                 _decorr = _decorrelate_diffim(
-                                    diff_arr, _ker_2d,
-                                    float(_ref_var), float(_sci_var), _nan_mask,
+                                    diff_arr,
+                                    _ker_2d,
+                                    float(_ref_var),
+                                    float(_sci_var),
+                                    _nan_mask,
                                 )
                             else:
                                 _decorr = _decorrelate_diffim(
-                                    diff_arr, _ker_2d,
-                                    float(_sci_var), float(_ref_var), _nan_mask,
+                                    diff_arr,
+                                    _ker_2d,
+                                    float(_sci_var),
+                                    float(_ref_var),
+                                    _nan_mask,
                                 )
-                            _decorr_diff_path = FITS_DIFF.replace(".fits", "_decorr.fits")
+                            _decorr_diff_path = _sidecar_path(FITS_DIFF, "_decorr")
                             _decorr_hdr = diff_hdr.copy()
-                            _decorr_hdr["DECORR"] = (True, "DMTN-021 A&L decorrelation applied")
+                            _decorr_hdr["DECORR"] = (
+                                True,
+                                "DMTN-021 A&L decorrelation applied",
+                            )
                             _decorr_hdr["PURPOSE"] = "DETECTION"
                             safe_fits_write(
                                 _decorr_diff_path,
@@ -3063,7 +3534,10 @@ def run_sfft() -> Optional[int]:
                             "Noise decorrelation requested but the matching "
                             "kernel or input variances are unavailable; skipped."
                         )
-                diff_hdr["DECORR"] = (False, "Non-decorrelated difference image (photometry)")
+                diff_hdr["DECORR"] = (
+                    False,
+                    "Non-decorrelated difference image (photometry)",
+                )
 
                 # --- Step 2: Variance calibration of the noise MODEL ---
                 # Measure the actual difference-image noise (IQR sigma) and
@@ -3080,7 +3554,7 @@ def run_sfft() -> Optional[int]:
                         # Diagnostic decomposition: how much of the excess is
                         # explained by the kernel L2 norm on the convolved side.
                         if _ker_l2 is not None and _ref_var is not None:
-                            _k2 = _ker_l2 ** 2
+                            _k2 = _ker_l2**2
                             _var_exp = (
                                 _sci_var * _k2 + _ref_var
                                 if _convd_side == "SCI"
@@ -3095,10 +3569,10 @@ def run_sfft() -> Optional[int]:
                         # Record the measured factor up to the same generous
                         # sanity cap the ZOGY backend uses (1e4).  The old 5.0
                         # cap silently left VSCALE=1.0 - understating the
-                        # uncertainty by up to the true factor - for a merely
-                        # noisy subtraction while ZOGY reported the same data
-                        # faithfully.  Values above 5x are still flagged.
-                        if 1.05 < _vscale < 1e4:
+                        # uncertainty by up to the true factor.  VSCALE<1 (an
+                        # over-subtraction noise deficit) is also recorded so
+                        # the error model is honest in both directions.
+                        if 0.2 < _vscale < 1e4:
                             diff_hdr["VSCALE"] = (
                                 round(float(_vscale), 6),
                                 "Noise-model factor sigma_diff/sigma_sci (IQR)",
@@ -3110,6 +3584,12 @@ def run_sfft() -> Optional[int]:
                                     "science noise model - suspiciously large "
                                     "(check subtraction quality); VSCALE written "
                                     "to header regardless."
+                                )
+                            elif _vscale < 0.8:
+                                log_warning(
+                                    f"Difference-image noise is only {_vscale:.2f}x "
+                                    "the science model - possible over-subtraction; "
+                                    "VSCALE written to header."
                                 )
                             else:
                                 log_info(
@@ -3131,13 +3611,18 @@ def run_sfft() -> Optional[int]:
 
                 decorr_status = "ON (side file)" if _applied_decorr else "OFF"
                 vscale_status = "ON" if _applied_vscale else "OFF"
-                log_info(f"Post-subtraction summary: decorrelation={decorr_status}, variance scaling={vscale_status}")
+                log_info(
+                    f"Post-subtraction summary: decorrelation={decorr_status}, variance scaling={vscale_status}"
+                )
 
                 hdul[0].data = diff_arr.astype(np.float32)
                 hdul[0].header = diff_hdr
 
         except Exception as _post_e:
-            log_warning(f"Post-subtraction processing failed ({_post_e}); skipping.")
+            log_warning(
+                f"Post-subtraction processing failed ({_post_e}); skipping.",
+            )
+            logger.debug("Post-subtraction processing traceback", exc_info=True)
 
         # ------------------------------------------------------------------
         # Re-impose the full invalid-pixel mask on the output difference
@@ -3148,14 +3633,10 @@ def run_sfft() -> Optional[int]:
         # must not survive into the saved products.  This also covers the
         # path where post-subtraction processing raised before writing.
         # ------------------------------------------------------------------
-        if (
-            np.any(output_invalid_mask)
-            and FITS_DIFF
-            and os.path.isfile(FITS_DIFF)
-        ):
+        if np.any(output_invalid_mask) and FITS_DIFF and os.path.isfile(FITS_DIFF):
             for _path, _label in (
                 (FITS_DIFF, "main diff"),
-                (FITS_DIFF.replace(".fits", "_decorr.fits"), "decorrelated diff"),
+                (_sidecar_path(FITS_DIFF, "_decorr"), "decorrelated diff"),
             ):
                 if not os.path.isfile(_path):
                     continue
@@ -3177,9 +3658,15 @@ def run_sfft() -> Optional[int]:
             if FITS_DIFF and os.path.isfile(FITS_DIFF):
                 with fits.open(FITS_DIFF, mode="update", memmap=False) as hdul:
                     hdr = hdul[0].header
-                    hdr["FORCECON"] = (ForceConv, "SFFT convolution direction (REF or SCI)")
+                    hdr["FORCECON"] = (
+                        ForceConv,
+                        "SFFT convolution direction (REF or SCI)",
+                    )
                     if fits_solution and os.path.isfile(fits_solution):
-                        hdr["SOLPATH"] = (fits_solution, "Path to SFFT solution FITS (kernel)")
+                        hdr["SOLPATH"] = (
+                            fits_solution,
+                            "Path to SFFT solution FITS (kernel)",
+                        )
                     hdul.flush()
         except Exception as e:
             log_warning(f"Failed to write ForceConv/solution header: {e}")
@@ -3226,9 +3713,18 @@ def run_sfft() -> Optional[int]:
                     ast_ss = prep_data.get("SExCatalog-SubSource")
                     if ast_ss is None or len(ast_ss) == 0:
                         return
-                    required_cols = ["MAG_REF_REF", "MAGERR_REF_REF", "MAG_REF_SCI", "MAGERR_REF_SCI"]
+                    required_cols = [
+                        "MAG_REF_REF",
+                        "MAGERR_REF_REF",
+                        "MAG_REF_SCI",
+                        "MAGERR_REF_SCI",
+                    ]
                     # Handle both pandas DataFrame and astropy Table
-                    col_names = ast_ss.columns if hasattr(ast_ss, 'columns') else ast_ss.dtype.names
+                    col_names = (
+                        ast_ss.columns
+                        if hasattr(ast_ss, "columns")
+                        else ast_ss.dtype.names
+                    )
                     missing_cols = [c for c in required_cols if c not in col_names]
                     if missing_cols:
                         log_warning(
@@ -3236,10 +3732,12 @@ def run_sfft() -> Optional[int]:
                             "SFFT catalog schema may differ from expected version."
                         )
                         return
-                    
-                    n_input = len(matching_sources) if matching_sources is not None else 0
+
+                    n_input = (
+                        len(matching_sources) if matching_sources is not None else 0
+                    )
                     n_final = len(ast_ss)
-                    
+
                     x_data = ast_ss["MAG_REF_REF"]
                     ex_data = ast_ss["MAGERR_REF_REF"]
                     y_data = ast_ss["MAG_REF_SCI"] - ast_ss["MAG_REF_REF"]
@@ -3249,11 +3747,13 @@ def run_sfft() -> Optional[int]:
                         median - CVREJ_MAGD_THRESH,
                         median + CVREJ_MAGD_THRESH,
                     )
-                    from ..core.plotting_utils import apply_autophot_mplstyle, get_plot_color
-                    apply_autophot_mplstyle()
-                    fig, ax = plt.subplots(
-                        figsize=set_size(540, aspect=1.01), dpi=150
+                    from ..core.plotting_utils import (
+                        apply_autophot_mplstyle,
+                        get_plot_color,
                     )
+
+                    apply_autophot_mplstyle()
+                    fig, ax = plt.subplots(figsize=set_size(540, aspect=1.01), dpi=150)
                     ax.errorbar(
                         x_data,
                         y_data,
@@ -3262,8 +3762,8 @@ def run_sfft() -> Optional[int]:
                         fmt="o",
                         markersize=3.5,
                         mfc="none",
-                        color=get_plot_color('sfft_scatter'),
-                        ecolor=get_plot_color('sfft_scatter'),
+                        color=get_plot_color("sfft_scatter"),
+                        ecolor=get_plot_color("sfft_scatter"),
                         capsize=3.5 / 4,
                         elinewidth=0.5,
                         markeredgewidth=0.9,
@@ -3276,17 +3776,27 @@ def run_sfft() -> Optional[int]:
                         xmax=np.nanmax(x_data),
                         linestyles=(0, (5, 2)),
                         linewidth=1.2,
-                        colors=get_plot_color('threshold_line'),
+                        colors=get_plot_color("threshold_line"),
                         label="median / thresholds",
                     )
                     ax.set_xlabel("Reference Instrumental Magnitude [mag]")
-                    ax.set_ylabel(r"$\Delta$ Instrumental Magnitude (Science $-$ Reference) [mag]")
+                    ax.set_ylabel(
+                        r"$\Delta$ Instrumental Magnitude (Science $-$ Reference) [mag]"
+                    )
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
                     ax.legend(loc="best", frameon=False, fontsize=8)
-                    ax.set_title(f"SFFT source matching: {n_input} input -> {n_final} final sources", fontsize=10)
-                    png_path = os.path.join(out_dir, f"SFFT_Matching_{out_base}.{_plot_fmt}")
+                    ax.set_title(
+                        f"SFFT source matching: {n_input} input -> {n_final} final sources",
+                        fontsize=10,
+                    )
+                    png_path = os.path.join(
+                        out_dir, f"SFFT_Matching_{out_base}.{_plot_fmt}"
+                    )
                     fig.savefig(
-                        png_path, bbox_inches="tight", dpi=150, facecolor=get_plot_color("figure_facecolor")
+                        png_path,
+                        bbox_inches="tight",
+                        dpi=150,
+                        facecolor=get_plot_color("figure_facecolor"),
                     )
                     plt.close(fig)
                 except Exception as e:
@@ -3295,21 +3805,36 @@ def run_sfft() -> Optional[int]:
             generate_plot()
 
         # --- Per-image SFFT quality summary ---
-        _n_matched_final = len(matched_sources) if isinstance(matched_sources, pd.DataFrame) else 0
+        _n_matched_final = (
+            len(matched_sources) if isinstance(matched_sources, pd.DataFrame) else 0
+        )
         _diff_finite_frac = float("nan")
         try:
             if FITS_DIFF and os.path.isfile(FITS_DIFF):
                 with fits.open(FITS_DIFF, memmap=True) as _hdl:
                     _diff_data = np.asarray(_hdl[0].data)
-                    _diff_finite_frac = float(np.count_nonzero(np.isfinite(_diff_data))) / float(_diff_data.size)
+                    _diff_finite_frac = float(
+                        np.count_nonzero(np.isfinite(_diff_data))
+                    ) / float(_diff_data.size)
         except Exception:
             pass
         log_info(
             f"SFFT per-image summary: matched_sources={_n_matched_final} | "
             f"kernel_hw={kernel_half_width} px | ForceConv={ForceConv} | "
-            f"diff_finite_frac={_diff_finite_frac*100:.1f}% | "
-            f"invalid_input_frac={_frac_invalid_max*100:.1f}%"
+            f"diff_finite_frac={_diff_finite_frac * 100:.1f}% | "
+            f"invalid_input_frac={_frac_invalid_max * 100:.1f}%"
         )
+        # A diff that is nearly all NaN is not a successful subtraction even
+        # when some finite pixels remain.
+        if not np.isfinite(_diff_finite_frac):
+            _diff_finite_frac = 0.0
+        _fin_floor = max(0.25, 1.0 - _frac_invalid_max - 0.05)
+        if _diff_finite_frac < _fin_floor:
+            raise RuntimeError(
+                f"Difference image is only {_diff_finite_frac * 100:.1f}% "
+                f"finite (input-invalid floor {_fin_floor * 100:.1f}%); "
+                "subtraction failed."
+            )
 
     except Exception as e:
         exc_type, _, exc_tb = sys.exc_info()
@@ -3319,7 +3844,10 @@ def run_sfft() -> Optional[int]:
             else "unknown"
         )
         line = exc_tb.tb_lineno if exc_tb else -1
-        logger.error(f"Fatal Error: {exc_type} in {fname} at line {line}: {e}")
+        logger.error(
+            f"Fatal Error: {exc_type} in {fname} at line {line}: {e}",
+            exc_info=True,
+        )
         return None
     finally:
         # Clean up temporary synchronized-mask FITS files if they were created.
@@ -3331,6 +3859,7 @@ def run_sfft() -> Optional[int]:
                     log_info(f"Cleaned up temp file: {_tmp_path}")
             except Exception:
                 pass
+            _TEMP_FILES.discard(_tmp_path)
 
     log_info(f"Total elapsed: {time.time() - t0_total:.3f} s")
     return 1
