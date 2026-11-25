@@ -1055,6 +1055,20 @@ default_input:
     sfft_memory_policy: "shrink" # str --- Over-budget policy when the SFFT estimate exceeds sfft_max_memory_gb. "shrink" (default): drop kernel_order toward 0, then reduce kernel half-width toward its PSF-difference floor, and skip to HOTPANTS if even the minimum cannot fit - protects the host but degrades the subtraction kernel. "fallback": never shrink; use HOTPANTS with the SFFT kernel left intact - preserves subtraction quality at the cost of the algorithm choice. "ignore": never shrink; log the estimate and run the full kernel anyway - full SFFT quality but accepts the OOM/swap risk (the estimate is a conservative upper bound, so moderate overshoot often still fits).
 
 
+    # Optional difference-image quality gate tuning. Each key maps onto the
+    # QualityConfig dataclass in subtraction/difference_quality.py; omit the
+    # whole block to keep defaults. The gate classifies each diff as
+    # pass/downgrade/fail from dipole, bright-star, background, edge, and
+    # autocorrelation metrics; a "fail" discards the difference image.
+    # difference_quality:
+    #   dipole_n_sigma: 5.0 # float --- Residual sigma threshold for a dipole lobe.
+    #   dipole_min_flux_frac: 0.10 # float --- Bipolar amplitude must also exceed this fraction of the source's flux to count as a dipole (kernel-mismatch amplitude scales with flux, so a pure sigma floor flags percent-level matching error on bright stars).
+    #   dipole_max_fraction_pass: 0.05 # float --- Dipole fraction at or below this scores clean.
+    #   dipole_max_fraction_fail: 0.20 # float --- Dipole fraction at or above this scores zero.
+    #   bright_star_min_flux_frac: 0.10 # float --- Bright-star annulus excess allowed up to this fraction of the star's flux before penalising (same flux-scaling logic as dipoles).
+    #   autocorr_max_peak: 0.3 # float --- Allowed autocorrelation excess above the kernel-implied level the backend reports via EXPAC/EXPACN. Negative (ringing) peaks are scored raw against this limit.
+    #   pass_threshold: 0.75 # float --- Weighted score at or above this classifies "pass".
+    #   downgrade_threshold: 0.50 # float --- Below this the diff is discarded.
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).
     inpaint_method: biharmonic # str --- Inpainting algorithm name (e.g. biharmonic).
     inpaint_saturate_frac: 0.90 # float --- Saturation threshold as fraction of max/bit-depth for core mask creation.
