@@ -30,17 +30,32 @@ from astropy.coordinates import SkyCoord
 from astropy.table import Table
 
 # --- Local Imports ---
-from ..core.functions import clean_subprocess_log, strip_subprocess_noise, log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header, copy_wcs_from_header, cap_console_lines, which_exe, ascii_table, STATUS  # type: ignore
+from ..core.functions import (
+    clean_subprocess_log,
+    strip_subprocess_noise,
+    log_step,
+    log_warning_from_exception,
+    safe_fits_write,
+    remove_wcs_from_header,
+    copy_wcs_from_header,
+    cap_console_lines,
+    which_exe,
+    ascii_table,
+    STATUS,
+)  # type: ignore
 
 
 def _resolve_sextractor_exe():
     """Lazy resolver for SExtractor executable to avoid circular import."""
     try:
         from ..subtraction.run_sex import get_sextractor_executable
+
         return get_sextractor_executable()
     except (ModuleNotFoundError, ImportError):
         from ..core.functions import which_exe
+
         return which_exe("sex") or which_exe("sextractor")
+
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -214,6 +229,7 @@ def table_to_ldac(table, header=None, writeto=None) -> fits.HDUList:
     hdulist = fits.HDUList([primary_hdu, header_hdu, data_hdu])
     if writeto is not None:
         from astropy.io import fits
+
         # safe_fits_write only handles single image + header; write the
         # multi-extension HDUList directly.
         hdulist.writeto(writeto, overwrite=True)
@@ -236,12 +252,29 @@ _WCS_CACHE_MAX = 32
 # post-SCAMP header that differs only in distortion coefficients reuse a WCS
 # built from the pre-refinement solution.
 _WCS_KEY_PREFIXES = (
-    "CRPIX", "CRVAL", "CTYPE", "CUNIT",
-    "CDELT", "CROTA", "CD", "PC", "PV",
-    "LONPOLE", "LATPOLE", "LONGPOLE",
-    "EQUINOX", "RADESYS", "RADECSYS", "RADYSYS",
-    "WCSAXES", "WCSNAME", "PROJP",
-    "LTV", "LTM", "SIP", "TNX",
+    "CRPIX",
+    "CRVAL",
+    "CTYPE",
+    "CUNIT",
+    "CDELT",
+    "CROTA",
+    "CD",
+    "PC",
+    "PV",
+    "LONPOLE",
+    "LATPOLE",
+    "LONGPOLE",
+    "EQUINOX",
+    "RADESYS",
+    "RADECSYS",
+    "RADYSYS",
+    "WCSAXES",
+    "WCSNAME",
+    "PROJP",
+    "LTV",
+    "LTM",
+    "SIP",
+    "TNX",
 )
 
 # SIP / polynomial distortion coefficient keys are stems (A_ORDER, A_0_0,
@@ -271,6 +304,27 @@ def _wcs_cache_key(header):
 def invalidate_wcs_cache():
     """Clear the WCS cache (call after WCS solving or header modification)."""
     _WCS_CACHE.clear()
+
+
+def _pixel_scales_deg(wcs_obj) -> np.ndarray:
+    """Pixel scales (deg/pixel) as a plain float ndarray.
+
+    astropy returns a ``Quantity`` in some versions and a bare ndarray in
+    others; normalise so callers can compare/branch without unit-handling
+    surprises.
+    """
+    try:
+        from astropy import units as _au
+        from astropy.wcs.utils import proj_plane_pixel_scales as _pfunc
+
+        _raw = _pfunc(wcs_obj)
+        try:
+            return np.asarray(_raw.to_value(_au.deg), dtype=float)
+        except AttributeError:
+            # Already unit-less degrees.
+            return np.asarray(_raw, dtype=float)
+    except Exception:
+        return np.zeros(0)
 
 
 def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
@@ -310,7 +364,7 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
         # logger.info() on astropy.wcs.wcs.
         header = _normalize_projection_codes(header, inplace=False)
 
-        required = ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2']
+        required = ["CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2"]
         missing = [k for k in required if k not in header]
         if missing:
             logger.warning("get_wcs: missing keywords %s", missing)
@@ -339,14 +393,64 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
 
                 # Test transformation (CRPIX is FITS 1-based; pixel_to_world uses 0-based)
                 try:
-                    test_x = float(header['CRPIX1']) - 1.0
-                    test_y = float(header['CRPIX2']) - 1.0
+                    test_x = float(header["CRPIX1"]) - 1.0
+                    test_y = float(header["CRPIX2"]) - 1.0
                     test_world = wcs.pixel_to_world(test_x, test_y)
                     if test_world is None:
-                        logger.warning("get_wcs: WCS transformation test failed - returned None")
+                        logger.warning(
+                            "get_wcs: WCS transformation test failed - returned None"
+                        )
                         return None
                 except Exception as e:
-                    logger.warning("get_wcs: WCS transformation test failed with exception: %s", e)
+                    logger.warning(
+                        "get_wcs: WCS transformation test failed with exception: %s", e
+                    )
+                    return None
+
+                # Field-wide + degeneracy check.  A singular/zero CD matrix can
+                # still map CRPIX->CRVAL and pass the single-point test above,
+                # then poison pixel-scale/footprint logic downstream.
+                _grid_ok = True
+                try:
+                    _shape_hint = getattr(wcs, "array_shape", None)
+                    if _shape_hint is not None:
+                        _nyg, _nxg = int(_shape_hint[0]), int(_shape_hint[1])
+                    else:
+                        _nyg = int(float(header.get("NAXIS2", 0)) or 0)
+                        _nxg = int(float(header.get("NAXIS1", 0)) or 0)
+                    _gx_max = max(_nxg - 1, 0)
+                    _gy_max = max(_nyg - 1, 0)
+                    for _gpx, _gpy in (
+                        (0.0, 0.0),
+                        (float(_gx_max), 0.0),
+                        (0.0, float(_gy_max)),
+                        (float(_gx_max), float(_gy_max)),
+                        (float(_gx_max) / 2.0, float(_gy_max) / 2.0),
+                    ):
+                        _gw = wcs.pixel_to_world(_gpx, _gpy)
+                        if _gw is None:
+                            _grid_ok = False
+                            break
+                        if not (
+                            np.isfinite(float(_gw.ra.deg))
+                            and np.isfinite(float(_gw.dec.deg))
+                        ):
+                            _grid_ok = False
+                            break
+                    _ps = _pixel_scales_deg(wcs)
+                    if (
+                        _ps.size < 2
+                        or not np.all(np.isfinite(_ps[:2]))
+                        or not np.all(_ps[:2] > 0)
+                    ):
+                        _grid_ok = False
+                except Exception:
+                    _grid_ok = False
+                if not _grid_ok:
+                    logger.warning(
+                        "get_wcs: WCS fails the field-wide transform test or "
+                        "has a degenerate pixel scale; rejecting it."
+                    )
                     return None
 
         if cache_key is not None:
@@ -577,7 +681,12 @@ def _extract_match_points_from_solve_field(
             x_candidates = [i for i, v in enumerate(vals) if -1.0 <= v <= (nx + 1.0)]
             y_candidates = [i for i, v in enumerate(vals) if -1.0 <= v <= (ny + 1.0)]
 
-            if not ra_candidates or not dec_candidates or not x_candidates or not y_candidates:
+            if (
+                not ra_candidates
+                or not dec_candidates
+                or not x_candidates
+                or not y_candidates
+            ):
                 continue
 
             best_sep = None
@@ -609,7 +718,9 @@ def _extract_match_points_from_solve_field(
                                     dec=dec_val * u.deg,
                                     frame="icrs",
                                 )
-                                sep_arcsec = c_pred.separation(c_true).to(u.arcsec).value
+                                sep_arcsec = (
+                                    c_pred.separation(c_true).to(u.arcsec).value
+                                )
                             except Exception:
                                 continue
 
@@ -705,7 +816,9 @@ def _extract_corr_points_from_solve_field(
         str(ra_col),
         str(dec_col),
     )
-    if not str(ra_col).lower().startswith("index_") or not str(dec_col).lower().startswith("index_"):
+    if not str(ra_col).lower().startswith("index_") or not str(
+        dec_col
+    ).lower().startswith("index_"):
         logger.warning(
             "solve-field .corr is not using index_* sky columns (ra=%s dec=%s); check .corr schema for this astrometry.net version.",
             str(ra_col),
@@ -776,7 +889,9 @@ def _best_wcs_match_separation_stats_arcsec(
     if wcs_obj is None:
         logger.debug("_best_wcs_match_separation_stats_arcsec: wcs_obj is None")
         return np.nan, np.nan, 0.0
-    med1, p951 = _wcs_match_separation_stats_arcsec(wcs_obj, x_pix, y_pix, ra_deg, dec_deg)
+    med1, p951 = _wcs_match_separation_stats_arcsec(
+        wcs_obj, x_pix, y_pix, ra_deg, dec_deg
+    )
     x0 = np.asarray(x_pix, dtype=float) + 1.0
     y0 = np.asarray(y_pix, dtype=float) + 1.0
     med0, p950 = _wcs_match_separation_stats_arcsec(wcs_obj, x0, y0, ra_deg, dec_deg)
@@ -1105,7 +1220,7 @@ def load_background_std(background_std) -> np.ndarray:
         with fits.open(background_std) as hdul:
             data = hdul[0].data
             # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
-            if data.dtype.kind != 'f':
+            if data.dtype.kind != "f":
                 data = data.astype(np.float32)
             return data
     if isinstance(background_std, np.ndarray):
@@ -1129,7 +1244,9 @@ def create_conv_file(path: str, fwhm_pixels: float = 3.0, force: bool = False) -
     kernel_size = max(3, int(np.ceil(fwhm_pixels * 3)))
     if kernel_size % 2 == 0:
         kernel_size += 1  # Ensure odd size
-    kernel_size = min(kernel_size, 7)  # SExtractor hard limit; filename is gaussian_7x7.conv
+    kernel_size = min(
+        kernel_size, 7
+    )  # SExtractor hard limit; filename is gaussian_7x7.conv
     center = kernel_size // 2
     sigma = fwhm_pixels / 2.355  # FWHM = 2.355 * sigma
     conv_text = f"CONV NORM\n# {kernel_size}x{kernel_size} convolution mask with FWHM = {fwhm_pixels:.1f} pixels\n"
@@ -1540,9 +1657,7 @@ def _write_solve_xylist(xy, flux, path, width=None, height=None):
         # must be brightest-first.  A scan-order (e.g. SExtractor) list on a
         # sparse field starves every object window of a usable quad.
         if sortable:
-            order = np.argsort(
-                np.where(np.isfinite(f_col), f_col, -np.inf)
-            )[::-1]
+            order = np.argsort(np.where(np.isfinite(f_col), f_col, -np.inf))[::-1]
             xy = xy[order]
             f_col = f_col[order]
         x_col = xy[:, 0] + 1.0
@@ -1743,8 +1858,6 @@ def verify_wcs_residuals(
         float(np.nanpercentile(sep_arcsec, 95.0)),
         int(sep_arcsec.size),
     )
-
-
 
 
 # =============================================================================
@@ -2135,7 +2248,9 @@ class WCSSolver:
             else which_exe("scamp")
         )
         sex_exe = str(
-            sex_exe if sex_exe and os.path.isfile(str(sex_exe)) else _resolve_sextractor_exe()
+            sex_exe
+            if sex_exe and os.path.isfile(str(sex_exe))
+            else _resolve_sextractor_exe()
         )
 
         if not os.path.isfile(self.fpath):
@@ -2245,7 +2360,9 @@ class WCSSolver:
             except Exception:
                 satur_str = "65535"
 
-            detect_thresh = str(_wcs_cfg_float(wcs_cfg, "sextractor_detect_thresh", 1.5))
+            detect_thresh = str(
+                _wcs_cfg_float(wcs_cfg, "sextractor_detect_thresh", 1.5)
+            )
             analysis_thresh = str(
                 _wcs_cfg_float(wcs_cfg, "sextractor_analysis_thresh", 1.2)
             )
@@ -2339,7 +2456,8 @@ class WCSSolver:
                 )
                 if result.stdout:
                     logger.debug(
-                        "SExtractor stdout: %s", result.stdout.decode("utf-8", errors="replace")
+                        "SExtractor stdout: %s",
+                        result.stdout.decode("utf-8", errors="replace"),
                     )
                 if result.stderr:
                     _stderr = strip_subprocess_noise(
@@ -2355,7 +2473,7 @@ class WCSSolver:
             if not os.path.isfile(cat_path):
                 logger.warning(
                     "SCAMP: SExtractor catalog not created at %s; aborting SCAMP solve.",
-                    cat_path
+                    cat_path,
                 )
                 try:
                     temp_files = os.listdir(temp_dir)
@@ -2402,19 +2520,25 @@ class WCSSolver:
                     wcs_cfg.get("scamp_astrefcent_keys", "XWIN_WORLD,YWIN_WORLD")
                 ),
                 "ASTREFERR_KEYS": str(
-                    wcs_cfg.get("scamp_astreferr_keys", "ERRA_WORLD,ERRB_WORLD,ERRTHETA_WORLD")
+                    wcs_cfg.get(
+                        "scamp_astreferr_keys", "ERRA_WORLD,ERRB_WORLD,ERRTHETA_WORLD"
+                    )
                 ),
-                "DISTORT_KEYS": str(wcs_cfg.get("scamp_distort_keys", "XWIN_IMAGE,YWIN_IMAGE")),
-                "SN_THRESHOLDS": str(wcs_cfg.get("scamp_sn_thresholds", "5.0,100000.0")),
+                "DISTORT_KEYS": str(
+                    wcs_cfg.get("scamp_distort_keys", "XWIN_IMAGE,YWIN_IMAGE")
+                ),
+                "SN_THRESHOLDS": str(
+                    wcs_cfg.get("scamp_sn_thresholds", "5.0,100000.0")
+                ),
                 "CROSSID_RADIUS": _wcs_cfg_float(wcs_cfg, "scamp_crossid_radius", 2.5),
                 "POSITION_MAXERR": _wcs_cfg_float(
                     wcs_cfg, "scamp_position_maxerr", 1.0
                 ),
-                "FWHM_THRESHOLDS": str(wcs_cfg.get("scamp_fwhm_thresholds", "1.0,15.0")),
-                "MOSAIC_TYPE": str(wcs_cfg.get("scamp_mosaic_type", "UNCHANGED")),
-                "STABILITY_TYPE": str(
-                    wcs_cfg.get("scamp_stability_type", "EXPOSURE")
+                "FWHM_THRESHOLDS": str(
+                    wcs_cfg.get("scamp_fwhm_thresholds", "1.0,15.0")
                 ),
+                "MOSAIC_TYPE": str(wcs_cfg.get("scamp_mosaic_type", "UNCHANGED")),
+                "STABILITY_TYPE": str(wcs_cfg.get("scamp_stability_type", "EXPOSURE")),
             }
             _ref_srv = wcs_cfg.get("scamp_ref_server") or "vizier.cfa.harvard.edu"
             scamp_cfg["REF_SERVER"] = str(_ref_srv).strip()
@@ -2451,9 +2575,7 @@ class WCSSolver:
                         scamp_out = f.read().strip()
                     if scamp_out:
                         logger.warning("SCAMP output:\n%s", scamp_out[-2000:])
-                        _log_scamp_vizier_failure_hint(
-                            logger, scamp_out, scamp_log
-                        )
+                        _log_scamp_vizier_failure_hint(logger, scamp_out, scamp_log)
                 except Exception:
                     pass
                 logger.warning("SCAMP did not produce a .head file; WCS not updated.")
@@ -2544,7 +2666,9 @@ class WCSSolver:
                         pass
                 seed_header["NAXIS1"] = self.image.shape[1]
                 seed_header["NAXIS2"] = self.image.shape[0]
-                safe_fits_write(seed_fpath, self.image, seed_header, output_verify="ignore")
+                safe_fits_write(
+                    seed_fpath, self.image, seed_header, output_verify="ignore"
+                )
 
                 seeded_solver = WCSSolver(
                     fpath=seed_fpath,
@@ -2607,14 +2731,21 @@ class WCSSolver:
             if not isinstance(scamp_header, fits.Header):
                 continue
 
-            if x_m is not None and y_m is not None and ra_m is not None and dec_m is not None:
+            if (
+                x_m is not None
+                and y_m is not None
+                and ra_m is not None
+                and dec_m is not None
+            ):
                 scamp_wcs = get_wcs(scamp_header)
                 if scamp_wcs is not None:
                     med_arcsec, p95_arcsec, _ = _best_wcs_match_separation_stats_arcsec(
                         scamp_wcs, x_m, y_m, ra_m, dec_m
                     )
                 else:
-                    logger.debug("SCAMP trial: get_wcs returned None, skipping residual calculation")
+                    logger.debug(
+                        "SCAMP trial: get_wcs returned None, skipping residual calculation"
+                    )
                     med_arcsec, p95_arcsec = np.nan, np.nan
                 logger.info(
                     "SCAMP trial '%s': matched-star residual med/p95=%.3f/%.3f arcsec",
@@ -2651,16 +2782,21 @@ class WCSSolver:
                     cy = (best_trial_header.get("NAXIS2", 1000) - 1) / 2
                     ra_test, dec_test = test_wcs.all_pix2world(cx, cy, 0)
                     # world -> pix must reproduce the centre pixel
-                    x_back, y_back = test_wcs.all_world2pix(ra_test, dec_test, 0, maxiter=50)
+                    x_back, y_back = test_wcs.all_world2pix(
+                        ra_test, dec_test, 0, maxiter=50
+                    )
                     if not (np.isfinite(x_back) and np.isfinite(y_back)):
                         raise ValueError("WCS round-trip failed")
                     logger.debug("SCAMP WCS passed invertibility test at image center")
             except Exception as inv_exc:
                 logger.warning(
                     "SCAMP trial '%s' distortion model failed invertibility test: %s. Rejecting extreme distortion solution.",
-                    best_trial_label, inv_exc
+                    best_trial_label,
+                    inv_exc,
                 )
-                return np.nan  # Reject this SCAMP solution, will fall back to solve-field SIP
+                return (
+                    np.nan
+                )  # Reject this SCAMP solution, will fall back to solve-field SIP
 
             logger.info(
                 "Using SCAMP WCS solution (trial='%s', preferred TPV/PV distortion model).",
@@ -2670,7 +2806,9 @@ class WCSSolver:
                 best_trial_header, prefix="SCAMP solved WCS"
             )
             return best_trial_header
-        logger.warning("SCAMP unavailable/failed after solve-field; keeping solve-field WCS.")
+        logger.warning(
+            "SCAMP unavailable/failed after solve-field; keeping solve-field WCS."
+        )
         return np.nan
 
     # --- Robust linear plate-model refinement from matched (pixel, sky) points ---
@@ -2714,8 +2852,8 @@ class WCSSolver:
                 cos_dec0 = 1e-6
 
             # Tangent-plane sky offsets (degrees) about (ra0, dec0).
-            xi = (ra - ra0) * cos_dec0   # xi ~ dRA * cos(dec)
-            eta = dec - dec0             # eta ~ dDec
+            xi = (ra - ra0) * cos_dec0  # xi ~ dRA * cos(dec)
+            eta = dec - dec0  # eta ~ dDec
             dx = x - xc
             dy = y - yc
 
@@ -2741,8 +2879,7 @@ class WCSSolver:
                 # conversion twice, inflating the clip threshold from ~4.4*MAD
                 # to ~6.6*MAD and letting astrometric outliers into the fit.
                 sigma = float(
-                    1.4826
-                    * np.nanmedian(np.abs(res_arcsec - np.nanmedian(res_arcsec)))
+                    1.4826 * np.nanmedian(np.abs(res_arcsec - np.nanmedian(res_arcsec)))
                 )
                 if not np.isfinite(sigma) or sigma <= 0:
                     break
@@ -2788,9 +2925,7 @@ class WCSSolver:
                 "rms_arcsec": rms_arcsec,
             }
         except Exception as exc:
-            log_warning_from_exception(
-                logger, "_fit_wcs_from_points failed", exc
-            )
+            log_warning_from_exception(logger, "_fit_wcs_from_points failed", exc)
             return None
 
     def _fetch_verify_catalog(self, wcs_cfg: dict):
@@ -2815,8 +2950,7 @@ class WCSSolver:
             dec0 = float(self.header.get("CRVAL2", np.nan))
             if not (np.isfinite(ra0) and np.isfinite(dec0)):
                 logger.warning(
-                    "verify_input_wcs: header CRVAL not finite; proceeding "
-                    "to solve."
+                    "verify_input_wcs: header CRVAL not finite; proceeding to solve."
                 )
                 return None
             ny, nx = self.image.shape[0], self.image.shape[1]
@@ -2912,16 +3046,15 @@ class WCSSolver:
             if med <= max_med and p95 <= max_p95:
                 logger.log(
                     STATUS,
-                    'Input WCS verified (n=%d, med=%.3f", p95=%.3f") - '
-                    "skipping solve",
+                    'Input WCS verified (n=%d, med=%.3f", p95=%.3f") - skipping solve',
                     int(n_matches),
                     float(med),
                     float(p95),
                 )
                 return True
             logger.info(
-                "Input WCS failed verification (n=%d, med=%.3f\", "
-                "p95=%.3f\"; limits %.3f/%.3f arcsec) - proceeding to solve.",
+                'Input WCS failed verification (n=%d, med=%.3f", '
+                'p95=%.3f"; limits %.3f/%.3f arcsec) - proceeding to solve.',
                 int(n_matches),
                 float(med),
                 float(p95),
@@ -3005,11 +3138,94 @@ class WCSSolver:
             try:
                 header = self._plate_solve_scamp(wcs_cfg=wcs_cfg, cpulimit=cpulimit)
                 if isinstance(header, fits.Header):
-                    self.solved_new_wcs = True
-                    return header
-                logger.warning(
-                    "SCAMP solve failed or unavailable; falling back to Astrometry.net."
-                )
+                    # SCAMP output bypasses the solve-field scale/position
+                    # checks; a mirrored or badly scaled solution must not be
+                    # accepted silently.
+                    _scamp_ok = True
+                    try:
+                        _scamp_w = get_wcs(header)
+                        if _scamp_w is None or not _scamp_w.has_celestial:
+                            _scamp_ok = False
+                        else:
+                            # Parity vs the input WCS: a flipped solution has the
+                            # opposite CD determinant sign.
+                            def _wcs2x2(_w):
+                                _m = getattr(_w.wcs, "cd", None)
+                                if _m is not None and np.asarray(_m).shape == (2, 2):
+                                    return np.asarray(_m, dtype=float)
+                                _pc = getattr(_w.wcs, "pc", None)
+                                _cdelt = getattr(_w.wcs, "cdelt", None)
+                                if (
+                                    _pc is not None
+                                    and _cdelt is not None
+                                    and np.asarray(_pc).shape == (2, 2)
+                                    and np.size(_cdelt) >= 2
+                                ):
+                                    return np.diag(np.asarray(_cdelt[:2])) @ np.asarray(
+                                        _pc
+                                    )
+                                return None
+
+                            _m_in = _wcs2x2(get_wcs(self.header))
+                            _m_out = _wcs2x2(_scamp_w)
+                            if _m_in is not None and _m_out is not None:
+                                _d_in = float(np.linalg.det(_m_in))
+                                _d_out = float(np.linalg.det(_m_out))
+                                if (
+                                    np.isfinite(_d_in)
+                                    and np.isfinite(_d_out)
+                                    and _d_in != 0
+                                    and np.sign(_d_in) != np.sign(_d_out)
+                                ):
+                                    logger.warning(
+                                        "SCAMP solution has opposite parity to "
+                                        "the input WCS (det %.4g -> %.4g); "
+                                        "rejecting mirrored solution.",
+                                        _d_in,
+                                        _d_out,
+                                    )
+                                    _scamp_ok = False
+                            # Scale sanity against the configured expectation.
+                            _exp_scale = _wcs_cfg_float(wcs_cfg, "pixel_scale", 0.0)
+                            if _scamp_ok and _exp_scale > 0:
+                                _sc = _pixel_scales_deg(_scamp_w)
+                                if (
+                                    _sc.size < 2
+                                    or not np.all(np.isfinite(_sc[:2]))
+                                    or not np.all(_sc[:2] > 0)
+                                ):
+                                    _scamp_ok = False
+                                else:
+                                    _sci_scale = float(np.mean(_sc[:2])) * 3600.0
+                                    _tol = _wcs_cfg_float(
+                                        wcs_cfg, "solved_scale_tolerance", 2.0
+                                    )
+                                    if not (
+                                        1.0 / _tol <= _exp_scale / _sci_scale <= _tol
+                                    ):
+                                        logger.warning(
+                                            'SCAMP solution pixel scale %.3f"/px '
+                                            'differs from the expected %.3f"/px '
+                                            "beyond the tolerance %.2f; "
+                                            "rejecting.",
+                                            _sci_scale,
+                                            _exp_scale,
+                                            _tol,
+                                        )
+                                        _scamp_ok = False
+                    except Exception as _scamp_val_e:
+                        logger.warning(
+                            "SCAMP solution validation failed (%s); accepting "
+                            "with risk.",
+                            _scamp_val_e,
+                        )
+                    if _scamp_ok:
+                        self.solved_new_wcs = True
+                        return header
+                    logger.warning(
+                        "SCAMP solution failed validation; falling back to "
+                        "Astrometry.net."
+                    )
             except Exception as exc:
                 logger.warning(
                     "SCAMP solve raised an exception (%s); falling back to Astrometry.net.",
@@ -3021,11 +3237,7 @@ class WCSSolver:
                 "solve-field only (SIP)."
             )
 
-        logger.info(
-            log_step(
-                f"WCS: Astrometry.net - {os.path.basename(self.fpath)}"
-            )
-        )
+        logger.info(log_step(f"WCS: Astrometry.net - {os.path.basename(self.fpath)}"))
         # Resolve solve-field executable: honour explicit config, then PATH,
         # then common installation locations outside the active conda env.
         if solvefield_exe:
@@ -3049,10 +3261,20 @@ class WCSSolver:
             ]
             # Also search Linuxbrew/ Homebrew Cellar versions
             _cellar_paths = sorted(
-                glob.glob("/home/linuxbrew/.linuxbrew/Cellar/astrometry-net/*/bin/solve-field")
+                glob.glob(
+                    "/home/linuxbrew/.linuxbrew/Cellar/astrometry-net/*/bin/solve-field"
+                )
                 + glob.glob("/opt/homebrew/Cellar/astrometry-net/*/bin/solve-field")
-                + glob.glob(os.path.expanduser("~/.linuxbrew/Cellar/astrometry-net/*/bin/solve-field"))
-                + glob.glob(os.path.expanduser("~/homebrew/Cellar/astrometry-net/*/bin/solve-field")),
+                + glob.glob(
+                    os.path.expanduser(
+                        "~/.linuxbrew/Cellar/astrometry-net/*/bin/solve-field"
+                    )
+                )
+                + glob.glob(
+                    os.path.expanduser(
+                        "~/homebrew/Cellar/astrometry-net/*/bin/solve-field"
+                    )
+                ),
                 reverse=True,
             )
             for _p in _common_paths + _cellar_paths:
@@ -3131,9 +3353,7 @@ class WCSSolver:
         )
         _budget_default = 60.0 if _has_input_wcs else 1800.0
         try:
-            _total_budget_sec = float(
-                wcs_cfg.get(_budget_key, _budget_default) or 0.0
-            )
+            _total_budget_sec = float(wcs_cfg.get(_budget_key, _budget_default) or 0.0)
         except (TypeError, ValueError):
             logger.warning(
                 "Ignoring invalid wcs.%s=%r.",
@@ -3148,9 +3368,7 @@ class WCSSolver:
                 _total_budget_sec,
             )
         self._solve_deadline = (
-            time.monotonic() + _total_budget_sec
-            if _total_budget_sec > 0
-            else None
+            time.monotonic() + _total_budget_sec if _total_budget_sec > 0 else None
         )
         self._solve_budget_warned = False
         downsample = (
@@ -3171,10 +3389,7 @@ class WCSSolver:
         if os.path.isfile(wcs_file):
             os.remove(wcs_file)
         astrometry_log_fpath = os.path.join(dirname, f"Astrometry_{base}.log")
-        sextractor_exe = (
-            wcs_cfg.get("sextractor_exe_loc")
-            or _resolve_sextractor_exe()
-        )
+        sextractor_exe = wcs_cfg.get("sextractor_exe_loc") or _resolve_sextractor_exe()
         use_sextractor = sextractor_exe is not None
         # --- Create a temporary SExtractor config file ---
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3279,16 +3494,13 @@ class WCSSolver:
             # A wrong pixel_scale can prevent convergence, so build two sets:
             #   - constrained: around the hint (if present)
             #   - wide: wcs.wide_scale_{low,high}_arcsec (default 0.1--5.0)
-            ra, dec = self.default_input.get("target_ra"), self.default_input.get(
-                "target_dec"
+            ra, dec = (
+                self.default_input.get("target_ra"),
+                self.default_input.get("target_dec"),
             )
             radius_deg = _wcs_cfg_float(wcs_cfg, "search_radius", 0.5)
-            scale_low_wide = _wcs_cfg_float(
-                wcs_cfg, "wide_scale_low_arcsec", 0.1
-            )
-            scale_high_wide = _wcs_cfg_float(
-                wcs_cfg, "wide_scale_high_arcsec", 5.0
-            )
+            scale_low_wide = _wcs_cfg_float(wcs_cfg, "wide_scale_low_arcsec", 0.1)
+            scale_high_wide = _wcs_cfg_float(wcs_cfg, "wide_scale_high_arcsec", 5.0)
 
             # Ordered --ra/--dec hint centers.  When the header already
             # carries a usable WCS its reference position usually sits closer
@@ -3305,9 +3517,7 @@ class WCSSolver:
             if _pos_hints:
                 logger.info(
                     "solve-field position hint(s): %s",
-                    ", ".join(
-                        "(%.5f, %.5f)" % (h[0], h[1]) for h in _pos_hints
-                    ),
+                    ", ".join("(%.5f, %.5f)" % (h[0], h[1]) for h in _pos_hints),
                 )
 
             def _scale_args_for_hint(
@@ -3395,9 +3605,7 @@ class WCSSolver:
                     if n_objs > 0:
                         common_args.insert(-1, "--objs")
                         common_args.insert(-1, str(n_objs))
-                        logger.debug(
-                            "solve-field object budget: --objs %d", n_objs
-                        )
+                        logger.debug("solve-field object budget: --objs %d", n_objs)
                 except Exception:
                     logger.warning(
                         "Ignoring invalid wcs.objs=%r (expected positive integer).",
@@ -3409,7 +3617,7 @@ class WCSSolver:
             # when this flag was always on. Default: omit (False); set True for
             # legacy behavior matching older AutoPHoT.
             use_crpix_center = bool(wcs_cfg.get("solve_field_crpix_center", False))
-            
+
             # Sigma level for sources used by solve-field.
             # Lower values detect more sources (useful for sparse fields).
             solve_nsigma_val = int(wcs_cfg.get("solve_field_nsigma", 5))
@@ -3418,9 +3626,7 @@ class WCSSolver:
             # stage found nothing), lower nsigma to help solve-field detect
             # more sources.  This avoids the reactive nsigma=3 retry after
             # zero-SIP failure.
-            _sparse_nsigma = _wcs_cfg_int(
-                wcs_cfg, "solve_field_sparse_nsigma", 3
-            )
+            _sparse_nsigma = _wcs_cfg_int(wcs_cfg, "solve_field_sparse_nsigma", 3)
             _reduced_nsigma = _solve_nsigma_for_count(
                 n_detected_sources, solve_nsigma_val, _sparse_nsigma
             )
@@ -3434,7 +3640,7 @@ class WCSSolver:
                 )
                 solve_nsigma_val = _reduced_nsigma
             solve_nsigma = str(solve_nsigma_val)
-            
+
             # fits2fits rewrites the input image to sanitize it on every
             # invocation; skip it when the input is known-standard FITS.
             if _wcs_cfg_bool(wcs_cfg, "solve_field_no_fits2fits", False):
@@ -3510,7 +3716,9 @@ class WCSSolver:
             # (up to 6 invocations) on sparse fields.
             if n_detected_sources is not None and n_detected_sources > 0:
                 _max_feasible = 0
-                for _ord, _min_src in sorted(_min_sources_for_order.items(), reverse=True):
+                for _ord, _min_src in sorted(
+                    _min_sources_for_order.items(), reverse=True
+                ):
                     if n_detected_sources >= _min_src:
                         _max_feasible = _ord
                         break
@@ -3520,14 +3728,20 @@ class WCSSolver:
                         logger.info(
                             "Proactive tweak order cap: %d detected sources -> "
                             "max feasible order %d -> sequence %s (was %s)",
-                            n_detected_sources, _max_feasible, _capped, tweak_orders,
+                            n_detected_sources,
+                            _max_feasible,
+                            _capped,
+                            tweak_orders,
                         )
                     tweak_orders = _capped
                 elif _max_feasible > 0:
                     logger.info(
                         "Proactive tweak order cap: %d detected sources -> "
                         "requested order(s) %s exceed max feasible %d -> using %d",
-                        n_detected_sources, tweak_orders, _max_feasible, _max_feasible,
+                        n_detected_sources,
+                        tweak_orders,
+                        _max_feasible,
+                        _max_feasible,
                     )
                     tweak_orders = [_max_feasible]
                 else:
@@ -3553,9 +3767,7 @@ class WCSSolver:
             # fields where our detection stage starved, this is the only
             # path that gives the solver anything to work with.
             _solve_xy = _det_xy
-            _min_xyls_src = _wcs_cfg_int(
-                wcs_cfg, "solve_field_xylist_min_sources", 8
-            )
+            _min_xyls_src = _wcs_cfg_int(wcs_cfg, "solve_field_xylist_min_sources", 8)
             _xyls_xy = _solve_xy
             _xyls_flux = (
                 _coerce_detected_flux(detected_xy, len(_xyls_xy))
@@ -3570,9 +3782,7 @@ class WCSSolver:
             ):
                 _det_xy2, _det_flux2 = _detect_solve_sources(
                     self.image,
-                    _wcs_cfg_float(
-                        wcs_cfg, "solve_field_sparse_detect_sigma", 2.5
-                    ),
+                    _wcs_cfg_float(wcs_cfg, "solve_field_sparse_detect_sigma", 2.5),
                 )
                 if _det_xy2 is not None and len(_det_xy2) >= _min_xyls_src:
                     _xyls_xy = _det_xy2
@@ -3700,7 +3910,9 @@ class WCSSolver:
                     ):
                         logger.log(
                             STATUS,
-                            "WCS solved (%s) with tweak order %s", label, tweak_order,
+                            "WCS solved (%s) with tweak order %s",
+                            label,
+                            tweak_order,
                         )
                         # solve-field may return no usable SIP even when asked:
                         # too few matched stars for the requested order yields
@@ -3732,7 +3944,11 @@ class WCSSolver:
                                             os.remove(wcs_file)
                                         _lower_args = (
                                             _base_args
-                                            + ["--tweak-order", str(_lower), "--no-verify"]
+                                            + [
+                                                "--tweak-order",
+                                                str(_lower),
+                                                "--no-verify",
+                                            ]
                                             + scale_args_use
                                         )
                                         _lower_args = _with_solve_cpulimit(
@@ -3759,8 +3975,10 @@ class WCSSolver:
                                             _lower,
                                         )
                                         if self._run_solve_field(
-                                            _lower_args, wcs_file,
-                                            _attempt_timeout, astrometry_log_fpath
+                                            _lower_args,
+                                            wcs_file,
+                                            _attempt_timeout,
+                                            astrometry_log_fpath,
                                         ):
                                             try:
                                                 with fits.open(wcs_file) as _lh:
@@ -3799,9 +4017,7 @@ class WCSSolver:
                                     # No lower order produced non-zero SIP:
                                     # restore the original solve (order 0 = TAN)
                                     if not os.path.isfile(wcs_file):
-                                        if _wcs_backup and os.path.isfile(
-                                            _wcs_backup
-                                        ):
+                                        if _wcs_backup and os.path.isfile(_wcs_backup):
                                             logger.warning(
                                                 "Could not solve with any lower tweak "
                                                 "order; restoring the order-%d solve.",
@@ -3815,8 +4031,10 @@ class WCSSolver:
                                                 tweak_order,
                                             )
                                             self._run_solve_field(
-                                                args, wcs_file, _attempt_timeout,
-                                                astrometry_log_fpath
+                                                args,
+                                                wcs_file,
+                                                _attempt_timeout,
+                                                astrometry_log_fpath,
                                             )
                                     if _wcs_backup and os.path.isfile(_wcs_backup):
                                         try:
@@ -3829,14 +4047,17 @@ class WCSSolver:
                                         try:
                                             with fits.open(wcs_file) as _fh:
                                                 _fhdr = _fh[0].header
-                                            if _fhdr.get("A_ORDER", 0) > 0 and not _has_nonzero_sip(_fhdr):
+                                            if _fhdr.get(
+                                                "A_ORDER", 0
+                                            ) > 0 and not _has_nonzero_sip(_fhdr):
                                                 _orig_nsigma = solve_nsigma
                                                 _lower_nsigma = "3"
                                                 logger.info(
                                                     "Retrying solve with nsigma=%s "
                                                     "(was %s) to detect more sources "
                                                     "for SIP fitting",
-                                                    _lower_nsigma, _orig_nsigma,
+                                                    _lower_nsigma,
+                                                    _orig_nsigma,
                                                 )
                                                 if os.path.isfile(wcs_file):
                                                     os.remove(wcs_file)
@@ -3844,8 +4065,10 @@ class WCSSolver:
                                                     args, "--nsigma", _lower_nsigma
                                                 )
                                                 if self._run_solve_field(
-                                                    _nsigma_args, wcs_file,
-                                                    _attempt_timeout, astrometry_log_fpath
+                                                    _nsigma_args,
+                                                    wcs_file,
+                                                    _attempt_timeout,
+                                                    astrometry_log_fpath,
                                                 ):
                                                     try:
                                                         with fits.open(wcs_file) as _nh:
@@ -3893,9 +4116,12 @@ class WCSSolver:
                         if tweak_order > 0 and os.path.isfile(wcs_file):
                             try:
                                 from astropy.wcs import WCS as _WCS
+
                                 with fits.open(wcs_file) as _mh:
                                     _mhdr = _mh[0].header
-                                if _mhdr.get("A_ORDER", 0) > 0 and _has_nonzero_sip(_mhdr):
+                                if _mhdr.get("A_ORDER", 0) > 0 and _has_nonzero_sip(
+                                    _mhdr
+                                ):
                                     _mw = _WCS(_mhdr)
                                     _ny = _mhdr.get("NAXIS2", 2048)
                                     _nx = _mhdr.get("NAXIS1", 2048)
@@ -3913,10 +4139,7 @@ class WCSSolver:
                                     _cd21 = _mhdr.get("CD2_1", 0.0)
                                     _cd22 = _mhdr.get("CD2_2")
                                     _det_cd = None
-                                    if (
-                                        _cd11 is not None
-                                        and _cd22 is not None
-                                    ):
+                                    if _cd11 is not None and _cd22 is not None:
                                         _det_cd = abs(
                                             float(_cd11) * float(_cd22)
                                             - float(_cd12) * float(_cd21)
@@ -3928,34 +4151,39 @@ class WCSSolver:
                                     ):
                                         _pixscale = float(np.sqrt(_det_cd)) * 3600
                                     else:
-                                        _pixscale = abs(
-                                            float(
-                                                _mhdr.get(
-                                                    "CD1_1",
-                                                    _mhdr.get("CDELT1", 1e-4),
+                                        _pixscale = (
+                                            abs(
+                                                float(
+                                                    _mhdr.get(
+                                                        "CD1_1",
+                                                        _mhdr.get("CDELT1", 1e-4),
+                                                    )
                                                 )
                                             )
-                                        ) * 3600
+                                            * 3600
+                                        )
                                     _sip_thresh_px = 0.05 * max(_nx, _ny)
-                                    for _cx, _cy in [(0,0), (_nx-1,0), (0,_ny-1), (_nx-1,_ny-1)]:
+                                    for _cx, _cy in [
+                                        (0, 0),
+                                        (_nx - 1, 0),
+                                        (0, _ny - 1),
+                                        (_nx - 1, _ny - 1),
+                                    ]:
                                         _ra_s, _dec_s = _mw.all_pix2world(_cx, _cy, 0)
                                         _ra_t, _dec_t = _mw.wcs_pix2world(_cx, _cy, 0)
                                         # Small-angle separation: wrap dRA
                                         # and project by cos(dec), else a
                                         # high-dec or RA=0 field reports a
                                         # spuriously large correction.
-                                        _dra = (
-                                            _ra_s - _ra_t + 180.0
-                                        ) % 360.0 - 180.0
+                                        _dra = (_ra_s - _ra_t + 180.0) % 360.0 - 180.0
                                         _ddec = _dec_s - _dec_t
                                         _cosd = np.cos(
-                                            np.deg2rad(
-                                                0.5 * (_dec_s + _dec_t)
-                                            )
+                                            np.deg2rad(0.5 * (_dec_s + _dec_t))
                                         )
-                                        _delta = np.sqrt(
-                                            (_dra * _cosd) ** 2 + _ddec**2
-                                        ) * 3600
+                                        _delta = (
+                                            np.sqrt((_dra * _cosd) ** 2 + _ddec**2)
+                                            * 3600
+                                        )
                                         _delta_px = _delta / max(_pixscale, 0.01)
                                         _max_sip_px = max(_max_sip_px, _delta_px)
                                     if _max_sip_px > _sip_thresh_px:
@@ -3964,7 +4192,9 @@ class WCSSolver:
                                             "correction = %.1f px (> %.1f px = 5%% of "
                                             "image) at tweak order %d. Retrying with "
                                             "lower orders.",
-                                            _max_sip_px, _sip_thresh_px, tweak_order,
+                                            _max_sip_px,
+                                            _sip_thresh_px,
+                                            tweak_order,
                                         )
                                         # Same backup-and-rename restore as the
                                         # zero-SIP descent above: re-solving the
@@ -3980,7 +4210,11 @@ class WCSSolver:
                                                 os.remove(wcs_file)
                                             _lower_args = (
                                                 _base_args
-                                                + ["--tweak-order", str(_lower), "--no-verify"]
+                                                + [
+                                                    "--tweak-order",
+                                                    str(_lower),
+                                                    "--no-verify",
+                                                ]
                                                 + scale_args_use
                                             )
                                             _lower_args = _with_solve_cpulimit(
@@ -3993,9 +4227,12 @@ class WCSSolver:
                                                     sextractor_cmd,
                                                     "--source-extractor-config",
                                                     str(config_file),
-                                                    "--x-column", "XWIN_IMAGE",
-                                                    "--y-column", "YWIN_IMAGE",
-                                                    "--sort-column", "MAG_AUTO",
+                                                    "--x-column",
+                                                    "XWIN_IMAGE",
+                                                    "--y-column",
+                                                    "YWIN_IMAGE",
+                                                    "--sort-column",
+                                                    "MAG_AUTO",
                                                     "--sort-ascending",
                                                 ]
                                             logger.info(
@@ -4004,21 +4241,37 @@ class WCSSolver:
                                                 _lower,
                                             )
                                             if self._run_solve_field(
-                                                _lower_args, wcs_file,
-                                                _attempt_timeout, astrometry_log_fpath
+                                                _lower_args,
+                                                wcs_file,
+                                                _attempt_timeout,
+                                                astrometry_log_fpath,
                                             ):
                                                 try:
                                                     with fits.open(wcs_file) as _lh:
                                                         _lhdr = _lh[0].header
-                                                    if _lhdr.get("A_ORDER", 0) > 0 and _has_nonzero_sip(_lhdr):
+                                                    if _lhdr.get(
+                                                        "A_ORDER", 0
+                                                    ) > 0 and _has_nonzero_sip(_lhdr):
                                                         _lw = _WCS(_lhdr)
                                                         _lmax = 0.0
-                                                        for _cx, _cy in [(0,0), (_nx-1,0), (0,_ny-1), (_nx-1,_ny-1)]:
-                                                            _ra_s, _dec_s = _lw.all_pix2world(_cx, _cy, 0)
-                                                            _ra_t, _dec_t = _lw.wcs_pix2world(_cx, _cy, 0)
+                                                        for _cx, _cy in [
+                                                            (0, 0),
+                                                            (_nx - 1, 0),
+                                                            (0, _ny - 1),
+                                                            (_nx - 1, _ny - 1),
+                                                        ]:
+                                                            _ra_s, _dec_s = (
+                                                                _lw.all_pix2world(
+                                                                    _cx, _cy, 0
+                                                                )
+                                                            )
+                                                            _ra_t, _dec_t = (
+                                                                _lw.wcs_pix2world(
+                                                                    _cx, _cy, 0
+                                                                )
+                                                            )
                                                             _dra = (
-                                                                _ra_s - _ra_t
-                                                                + 180.0
+                                                                _ra_s - _ra_t + 180.0
                                                             ) % 360.0 - 180.0
                                                             _ddec = _dec_s - _dec_t
                                                             _cosd = np.cos(
@@ -4027,27 +4280,34 @@ class WCSSolver:
                                                                     * (_dec_s + _dec_t)
                                                                 )
                                                             )
-                                                            _delta = np.sqrt(
-                                                                (_dra * _cosd) ** 2
-                                                                + _ddec**2
-                                                            ) * 3600
+                                                            _delta = (
+                                                                np.sqrt(
+                                                                    (_dra * _cosd) ** 2
+                                                                    + _ddec**2
+                                                                )
+                                                                * 3600
+                                                            )
                                                             _delta_px = _delta / max(
                                                                 _pixscale, 0.01
                                                             )
-                                                            _lmax = max(_lmax, _delta_px)
+                                                            _lmax = max(
+                                                                _lmax, _delta_px
+                                                            )
                                                         if _lmax <= _sip_thresh_px:
                                                             logger.info(
                                                                 "SIP overfitting resolved at "
                                                                 "tweak order %d (max corner "
                                                                 "correction = %.1f px)",
-                                                                _lower, _lmax,
+                                                                _lower,
+                                                                _lmax,
                                                             )
                                                             break
                                                         else:
                                                             logger.info(
                                                                 "Tweak order %d still has "
                                                                 "large SIP (%.1f px)",
-                                                                _lower, _lmax,
+                                                                _lower,
+                                                                _lmax,
                                                             )
                                                     else:
                                                         # Zero SIP or order 0 - acceptable
@@ -4088,12 +4348,12 @@ class WCSSolver:
                                                     tweak_order,
                                                 )
                                                 self._run_solve_field(
-                                                    args, wcs_file, _attempt_timeout,
-                                                    astrometry_log_fpath
+                                                    args,
+                                                    wcs_file,
+                                                    _attempt_timeout,
+                                                    astrometry_log_fpath,
                                                 )
-                                        if _wcs_backup and os.path.isfile(
-                                            _wcs_backup
-                                        ):
+                                        if _wcs_backup and os.path.isfile(_wcs_backup):
                                             try:
                                                 os.remove(_wcs_backup)
                                             except OSError:
@@ -4103,7 +4363,9 @@ class WCSSolver:
                                             "SIP magnitude OK: max corner correction "
                                             "= %.1f px (threshold %.1f px) at tweak "
                                             "order %d",
-                                            _max_sip_px, _sip_thresh_px, tweak_order,
+                                            _max_sip_px,
+                                            _sip_thresh_px,
+                                            tweak_order,
                                         )
                             except Exception as _sip_mag_err:
                                 logger.debug(
@@ -4126,9 +4388,7 @@ class WCSSolver:
                 nx,
                 ny,
                 downsample,
-                ds_max=_wcs_cfg_int(
-                    wcs_cfg, "solve_field_downsample_max", 8
-                ),
+                ds_max=_wcs_cfg_int(wcs_cfg, "solve_field_downsample_max", 8),
                 min_pixels=_wcs_cfg_int(
                     wcs_cfg, "solve_field_downsample_min_pixels", 256
                 ),
@@ -4155,9 +4415,7 @@ class WCSSolver:
                 """
                 nonlocal common_args, _solved_pos_hint
                 _saved_common_args = common_args
-                common_args = (
-                    _common_args_prefix + [str(_level)] + _common_args_suffix
-                )
+                common_args = _common_args_prefix + [str(_level)] + _common_args_suffix
                 _sa = scale_args
                 _soa = scale_only_args
                 try:
@@ -4167,9 +4425,7 @@ class WCSSolver:
                     # lies outside the first search cone.
                     _hi = 0
                     while True:
-                        _hint = (
-                            _pos_hints[_hi] if _hi < len(_pos_hints) else None
-                        )
+                        _hint = _pos_hints[_hi] if _hi < len(_pos_hints) else None
                         if _hi > 0:
                             _sa = _scale_args_for_hint(
                                 scale_low_hint,
@@ -4254,8 +4510,8 @@ class WCSSolver:
                         logger.warning("Retrying without SExtractor")
                         tweak_order = tweak_orders[0]
                         logger.info(
-                            "Attempting WCS solve without SExtractor "
-                            "(tweak order %s)", tweak_order
+                            "Attempting WCS solve without SExtractor (tweak order %s)",
+                            tweak_order,
                         )
                         args_no_sex = (
                             common_args
@@ -4277,13 +4533,13 @@ class WCSSolver:
                         ):
                             logger.log(
                                 STATUS,
-                                "WCS solved without SExtractor "
-                                "(tweak order %s)", tweak_order,
+                                "WCS solved without SExtractor (tweak order %s)",
+                                tweak_order,
                             )
                             return True
                         logger.warning(
-                            "No solution without SExtractor "
-                            "(tweak order %s)", tweak_order
+                            "No solution without SExtractor (tweak order %s)",
+                            tweak_order,
                         )
                     # Step 4: blind solve (no position constraint).  Only
                     # run when a position cone was tried above; with no
@@ -4301,9 +4557,7 @@ class WCSSolver:
                         # tweak order, so only the configured first order
                         # is worth the blind cpulimit.
                         tweak_order = tweak_orders[0]
-                        logger.info(
-                            "Blind solve with tweak order %s", tweak_order
-                        )
+                        logger.info("Blind solve with tweak order %s", tweak_order)
                         args_blind = (
                             common_args
                             + [
@@ -4313,9 +4567,7 @@ class WCSSolver:
                             ]
                             + _soa
                         )
-                        args_blind = _with_solve_cpulimit(
-                            args_blind, blind_timeout_sec
-                        )
+                        args_blind = _with_solve_cpulimit(args_blind, blind_timeout_sec)
                         # A confirmed-starved field only produces a
                         # zero-source SExtractor catalog; skip the wasted
                         # extraction here as in the hinted passes.
@@ -4342,13 +4594,12 @@ class WCSSolver:
                         ):
                             logger.log(
                                 STATUS,
-                                "WCS solved with blind solve "
-                                "(tweak order %s)", tweak_order,
+                                "WCS solved with blind solve (tweak order %s)",
+                                tweak_order,
                             )
                             return True
                         logger.warning(
-                            "No solution with blind solve "
-                            "(tweak order %s)", tweak_order
+                            "No solution with blind solve (tweak order %s)", tweak_order
                         )
                     return False
                 finally:
@@ -4365,9 +4616,7 @@ class WCSSolver:
                 """
                 _hi = 0
                 while True:
-                    _hint = (
-                        _pos_hints[_hi] if _hi < len(_pos_hints) else None
-                    )
+                    _hint = _pos_hints[_hi] if _hi < len(_pos_hints) else None
                     _sa = scale_args
                     if _hi > 0:
                         _sa = _scale_args_for_hint(
@@ -4407,8 +4656,7 @@ class WCSSolver:
                         )
                         _attempt_solve_with_args(
                             _sa,
-                            label="xylist wide scale "
-                            "(dropped pixel-scale hint)",
+                            label="xylist wide scale (dropped pixel-scale hint)",
                             pos_hint=_hint,
                             input_path=xyls_input,
                             allow_sextractor=False,
@@ -4450,14 +4698,11 @@ class WCSSolver:
                     break
                 if _level != downsample:
                     logger.warning(
-                        "WCS not solved at downsample %s; retrying with "
-                        "downsample %s.",
+                        "WCS not solved at downsample %s; retrying with downsample %s.",
                         downsample if downsample else _level // 2,
                         _level,
                     )
-                if _try_level(
-                    _level, starved=(_li == 0 and _skip_sex_starved)
-                ):
+                if _try_level(_level, starved=(_li == 0 and _skip_sex_starved)):
                     _solved = True
                     break
 
@@ -4567,9 +4812,7 @@ class WCSSolver:
                     # than the configured target.
                     _pos_tol = wcs_cfg.get("solved_position_tolerance_arcsec", None)
                     if _pos_tol is None:
-                        _pos_tol = (
-                            float(radius_deg) * 3600.0 if radius_deg else 0.0
-                        )
+                        _pos_tol = float(radius_deg) * 3600.0 if radius_deg else 0.0
                     _pos_tol = float(_pos_tol or 0.0)
                     if _pos_tol > 0 and _solved_pos_hint is not None:
                         _hint_ra, _hint_dec = (
@@ -4582,16 +4825,13 @@ class WCSSolver:
                         _solved_crval2 = float(
                             _solved_hdr.get("CRVAL2", np.nan) or np.nan
                         )
-                        if np.isfinite(_solved_crval1) and np.isfinite(
-                            _solved_crval2
-                        ):
-                            _dra = (
-                                (_solved_crval1 - _hint_ra + 180.0) % 360.0
-                            ) - 180.0
+                        if np.isfinite(_solved_crval1) and np.isfinite(_solved_crval2):
+                            _dra = ((_solved_crval1 - _hint_ra + 180.0) % 360.0) - 180.0
                             _ddec = _solved_crval2 - _hint_dec
-                            _pos_off = np.hypot(
-                                _dra * np.cos(np.deg2rad(_hint_dec)), _ddec
-                            ) * 3600.0
+                            _pos_off = (
+                                np.hypot(_dra * np.cos(np.deg2rad(_hint_dec)), _ddec)
+                                * 3600.0
+                            )
                             if _pos_off > _pos_tol:
                                 _solved_pos_ok = False
                                 logger.warning(
@@ -4685,7 +4925,9 @@ class WCSSolver:
                 _log_header_distortion_coefficients(
                     wcs_header, prefix="astrometry.net solved WCS"
                 )
-                if wcs_header.get("A_ORDER", 0) > 0 and not _has_nonzero_sip(wcs_header):
+                if wcs_header.get("A_ORDER", 0) > 0 and not _has_nonzero_sip(
+                    wcs_header
+                ):
                     logger.warning(
                         "astrometry.net solved WCS has A_ORDER=%d but all SIP\n"
                         "    coefficients are zero (too few matched stars for\n"
@@ -4717,16 +4959,16 @@ class WCSSolver:
                             ny,
                             max_points=max_pts_diag,
                             max_lines=int(
-                                wcs_cfg.get("fit_wcs_from_points_max_match_lines", 20000)
+                                wcs_cfg.get(
+                                    "fit_wcs_from_points_max_match_lines", 20000
+                                )
                             ),
                             max_sep_arcsec=float(
                                 wcs_cfg.get("fit_wcs_from_points_max_sep_arcsec", 3.0)
                             ),
                         )
                     keep_if_not_better = bool(
-                        wcs_cfg.get(
-                            "keep_input_wcs_if_solved_not_better", True
-                        )
+                        wcs_cfg.get("keep_input_wcs_if_solved_not_better", True)
                     )
                     clear_gain = False
                     if diag_points is not None:
@@ -4738,18 +4980,26 @@ class WCSSolver:
                             np.asarray(dec_d, dtype=float),
                         )
                         if input_wcs_for_compare is not None:
-                            med_in, p95_in, sh_in = _best_wcs_match_separation_stats_arcsec(
-                                input_wcs_for_compare, x_d, y_d, ra_d, dec_d
+                            med_in, p95_in, sh_in = (
+                                _best_wcs_match_separation_stats_arcsec(
+                                    input_wcs_for_compare, x_d, y_d, ra_d, dec_d
+                                )
                             )
                         else:
-                            logger.debug("input_wcs_for_compare is None, skipping comparison")
+                            logger.debug(
+                                "input_wcs_for_compare is None, skipping comparison"
+                            )
                             med_in, p95_in, sh_in = np.nan, np.nan, 0.0
                         if solved_wcs_for_compare is not None:
-                            med_sv, p95_sv, sh_sv = _best_wcs_match_separation_stats_arcsec(
-                                solved_wcs_for_compare, x_d, y_d, ra_d, dec_d
+                            med_sv, p95_sv, sh_sv = (
+                                _best_wcs_match_separation_stats_arcsec(
+                                    solved_wcs_for_compare, x_d, y_d, ra_d, dec_d
+                                )
                             )
                         else:
-                            logger.debug("solved_wcs_for_compare is None, skipping comparison")
+                            logger.debug(
+                                "solved_wcs_for_compare is None, skipping comparison"
+                            )
                             med_sv, p95_sv, sh_sv = np.nan, np.nan, 0.0
                         logger.log(
                             STATUS,
@@ -4781,9 +5031,8 @@ class WCSSolver:
                         ctype1_sv_u = str(wcs_header.get("CTYPE1", "")).upper()
                         ctype2_sv_u = str(wcs_header.get("CTYPE2", "")).upper()
                         model_switch = (
-                            ("TPV" in ctype1_in_u or "TPV" in ctype2_in_u)
-                            and ("TAN-SIP" in ctype1_sv_u or "TAN-SIP" in ctype2_sv_u)
-                        )
+                            "TPV" in ctype1_in_u or "TPV" in ctype2_in_u
+                        ) and ("TAN-SIP" in ctype1_sv_u or "TAN-SIP" in ctype2_sv_u)
                         clear_gain = bool(
                             np.isfinite(med_in)
                             and np.isfinite(med_sv)
@@ -4865,9 +5114,7 @@ class WCSSolver:
                     if (
                         matched_points_for_refine is not None
                         and not keep_input_wcs_full
-                        and _wcs_cfg_bool(
-                            wcs_cfg, "refit_wcs_from_points", True
-                        )
+                        and _wcs_cfg_bool(wcs_cfg, "refit_wcs_from_points", True)
                     ):
                         _fit = self._fit_wcs_from_points(
                             matched_points_for_refine[0],
@@ -4878,41 +5125,66 @@ class WCSSolver:
                         if _fit is not None:
                             _before = np.nan
                             _after = np.nan
+                            _pre_refit_hdr = wcs_header.copy()
                             try:
                                 _before_wcs = get_wcs(wcs_header)
                                 if _before_wcs is not None:
-                                    _before = (
-                                        _best_wcs_match_separation_stats_arcsec(
-                                            _before_wcs,
-                                            matched_points_for_refine[0],
-                                            matched_points_for_refine[1],
-                                            matched_points_for_refine[2],
-                                            matched_points_for_refine[3],
-                                        )[0]
-                                    )
+                                    _before = _best_wcs_match_separation_stats_arcsec(
+                                        _before_wcs,
+                                        matched_points_for_refine[0],
+                                        matched_points_for_refine[1],
+                                        matched_points_for_refine[2],
+                                        matched_points_for_refine[3],
+                                    )[0]
                             except Exception:
                                 _before = np.nan
+                            # The fit returns CRPIX/CRVAL/CD for the new linear
+                            # solution.  Any SIP/PV/TNX distortion in the header
+                            # is still referenced to the OLD CRPIX, so applying
+                            # both would evaluate the polynomial about the wrong
+                            # origin - drop the distortion to emit a pure TAN
+                            # solution (honest, not subtly wrong).
+                            for _dk in list(wcs_header.keys()):
+                                _ku = str(_dk).upper().lstrip("HIERARCH ")
+                                if _ku.startswith(_WCS_KEY_STEMS) or _ku.startswith(
+                                    ("PV", "D_", "DP_")
+                                ):
+                                    del wcs_header[_dk]
                             for _fk, _fv in _fit["keywords"].items():
                                 wcs_header[_fk] = _fv
                             wcs_header["CTYPE1"] = "RA---TAN"
                             wcs_header["CTYPE2"] = "DEC--TAN"
-                            _normalize_projection_codes(
-                                wcs_header, inplace=True
-                            )
+                            _normalize_projection_codes(wcs_header, inplace=True)
                             try:
                                 _after_wcs = get_wcs(wcs_header)
                                 if _after_wcs is not None:
-                                    _after = (
-                                        _best_wcs_match_separation_stats_arcsec(
-                                            _after_wcs,
-                                            matched_points_for_refine[0],
-                                            matched_points_for_refine[1],
-                                            matched_points_for_refine[2],
-                                            matched_points_for_refine[3],
-                                        )[0]
-                                    )
+                                    _after = _best_wcs_match_separation_stats_arcsec(
+                                        _after_wcs,
+                                        matched_points_for_refine[0],
+                                        matched_points_for_refine[1],
+                                        matched_points_for_refine[2],
+                                        matched_points_for_refine[3],
+                                    )[0]
                             except Exception:
                                 _after = np.nan
+                            # Only adopt a refinement that does not worsen the
+                            # residuals; otherwise restore the previous header.
+                            if (
+                                np.isfinite(_before)
+                                and np.isfinite(_after)
+                                and _after > 1.05 * _before
+                            ):
+                                logger.warning(
+                                    "WCS linear refinement worsens residual "
+                                    "rms (%.3f -> %.3f arcsec from %d stars); "
+                                    "reverting to the pre-refinement WCS.",
+                                    float(_before),
+                                    float(_after),
+                                    _fit["n_used"],
+                                )
+                                wcs_header.clear()
+                                wcs_header.update(_pre_refit_hdr)
+                                _after = _before
                             logger.info(
                                 "WCS linear refinement from %d matched stars: "
                                 "rms %.3f -> %.3f arcsec.",
@@ -4939,9 +5211,14 @@ class WCSSolver:
                     logger.info(
                         "WCS header delta: CTYPE (%s, %s) -> (%s, %s); "
                         "dCRPIX=(%g, %g) px; dCRVAL=(%g, %g) arcsec",
-                        ctype1_in, ctype2_in, ctype1_sv, ctype2_sv,
-                        float(crpix1_sv - crpix1_in), float(crpix2_sv - crpix2_in),
-                        float(dra_arcsec), float(ddec_arcsec),
+                        ctype1_in,
+                        ctype2_in,
+                        ctype1_sv,
+                        ctype2_sv,
+                        float(crpix1_sv - crpix1_in),
+                        float(crpix2_sv - crpix2_in),
+                        float(dra_arcsec),
+                        float(ddec_arcsec),
                     )
                 except Exception as exc:
                     log_warning_from_exception(
@@ -4952,10 +5229,22 @@ class WCSSolver:
                     try:
                         self.header["NAXIS1"] = self.image.shape[1]
                         self.header["NAXIS2"] = self.image.shape[0]
-                        safe_fits_write(self.fpath, self.image, self.header, output_verify="ignore")
+                        safe_fits_write(
+                            self.fpath, self.image, self.header, output_verify="ignore"
+                        )
                         # Cleanup solve artifacts even when keeping input WCS.
-                        for pattern in [".rdls", ".solved", ".xyls", ".orig", ".axy", ".match", ".corr"]:
-                            for f in _solve_artifact_glob(dirname, _tmp_tag, base, pattern):
+                        for pattern in [
+                            ".rdls",
+                            ".solved",
+                            ".xyls",
+                            ".orig",
+                            ".axy",
+                            ".match",
+                            ".corr",
+                        ]:
+                            for f in _solve_artifact_glob(
+                                dirname, _tmp_tag, base, pattern
+                            ):
                                 try:
                                     os.remove(f)
                                 except OSError:
@@ -5139,7 +5428,11 @@ class WCSSolver:
                         # When preserving distortion, we also preserve the
                         # distortion's associated linear terms. Applying an
                         # extra CRPIX offset would break that consistency.
-                        allow = bool(wcs_cfg.get("allow_crpix_offset_with_preserved_distortion", False))
+                        allow = bool(
+                            wcs_cfg.get(
+                                "allow_crpix_offset_with_preserved_distortion", False
+                            )
+                        )
                         if not allow:
                             logger.info(
                                 "Preserving distortion on redo: skipping crpix_offset=%.3f to keep PV/SIP consistency",
@@ -5171,7 +5464,9 @@ class WCSSolver:
                 with silence_astropy_wcs_info():
                     merged_wcs = get_wcs(self.header)
                     if merged_wcs is None:
-                        logger.warning("Merged WCS is None after get_wcs - cannot validate pixel scale")
+                        logger.warning(
+                            "Merged WCS is None after get_wcs - cannot validate pixel scale"
+                        )
                         if _input_header_wcs_valid:
                             logger.warning(
                                 "Restoring original input WCS (merged solve unusable)."
@@ -5216,7 +5511,10 @@ class WCSSolver:
 
                 # Adopted solutions always hit the disk - redo_wcs or a
                 # missing WCS means the on-file astrometry is untrusted.
-                safe_fits_write(self.fpath, self.image, self.header,
+                safe_fits_write(
+                    self.fpath,
+                    self.image,
+                    self.header,
                     output_verify="ignore",
                 )
                 self.solved_new_wcs = True
@@ -5248,9 +5546,7 @@ class WCSSolver:
                     # The merge may have stripped WCS keywords from
                     # self.header before failing; restore the input WCS so
                     # the image keeps its original astrometry.
-                    logger.warning(
-                        "Restoring original input WCS after merge failure."
-                    )
+                    logger.warning("Restoring original input WCS after merge failure.")
                     try:
                         _restore_input_wcs_inplace()
                     except Exception:
@@ -5259,7 +5555,9 @@ class WCSSolver:
                         # A partial merge may already be on disk; rewrite so
                         # the file matches the restored header.
                         safe_fits_write(
-                            self.fpath, self.image, self.header,
+                            self.fpath,
+                            self.image,
+                            self.header,
                             output_verify="ignore",
                         )
                     except Exception:
