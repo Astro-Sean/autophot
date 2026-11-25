@@ -9,9 +9,12 @@ discontinuities that otherwise propagate into convolution / subtraction artifact
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__.rsplit(".", 1)[-1])
 
 
 @dataclass(frozen=True)
@@ -49,19 +52,39 @@ def build_saturation_core_mask(
     img = np.asarray(image)
     if img.ndim != 2:
         raise ValueError("build_saturation_core_mask expects a 2D image.")
-    if not np.isfinite(saturate) or saturate <= 0:
+    if saturate is None or not np.isfinite(saturate) or saturate <= 0:
         return np.zeros(img.shape, dtype=bool)
 
     thr = float(saturate_frac) * float(saturate)
     core = np.isfinite(img) & (img >= thr)
     if dilate_radius and dilate_radius > 0 and np.any(core):
         try:
+            import warnings as _warn
+
             from skimage.morphology import binary_dilation, disk
 
-            core = binary_dilation(core, disk(int(dilate_radius)))
-        except Exception:
-            # Fall back to no dilation if skimage morphology isn't available.
-            pass
+            with _warn.catch_warnings():
+                _warn.simplefilter("ignore", FutureWarning)
+                core = binary_dilation(core, disk(int(dilate_radius)))
+        except Exception as _dil_e:
+            # scipy.ndimage is already a hard dependency; use it rather than
+            # silently skipping the dilation the caller asked for.
+            from scipy.ndimage import binary_dilation as _sd_dilation
+            from scipy.ndimage import generate_binary_structure
+
+            try:
+                core = _sd_dilation(
+                    core,
+                    structure=generate_binary_structure(2, 0.5),
+                    iterations=int(max(dilate_radius, 1)),
+                )
+            except Exception as _sd_e:
+                logger.warning(
+                    "Mask dilation failed with skimage (%s) and scipy (%s); "
+                    "leaving the undilated saturation mask.",
+                    _dil_e,
+                    _sd_e,
+                )
     return np.asarray(core, dtype=bool)
 
 
@@ -83,8 +106,16 @@ def inpaint_image(
     m = np.asarray(mask, dtype=bool)
     if img.shape != m.shape:
         raise ValueError("inpaint_image: image and mask must have the same shape.")
+    # Non-finite pixels outside the mask poison the biharmonic RHS: skimage
+    # treats every unmasked pixel as a known point, and a single NaN there
+    # propagates through the solve.  Treat them as masked too.
+    m = m | ~np.isfinite(img)
     if not np.any(m):
         return img
+    if not np.any(~m):
+        raise ValueError(
+            "inpaint_image: every pixel is masked - nothing to anchor the solve."
+        )
 
     method = str(method).strip().lower()
     if method != "biharmonic":
@@ -94,7 +125,15 @@ def inpaint_image(
 
     # Mask is passed explicitly (no need to pre-set NaNs);
     # channel_axis=None for 2-D images.
-    return sk_inpaint.inpaint_biharmonic(img, m, channel_axis=None)
+    out = sk_inpaint.inpaint_biharmonic(img, m, channel_axis=None)
+    if not np.all(np.isfinite(out)):
+        logger.warning(
+            "Biharmonic inpainting produced non-finite output (%d bad "
+            "pixels); keeping original values in those positions.",
+            int(np.count_nonzero(~np.isfinite(out))),
+        )
+        out = np.where(np.isfinite(out), out, img)
+    return out
 
 
 def inpaint_saturated_cores(
@@ -125,8 +164,16 @@ def inpaint_saturated_cores(
 
     frac = float(np.mean(mask))
     if frac > float(cfg.max_mask_fraction):
-        # Too much to inpaint safely; return unchanged.
-        return img, mask
+        # Too much to inpaint safely; return unchanged.  The applied mask is
+        # empty so callers do not treat pixels as repaired, and do not feed
+        # un-inpainted saturated cores into kernel-stamp selection via this
+        # mask (downstream saturation masking still applies independently).
+        logger.info(
+            "Inpainting skipped: mask fraction %.2f exceeds the %.2f safety limit.",
+            frac,
+            float(cfg.max_mask_fraction),
+        )
+        return img, np.zeros(img.shape, dtype=bool)
 
     out = inpaint_image(img, mask, method=cfg.method)
     return out, mask
