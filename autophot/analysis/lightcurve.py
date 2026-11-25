@@ -16,6 +16,8 @@ Band colour mappings, effective wavelengths, and canonical band-label
 resolution helpers are also defined here.
 """
 
+import csv
+import io
 import logging
 import os
 import numpy as np
@@ -1848,7 +1850,7 @@ def _telescope_label_series(df, aliases=None):
 
     The fields come straight from the FITS header via the output CSV.
     Header-fallback tokens (unknown/nan/empty) are dropped from the join,
-    and a row where nothing survives writes "-".
+    and a row where nothing survives writes "--".
     """
     n = len(df)
     _missing = {"", "unknown", "unknown_reference", "unknown_instrument", "nan", "none"}
@@ -1862,10 +1864,37 @@ def _telescope_label_series(df, aliases=None):
         return s.mask(s.str.lower().isin(_missing), "")
 
     label = (_clean("telescope") + "+" + _clean("instrument")).str.strip("+")
-    label = label.fillna("-").where(label != "", "-")
+    label = label.fillna("--").where(label != "", "--")
     if aliases:
         label = label.replace(aliases)
     return label
+
+
+def _write_aligned_csv(df, fpath, float_format="%.3f", na_rep="--"):
+    """Write *df* to *fpath* as CSV with every cell padded to a fixed
+    per-column width, so the raw file stays vertically aligned.
+
+    The padding lives inside the fields, so the file still parses as
+    ordinary comma-separated text (``pd.read_csv(...,
+    skipinitialspace=True)``).
+    """
+    buf = io.StringIO()
+    df.to_csv(buf, index=False, float_format=float_format, na_rep=na_rep)
+    buf.seek(0)
+    rows = list(csv.reader(buf))
+    if not rows:
+        return
+    n_cols = max(len(r) for r in rows)
+    widths = [
+        max(len(r[i]) for r in rows if i < len(r)) for i in range(n_cols)
+    ]
+    with open(fpath, "w") as fh:
+        for r in rows:
+            cells = [
+                (r[i] if i < len(r) else "").rjust(widths[i])
+                for i in range(n_cols)
+            ]
+            fh.write(",".join(cells).rstrip() + "\n")
 
 
 def generate_photometry_table(
@@ -2246,9 +2275,10 @@ def generate_photometry_table(
     if "MJD" in out_phot.columns:
         out_phot["MJD"] = pd.to_numeric(
             out_phot["MJD"], errors="coerce"
-        ).map(lambda v: f"{v:.6f}" if np.isfinite(v) else "-")
-    # Uniform numeric formatting; non-detections use NaN for Mag/Error (written as empty or "-")
-    out_phot.to_csv(fname, index=False, float_format="%.3f", na_rep="-")
+        ).map(lambda v: f"{v:.6f}" if np.isfinite(v) else "--")
+    # Uniform numeric formatting; non-detections use NaN for Mag/Error
+    # (written as "--").  Fixed-width cells keep the raw file aligned.
+    _write_aligned_csv(out_phot, fname, float_format="%.3f", na_rep="--")
 
     # ---------- Colour evolution table (same-night pairs) ----------
     color_table_path = None
@@ -2392,11 +2422,11 @@ def generate_photometry_table(
                         {
                             "MJD": round(mjd_mid, 3),
                             "Date": date_str,
-                            "Phase": round(phase, 3) if np.isfinite(phase) else "-",
+                            "Phase": round(phase, 3) if np.isfinite(phase) else "--",
                             "Color": color_name,
                             "Value": round(color_value, 3),
                             "Error": round(err_val, 3),
-                            "Limit": "-",
+                            "Limit": "--",
                         }
                     )
                 elif det1_arr_tbl[i] and not det2[j]:
@@ -2405,10 +2435,10 @@ def generate_photometry_table(
                         {
                             "MJD": round(mjd_mid, 3),
                             "Date": date_str,
-                            "Phase": round(phase, 3) if np.isfinite(phase) else "-",
+                            "Phase": round(phase, 3) if np.isfinite(phase) else "--",
                             "Color": color_name,
                             "Value": round(color_value, 3),
-                            "Error": "-",
+                            "Error": "--",
                             "Limit": "upper",
                         }
                     )
@@ -2418,10 +2448,10 @@ def generate_photometry_table(
                         {
                             "MJD": round(mjd_mid, 3),
                             "Date": date_str,
-                            "Phase": round(phase, 3) if np.isfinite(phase) else "-",
+                            "Phase": round(phase, 3) if np.isfinite(phase) else "--",
                             "Color": color_name,
                             "Value": round(color_value, 3),
-                            "Error": "-",
+                            "Error": "--",
                             "Limit": "lower",
                         }
                     )
@@ -2431,8 +2461,8 @@ def generate_photometry_table(
             color_table_path = os.path.join(
                 save_path, f"{_table_tag}_Colors.dat"
             )
-            color_df.to_csv(
-                color_table_path, index=False, float_format="%.3f", na_rep="-"
+            _write_aligned_csv(
+                color_df, color_table_path, float_format="%.3f", na_rep="--"
             )
 
     return out_phot
