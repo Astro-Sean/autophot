@@ -27,7 +27,6 @@ Key design choices
 
 # TODO: Mask out regions where the pixel shares the same value as it's nearest nighbout. Also dilute this to avoid aretifacts at the edges
 
-
 # --- Standard Library ---
 import contextlib
 import io
@@ -59,26 +58,44 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from astropy.convolution import Gaussian2DKernel, convolve
 from astropy.coordinates import SkyCoord
-from astropy.stats import (SigmaClip, gaussian_fwhm_to_sigma,
-                           sigma_clipped_stats)
+from astropy.stats import SigmaClip, gaussian_fwhm_to_sigma, sigma_clipped_stats
 from astropy.visualization import ZScaleInterval
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from photutils.background import (Background2D, BiweightLocationBackground,
-                                  BiweightScaleBackgroundRMS, MedianBackground)
+from photutils.background import (
+    Background2D,
+    BiweightLocationBackground,
+    BiweightScaleBackgroundRMS,
+    MedianBackground,
+)
 
 from photutils.segmentation import detect_sources, detect_threshold
-from scipy.ndimage import (binary_dilation, distance_transform_edt,
-                           find_objects, gaussian_filter)
+from scipy.ndimage import (
+    binary_dilation,
+    distance_transform_edt,
+    find_objects,
+    gaussian_filter,
+)
 from scipy.ndimage import label as ndi_label
 from scipy.ndimage import uniform_filter
 
 # --- Local ---
-from ..core.functions import (STATUS, biweight_sky_sigma, biweight_stdfunc,
-                       border_msg, log_step, log_warning_from_exception,
-                       photutils_n_threads, set_size)
-from ..core.plotting_utils import (apply_autophot_mplstyle, get_plot_color,
-                            get_plot_ext, mask_legend_patch,
-                            overlay_mask_hatch)
+from ..core.functions import (
+    STATUS,
+    biweight_sky_sigma,
+    biweight_stdfunc,
+    border_msg,
+    log_step,
+    log_warning_from_exception,
+    photutils_n_threads,
+    set_size,
+)
+from ..core.plotting_utils import (
+    apply_autophot_mplstyle,
+    get_plot_color,
+    get_plot_ext,
+    mask_legend_patch,
+    overlay_mask_hatch,
+)
 from .wcs import get_wcs
 
 
@@ -189,14 +206,10 @@ def _read_mm_class_table(path, class_abbr, logger=None) -> np.ndarray:
                 continue
     missing = [c for c in class_abbr if c not in values]
     if missing:
-        raise ValueError(
-            f"{path}: no value for MaxiMask class(es) {missing}"
-        )
+        raise ValueError(f"{path}: no value for MaxiMask class(es) {missing}")
     extra = [k for k in values if k not in class_abbr]
     if extra and logger is not None:
-        logger.warning(
-            "%s: unknown MaxiMask class row(s) %s ignored", path, extra
-        )
+        logger.warning("%s: unknown MaxiMask class row(s) %s ignored", path, extra)
     return np.array([values[c] for c in class_abbr], dtype=np.float32)
 
 
@@ -209,9 +222,7 @@ def _maximask_num_threads(config) -> int:
     whole-machine thread pool - TF ignores the OMP/BLAS pins applied at
     interpreter start.
     """
-    cfg_bkg = (
-        (config.get("background", {}) or {}) if isinstance(config, dict) else {}
-    )
+    cfg_bkg = (config.get("background", {}) or {}) if isinstance(config, dict) else {}
     try:
         n = int(cfg_bkg.get("maximask_num_threads", 0) or 0)
     except (TypeError, ValueError):
@@ -252,9 +263,7 @@ def _smooth_for_detection(
         finite = np.isfinite(data)
         if finite.all():
             return gaussian_filter(data, sigma=sigma, mode="nearest")
-        num = gaussian_filter(
-            np.where(finite, data, 0.0), sigma=sigma, mode="nearest"
-        )
+        num = gaussian_filter(np.where(finite, data, 0.0), sigma=sigma, mode="nearest")
         den = gaussian_filter(finite.astype(np.float64), sigma=sigma, mode="nearest")
         work = num / np.maximum(den, 1e-12)
         work[~finite] = np.nan
@@ -861,8 +870,7 @@ class BackgroundSubtractor:
                     else:
                         trial_mask = dist_to_src <= float(cur_r * cur_iters)
                         trial_frac = (
-                            n_mask_px
-                            + int(np.count_nonzero(trial_mask & ~mask))
+                            n_mask_px + int(np.count_nonzero(trial_mask & ~mask))
                         ) / mask.size
                     if trial_frac <= target_frac:
                         best_new_mask = trial_mask
@@ -982,9 +990,7 @@ class BackgroundSubtractor:
                 if isinstance(self.config, dict)
                 else {}
             )
-            saturate_frac = float(
-                cfg_bkg.get("saturation_mask_frac", 0.90)
-            )
+            saturate_frac = float(cfg_bkg.get("saturation_mask_frac", 0.90))
         sat_mask = image >= saturate_frac * saturate
         if np.any(sat_mask):
             selem = _disk_structuring_element(dilate_radius)
@@ -1092,9 +1098,7 @@ class BackgroundSubtractor:
             else {}
         )
         if saturate_frac is None:
-            saturate_frac = float(
-                cfg_bkg.get("saturation_mask_frac", 0.90)
-            )
+            saturate_frac = float(cfg_bkg.get("saturation_mask_frac", 0.90))
         sat_core = np.asarray(image >= (saturate_frac * saturate), dtype=bool)
         if not np.any(sat_core):
             return np.zeros_like(image, dtype=bool)
@@ -1139,7 +1143,8 @@ class BackgroundSubtractor:
             blob_slices = [sl for j, sl in enumerate(blob_slices) if j in keep_idx]
             self.logger.debug(
                 "Saturation streak mask: capping to %d of %d blobs (largest first).",
-                len(blob_slices), n_comp,
+                len(blob_slices),
+                n_comp,
             )
         for idx, sl in enumerate(blob_slices, start=1):
             if sl is None:
@@ -1301,7 +1306,8 @@ class BackgroundSubtractor:
             blob_slices = [sl for j, sl in enumerate(blob_slices) if j in keep_idx]
             self.logger.debug(
                 "Satellite trail mask: capping to %d of %d blobs (largest first).",
-                len(blob_slices), n_comp,
+                len(blob_slices),
+                n_comp,
             )
         for idx, sl in enumerate(blob_slices, start=1):
             if sl is None:
@@ -1423,7 +1429,8 @@ class BackgroundSubtractor:
             blob_slices = [sl for j, sl in enumerate(blob_slices) if j in keep_idx]
             self.logger.debug(
                 "Defect column mask: capping to %d of %d blobs (largest first).",
-                len(blob_slices), n_comp,
+                len(blob_slices),
+                n_comp,
             )
         for idx, sl in enumerate(blob_slices, start=1):
             if sl is None:
@@ -1472,7 +1479,7 @@ class BackgroundSubtractor:
                 col_mask, structure=struct, iterations=dilate_iterations
             )
             self.logger.info(
-                "Defect column/row mask: %d px (%d axis-aligned " "component(s))",
+                "Defect column/row mask: %d px (%d axis-aligned component(s))",
                 int(np.sum(col_mask)),
                 n_cols,
             )
@@ -1665,8 +1672,7 @@ class BackgroundSubtractor:
                 normed = np.nan_to_num(normed, nan=0.0, posinf=0.0, neginf=0.0)
             preds = np.zeros(normed.shape + (nb,), dtype=np.float32)
             self.logger.info(
-                "Running MaxiMask inference (%s) - this takes ~1 min per "
-                "MPix on CPU",
+                "Running MaxiMask inference (%s) - this takes ~1 min per MPix on CPU",
                 "GPU" if allow_gpu else "CPU",
             )
             # process_image drives a tqdm bar with no verbosity switch and
@@ -2133,7 +2139,13 @@ class BackgroundSubtractor:
         if not np.isfinite(gstd) or gstd <= 0:
             gstd = float(_)
         bkg_surface = np.full_like(image, gmed, dtype=np.float32)
-        bkg_rms = np.full_like(image, max(gstd, 1.0), dtype=np.float32)
+        # Floor at the same scale-relative value as the primary Background2D
+        # path (rms_floor = max(median*0.1, 1e-6)) in image (ADU) units.  The
+        # old fixed 1.0 ADU floor inflated every background_rms-derived error
+        # on high-gain / low-noise frames whose sky noise is well below 1 ADU.
+        bkg_rms = np.full_like(
+            image, max(gstd, max(gstd * 0.1, 1e-6)), dtype=np.float32
+        )
         return True, bkg_surface, bkg_rms, gmed
 
     # -------------------------------------------------------------------------
@@ -2214,7 +2226,12 @@ class BackgroundSubtractor:
             f"{prefix_title}_{base}{get_plot_ext(getattr(self, 'config', None))}",
         )
 
-        fig.savefig(save_path_png, dpi=150, bbox_inches="tight", facecolor=get_plot_color("figure_facecolor"))
+        fig.savefig(
+            save_path_png,
+            dpi=150,
+            bbox_inches="tight",
+            facecolor=get_plot_color("figure_facecolor"),
+        )
         plt.close(fig)
 
     # =========================================================================
@@ -2305,9 +2322,7 @@ class BackgroundSubtractor:
         # is missing and the unit is arcsec, fall back to treating FWHM as
         # pixels and log a warning rather than silently mis-sizing the mesh.
         if fwhm is not None:
-            fwhm_unit = str(
-                cfg_bkg.get("fwhm_unit", "pixels")
-            ).strip().lower()
+            fwhm_unit = str(cfg_bkg.get("fwhm_unit", "pixels")).strip().lower()
             if fwhm_unit == "arcsec" and pixel_scale:
                 fwhm_pixels = float(fwhm) / float(pixel_scale)
             elif fwhm_unit == "arcsec" and not pixel_scale:
@@ -2332,9 +2347,7 @@ class BackgroundSubtractor:
         _needs_data_saturation = not (
             np.isfinite(_saturate_cfg_raw) and _saturate_cfg_raw <= 0
         ) and (not np.isfinite(_saturate_cfg_raw) or _saturate_cfg_raw > 1e8)
-        skip_trail = fast_mode and bool(
-            cfg_bkg.get("fast_mode_skip_trail_mask", True)
-        )
+        skip_trail = fast_mode and bool(cfg_bkg.get("fast_mode_skip_trail_mask", True))
         run_trail = bool(self.config.get("mask_satellite_trails", True)) and not (
             skip_trail
         )
@@ -2344,12 +2357,7 @@ class BackgroundSubtractor:
         # no mask and no exact-zero pixels exist, so it can reuse the pair.
         _share_classify_stats = (not _user_mask_provided) and not np.any(zero_mask)
         image_med = image_sig = None
-        if (
-            _needs_data_saturation
-            or run_trail
-            or run_columns
-            or _share_classify_stats
-        ):
+        if _needs_data_saturation or run_trail or run_columns or _share_classify_stats:
             _finite_vals = image[np.isfinite(image)]
             if _finite_vals.size:
                 image_med = float(np.median(_finite_vals))
@@ -2417,9 +2425,7 @@ class BackgroundSubtractor:
             _saturate_for_mask = np.inf
             _saturate_disabled = True
         if _needs_data_saturation:
-            _eff_sat = self._estimate_effective_saturation(
-                image, image_med, image_sig
-            )
+            _eff_sat = self._estimate_effective_saturation(image, image_med, image_sig)
             if np.isfinite(_eff_sat) and _eff_sat > 0:
                 _saturate_for_mask = _eff_sat
                 # Also update config so the streak mask uses the same value.
@@ -2438,9 +2444,7 @@ class BackgroundSubtractor:
         sat_mask = self._make_saturation_mask(
             image,
             _saturate_for_mask,
-            saturate_frac=float(
-                cfg_bkg.get("saturation_mask_frac", 0.90)
-            ),
+            saturate_frac=float(cfg_bkg.get("saturation_mask_frac", 0.90)),
         )
         # ---- Saturation streak / bleed mask (avoid regions from saturated stars) ----
         bleed_half = int(self.config.get("saturate_streak_bleed_half_length", 100))
@@ -2451,9 +2455,7 @@ class BackgroundSubtractor:
             streak_mask = self._make_saturation_streak_mask(
                 image,
                 _saturate_for_mask,
-                saturate_frac=float(
-                    cfg_bkg.get("saturation_mask_frac", 0.90)
-                ),
+                saturate_frac=float(cfg_bkg.get("saturation_mask_frac", 0.90)),
                 bleed_half_length=bleed_half,
                 use_principal_axis=use_pa,
                 follow_curved=follow_curved,
