@@ -36,9 +36,11 @@ from astropy.table import Table
 # reproject is optional - used for the WCS-based fallback alignment path
 try:
     from reproject import reproject_interp, reproject_adaptive
+
     HAS_REPROJECT = True
     # Optional kwargs (e.g. despike_jacobian) vary by reproject version
     import inspect as _inspect
+
     _ADAPTIVE_PARAMS = set(_inspect.signature(reproject_adaptive).parameters.keys())
 except ImportError:
     HAS_REPROJECT = False
@@ -53,7 +55,15 @@ from scipy.optimize import minimize
 from concurrent.futures import ThreadPoolExecutor
 import astropy.units as u
 
-from ..core.functions import remove_wcs_from_header, log_warning_from_exception, resolve_verbose_level, clean_subprocess_log, refresh_sibling_weight_map, invalidate_fits_cache, stat_block
+from ..core.functions import (
+    remove_wcs_from_header,
+    log_warning_from_exception,
+    resolve_verbose_level,
+    clean_subprocess_log,
+    refresh_sibling_weight_map,
+    invalidate_fits_cache,
+    stat_block,
+)
 from ..pipeline.wcs import get_wcs, _normalize_projection_codes
 from .run_sex import SExtractorWrapper
 
@@ -219,7 +229,10 @@ class ImageDistortionCorrector:
 
     # ---------------------------- Constructor / logger ----------------------------
     def __init__(
-        self, input_yaml, verbose_level: int | None = None, delete_originals: bool = True
+        self,
+        input_yaml,
+        verbose_level: int | None = None,
+        delete_originals: bool = True,
     ):
         """
         Initialize the ImageDistortionCorrector.
@@ -326,8 +339,12 @@ class ImageDistortionCorrector:
                     return hashlib.md5(cat_path.name.encode()).hexdigest()
 
                 cols = [c.name for c in data_hdu.columns]
-                ra = data_hdu.data["XWIN_WORLD" if "XWIN_WORLD" in cols else "ALPHA_J2000"]
-                dec = data_hdu.data["YWIN_WORLD" if "YWIN_WORLD" in cols else "DELTA_J2000"]
+                ra = data_hdu.data[
+                    "XWIN_WORLD" if "XWIN_WORLD" in cols else "ALPHA_J2000"
+                ]
+                dec = data_hdu.data[
+                    "YWIN_WORLD" if "YWIN_WORLD" in cols else "DELTA_J2000"
+                ]
                 ra = np.asarray(ra, dtype=float)
                 dec = np.asarray(dec, dtype=float)
                 valid = np.isfinite(ra) & np.isfinite(dec)
@@ -397,7 +414,10 @@ class ImageDistortionCorrector:
                         }
                         changed = False
                         for old_name, new_name in rename_map.items():
-                            if old_name in tbl.colnames and new_name not in tbl.colnames:
+                            if (
+                                old_name in tbl.colnames
+                                and new_name not in tbl.colnames
+                            ):
                                 tbl.rename_column(old_name, new_name)
                                 changed = True
                         # Add dummy ERRTHETA_WORLD if missing (ASTREFERR_KEYS expects it)
@@ -409,7 +429,9 @@ class ImageDistortionCorrector:
                             tbl["ERRTHETA_WORLD"] = np.zeros(len(tbl), dtype=np.float32)
                             changed = True
                         if changed:
-                            tbl.meta["COMMENT"] = "Renamed GAIA columns for SCAMP FILE mode"
+                            tbl.meta["COMMENT"] = (
+                                "Renamed GAIA columns for SCAMP FILE mode"
+                            )
                         new_hdu = fits.table_to_hdu(tbl)
                         new_hdu.header["EXTNAME"] = hdu.name
                         new_hdul.append(new_hdu)
@@ -419,9 +441,7 @@ class ImageDistortionCorrector:
                 # matters: parallel image workers share the same cache key, and
                 # a fixed ".tmp" name would let two writers interleave on the
                 # same temp file before either renames it.
-                tmp_cat = cat_path.with_name(
-                    f"{cat_path.name}.{os.getpid()}.tmp"
-                )
+                tmp_cat = cat_path.with_name(f"{cat_path.name}.{os.getpid()}.tmp")
                 new_hdul.writeto(str(tmp_cat), overwrite=True)
                 os.replace(str(tmp_cat), str(cat_path))
 
@@ -430,9 +450,7 @@ class ImageDistortionCorrector:
                 "catalog": "GAIA-DR3",
                 "cache_key": cache_key,
             }
-            tmp_meta = meta_path.with_name(
-                f"{meta_path.name}.{os.getpid()}.tmp"
-            )
+            tmp_meta = meta_path.with_name(f"{meta_path.name}.{os.getpid()}.tmp")
             with open(tmp_meta, "w") as f:
                 json.dump(meta, f)
             os.replace(str(tmp_meta), str(meta_path))
@@ -535,7 +553,9 @@ class ImageDistortionCorrector:
                 fwhm_pixels,
             )
         elif aperture_radius is not None and float(aperture_radius) > 0:
-            half_width = min(int(np.ceil(float(aperture_radius))), MAX_KERNEL_HALF_WIDTH)
+            half_width = min(
+                int(np.ceil(float(aperture_radius))), MAX_KERNEL_HALF_WIDTH
+            )
             self.logger.info(
                 "Convolution kernel half-width set from aperture radius: %d px (FWHM=%.1f px)",
                 half_width,
@@ -622,6 +642,7 @@ class ImageDistortionCorrector:
                 overlay_mask_hatch,
                 safe_tight_layout,
             )
+
             apply_autophot_mplstyle()
 
             fig, ax = plt.subplots(figsize=figsize)
@@ -677,7 +698,12 @@ class ImageDistortionCorrector:
                 )
 
             safe_tight_layout()
-            fig.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor=get_plot_color("figure_facecolor"))
+            fig.savefig(
+                output_plot_path,
+                dpi=150,
+                bbox_inches="tight",
+                facecolor=get_plot_color("figure_facecolor"),
+            )
             plt.close(fig)
 
         except Exception as e:
@@ -861,7 +887,7 @@ class ImageDistortionCorrector:
             # Store original dtype for saturation check before conversion
             original_dtype = data.dtype
             # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
-            if data.dtype.kind != 'f':
+            if data.dtype.kind != "f":
                 data = data.astype(np.float32)
             satur = None
             if np.issubdtype(original_dtype, np.integer):
@@ -880,13 +906,29 @@ class ImageDistortionCorrector:
                     peak_idx = int(np.argmax(hist))
                     pct = float(np.nanpercentile(finite, 99.99))
                     satur = float(max(bins[min(peak_idx, len(bins) - 2)], pct))
-            # Cap at reasonable maximum (65535 = max for 16-bit unsigned)
-            # SExtractor rejects SATUR_LEVEL values that are too large
+            # Cap at a reasonable maximum.  The 16-bit 65535 ceiling is only
+            # appropriate for integer data: for float frames with large ADU
+            # (gain-applied, 10^5-10^7), capping to 65535 would flag every
+            # bright star as saturated and strip the best alignment anchors.
             max_saturation = 65535
-            if satur > max_saturation:
+            if np.issubdtype(data.dtype, np.floating):
+                _fmax = float(np.nanmax(data)) if finite.size else float("nan")
+                if np.isfinite(_fmax) and satur > 0.99 * _fmax:
+                    self.logger.warning(
+                        "Heuristic saturation %.4g above the brightest float "
+                        "pixel (%.4g); clamping to 0.99*max to avoid flagging "
+                        "the whole field.",
+                        satur,
+                        _fmax,
+                    )
+                    satur = 0.99 * _fmax
+                # No 16-bit ceiling for float data: the frame's well depth is
+                # encoded in its own value range, not a 16-bit convention.
+            elif satur > max_saturation:
                 self.logger.warning(
                     "Heuristic saturation %s exceeds SExtractor maximum; capping at %d",
-                    satur, max_saturation
+                    satur,
+                    max_saturation,
                 )
                 satur = max_saturation
             return satur
@@ -908,7 +950,9 @@ class ImageDistortionCorrector:
         try:
             p = Path(str(fits_image))
             candidates = [
-                p.with_name(p.name + ".weight" + p.suffix),  # e.g. foo.fits -> foo.weight.fits
+                p.with_name(
+                    p.name + ".weight" + p.suffix
+                ),  # e.g. foo.fits -> foo.weight.fits
                 p.with_suffix(".weight.fits"),  # legacy
             ]
             img_shape = None
@@ -931,8 +975,12 @@ class ImageDistortionCorrector:
                         self.logger.warning(
                             "Ignoring weight map %s: shape %sx%s does not match "
                             "image %s (%sx%s) - stale pre-resampling product.",
-                            c.name, w_shape[0], w_shape[1],
-                            p.name, img_shape[0], img_shape[1],
+                            c.name,
+                            w_shape[0],
+                            w_shape[1],
+                            p.name,
+                            img_shape[0],
+                            img_shape[1],
                         )
                         continue
                 except Exception:
@@ -983,12 +1031,40 @@ class ImageDistortionCorrector:
                 header = hdul[0].header
                 if fwhm_pixels is None or fwhm_pixels <= 0:
                     fwhm_pixels = self._header_fwhm_pixels(header)
-                pixel_scale_header = header.get("PIXSCALE", header.get("CDELT2", 0))
-                if pixel_scale_header:
-                    pixel_scale_header = abs(float(pixel_scale_header)) * 3600.0
-                else:
-                    pixel_scale_header = PIXEL_SCALE if PIXEL_SCALE > 0 else 1.0
+                # Pixel scale from WCS when available (CD/PC/CDELT forms),
+                # falling back to PIXSCALE / CDELT2 / caller value.  The old
+                # CDELT2-only fallback silently assumed 1.0"/px for CD-matrix
+                # headers, mis-sizing the SExtractor filter and SEEING_FWHM.
+                _ps = None
+                try:
+                    from ..pipeline.wcs import _pixel_scales_deg
+                    from astropy.wcs import WCS
+
+                    _w = WCS(header, relax=True)
+                    if _w.has_celestial:
+                        _sc = _pixel_scales_deg(_w)
+                        if (
+                            _sc.size >= 2
+                            and np.all(np.isfinite(_sc[:2]))
+                            and float(_sc[0]) > 0
+                        ):
+                            _ps = float(np.median(np.abs(_sc[:2]))) * 3600.0
+                except Exception:
+                    _ps = None
+                if not (_ps and _ps > 0):
+                    _ps = header.get("PIXSCALE", header.get("CDELT2", 0))
+                    if _ps:
+                        _ps = abs(float(_ps)) * 3600.0
+                    else:
+                        _ps = PIXEL_SCALE if PIXEL_SCALE > 0 else 1.0
+                pixel_scale_header = _ps
                 seeing_fwhm_arcsec = float(fwhm_pixels) * pixel_scale_header
+                if pixel_scale_header in (None, 1.0) and PIXEL_SCALE <= 0:
+                    self.logger.warning(
+                        "run_sextractor: pixel scale not found in header/WCS; "
+                        "assuming 1.0 arcsec/px (this can mis-size the "
+                        'detection kernel on non-1.0"/px instruments).'
+                    )
 
             # Kernel sizing priority: scale > aperture_radius > 1.7xFWHM.
             # scale is already half the pipeline source-cutout box size, so it
@@ -997,7 +1073,9 @@ class ImageDistortionCorrector:
             _eff_aperture: Optional[float] = None
             if aperture_radius is not None and float(aperture_radius) > 0:
                 _eff_aperture = float(aperture_radius)
-            _scale_hw: Optional[int] = int(scale) if scale is not None and int(scale) > 0 else None
+            _scale_hw: Optional[int] = (
+                int(scale) if scale is not None and int(scale) > 0 else None
+            )
 
             self._create_conv_file(
                 conv_path,
@@ -1023,13 +1101,14 @@ class ImageDistortionCorrector:
             # (FWHM < threshold) occupy only ~2-3 pixels, so MINAREA=3 can miss
             # real point sources.
             if not for_alignment and not crowded:
-                _us_thresh_idc = float(
-                    (getattr(self, "input_yaml", {}) or {}).get(
-                        "photometry", {}
-                    ) or {}
-                ).get("undersampled_fwhm_threshold", 2.5) if isinstance(
-                    getattr(self, "input_yaml", None), dict
-                ) else 2.5
+                _us_thresh_idc = (
+                    float(
+                        (getattr(self, "input_yaml", {}) or {}).get("photometry", {})
+                        or {}
+                    ).get("undersampled_fwhm_threshold", 2.5)
+                    if isinstance(getattr(self, "input_yaml", None), dict)
+                    else 2.5
+                )
                 if fwhm_pixels < _us_thresh_idc:
                     _orig_minarea = int(final_config.get("DETECT_MINAREA", 3))
                     if fwhm_pixels < 1.5:
@@ -1040,8 +1119,10 @@ class ImageDistortionCorrector:
                         self.logger.info(
                             "Undersampled image (FWHM=%.2f px < %.1f): reducing "
                             "DETECT_MINAREA from %d to %d",
-                            fwhm_pixels, _us_thresh_idc,
-                            _orig_minarea, final_config["DETECT_MINAREA"],
+                            fwhm_pixels,
+                            _us_thresh_idc,
+                            _orig_minarea,
+                            final_config["DETECT_MINAREA"],
                         )
 
             final_config.update(
@@ -1065,17 +1146,18 @@ class ImageDistortionCorrector:
                 # with "measured frame and weight map have different sizes".
                 try:
                     _wh = fits.getheader(wpath)
-                    if (
-                        int(_wh.get("NAXIS1", -1)) != int(header.get("NAXIS1", -2))
-                        or int(_wh.get("NAXIS2", -1)) != int(header.get("NAXIS2", -2))
-                    ):
+                    if int(_wh.get("NAXIS1", -1)) != int(
+                        header.get("NAXIS1", -2)
+                    ) or int(_wh.get("NAXIS2", -1)) != int(header.get("NAXIS2", -2)):
                         self.logger.warning(
                             "Ignoring weight map %s: shape %sx%s does not match "
                             "image %s (%sx%s).",
                             Path(wpath).name,
-                            _wh.get("NAXIS1"), _wh.get("NAXIS2"),
+                            _wh.get("NAXIS1"),
+                            _wh.get("NAXIS2"),
                             Path(fits_image).name,
-                            header.get("NAXIS1"), header.get("NAXIS2"),
+                            header.get("NAXIS1"),
+                            header.get("NAXIS2"),
                         )
                         wpath = ""
                 except Exception:
@@ -1090,11 +1172,7 @@ class ImageDistortionCorrector:
                 # WEIGHT marker keeps the old interpretation.
                 _wtype = "MAP_RMS"
                 try:
-                    _mt = (
-                        str(fits.getheader(wpath).get("MAPTYPE", ""))
-                        .strip()
-                        .upper()
-                    )
+                    _mt = str(fits.getheader(wpath).get("MAPTYPE", "")).strip().upper()
                     if _mt == "WEIGHT":
                         _wtype = "MAP_WEIGHT"
                 except Exception:
@@ -1168,7 +1246,36 @@ class ImageDistortionCorrector:
                 str(final_config["NTHREADS"]),
             ]
 
-            subprocess.run(cmd1, check=True, text=True)
+            _sex_timeout = float(getattr(self, "sex_exec_timeout", 600.0))
+            try:
+                _sex_proc = subprocess.run(
+                    cmd1,
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                    timeout=_sex_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                self.logger.error(
+                    "SExtractor timed out after %.0f s (image %s); "
+                    "catalog may be incomplete.",
+                    _sex_timeout,
+                    fits_image,
+                )
+                raise RuntimeError(
+                    f"SExtractor timed out after {_sex_timeout:.0f} s on {fits_image}."
+                )
+            if _sex_proc.returncode != 0:
+                self.logger.error(
+                    "SExtractor failed with return code %d on %s. stderr:\n%s",
+                    _sex_proc.returncode,
+                    fits_image,
+                    (_sex_proc.stderr or "")[-2000:],
+                )
+                raise RuntimeError(
+                    f"SExtractor exited {_sex_proc.returncode} on "
+                    f"{fits_image}: {(_sex_proc.stderr or '')[-500:]}"
+                )
 
             tbhdu = 2
             with fits.open(catalog_path, mode="update") as hdul:
@@ -1217,14 +1324,24 @@ class ImageDistortionCorrector:
                     # Optionally override the max-FWHM cutoff:
                     #   template_subtraction.alignment_max_fwhm_pix: <float>
                     iy = getattr(self, "input_yaml", None) or {}
-                    ts = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
+                    ts = (
+                        iy.get("template_subtraction", {})
+                        if isinstance(iy, dict)
+                        else {}
+                    )
                     use_ext = bool(
                         isinstance(ts, dict)
                         and ts.get("alignment_use_extended_sources", False)
                     )
-                    max_fwhm = float(
-                        ts.get("alignment_max_fwhm_pix", self.ALIGNMENT_MAX_FWHM_PIX)
-                    ) if isinstance(ts, dict) else self.ALIGNMENT_MAX_FWHM_PIX
+                    max_fwhm = (
+                        float(
+                            ts.get(
+                                "alignment_max_fwhm_pix", self.ALIGNMENT_MAX_FWHM_PIX
+                            )
+                        )
+                        if isinstance(ts, dict)
+                        else self.ALIGNMENT_MAX_FWHM_PIX
+                    )
                     if not use_ext:
                         if "FWHM_IMAGE" in catalog.colnames:
                             would_keep = good & (catalog["FWHM_IMAGE"] <= max_fwhm)
@@ -1269,54 +1386,60 @@ class ImageDistortionCorrector:
                     # Add SCAMP-required columns if not present
                     try:
                         from ..pipeline.wcs import get_wcs as _get_wcs_for_scamp
+
                         wcs = _get_wcs_for_scamp(fits.getheader(fits_image))
                         if wcs is None:
                             raise ValueError("get_wcs returned None")
-                        if 'XWIN_WORLD' not in cleaned.colnames and 'XWIN_IMAGE' in cleaned.colnames:
+                        if (
+                            "XWIN_WORLD" not in cleaned.colnames
+                            and "XWIN_IMAGE" in cleaned.colnames
+                        ):
                             # SExtractor uses 1-based pixel coordinates (FITS convention)
                             # astropy WCS pixel_to_world expects 0-based numpy convention
-                            x_coords = np.asarray(cleaned['XWIN_IMAGE'], float) - 1.0
-                            y_coords = np.asarray(cleaned['YWIN_IMAGE'], float) - 1.0
+                            x_coords = np.asarray(cleaned["XWIN_IMAGE"], float) - 1.0
+                            y_coords = np.asarray(cleaned["YWIN_IMAGE"], float) - 1.0
                             world_coords = wcs.pixel_to_world(x_coords, y_coords)
-                            cleaned['XWIN_WORLD'] = world_coords.ra.deg
-                            cleaned['YWIN_WORLD'] = world_coords.dec.deg
-                            cleaned['X_WORLD'] = world_coords.ra.deg
-                            cleaned['Y_WORLD'] = world_coords.dec.deg
-                            cleaned['ALPHA_J2000'] = world_coords.ra.deg
-                            cleaned['DELTA_J2000'] = world_coords.dec.deg
+                            cleaned["XWIN_WORLD"] = world_coords.ra.deg
+                            cleaned["YWIN_WORLD"] = world_coords.dec.deg
+                            cleaned["X_WORLD"] = world_coords.ra.deg
+                            cleaned["Y_WORLD"] = world_coords.dec.deg
+                            cleaned["ALPHA_J2000"] = world_coords.ra.deg
+                            cleaned["DELTA_J2000"] = world_coords.dec.deg
                     except Exception as e:
-                        self.logger.warning("Could not compute world coordinates: %s", e)
+                        self.logger.warning(
+                            "Could not compute world coordinates: %s", e
+                        )
                     # SCAMP ASTREFMAG_KEY expects MAG_AUTO/MAGERR_AUTO
-                    if 'MAG_AUTO' not in cleaned.colnames:
-                        if 'MAG_APER' in cleaned.colnames:
-                            cleaned['MAG_AUTO'] = cleaned['MAG_APER']
-                        elif 'FLUX_AUTO' in cleaned.colnames:
-                            cleaned['MAG_AUTO'] = -2.5 * np.log10(cleaned['FLUX_AUTO'])
+                    if "MAG_AUTO" not in cleaned.colnames:
+                        if "MAG_APER" in cleaned.colnames:
+                            cleaned["MAG_AUTO"] = cleaned["MAG_APER"]
+                        elif "FLUX_AUTO" in cleaned.colnames:
+                            cleaned["MAG_AUTO"] = -2.5 * np.log10(cleaned["FLUX_AUTO"])
                         else:
-                            cleaned['MAG_AUTO'] = 0.0
-                    if 'MAGERR_AUTO' not in cleaned.colnames:
-                        if 'MAGERR_APER' in cleaned.colnames:
-                            cleaned['MAGERR_AUTO'] = cleaned['MAGERR_APER']
+                            cleaned["MAG_AUTO"] = 0.0
+                    if "MAGERR_AUTO" not in cleaned.colnames:
+                        if "MAGERR_APER" in cleaned.colnames:
+                            cleaned["MAGERR_AUTO"] = cleaned["MAGERR_APER"]
                         else:
-                            cleaned['MAGERR_AUTO'] = 0.1
+                            cleaned["MAGERR_AUTO"] = 0.1
                     # SCAMP CENTROIDERR_KEYS/ASTREFERR_KEYS expect these error columns
-                    if 'ERRAWIN_IMAGE' not in cleaned.colnames:
-                        if 'FWHM_IMAGE' in cleaned.colnames:
-                            cleaned['ERRAWIN_IMAGE'] = cleaned['FWHM_IMAGE'] * 0.1
+                    if "ERRAWIN_IMAGE" not in cleaned.colnames:
+                        if "FWHM_IMAGE" in cleaned.colnames:
+                            cleaned["ERRAWIN_IMAGE"] = cleaned["FWHM_IMAGE"] * 0.1
                         else:
-                            cleaned['ERRAWIN_IMAGE'] = 0.1
-                    if 'ERRBWIN_IMAGE' not in cleaned.colnames:
-                        cleaned['ERRBWIN_IMAGE'] = cleaned['ERRAWIN_IMAGE']
-                    if 'ERRX2WIN_IMAGE' not in cleaned.colnames:
-                        cleaned['ERRX2WIN_IMAGE'] = cleaned['ERRAWIN_IMAGE'] ** 2
-                    if 'ERRY2WIN_IMAGE' not in cleaned.colnames:
-                        cleaned['ERRY2WIN_IMAGE'] = cleaned['ERRAWIN_IMAGE'] ** 2
-                    if 'ERRTHETAWIN_IMAGE' not in cleaned.colnames:
-                        cleaned['ERRTHETAWIN_IMAGE'] = 0.1
-                    if 'ERRX2WIN_WORLD' not in cleaned.colnames:
-                        cleaned['ERRX2WIN_WORLD'] = cleaned['ERRX2WIN_IMAGE']
-                    if 'ERRY2WIN_WORLD' not in cleaned.colnames:
-                        cleaned['ERRY2WIN_WORLD'] = cleaned['ERRY2WIN_IMAGE']
+                            cleaned["ERRAWIN_IMAGE"] = 0.1
+                    if "ERRBWIN_IMAGE" not in cleaned.colnames:
+                        cleaned["ERRBWIN_IMAGE"] = cleaned["ERRAWIN_IMAGE"]
+                    if "ERRX2WIN_IMAGE" not in cleaned.colnames:
+                        cleaned["ERRX2WIN_IMAGE"] = cleaned["ERRAWIN_IMAGE"] ** 2
+                    if "ERRY2WIN_IMAGE" not in cleaned.colnames:
+                        cleaned["ERRY2WIN_IMAGE"] = cleaned["ERRAWIN_IMAGE"] ** 2
+                    if "ERRTHETAWIN_IMAGE" not in cleaned.colnames:
+                        cleaned["ERRTHETAWIN_IMAGE"] = 0.1
+                    if "ERRX2WIN_WORLD" not in cleaned.colnames:
+                        cleaned["ERRX2WIN_WORLD"] = cleaned["ERRX2WIN_IMAGE"]
+                    if "ERRY2WIN_WORLD" not in cleaned.colnames:
+                        cleaned["ERRY2WIN_WORLD"] = cleaned["ERRY2WIN_IMAGE"]
                     # Convert image-coordinate errors (pixels) to world errors
                     # (degrees) using the actual image pixel scale; fall back
                     # to a nominal value only if the WCS is unusable.
@@ -1324,11 +1447,12 @@ class ImageDistortionCorrector:
                     _pixscale_src = "nominal fallback (0.1585 arcsec/px)"
                     try:
                         from ..pipeline.wcs import get_wcs as _get_wcs_for_err
+
                         _wcs_err = _get_wcs_for_err(fits.getheader(fits_image))
                         if _wcs_err is not None:
-                            _ps = np.asarray(
-                                _wcs_err.proj_plane_pixel_scales(), float
-                            )
+                            from ..pipeline.wcs import _pixel_scales_deg
+
+                            _ps = _pixel_scales_deg(_wcs_err)
                             if np.all(np.isfinite(_ps)) and np.all(_ps > 0):
                                 pixel_scale = float(np.mean(_ps))
                                 _pixscale_src = "image WCS"
@@ -1347,18 +1471,19 @@ class ImageDistortionCorrector:
                         logging.debug(
                             "SCAMP error columns: world errors from %s "
                             "(%.4f arcsec/px).",
-                            _pixscale_src, pixel_scale * 3600.0,
+                            _pixscale_src,
+                            pixel_scale * 3600.0,
                         )
-                    if 'ERRA_WORLD' not in cleaned.colnames:
-                        cleaned['ERRA_WORLD'] = cleaned['ERRAWIN_IMAGE'] * pixel_scale
-                    if 'ERRDEC_WORLD' not in cleaned.colnames:
-                        cleaned['ERRDEC_WORLD'] = cleaned['ERRAWIN_IMAGE'] * pixel_scale
-                    if 'ERRB_WORLD' not in cleaned.colnames:
-                        cleaned['ERRB_WORLD'] = cleaned['ERRBWIN_IMAGE'] * pixel_scale
-                    if 'ERRX2_WORLD' not in cleaned.colnames:
-                        cleaned['ERRX2_WORLD'] = cleaned['ERRX2WIN_WORLD']
-                    if 'ERRY2_WORLD' not in cleaned.colnames:
-                        cleaned['ERRY2_WORLD'] = cleaned['ERRY2WIN_WORLD']
+                    if "ERRA_WORLD" not in cleaned.colnames:
+                        cleaned["ERRA_WORLD"] = cleaned["ERRAWIN_IMAGE"] * pixel_scale
+                    if "ERRDEC_WORLD" not in cleaned.colnames:
+                        cleaned["ERRDEC_WORLD"] = cleaned["ERRAWIN_IMAGE"] * pixel_scale
+                    if "ERRB_WORLD" not in cleaned.colnames:
+                        cleaned["ERRB_WORLD"] = cleaned["ERRBWIN_IMAGE"] * pixel_scale
+                    if "ERRX2_WORLD" not in cleaned.colnames:
+                        cleaned["ERRX2_WORLD"] = cleaned["ERRX2WIN_WORLD"]
+                    if "ERRY2_WORLD" not in cleaned.colnames:
+                        cleaned["ERRY2_WORLD"] = cleaned["ERRY2WIN_WORLD"]
                     hdul[tbhdu].data = cleaned.as_array()
                     hdul.flush()
                 else:
@@ -1373,6 +1498,7 @@ class ImageDistortionCorrector:
                 )
             else:
                 from astropy.stats import sigma_clipped_stats
+
                 _, fwhm, _ = sigma_clipped_stats(cleaned["FWHM_IMAGE"], sigma=3)
             if not np.isfinite(fwhm) or fwhm <= 0:
                 fwhm = 2.5
@@ -1436,6 +1562,7 @@ class ImageDistortionCorrector:
 
     def _extract_wcs_and_scale(self, fits_path):
         from astropy.wcs.utils import proj_plane_pixel_scales
+
         with fits.open(fits_path) as hdul:
             header = hdul[0].header
             wcs_obj = get_wcs(header)
@@ -1522,7 +1649,11 @@ class ImageDistortionCorrector:
             self.logger.info(
                 "Verification: filtered to %d/%d point-like sources "
                 "(FWHM<=%.1f px, ELLIP<=%.2f, FLAGS<=%d)",
-                n_after, n_before, _fwhm_max, max_ellipticity, max_flags,
+                n_after,
+                n_before,
+                _fwhm_max,
+                max_ellipticity,
+                max_flags,
             )
         return catalog[good]
 
@@ -1658,13 +1789,18 @@ class ImageDistortionCorrector:
                     _sci_shape = (_sci_h.get("NAXIS2", 0), _sci_h.get("NAXIS1", 0))
                     _ref_shape = (_ref_h.get("NAXIS2", 0), _ref_h.get("NAXIS1", 0))
 
-                    _ref_has_sip = any(k in _ref_h for k in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"])
+                    _ref_has_sip = any(
+                        k in _ref_h
+                        for k in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+                    )
                     _ref_has_pv = any(str(k).startswith("PV") for k in _ref_h)
 
                     # Only cut if reference is significantly larger (>1.5x in either dimension)
                     # AND has no non-linear distortion (SIP/TPV).
-                    if (_ref_shape[0] > _sci_shape[0] * 1.5 or _ref_shape[1] > _sci_shape[1] * 1.5) \
-                            and not (_ref_has_sip or _ref_has_pv):
+                    if (
+                        _ref_shape[0] > _sci_shape[0] * 1.5
+                        or _ref_shape[1] > _sci_shape[1] * 1.5
+                    ) and not (_ref_has_sip or _ref_has_pv):
                         from ..core.functions import nan_crop
 
                         # numpy 0-based image center: (nx-1)/2, (ny-1)/2
@@ -1672,8 +1808,13 @@ class ImageDistortionCorrector:
                         _scy = (_sci_shape[0] - 1) / 2.0
                         _sci_cra, _sci_cdec = _sci_w.all_pix2world([_scx], [_scy], 0)
 
-                        _rcx_arr, _rcy_arr = _safe_world2pix(_ref_w, _sci_cra[0], _sci_cdec[0], 0)
-                        _rcx, _rcy = float(np.atleast_1d(_rcx_arr)[0]), float(np.atleast_1d(_rcy_arr)[0])
+                        _rcx_arr, _rcy_arr = _safe_world2pix(
+                            _ref_w, _sci_cra[0], _sci_cdec[0], 0
+                        )
+                        _rcx, _rcy = (
+                            float(np.atleast_1d(_rcx_arr)[0]),
+                            float(np.atleast_1d(_rcy_arr)[0]),
+                        )
 
                         # Cutout size: science size + 20% margin for alignment shifts
                         _cut_h = int(_sci_shape[0] * 1.2)
@@ -1682,18 +1823,25 @@ class ImageDistortionCorrector:
                         if np.isfinite(_rcx) and np.isfinite(_rcy):
                             _ref_header_out = _ref_h.copy()
                             _ref_data_cropped, _ref_header_out = nan_crop(
-                                _rh[0].data, _ref_header_out,
-                                _rcx, _rcy, _cut_h, _cut_w,
+                                _rh[0].data,
+                                _ref_header_out,
+                                _rcx,
+                                _rcy,
+                                _cut_h,
+                                _cut_w,
                             )
                             fits.writeto(
                                 ref_image_copy,
                                 _ref_data_cropped.astype(_rh[0].data.dtype),
                                 _ref_header_out,
-                                overwrite=True
+                                overwrite=True,
                             )
                             self.logger.info(
                                 "Pre-cut reference to %dx%d centered on science region (was %dx%d)",
-                                _cut_w, _cut_h, _ref_shape[1], _ref_shape[0]
+                                _cut_w,
+                                _cut_h,
+                                _ref_shape[1],
+                                _ref_shape[0],
                             )
                     elif _ref_has_sip or _ref_has_pv:
                         self.logger.info(
@@ -1710,12 +1858,24 @@ class ImageDistortionCorrector:
             with fits.open(sci_image_copy) as hdul:
                 sci_head_initial = hdul[0].header
 
-            has_sip = any(key in sci_head_initial for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"])
-            has_pv = any(str(key).startswith("PV") and len(str(key)) > 2 and str(key)[2:3].isdigit()
-                        for key in sci_head_initial)
+            has_sip = any(
+                key in sci_head_initial
+                for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+            )
+            has_pv = any(
+                str(key).startswith("PV")
+                and len(str(key)) > 2
+                and str(key)[2:3].isdigit()
+                for key in sci_head_initial
+            )
             ctype1 = str(sci_head_initial.get("CTYPE1", "")).upper()
             ctype2 = str(sci_head_initial.get("CTYPE2", "")).upper()
-            has_distortion_ctype = "TAN-SIP" in ctype1 or "TAN-SIP" in ctype2 or "TPV" in ctype1 or "TPV" in ctype2
+            has_distortion_ctype = (
+                "TAN-SIP" in ctype1
+                or "TAN-SIP" in ctype2
+                or "TPV" in ctype1
+                or "TPV" in ctype2
+            )
 
             has_distortion = has_sip or has_pv or has_distortion_ctype
 
@@ -1733,8 +1893,11 @@ class ImageDistortionCorrector:
                         int(_ref_hdr.get("B_ORDER", 0)),
                     )
                     _ref_pv_count = sum(
-                        1 for k in _ref_hdr
-                        if str(k).startswith("PV") and len(str(k)) > 2 and str(k)[2:3].isdigit()
+                        1
+                        for k in _ref_hdr
+                        if str(k).startswith("PV")
+                        and len(str(k)) > 2
+                        and str(k)[2:3].isdigit()
                     )
                     if _ref_sip_order > 0:
                         ref_distort_order = _ref_sip_order
@@ -1764,8 +1927,11 @@ class ImageDistortionCorrector:
                         int(_sci_hdr_dist.get("B_ORDER", 0)),
                     )
                     _sci_pv_count = sum(
-                        1 for k in _sci_hdr_dist
-                        if str(k).startswith("PV") and len(str(k)) > 2 and str(k)[2:3].isdigit()
+                        1
+                        for k in _sci_hdr_dist
+                        if str(k).startswith("PV")
+                        and len(str(k)) > 2
+                        and str(k)[2:3].isdigit()
                     )
                     if _sci_sip_order > 0:
                         sci_distort_order = _sci_sip_order
@@ -1783,7 +1949,9 @@ class ImageDistortionCorrector:
             # as part of the resampling process. Running distortion correction separately
             # can produce output with different dimensions due to SIP/TPV distortion.
             if has_distortion:
-                distortion_type = "SIP" if has_sip else "TPV/PV" if has_pv else "CTYPE-based"
+                distortion_type = (
+                    "SIP" if has_sip else "TPV/PV" if has_pv else "CTYPE-based"
+                )
                 self.logger.info(
                     f"Science image has {distortion_type} distortion. "
                     "Correction will happen during SWarp resampling."
@@ -1794,6 +1962,7 @@ class ImageDistortionCorrector:
                 if has_sip:
                     try:
                         from sip_tpv import sip_to_pv as _sip_to_pv
+
                         with fits.open(sci_image_copy, mode="update") as _hdul:
                             _sci_hdr = _hdul[0].header
                             _sip_to_pv(_sci_hdr, tpv_format=True, preserve=False)
@@ -1809,7 +1978,8 @@ class ImageDistortionCorrector:
                     except Exception as _e:
                         self.logger.warning(
                             "Failed to convert science SIP to PV (%s). "
-                            "SWarp will ignore the distortion.", _e
+                            "SWarp will ignore the distortion.",
+                            _e,
                         )
             with (
                 fits.open(sci_image_copy) as hdul,
@@ -1818,6 +1988,7 @@ class ImageDistortionCorrector:
                 sci_data, sci_head = hdul[0].data, hdul[0].header
                 ref_data, ref_head = hdul_ref[0].data, hdul_ref[0].header
                 from astropy.wcs.utils import proj_plane_pixel_scales
+
                 sci_wcs = get_wcs(sci_head)
                 ref_wcs = get_wcs(ref_head)
                 sci_shape = sci_data.shape
@@ -1849,18 +2020,27 @@ class ImageDistortionCorrector:
 
                 self.logger.info(
                     "Output grid: %dx%d  CENTER=(%.6f,%.6f)  PIXEL_SCALE=%.4f (science was %dx%d, reference was %dx%d)",
-                    output_width, output_height, center_ra, center_dec, sci_pix_scale,
-                    sci_shape[1], sci_shape[0], ref_shape[1], ref_shape[0]
+                    output_width,
+                    output_height,
+                    center_ra,
+                    center_dec,
+                    sci_pix_scale,
+                    sci_shape[1],
+                    sci_shape[0],
+                    ref_shape[1],
+                    ref_shape[0],
                 )
 
                 # Verify reference covers the science region (diagnostic only -
                 # never abort alignment if this check fails or WCS doesn't converge).
                 try:
                     sci_corners = np.array(
-                        [[0, 0],
-                         [sci_shape[1] - 1, 0],
-                         [sci_shape[1] - 1, sci_shape[0] - 1],
-                         [0, sci_shape[0] - 1]]
+                        [
+                            [0, 0],
+                            [sci_shape[1] - 1, 0],
+                            [sci_shape[1] - 1, sci_shape[0] - 1],
+                            [0, sci_shape[0] - 1],
+                        ]
                     )
                     sci_world_corners = sci_wcs.all_pix2world(sci_corners, 0)
                     # _safe_world2pix returns NaN for non-converging points instead
@@ -1868,9 +2048,14 @@ class ImageDistortionCorrector:
                     ref_x, ref_y = _safe_world2pix(
                         ref_wcs, sci_world_corners[:, 0], sci_world_corners[:, 1], 0
                     )
-                    ref_in_bounds = (np.isfinite(ref_x) & np.isfinite(ref_y) &
-                                     (ref_x >= 0) & (ref_x < ref_shape[1]) &
-                                     (ref_y >= 0) & (ref_y < ref_shape[0]))
+                    ref_in_bounds = (
+                        np.isfinite(ref_x)
+                        & np.isfinite(ref_y)
+                        & (ref_x >= 0)
+                        & (ref_x < ref_shape[1])
+                        & (ref_y >= 0)
+                        & (ref_y < ref_shape[0])
+                    )
                     n_oob = int((~ref_in_bounds).sum())
                     if n_oob > 0:
                         severity = "severe" if n_oob >= 2 else "minor"
@@ -1882,8 +2067,10 @@ class ImageDistortionCorrector:
                             "    borders in the aligned template, increasing\n"
                             "    the masked fraction and reducing sources\n"
                             "    available for SFFT kernel fitting.",
-                            n_oob, severity,
-                            np.round(ref_x, 1).tolist(), np.round(ref_y, 1).tolist(),
+                            n_oob,
+                            severity,
+                            np.round(ref_x, 1).tolist(),
+                            np.round(ref_y, 1).tolist(),
                         )
                     else:
                         self.logger.debug("Reference image fully covers science region")
@@ -1914,15 +2101,21 @@ class ImageDistortionCorrector:
             # sources needed as alignment anchors
             sci_w = None
             ref_w = None
-            self.logger.info("Alignment SExtractor: weight maps disabled to avoid masking sources")
+            self.logger.info(
+                "Alignment SExtractor: weight maps disabled to avoid masking sources"
+            )
 
             # Log science image statistics to debug detection issues
             with fits.open(sci_image_copy) as hdul:
                 sci_data = hdul[0].data
                 self.logger.debug(
                     "Science image stats: shape=%s, min=%.2f, max=%.2f, mean=%.2f, median=%.2f, std=%.2f",
-                    sci_data.shape, np.nanmin(sci_data), np.nanmax(sci_data),
-                    np.nanmean(sci_data), np.nanmedian(sci_data), np.nanstd(sci_data)
+                    sci_data.shape,
+                    np.nanmin(sci_data),
+                    np.nanmax(sci_data),
+                    np.nanmean(sci_data),
+                    np.nanmedian(sci_data),
+                    np.nanstd(sci_data),
                 )
                 # Check if image has been modified (e.g., by SWarp copy)
                 self.logger.info(
@@ -1930,12 +2123,13 @@ class ImageDistortionCorrector:
                     hdul[0].header.get("FWHM", "N/A"),
                     hdul[0].header.get("APER", "N/A"),
                     hdul[0].header.get("CRPIX1", "N/A"),
-                    hdul[0].header.get("CRPIX2", "N/A")
+                    hdul[0].header.get("CRPIX2", "N/A"),
                 )
                 # Check if this is a cropped image (from templates.py)
                 self.logger.debug(
                     "Science image path: %s (original: %s)",
-                    sci_image_copy, science_image
+                    sci_image_copy,
+                    science_image,
                 )
 
             # --- FWHM estimation from header (skip redundant pass-1 SExtractor) ---
@@ -1959,26 +2153,35 @@ class ImageDistortionCorrector:
 
             # Use header FWHM directly (already measured by main pipeline).
             # Fallback to 2.0 px only if header is missing.
-            fwhm_sci_pix = float(sci_hdr_fwhm) if sci_hdr_fwhm and sci_hdr_fwhm > 0 else 2.0
-            fwhm_ref_pix = float(ref_hdr_fwhm) if ref_hdr_fwhm and ref_hdr_fwhm > 0 else 2.0
+            fwhm_sci_pix = (
+                float(sci_hdr_fwhm) if sci_hdr_fwhm and sci_hdr_fwhm > 0 else 2.0
+            )
+            fwhm_ref_pix = (
+                float(ref_hdr_fwhm) if ref_hdr_fwhm and ref_hdr_fwhm > 0 else 2.0
+            )
 
             self.logger.info(
                 "Alignment SExtractor: using header FWHM sci=%.2f px ref=%.2f px "
                 "(skipping redundant pass-1)",
-                fwhm_sci_pix, fwhm_ref_pix,
+                fwhm_sci_pix,
+                fwhm_ref_pix,
             )
 
             # SExtractorWrapper saves catalog as <stem>_PYSEx_CAT.fits in the mdir
             # SCAMP expects .cat extension for FITS-LDAC catalogs
             sci_catalog_path = str(science_aligned_dir / "science_image_PYSEx_CAT.cat")
-            ref_catalog_path = str(reference_aligned_dir / "reference_image_PYSEx_CAT.cat")
+            ref_catalog_path = str(
+                reference_aligned_dir / "reference_image_PYSEx_CAT.cat"
+            )
 
             # Single SExtractor run with FWHM-based kernel sizing.
             # Sci and ref runs are independent -- parallelize for ~2x speedup.
             sci_scale = int(max(5, 1.5 * fwhm_sci_pix))
             ref_scale = int(max(5, 1.5 * fwhm_ref_pix))
             combined_scale = max(sci_scale, ref_scale)
-            self.logger.info("SExtractor alignment: scale=%d px (FWHM-based)", combined_scale)
+            self.logger.info(
+                "SExtractor alignment: scale=%d px (FWHM-based)", combined_scale
+            )
 
             def _run_sextractor_sci():
                 return self.sextractor.run(
@@ -2026,8 +2229,12 @@ class ImageDistortionCorrector:
                 sci_fwhm2, sci_catalog2_raw, sci_scale2 = _sci_future.result()
                 ref_fwhm2, ref_catalog2_raw, ref_scale2 = _ref_future.result()
 
-            fwhm_sci_pix = float(sci_fwhm2) if sci_fwhm2 and sci_fwhm2 > 0 else fwhm_sci_pix
-            fwhm_ref_pix = float(ref_fwhm2) if ref_fwhm2 and ref_fwhm2 > 0 else fwhm_ref_pix
+            fwhm_sci_pix = (
+                float(sci_fwhm2) if sci_fwhm2 and sci_fwhm2 > 0 else fwhm_sci_pix
+            )
+            fwhm_ref_pix = (
+                float(ref_fwhm2) if ref_fwhm2 and ref_fwhm2 > 0 else fwhm_ref_pix
+            )
 
             # Sanity check: cap alignment FWHM using the pipeline's header FWHM.
             # The header FWHM comes from the carefully measured measure_image step
@@ -2049,13 +2256,16 @@ class ImageDistortionCorrector:
                     self.logger.info(
                         "Science header FWHM %.1f px matches config default; "
                         "trusting SExtractor measurement %.1f px instead.",
-                        sci_hdr_fwhm, fwhm_sci_pix,
+                        sci_hdr_fwhm,
+                        fwhm_sci_pix,
                     )
                 elif fwhm_sci_pix > FWHM_INFLATION_FACTOR * sci_hdr_fwhm:
                     self.logger.warning(
                         "Alignment science FWHM %.1f px is inflated (> %.1f x header FWHM %.1f px); "
                         "capping at header FWHM.",
-                        fwhm_sci_pix, FWHM_INFLATION_FACTOR, sci_hdr_fwhm,
+                        fwhm_sci_pix,
+                        FWHM_INFLATION_FACTOR,
+                        sci_hdr_fwhm,
                     )
                     fwhm_sci_pix = sci_hdr_fwhm
             if ref_hdr_fwhm and np.isfinite(ref_hdr_fwhm) and ref_hdr_fwhm > 0:
@@ -2064,13 +2274,16 @@ class ImageDistortionCorrector:
                     self.logger.info(
                         "Reference header FWHM %.1f px matches config default; "
                         "trusting SExtractor measurement %.1f px instead.",
-                        ref_hdr_fwhm, fwhm_ref_pix,
+                        ref_hdr_fwhm,
+                        fwhm_ref_pix,
                     )
                 elif fwhm_ref_pix > FWHM_INFLATION_FACTOR * ref_hdr_fwhm:
                     self.logger.warning(
                         "Alignment reference FWHM %.1f px is inflated (> %.1f x header FWHM %.1f px); "
                         "capping at header FWHM.",
-                        fwhm_ref_pix, FWHM_INFLATION_FACTOR, ref_hdr_fwhm,
+                        fwhm_ref_pix,
+                        FWHM_INFLATION_FACTOR,
+                        ref_hdr_fwhm,
                     )
                     fwhm_ref_pix = ref_hdr_fwhm
 
@@ -2079,15 +2292,21 @@ class ImageDistortionCorrector:
             if fwhm_sci_pix > MAX_REASONABLE_FWHM:
                 self.logger.warning(
                     "Alignment FWHM %.1f px is unreasonable (> %.0f px); using default FWHM.",
-                    fwhm_sci_pix, MAX_REASONABLE_FWHM,
+                    fwhm_sci_pix,
+                    MAX_REASONABLE_FWHM,
                 )
-                fwhm_sci_pix = sci_hdr_fwhm if (sci_hdr_fwhm and sci_hdr_fwhm > 0) else 8.5
+                fwhm_sci_pix = (
+                    sci_hdr_fwhm if (sci_hdr_fwhm and sci_hdr_fwhm > 0) else 8.5
+                )
             if fwhm_ref_pix > MAX_REASONABLE_FWHM:
                 self.logger.warning(
                     "Alignment FWHM %.1f px is unreasonable (> %.0f px); using default FWHM.",
-                    fwhm_ref_pix, MAX_REASONABLE_FWHM,
+                    fwhm_ref_pix,
+                    MAX_REASONABLE_FWHM,
                 )
-                fwhm_ref_pix = ref_hdr_fwhm if (ref_hdr_fwhm and ref_hdr_fwhm > 0) else 8.5
+                fwhm_ref_pix = (
+                    ref_hdr_fwhm if (ref_hdr_fwhm and ref_hdr_fwhm > 0) else 8.5
+                )
 
             # return_raw=True already wrote the FITS-LDAC catalogs to the mdir
             # at the expected paths - no manual write needed.
@@ -2095,15 +2314,28 @@ class ImageDistortionCorrector:
             sci_catalog2 = sci_catalog2_raw
             ref_catalog2 = ref_catalog2_raw
 
-            sci_sex = {"fwhm": sci_fwhm2, "catalog": sci_catalog2, "catalog_path": sci_catalog_path}
-            ref_sex = {"fwhm": ref_fwhm2, "catalog": ref_catalog2, "catalog_path": ref_catalog_path}
+            sci_sex = {
+                "fwhm": sci_fwhm2,
+                "catalog": sci_catalog2,
+                "catalog_path": sci_catalog_path,
+            }
+            ref_sex = {
+                "fwhm": ref_fwhm2,
+                "catalog": ref_catalog2,
+                "catalog_path": ref_catalog_path,
+            }
 
-            self.logger.info("SExtractor alignment: %d sci / %d ref sources", len(sci_catalog2) if sci_catalog2 is not None else 0, len(ref_catalog2) if ref_catalog2 is not None else 0)
+            self.logger.info(
+                "SExtractor alignment: %d sci / %d ref sources",
+                len(sci_catalog2) if sci_catalog2 is not None else 0,
+                len(ref_catalog2) if ref_catalog2 is not None else 0,
+            )
 
             # --- Sparse-field retry: if very few sources, re-run with maximum sensitivity ---
             _sparse_thresh = int(
                 ts.get("alignment_sparse_field_retry_count", 15)
-                if isinstance(ts, dict) else 15
+                if isinstance(ts, dict)
+                else 15
             )
             _n_sci2 = len(sci_catalog2) if sci_catalog2 is not None else 0
             _n_ref2 = len(ref_catalog2) if ref_catalog2 is not None else 0
@@ -2112,7 +2344,9 @@ class ImageDistortionCorrector:
                     "Sparse field detected (%d sci / %d ref sources < %d). "
                     "Re-running SExtractor with maximum sensitivity "
                     "(DETECT_THRESH=0.5, BACK_SIZE=32, CLEAN=N).",
-                    _n_sci2, _n_ref2, _sparse_thresh,
+                    _n_sci2,
+                    _n_ref2,
+                    _sparse_thresh,
                 )
                 # Adaptive BACK_SIZE: use min(32, max(16, image_size//8))
                 with fits.open(str(sci_image_copy), memmap=False) as _h:
@@ -2141,12 +2375,17 @@ class ImageDistortionCorrector:
                     if sci_catalog3_raw is not None and len(sci_catalog3_raw) > _n_sci2:
                         self.logger.info(
                             "Sparse-field retry: science %d -> %d sources",
-                            _n_sci2, len(sci_catalog3_raw),
+                            _n_sci2,
+                            len(sci_catalog3_raw),
                         )
                         sci_fwhm2 = sci_fwhm3
                         sci_catalog2_raw = sci_catalog3_raw
                         sci_catalog2 = sci_catalog3_raw
-                        fwhm_sci_pix = float(sci_fwhm3) if sci_fwhm3 and sci_fwhm3 > 0 else fwhm_sci_pix
+                        fwhm_sci_pix = (
+                            float(sci_fwhm3)
+                            if sci_fwhm3 and sci_fwhm3 > 0
+                            else fwhm_sci_pix
+                        )
 
                 if _n_ref2 < _sparse_thresh:
                     ref_fwhm3, ref_catalog3_raw, _ = self.sextractor.run(
@@ -2167,20 +2406,37 @@ class ImageDistortionCorrector:
                     if ref_catalog3_raw is not None and len(ref_catalog3_raw) > _n_ref2:
                         self.logger.info(
                             "Sparse-field retry: reference %d -> %d sources",
-                            _n_ref2, len(ref_catalog3_raw),
+                            _n_ref2,
+                            len(ref_catalog3_raw),
                         )
                         ref_fwhm2 = ref_fwhm3
                         ref_catalog2_raw = ref_catalog3_raw
                         ref_catalog2 = ref_catalog3_raw
-                        fwhm_ref_pix = float(ref_fwhm3) if ref_fwhm3 and ref_fwhm3 > 0 else fwhm_ref_pix
+                        fwhm_ref_pix = (
+                            float(ref_fwhm3)
+                            if ref_fwhm3 and ref_fwhm3 > 0
+                            else fwhm_ref_pix
+                        )
 
-                sci_sex = {"fwhm": sci_fwhm2, "catalog": sci_catalog2, "catalog_path": sci_catalog_path}
-                ref_sex = {"fwhm": ref_fwhm2, "catalog": ref_catalog2, "catalog_path": ref_catalog_path}
+                sci_sex = {
+                    "fwhm": sci_fwhm2,
+                    "catalog": sci_catalog2,
+                    "catalog_path": sci_catalog_path,
+                }
+                ref_sex = {
+                    "fwhm": ref_fwhm2,
+                    "catalog": ref_catalog2,
+                    "catalog_path": ref_catalog_path,
+                }
 
             # Save copies of the full catalogs for SCAMP BEFORE filter_matched_sources overwrites them
             # This must happen immediately after pass-2 SExtractor completes
-            sci_catalog_scamp_backup = str(science_aligned_dir / "science_image_PYSEx_CAT_scamp.cat")
-            ref_catalog_scamp_backup = str(reference_aligned_dir / "reference_image_PYSEx_CAT_scamp.cat")
+            sci_catalog_scamp_backup = str(
+                science_aligned_dir / "science_image_PYSEx_CAT_scamp.cat"
+            )
+            ref_catalog_scamp_backup = str(
+                reference_aligned_dir / "reference_image_PYSEx_CAT_scamp.cat"
+            )
             shutil.copy2(sci_catalog_path, sci_catalog_scamp_backup)
             shutil.copy2(ref_catalog_path, ref_catalog_scamp_backup)
 
@@ -2207,7 +2463,8 @@ class ImageDistortionCorrector:
                 self.logger.info(
                     "Science catalog filtered from %d to %d sources "
                     "(dropped %d ghost/stacking artifacts with no reference counterpart).",
-                    _n_sci_before_filter, _n_sci_after_filter,
+                    _n_sci_before_filter,
+                    _n_sci_after_filter,
                     _n_sci_before_filter - _n_sci_after_filter,
                 )
 
@@ -2215,7 +2472,11 @@ class ImageDistortionCorrector:
             # (Moved here from below so science-first GAIA SWarp has access.)
             # Use configurable undersampled threshold (default 2.5 px)
             # Read from photometry subsection for consistency with main.py, catalog.py, psf.py
-            _phot_cfg_idc = self.input_yaml.get("photometry", {}) or {} if isinstance(self.input_yaml, dict) else {}
+            _phot_cfg_idc = (
+                self.input_yaml.get("photometry", {}) or {}
+                if isinstance(self.input_yaml, dict)
+                else {}
+            )
             undersampled_thresh = float(
                 _phot_cfg_idc.get("undersampled_fwhm_threshold", 2.5)
             )
@@ -2251,7 +2512,9 @@ class ImageDistortionCorrector:
                     reason = f"FWHM >= {threshold} px (well-sampled)"
                 self.logger.debug(
                     "SWarp resampling: %s selected (%s, FWHM=%.2f px)",
-                    method, reason, fwhm_pix
+                    method,
+                    reason,
+                    fwhm_pix,
                 )
                 return method
 
@@ -2306,13 +2569,17 @@ class ImageDistortionCorrector:
                             "Science has distortion order %d but only %d sources "
                             "(need %d for degree %d). GAIA SCAMP will use degree %d. "
                             "If alignment is poor, consider disabling science-first astrometry.",
-                            sci_distort_order, n_sci_for_gaia,
+                            sci_distort_order,
+                            n_sci_for_gaia,
                             _sci_min_sources_for_degree.get(sci_distort_order, 999),
-                            sci_distort_order, _sci_feasible_degree,
+                            sci_distort_order,
+                            _sci_feasible_degree,
                         )
                     self.logger.info(
                         "Science GAIA SCAMP: DISTORT_DEGREES=%d (sci order=%d, %d sources)",
-                        _sci_feasible_degree, sci_distort_order, n_sci_for_gaia,
+                        _sci_feasible_degree,
+                        sci_distort_order,
+                        n_sci_for_gaia,
                     )
 
                     # Phase 1a: SCAMP on science catalog vs GAIA-DR3
@@ -2327,10 +2594,18 @@ class ImageDistortionCorrector:
                             "DISTORT_DEGREES": _sci_feasible_degree,
                             "CROSSID_RADIUS": "5.0",
                             "POSITION_MAXERR": "1.0",
-                            "SN_THRESHOLDS": _sci_wcs_cfg.get("scamp_sn_thresholds", "3.0,100000.0"),
-                            "MATCH_NMAX": int(_sci_wcs_cfg.get("scamp_match_nmax", 0) or 0),
-                            "PIXSCALE_MAXERR": float(_sci_wcs_cfg.get("scamp_pixscale_maxerr", 1.2) or 1.2),
-                            "POSANGLE_MAXERR": float(_sci_wcs_cfg.get("scamp_posangle_maxerr", 5.0) or 5.0),
+                            "SN_THRESHOLDS": _sci_wcs_cfg.get(
+                                "scamp_sn_thresholds", "3.0,100000.0"
+                            ),
+                            "MATCH_NMAX": int(
+                                _sci_wcs_cfg.get("scamp_match_nmax", 0) or 0
+                            ),
+                            "PIXSCALE_MAXERR": float(
+                                _sci_wcs_cfg.get("scamp_pixscale_maxerr", 1.2) or 1.2
+                            ),
+                            "POSANGLE_MAXERR": float(
+                                _sci_wcs_cfg.get("scamp_posangle_maxerr", 5.0) or 5.0
+                            ),
                             "MATCH_RESOL": "0.0",
                             "ASTREF_WEIGHT": "1",
                             "VERBOSE_TYPE": "FULL"
@@ -2357,9 +2632,7 @@ class ImageDistortionCorrector:
                     if Path(sci_head_src).resolve() != sci_head_dst.resolve():
                         shutil.copy2(sci_head_src, sci_head_dst)
                     _normalize_head_file(sci_head_dst)
-                    self.logger.info(
-                        "Copied GAIA SCAMP .head to %s", sci_head_dst
-                    )
+                    self.logger.info("Copied GAIA SCAMP .head to %s", sci_head_dst)
 
                     # Phase 1b: SWarp science to GAIA-corrected grid
                     self.logger.info("Phase 1b: SWarp science to GAIA grid")
@@ -2471,8 +2744,7 @@ class ImageDistortionCorrector:
 
                             # Predictable catalog path based on known stem
                             sci_catalog_path = str(
-                                science_aligned_dir
-                                / "science_corrected_PYSEx_CAT.cat"
+                                science_aligned_dir / "science_corrected_PYSEx_CAT.cat"
                             )
 
                             sci_sex = {
@@ -2514,18 +2786,28 @@ class ImageDistortionCorrector:
             # BUG 108: Skip capping when header FWHM is the stale config default.
             if sci_hdr_fwhm and np.isfinite(sci_hdr_fwhm) and sci_hdr_fwhm > 0:
                 _sci_hdr_is_stale_p2 = abs(sci_hdr_fwhm - _config_fwhm_default) < 0.01
-                if not _sci_hdr_is_stale_p2 and fwhm_sci_pix > FWHM_INFLATION_FACTOR * sci_hdr_fwhm:
+                if (
+                    not _sci_hdr_is_stale_p2
+                    and fwhm_sci_pix > FWHM_INFLATION_FACTOR * sci_hdr_fwhm
+                ):
                     self.logger.warning(
                         "Pass-2 science FWHM %.1f px inflated (> %.1f x header %.1f px); capping.",
-                        fwhm_sci_pix, FWHM_INFLATION_FACTOR, sci_hdr_fwhm,
+                        fwhm_sci_pix,
+                        FWHM_INFLATION_FACTOR,
+                        sci_hdr_fwhm,
                     )
                     fwhm_sci_pix = sci_hdr_fwhm
             if ref_hdr_fwhm and np.isfinite(ref_hdr_fwhm) and ref_hdr_fwhm > 0:
                 _ref_hdr_is_stale_p2 = abs(ref_hdr_fwhm - _config_fwhm_default) < 0.01
-                if not _ref_hdr_is_stale_p2 and fwhm_ref_pix > FWHM_INFLATION_FACTOR * ref_hdr_fwhm:
+                if (
+                    not _ref_hdr_is_stale_p2
+                    and fwhm_ref_pix > FWHM_INFLATION_FACTOR * ref_hdr_fwhm
+                ):
                     self.logger.warning(
                         "Pass-2 reference FWHM %.1f px inflated (> %.1f x header %.1f px); capping.",
-                        fwhm_ref_pix, FWHM_INFLATION_FACTOR, ref_hdr_fwhm,
+                        fwhm_ref_pix,
+                        FWHM_INFLATION_FACTOR,
+                        ref_hdr_fwhm,
                     )
                     fwhm_ref_pix = ref_hdr_fwhm
 
@@ -2547,12 +2829,16 @@ class ImageDistortionCorrector:
             fwhm_sci_arcsec = fwhm_sci_pix * sci_pix_scale
             fwhm_ref_arcsec = fwhm_ref_pix * ref_pix_scale
             self.logger.info(
-                "FWHM: sci=%.2f px (%.2f\") ref=%.2f px (%.2f\")  "
+                'FWHM: sci=%.2f px (%.2f") ref=%.2f px (%.2f")  '
                 "[header: sci=%.2f ref=%.2f  undersampled: sci=%s ref=%s]",
-                fwhm_sci_pix, fwhm_sci_arcsec,
-                fwhm_ref_pix, fwhm_ref_arcsec,
-                sci_hdr_fwhm or -1, ref_hdr_fwhm or -1,
-                sci_is_undersampled, ref_is_undersampled,
+                fwhm_sci_pix,
+                fwhm_sci_arcsec,
+                fwhm_ref_pix,
+                fwhm_ref_arcsec,
+                sci_hdr_fwhm or -1,
+                ref_hdr_fwhm or -1,
+                sci_is_undersampled,
+                ref_is_undersampled,
             )
 
             crossid_radius = max(2.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 3.0)
@@ -2561,9 +2847,13 @@ class ImageDistortionCorrector:
             # Configurable minimum matched sources for a reliable SCAMP solution.
             # SCAMP needs at least ~6 matched sources for a linear WCS fit
             # (shift, scale, rotation = 4 params, plus a few extra for a stable fit).
-            align_cfg = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
+            align_cfg = (
+                iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
+            )
             min_matched = int(align_cfg.get("alignment_min_matched_sources", 6))
-            max_match_radius = float(align_cfg.get("alignment_max_match_radius_arcsec", 30.0))
+            max_match_radius = float(
+                align_cfg.get("alignment_max_match_radius_arcsec", 30.0)
+            )
 
             # Adaptive minimum for sparse fields: if the science catalog has
             # few sources, requiring 6 matches may be impossible.  Lower the
@@ -2575,7 +2865,9 @@ class ImageDistortionCorrector:
                     self.logger.info(
                         "Sparse field: science has only %d sources; lowering min_matched "
                         "from %d to %d (50%% of science catalog).",
-                        n_sci_sources, min_matched, adaptive_min,
+                        n_sci_sources,
+                        min_matched,
+                        adaptive_min,
                     )
                     min_matched = adaptive_min
 
@@ -2594,8 +2886,11 @@ class ImageDistortionCorrector:
                 if _num_matched < min_matched and crossid_radius < max_match_radius:
                     retry_radius = min(crossid_radius * 2.0, max_match_radius)
                     self.logger.warning(
-                        "Only %d matched sources (< %d minimum). Retrying with %.1f\" radius (was %.1f\").",
-                        _num_matched, min_matched, retry_radius, crossid_radius,
+                        'Only %d matched sources (< %d minimum). Retrying with %.1f" radius (was %.1f").',
+                        _num_matched,
+                        min_matched,
+                        retry_radius,
+                        crossid_radius,
                     )
                     # filter_matched_sources rewrites both catalogs in place
                     # with matched-only subsets, so the unfiltered catalogs
@@ -2617,9 +2912,11 @@ class ImageDistortionCorrector:
                     # (4 parameters: shift+scale/rotation).  Don't inflate the
                     # radius - the WCS is good, we just have a sparse field.
                     self.logger.info(
-                        "Sparse field: %d matched sources at %.1f\" radius (< %d default minimum). "
+                        'Sparse field: %d matched sources at %.1f" radius (< %d default minimum). '
                         "Proceeding with SCAMP - a linear fit needs only 3-4 matches.",
-                        _num_matched, crossid_radius, min_matched,
+                        _num_matched,
+                        crossid_radius,
+                        min_matched,
                     )
                     min_matched = _num_matched
 
@@ -2638,7 +2935,8 @@ class ImageDistortionCorrector:
                         shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
 
                         dra, ddec = self._estimate_wcs_offset_from_headers(
-                            str(sci_image_copy), str(ref_image_copy),
+                            str(sci_image_copy),
+                            str(ref_image_copy),
                         )
                         offset_magnitude = float(np.sqrt(dra**2 + ddec**2))
 
@@ -2649,9 +2947,12 @@ class ImageDistortionCorrector:
                                 max_match_radius * 3.0,
                             )
                             self.logger.info(
-                                "Wide-offset match (from WCS headers): offset=%.1f\" "
-                                "(dRA=%.1f\" dDec=%.1f\"), using %.1f\" match radius",
-                                offset_magnitude, dra, ddec, wide_radius,
+                                'Wide-offset match (from WCS headers): offset=%.1f" '
+                                '(dRA=%.1f" dDec=%.1f"), using %.1f" match radius',
+                                offset_magnitude,
+                                dra,
+                                ddec,
+                                wide_radius,
                             )
                             _num_matched, _ = _do_match(wide_radius)
                             crossid_radius = wide_radius
@@ -2665,13 +2966,15 @@ class ImageDistortionCorrector:
                                 self.logger.info(
                                     "Wide-offset matching found %d sources (< %d minimum). "
                                     "Proceeding with SCAMP using large CROSSID_RADIUS.",
-                                    _num_matched, min_matched,
+                                    _num_matched,
+                                    min_matched,
                                 )
                                 min_matched = _num_matched
                             else:
                                 # Try catalog-based estimation as secondary
                                 dra2, ddec2, n_consistent = self._estimate_wcs_offset(
-                                    sci_catalog_scamp_backup, ref_catalog_scamp_backup,
+                                    sci_catalog_scamp_backup,
+                                    ref_catalog_scamp_backup,
                                 )
                                 cat_offset = float(np.sqrt(dra2**2 + ddec2**2))
                                 if cat_offset > crossid_radius and n_consistent >= 3:
@@ -2680,8 +2983,12 @@ class ImageDistortionCorrector:
                                         max_match_radius * 3.0,
                                     )
                                     if wide_radius2 > crossid_radius:
-                                        shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
-                                        shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
+                                        shutil.copy2(
+                                            sci_catalog_scamp_backup, sci_catalog_path
+                                        )
+                                        shutil.copy2(
+                                            ref_catalog_scamp_backup, ref_catalog_path
+                                        )
                                         _num_matched, _ = _do_match(wide_radius2)
                                         crossid_radius = wide_radius2
                                         if _num_matched >= 3:
@@ -2692,19 +2999,21 @@ class ImageDistortionCorrector:
                                             min_matched = _num_matched
                         else:
                             self.logger.info(
-                                "WCS header offset too small (%.1f\").",
+                                'WCS header offset too small (%.1f").',
                                 offset_magnitude,
                             )
                     except Exception as offset_err:
                         self.logger.warning(
-                            "Wide-offset estimation failed: %s", offset_err,
+                            "Wide-offset estimation failed: %s",
+                            offset_err,
                         )
 
                 if _num_matched < min_matched:
                     self.logger.warning(
                         "Only %d matched sources after all retries (< %d minimum). "
                         "Falling back to reproject/AstroAlign.",
-                        _num_matched, min_matched,
+                        _num_matched,
+                        min_matched,
                     )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
@@ -2718,10 +3027,11 @@ class ImageDistortionCorrector:
                     science_image, reference_image, output_dir
                 )
 
-
             self.logger.info(
                 "SCAMP+SWarp alignment: %d matched sources (sci=%d ref=%d)",
-                _num_matched, n_sci, n_ref,
+                _num_matched,
+                n_sci,
+                n_ref,
             )
             pix_scale = sci_pix_scale
 
@@ -2738,8 +3048,15 @@ class ImageDistortionCorrector:
             # Floor at 1.0" to handle typical plate-solve uncertainties.
             is_sparse_field = _num_matched < 50
             _iy_align = getattr(self, "input_yaml", None) or {}
-            _ts_align = _iy_align.get("template_subtraction", {}) if isinstance(_iy_align, dict) else {}
-            _use_extended = bool(isinstance(_ts_align, dict) and _ts_align.get("alignment_use_extended_sources", False))
+            _ts_align = (
+                _iy_align.get("template_subtraction", {})
+                if isinstance(_iy_align, dict)
+                else {}
+            )
+            _use_extended = bool(
+                isinstance(_ts_align, dict)
+                and _ts_align.get("alignment_use_extended_sources", False)
+            )
             position_maxerr_arcsec = max(
                 1.0,
                 2.0 * pix_scale,
@@ -2769,7 +3086,8 @@ class ImageDistortionCorrector:
                 self.logger.info(
                     "Sparse field (%d matched): lowering SCAMP high-SN "
                     "threshold to %.0f for quad formation",
-                    _num_matched, _sn_hi,
+                    _num_matched,
+                    _sn_hi,
                 )
             sn_thresholds = f"{_sn_lo},{_sn_hi}"
             # MATCH_NMAX: limit detections for pattern matching.
@@ -2780,7 +3098,8 @@ class ImageDistortionCorrector:
                 _match_nmax = 500
                 self.logger.info(
                     "Dense field (%d matched): capping SCAMP MATCH_NMAX at %d",
-                    _num_matched, _match_nmax,
+                    _num_matched,
+                    _match_nmax,
                 )
             # PIXSCALE_MAXERR / POSANGLE_MAXERR: quad matching tolerances.
             _pixscale_maxerr = float(_wcs_cfg.get("scamp_pixscale_maxerr", 1.2) or 1.2)
@@ -2804,14 +3123,12 @@ class ImageDistortionCorrector:
             # Minimum matched sources for each polynomial degree.
             # Degree 1 (linear WCS: shift/rotation/scale) needs only ~5 sources
             # to be stable for sparse fields.  SCAMP does not accept degree 0.
-            # BUG 119: Increased thresholds to require ~2x params to prevent
-            # overfitting.  With 36 stars at degree 4 (30 params), the old
-            # threshold of 30 allowed 1.2 stars/param -> SCAMP residual 0.68px
-            # but post-SWarp RMS 2.94px (4.4x overfitting ratio).
-            # Current: 1.3x params - less conservative but post-SWarp
-            # verification gate catches overfitting.  Degree 4 with 39 sources
-            # (1.3x) was validated on J2344 field (38 sources, RMS=1.89px).
-            _min_sources_for_degree = {0: 3, 1: 5, 2: 16, 3: 26, 4: 35}
+            # BUG 119: require ~2x the number of free parameters per axis
+            # (degree d has (d+1)(d+2)/2 terms per axis; degree 2 -> 12 total,
+            # degree 3 -> 20, degree 4 -> 30).  With 36 stars at degree 4 the
+            # old threshold of 30 allowed 1.2 stars/param -> SCAMP residual
+            # 0.68 px but post-SWarp RMS 2.94 px (a 4.4x overfitting ratio).
+            _min_sources_for_degree = {0: 3, 1: 10, 2: 24, 3: 40, 4: 60}
 
             required_degree = ref_distort_order
 
@@ -2831,7 +3148,8 @@ class ImageDistortionCorrector:
                 self.logger.warning(
                     "Only %d matched sources - too few for SCAMP degree 1 "
                     "(need %d). Falling back to reproject/AstroAlign.",
-                    _num_matched, _min_sources_for_degree[1],
+                    _num_matched,
+                    _min_sources_for_degree[1],
                 )
                 return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
@@ -2848,9 +3166,11 @@ class ImageDistortionCorrector:
                     "Reference has distortion order %d but only %d matched sources "
                     "(need %d for degree %d). Running SCAMP at degree %d - "
                     "post-SWarp verification will reject if residuals are too large.",
-                    required_degree, _num_matched,
+                    required_degree,
+                    _num_matched,
                     _min_sources_for_degree.get(required_degree, 999),
-                    required_degree, feasible_degree,
+                    required_degree,
+                    feasible_degree,
                 )
                 # Enable SIP-to-PV conversion: keep SCAMP's linear correction
                 # (CRVAL/CD) but convert the reference's original high-order
@@ -2866,7 +3186,8 @@ class ImageDistortionCorrector:
                 self.logger.info(
                     "SCAMP+SWarp retry: using conservative distortion degree %d "
                     "instead of feasible degree %d.",
-                    distort_degrees, feasible_degree,
+                    distort_degrees,
+                    feasible_degree,
                 )
             # Relax ellipticity cut for sparse fields to include more sources.
             # When extended sources are enabled, allow highly elliptical galaxies
@@ -2897,7 +3218,7 @@ class ImageDistortionCorrector:
                 # Upper FWHM threshold: reject galaxies while allowing moderate
                 # extension.  Extended sources need a wider window (10x) since
                 # SExtractor FWHM can be inflated by blending/noise.
-                "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{_fwhm_upper_mult*fwhm_ref_pix:.2f}",
+                "FWHM_THRESHOLDS": f"{0.3 * fwhm_ref_pix:.2f},{_fwhm_upper_mult * fwhm_ref_pix:.2f}",
             }
             # SCAMP does not accept DISTORT_DEGREES=0 ("keyword out of range").
             # Use 1 as the minimum - degree 1 is a linear WCS (shift/rotation/scale)
@@ -2908,11 +3229,19 @@ class ImageDistortionCorrector:
             distort_label = max(1, distort_degrees)
             self.logger.info(
                 'SCAMP:\t\tcrossid=%.1f" maxerr=%.1f" distort=%d%s%s '
-                'SN=[%s] nmax=%d pixscale=%.2f posangle=%.1f deg '
-                '(ref SIP/PV order=%d, %d matched)',
-                crossid_arcsec, position_maxerr_arcsec, distort_label, sparse_note, ext_note,
-                sn_thresholds, _match_nmax, _pixscale_maxerr, _posangle_maxerr,
-                ref_distort_order, _num_matched,
+                "SN=[%s] nmax=%d pixscale=%.2f posangle=%.1f deg "
+                "(ref SIP/PV order=%d, %d matched)",
+                crossid_arcsec,
+                position_maxerr_arcsec,
+                distort_label,
+                sparse_note,
+                ext_note,
+                sn_thresholds,
+                _match_nmax,
+                _pixscale_maxerr,
+                _posangle_maxerr,
+                ref_distort_order,
+                _num_matched,
             )
 
             # Allow YAML to override the automatic SWarp resampling choice for expert tuning.
@@ -2951,12 +3280,17 @@ class ImageDistortionCorrector:
 
             self.logger.info(
                 "SWarp:\t\tsci=%s ref=%s (per-image preference; common_grid uses combined method below)",
-                sci_resampling_method, ref_resampling_method,
+                sci_resampling_method,
+                ref_resampling_method,
             )
 
             self.logger.info(
-                "SWarp grid:\tcenter=(%.4f, %.4f) size=%dx%d scale=%.3f\"/px",
-                center_ra, center_dec, output_width, output_height, pix_scale,
+                'SWarp grid:\tcenter=(%.4f, %.4f) size=%dx%d scale=%.3f"/px',
+                center_ra,
+                center_dec,
+                output_width,
+                output_height,
+                pix_scale,
             )
 
             # Run SCAMP on reference catalog only, using science catalog as reference.
@@ -2990,7 +3324,8 @@ class ImageDistortionCorrector:
                             hdul[0].header["FILTER"] = "w_ref"
                         hdul.writeto(ref_cat_tmp, overwrite=True)
                     self.logger.debug(
-                        "Created temporary reference catalog with FILTER=w_ref: %s", ref_cat_tmp
+                        "Created temporary reference catalog with FILTER=w_ref: %s",
+                        ref_cat_tmp,
                     )
 
                     self.logger.info(
@@ -3009,8 +3344,12 @@ class ImageDistortionCorrector:
                     )
 
                 except Exception as e:
-                    self.logger.error("Failed to create temporary catalog for SCAMP: %s", e)
-                    self.logger.warning("Falling back to single-catalog SCAMP on reference...")
+                    self.logger.error(
+                        "Failed to create temporary catalog for SCAMP: %s", e
+                    )
+                    self.logger.warning(
+                        "Falling back to single-catalog SCAMP on reference..."
+                    )
                     scamp_result = self.run_scamp(
                         ref_catalog_scamp_backup,
                         reference_cat=sci_catalog_scamp_backup,
@@ -3026,13 +3365,15 @@ class ImageDistortionCorrector:
                     _retry_config = dict(scamp_config_ref)
                     _retry_config["DISTORT_DEGREES"] = 1
                     _retry_config["CROSSID_RADIUS"] = max(float(crossid_arcsec), 5.0)
-                    _retry_config["POSITION_MAXERR"] = max(float(position_maxerr_arcsec), 2.0)
+                    _retry_config["POSITION_MAXERR"] = max(
+                        float(position_maxerr_arcsec), 2.0
+                    )
                     # Relax quad matching tolerances for retry
                     _retry_config["PIXSCALE_MAXERR"] = max(_pixscale_maxerr * 1.5, 2.0)
                     _retry_config["POSANGLE_MAXERR"] = max(_posangle_maxerr * 1.5, 10.0)
                     self.logger.warning(
                         "SCAMP failed. Retrying with DISTORT_DEGREES=1, "
-                        "CROSSID_RADIUS=%.1f\", POSITION_MAXERR=%.1f\", "
+                        'CROSSID_RADIUS=%.1f", POSITION_MAXERR=%.1f", '
                         "PIXSCALE_MAXERR=%.2f, POSANGLE_MAXERR=%.1f.",
                         float(_retry_config["CROSSID_RADIUS"]),
                         float(_retry_config["POSITION_MAXERR"]),
@@ -3069,22 +3410,30 @@ class ImageDistortionCorrector:
                     pass
 
                 # Quality gate: check SCAMP astrometric residual
-                scamp_distortion = scamp_result.get("distortion") if isinstance(scamp_result, dict) else None
-                max_scamp_residual = float(align_cfg.get("alignment_max_scamp_residual_arcsec", 2.0))
+                scamp_distortion = (
+                    scamp_result.get("distortion")
+                    if isinstance(scamp_result, dict)
+                    else None
+                )
+                max_scamp_residual = float(
+                    align_cfg.get("alignment_max_scamp_residual_arcsec", 2.0)
+                )
                 if isinstance(scamp_distortion, dict):
                     scamp_rms = scamp_distortion.get("astrometric_rms_arcsec")
                     scamp_nstars = scamp_distortion.get("n_matched_stars")
                     if scamp_rms is not None and scamp_rms > max_scamp_residual:
                         self.logger.warning(
-                            "SCAMP astrometric residual large (%.3f\" > %.1f\"). "
+                            'SCAMP astrometric residual large (%.3f" > %.1f"). '
                             "Proceeding with SWarp - post-SWarp verification gate will decide.",
-                            scamp_rms, max_scamp_residual,
+                            scamp_rms,
+                            max_scamp_residual,
                         )
                     if scamp_nstars is not None and scamp_nstars < min_matched:
                         self.logger.warning(
                             "SCAMP matched only %d stars (< %d minimum). "
                             "Proceeding with SWarp - post-SWarp verification gate will decide.",
-                            scamp_nstars, min_matched,
+                            scamp_nstars,
+                            min_matched,
                         )
                     if scamp_rms is None and scamp_nstars is None:
                         self.logger.warning(
@@ -3123,7 +3472,11 @@ class ImageDistortionCorrector:
                 head_src = head_by_stem.get(orig_stem)
             # Fallback: single .head key (non-temp-catalog SCAMP path)
             if not head_src:
-                head_src = scamp_result.get("head_file") if isinstance(scamp_result, dict) else None
+                head_src = (
+                    scamp_result.get("head_file")
+                    if isinstance(scamp_result, dict)
+                    else None
+                )
 
             if head_src and Path(head_src).exists():
                 head_dst = fits_copy.with_suffix(".head")
@@ -3137,7 +3490,9 @@ class ImageDistortionCorrector:
                         )
                 # Normalize CTYPE codes so SWarp recognizes PV/SIP distortion.
                 if _normalize_head_file(head_dst):
-                    self.logger.info("Normalized .head projection codes for %s SWarp", label)
+                    self.logger.info(
+                        "Normalized .head projection codes for %s SWarp", label
+                    )
                 # Convert reference's original SIP distortion to PV in the .head.
                 # SCAMP writes PV (TPV) keywords at the feasible degree, which
                 # loses high-order SIP when feasible_degree < required_degree.
@@ -3146,13 +3501,13 @@ class ImageDistortionCorrector:
                 # lower-degree PV while keeping SCAMP's linear CRVAL/CD/CRPIX.
                 # SWarp only reads PV/TPV - it silently ignores SIP keywords.
                 if preserve_sip_in_head:
-                    self._preserve_reference_sip_in_head(
-                        head_dst, ref_image_copy
-                    )
+                    self._preserve_reference_sip_in_head(head_dst, ref_image_copy)
             else:
                 self.logger.warning(
                     "No SCAMP .head found for %s image (searched stems: %s, available: %s)",
-                    label, [cat_tmp_stem, Path(orig_cat_path).stem], list(head_by_stem.keys()),
+                    label,
+                    [cat_tmp_stem, Path(orig_cat_path).stem],
+                    list(head_by_stem.keys()),
                 )
 
             # Plot matched sources side-by-side with SCAMP-matched sources overlaid.
@@ -3168,12 +3523,14 @@ class ImageDistortionCorrector:
                 )
             try:
                 from ..core.plotting_utils import get_plot_ext
+
                 self.plot_matched_sources_side_by_side(
                     sci_image_path=str(sci_image_copy),
                     ref_image_path=str(ref_image_copy),
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
-                    output_plot_path=output_dir / f"Matched_Sources_{Path(sci_image_copy).stem}{get_plot_ext(self.input_yaml)}",
+                    output_plot_path=output_dir
+                    / f"Matched_Sources_{Path(sci_image_copy).stem}{get_plot_ext(self.input_yaml)}",
                     label_fontsize=7,
                     circle_radius_sci=fwhm_sci_pix,
                     circle_radius_ref=fwhm_ref_pix,
@@ -3191,15 +3548,19 @@ class ImageDistortionCorrector:
             # This is unavoidable (both images must share the same grid), but the
             # warning helps diagnose PSF mismatch issues in SFFT.
             if sci_pix_scale > 0 and ref_pix_scale > 0:
-                _ps_ratio = max(sci_pix_scale, ref_pix_scale) / min(sci_pix_scale, ref_pix_scale)
+                _ps_ratio = max(sci_pix_scale, ref_pix_scale) / min(
+                    sci_pix_scale, ref_pix_scale
+                )
                 if _ps_ratio > 1.5:
                     self.logger.warning(
-                        "Large pixel scale ratio (%.2fx): sci=%.4f\"/px\n"
-                        "    ref=%.4f\"/px. Resampling to the coarser grid\n"
+                        'Large pixel scale ratio (%.2fx): sci=%.4f"/px\n'
+                        '    ref=%.4f"/px. Resampling to the coarser grid\n'
                         "    will degrade the PSF of the finer-scale image.\n"
                         "    SFFT kernel should compensate, but subtraction\n"
                         "    quality may be reduced.",
-                        _ps_ratio, sci_pix_scale, ref_pix_scale,
+                        _ps_ratio,
+                        sci_pix_scale,
+                        ref_pix_scale,
                     )
 
             # Science has no .head file (it defines the output grid via its WCS
@@ -3222,8 +3583,12 @@ class ImageDistortionCorrector:
             ref_fwhm_resample = (
                 ref_hdr_fwhm if (ref_hdr_fwhm and ref_hdr_fwhm > 0) else fwhm_ref_pix
             )
-            sci_fwhm_valid = sci_fwhm_resample is not None and np.isfinite(sci_fwhm_resample)
-            ref_fwhm_valid = ref_fwhm_resample is not None and np.isfinite(ref_fwhm_resample)
+            sci_fwhm_valid = sci_fwhm_resample is not None and np.isfinite(
+                sci_fwhm_resample
+            )
+            ref_fwhm_valid = ref_fwhm_resample is not None and np.isfinite(
+                ref_fwhm_resample
+            )
 
             # Use three-tier strategy for combined resampling
             # Default to most conservative method if either image needs it
@@ -3274,9 +3639,13 @@ class ImageDistortionCorrector:
 
             if resample_mode == "wcs_only":
                 # Skip SWarp resampling - apply SCAMP WCS correction to header only
-                self.logger.info("Skipping SWarp resampling (WCS-only alignment for template subtraction)")
+                self.logger.info(
+                    "Skipping SWarp resampling (WCS-only alignment for template subtraction)"
+                )
 
-                aligned_ref = output_dir / f"aligned_ref_{Path(reference_image).stem}.fits"
+                aligned_ref = (
+                    output_dir / f"aligned_ref_{Path(reference_image).stem}.fits"
+                )
                 # Science image is never modified - use the copy as-is
                 aligned_sci = Path(sci_image_for_swarp)
 
@@ -3284,20 +3653,86 @@ class ImageDistortionCorrector:
 
                 head_file = Path(ref_image_copy).with_suffix(".head")
                 if head_file.exists():
-                    self.logger.info("Applying SCAMP .head WCS to reference image header")
+                    self.logger.info(
+                        "Applying SCAMP .head WCS to reference image header"
+                    )
                     try:
                         from ..pipeline.wcs import _normalize_projection_codes
+
                         scamp_header = fits.Header.fromtextfile(str(head_file))
-                        scamp_header = _normalize_projection_codes(scamp_header, inplace=False)
-                        with fits.open(aligned_ref, mode="update", memmap=False) as hdul:
+                        scamp_header = _normalize_projection_codes(
+                            scamp_header, inplace=False
+                        )
+                        with fits.open(
+                            aligned_ref, mode="update", memmap=False
+                        ) as hdul:
                             hdr = hdul[0].header
                             hdr = remove_wcs_from_header(hdr)
+                            # Validate the SCAMP .head solution itself before
+                            # merging: refuse an uninvertible/malformed WCS
+                            # rather than shipping a broken product.
+                            _scamp_valid = False
+                            try:
+                                from astropy.wcs import WCS as _AWCS
+
+                                _w = _AWCS(scamp_header, relax=True)
+                                if _w.has_celestial:
+                                    _nyv, _nxv = hdul[0].data.shape
+                                    _ok = True
+                                    for _px, _py in [
+                                        (0.0, 0.0),
+                                        (float(_nxv - 1), 0.0),
+                                        (0.0, float(_nyv - 1)),
+                                        (float(_nxv - 1), float(_nyv - 1)),
+                                        ((_nxv - 1) / 2.0, (_nyv - 1) / 2.0),
+                                    ]:
+                                        _ra, _dec = _w.all_pix2world([_px], [_py], 0)
+                                        if not (
+                                            np.all(np.isfinite(_ra))
+                                            and np.all(np.isfinite(_dec))
+                                        ):
+                                            _ok = False
+                                            break
+                                        _px2, _py2 = _w.all_world2pix(_ra, _dec, 0)
+                                        if not (
+                                            np.all(np.isfinite(_px2))
+                                            and np.all(np.isfinite(_py2))
+                                        ):
+                                            _ok = False
+                                            break
+                                    if _ok:
+                                        _scamp_valid = True
+                            except Exception:
+                                _scamp_valid = False
+                            if not _scamp_valid:
+                                raise ValueError(
+                                    "SCAMP .head produces an invalid/non-invertible "
+                                    "WCS; refusing to apply it."
+                                )
                             _wcs_prefixes = (
-                                "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT",
-                                "CROTA", "PV", "LONPOLE", "LATPOLE", "EQUINOX",
-                                "WCSNAME", "CUNIT", "WCSAXES", "PROJP", "LTV",
-                                "LTM", "RADECSYS", "RADESYS", "RADYSYS",
-                                "LONGPOLE", "TNX", "SIP_",
+                                "CRPIX",
+                                "CRVAL",
+                                "CTYPE",
+                                "CD",
+                                "PC",
+                                "CDELT",
+                                "CROTA",
+                                "PV",
+                                "LONPOLE",
+                                "LATPOLE",
+                                "EQUINOX",
+                                "WCSNAME",
+                                "CUNIT",
+                                "WCSAXES",
+                                "PROJP",
+                                "LTV",
+                                "LTM",
+                                "RADECSYS",
+                                "RADESYS",
+                                "RADYSYS",
+                                "LONGPOLE",
+                                "TNX",
+                                "SIP_",
                             )
                             _wcs_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
                             for key in scamp_header:
@@ -3306,17 +3741,22 @@ class ImageDistortionCorrector:
                                 is_wcs = any(key.startswith(p) for p in _wcs_prefixes)
                                 if not is_wcs and "_" in key:
                                     stem = key.split("_")[0] + "_"
-                                    is_wcs = stem in _wcs_stems and key.startswith(stem.rstrip("_"))
+                                    is_wcs = stem in _wcs_stems and key.startswith(
+                                        stem.rstrip("_")
+                                    )
                                 if is_wcs:
                                     hdr[key] = scamp_header[key]
                             hdr["NAXIS1"] = hdul[0].data.shape[1]
                             hdr["NAXIS2"] = hdul[0].data.shape[0]
                             hdul.flush()
-                        self.logger.info("SCAMP WCS applied to reference image: %s", aligned_ref)
+                        self.logger.info(
+                            "SCAMP WCS applied to reference image: %s", aligned_ref
+                        )
                     except Exception as e:
                         self.logger.warning(
                             "Failed to apply SCAMP .head to reference image: %s. "
-                            "Reference retains original WCS.", e
+                            "Reference retains original WCS.",
+                            e,
                         )
                 else:
                     self.logger.warning(
@@ -3324,24 +3764,36 @@ class ImageDistortionCorrector:
                         head_file,
                     )
 
-                self.logger.info("WCS-only alignment complete: sci=%s, ref=%s", aligned_sci, aligned_ref)
+                self.logger.info(
+                    "WCS-only alignment complete: sci=%s, ref=%s",
+                    aligned_sci,
+                    aligned_ref,
+                )
 
             elif resample_mode == "native_scale":
                 # Each image resampled independently keeping its native pixel scale,
                 # but aligned to the same sky center. Output shapes differ if pixel
                 # scales differ, but sky coverage is approximately matched.
                 self.logger.info(
-                    "Using native-scale resampling: science=%.4f\"/px ref=%.4f\"/px",
-                    sci_pix_scale, ref_pix_scale,
+                    'Using native-scale resampling: science=%.4f"/px ref=%.4f"/px',
+                    sci_pix_scale,
+                    ref_pix_scale,
                 )
 
                 # Compute reference IMAGE_SIZE to match science sky coverage
-                ref_output_width = int(round(sci_shape[1] * sci_pix_scale / ref_pix_scale))
-                ref_output_height = int(round(sci_shape[0] * sci_pix_scale / ref_pix_scale))
+                ref_output_width = int(
+                    round(sci_shape[1] * sci_pix_scale / ref_pix_scale)
+                )
+                ref_output_height = int(
+                    round(sci_shape[0] * sci_pix_scale / ref_pix_scale)
+                )
 
                 self.logger.info(
                     "Native-scale shapes: science=%dx%d reference=%dx%d",
-                    sci_shape[1], sci_shape[0], ref_output_width, ref_output_height,
+                    sci_shape[1],
+                    sci_shape[0],
+                    ref_output_width,
+                    ref_output_height,
                 )
 
                 resample_dir_sci = resample_dir / "sci"
@@ -3464,15 +3916,21 @@ class ImageDistortionCorrector:
                 try:
                     _sci_out = fits.getdata(aligned_sci)
                     _ref_out = fits.getdata(aligned_ref)
-                    _sci_nan_frac = float(np.count_nonzero(~np.isfinite(_sci_out))) / _sci_out.size
-                    _ref_nan_frac = float(np.count_nonzero(~np.isfinite(_ref_out))) / _ref_out.size
+                    _sci_nan_frac = (
+                        float(np.count_nonzero(~np.isfinite(_sci_out))) / _sci_out.size
+                    )
+                    _ref_nan_frac = (
+                        float(np.count_nonzero(~np.isfinite(_ref_out))) / _ref_out.size
+                    )
                     self.logger.info(
                         "SWarp coverage:\tsci=%.1f%% ref=%.1f%%",
                         (1.0 - _sci_nan_frac) * 100,
                         (1.0 - _ref_nan_frac) * 100,
                     )
                 except Exception as _diag_e:
-                    self.logger.debug("Post-SWarp coverage diagnostic failed: %s", _diag_e)
+                    self.logger.debug(
+                        "Post-SWarp coverage diagnostic failed: %s", _diag_e
+                    )
 
             # Copy to the expected resampled_dir location for downstream logic
             resampled_dir = resample_dir
@@ -3500,9 +3958,7 @@ class ImageDistortionCorrector:
             _post_swarp_verify = bool(
                 align_cfg.get(
                     "post_swarp_verify",
-                    align_cfg.get(
-                        "alignment_require_post_swarp_verification", True
-                    ),
+                    align_cfg.get("alignment_require_post_swarp_verification", True),
                 )
             )
             if not _post_swarp_verify:
@@ -3511,370 +3967,426 @@ class ImageDistortionCorrector:
                     "skipping SExtractor cross-match."
                 )
             elif resample_mode in ("wcs_only", "native_scale"):
-                self.logger.info(
-                    "Skipping pixel-space alignment verification for resample_mode=%s "
-                    "(images on different pixel grids).",
+                self.logger.warning(
+                    "Skipping pixel-space alignment verification for "
+                    "resample_mode=%s (images on different pixel grids).  A "
+                    "SCAMP error of several pixels would not be caught here; "
+                    "downstream consumers must re-verify alignment after "
+                    "resampling to a common grid.",
                     resample_mode,
                 )
             else:
-              try:
-                self.logger.info("Verifying post-SWarp alignment via SExtractor cross-match...")
-                _verify_dir = str(Path(output_dir) / "post_swarp_verify")
-                # Use the actual PSF FWHM for detection so windowed centroids are
-                # measured with a matched filter.  Keep the match-tolerance FWHM
-                # capped at 4 px so the nearest-neighbor search stays tight and
-                # false matches are rejected.
-                _verify_fwhm = max(max(fwhm_sci_pix, fwhm_ref_pix), 2.5)
-                _match_tol_fwhm = min(_verify_fwhm, 4.0)
-
-                # Sparse-field retry: if the first SExtractor pass detects
-                # very few sources, retry with an even lower detection
-                # threshold.  Sparse fields (e.g. high-Galactic-latitude) can
-                # have only 3-10 detectable sources; the standard alignment
-                # config (DETECT_THRESH=0.8) may still miss the faintest ones.
-                _SPARSE_RETRY_THRESH = 5
-                _SPARSE_SEX_OVERRIDE = {
-                    "DETECT_THRESH": 0.5,
-                    "ANALYSIS_THRESH": 0.3,
-                    "DETECT_MINAREA": 1,
-                    "BACK_SIZE": 16,
-                }
-
-                with ThreadPoolExecutor(max_workers=2) as _pool:
-                    _sci_fut = _pool.submit(
-                        self.run_sextractor,
-                        str(aligned_sci),
-                        output_dir=str(Path(_verify_dir) / "sci"),
-                        for_alignment=True,
-                        fwhm_pixels=_verify_fwhm,
-                    )
-                    _ref_fut = _pool.submit(
-                        self.run_sextractor,
-                        str(aligned_ref),
-                        output_dir=str(Path(_verify_dir) / "ref"),
-                        for_alignment=True,
-                        fwhm_pixels=_verify_fwhm,
-                    )
-                    sci_sex_result = _sci_fut.result()
-                    ref_sex_result = _ref_fut.result()
-
-                sci_cat_verify = sci_sex_result.get("catalog")
-                ref_cat_verify = ref_sex_result.get("catalog")
-
-                # Filter verification catalogs to point-like sources only.
-                # Extended galaxies have centroids that differ between filters and
-                # exposures, which inflates the measured RMS/P95 and causes false
-                # rejection of good SCAMP+SWarp alignments.  Alignment itself still
-                # uses extended sources when enabled; verification must measure
-                # astrometric residuals on a clean stellar sample.
-                _verify_fwhm_ref = max(fwhm_sci_pix, fwhm_ref_pix)
-                sci_cat_verify = self._filter_pointlike_sources(
-                    sci_cat_verify, _verify_fwhm_ref
-                )
-                ref_cat_verify = self._filter_pointlike_sources(
-                    ref_cat_verify, _verify_fwhm_ref
-                )
-
-                n_sci_det = len(sci_cat_verify) if sci_cat_verify is not None else 0
-                n_ref_det = len(ref_cat_verify) if ref_cat_verify is not None else 0
-
-                # Sparse-field retry with even lower threshold
-                if n_sci_det < _SPARSE_RETRY_THRESH or n_ref_det < _SPARSE_RETRY_THRESH:
+                try:
                     self.logger.info(
-                        "Sparse field detected (%d sci / %d ref sources); "
-                        "retrying SExtractor with DETECT_THRESH=0.5",
-                        n_sci_det, n_ref_det,
+                        "Verifying post-SWarp alignment via SExtractor cross-match..."
                     )
-                    if n_sci_det < _SPARSE_RETRY_THRESH:
-                        sci_sex_result = self.run_sextractor(
+                    _verify_dir = str(Path(output_dir) / "post_swarp_verify")
+                    # Use the actual PSF FWHM for detection so windowed centroids are
+                    # measured with a matched filter.  Keep the match-tolerance FWHM
+                    # capped at 4 px so the nearest-neighbor search stays tight and
+                    # false matches are rejected.
+                    _verify_fwhm = max(max(fwhm_sci_pix, fwhm_ref_pix), 2.5)
+                    _match_tol_fwhm = min(_verify_fwhm, 4.0)
+
+                    # Sparse-field retry: if the first SExtractor pass detects
+                    # very few sources, retry with an even lower detection
+                    # threshold.  Sparse fields (e.g. high-Galactic-latitude) can
+                    # have only 3-10 detectable sources; the standard alignment
+                    # config (DETECT_THRESH=0.8) may still miss the faintest ones.
+                    _SPARSE_RETRY_THRESH = 5
+                    _SPARSE_SEX_OVERRIDE = {
+                        "DETECT_THRESH": 0.5,
+                        "ANALYSIS_THRESH": 0.3,
+                        "DETECT_MINAREA": 1,
+                        "BACK_SIZE": 16,
+                    }
+
+                    with ThreadPoolExecutor(max_workers=2) as _pool:
+                        _sci_fut = _pool.submit(
+                            self.run_sextractor,
                             str(aligned_sci),
-                            output_dir=str(Path(_verify_dir) / "sci_sparse"),
+                            output_dir=str(Path(_verify_dir) / "sci"),
                             for_alignment=True,
                             fwhm_pixels=_verify_fwhm,
-                            config=_SPARSE_SEX_OVERRIDE,
                         )
-                        sci_cat_verify = self._filter_pointlike_sources(
-                            sci_sex_result.get("catalog"), _verify_fwhm_ref
-                        )
-                        n_sci_det = len(sci_cat_verify) if sci_cat_verify is not None else 0
-                    if n_ref_det < _SPARSE_RETRY_THRESH:
-                        ref_sex_result = self.run_sextractor(
+                        _ref_fut = _pool.submit(
+                            self.run_sextractor,
                             str(aligned_ref),
-                            output_dir=str(Path(_verify_dir) / "ref_sparse"),
+                            output_dir=str(Path(_verify_dir) / "ref"),
                             for_alignment=True,
                             fwhm_pixels=_verify_fwhm,
-                            config=_SPARSE_SEX_OVERRIDE,
                         )
-                        ref_cat_verify = self._filter_pointlike_sources(
-                            ref_sex_result.get("catalog"), _verify_fwhm_ref
+                        sci_sex_result = _sci_fut.result()
+                        ref_sex_result = _ref_fut.result()
+
+                    sci_cat_verify = sci_sex_result.get("catalog")
+                    ref_cat_verify = ref_sex_result.get("catalog")
+
+                    # Filter verification catalogs to point-like sources only.
+                    # Extended galaxies have centroids that differ between filters and
+                    # exposures, which inflates the measured RMS/P95 and causes false
+                    # rejection of good SCAMP+SWarp alignments.  Alignment itself still
+                    # uses extended sources when enabled; verification must measure
+                    # astrometric residuals on a clean stellar sample.
+                    _verify_fwhm_ref = max(fwhm_sci_pix, fwhm_ref_pix)
+                    sci_cat_verify = self._filter_pointlike_sources(
+                        sci_cat_verify, _verify_fwhm_ref
+                    )
+                    ref_cat_verify = self._filter_pointlike_sources(
+                        ref_cat_verify, _verify_fwhm_ref
+                    )
+
+                    n_sci_det = len(sci_cat_verify) if sci_cat_verify is not None else 0
+                    n_ref_det = len(ref_cat_verify) if ref_cat_verify is not None else 0
+
+                    # Sparse-field retry with even lower threshold
+                    if (
+                        n_sci_det < _SPARSE_RETRY_THRESH
+                        or n_ref_det < _SPARSE_RETRY_THRESH
+                    ):
+                        self.logger.info(
+                            "Sparse field detected (%d sci / %d ref sources); "
+                            "retrying SExtractor with DETECT_THRESH=0.5",
+                            n_sci_det,
+                            n_ref_det,
                         )
-                        n_ref_det = len(ref_cat_verify) if ref_cat_verify is not None else 0
+                        if n_sci_det < _SPARSE_RETRY_THRESH:
+                            sci_sex_result = self.run_sextractor(
+                                str(aligned_sci),
+                                output_dir=str(Path(_verify_dir) / "sci_sparse"),
+                                for_alignment=True,
+                                fwhm_pixels=_verify_fwhm,
+                                config=_SPARSE_SEX_OVERRIDE,
+                            )
+                            sci_cat_verify = self._filter_pointlike_sources(
+                                sci_sex_result.get("catalog"), _verify_fwhm_ref
+                            )
+                            n_sci_det = (
+                                len(sci_cat_verify) if sci_cat_verify is not None else 0
+                            )
+                        if n_ref_det < _SPARSE_RETRY_THRESH:
+                            ref_sex_result = self.run_sextractor(
+                                str(aligned_ref),
+                                output_dir=str(Path(_verify_dir) / "ref_sparse"),
+                                for_alignment=True,
+                                fwhm_pixels=_verify_fwhm,
+                                config=_SPARSE_SEX_OVERRIDE,
+                            )
+                            ref_cat_verify = self._filter_pointlike_sources(
+                                ref_sex_result.get("catalog"), _verify_fwhm_ref
+                            )
+                            n_ref_det = (
+                                len(ref_cat_verify) if ref_cat_verify is not None else 0
+                            )
 
-                self.logger.info(
-                    "Alignment verification: detected %d sci / %d ref sources",
-                    n_sci_det, n_ref_det,
-                )
+                    self.logger.info(
+                        "Alignment verification: detected %d sci / %d ref sources",
+                        n_sci_det,
+                        n_ref_det,
+                    )
 
-                # Sparse-field: allow verification with as few as 2 sources
-                # on each side.  With 2 mutual matches we still get a
-                # meaningful median offset.
-                _min_det_for_verify = 2 if min(n_sci_det, n_ref_det) < 5 else 3
+                    # Sparse-field: allow verification with as few as 2 sources
+                    # on each side.  With 2 mutual matches we still get a
+                    # meaningful median offset.
+                    _min_det_for_verify = 2 if min(n_sci_det, n_ref_det) < 5 else 3
 
-                if sci_cat_verify is not None and ref_cat_verify is not None and n_sci_det >= _min_det_for_verify and n_ref_det >= _min_det_for_verify:
-                    from scipy.spatial import cKDTree
-                    _x_col = "XWIN_IMAGE" if "XWIN_IMAGE" in sci_cat_verify.colnames else "X_IMAGE"
-                    _y_col = "YWIN_IMAGE" if "YWIN_IMAGE" in sci_cat_verify.colnames else "Y_IMAGE"
-                    # SExtractor uses 1-based pixel coordinates; convert to 0-based
-                    sci_xy = np.column_stack([
-                        np.asarray(sci_cat_verify[_x_col], float) - 1.0,
-                        np.asarray(sci_cat_verify[_y_col], float) - 1.0,
-                    ])
-                    ref_xy = np.column_stack([
-                        np.asarray(ref_cat_verify[_x_col], float) - 1.0,
-                        np.asarray(ref_cat_verify[_y_col], float) - 1.0,
-                    ])
+                    if (
+                        sci_cat_verify is not None
+                        and ref_cat_verify is not None
+                        and n_sci_det >= _min_det_for_verify
+                        and n_ref_det >= _min_det_for_verify
+                    ):
+                        from scipy.spatial import cKDTree
 
-                    # Mutual nearest-neighbor matching: a sci source
-                    # matches a ref source only if each is the other's
-                    # closest neighbor.  This eliminates false matches
-                    # that artificially lower the measured offset.
-                    tree_ref = cKDTree(ref_xy)
-                    tree_sci = cKDTree(sci_xy)
+                        _x_col = (
+                            "XWIN_IMAGE"
+                            if "XWIN_IMAGE" in sci_cat_verify.colnames
+                            else "X_IMAGE"
+                        )
+                        _y_col = (
+                            "YWIN_IMAGE"
+                            if "YWIN_IMAGE" in sci_cat_verify.colnames
+                            else "Y_IMAGE"
+                        )
+                        # SExtractor uses 1-based pixel coordinates; convert to 0-based
+                        sci_xy = np.column_stack(
+                            [
+                                np.asarray(sci_cat_verify[_x_col], float) - 1.0,
+                                np.asarray(sci_cat_verify[_y_col], float) - 1.0,
+                            ]
+                        )
+                        ref_xy = np.column_stack(
+                            [
+                                np.asarray(ref_cat_verify[_x_col], float) - 1.0,
+                                np.asarray(ref_cat_verify[_y_col], float) - 1.0,
+                            ]
+                        )
 
-                    d_sr, i_sr = tree_ref.query(sci_xy, k=1)
-                    d_rs, i_rs = tree_sci.query(ref_xy, k=1)
+                        # Mutual nearest-neighbor matching: a sci source
+                        # matches a ref source only if each is the other's
+                        # closest neighbor.  This eliminates false matches
+                        # that artificially lower the measured offset.
+                        tree_ref = cKDTree(ref_xy)
+                        tree_sci = cKDTree(sci_xy)
 
-                    idx_s = np.arange(len(sci_xy), dtype=int)
-                    mutual = (i_rs[i_sr] == idx_s) & np.isfinite(d_sr)
+                        d_sr, i_sr = tree_ref.query(sci_xy, k=1)
+                        d_rs, i_rs = tree_sci.query(ref_xy, k=1)
 
-                    # Adaptive match tolerance: in sparse fields the
-                    # SWarp resampling kernel can shift centroids by
-                    # up to ~1 px.  Use 2*FWHM normally, but widen to
-                    # 3*FWHM when very few sources are available.
-                    _n_total = len(sci_xy) + len(ref_xy)
-                    if _n_total < 10:
-                        match_tol = 3.0 * _match_tol_fwhm
-                    else:
-                        match_tol = 2.0 * _match_tol_fwhm
-                    good = mutual & (d_sr < match_tol)
-                    n_matched_verify = int(good.sum())
+                        idx_s = np.arange(len(sci_xy), dtype=int)
+                        mutual = (i_rs[i_sr] == idx_s) & np.isfinite(d_sr)
 
-                    # Sparse-field: accept 2 matches (median of 2 still
-                    # estimates a constant offset).
-                    _min_matches = 2 if _n_total < 10 else 3
+                        # Adaptive match tolerance: in sparse fields the
+                        # SWarp resampling kernel can shift centroids by
+                        # up to ~1 px.  Use 2*FWHM normally, but widen to
+                        # 3*FWHM when very few sources are available.
+                        _n_total = len(sci_xy) + len(ref_xy)
+                        if _n_total < 10:
+                            match_tol = 3.0 * _match_tol_fwhm
+                        else:
+                            match_tol = 2.0 * _match_tol_fwhm
+                        good = mutual & (d_sr < match_tol)
+                        n_matched_verify = int(good.sum())
 
-                    if n_matched_verify >= _min_matches:
-                        dx = sci_xy[good, 0] - ref_xy[i_sr[good], 0]
-                        dy = sci_xy[good, 1] - ref_xy[i_sr[good], 1]
+                        # Sparse-field: accept 2 matches (median of 2 still
+                        # estimates a constant offset).
+                        _min_matches = 2 if _n_total < 10 else 3
 
-                        # Skip sigma clipping for small samples -
-                        # MAD-based sigma estimates are unstable for
-                        # N < 8 and can discard valid matches.
-                        if n_matched_verify >= 8:
-                            from astropy.stats import sigma_clip as _sc_verify
-                            dx_clipped = _sc_verify(dx, sigma=2.5, maxiters=3)
-                            dy_clipped = _sc_verify(dy, sigma=2.5, maxiters=3)
-                            both_ok = ~dx_clipped.mask & ~dy_clipped.mask
-                            if np.sum(both_ok) >= _min_matches:
-                                _dx_use = dx[both_ok]
-                                _dy_use = dy[both_ok]
-                                _matched_xy = sci_xy[good][both_ok]
+                        if n_matched_verify >= _min_matches:
+                            dx = sci_xy[good, 0] - ref_xy[i_sr[good], 0]
+                            dy = sci_xy[good, 1] - ref_xy[i_sr[good], 1]
+
+                            # Skip sigma clipping for small samples -
+                            # MAD-based sigma estimates are unstable for
+                            # N < 8 and can discard valid matches.
+                            if n_matched_verify >= 8:
+                                from astropy.stats import sigma_clip as _sc_verify
+
+                                dx_clipped = _sc_verify(dx, sigma=2.5, maxiters=3)
+                                dy_clipped = _sc_verify(dy, sigma=2.5, maxiters=3)
+                                both_ok = ~dx_clipped.mask & ~dy_clipped.mask
+                                if np.sum(both_ok) >= _min_matches:
+                                    _dx_use = dx[both_ok]
+                                    _dy_use = dy[both_ok]
+                                    _matched_xy = sci_xy[good][both_ok]
+                                else:
+                                    _dx_use = dx
+                                    _dy_use = dy
+                                    _matched_xy = sci_xy[good]
                             else:
                                 _dx_use = dx
                                 _dy_use = dy
                                 _matched_xy = sci_xy[good]
-                        else:
-                            _dx_use = dx
-                            _dy_use = dy
-                            _matched_xy = sci_xy[good]
 
-                        med_dx = float(np.median(_dx_use))
-                        med_dy = float(np.median(_dy_use))
-                        rms_dx = float(np.std(_dx_use))
-                        rms_dy = float(np.std(_dy_use))
-                        _indiv_offsets = np.sqrt(_dx_use**2 + _dy_use**2)
-                        _p95_offset = float(np.percentile(_indiv_offsets, 95))
-                        _max_offset = float(np.max(_indiv_offsets))
-                        _local_k = min(3, len(_matched_xy))
-                        _local_indices = cKDTree(_matched_xy).query(
-                            _matched_xy, k=_local_k
-                        )[1]
-                        _local_dx = np.median(_dx_use[_local_indices], axis=1)
-                        _local_dy = np.median(_dy_use[_local_indices], axis=1)
-                        _local_offsets = np.hypot(_local_dx, _local_dy)
-                        _local_offset_p95 = float(
-                            np.percentile(_local_offsets, 95)
-                        )
-                        _local_offset_max = float(np.max(_local_offsets))
+                            med_dx = float(np.median(_dx_use))
+                            med_dy = float(np.median(_dy_use))
+                            rms_dx = float(np.std(_dx_use))
+                            rms_dy = float(np.std(_dy_use))
+                            _indiv_offsets = np.sqrt(_dx_use**2 + _dy_use**2)
+                            _p95_offset = float(np.percentile(_indiv_offsets, 95))
+                            _max_offset = float(np.max(_indiv_offsets))
+                            _local_k = min(3, len(_matched_xy))
+                            _local_indices = cKDTree(_matched_xy).query(
+                                _matched_xy, k=_local_k
+                            )[1]
+                            _local_dx = np.median(_dx_use[_local_indices], axis=1)
+                            _local_dy = np.median(_dy_use[_local_indices], axis=1)
+                            _local_offsets = np.hypot(_local_dx, _local_dy)
+                            _local_offset_p95 = float(np.percentile(_local_offsets, 95))
+                            _local_offset_max = float(np.max(_local_offsets))
 
-                        # --- Per-quadrant verification ---
-                        # Ensure ALL parts of the image are aligned, not just
-                        # the field center.  A good global median can hide a
-                        # systematic offset in one quadrant caused by
-                        # distortion-model divergence at the field edges.
-                        # We split the matched sources into a 2x2 grid based
-                        # on the median (x, y) of the matched sample and
-                        # report per-quadrant median offset and max offset.
-                        _quad_med_x = float(np.median(_matched_xy[:, 0]))
-                        _quad_med_y = float(np.median(_matched_xy[:, 1]))
-                        _quadrant_stats = {}
-                        _quadrant_labels = [
-                            ("bottom_left", _matched_xy[:, 0] <= _quad_med_x, _matched_xy[:, 1] <= _quad_med_y),
-                            ("bottom_right", _matched_xy[:, 0] > _quad_med_x, _matched_xy[:, 1] <= _quad_med_y),
-                            ("top_left", _matched_xy[:, 0] <= _quad_med_x, _matched_xy[:, 1] > _quad_med_y),
-                            ("top_right", _matched_xy[:, 0] > _quad_med_x, _matched_xy[:, 1] > _quad_med_y),
-                        ]
-                        _worst_quadrant_offset = 0.0
-                        for _qlabel, _qx_mask, _qy_mask in _quadrant_labels:
-                            _qmask = _qx_mask & _qy_mask
-                            _qn = int(_qmask.sum())
-                            if _qn >= 2:
-                                _q_dx = _dx_use[_qmask]
-                                _q_dy = _dy_use[_qmask]
-                                _q_med_off = float(np.sqrt(np.median(_q_dx)**2 + np.median(_q_dy)**2))
-                                _q_max_off = float(np.max(np.sqrt(_q_dx**2 + _q_dy**2)))
-                                _quadrant_stats[_qlabel] = {
-                                    "n": _qn,
-                                    "median_offset_px": _q_med_off,
-                                    "max_offset_px": _q_max_off,
-                                }
-                                if _q_med_off > _worst_quadrant_offset:
-                                    _worst_quadrant_offset = _q_med_off
-                        if _quadrant_stats:
-                            _quad_summary = ", ".join(
-                                f"{_ql}: n={_qd['n']} med={_qd['median_offset_px']:.2f}px max={_qd['max_offset_px']:.2f}px"
-                                for _ql, _qd in _quadrant_stats.items()
-                            )
-                            self.logger.info(
-                                "Per-quadrant alignment: %s; worst_quadrant_median=%.2f px",
-                                _quad_summary, _worst_quadrant_offset,
-                            )
-
-                        total_offset = np.sqrt(med_dx**2 + med_dy**2)
-                        self.logger.info(
-                            stat_block(
-                                "Alignment verification:",
-                                f"offset=({med_dx:.3f}, {med_dy:.3f}) px",
-                                f"RMS=({rms_dx:.3f}, {rms_dy:.3f}) px "
-                                f"total={total_offset:.3f} px",
-                                f"P95={_p95_offset:.3f} px "
-                                f"max={_max_offset:.3f} px "
-                                f"local-P95/max={_local_offset_p95:.3f}/"
-                                f"{_local_offset_max:.3f} px",
-                                f"{n_matched_verify} matches",
-                            )
-                        )
-
-                        alignment_metadata = {
-                            "offset_x": med_dx,
-                            "offset_y": med_dy,
-                            "rms_x": rms_dx,
-                            "rms_y": rms_dy,
-                            "n_matched": n_matched_verify,
-                            "p95_offset": _p95_offset,
-                            "max_offset": _max_offset,
-                            "local_offset_p95": _local_offset_p95,
-                            "local_offset_max": _local_offset_max,
-                            "quadrant_stats": _quadrant_stats,
-                            "worst_quadrant_offset": _worst_quadrant_offset,
-                        }
-
-                        # Spatial coverage check: matched sources confined to
-                        # a small region of the detector cannot validate
-                        # rotation/scale over the full field.  Defer the
-                        # decision to SCAMP's own astrometric residuals (the
-                        # elif branch below) instead of accepting on the
-                        # cluster alone.
-                        try:
-                            _v_hdr = fits.getheader(str(aligned_sci))
-                            _v_nx = float(_v_hdr.get("NAXIS1") or 0.0)
-                            _v_ny = float(_v_hdr.get("NAXIS2") or 0.0)
-                        except Exception:
-                            _v_nx = _v_ny = 0.0
-                        if _v_nx > 0 and _v_ny > 0 and len(_matched_xy) >= 2:
-                            _span_x = (
-                                float(_matched_xy[:, 0].max())
-                                - float(_matched_xy[:, 0].min())
-                            ) / _v_nx
-                            _span_y = (
-                                float(_matched_xy[:, 1].max())
-                                - float(_matched_xy[:, 1].min())
-                            ) / _v_ny
-                            if _span_x < 0.25 or _span_y < 0.25:
-                                self.logger.warning(
-                                    "Post-SWarp verification: %d matched sources "
-                                    "cover only %.0f%%x%.0f%% of the field - "
-                                    "cluster-limited verification; deferring "
-                                    "acceptance to SCAMP astrometric residuals.",
-                                    n_matched_verify, 100 * _span_x, 100 * _span_y,
+                            # --- Per-quadrant verification ---
+                            # Ensure ALL parts of the image are aligned, not just
+                            # the field center.  A good global median can hide a
+                            # systematic offset in one quadrant caused by
+                            # distortion-model divergence at the field edges.
+                            # We split the matched sources into a 2x2 grid based
+                            # on the median (x, y) of the matched sample and
+                            # report per-quadrant median offset and max offset.
+                            _quad_med_x = float(np.median(_matched_xy[:, 0]))
+                            _quad_med_y = float(np.median(_matched_xy[:, 1]))
+                            _quadrant_stats = {}
+                            _quadrant_labels = [
+                                (
+                                    "bottom_left",
+                                    _matched_xy[:, 0] <= _quad_med_x,
+                                    _matched_xy[:, 1] <= _quad_med_y,
+                                ),
+                                (
+                                    "bottom_right",
+                                    _matched_xy[:, 0] > _quad_med_x,
+                                    _matched_xy[:, 1] <= _quad_med_y,
+                                ),
+                                (
+                                    "top_left",
+                                    _matched_xy[:, 0] <= _quad_med_x,
+                                    _matched_xy[:, 1] > _quad_med_y,
+                                ),
+                                (
+                                    "top_right",
+                                    _matched_xy[:, 0] > _quad_med_x,
+                                    _matched_xy[:, 1] > _quad_med_y,
+                                ),
+                            ]
+                            _worst_quadrant_offset = 0.0
+                            for _qlabel, _qx_mask, _qy_mask in _quadrant_labels:
+                                _qmask = _qx_mask & _qy_mask
+                                _qn = int(_qmask.sum())
+                                if _qn >= 2:
+                                    _q_dx = _dx_use[_qmask]
+                                    _q_dy = _dy_use[_qmask]
+                                    _q_med_off = float(
+                                        np.sqrt(
+                                            np.median(_q_dx) ** 2
+                                            + np.median(_q_dy) ** 2
+                                        )
+                                    )
+                                    _q_max_off = float(
+                                        np.max(np.sqrt(_q_dx**2 + _q_dy**2))
+                                    )
+                                    _quadrant_stats[_qlabel] = {
+                                        "n": _qn,
+                                        "median_offset_px": _q_med_off,
+                                        "max_offset_px": _q_max_off,
+                                    }
+                                    if _q_med_off > _worst_quadrant_offset:
+                                        _worst_quadrant_offset = _q_med_off
+                            if _quadrant_stats:
+                                _quad_summary = ", ".join(
+                                    f"{_ql}: n={_qd['n']} med={_qd['median_offset_px']:.2f}px max={_qd['max_offset_px']:.2f}px"
+                                    for _ql, _qd in _quadrant_stats.items()
                                 )
-                                alignment_metadata = {
-                                    "coverage_ok": False,
-                                    "n_matched": n_matched_verify,
-                                }
+                                self.logger.info(
+                                    "Per-quadrant alignment: %s; worst_quadrant_median=%.2f px",
+                                    _quad_summary,
+                                    _worst_quadrant_offset,
+                                )
 
+                            total_offset = np.sqrt(med_dx**2 + med_dy**2)
+                            self.logger.info(
+                                stat_block(
+                                    "Alignment verification:",
+                                    f"offset=({med_dx:.3f}, {med_dy:.3f}) px",
+                                    f"RMS=({rms_dx:.3f}, {rms_dy:.3f}) px "
+                                    f"total={total_offset:.3f} px",
+                                    f"P95={_p95_offset:.3f} px "
+                                    f"max={_max_offset:.3f} px "
+                                    f"local-P95/max={_local_offset_p95:.3f}/"
+                                    f"{_local_offset_max:.3f} px",
+                                    f"{n_matched_verify} matches",
+                                )
+                            )
+
+                            alignment_metadata = {
+                                "offset_x": med_dx,
+                                "offset_y": med_dy,
+                                "rms_x": rms_dx,
+                                "rms_y": rms_dy,
+                                "n_matched": n_matched_verify,
+                                "p95_offset": _p95_offset,
+                                "max_offset": _max_offset,
+                                "local_offset_p95": _local_offset_p95,
+                                "local_offset_max": _local_offset_max,
+                                "quadrant_stats": _quadrant_stats,
+                                "worst_quadrant_offset": _worst_quadrant_offset,
+                            }
+
+                            # Spatial coverage check: matched sources confined to
+                            # a small region of the detector cannot validate
+                            # rotation/scale over the full field.  Defer the
+                            # decision to SCAMP's own astrometric residuals (the
+                            # elif branch below) instead of accepting on the
+                            # cluster alone.
+                            try:
+                                _v_hdr = fits.getheader(str(aligned_sci))
+                                _v_nx = float(_v_hdr.get("NAXIS1") or 0.0)
+                                _v_ny = float(_v_hdr.get("NAXIS2") or 0.0)
+                            except Exception:
+                                _v_nx = _v_ny = 0.0
+                            if _v_nx > 0 and _v_ny > 0 and len(_matched_xy) >= 2:
+                                _span_x = (
+                                    float(_matched_xy[:, 0].max())
+                                    - float(_matched_xy[:, 0].min())
+                                ) / _v_nx
+                                _span_y = (
+                                    float(_matched_xy[:, 1].max())
+                                    - float(_matched_xy[:, 1].min())
+                                ) / _v_ny
+                                if _span_x < 0.25 or _span_y < 0.25:
+                                    self.logger.warning(
+                                        "Post-SWarp verification: %d matched sources "
+                                        "cover only %.0f%%x%.0f%% of the field - "
+                                        "cluster-limited verification; deferring "
+                                        "acceptance to SCAMP astrometric residuals.",
+                                        n_matched_verify,
+                                        100 * _span_x,
+                                        100 * _span_y,
+                                    )
+                                    alignment_metadata = {
+                                        "coverage_ok": False,
+                                        "n_matched": n_matched_verify,
+                                    }
+
+                        else:
+                            self.logger.info(
+                                "Alignment verification: only %d matches (< %d); "
+                                "checking for a coherent offset among mutual pairs.",
+                                n_matched_verify,
+                                _min_matches,
+                            )
+                            # Distinguish a genuinely sparse field from a coherent
+                            # misregistration larger than the match tolerance: if
+                            # most mutual nearest neighbours share a common
+                            # displacement, the alignment is measurably wrong even
+                            # though few pairs survive the tolerance cut.
+                            _n_mut = int(mutual.sum())
+                            if _n_mut >= 3:
+                                _dx_all = sci_xy[mutual, 0] - ref_xy[i_sr[mutual], 0]
+                                _dy_all = sci_xy[mutual, 1] - ref_xy[i_sr[mutual], 1]
+                                _mdx = float(np.median(_dx_all))
+                                _mdy = float(np.median(_dy_all))
+                                _res = np.hypot(_dx_all - _mdx, _dy_all - _mdy)
+                                _n_coh = int(np.sum(_res <= match_tol))
+                                _coh_min = max(3, int(np.ceil(0.6 * _n_mut)))
+                                _med_off = float(np.hypot(_mdx, _mdy))
+                                if _n_coh >= _coh_min and _med_off > match_tol:
+                                    self.logger.warning(
+                                        "Post-SWarp verification: %d mutual pairs "
+                                        "share a coherent offset of %.2f px "
+                                        "(> %.2f px tolerance) - misregistration "
+                                        "detected.",
+                                        _n_coh,
+                                        _med_off,
+                                        match_tol,
+                                    )
+                                    alignment_metadata = {
+                                        "offset_x": _mdx,
+                                        "offset_y": _mdy,
+                                        "rms_x": float(np.std(_dx_all)),
+                                        "rms_y": float(np.std(_dy_all)),
+                                        "n_matched": _n_coh,
+                                        "coherent_misregistration": True,
+                                    }
                     else:
                         self.logger.info(
-                            "Alignment verification: only %d matches (< %d); "
-                            "checking for a coherent offset among mutual pairs.",
-                            n_matched_verify, _min_matches,
+                            "Alignment verification: SExtractor detected insufficient sources "
+                            "(%d sci / %d ref; need >= %d each).",
+                            n_sci_det,
+                            n_ref_det,
+                            _min_det_for_verify,
                         )
-                        # Distinguish a genuinely sparse field from a coherent
-                        # misregistration larger than the match tolerance: if
-                        # most mutual nearest neighbours share a common
-                        # displacement, the alignment is measurably wrong even
-                        # though few pairs survive the tolerance cut.
-                        _n_mut = int(mutual.sum())
-                        if _n_mut >= 3:
-                            _dx_all = (
-                                sci_xy[mutual, 0] - ref_xy[i_sr[mutual], 0]
-                            )
-                            _dy_all = (
-                                sci_xy[mutual, 1] - ref_xy[i_sr[mutual], 1]
-                            )
-                            _mdx = float(np.median(_dx_all))
-                            _mdy = float(np.median(_dy_all))
-                            _res = np.hypot(_dx_all - _mdx, _dy_all - _mdy)
-                            _n_coh = int(np.sum(_res <= match_tol))
-                            _coh_min = max(3, int(np.ceil(0.6 * _n_mut)))
-                            _med_off = float(np.hypot(_mdx, _mdy))
-                            if _n_coh >= _coh_min and _med_off > match_tol:
-                                self.logger.warning(
-                                    "Post-SWarp verification: %d mutual pairs "
-                                    "share a coherent offset of %.2f px "
-                                    "(> %.2f px tolerance) - misregistration "
-                                    "detected.",
-                                    _n_coh, _med_off, match_tol,
-                                )
-                                alignment_metadata = {
-                                    "offset_x": _mdx,
-                                    "offset_y": _mdy,
-                                    "rms_x": float(np.std(_dx_all)),
-                                    "rms_y": float(np.std(_dy_all)),
-                                    "n_matched": _n_coh,
-                                    "coherent_misregistration": True,
-                                }
-                else:
-                    self.logger.info(
-                        "Alignment verification: SExtractor detected insufficient sources "
-                        "(%d sci / %d ref; need >= %d each).",
-                        n_sci_det, n_ref_det, _min_det_for_verify,
+                except Exception as e:
+                    self.logger.warning(
+                        "Alignment verification failed (non-fatal): %s", e
                     )
-              except Exception as e:
-                self.logger.warning("Alignment verification failed (non-fatal): %s", e)
-                alignment_metadata = {}
+                    alignment_metadata = {}
 
             # Post-SWarp quality gate: reject alignment if systematic offset
             # or RMS is too large.  A small median offset with large RMS
             # indicates widespread misalignment (e.g., bad SCAMP solution or
             # WCS distortion mismatch) that the median hides.
             #
-            max_acceptable_offset = float(
-                align_cfg.get("alignment_max_offset_px", 0.5)
-            )
-            max_acceptable_rms = float(
-                align_cfg.get("alignment_max_rms_px", 0.75)
-            )
+            max_acceptable_offset = float(align_cfg.get("alignment_max_offset_px", 0.5))
+            max_acceptable_rms = float(align_cfg.get("alignment_max_rms_px", 0.75))
             # True P95 tail statistic; prefer the dedicated p95 key but fall
             # back to the renamed alignment_max_p90_px threshold (stricter).
             max_acceptable_p95 = float(
@@ -3908,9 +4420,10 @@ class ImageDistortionCorrector:
                 # FWHM-scaled like every other threshold above: a coherent
                 # local warp that is fatal for a 3-px PSF is a small fraction
                 # of the PSF on a well-sampled image.
-                _local_offset_limit = float(
-                    align_cfg.get("alignment_max_local_offset_px", 0.5)
-                ) * _fwhm_scale
+                _local_offset_limit = (
+                    float(align_cfg.get("alignment_max_local_offset_px", 0.5))
+                    * _fwhm_scale
+                )
                 _n_match = alignment_metadata.get("n_matched", 0)
 
                 # Sparse-field: use adaptive minimum for offset gate.
@@ -3933,36 +4446,48 @@ class ImageDistortionCorrector:
                 _worst_quad = alignment_metadata.get("worst_quadrant_offset", 0.0)
                 _worst_quad_limit = max(1.5, max_acceptable_offset * 2.0)
                 _reject = (
-                    _n_match >= _gate_min_matches
-                    and _off > max_acceptable_offset
-                ) or (
-                    _n_match >= _gate_min_matches
-                    and _max_off > _max_off_threshold
-                ) or (
-                    _n_match >= 3
-                    and _local_offset_max > _local_offset_limit
-                ) or (
-                    _n_match >= 8
-                    and _worst_quad > _worst_quad_limit
+                    (_n_match >= _gate_min_matches and _off > max_acceptable_offset)
+                    or (_n_match >= _gate_min_matches and _max_off > _max_off_threshold)
+                    or (_n_match >= 3 and _local_offset_max > _local_offset_limit)
+                    or (_n_match >= 8 and _worst_quad > _worst_quad_limit)
                 )
                 if _n_match >= _min_n_for_percentile:
-                    _reject = _reject or _rms > max_acceptable_rms or _p95 > max_acceptable_p95
+                    _reject = (
+                        _reject
+                        or _rms > max_acceptable_rms
+                        or _p95 > max_acceptable_p95
+                    )
 
                 if _reject:
                     _reasons = []
                     if _off > max_acceptable_offset:
-                        _reasons.append("offset=%.2f px (> %.2f px)" % (_off, max_acceptable_offset))
+                        _reasons.append(
+                            "offset=%.2f px (> %.2f px)" % (_off, max_acceptable_offset)
+                        )
                     if _max_off > _max_off_threshold:
-                        _reasons.append("max_offset=%.2f px (> %.2f px)" % (_max_off, _max_off_threshold))
+                        _reasons.append(
+                            "max_offset=%.2f px (> %.2f px)"
+                            % (_max_off, _max_off_threshold)
+                        )
                     if _n_match >= 3 and _local_offset_max > _local_offset_limit:
-                        _reasons.append("local_offset=%.2f px (> %.2f px)" % (_local_offset_max, _local_offset_limit))
+                        _reasons.append(
+                            "local_offset=%.2f px (> %.2f px)"
+                            % (_local_offset_max, _local_offset_limit)
+                        )
                     if _n_match >= 8 and _worst_quad > _worst_quad_limit:
-                        _reasons.append("worst_quadrant=%.2f px (> %.2f px)" % (_worst_quad, _worst_quad_limit))
+                        _reasons.append(
+                            "worst_quadrant=%.2f px (> %.2f px)"
+                            % (_worst_quad, _worst_quad_limit)
+                        )
                     if _n_match >= _min_n_for_percentile:
                         if _rms > max_acceptable_rms:
-                            _reasons.append("RMS=%.2f px (> %.2f px)" % (_rms, max_acceptable_rms))
+                            _reasons.append(
+                                "RMS=%.2f px (> %.2f px)" % (_rms, max_acceptable_rms)
+                            )
                         if _p95 > max_acceptable_p95:
-                            _reasons.append("P95=%.2f px (> %.2f px)" % (_p95, max_acceptable_p95))
+                            _reasons.append(
+                                "P95=%.2f px (> %.2f px)" % (_p95, max_acceptable_p95)
+                            )
                     # BUG 116: Galaxy-contaminated verification override.
                     # When the median offset passes the gate but RMS/P95 fail,
                     # check whether SCAMP's own residual (measured on filtered
@@ -3977,7 +4502,9 @@ class ImageDistortionCorrector:
                     _scamp_rms_pix_check = None
                     _scamp_nstars_check = None
                     if isinstance(_scamp_distort_info, dict):
-                        _scamp_rms_arcsec = _scamp_distort_info.get("astrometric_rms_arcsec")
+                        _scamp_rms_arcsec = _scamp_distort_info.get(
+                            "astrometric_rms_arcsec"
+                        )
                         _scamp_nstars_check = _scamp_distort_info.get("n_matched_stars")
                         if _scamp_rms_arcsec is not None and sci_pix_scale > 0:
                             _scamp_rms_pix_check = _scamp_rms_arcsec / sci_pix_scale
@@ -4005,8 +4532,11 @@ class ImageDistortionCorrector:
                             "    good and SCAMP residual=%.3f px (%d stars).\n"
                             "    Galaxy contamination in verification likely.\n"
                             "    Accepting SCAMP+SWarp alignment.",
-                            "; ".join(_reasons), _n_match, _off,
-                            _scamp_rms_pix_check, _scamp_nstars_check,
+                            "; ".join(_reasons),
+                            _n_match,
+                            _off,
+                            _scamp_rms_pix_check,
+                            _scamp_nstars_check,
                         )
                     else:
                         if not bool(
@@ -4017,7 +4547,9 @@ class ImageDistortionCorrector:
                                     "Post-SWarp alignment rejected: %s (%d matches, FWHM=%.1f px). "
                                     "Retrying SCAMP+SWarp with distortion degree %d.",
                                     "; ".join(_reasons) if _reasons else "unknown",
-                                    _n_match, _gate_fwhm, distort_degrees - 1,
+                                    _n_match,
+                                    _gate_fwhm,
+                                    distort_degrees - 1,
                                 )
                                 return self.align_and_resample_both_images(
                                     science_image,
@@ -4048,7 +4580,9 @@ class ImageDistortionCorrector:
                         self.logger.warning(
                             "Post-SWarp alignment rejected: %s (%d matches, FWHM=%.1f px). "
                             "Falling back to reproject/AstroAlign.",
-                            "; ".join(_reasons) if _reasons else "unknown", _n_match, _gate_fwhm,
+                            "; ".join(_reasons) if _reasons else "unknown",
+                            _n_match,
+                            _gate_fwhm,
                         )
                         # BUG 109: Save SWarp result as last-resort fallback.
                         # If reproject and astroalign also fail, the SWarp result
@@ -4064,8 +4598,13 @@ class ImageDistortionCorrector:
                         # which is the same path as reference_image when it's already
                         # in the output dir.  Without backup, the second fallback
                         # reads the first fallback's output, not the original template.
-                        _last_resort_sci = output_dir / f"swarp_last_resort_{Path(science_image).name}"
-                        _last_resort_ref = output_dir / f"swarp_last_resort_{Path(reference_image).name}"
+                        _last_resort_sci = (
+                            output_dir / f"swarp_last_resort_{Path(science_image).name}"
+                        )
+                        _last_resort_ref = (
+                            output_dir
+                            / f"swarp_last_resort_{Path(reference_image).name}"
+                        )
                         shutil.copy2(str(aligned_sci), str(_last_resort_sci))
                         shutil.copy2(str(aligned_ref), str(_last_resort_ref))
                         # Backups go in a subdirectory: reproject names its
@@ -4074,8 +4613,12 @@ class ImageDistortionCorrector:
                         # product and the originals would be lost.
                         _backup_dir = output_dir / "._align_backup"
                         _backup_dir.mkdir(parents=True, exist_ok=True)
-                        _ref_backup = _backup_dir / f"._ref_backup_{Path(reference_image).name}"
-                        _sci_backup = _backup_dir / f"._sci_backup_{Path(science_image).name}"
+                        _ref_backup = (
+                            _backup_dir / f"._ref_backup_{Path(reference_image).name}"
+                        )
+                        _sci_backup = (
+                            _backup_dir / f"._sci_backup_{Path(science_image).name}"
+                        )
                         shutil.copy2(reference_image, str(_ref_backup))
                         shutil.copy2(science_image, str(_sci_backup))
                         _swarp_last_resort = {
@@ -4086,7 +4629,9 @@ class ImageDistortionCorrector:
                             "reject_rms": _rms,
                             "reject_p95": _p95,
                             "reject_offset": _off,
-                            "reject_max": alignment_metadata.get("max_offset", float("inf")),
+                            "reject_max": alignment_metadata.get(
+                                "max_offset", float("inf")
+                            ),
                             "reject_n_matched": _n_match,
                         }
                         # Try reproject directly (not through combined method) so
@@ -4094,21 +4639,39 @@ class ImageDistortionCorrector:
                         _reproj_result = self.align_with_reproject(
                             str(_sci_backup), str(_ref_backup), output_dir=output_dir
                         )
-                        if _reproj_result and not _reproj_result.get("rejected") and _reproj_result.get("science_aligned"):
+                        if (
+                            _reproj_result
+                            and not _reproj_result.get("rejected")
+                            and _reproj_result.get("science_aligned")
+                        ):
                             # The aligned product was named after the backup
                             # filename; move it to the conventional in-place
                             # path before deleting the backups.
                             _res_ref = _reproj_result.get("reference_aligned")
                             try:
-                                if _res_ref and os.path.isfile(_res_ref) and os.path.abspath(str(_res_ref)) != os.path.abspath(str(reference_image)):
+                                if (
+                                    _res_ref
+                                    and os.path.isfile(_res_ref)
+                                    and os.path.abspath(str(_res_ref))
+                                    != os.path.abspath(str(reference_image))
+                                ):
                                     shutil.copy2(str(_res_ref), str(reference_image))
                                     invalidate_fits_cache(str(reference_image))
-                                _reproj_result["reference_aligned"] = str(reference_image)
+                                _reproj_result["reference_aligned"] = str(
+                                    reference_image
+                                )
                             except Exception:
                                 pass
                             for _tmp in [_ref_backup, _sci_backup, _res_ref]:
                                 try:
-                                    if _tmp and os.path.exists(_tmp) and os.path.abspath(str(_tmp)) != os.path.abspath(str(_reproj_result.get("reference_aligned"))):
+                                    if (
+                                        _tmp
+                                        and os.path.exists(_tmp)
+                                        and os.path.abspath(str(_tmp))
+                                        != os.path.abspath(
+                                            str(_reproj_result.get("reference_aligned"))
+                                        )
+                                    ):
                                         os.remove(_tmp)
                                 except OSError:
                                     pass
@@ -4120,29 +4683,53 @@ class ImageDistortionCorrector:
                         if _reproj_result and _reproj_result.get("rejected"):
                             _reproj_ref_src = _reproj_result.get("reference_aligned")
                             if _reproj_ref_src and os.path.isfile(_reproj_ref_src):
-                                _reproj_ref_persist = output_dir / f"reproject_last_resort_{Path(reference_image).name}"
+                                _reproj_ref_persist = (
+                                    output_dir
+                                    / f"reproject_last_resort_{Path(reference_image).name}"
+                                )
                                 shutil.copy2(_reproj_ref_src, str(_reproj_ref_persist))
                                 _reproj_rejected = {
                                     "science_aligned": science_image,
                                     "reference_aligned": str(_reproj_ref_persist),
                                     "alignment_method": "reproject_last_resort",
                                     "rejected": True,
-                                    "reject_rms": _reproj_result.get("reject_rms", float('inf')),
-                                    "reject_p95": _reproj_result.get("reject_p95", float('inf')),
-                                    "reject_offset": _reproj_result.get("reject_offset", float('inf')),
-                                    "reject_max": _reproj_result.get("reject_max", float("inf")),
-                                    "reject_n_matched": _reproj_result.get("reject_n_matched", 0),
+                                    "reject_rms": _reproj_result.get(
+                                        "reject_rms", float("inf")
+                                    ),
+                                    "reject_p95": _reproj_result.get(
+                                        "reject_p95", float("inf")
+                                    ),
+                                    "reject_offset": _reproj_result.get(
+                                        "reject_offset", float("inf")
+                                    ),
+                                    "reject_max": _reproj_result.get(
+                                        "reject_max", float("inf")
+                                    ),
+                                    "reject_n_matched": _reproj_result.get(
+                                        "reject_n_matched", 0
+                                    ),
                                 }
-                        self.logger.warning("Reproject failed. Falling back to AstroAlign.")
+                        self.logger.warning(
+                            "Reproject failed. Falling back to AstroAlign."
+                        )
                         _aa_result = self.align_with_astroalign(
                             str(_sci_backup), str(_ref_backup), output_dir
                         )
-                        if _aa_result and not _aa_result.get("rejected") and _aa_result.get("science_aligned"):
+                        if (
+                            _aa_result
+                            and not _aa_result.get("rejected")
+                            and _aa_result.get("science_aligned")
+                        ):
                             # Same backup-filename collision as reproject:
                             # the aligned product is named after _ref_backup.
                             _res_ref = _aa_result.get("reference_aligned")
                             try:
-                                if _res_ref and os.path.isfile(_res_ref) and os.path.abspath(str(_res_ref)) != os.path.abspath(str(reference_image)):
+                                if (
+                                    _res_ref
+                                    and os.path.isfile(_res_ref)
+                                    and os.path.abspath(str(_res_ref))
+                                    != os.path.abspath(str(reference_image))
+                                ):
                                     shutil.copy2(str(_res_ref), str(reference_image))
                                     invalidate_fits_cache(str(reference_image))
                                 _aa_result["reference_aligned"] = str(reference_image)
@@ -4150,7 +4737,14 @@ class ImageDistortionCorrector:
                                 pass
                             for _tmp in [_ref_backup, _sci_backup, _res_ref]:
                                 try:
-                                    if _tmp and os.path.exists(_tmp) and os.path.abspath(str(_tmp)) != os.path.abspath(str(_aa_result.get("reference_aligned"))):
+                                    if (
+                                        _tmp
+                                        and os.path.exists(_tmp)
+                                        and os.path.abspath(str(_tmp))
+                                        != os.path.abspath(
+                                            str(_aa_result.get("reference_aligned"))
+                                        )
+                                    ):
                                         os.remove(_tmp)
                                 except OSError:
                                     pass
@@ -4162,18 +4756,31 @@ class ImageDistortionCorrector:
                         if _aa_result and _aa_result.get("rejected"):
                             _aa_ref_src = _aa_result.get("reference_aligned")
                             if _aa_ref_src and os.path.isfile(_aa_ref_src):
-                                _aa_ref_persist = output_dir / f"astroalign_last_resort_{Path(reference_image).name}"
+                                _aa_ref_persist = (
+                                    output_dir
+                                    / f"astroalign_last_resort_{Path(reference_image).name}"
+                                )
                                 shutil.copy2(_aa_ref_src, str(_aa_ref_persist))
                                 _aa_rejected = {
                                     "science_aligned": science_image,
                                     "reference_aligned": str(_aa_ref_persist),
                                     "alignment_method": "astroalign_last_resort",
                                     "rejected": True,
-                                    "reject_rms": _aa_result.get("reject_rms", float('inf')),
-                                    "reject_p95": _aa_result.get("reject_p95", float('inf')),
-                                    "reject_offset": _aa_result.get("reject_offset", float('inf')),
-                                    "reject_max": _aa_result.get("reject_max", float("inf")),
-                                    "reject_n_matched": _aa_result.get("reject_n_matched", 0),
+                                    "reject_rms": _aa_result.get(
+                                        "reject_rms", float("inf")
+                                    ),
+                                    "reject_p95": _aa_result.get(
+                                        "reject_p95", float("inf")
+                                    ),
+                                    "reject_offset": _aa_result.get(
+                                        "reject_offset", float("inf")
+                                    ),
+                                    "reject_max": _aa_result.get(
+                                        "reject_max", float("inf")
+                                    ),
+                                    "reject_n_matched": _aa_result.get(
+                                        "reject_n_matched", 0
+                                    ),
                                 }
                         # BUG 113: All methods rejected - pick the best by RMS.
                         # BUG 115: Exclude candidates whose aligned output is all-NaN
@@ -4224,9 +4831,9 @@ class ImageDistortionCorrector:
                         _best = min(
                             _valid_candidates,
                             key=lambda c: (
-                                c.get("reject_max", float('inf')),
-                                c.get("reject_rms", float('inf')),
-                                c.get("reject_p95", float('inf')),
+                                c.get("reject_max", float("inf")),
+                                c.get("reject_rms", float("inf")),
+                                c.get("reject_p95", float("inf")),
                             ),
                         )
                         for _tmp in [_ref_backup, _sci_backup]:
@@ -4256,8 +4863,12 @@ class ImageDistortionCorrector:
                             f"{_n_match} matches, FWHM={_gate_fwhm:.1f} px",
                         )
                     )
-            elif _post_swarp_verify and resample_mode == "common_grid" and bool(
-                align_cfg.get("alignment_require_post_swarp_verification", True)
+            elif (
+                _post_swarp_verify
+                and resample_mode == "common_grid"
+                and bool(
+                    align_cfg.get("alignment_require_post_swarp_verification", True)
+                )
             ):
                 # Sparse-field fallback: when post-SWarp verification cannot
                 # measure offsets (too few sources detected/matched), check
@@ -4282,9 +4893,10 @@ class ImageDistortionCorrector:
                     align_cfg.get("alignment_max_scamp_residual_arcsec", 2.0)
                 )
                 # Convert SCAMP arcsec residual to pixels for comparison
-                _pixel_scale_arcsec = abs(
-                    float(fits.getheader(str(aligned_sci)).get("CDELT2", 0))
-                ) * 3600.0
+                _pixel_scale_arcsec = (
+                    abs(float(fits.getheader(str(aligned_sci)).get("CDELT2", 0)))
+                    * 3600.0
+                )
                 if _pixel_scale_arcsec > 0 and _scamp_rms_val is not None:
                     _scamp_rms_pix = _scamp_rms_val / _pixel_scale_arcsec
                 else:
@@ -4300,16 +4912,19 @@ class ImageDistortionCorrector:
                 if _scamp_trustworthy:
                     self.logger.info(
                         "Post-SWarp verification could not measure offsets (sparse field), "
-                        "but SCAMP residuals are good (RMS=%.3f\" / %.2f px, %d stars). "
+                        'but SCAMP residuals are good (RMS=%.3f" / %.2f px, %d stars). '
                         "Accepting SCAMP+SWarp alignment.",
-                        _scamp_rms_val, _scamp_rms_pix or -1, _scamp_nstars_val,
+                        _scamp_rms_val,
+                        _scamp_rms_pix or -1,
+                        _scamp_nstars_val,
                     )
                 else:
                     self.logger.warning(
                         "Post-SWarp alignment could not be measured (sparse field) "
                         "and SCAMP residuals are poor or unavailable "
                         "(SCAMP RMS=%s, stars=%s). Falling back to reproject/AstroAlign.",
-                        _scamp_rms_val, _scamp_nstars_val,
+                        _scamp_rms_val,
+                        _scamp_nstars_val,
                     )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
@@ -4347,32 +4962,42 @@ class ImageDistortionCorrector:
                         ref_wcs_info = wcs_info
                     self.logger.info(
                         "SWarp [%s]:\tshape=%dx%d CRPIX=(%.1f,%.1f) CTYPE=%s/%s",
-                        _label, _ny, _nx,
-                        wcs_info["crpix1"], wcs_info["crpix2"],
-                        wcs_info["ctype1"], wcs_info["ctype2"],
+                        _label,
+                        _ny,
+                        _nx,
+                        wcs_info["crpix1"],
+                        wcs_info["crpix2"],
+                        wcs_info["ctype1"],
+                        wcs_info["ctype2"],
                     )
                 except Exception as _e:
-                    self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
+                    self.logger.debug(
+                        "Could not read WCS from SWarp output [%s]: %s", _label, _e
+                    )
 
             # Verify CRPIX consistency between science and reference outputs
             if sci_wcs_info and ref_wcs_info:
                 if sci_wcs_info["shape"] != ref_wcs_info["shape"]:
                     self.logger.warning(
                         "SWarp shapes differ: sci=%s ref=%s",
-                        sci_wcs_info["shape"], ref_wcs_info["shape"]
+                        sci_wcs_info["shape"],
+                        ref_wcs_info["shape"],
                     )
                 crpix_diff_x = abs(sci_wcs_info["crpix1"] - ref_wcs_info["crpix1"])
                 crpix_diff_y = abs(sci_wcs_info["crpix2"] - ref_wcs_info["crpix2"])
                 if crpix_diff_x > 0.01 or crpix_diff_y > 0.01:
                     self.logger.warning(
                         "CRPIX mismatch: sci=(%.1f,%.1f) ref=(%.1f,%.1f)",
-                        sci_wcs_info["crpix1"], sci_wcs_info["crpix2"],
-                        ref_wcs_info["crpix1"], ref_wcs_info["crpix2"]
+                        sci_wcs_info["crpix1"],
+                        sci_wcs_info["crpix2"],
+                        ref_wcs_info["crpix1"],
+                        ref_wcs_info["crpix2"],
                     )
                 else:
                     self.logger.debug(
                         "CRPIX consistent: (%.1f,%.1f)",
-                        sci_wcs_info["crpix1"], sci_wcs_info["crpix2"]
+                        sci_wcs_info["crpix1"],
+                        sci_wcs_info["crpix2"],
                     )
 
             # Verify output shapes match. Only relevant for common_grid mode where
@@ -4400,7 +5025,10 @@ class ImageDistortionCorrector:
                         dx = abs(_sci_shape[1] - _ref_shape[1])
                         self.logger.warning(
                             "SWarp shape mismatch: sci=%s ref=%s (delta %d,%d)",
-                            _sci_shape, _ref_shape, dy, dx,
+                            _sci_shape,
+                            _ref_shape,
+                            dy,
+                            dx,
                         )
 
                         # Large shape mismatch (>500 px) means SCAMP shifted the reference
@@ -4410,7 +5038,8 @@ class ImageDistortionCorrector:
                         if dy > 500 or dx > 500:
                             self.logger.warning(
                                 "Shape mismatch too large (%d,%d); falling back to reproject/AstroAlign.",
-                                dy, dx,
+                                dy,
+                                dx,
                             )
                             return self._align_fallback_reproject_then_astroalign(
                                 science_image, reference_image, output_dir
@@ -4431,10 +5060,13 @@ class ImageDistortionCorrector:
                             ref_cx = float(ref_cx_arr[0])
                             ref_cy = float(ref_cy_arr[0])
                             if not (np.isfinite(ref_cx) and np.isfinite(ref_cy)):
-                                raise ValueError(f"non-finite ref center: ({ref_cx}, {ref_cy})")
+                                raise ValueError(
+                                    f"non-finite ref center: ({ref_cx}, {ref_cy})"
+                                )
                         except Exception as _ce:
                             self.logger.debug(
-                                "Could not project SWarp CENTER into reference WCS (%s); using pixel center instead.", _ce
+                                "Could not project SWarp CENTER into reference WCS (%s); using pixel center instead.",
+                                _ce,
                             )
                             # Use correct numpy 0-based center
                             ref_cx = (_ref_shape[1] - 1) / 2.0
@@ -4442,8 +5074,12 @@ class ImageDistortionCorrector:
 
                         _ref_header = _ref_header.copy()
                         _ref_data_adjusted, _ref_header = nan_crop(
-                            _ref_data, _ref_header,
-                            ref_cx, ref_cy, ny_target, nx_target,
+                            _ref_data,
+                            _ref_header,
+                            ref_cx,
+                            ref_cy,
+                            ny_target,
+                            nx_target,
                         )
 
                         # Do NOT overwrite CRPIX/CRVAL to the science values.  nan_crop
@@ -4451,7 +5087,9 @@ class ImageDistortionCorrector:
                         # reference WCS remains valid for the resliced data; forcing the
                         # reference CRPIX to the science centre without moving the data
                         # introduces a sub-pixel WCS/data misalignment.
-                        fits.writeto(aligned_ref, _ref_data_adjusted, _ref_header, overwrite=True)
+                        fits.writeto(
+                            aligned_ref, _ref_data_adjusted, _ref_header, overwrite=True
+                        )
 
                         self.logger.info(
                             "Reference adjusted to science shape=%s (centered on SWarp sky CENTER, pad/trim <=20 px).",
@@ -4459,11 +5097,13 @@ class ImageDistortionCorrector:
                         )
                     else:
                         self.logger.info(
-                            "SWarp match:\tboth images shape=%s", _sci_shape,
+                            "SWarp match:\tboth images shape=%s",
+                            _sci_shape,
                         )
                 except Exception as _e:
                     self.logger.error(
-                        "Could not verify or fix SWarp output shapes: %s. Falling back.", _e
+                        "Could not verify or fix SWarp output shapes: %s. Falling back.",
+                        _e,
                     )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
@@ -4499,8 +5139,13 @@ class ImageDistortionCorrector:
                             science_image, reference_image, output_dir
                         )
                     # Test world2pix (critical for nan_crop center calculation)
-                    test_px, test_py = _safe_world2pix(ref_wcs, ref_ra[0], ref_dec[0], 0)
-                    test_px, test_py = float(np.atleast_1d(test_px)[0]), float(np.atleast_1d(test_py)[0])
+                    test_px, test_py = _safe_world2pix(
+                        ref_wcs, ref_ra[0], ref_dec[0], 0
+                    )
+                    test_px, test_py = (
+                        float(np.atleast_1d(test_px)[0]),
+                        float(np.atleast_1d(test_py)[0]),
+                    )
                     if not (np.isfinite(test_px) and np.isfinite(test_py)):
                         self.logger.error(
                             f"SWarp-aligned reference has non-invertible WCS: world2pix returned NaN/Inf. "
@@ -4510,7 +5155,9 @@ class ImageDistortionCorrector:
                             science_image, reference_image, output_dir
                         )
             except Exception as e:
-                self.logger.error("Failed to validate WCS of SWarp-aligned reference: %s", e)
+                self.logger.error(
+                    "Failed to validate WCS of SWarp-aligned reference: %s", e
+                )
                 return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
                 )
@@ -4530,8 +5177,13 @@ class ImageDistortionCorrector:
                             science_image, reference_image, output_dir
                         )
                     # Test world2pix (critical for nan_crop center calculation)
-                    test_px, test_py = _safe_world2pix(sci_wcs, sci_ra[0], sci_dec[0], 0)
-                    test_px, test_py = float(np.atleast_1d(test_px)[0]), float(np.atleast_1d(test_py)[0])
+                    test_px, test_py = _safe_world2pix(
+                        sci_wcs, sci_ra[0], sci_dec[0], 0
+                    )
+                    test_px, test_py = (
+                        float(np.atleast_1d(test_px)[0]),
+                        float(np.atleast_1d(test_py)[0]),
+                    )
                     if not (np.isfinite(test_px) and np.isfinite(test_py)):
                         self.logger.error(
                             f"SWarp-aligned science has non-invertible WCS: world2pix returned NaN/Inf. "
@@ -4541,13 +5193,45 @@ class ImageDistortionCorrector:
                             science_image, reference_image, output_dir
                         )
             except Exception as e:
-                self.logger.error("Failed to validate WCS of SWarp-aligned science: %s", e)
+                self.logger.error(
+                    "Failed to validate WCS of SWarp-aligned science: %s", e
+                )
                 return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
                 )
 
+            # Copy aligned products into place ATOMICALLY: copy to a sibling
+            # temp then os.replace, so a mid-copy failure can never leave a
+            # truncated FITS that downstream subtraction would consume.  Any
+            # failure is a hard error (raised), not a warning - a partial
+            # primary science frame is worse than failing the alignment.
+            for _label, _src, _dst in (
+                ("reference", aligned_ref, aligned_reference_fpath),
+                ("science", aligned_sci, aligned_science_fpath),
+            ):
+                _tmp = f"{_dst}.part-{os.getpid()}"
+                try:
+                    shutil.copy2(str(_src), _tmp)
+                    os.replace(_tmp, str(_dst))
+                except Exception as _copy_e:
+                    try:
+                        if os.path.isfile(_tmp):
+                            os.remove(_tmp)
+                    except OSError:
+                        pass
+                    self.logger.error(
+                        "Could not save aligned %s image %s atomically: %s",
+                        _label,
+                        _dst,
+                        _copy_e,
+                    )
+                    self.logger.error(
+                        "Destructive aligned copy for %s image failed; "
+                        "aborting this alignment (originals left in place).",
+                        _label,
+                    )
+                    raise
             try:
-                shutil.copyfile(aligned_ref, aligned_reference_fpath)
                 self.logger.debug(
                     "Saved aligned reference image to: %s",
                     aligned_reference_fpath,
@@ -4563,13 +5247,12 @@ class ImageDistortionCorrector:
                 )
             except Exception as e:
                 self.logger.warning(
-                    "Could not save aligned reference image %s: %s",
+                    "Could not refresh weight map for aligned reference %s: %s",
                     aligned_reference_fpath,
                     e,
                 )
 
             try:
-                shutil.copyfile(aligned_sci, aligned_science_fpath)
                 self.logger.debug(
                     "Overwrote science image with aligned version: %s",
                     aligned_science_fpath,
@@ -4586,7 +5269,7 @@ class ImageDistortionCorrector:
                     )
             except Exception as e:
                 self.logger.warning(
-                    "Could not overwrite science image %s: %s",
+                    "Could not refresh weight map for aligned science %s: %s",
                     aligned_science_fpath,
                     e,
                 )
@@ -4594,7 +5277,9 @@ class ImageDistortionCorrector:
             # SWarp outputs TAN projection but the distortion model is still needed for accurate WCS
             # Removing SIP coefficients causes systematic WCS errors across the field
             # SWarp resampling does not inherently correct distortion - it just applies linear transforms
-            self.logger.debug("Preserving SIP/TPV distortion coefficients in aligned science image header")
+            self.logger.debug(
+                "Preserving SIP/TPV distortion coefficients in aligned science image header"
+            )
 
             # Working dirs removed only after the aligned copies are in place.
             if science_aligned_dir.exists():
@@ -4634,6 +5319,20 @@ class ImageDistortionCorrector:
                 f"Alignment failed: Type: {exc_type.__name__} File: {fname} Line: {lineno} Message: {e}"
             )
             return None
+        finally:
+            # Every early-return/exception path must release the working dirs
+            # (success already removes them; rmtree is a no-op there).  These
+            # contain full copies of both images.
+            for _wd in (
+                locals().get("science_aligned_dir"),
+                locals().get("reference_aligned_dir"),
+            ):
+                if _wd is None:
+                    continue
+                try:
+                    shutil.rmtree(str(_wd), ignore_errors=True)
+                except Exception:
+                    pass
 
     # ------------------------------ Reproject (WCS-based) path ------------------------------
 
@@ -4667,14 +5366,14 @@ class ImageDistortionCorrector:
                 sci_header = h_sci[0].header
                 if sci_data is None or sci_data.size == 0:
                     return None
-                if sci_data.dtype.kind != 'f':
+                if sci_data.dtype.kind != "f":
                     sci_data = sci_data.astype(np.float32)
             with fits.open(reference_image, mode="readonly") as h_ref:
                 ref_data = h_ref[0].data
                 ref_header = h_ref[0].header
                 if ref_data is None or ref_data.size == 0:
                     return None
-                if ref_data.dtype.kind != 'f':
+                if ref_data.dtype.kind != "f":
                     ref_data = ref_data.astype(np.float32)
             sci_wcs = get_wcs(sci_header)
             ref_wcs = get_wcs(ref_header)
@@ -4702,7 +5401,11 @@ class ImageDistortionCorrector:
                 # measured FWHM lives on the science header.
                 _refine_fwhm = max(
                     self._science_header_fwhm(science_image)
-                    or (float(self.input_yaml.get("fwhm", 3.0)) if hasattr(self, "input_yaml") else 3.0),
+                    or (
+                        float(self.input_yaml.get("fwhm", 3.0))
+                        if hasattr(self, "input_yaml")
+                        else 3.0
+                    ),
                     2.5,
                 )
                 with ThreadPoolExecutor(max_workers=2) as _pool:
@@ -4724,15 +5427,20 @@ class ImageDistortionCorrector:
                     _ref_sex_refine = _ref_fut.result()
                 _sci_cat_refine = _sci_sex_refine.get("catalog")
                 _ref_cat_refine = _ref_sex_refine.get("catalog")
-                _n_sci_refine = len(_sci_cat_refine) if _sci_cat_refine is not None else 0
-                _n_ref_refine = len(_ref_cat_refine) if _ref_cat_refine is not None else 0
+                _n_sci_refine = (
+                    len(_sci_cat_refine) if _sci_cat_refine is not None else 0
+                )
+                _n_ref_refine = (
+                    len(_ref_cat_refine) if _ref_cat_refine is not None else 0
+                )
 
                 # Sparse-field retry with lower threshold
                 if _n_sci_refine < 5 or _n_ref_refine < 5:
                     self.logger.info(
                         "Reproject WCS refine: sparse field (%d sci / %d ref); "
                         "retrying SExtractor with DETECT_THRESH=0.5",
-                        _n_sci_refine, _n_ref_refine,
+                        _n_sci_refine,
+                        _n_ref_refine,
                     )
                     _SPARSE_REFINE_OVERRIDE = {
                         "DETECT_THRESH": 0.5,
@@ -4749,7 +5457,9 @@ class ImageDistortionCorrector:
                             config=_SPARSE_REFINE_OVERRIDE,
                         )
                         _sci_cat_refine = _sci_sex_refine.get("catalog")
-                        _n_sci_refine = len(_sci_cat_refine) if _sci_cat_refine is not None else 0
+                        _n_sci_refine = (
+                            len(_sci_cat_refine) if _sci_cat_refine is not None else 0
+                        )
                     if _n_ref_refine < 5:
                         _ref_sex_refine = self.run_sextractor(
                             reference_image,
@@ -4759,7 +5469,9 @@ class ImageDistortionCorrector:
                             config=_SPARSE_REFINE_OVERRIDE,
                         )
                         _ref_cat_refine = _ref_sex_refine.get("catalog")
-                        _n_ref_refine = len(_ref_cat_refine) if _ref_cat_refine is not None else 0
+                        _n_ref_refine = (
+                            len(_ref_cat_refine) if _ref_cat_refine is not None else 0
+                        )
 
                 if (
                     _sci_cat_refine is not None
@@ -4769,9 +5481,12 @@ class ImageDistortionCorrector:
                 ):
                     # Filter science catalog to only sources with reference counterparts
                     _reproj_filter_radius = max(
-                        3.0 * _refine_fwhm * (
+                        3.0
+                        * _refine_fwhm
+                        * (
                             float(self.input_yaml.get("pixel_scale", 1.0))
-                            if hasattr(self, "input_yaml") else 1.0
+                            if hasattr(self, "input_yaml")
+                            else 1.0
                         ),
                         10.0,
                     )
@@ -4781,9 +5496,12 @@ class ImageDistortionCorrector:
                         match_radius_arcsec=_reproj_filter_radius,
                     )
                     _refine_crossid = max(
-                        2.0 * _refine_fwhm * (
+                        2.0
+                        * _refine_fwhm
+                        * (
                             float(self.input_yaml.get("pixel_scale", 1.0))
-                            if hasattr(self, "input_yaml") else 1.0
+                            if hasattr(self, "input_yaml")
+                            else 1.0
                         ),
                         3.0,
                     )
@@ -4805,19 +5523,41 @@ class ImageDistortionCorrector:
                             ref_cat_path=_ref_sex_refine["catalog_path"],
                             output_head_path=_refine_head_path,
                         )
-                        if _refine_result is not None and Path(_refine_head_path).exists():
+                        if (
+                            _refine_result is not None
+                            and Path(_refine_head_path).exists()
+                        ):
                             from ..pipeline.wcs import _normalize_projection_codes
+
                             _corrected_hdr = fits.Header.fromtextfile(_refine_head_path)
                             _corrected_hdr = _normalize_projection_codes(
                                 _corrected_hdr, inplace=False
                             )
                             ref_header = remove_wcs_from_header(ref_header)
                             _wcs_prefixes = (
-                                "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT",
-                                "CROTA", "PV", "LONPOLE", "LATPOLE", "EQUINOX",
-                                "WCSNAME", "CUNIT", "WCSAXES", "PROJP", "LTV",
-                                "LTM", "RADECSYS", "RADESYS", "RADYSYS",
-                                "LONGPOLE", "TNX", "SIP_",
+                                "CRPIX",
+                                "CRVAL",
+                                "CTYPE",
+                                "CD",
+                                "PC",
+                                "CDELT",
+                                "CROTA",
+                                "PV",
+                                "LONPOLE",
+                                "LATPOLE",
+                                "EQUINOX",
+                                "WCSNAME",
+                                "CUNIT",
+                                "WCSAXES",
+                                "PROJP",
+                                "LTV",
+                                "LTM",
+                                "RADECSYS",
+                                "RADESYS",
+                                "RADYSYS",
+                                "LONGPOLE",
+                                "TNX",
+                                "SIP_",
                             )
                             _wcs_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
                             for _key in _corrected_hdr:
@@ -4826,7 +5566,9 @@ class ImageDistortionCorrector:
                                 _is_wcs = any(_key.startswith(p) for p in _wcs_prefixes)
                                 if not _is_wcs and "_" in _key:
                                     _stem = _key.split("_")[0] + "_"
-                                    _is_wcs = _stem in _wcs_stems and _key.startswith(_stem.rstrip("_"))
+                                    _is_wcs = _stem in _wcs_stems and _key.startswith(
+                                        _stem.rstrip("_")
+                                    )
                                 if _is_wcs:
                                     ref_header[_key] = _corrected_hdr[_key]
                             ref_wcs = get_wcs(ref_header)
@@ -4845,7 +5587,9 @@ class ImageDistortionCorrector:
                                     "falling back to original reference WCS."
                                 )
                                 ref_wcs = get_wcs(
-                                    fits.open(reference_image, mode="readonly")[0].header
+                                    fits.open(reference_image, mode="readonly")[
+                                        0
+                                    ].header
                                 )
                         else:
                             self.logger.info(
@@ -4862,7 +5606,8 @@ class ImageDistortionCorrector:
                     self.logger.info(
                         "Reproject: insufficient sources for WCS refine "
                         "(%d sci / %d ref); using original reference WCS.",
-                        _n_sci_refine, _n_ref_refine,
+                        _n_sci_refine,
+                        _n_ref_refine,
                     )
             except Exception as _refine_exc:
                 self.logger.debug(
@@ -4881,30 +5626,41 @@ class ImageDistortionCorrector:
             if n_nan > 0:
                 self.logger.info(
                     "Reference has %d NaN pixels (%.2f%%) - replacing with 0 before reprojection.",
-                    n_nan, 100.0 * n_nan / ref_data.size,
+                    n_nan,
+                    100.0 * n_nan / ref_data.size,
                 )
                 ref_data = np.where(ref_valid_mask, ref_data, 0.0)
 
             # Build reproject config from input_yaml (same as templates.py)
             iy = getattr(self, "input_yaml", None) or {}
             align_cfg = iy.get("alignment", {}) if isinstance(iy, dict) else {}
-            quality_cfg = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
-            req_method = str(align_cfg.get("reproject_method", "adaptive")).lower().strip()
-            interp_order = str(align_cfg.get("reproject_interp_order", "bicubic")).lower().strip()
+            quality_cfg = (
+                iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
+            )
+            req_method = (
+                str(align_cfg.get("reproject_method", "adaptive")).lower().strip()
+            )
+            interp_order = (
+                str(align_cfg.get("reproject_interp_order", "bicubic")).lower().strip()
+            )
             use_parallel = bool(align_cfg.get("reproject_parallel", False))
             roundtrip = bool(align_cfg.get("reproject_roundtrip_coords", True))
-            conserve_flux = bool(align_cfg.get("reproject_adaptive_conserve_flux", False))
-            center_jacobian = bool(align_cfg.get("reproject_adaptive_center_jacobian", False))
+            conserve_flux = bool(
+                align_cfg.get("reproject_adaptive_conserve_flux", False)
+            )
+            center_jacobian = bool(
+                align_cfg.get("reproject_adaptive_center_jacobian", False)
+            )
 
             # center_jacobian needed for large rotation differences (>30 deg);
             # the default Jacobian approximation degrades there
             try:
-                sci_rot = np.degrees(np.arctan2(
-                    sci_wcs.wcs.cd[0, 1], sci_wcs.wcs.cd[0, 0]
-                ))
-                ref_rot = np.degrees(np.arctan2(
-                    ref_wcs.wcs.cd[0, 1], ref_wcs.wcs.cd[0, 0]
-                ))
+                sci_rot = np.degrees(
+                    np.arctan2(sci_wcs.wcs.cd[0, 1], sci_wcs.wcs.cd[0, 0])
+                )
+                ref_rot = np.degrees(
+                    np.arctan2(ref_wcs.wcs.cd[0, 1], ref_wcs.wcs.cd[0, 0])
+                )
                 _rot_diff = abs(sci_rot - ref_rot)
                 if _rot_diff > 180:
                     _rot_diff = 360 - _rot_diff
@@ -4920,11 +5676,17 @@ class ImageDistortionCorrector:
 
             # Normalise interp_order string for reproject_interp
             _interp_map = {
-                "nearest": "nearest-neighbor", "nearest-neighbor": "nearest-neighbor",
+                "nearest": "nearest-neighbor",
+                "nearest-neighbor": "nearest-neighbor",
                 "nn": "nearest-neighbor",
-                "bilinear": "bilinear", "linear": "bilinear", "1": "bilinear",
-                "biquadratic": "biquadratic", "2": "biquadratic",
-                "bicubic": "bicubic", "cubic": "bicubic", "3": "bicubic",
+                "bilinear": "bilinear",
+                "linear": "bilinear",
+                "1": "bilinear",
+                "biquadratic": "biquadratic",
+                "2": "biquadratic",
+                "bicubic": "bicubic",
+                "cubic": "bicubic",
+                "3": "bicubic",
             }
             interp_order_norm = _interp_map.get(interp_order, "bilinear")
 
@@ -4934,16 +5696,26 @@ class ImageDistortionCorrector:
             _fwhm = self._science_header_fwhm(science_image) or (
                 float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
             )
-            _us_thresh_reproj = float(
-                (iy.get("photometry", {}) or {}).get(
-                    "undersampled_fwhm_threshold", 2.5
+            _us_thresh_reproj = (
+                float(
+                    (iy.get("photometry", {}) or {}).get(
+                        "undersampled_fwhm_threshold", 2.5
+                    )
                 )
-            ) if isinstance(iy, dict) else 2.5
-            if _fwhm > 0 and _fwhm < _us_thresh_reproj and interp_order_norm in ("bicubic", "biquadratic"):
+                if isinstance(iy, dict)
+                else 2.5
+            )
+            if (
+                _fwhm > 0
+                and _fwhm < _us_thresh_reproj
+                and interp_order_norm in ("bicubic", "biquadratic")
+            ):
                 self.logger.info(
                     "Undersampled image (FWHM=%.2f px < %.1f) - downgrading %s to bilinear "
                     "to avoid ringing artifacts.",
-                    _fwhm, _us_thresh_reproj, interp_order_norm,
+                    _fwhm,
+                    _us_thresh_reproj,
+                    interp_order_norm,
                 )
                 interp_order_norm = "bilinear"
 
@@ -4972,7 +5744,11 @@ class ImageDistortionCorrector:
                             parallel=use_parallel,
                             conserve_flux=conserve_flux,
                             center_jacobian=center_jacobian,
-                            **({"despike_jacobian": True} if "despike_jacobian" in _ADAPTIVE_PARAMS else {}),
+                            **(
+                                {"despike_jacobian": True}
+                                if "despike_jacobian" in _ADAPTIVE_PARAMS
+                                else {}
+                            ),
                         )
                     elif m == "interp":
                         aligned_ref, footprint = reproject_interp(
@@ -5000,7 +5776,9 @@ class ImageDistortionCorrector:
                     self.logger.debug("Reproject (%s) failed: %s", m, _e)
 
             if used_method is None or aligned_ref is None or footprint is None:
-                self.logger.warning("Reproject alignment failed (all methods): %s", last_exc)
+                self.logger.warning(
+                    "Reproject alignment failed (all methods): %s", last_exc
+                )
                 return None
 
             # Footprint coverage check - zero overlap means WCS mismatch
@@ -5016,17 +5794,23 @@ class ImageDistortionCorrector:
                     _vsrc = ref_valid_mask.astype(np.float64)
                     if used_method == "adaptive":
                         _vf, _ = reproject_adaptive(
-                            (_vsrc, ref_wcs), sci_wcs,
+                            (_vsrc, ref_wcs),
+                            sci_wcs,
                             shape_out=sci_data.shape,
                             roundtrip_coords=roundtrip,
                             parallel=use_parallel,
                             conserve_flux=conserve_flux,
                             center_jacobian=center_jacobian,
-                            **({"despike_jacobian": True} if "despike_jacobian" in _ADAPTIVE_PARAMS else {}),
+                            **(
+                                {"despike_jacobian": True}
+                                if "despike_jacobian" in _ADAPTIVE_PARAMS
+                                else {}
+                            ),
                         )
                     elif used_method == "interp":
                         _vf, _ = reproject_interp(
-                            (_vsrc, ref_wcs), sci_wcs,
+                            (_vsrc, ref_wcs),
+                            sci_wcs,
                             shape_out=sci_data.shape,
                             order=interp_order_norm,
                             roundtrip_coords=roundtrip,
@@ -5035,32 +5819,25 @@ class ImageDistortionCorrector:
                         from reproject import reproject_exact
 
                         _vf, _ = reproject_exact(
-                            (_vsrc, ref_wcs), sci_wcs,
+                            (_vsrc, ref_wcs),
+                            sci_wcs,
                             shape_out=sci_data.shape,
                             parallel=use_parallel,
                         )
                     _vf = np.asarray(_vf, dtype=float)
                     _majority = fp_mask & np.isfinite(_vf) & (_vf > 0.5)
                     aligned_ref = np.asarray(aligned_ref, dtype=float)
-                    aligned_ref[_majority] = (
-                        aligned_ref[_majority] / _vf[_majority]
-                    )
+                    aligned_ref[_majority] = aligned_ref[_majority] / _vf[_majority]
                     fp_mask &= _majority
                     # The downstream weight map should carry partial
                     # coverage, not just the binary footprint.
                     _weight_fp = np.asarray(footprint, dtype=np.float32)
-                    _vf_clip = np.clip(
-                        np.where(np.isfinite(_vf), _vf, 0.0), 0.0, 1.0
-                    )
+                    _vf_clip = np.clip(np.where(np.isfinite(_vf), _vf, 0.0), 0.0, 1.0)
                     # Pixels rejected as majority-invalid become NaN in
                     # aligned_ref; they must carry zero weight too.
-                    _weight_fp = (
-                        _weight_fp * _vf_clip * fp_mask
-                    ).astype(np.float32)
+                    _weight_fp = (_weight_fp * _vf_clip * fp_mask).astype(np.float32)
                 except Exception as _ve:
-                    self.logger.debug(
-                        "Valid-fraction correction skipped: %s", _ve
-                    )
+                    self.logger.debug("Valid-fraction correction skipped: %s", _ve)
             else:
                 _weight_fp = np.asarray(footprint, dtype=np.float32)
             n_footprint = int(np.sum(fp_mask))
@@ -5069,14 +5846,17 @@ class ImageDistortionCorrector:
                 self.logger.warning(
                     "Reproject has zero footprint coverage (%d/%d pixels). "
                     "Template and science WCS do not overlap.",
-                    n_footprint, n_total,
+                    n_footprint,
+                    n_total,
                 )
                 return None
             if n_footprint < n_total * 0.5:
                 self.logger.warning(
                     "Reproject footprint coverage is low: %d/%d pixels (%.1f%%). "
                     "Large unmasked borders may affect subtraction quality.",
-                    n_footprint, n_total, 100.0 * n_footprint / n_total,
+                    n_footprint,
+                    n_total,
+                    100.0 * n_footprint / n_total,
                 )
 
             aligned_ref = np.asarray(aligned_ref, dtype=float)
@@ -5085,11 +5865,13 @@ class ImageDistortionCorrector:
             out_header = ref_header.copy()
             out_header = remove_wcs_from_header(out_header)
             from ..core.functions import copy_wcs_from_header
+
             copy_wcs_from_header(sci_header, out_header)
             base_ref = Path(reference_image).stem
             ext_ref = Path(reference_image).suffix
             aligned_reference_fpath = output_dir / f"{base_ref}{ext_ref}"
             from ..core.functions import safe_fits_write
+
             safe_fits_write(str(aligned_reference_fpath), aligned_ref, out_header)
             # The write may have overwritten the original template in place;
             # a sibling weight map still on the old grid must be refreshed.
@@ -5100,7 +5882,8 @@ class ImageDistortionCorrector:
             )
             self.logger.info(
                 "Alignment via WCS reproject succeeded (method=%s, coverage=%.1f%%).",
-                used_method, 100.0 * n_footprint / n_total,
+                used_method,
+                100.0 * n_footprint / n_total,
             )
 
             # Post-reproject alignment verification via centroid cross-match.
@@ -5113,7 +5896,11 @@ class ImageDistortionCorrector:
 
                 _reproj_fwhm_est = max(
                     self._science_header_fwhm(science_image)
-                    or (float(self.input_yaml.get("fwhm", 3.0)) if hasattr(self, "input_yaml") else 3.0),
+                    or (
+                        float(self.input_yaml.get("fwhm", 3.0))
+                        if hasattr(self, "input_yaml")
+                        else 3.0
+                    ),
                     2.5,
                 )
                 # Use the actual PSF FWHM for detection; keep the tolerance FWHM
@@ -5163,7 +5950,8 @@ class ImageDistortionCorrector:
                     self.logger.info(
                         "Sparse field in reproject verify (%d sci / %d ref); "
                         "retrying SExtractor with DETECT_THRESH=0.5",
-                        _n_sci_reproj, _n_ref_reproj,
+                        _n_sci_reproj,
+                        _n_ref_reproj,
                     )
                     _SPARSE_REPROJ_OVERRIDE = {
                         "DETECT_THRESH": 0.5,
@@ -5197,18 +5985,35 @@ class ImageDistortionCorrector:
                         _n_ref_reproj = len(_ref_cat_v) if _ref_cat_v is not None else 0
 
                 _reproj_min_det = 2 if min(_n_sci_reproj, _n_ref_reproj) < 5 else 3
-                if _sci_cat_v is not None and _ref_cat_v is not None and _n_sci_reproj >= _reproj_min_det and _n_ref_reproj >= _reproj_min_det:
-                    _x_col = "XWIN_IMAGE" if "XWIN_IMAGE" in _sci_cat_v.colnames else "X_IMAGE"
-                    _y_col = "YWIN_IMAGE" if "YWIN_IMAGE" in _sci_cat_v.colnames else "Y_IMAGE"
+                if (
+                    _sci_cat_v is not None
+                    and _ref_cat_v is not None
+                    and _n_sci_reproj >= _reproj_min_det
+                    and _n_ref_reproj >= _reproj_min_det
+                ):
+                    _x_col = (
+                        "XWIN_IMAGE"
+                        if "XWIN_IMAGE" in _sci_cat_v.colnames
+                        else "X_IMAGE"
+                    )
+                    _y_col = (
+                        "YWIN_IMAGE"
+                        if "YWIN_IMAGE" in _sci_cat_v.colnames
+                        else "Y_IMAGE"
+                    )
                     # SExtractor uses 1-based pixel coordinates; convert to 0-based
-                    _sci_xy = np.column_stack([
-                        np.asarray(_sci_cat_v[_x_col], float) - 1.0,
-                        np.asarray(_sci_cat_v[_y_col], float) - 1.0,
-                    ])
-                    _ref_xy = np.column_stack([
-                        np.asarray(_ref_cat_v[_x_col], float) - 1.0,
-                        np.asarray(_ref_cat_v[_y_col], float) - 1.0,
-                    ])
+                    _sci_xy = np.column_stack(
+                        [
+                            np.asarray(_sci_cat_v[_x_col], float) - 1.0,
+                            np.asarray(_sci_cat_v[_y_col], float) - 1.0,
+                        ]
+                    )
+                    _ref_xy = np.column_stack(
+                        [
+                            np.asarray(_ref_cat_v[_x_col], float) - 1.0,
+                            np.asarray(_ref_cat_v[_y_col], float) - 1.0,
+                        ]
+                    )
 
                     # Mutual nearest neighbors only - rejects false matches
                     _tree_ref = cKDTree(_ref_xy)
@@ -5220,7 +6025,9 @@ class ImageDistortionCorrector:
 
                     # Adaptive match tolerance for sparse fields
                     _n_total_reproj = len(_sci_xy) + len(_ref_xy)
-                    _reproj_match_tol = (3.0 if _n_total_reproj < 10 else 2.0) * _match_tol_fwhm
+                    _reproj_match_tol = (
+                        3.0 if _n_total_reproj < 10 else 2.0
+                    ) * _match_tol_fwhm
                     _good = _mutual & (_d_sr < _reproj_match_tol)
                     _reproj_min_matches = 2 if _n_total_reproj < 10 else 3
                     if _good.sum() >= _reproj_min_matches:
@@ -5246,10 +6053,26 @@ class ImageDistortionCorrector:
                         _reproj_quad_med_y = float(np.median(_reproj_matched_xy[:, 1]))
                         _reproj_quadrant_stats = {}
                         _reproj_quad_labels = [
-                            ("bottom_left", _reproj_matched_xy[:, 0] <= _reproj_quad_med_x, _reproj_matched_xy[:, 1] <= _reproj_quad_med_y),
-                            ("bottom_right", _reproj_matched_xy[:, 0] > _reproj_quad_med_x, _reproj_matched_xy[:, 1] <= _reproj_quad_med_y),
-                            ("top_left", _reproj_matched_xy[:, 0] <= _reproj_quad_med_x, _reproj_matched_xy[:, 1] > _reproj_quad_med_y),
-                            ("top_right", _reproj_matched_xy[:, 0] > _reproj_quad_med_x, _reproj_matched_xy[:, 1] > _reproj_quad_med_y),
+                            (
+                                "bottom_left",
+                                _reproj_matched_xy[:, 0] <= _reproj_quad_med_x,
+                                _reproj_matched_xy[:, 1] <= _reproj_quad_med_y,
+                            ),
+                            (
+                                "bottom_right",
+                                _reproj_matched_xy[:, 0] > _reproj_quad_med_x,
+                                _reproj_matched_xy[:, 1] <= _reproj_quad_med_y,
+                            ),
+                            (
+                                "top_left",
+                                _reproj_matched_xy[:, 0] <= _reproj_quad_med_x,
+                                _reproj_matched_xy[:, 1] > _reproj_quad_med_y,
+                            ),
+                            (
+                                "top_right",
+                                _reproj_matched_xy[:, 0] > _reproj_quad_med_x,
+                                _reproj_matched_xy[:, 1] > _reproj_quad_med_y,
+                            ),
                         ]
                         _reproj_worst_quad = 0.0
                         for _rql, _rqx, _rqy in _reproj_quad_labels:
@@ -5258,7 +6081,11 @@ class ImageDistortionCorrector:
                             if _rqn >= 2:
                                 _rq_dx = _dx[_rqmask]
                                 _rq_dy = _dy[_rqmask]
-                                _rq_med_off = float(np.sqrt(np.median(_rq_dx)**2 + np.median(_rq_dy)**2))
+                                _rq_med_off = float(
+                                    np.sqrt(
+                                        np.median(_rq_dx) ** 2 + np.median(_rq_dy) ** 2
+                                    )
+                                )
                                 _reproj_quadrant_stats[_rql] = {
                                     "n": _rqn,
                                     "median_offset_px": _rq_med_off,
@@ -5272,7 +6099,8 @@ class ImageDistortionCorrector:
                             )
                             self.logger.info(
                                 "Reproject per-quadrant: %s; worst=%.2f px",
-                                _rq_summary, _reproj_worst_quad,
+                                _rq_summary,
+                                _reproj_worst_quad,
                             )
 
                         self.logger.info(
@@ -5281,17 +6109,14 @@ class ImageDistortionCorrector:
                                 f"offset=({_med_dx:.3f}, {_med_dy:.3f}) px",
                                 f"RMS=({_rms_dx:.3f}, {_rms_dy:.3f}) px "
                                 f"total={_total:.3f} px rms={_rms:.3f} px",
-                                f"P95={_p95_reproj:.3f} px "
-                                f"({_n_match_reproj} matches)",
+                                f"P95={_p95_reproj:.3f} px ({_n_match_reproj} matches)",
                             )
                         )
 
                         _max_off = float(
                             quality_cfg.get("alignment_max_offset_px", 0.5)
                         )
-                        _max_rms = float(
-                            quality_cfg.get("alignment_max_rms_px", 0.75)
-                        )
+                        _max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
                         _max_p95 = float(
                             quality_cfg.get(
                                 "alignment_max_p95_px",
@@ -5304,10 +6129,9 @@ class ImageDistortionCorrector:
                         # FWHM-adaptive thresholds for fallback gates; use the
                         # measured header FWHM (input_yaml["fwhm"] is still the
                         # config default at this stage).
-                        _reproj_fwhm = (
-                            self._science_header_fwhm(science_image)
-                            or float(self.input_yaml.get("fwhm", 3.0))
-                        )
+                        _reproj_fwhm = self._science_header_fwhm(
+                            science_image
+                        ) or float(self.input_yaml.get("fwhm", 3.0))
                         _reproj_scale = max(0.5, min(3.0, _reproj_fwhm / 3.0))
                         _max_off *= _reproj_scale
                         _max_rms *= _reproj_scale
@@ -5317,25 +6141,44 @@ class ImageDistortionCorrector:
                         _reproj_reject = (
                             _n_match_reproj >= _reproj_min_matches and _total > _max_off
                         ) or (
-                            _n_match_reproj >= 8 and _reproj_worst_quad > _reproj_worst_quad_limit
+                            _n_match_reproj >= 8
+                            and _reproj_worst_quad > _reproj_worst_quad_limit
                         )
                         if _n_match_reproj >= _reproj_min_n:
-                            _reproj_reject = _reproj_reject or _rms > _max_rms or _p95_reproj > _max_p95
+                            _reproj_reject = (
+                                _reproj_reject
+                                or _rms > _max_rms
+                                or _p95_reproj > _max_p95
+                            )
                         if _reproj_reject:
                             _reasons = []
                             if _total > _max_off:
-                                _reasons.append("offset=%.2f px (> %.2f px)" % (_total, _max_off))
-                            if _n_match_reproj >= 8 and _reproj_worst_quad > _reproj_worst_quad_limit:
-                                _reasons.append("worst_quadrant=%.2f px (> %.2f px)" % (_reproj_worst_quad, _reproj_worst_quad_limit))
+                                _reasons.append(
+                                    "offset=%.2f px (> %.2f px)" % (_total, _max_off)
+                                )
+                            if (
+                                _n_match_reproj >= 8
+                                and _reproj_worst_quad > _reproj_worst_quad_limit
+                            ):
+                                _reasons.append(
+                                    "worst_quadrant=%.2f px (> %.2f px)"
+                                    % (_reproj_worst_quad, _reproj_worst_quad_limit)
+                                )
                             if _n_match_reproj >= _reproj_min_n:
                                 if _rms > _max_rms:
-                                    _reasons.append("RMS=%.2f px (> %.2f px)" % (_rms, _max_rms))
+                                    _reasons.append(
+                                        "RMS=%.2f px (> %.2f px)" % (_rms, _max_rms)
+                                    )
                                 if _p95_reproj > _max_p95:
-                                    _reasons.append("P95=%.2f px (> %.2f px)" % (_p95_reproj, _max_p95))
+                                    _reasons.append(
+                                        "P95=%.2f px (> %.2f px)"
+                                        % (_p95_reproj, _max_p95)
+                                    )
                             self.logger.warning(
                                 "Reproject alignment rejected: %s (%d matches). "
                                 "Falling through to next alignment method.",
-                                "; ".join(_reasons) if _reasons else "unknown", _n_match_reproj,
+                                "; ".join(_reasons) if _reasons else "unknown",
+                                _n_match_reproj,
                             )
                             return {
                                 "science_aligned": science_image,
@@ -5352,7 +6195,10 @@ class ImageDistortionCorrector:
                             self.logger.info(
                                 "Reproject alignment accepted: offset=%.2f px, "
                                 "RMS=%.2f px, P95=%.2f px (%d matches).",
-                                _total, _rms, _p95_reproj, _n_match_reproj,
+                                _total,
+                                _rms,
+                                _p95_reproj,
+                                _n_match_reproj,
                             )
                             reproject_metadata = {
                                 "offset_x": _med_dx,
@@ -5375,7 +6221,8 @@ class ImageDistortionCorrector:
                             except Exception:
                                 _v_nx2 = _v_ny2 = 0.0
                             if (
-                                _v_nx2 > 0 and _v_ny2 > 0
+                                _v_nx2 > 0
+                                and _v_ny2 > 0
                                 and len(_reproj_matched_xy) >= 2
                             ):
                                 _rspan_x = (
@@ -5393,7 +6240,8 @@ class ImageDistortionCorrector:
                                         "the field - coverage-limited "
                                         "verification.",
                                         _n_match_reproj,
-                                        100 * _rspan_x, 100 * _rspan_y,
+                                        100 * _rspan_x,
+                                        100 * _rspan_y,
                                     )
                                     reproject_metadata["coverage_ok"] = False
                     else:
@@ -5404,43 +6252,46 @@ class ImageDistortionCorrector:
                         # evidence the reprojected image is measurably wrong.
                         _n_mut_r = int(_mutual.sum())
                         if _n_mut_r >= 3:
-                            _dx_all_r = (
-                                _sci_xy[_mutual, 0] - _ref_xy[_i_sr[_mutual], 0]
-                            )
-                            _dy_all_r = (
-                                _sci_xy[_mutual, 1] - _ref_xy[_i_sr[_mutual], 1]
-                            )
+                            _dx_all_r = _sci_xy[_mutual, 0] - _ref_xy[_i_sr[_mutual], 0]
+                            _dy_all_r = _sci_xy[_mutual, 1] - _ref_xy[_i_sr[_mutual], 1]
                             _mdx_r = float(np.median(_dx_all_r))
                             _mdy_r = float(np.median(_dy_all_r))
                             _res_r = np.hypot(_dx_all_r - _mdx_r, _dy_all_r - _mdy_r)
                             _n_coh_r = int(np.sum(_res_r <= _reproj_match_tol))
                             _coh_min_r = max(3, int(np.ceil(0.6 * _n_mut_r)))
                             _med_off_r = float(np.hypot(_mdx_r, _mdy_r))
-                            if _n_coh_r >= _coh_min_r and _med_off_r > _reproj_match_tol:
+                            if (
+                                _n_coh_r >= _coh_min_r
+                                and _med_off_r > _reproj_match_tol
+                            ):
                                 self.logger.warning(
                                     "Reproject verification: %d mutual pairs "
                                     "share a coherent offset of %.2f px "
                                     "(> %.2f px tolerance) - misregistration "
                                     "detected; rejecting.",
-                                    _n_coh_r, _med_off_r, _reproj_match_tol,
+                                    _n_coh_r,
+                                    _med_off_r,
+                                    _reproj_match_tol,
                                 )
                                 return {
                                     "science_aligned": science_image,
                                     "reference_aligned": str(aligned_reference_fpath),
                                     "alignment_method": f"reproject/{used_method}",
                                     "rejected": True,
-                                    "reject_rms": float(np.hypot(
-                                        np.std(_dx_all_r), np.std(_dy_all_r)
-                                    )),
+                                    "reject_rms": float(
+                                        np.hypot(np.std(_dx_all_r), np.std(_dy_all_r))
+                                    ),
                                     "reject_p95": float("inf"),
                                     "reject_offset": _med_off_r,
-                                    "reject_max": float(np.max(
-                                        np.hypot(_dx_all_r, _dy_all_r)
-                                    )),
+                                    "reject_max": float(
+                                        np.max(np.hypot(_dx_all_r, _dy_all_r))
+                                    ),
                                     "reject_n_matched": _n_coh_r,
                                 }
             except Exception as _ve:
-                self.logger.debug("Post-reproject verification failed (non-fatal): %s", _ve)
+                self.logger.debug(
+                    "Post-reproject verification failed (non-fatal): %s", _ve
+                )
 
             if not reproject_metadata:
                 self.logger.warning(
@@ -5513,7 +6364,12 @@ class ImageDistortionCorrector:
                 _scx = (sci_data.shape[1] - 1) / 2.0
                 _scy = (sci_data.shape[0] - 1) / 2.0
                 _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
-                return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
+                return (
+                    sci_data.shape[1],
+                    sci_data.shape[0],
+                    float(_fb_ra[0]),
+                    float(_fb_dec[0]),
+                )
 
             # Convert bounding box corners to world coordinates.
             # _valid_bbox gives the first/last 0-based pixel indices that contain
@@ -5522,10 +6378,12 @@ class ImageDistortionCorrector:
             def _bbox_corners(bbox):
                 x1, y1, x2, y2 = bbox
                 return np.array(
-                    [[x1 - 0.5, y1 - 0.5],
-                     [x2 + 0.5, y1 - 0.5],
-                     [x2 + 0.5, y2 + 0.5],
-                     [x1 - 0.5, y2 + 0.5]]
+                    [
+                        [x1 - 0.5, y1 - 0.5],
+                        [x2 + 0.5, y1 - 0.5],
+                        [x2 + 0.5, y2 + 0.5],
+                        [x1 - 0.5, y2 + 0.5],
+                    ]
                 )
 
             sci_corners = _bbox_corners(sci_bbox)
@@ -5538,13 +6396,13 @@ class ImageDistortionCorrector:
             # min/max over corner RAs gives ra_min~0, ra_max~360 for a
             # field straddling RA=0, producing a ~360-degree "overlap".
             _ra_ref = float(
-                np.median(
-                    np.concatenate([sci_world[:, 0], ref_world[:, 0]])
-                )
+                np.median(np.concatenate([sci_world[:, 0], ref_world[:, 0]]))
             )
 
             def _unwrap_ra(ra):
-                return (np.asarray(ra, float) - _ra_ref + 180.0) % 360.0 - 180.0 + _ra_ref
+                return (
+                    (np.asarray(ra, float) - _ra_ref + 180.0) % 360.0 - 180.0 + _ra_ref
+                )
 
             _sci_ra = _unwrap_ra(sci_world[:, 0])
             _ref_ra = _unwrap_ra(ref_world[:, 0])
@@ -5560,7 +6418,12 @@ class ImageDistortionCorrector:
                 _scx = (sci_data.shape[1] - 1) / 2.0
                 _scy = (sci_data.shape[0] - 1) / 2.0
                 _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
-                return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
+                return (
+                    sci_data.shape[1],
+                    sci_data.shape[0],
+                    float(_fb_ra[0]),
+                    float(_fb_dec[0]),
+                )
 
             # Convert overlap size to pixels at output pixel scale
             # cos(dec) factor for RA separation
@@ -5584,8 +6447,8 @@ class ImageDistortionCorrector:
                 # overlap_center_ra is in the unwrapped frame; bring the
                 # target into it before differencing.
                 dra_arcsec = (
-                    _unwrap_ra(target_ra) - overlap_center_ra
-                ) * cos_dec * 3600
+                    (_unwrap_ra(target_ra) - overlap_center_ra) * cos_dec * 3600
+                )
                 ddec_arcsec = (target_dec - overlap_center_dec) * 3600
 
                 dx_pix = dra_arcsec / pix_scale
@@ -5599,7 +6462,8 @@ class ImageDistortionCorrector:
                     width = int(2 * new_half_w)
                     self.logger.debug(
                         "Expanded output width to include target: %d -> %d",
-                        int(2 * half_w), width
+                        int(2 * half_w),
+                        width,
                     )
 
                 if abs(dy_pix) >= half_h - 5:  # 5 pixel margin
@@ -5607,7 +6471,8 @@ class ImageDistortionCorrector:
                     height = int(2 * new_half_h)
                     self.logger.debug(
                         "Expanded output height to include target: %d -> %d",
-                        int(2 * half_h), height
+                        int(2 * half_h),
+                        height,
                     )
 
             # Cap at original science size (don't expand beyond input)
@@ -5618,15 +6483,27 @@ class ImageDistortionCorrector:
             # Final check: if target is provided, verify it's within the output bounds
             # If not, use full science image size to ensure target is included
             if target_ra is not None and target_dec is not None:
-                sci_target_x, sci_target_y = sci_wcs.all_world2pix([target_ra], [target_dec], 0)
-                sci_target_x, sci_target_y = float(sci_target_x[0]), float(sci_target_y[0])
+                sci_target_x, sci_target_y = sci_wcs.all_world2pix(
+                    [target_ra], [target_dec], 0
+                )
+                sci_target_x, sci_target_y = (
+                    float(sci_target_x[0]),
+                    float(sci_target_y[0]),
+                )
 
                 margin = 50  # pixels
-                if not (margin <= sci_target_x < width - margin and margin <= sci_target_y < height - margin):
+                if not (
+                    margin <= sci_target_x < width - margin
+                    and margin <= sci_target_y < height - margin
+                ):
                     self.logger.warning(
                         "Target (%.1f, %.1f) is outside output bounds (%dx%d). Using full science image size (%dx%d) to ensure target is included.",
-                        sci_target_x, sci_target_y, width, height,
-                        sci_data.shape[1], sci_data.shape[0]
+                        sci_target_x,
+                        sci_target_y,
+                        width,
+                        height,
+                        sci_data.shape[1],
+                        sci_data.shape[0],
                     )
                     width = sci_data.shape[1]
                     height = sci_data.shape[0]
@@ -5641,9 +6518,19 @@ class ImageDistortionCorrector:
             _scy = (sci_data.shape[0] - 1) / 2.0
             try:
                 _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
-                return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
+                return (
+                    sci_data.shape[1],
+                    sci_data.shape[0],
+                    float(_fb_ra[0]),
+                    float(_fb_dec[0]),
+                )
             except Exception:
-                return sci_data.shape[1], sci_data.shape[0], float(sci_wcs.wcs.crval[0]), float(sci_wcs.wcs.crval[1])
+                return (
+                    sci_data.shape[1],
+                    sci_data.shape[0],
+                    float(sci_wcs.wcs.crval[0]),
+                    float(sci_wcs.wcs.crval[1]),
+                )
 
     def _compute_relative_wcs_correction(
         self,
@@ -5685,11 +6572,7 @@ class ImageDistortionCorrector:
                 sci_tab = Table(hs[2].data)
                 ref_tab = Table(hr[2].data)
 
-            if (
-                len(sci_tab) == 0
-                or len(ref_tab) == 0
-                or len(sci_tab) != len(ref_tab)
-            ):
+            if len(sci_tab) == 0 or len(ref_tab) == 0 or len(sci_tab) != len(ref_tab):
                 self.logger.warning(
                     "Relative WCS correction: no matched sources available"
                 )
@@ -5735,14 +6618,40 @@ class ImageDistortionCorrector:
             self.logger.info(
                 "Relative WCS correction: %d sources, "
                 "median offset=(%.3f, %.3f) px, RMS=%.3f px",
-                n_sources, median_dx, median_dy, rms_before,
+                n_sources,
+                median_dx,
+                median_dy,
+                rms_before,
             )
 
             # Fit affine model: dx = a0 + a1*rx + a2*ry, dy = b0 + b1*rx + b2*ry
             # This captures shift (a0, b0) + rotation/scale (a1, a2, b1, b2)
-            cd_sci = sci_wcs.wcs.cd
-            cd_ref = ref_wcs.wcs.cd
+            # Linear matrix of each WCS.  ``wcs.cd`` is None for PC+CDELT
+            # headers (very common), so fall back to diag(CDELT) @ PC.
+            def _pix_matrix(_w):
+                _m = getattr(_w.wcs, "cd", None)
+                if _m is not None and np.asarray(_m).shape == (2, 2):
+                    return np.asarray(_m, dtype=float)
+                _pc = getattr(_w.wcs, "pc", None)
+                _cdelt = getattr(_w.wcs, "cdelt", None)
+                if (
+                    _pc is not None
+                    and _cdelt is not None
+                    and np.asarray(_pc).shape == (2, 2)
+                    and np.size(_cdelt) >= 2
+                ):
+                    return np.diag(np.asarray(_cdelt[:2])) @ np.asarray(_pc)
+                return None
+
+            cd_sci = _pix_matrix(sci_wcs)
+            cd_ref = _pix_matrix(ref_wcs)
             crpix_ref = ref_wcs.wcs.crpix
+            if cd_sci is None or cd_ref is None:
+                self.logger.error(
+                    "Relative WCS correction: cannot derive a linear CD/PC "
+                    "matrix from one of the WCSes; skipping correction."
+                )
+                return None
 
             if n_sources >= 6:
                 # >=6 sources allow the full affine fit (6 parameters)
@@ -5756,7 +6665,12 @@ class ImageDistortionCorrector:
                 self.logger.info(
                     "Affine fit: dx=%.4f + %.6f*rx + %.6f*ry, "
                     "dy=%.4f + %.6f*rx + %.6f*ry",
-                    a0, a1, a2, b0, b1, b2,
+                    a0,
+                    a1,
+                    a2,
+                    b0,
+                    b1,
+                    b2,
                 )
 
                 # Convert affine correction to WCS terms:
@@ -5791,15 +6705,25 @@ class ImageDistortionCorrector:
                 delta_crval = cd_sci @ constant_pix + cd_sci @ M @ crpix_arr
 
                 corrected_header = ref_header.copy()
-                corrected_header["CRVAL1"] = float(ref_header["CRVAL1"]) + float(delta_crval[0])
-                corrected_header["CRVAL2"] = float(ref_header["CRVAL2"]) + float(delta_crval[1])
+                corrected_header["CRVAL1"] = float(ref_header["CRVAL1"]) + float(
+                    delta_crval[0]
+                )
+                corrected_header["CRVAL2"] = float(ref_header["CRVAL2"]) + float(
+                    delta_crval[1]
+                )
 
-                cd_old = np.array([
-                    [float(ref_header.get("CD1_1", cd_ref[0, 0])),
-                     float(ref_header.get("CD1_2", cd_ref[0, 1]))],
-                    [float(ref_header.get("CD2_1", cd_ref[1, 0])),
-                     float(ref_header.get("CD2_2", cd_ref[1, 1]))],
-                ])
+                cd_old = np.array(
+                    [
+                        [
+                            float(ref_header.get("CD1_1", cd_ref[0, 0])),
+                            float(ref_header.get("CD1_2", cd_ref[0, 1])),
+                        ],
+                        [
+                            float(ref_header.get("CD2_1", cd_ref[1, 0])),
+                            float(ref_header.get("CD2_2", cd_ref[1, 1])),
+                        ],
+                    ]
+                )
                 cd_new = cd_old + delta_cd
                 corrected_header["CD1_1"] = float(cd_new[0, 0])
                 corrected_header["CD1_2"] = float(cd_new[0, 1])
@@ -5807,12 +6731,16 @@ class ImageDistortionCorrector:
                 corrected_header["CD2_2"] = float(cd_new[1, 1])
 
                 self.logger.info(
-                    "Affine WCS correction: dCRVAL=(%.6f, %.6f) deg (%.3f\", %.3f\"), "
+                    'Affine WCS correction: dCRVAL=(%.6f, %.6f) deg (%.3f", %.3f"), '
                     "dCD=(%.2e, %.2e, %.2e, %.2e)",
-                    delta_crval[0], delta_crval[1],
-                    delta_crval[0] * 3600.0, delta_crval[1] * 3600.0,
-                    delta_cd[0, 0], delta_cd[0, 1],
-                    delta_cd[1, 0], delta_cd[1, 1],
+                    delta_crval[0],
+                    delta_crval[1],
+                    delta_crval[0] * 3600.0,
+                    delta_crval[1] * 3600.0,
+                    delta_cd[0, 0],
+                    delta_cd[0, 1],
+                    delta_cd[1, 0],
+                    delta_cd[1, 1],
                 )
 
             else:
@@ -5829,9 +6757,11 @@ class ImageDistortionCorrector:
                 corrected_header["CRVAL2"] = float(ref_header["CRVAL2"]) + delta_dec
 
                 self.logger.info(
-                    "CRVAL correction: dRA=%.6f deg (%.3f\"), dDec=%.6f deg (%.3f\")",
-                    delta_ra, delta_ra * 3600.0,
-                    delta_dec, delta_dec * 3600.0,
+                    'CRVAL correction: dRA=%.6f deg (%.3f"), dDec=%.6f deg (%.3f")',
+                    delta_ra,
+                    delta_ra * 3600.0,
+                    delta_dec,
+                    delta_dec * 3600.0,
                 )
 
             # Verify correction: re-compute residuals with corrected WCS
@@ -5842,22 +6772,44 @@ class ImageDistortionCorrector:
                 dx_c = sx - x_pred_c
                 dy_c = sy - y_pred_c
                 rms_after = float(np.sqrt(np.mean(dx_c**2 + dy_c**2)))
-                median_after = float(np.sqrt(np.median(dx_c)**2 + np.median(dy_c)**2))
+                median_after = float(
+                    np.sqrt(np.median(dx_c) ** 2 + np.median(dy_c) ** 2)
+                )
                 self.logger.info(
                     "Relative WCS correction verified: median %.3f -> %.3f px, "
                     "RMS %.3f -> %.3f px",
                     float(np.sqrt(median_dx**2 + median_dy**2)),
-                    median_after, rms_before, rms_after,
+                    median_after,
+                    rms_before,
+                    rms_after,
                 )
                 rms_before = rms_after  # Use post-correction RMS for quality gate
 
             # Write corrected header as .head file (WCS keys only)
             wcs_prefixes = (
-                "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT",
-                "CROTA", "PV", "LONPOLE", "LATPOLE", "EQUINOX",
-                "WCSNAME", "CUNIT", "WCSAXES", "PROJP", "LTV",
-                "LTM", "RADECSYS", "RADESYS", "RADYSYS",
-                "LONGPOLE", "TNX", "SIP_",
+                "CRPIX",
+                "CRVAL",
+                "CTYPE",
+                "CD",
+                "PC",
+                "CDELT",
+                "CROTA",
+                "PV",
+                "LONPOLE",
+                "LATPOLE",
+                "EQUINOX",
+                "WCSNAME",
+                "CUNIT",
+                "WCSAXES",
+                "PROJP",
+                "LTV",
+                "LTM",
+                "RADECSYS",
+                "RADESYS",
+                "RADYSYS",
+                "LONGPOLE",
+                "TNX",
+                "SIP_",
             )
             wcs_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
 
@@ -5888,6 +6840,7 @@ class ImageDistortionCorrector:
         except Exception as e:
             self.logger.warning("Relative WCS correction failed: %s", e)
             import traceback
+
             self.logger.debug(traceback.format_exc())
             return None
 
@@ -5919,7 +6872,8 @@ class ImageDistortionCorrector:
             scamp_header = fits.Header.fromtextfile(str(head_path))
 
             pv_count = sum(
-                1 for k in scamp_header
+                1
+                for k in scamp_header
                 if str(k).startswith("PV") and len(str(k)) > 2 and str(k)[2:3].isdigit()
             )
 
@@ -5935,7 +6889,8 @@ class ImageDistortionCorrector:
                     "SCAMP .head has %d PV keywords (self-consistent CD+PV). "
                     "Reference original SIP order was %d. "
                     "Using SCAMP's PV solution as-is - SWarp will apply it correctly.",
-                    pv_count, ref_sip_order,
+                    pv_count,
+                    ref_sip_order,
                 )
             else:
                 self.logger.info(
@@ -5948,7 +6903,8 @@ class ImageDistortionCorrector:
         except Exception as e:
             self.logger.warning(
                 "Failed to inspect SCAMP .head for PV keywords (%s). "
-                "Using SCAMP .head as-is.", e,
+                "Using SCAMP .head as-is.",
+                e,
             )
 
     def _scamp_reproject_reference_to_science(
@@ -6007,7 +6963,9 @@ class ImageDistortionCorrector:
                 sci_shape = sci_data.shape
                 sci_wcs = get_wcs(sci_header)
                 if sci_wcs is None:
-                    self.logger.error("Science image has no valid WCS for reproject target.")
+                    self.logger.error(
+                        "Science image has no valid WCS for reproject target."
+                    )
                     return None
 
             # --- Read reference data and header ---
@@ -6026,18 +6984,33 @@ class ImageDistortionCorrector:
             if n_nan_ref > 0:
                 self.logger.info(
                     "Reference has %d NaN pixels (%.2f%%) - replacing with 0 before reprojection.",
-                    n_nan_ref, 100.0 * n_nan_ref / ref_data.size,
+                    n_nan_ref,
+                    100.0 * n_nan_ref / ref_data.size,
                 )
                 ref_data = np.where(np.isfinite(ref_data), ref_data, 0.0)
 
             # --- Log WCS diagnostics for both images ---
             try:
-                sci_ps = np.sqrt(abs(sci_wcs.wcs.cd[0,0]*sci_wcs.wcs.cd[1,1] - sci_wcs.wcs.cd[0,1]*sci_wcs.wcs.cd[1,0])) * 3600.0
-                sci_rot = np.degrees(np.arctan2(sci_wcs.wcs.cd[0,1], sci_wcs.wcs.cd[0,0]))
+                sci_ps = (
+                    np.sqrt(
+                        abs(
+                            sci_wcs.wcs.cd[0, 0] * sci_wcs.wcs.cd[1, 1]
+                            - sci_wcs.wcs.cd[0, 1] * sci_wcs.wcs.cd[1, 0]
+                        )
+                    )
+                    * 3600.0
+                )
+                sci_rot = np.degrees(
+                    np.arctan2(sci_wcs.wcs.cd[0, 1], sci_wcs.wcs.cd[0, 0])
+                )
                 self.logger.info(
                     "Reproject diagnostics - science: shape=%s, pixscale=%.3f arcsec/px, "
                     "rotation=%.2f deg, CRPIX=(%.1f, %.1f)",
-                    sci_shape, sci_ps, sci_rot, sci_wcs.wcs.crpix[0], sci_wcs.wcs.crpix[1],
+                    sci_shape,
+                    sci_ps,
+                    sci_rot,
+                    sci_wcs.wcs.crpix[0],
+                    sci_wcs.wcs.crpix[1],
                 )
             except Exception:
                 pass
@@ -6048,17 +7021,38 @@ class ImageDistortionCorrector:
                 self.logger.info("Applying SCAMP .head WCS to reference for reproject")
                 try:
                     from ..pipeline.wcs import _normalize_projection_codes
+
                     scamp_header = fits.Header.fromtextfile(str(head_file))
-                    scamp_header = _normalize_projection_codes(scamp_header, inplace=False)
+                    scamp_header = _normalize_projection_codes(
+                        scamp_header, inplace=False
+                    )
 
                     # Remove old WCS from reference header, then copy SCAMP WCS in
                     ref_header = remove_wcs_from_header(ref_header)
                     _wcs_prefixes = (
-                        "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT",
-                        "CROTA", "PV", "LONPOLE", "LATPOLE", "EQUINOX",
-                        "WCSNAME", "CUNIT", "WCSAXES", "PROJP", "LTV",
-                        "LTM", "RADECSYS", "RADESYS", "RADYSYS",
-                        "LONGPOLE", "TNX", "SIP_",
+                        "CRPIX",
+                        "CRVAL",
+                        "CTYPE",
+                        "CD",
+                        "PC",
+                        "CDELT",
+                        "CROTA",
+                        "PV",
+                        "LONPOLE",
+                        "LATPOLE",
+                        "EQUINOX",
+                        "WCSNAME",
+                        "CUNIT",
+                        "WCSAXES",
+                        "PROJP",
+                        "LTV",
+                        "LTM",
+                        "RADECSYS",
+                        "RADESYS",
+                        "RADYSYS",
+                        "LONGPOLE",
+                        "TNX",
+                        "SIP_",
                     )
                     _wcs_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
                     for key in scamp_header:
@@ -6067,13 +7061,16 @@ class ImageDistortionCorrector:
                         is_wcs = any(key.startswith(p) for p in _wcs_prefixes)
                         if not is_wcs and "_" in key:
                             stem = key.split("_")[0] + "_"
-                            is_wcs = stem in _wcs_stems and key.startswith(stem.rstrip("_"))
+                            is_wcs = stem in _wcs_stems and key.startswith(
+                                stem.rstrip("_")
+                            )
                         if is_wcs:
                             ref_header[key] = scamp_header[key]
                 except Exception as e:
                     self.logger.warning(
                         "Failed to apply SCAMP .head to reference header (%s). "
-                        "Reproject will use reference's original WCS.", e
+                        "Reproject will use reference's original WCS.",
+                        e,
                     )
             else:
                 self.logger.warning(
@@ -6083,18 +7080,37 @@ class ImageDistortionCorrector:
 
             ref_wcs_corrected = get_wcs(ref_header)
             if ref_wcs_corrected is None:
-                self.logger.error("Could not build WCS from SCAMP-corrected reference header.")
+                self.logger.error(
+                    "Could not build WCS from SCAMP-corrected reference header."
+                )
                 return None
 
             # --- Log reference WCS diagnostics ---
             try:
-                ref_ps = np.sqrt(abs(ref_wcs_corrected.wcs.cd[0,0]*ref_wcs_corrected.wcs.cd[1,1] - ref_wcs_corrected.wcs.cd[0,1]*ref_wcs_corrected.wcs.cd[1,0])) * 3600.0
-                ref_rot = np.degrees(np.arctan2(ref_wcs_corrected.wcs.cd[0,1], ref_wcs_corrected.wcs.cd[0,0]))
+                ref_ps = (
+                    np.sqrt(
+                        abs(
+                            ref_wcs_corrected.wcs.cd[0, 0]
+                            * ref_wcs_corrected.wcs.cd[1, 1]
+                            - ref_wcs_corrected.wcs.cd[0, 1]
+                            * ref_wcs_corrected.wcs.cd[1, 0]
+                        )
+                    )
+                    * 3600.0
+                )
+                ref_rot = np.degrees(
+                    np.arctan2(
+                        ref_wcs_corrected.wcs.cd[0, 1], ref_wcs_corrected.wcs.cd[0, 0]
+                    )
+                )
                 self.logger.info(
                     "Reproject diagnostics - reference: shape=%s, pixscale=%.3f arcsec/px, "
                     "rotation=%.2f deg, CRPIX=(%.1f, %.1f)",
-                    ref_data.shape, ref_ps, ref_rot,
-                    ref_wcs_corrected.wcs.crpix[0], ref_wcs_corrected.wcs.crpix[1],
+                    ref_data.shape,
+                    ref_ps,
+                    ref_rot,
+                    ref_wcs_corrected.wcs.crpix[0],
+                    ref_wcs_corrected.wcs.crpix[1],
                 )
                 ps_ratio = ref_ps / sci_ps if sci_ps > 0 else 0.0
                 rot_diff = abs(ref_rot - sci_rot)
@@ -6102,7 +7118,8 @@ class ImageDistortionCorrector:
                     rot_diff = 360 - rot_diff
                 self.logger.info(
                     "Reproject diagnostics - pixel scale ratio=%.3f, rotation difference=%.2f deg",
-                    ps_ratio, rot_diff,
+                    ps_ratio,
+                    rot_diff,
                 )
             except Exception:
                 pass
@@ -6110,7 +7127,9 @@ class ImageDistortionCorrector:
             # --- Read reproject config ---
             cfg = reproject_cfg or {}
             req_method = str(cfg.get("reproject_method", "adaptive")).lower().strip()
-            interp_order = str(cfg.get("reproject_interp_order", "bicubic")).lower().strip()
+            interp_order = (
+                str(cfg.get("reproject_interp_order", "bicubic")).lower().strip()
+            )
             use_parallel = bool(cfg.get("reproject_parallel", False))
             roundtrip = bool(cfg.get("reproject_roundtrip_coords", True))
             conserve_flux = bool(cfg.get("reproject_adaptive_conserve_flux", False))
@@ -6146,11 +7165,17 @@ class ImageDistortionCorrector:
                 pass
 
             _interp_map = {
-                "nearest": "nearest-neighbor", "nearest-neighbor": "nearest-neighbor",
+                "nearest": "nearest-neighbor",
+                "nearest-neighbor": "nearest-neighbor",
                 "nn": "nearest-neighbor",
-                "bilinear": "bilinear", "linear": "bilinear", "1": "bilinear",
-                "biquadratic": "biquadratic", "2": "biquadratic",
-                "bicubic": "bicubic", "cubic": "bicubic", "3": "bicubic",
+                "bilinear": "bilinear",
+                "linear": "bilinear",
+                "1": "bilinear",
+                "biquadratic": "biquadratic",
+                "2": "biquadratic",
+                "bicubic": "bicubic",
+                "cubic": "bicubic",
+                "3": "bicubic",
             }
             interp_order_norm = _interp_map.get(interp_order, "bilinear")
 
@@ -6163,11 +7188,16 @@ class ImageDistortionCorrector:
             _fwhm = self._science_header_fwhm(sci_image_path) or (
                 float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
             )
-            if _fwhm > 0 and _fwhm < 2.5 and interp_order_norm in ("bicubic", "biquadratic"):
+            if (
+                _fwhm > 0
+                and _fwhm < 2.5
+                and interp_order_norm in ("bicubic", "biquadratic")
+            ):
                 self.logger.info(
                     "Undersampled image (FWHM=%.2f px < 2.5) - downgrading %s to bilinear "
                     "to avoid ringing artifacts.",
-                    _fwhm, interp_order_norm,
+                    _fwhm,
+                    interp_order_norm,
                 )
                 interp_order_norm = "bilinear"
 
@@ -6198,7 +7228,11 @@ class ImageDistortionCorrector:
                             parallel=use_parallel,
                             conserve_flux=conserve_flux,
                             center_jacobian=center_jacobian,
-                            **({"despike_jacobian": True} if "despike_jacobian" in _ADAPTIVE_PARAMS else {}),
+                            **(
+                                {"despike_jacobian": True}
+                                if "despike_jacobian" in _ADAPTIVE_PARAMS
+                                else {}
+                            ),
                         )
                     elif m == "interp":
                         aligned_ref, footprint = reproject_interp(
@@ -6244,31 +7278,37 @@ class ImageDistortionCorrector:
             if n_footprint < n_total * 0.5:
                 self.logger.warning(
                     "Reproject footprint coverage low: %d/%d pixels (%.1f%%).",
-                    n_footprint, n_total, 100.0 * n_footprint / n_total,
+                    n_footprint,
+                    n_total,
+                    100.0 * n_footprint / n_total,
                 )
             aligned_ref[~fp_mask] = np.nan
 
             # Build output header: science WCS keywords copied into ref header
             from ..core.functions import copy_wcs_from_header, safe_fits_write
+
             out_header = ref_header.copy()
             out_header = remove_wcs_from_header(out_header)
             copy_wcs_from_header(sci_header, out_header)
             out_header["NAXIS1"] = sci_shape[1]
             out_header["NAXIS2"] = sci_shape[0]
-            out_header["REPROJ"] = (True, "Reprojected to science grid via SCAMP+reproject")
+            out_header["REPROJ"] = (
+                True,
+                "Reprojected to science grid via SCAMP+reproject",
+            )
 
             safe_fits_write(str(output_path), aligned_ref, out_header)
 
             self.logger.info(
                 "SCAMP+reproject succeeded (method=%s, coverage=%.1f%%): %s",
-                used_method, 100.0 * n_footprint / n_total, output_path,
+                used_method,
+                100.0 * n_footprint / n_total,
+                output_path,
             )
             return output_path
 
         except Exception as e:
-            self.logger.warning(
-                "SCAMP+reproject failed: %s", e
-            )
+            self.logger.warning("SCAMP+reproject failed: %s", e)
             return None
 
     def _reproject_to_match(
@@ -6300,22 +7340,33 @@ class ImageDistortionCorrector:
 
         iy = getattr(self, "input_yaml", None) or {}
         align_cfg = iy.get("alignment", {}) if isinstance(iy, dict) else {}
-        interp_order = str(align_cfg.get("reproject_interp_order", "bicubic")).lower().strip()
+        interp_order = (
+            str(align_cfg.get("reproject_interp_order", "bicubic")).lower().strip()
+        )
         _interp_map = {
-            "nearest": "nearest-neighbor", "nearest-neighbor": "nearest-neighbor",
+            "nearest": "nearest-neighbor",
+            "nearest-neighbor": "nearest-neighbor",
             "nn": "nearest-neighbor",
-            "bilinear": "bilinear", "linear": "bilinear", "1": "bilinear",
-            "biquadratic": "biquadratic", "2": "biquadratic",
-            "bicubic": "bicubic", "cubic": "bicubic", "3": "bicubic",
+            "bilinear": "bilinear",
+            "linear": "bilinear",
+            "1": "bilinear",
+            "biquadratic": "biquadratic",
+            "2": "biquadratic",
+            "bicubic": "bicubic",
+            "cubic": "bicubic",
+            "3": "bicubic",
         }
         interp_order_norm = _interp_map.get(interp_order, "bilinear")
         use_parallel = bool(align_cfg.get("reproject_parallel", True))
 
         from ..pipeline.wcs import get_wcs as _get_wcs_for_reproj
+
         with fits.open(target_image) as target_hdul:
             target_wcs = _get_wcs_for_reproj(target_hdul[0].header)
             if target_wcs is None:
-                self.logger.error("_reproject_to_match: get_wcs failed for target image")
+                self.logger.error(
+                    "_reproject_to_match: get_wcs failed for target image"
+                )
                 return None
             target_shape = target_hdul[0].data.shape
 
@@ -6324,7 +7375,9 @@ class ImageDistortionCorrector:
             source_header = source_hdul[0].header.copy()
             source_wcs = _get_wcs_for_reproj(source_header)
             if source_wcs is None:
-                self.logger.error("_reproject_to_match: get_wcs failed for source image")
+                self.logger.error(
+                    "_reproject_to_match: get_wcs failed for source image"
+                )
                 return None
 
         # Reproject source onto target grid - exact-first for best accuracy
@@ -6348,7 +7401,11 @@ class ImageDistortionCorrector:
                         shape_out=target_shape,
                         roundtrip_coords=True,
                         parallel=use_parallel,
-                        **({"despike_jacobian": True} if "despike_jacobian" in _ADAPTIVE_PARAMS else {}),
+                        **(
+                            {"despike_jacobian": True}
+                            if "despike_jacobian" in _ADAPTIVE_PARAMS
+                            else {}
+                        ),
                     )
                 else:
                     reprojected_data, footprint = reproject_interp(
@@ -6366,6 +7423,7 @@ class ImageDistortionCorrector:
             return None
 
         from ..core.functions import update_header_from_wcs
+
         output_header = source_header.copy()
         update_header_from_wcs(output_header, target_wcs)
         output_header["REPROJ"] = (True, "Reprojected to match science grid")
@@ -6391,7 +7449,9 @@ class ImageDistortionCorrector:
         # the input filename, so a backup inside output_dir would be overwritten
         # by the aligned product and reference_aligned would dangle once the
         # backups are removed.
-        _output_dir = Path(output_dir) if output_dir is not None else Path(science_image).parent
+        _output_dir = (
+            Path(output_dir) if output_dir is not None else Path(science_image).parent
+        )
         _backup_dir = _output_dir / "._align_backup"
         _ref_backup = _backup_dir / f"._ref_backup_{Path(reference_image).name}"
         _sci_backup = _backup_dir / f"._sci_backup_{Path(science_image).name}"
@@ -6420,13 +7480,19 @@ class ImageDistortionCorrector:
                     shutil.copy2(str(_sci_backup), science_image)
                 except Exception:
                     pass
-        if result is not None and not result.get("rejected") and result.get("reference_aligned"):
+        if (
+            result is not None
+            and not result.get("rejected")
+            and result.get("reference_aligned")
+        ):
             _res_ref = result.get("reference_aligned")
             # Move the aligned product onto the conventional in-place path so
             # the returned path is stable and backup cleanup cannot invalidate
             # it (reproject named it after the backup filename).
             try:
-                if _res_ref and os.path.abspath(str(_res_ref)) != os.path.abspath(str(reference_image)):
+                if _res_ref and os.path.abspath(str(_res_ref)) != os.path.abspath(
+                    str(reference_image)
+                ):
                     shutil.copy2(str(_res_ref), str(reference_image))
                     invalidate_fits_cache(str(reference_image))
                     result["reference_aligned"] = str(reference_image)
@@ -6434,7 +7500,12 @@ class ImageDistortionCorrector:
                 pass
             for _tmp in [_ref_backup, _sci_backup, _res_ref]:
                 try:
-                    if _tmp and os.path.exists(_tmp) and os.path.abspath(str(_tmp)) != os.path.abspath(str(result.get("reference_aligned"))):
+                    if (
+                        _tmp
+                        and os.path.exists(_tmp)
+                        and os.path.abspath(str(_tmp))
+                        != os.path.abspath(str(result.get("reference_aligned")))
+                    ):
                         os.remove(_tmp)
                 except OSError:
                     pass
@@ -6451,12 +7522,21 @@ class ImageDistortionCorrector:
             str(_ref_backup) if _ref_backup else reference_image,
             output_dir,
         )
-        if aa_result is not None and not aa_result.get("rejected") and aa_result.get("science_aligned"):
+        if (
+            aa_result is not None
+            and not aa_result.get("rejected")
+            and aa_result.get("science_aligned")
+        ):
             # AstroAlign names its aligned product after the backup filename;
             # move it to the conventional in-place path before cleanup.
             _res_ref = aa_result.get("reference_aligned")
             try:
-                if _res_ref and os.path.isfile(_res_ref) and os.path.abspath(str(_res_ref)) != os.path.abspath(str(reference_image)):
+                if (
+                    _res_ref
+                    and os.path.isfile(_res_ref)
+                    and os.path.abspath(str(_res_ref))
+                    != os.path.abspath(str(reference_image))
+                ):
                     shutil.copy2(str(_res_ref), str(reference_image))
                     invalidate_fits_cache(str(reference_image))
                 aa_result["reference_aligned"] = str(reference_image)
@@ -6464,7 +7544,12 @@ class ImageDistortionCorrector:
                 pass
             for _tmp in [_ref_backup, _sci_backup, _res_ref]:
                 try:
-                    if _tmp and os.path.exists(_tmp) and os.path.abspath(str(_tmp)) != os.path.abspath(str(aa_result.get("reference_aligned"))):
+                    if (
+                        _tmp
+                        and os.path.exists(_tmp)
+                        and os.path.abspath(str(_tmp))
+                        != os.path.abspath(str(aa_result.get("reference_aligned")))
+                    ):
                         os.remove(_tmp)
                 except OSError:
                     pass
@@ -6540,7 +7625,9 @@ class ImageDistortionCorrector:
                 "sextractor_crowded", templates_cfg.get("crowded_field", False)
             )
 
-            def _extract_sources(fits_path, output_dir, aperture_radius, weight_path=None):
+            def _extract_sources(
+                fits_path, output_dir, aperture_radius, weight_path=None
+            ):
                 return self.run_sextractor(
                     str(fits_path),
                     output_dir=str(output_dir),
@@ -6555,9 +7642,13 @@ class ImageDistortionCorrector:
             sci_w = self._guess_map_weight_path(str(science_image))
             ref_w = self._guess_map_weight_path(str(reference_image))
             if sci_w:
-                self.logger.info("AstroAlign SExtractor: using science MAP_WEIGHT %s", sci_w)
+                self.logger.info(
+                    "AstroAlign SExtractor: using science MAP_WEIGHT %s", sci_w
+                )
             if ref_w:
-                self.logger.info("AstroAlign SExtractor: using reference MAP_WEIGHT %s", ref_w)
+                self.logger.info(
+                    "AstroAlign SExtractor: using reference MAP_WEIGHT %s", ref_w
+                )
 
             self.logger.info(
                 f"Extracting sources from science/reference images "
@@ -6567,11 +7658,17 @@ class ImageDistortionCorrector:
             with ThreadPoolExecutor(max_workers=2) as _pool:
                 _sci_fut = _pool.submit(
                     _extract_sources,
-                    sci_image_copy, science_aligned_dir, sci_aperture_radius, sci_w
+                    sci_image_copy,
+                    science_aligned_dir,
+                    sci_aperture_radius,
+                    sci_w,
                 )
                 _ref_fut = _pool.submit(
                     _extract_sources,
-                    ref_image_copy, reference_aligned_dir, ref_aperture_radius, ref_w
+                    ref_image_copy,
+                    reference_aligned_dir,
+                    ref_aperture_radius,
+                    ref_w,
                 )
                 sci_sex = _sci_fut.result()
                 ref_sex = _ref_fut.result()
@@ -6617,18 +7714,22 @@ class ImageDistortionCorrector:
             )
             try:
                 from ..core.plotting_utils import get_plot_ext
+
                 self.plot_matched_sources_side_by_side(
                     sci_image_path=str(sci_image_copy),
                     ref_image_path=str(ref_image_copy),
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
-                    output_plot_path=science_aligned_dir / f"Matched_Sources_{Path(sci_image_copy).stem}{get_plot_ext(self.input_yaml)}",
+                    output_plot_path=science_aligned_dir
+                    / f"Matched_Sources_{Path(sci_image_copy).stem}{get_plot_ext(self.input_yaml)}",
                     label_fontsize=10,
                     circle_radius_sci=fwhm_sci_pix,
                     circle_radius_ref=fwhm_ref_pix,
                 )
             except Exception as _plot_exc:
-                self.logger.debug("Matched-sources plot failed (non-fatal): %s", _plot_exc)
+                self.logger.debug(
+                    "Matched-sources plot failed (non-fatal): %s", _plot_exc
+                )
             sci_tab, ref_tab = _load_matched_catalogs(
                 sci_sex["catalog_path"], ref_sex["catalog_path"]
             )
@@ -6678,11 +7779,15 @@ class ImageDistortionCorrector:
             # Undersampling threshold for interpolation-order decisions.  Must
             # be defined before the aafitrans branch: when aafitrans is missing
             # or fails, the astroalign fallback below still references it.
-            _aa_us_thresh = float(
-                (iy.get("photometry", {}) or {}).get(
-                    "undersampled_fwhm_threshold", 2.5
+            _aa_us_thresh = (
+                float(
+                    (iy.get("photometry", {}) or {}).get(
+                        "undersampled_fwhm_threshold", 2.5
+                    )
                 )
-            ) if isinstance(iy, dict) else 2.5
+                if isinstance(iy, dict)
+                else 2.5
+            )
             use_aafitrans = False
             try:
                 import aafitrans
@@ -6711,6 +7816,28 @@ class ImageDistortionCorrector:
                     pts_sci,
                     max_control_points=min(MAX_CONTROL_POINTS, len(pts_ref)),
                 )
+            # Triangle-invariant matchers are mirror-ambiguous: a reflected
+            # solution on a roughly symmetric field yields small residuals and
+            # passes the residual gate while producing a flipped template.
+            try:
+                _tm = tform.params if hasattr(tform, "params") else tform._matrix
+                _t_det = float(np.linalg.det(_tm[:2, :2]))
+            except Exception:
+                _t_det = 0.0
+            if not np.isfinite(_t_det) or _t_det < 0:
+                self.logger.error(
+                    "AstroAlign transform has a non-positive determinant "
+                    "(%.3f) - mirrored/reflected solution. Rejecting this "
+                    "alignment.",
+                    _t_det,
+                )
+                return self._align_fallback_reproject_then_astroalign(
+                    science_image, reference_image, output_dir
+                )
+            self.logger.debug(
+                "AstroAlign transform determinant=%.3f (positive rotation confirmed).",
+                _t_det,
+            )
             if use_aafitrans:
                 try:
                     from scipy import ndimage
@@ -6721,20 +7848,25 @@ class ImageDistortionCorrector:
                     # convention, but skimage/aafitrans transforms use (x, y).
                     # Swap matrix rows/columns and offset components to convert.
                     _M = inv_matrix[:2, :2]
-                    _nd_matrix = np.array([[_M[1, 1], _M[1, 0]],
-                                           [_M[0, 1], _M[0, 0]]])
+                    _nd_matrix = np.array([[_M[1, 1], _M[1, 0]], [_M[0, 1], _M[0, 0]]])
                     _nd_offset = np.array([inv_matrix[1, 2], inv_matrix[0, 2]])
                     # Use bilinear (order=1) for undersampled images to avoid
                     # ringing artifacts from cubic interpolation on sparse PSFs.
-                    _aa_interp_order = 1 if (
-                        fwhm_sci_pix < _aa_us_thresh or fwhm_ref_pix < _aa_us_thresh
-                    ) else 3
+                    _aa_interp_order = (
+                        1
+                        if (
+                            fwhm_sci_pix < _aa_us_thresh or fwhm_ref_pix < _aa_us_thresh
+                        )
+                        else 3
+                    )
                     if _aa_interp_order == 1:
                         self.logger.info(
                             "AstroAlign (aafitrans): using bilinear interpolation "
                             "for undersampled image (sci FWHM=%.2f, ref FWHM=%.2f, "
                             "threshold=%.1f px).",
-                            fwhm_sci_pix, fwhm_ref_pix, _aa_us_thresh,
+                            fwhm_sci_pix,
+                            fwhm_ref_pix,
+                            _aa_us_thresh,
                         )
                     aligned_ref_img = ndimage.affine_transform(
                         ref_img,
@@ -6757,9 +7889,7 @@ class ImageDistortionCorrector:
                         order=1,
                         cval=0.0,
                     )
-                    footprint = np.isfinite(aligned_ref_img) & (
-                        _aligned_valid > 0.9
-                    )
+                    footprint = np.isfinite(aligned_ref_img) & (_aligned_valid > 0.9)
                     # BUG 117: If affine_transform produced all-NaN (convention
                     # issue or extreme transform), fall back to astroalign.
                     if not footprint.any():
@@ -6779,14 +7909,15 @@ class ImageDistortionCorrector:
                         max_control_points=min(MAX_CONTROL_POINTS, len(pts_ref)),
                     )
             if not use_aafitrans:
-                if (fwhm_sci_pix < _aa_us_thresh or fwhm_ref_pix < _aa_us_thresh):
+                if fwhm_sci_pix < _aa_us_thresh or fwhm_ref_pix < _aa_us_thresh:
                     self.logger.warning(
                         "AstroAlign (skimage fallback): using default cubic\n"
                         "    interpolation for undersampled image\n"
                         "    (sci FWHM=%.2f, ref FWHM=%.2f). Ringing\n"
                         "    artifacts may occur; aafitrans path with\n"
                         "    bilinear is preferred.",
-                        fwhm_sci_pix, fwhm_ref_pix,
+                        fwhm_sci_pix,
+                        fwhm_ref_pix,
                     )
                 # propagate_mask warps the source NaN footprint along with
                 # the data so interior chip-gap holes are excluded from the
@@ -6813,22 +7944,26 @@ class ImageDistortionCorrector:
             # transform mapped the entire reference outside the science grid
             # or NaN input pixels propagated through interpolation.  This is
             # a hard failure - return None so the caller falls through.
-            _finite_frac = float(np.isfinite(aligned_ref_img).sum()) / aligned_ref_img.size
+            _finite_frac = (
+                float(np.isfinite(aligned_ref_img).sum()) / aligned_ref_img.size
+            )
             if _finite_frac < 0.01:
                 self.logger.warning(
                     "AstroAlign: aligned output is %.1f%% finite (< 1%%); "
                     "transform likely maps reference outside science grid. "
                     "ref_shape=%s sci_shape=%s, rejecting.",
-                    _finite_frac * 100, ref_img.shape, sci_img.shape,
+                    _finite_frac * 100,
+                    ref_img.shape,
+                    sci_img.shape,
                 )
                 return {
                     "science_aligned": None,
                     "reference_aligned": None,
                     "alignment_method": "astroalign",
                     "rejected": True,
-                    "reject_rms": float('inf'),
-                    "reject_p95": float('inf'),
-                    "reject_offset": float('inf'),
+                    "reject_rms": float("inf"),
+                    "reject_p95": float("inf"),
+                    "reject_offset": float("inf"),
                     "reject_n_matched": 0,
                 }
             self.logger.info(
@@ -6837,6 +7972,7 @@ class ImageDistortionCorrector:
 
             def _save_aligned_image(data, header, output_path):
                 from ..core.functions import safe_fits_write
+
                 safe_fits_write(output_path, data, header)
 
             base_ref = os.path.splitext(os.path.basename(reference_image))[0]
@@ -6846,6 +7982,7 @@ class ImageDistortionCorrector:
             out_hdr = ref_head.copy()
             out_hdr = remove_wcs_from_header(out_hdr)
             from ..core.functions import copy_wcs_from_header as _copy_wcs2
+
             _copy_wcs2(sci_head, out_hdr)
             _save_aligned_image(aligned_ref_img, out_hdr, aligned_reference_fpath)
             # The write may have overwritten the original template in place;
@@ -6892,46 +8029,63 @@ class ImageDistortionCorrector:
                 _aa_max_p95 *= _aa_scale
                 # Sparse-field: accept 2 matches for AstroAlign
                 _aa_min_matches = 2 if _n_aa < 8 else 3
-                _max_resid = float(np.max(resid)) if resid.size else float('inf')
-                _aa_reject = _n_aa >= _aa_min_matches and np.isfinite(_med_resid) and _med_resid > _aa_max_off
+                _max_resid = float(np.max(resid)) if resid.size else float("inf")
+                _aa_reject = (
+                    _n_aa >= _aa_min_matches
+                    and np.isfinite(_med_resid)
+                    and _med_resid > _aa_max_off
+                )
                 if _n_aa >= _aa_min_n:
-                    _aa_reject = _aa_reject or (
-                        np.isfinite(rms_pix) and rms_pix > _aa_max_rms
-                    ) or (
-                        np.isfinite(_p95_resid) and _p95_resid > _aa_max_p95
+                    _aa_reject = (
+                        _aa_reject
+                        or (np.isfinite(rms_pix) and rms_pix > _aa_max_rms)
+                        or (np.isfinite(_p95_resid) and _p95_resid > _aa_max_p95)
                     )
                 if _aa_reject:
                     _reasons = []
                     if np.isfinite(_med_resid) and _med_resid > _aa_max_off:
-                        _reasons.append("med=%.2f px (> %.2f px)" % (_med_resid, _aa_max_off))
+                        _reasons.append(
+                            "med=%.2f px (> %.2f px)" % (_med_resid, _aa_max_off)
+                        )
                     if _n_aa >= _aa_min_n:
                         if np.isfinite(rms_pix) and rms_pix > _aa_max_rms:
-                            _reasons.append("RMS=%.2f px (> %.2f px)" % (rms_pix, _aa_max_rms))
+                            _reasons.append(
+                                "RMS=%.2f px (> %.2f px)" % (rms_pix, _aa_max_rms)
+                            )
                         if np.isfinite(_p95_resid) and _p95_resid > _aa_max_p95:
-                            _reasons.append("P95=%.2f px (> %.2f px)" % (_p95_resid, _aa_max_p95))
+                            _reasons.append(
+                                "P95=%.2f px (> %.2f px)" % (_p95_resid, _aa_max_p95)
+                            )
                     self.logger.warning(
                         "AstroAlign alignment rejected: %s (%d matches). "
                         "No more alignment methods available.",
-                        "; ".join(_reasons) if _reasons else "unknown", _n_aa,
+                        "; ".join(_reasons) if _reasons else "unknown",
+                        _n_aa,
                     )
                     return {
                         "science_aligned": aligned_science_fpath,
                         "reference_aligned": aligned_reference_fpath,
                         "alignment_method": "astroalign",
                         "rejected": True,
-                        "reject_rms": rms_pix if np.isfinite(rms_pix) else float('inf'),
-                        "reject_p95": _p95_resid if np.isfinite(_p95_resid) else float('inf'),
-                        "reject_offset": _med_resid if np.isfinite(_med_resid) else float('inf'),
-                        "reject_max": _max_resid if np.isfinite(_max_resid) else float('inf'),
+                        "reject_rms": rms_pix if np.isfinite(rms_pix) else float("inf"),
+                        "reject_p95": _p95_resid
+                        if np.isfinite(_p95_resid)
+                        else float("inf"),
+                        "reject_offset": _med_resid
+                        if np.isfinite(_med_resid)
+                        else float("inf"),
+                        "reject_max": _max_resid
+                        if np.isfinite(_max_resid)
+                        else float("inf"),
                         "reject_n_matched": _n_aa,
                     }
                 else:
                     self.logger.info(
                         "AstroAlign alignment accepted: med=%.2f px, "
                         "RMS=%.2f px, P95=%.2f px (%d matches).",
-                        _med_resid if np.isfinite(_med_resid) else float('nan'),
-                        rms_pix if np.isfinite(rms_pix) else float('nan'),
-                        _p95_resid if np.isfinite(_p95_resid) else float('nan'),
+                        _med_resid if np.isfinite(_med_resid) else float("nan"),
+                        rms_pix if np.isfinite(rms_pix) else float("nan"),
+                        _p95_resid if np.isfinite(_p95_resid) else float("nan"),
                         _n_aa,
                     )
                     alignment_verified = bool(
@@ -6952,10 +8106,14 @@ class ImageDistortionCorrector:
             # Working dirs removed only after successful alignment
             if science_aligned_dir.exists():
                 shutil.rmtree(science_aligned_dir, ignore_errors=True)
-                self.logger.debug("Removed aligned working dir: %s", science_aligned_dir)
+                self.logger.debug(
+                    "Removed aligned working dir: %s", science_aligned_dir
+                )
             if reference_aligned_dir.exists():
                 shutil.rmtree(reference_aligned_dir, ignore_errors=True)
-                self.logger.debug("Removed aligned working dir: %s", reference_aligned_dir)
+                self.logger.debug(
+                    "Removed aligned working dir: %s", reference_aligned_dir
+                )
 
             return {
                 "science_aligned": aligned_science_fpath,
@@ -7032,7 +8190,9 @@ class ImageDistortionCorrector:
             finite_ref = np.isfinite(ref_world.ra.deg) & np.isfinite(ref_world.dec.deg)
 
             if np.count_nonzero(finite_sci) < 3 or np.count_nonzero(finite_ref) < 3:
-                self.logger.debug("Too few finite coordinates for SCAMP source matching")
+                self.logger.debug(
+                    "Too few finite coordinates for SCAMP source matching"
+                )
                 return None
 
             ref_coords = SkyCoord(
@@ -7059,8 +8219,9 @@ class ImageDistortionCorrector:
 
             n_matched = int(len(sci_x))
             self.logger.info(
-                "SCAMP matched sources (from .head WCS): %d (radius=%.1f\")",
-                n_matched, match_radius_arcsec,
+                'SCAMP matched sources (from .head WCS): %d (radius=%.1f")',
+                n_matched,
+                match_radius_arcsec,
             )
 
             return {
@@ -7096,8 +8257,16 @@ class ImageDistortionCorrector:
                 ln = _localname(param.tag)
                 if ln == "PARAM":
                     name = param.get("name", "")
-                    if name in ("CD1_1", "CD1_2", "CD2_1", "CD2_2",
-                                "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"):
+                    if name in (
+                        "CD1_1",
+                        "CD1_2",
+                        "CD2_1",
+                        "CD2_2",
+                        "CRVAL1",
+                        "CRVAL2",
+                        "CRPIX1",
+                        "CRPIX2",
+                    ):
                         try:
                             wcs[name] = float(param.get("value"))
                         except (ValueError, TypeError):
@@ -7166,8 +8335,9 @@ class ImageDistortionCorrector:
 
             if astrometric_rms is not None:
                 self.logger.info(
-                    "SCAMP astrometric residual: %.4f\" (%d matched stars)",
-                    astrometric_rms, n_matched_stars or -1,
+                    'SCAMP astrometric residual: %.4f" (%d matched stars)',
+                    astrometric_rms,
+                    n_matched_stars or -1,
                 )
 
             return {
@@ -7245,7 +8415,7 @@ class ImageDistortionCorrector:
         weight_images: List[str] = []
         if no_weight_maps:
             weight_images = []
-        for img_path in ([] if no_weight_maps else input_images):
+        for img_path in [] if no_weight_maps else input_images:
             try:
                 with fits.open(img_path, memmap=False) as hdul:
                     data = np.asarray(hdul[0].data, dtype=float)
@@ -7440,7 +8610,9 @@ class ImageDistortionCorrector:
                     img = np.asarray(hdul_img[0].data, dtype=float)
                     if img.ndim != 2:
                         return
-                    with fits.open(weight_fits, mode="readonly", memmap=False) as hdul_w:
+                    with fits.open(
+                        weight_fits, mode="readonly", memmap=False
+                    ) as hdul_w:
                         w = np.asarray(hdul_w[0].data, dtype=float)
                     if w.shape != img.shape:
                         return
@@ -7481,7 +8653,9 @@ class ImageDistortionCorrector:
                 #   image.resamp.fits -> image.resamp.weight.fits
                 #   image.resamp.fits -> image.weight.fits
                 candidates = [
-                    rf.with_name(rf.name.replace(".resamp.fits", ".resamp.weight.fits")),
+                    rf.with_name(
+                        rf.name.replace(".resamp.fits", ".resamp.weight.fits")
+                    ),
                     rf.with_name(rf.name.replace(".resamp.fits", ".weight.fits")),
                 ]
                 # Also allow any weight file sharing the same stem prefix.
@@ -7573,25 +8747,13 @@ class ImageDistortionCorrector:
                 wcs_cfg.get("scamp_ref_server") or "vizier.cfa.harvard.edu"
             ),
             "CROSSID_RADIUS": float(wcs_cfg.get("scamp_crossid_radius", 2.5)),
-            "POSITION_MAXERR": float(
-                wcs_cfg.get("scamp_position_maxerr", 1.0)
-            ),
-            "FWHM_THRESHOLDS": str(
-                wcs_cfg.get("scamp_fwhm_thresholds", "1.0,15.0")
-            ),
-            "SN_THRESHOLDS": str(
-                wcs_cfg.get("scamp_sn_thresholds", "3.0,100000.0")
-            ),
+            "POSITION_MAXERR": float(wcs_cfg.get("scamp_position_maxerr", 1.0)),
+            "FWHM_THRESHOLDS": str(wcs_cfg.get("scamp_fwhm_thresholds", "1.0,15.0")),
+            "SN_THRESHOLDS": str(wcs_cfg.get("scamp_sn_thresholds", "3.0,100000.0")),
             "MOSAIC_TYPE": str(wcs_cfg.get("scamp_mosaic_type", "UNCHANGED")),
-            "STABILITY_TYPE": str(
-                wcs_cfg.get("scamp_stability_type", "EXPOSURE")
-            ),
-            "PIXSCALE_MAXERR": float(
-                wcs_cfg.get("scamp_pixscale_maxerr", 1.2)
-            ),
-            "POSANGLE_MAXERR": float(
-                wcs_cfg.get("scamp_posangle_maxerr", 5.0)
-            ),
+            "STABILITY_TYPE": str(wcs_cfg.get("scamp_stability_type", "EXPOSURE")),
+            "PIXSCALE_MAXERR": float(wcs_cfg.get("scamp_pixscale_maxerr", 1.2)),
+            "POSANGLE_MAXERR": float(wcs_cfg.get("scamp_posangle_maxerr", 5.0)),
             "MATCH_NMAX": int(wcs_cfg.get("scamp_match_nmax", 0)),
             "ASTREF_WEIGHT": int(wcs_cfg.get("scamp_astref_weight", 1)),
             "ASTREFMAG_KEY": str(wcs_cfg.get("scamp_astrefmag_key", "MAG_AUTO")),
@@ -7616,7 +8778,8 @@ class ImageDistortionCorrector:
             **_yaml_scamp,
             "DISTORT_DEGREES": distort_degrees,
             "ASTREF_CATALOG": (
-                "FILE" if reference_cat
+                "FILE"
+                if reference_cat
                 else str(wcs_cfg.get("scamp_astref_catalog", "GAIA-DR3"))
             ),
             "ASTREFCAT_NAME": reference_cat,
@@ -7687,15 +8850,15 @@ class ImageDistortionCorrector:
                 try:
                     shutil.rmtree(gaia_temp_dir)
                 except OSError as e:
-                    self.logger.debug("Could not remove GAIA temp dir %s: %s", gaia_temp_dir, e)
+                    self.logger.debug(
+                        "Could not remove GAIA temp dir %s: %s", gaia_temp_dir, e
+                    )
 
         # Timeout scales with catalog size: quad matching cost grows with
         # the number of detections, and a GAIA download adds network
         # latency.  wcs.scamp_timeout_sec overrides the 180 s base.
         try:
-            _scamp_base_timeout = float(
-                wcs_cfg.get("scamp_timeout_sec", 180) or 180
-            )
+            _scamp_base_timeout = float(wcs_cfg.get("scamp_timeout_sec", 180) or 180)
         except (TypeError, ValueError):
             _scamp_base_timeout = 180.0
         _nrows = 0
@@ -7725,7 +8888,10 @@ class ImageDistortionCorrector:
                 "SCAMP execution timed out after %d seconds", scamp_timeout
             )
             _clean_scamp_outputs()
-            raise
+            # Return None like every other failure path so callers using
+            # ``if res is None`` behave consistently; the caller's retry
+            # ladder can then decide whether to retry with a longer budget.
+            return None
 
         if not os.path.isfile(log_file):
             self.logger.warning(
@@ -7742,8 +8908,25 @@ class ImageDistortionCorrector:
         )
         if "Not enough matched detections" in log_content:
             self.logger.warning("SCAMP: Not enough matched detections in catalog")
-        if "FATAL ERROR" in log_content:
-            self.logger.warning("SCAMP: FATAL ERROR in log: %s", log_content[:500])
+        # Some Astromatic builds print FATAL ERROR / segfault on stderr yet
+        # still exit 0; a `.head` glob then picks up whatever file exists, so
+        # treat these as hard failures regardless of the exit code.
+        _hard_fatal = any(
+            tok in log_content
+            for tok in (
+                "FATAL ERROR",
+                "not positive definite",
+                "Segmentation fault",
+                "Core dumped",
+            )
+        )
+        if _hard_fatal:
+            self.logger.error(
+                "SCAMP reported a fatal condition in its log: %s",
+                log_content[:500],
+            )
+            _clean_scamp_outputs()
+            return None
 
         if result.returncode != 0 or "Not enough matched detections" in log_content:
             self.logger.warning(
@@ -7757,11 +8940,15 @@ class ImageDistortionCorrector:
             if saved_cats:
                 self._save_gaia_catalog_to_cache(str(saved_cats[0]), gaia_cache_key)
             else:
-                self.logger.debug("SCAMP did not save a reference catalog to %s", gaia_temp_dir)
+                self.logger.debug(
+                    "SCAMP did not save a reference catalog to %s", gaia_temp_dir
+                )
             try:
                 shutil.rmtree(gaia_temp_dir)
             except OSError as e:
-                self.logger.debug("Could not remove GAIA temp dir %s: %s", gaia_temp_dir, e)
+                self.logger.debug(
+                    "Could not remove GAIA temp dir %s: %s", gaia_temp_dir, e
+                )
             gaia_temp_dir = None
 
         distortion = self._parse_scamp_xml(xml_file)
@@ -7773,6 +8960,7 @@ class ImageDistortionCorrector:
         ):
             try:
                 import re
+
                 _log_rms = None
                 _log_nstars = None
                 _in_external_stats = False
@@ -7794,12 +8982,12 @@ class ImageDistortionCorrector:
                                 pass
                         # Expect: [group_num, dAXIS1, dAXIS2, chi2, nstars, ...]
                         if len(vals) >= 5:
-                            _log_rms = float(np.sqrt(vals[1]**2 + vals[2]**2))
+                            _log_rms = float(np.sqrt(vals[1] ** 2 + vals[2] ** 2))
                             _log_nstars = int(vals[4])
                         _in_external_stats = False
                 if _log_rms is not None or _log_nstars is not None:
                     self.logger.info(
-                        "SCAMP log fallback: residual RMS=%.4f\", matched stars=%d",
+                        'SCAMP log fallback: residual RMS=%.4f", matched stars=%d',
                         _log_rms if _log_rms is not None else -1,
                         _log_nstars if _log_nstars is not None else -1,
                     )
@@ -7877,7 +9065,9 @@ class ImageDistortionCorrector:
         head_file = Path(scamp_res.get("head_file", ""))
 
         if not head_file.exists() or head_file.stat().st_size == 0:
-            self.logger.info("SCAMP did not produce a valid .head file at %s", head_file)
+            self.logger.info(
+                "SCAMP did not produce a valid .head file at %s", head_file
+            )
             return None
 
         self.logger.debug("SCAMP produced .head file: %s", head_file)
@@ -7946,9 +9136,7 @@ class ImageDistortionCorrector:
         """
         fits_path = str(fits_path)
         wcs_cfg = (
-            self.input_yaml.get("wcs", {})
-            if isinstance(self.input_yaml, dict)
-            else {}
+            self.input_yaml.get("wcs", {}) if isinstance(self.input_yaml, dict) else {}
         )
         resampling_type = str(
             resampling_type
@@ -7965,9 +9153,7 @@ class ImageDistortionCorrector:
                 return None
 
         try:
-            wcs_obj, pixel_scale, sci_head = self._extract_wcs_and_scale(
-                fits_path
-            )
+            wcs_obj, pixel_scale, sci_head = self._extract_wcs_and_scale(fits_path)
         except Exception as e:
             log_warning_from_exception(
                 self.logger, f"Could not read WCS from {fits_path}", e
@@ -7982,11 +9168,7 @@ class ImageDistortionCorrector:
             return None
         ny, nx = int(sci_head["NAXIS2"]), int(sci_head["NAXIS1"])
 
-        out_dir = (
-            Path(output_dir)
-            if output_dir
-            else Path(mkdtemp(prefix="undistort_"))
-        )
+        out_dir = Path(output_dir) if output_dir else Path(mkdtemp(prefix="undistort_"))
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # --- SExtractor detection (SCAMP consumes the LDAC catalog) ---
@@ -7995,9 +9177,7 @@ class ImageDistortionCorrector:
         try:
             from .run_sex import nan_filled_copy_for_detection
 
-            det_path = str(
-                nan_filled_copy_for_detection(fits_path, sex_dir)
-            )
+            det_path = str(nan_filled_copy_for_detection(fits_path, sex_dir))
         except Exception:
             det_path = fits_path
         try:
@@ -8012,11 +9192,7 @@ class ImageDistortionCorrector:
         catalog_path = (sex_res or {}).get("catalog_path")
         catalog = (sex_res or {}).get("catalog")
         n_src = len(catalog) if catalog is not None else 0
-        if (
-            not catalog_path
-            or not Path(catalog_path).exists()
-            or n_src < 8
-        ):
+        if not catalog_path or not Path(catalog_path).exists() or n_src < 8:
             self.logger.warning(
                 "Distortion correction: only %d usable sources in %s; "
                 "need >= 8 for a GAIA cross-match - keeping original image.",
@@ -8054,8 +9230,7 @@ class ImageDistortionCorrector:
         for attempt_degree in range(degree, 0, -1):
             if attempt_degree < degree:
                 self.logger.info(
-                    "Distortion correction: retrying SCAMP with "
-                    "DISTORT_DEGREES=%d",
+                    "Distortion correction: retrying SCAMP with DISTORT_DEGREES=%d",
                     attempt_degree,
                 )
             for stale_head in sex_dir.glob("*.head"):
@@ -8148,8 +9323,7 @@ class ImageDistortionCorrector:
         corrected = Path(swarp_res.get("corrected_image") or "")
         if not corrected.exists():
             self.logger.warning(
-                "Distortion correction: SWarp output missing - keeping "
-                "original image."
+                "Distortion correction: SWarp output missing - keeping original image."
             )
             return None
         self.clean_image(corrected)
@@ -8262,7 +9436,9 @@ class ImageDistortionCorrector:
         max_sources: int = 100,
         selection_mode: str = "uniform",  # "uniform", "random", or "first"
         random_seed: Optional[int] = 42,  # Seed for reproducible random selection
-        scamp_matched_sources: Optional[dict] = None,  # dict with sci_x/sci_y/ref_x/ref_y
+        scamp_matched_sources: Optional[
+            dict
+        ] = None,  # dict with sci_x/sci_y/ref_x/ref_y
         **imshow_kwargs,
     ):
         try:
@@ -8289,20 +9465,24 @@ class ImageDistortionCorrector:
                 sci_data = block_reduce(sci_data, block_size=(4, 4), func=np.mean)
                 ref_data = block_reduce(ref_data, block_size=(4, 4), func=np.mean)
                 rebin_scale = 0.25  # Coordinates must be scaled by 1/4
-                logging.info("Rebinned images by 4x for display, coordinates will be scaled by %s", rebin_scale)
+                logging.info(
+                    "Rebinned images by 4x for display, coordinates will be scaled by %s",
+                    rebin_scale,
+                )
 
             from ..core.plotting_utils import apply_autophot_mplstyle, get_plot_color
+
             apply_autophot_mplstyle()
 
             # Palette defaults keep matched/unmatched semantics consistent
             # with plot.py (blue kept, red excluded); explicit kwargs still
             # override for external callers.
             if label_color is None:
-                label_color = get_plot_color('match_label')
+                label_color = get_plot_color("match_label")
             if matched_circle_color is None:
-                matched_circle_color = get_plot_color('matched')
+                matched_circle_color = get_plot_color("matched")
             if unmatched_circle_color is None:
-                unmatched_circle_color = get_plot_color('unmatched')
+                unmatched_circle_color = get_plot_color("unmatched")
 
             # Equal-aspect panels shrink inside cells that do not match the
             # data aspect, so size the figure from the image shapes and give
@@ -8319,21 +9499,24 @@ class ImageDistortionCorrector:
             wspace = 0.05
             if figsize is None:
                 fig_w = (
-                    (aspect1 + aspect2) * ax_h * cbar_overhead
-                    * (1 + wspace / 2) / (right - left)
+                    (aspect1 + aspect2)
+                    * ax_h
+                    * cbar_overhead
+                    * (1 + wspace / 2)
+                    / (right - left)
                 )
                 fig_h = ax_h / (top - bottom)
                 figsize = (fig_w, fig_h)
             fig, (ax1, ax2) = plt.subplots(
-                1, 2, figsize=figsize,
+                1,
+                2,
+                figsize=figsize,
                 gridspec_kw={
                     "width_ratios": [aspect1, aspect2],
                     "wspace": wspace,
                 },
             )
-            fig.subplots_adjust(
-                left=left, right=right, top=top, bottom=bottom
-            )
+            fig.subplots_adjust(left=left, right=right, top=top, bottom=bottom)
             zscale_sci = ZScaleInterval()
             zscale_ref = ZScaleInterval()
             vmin_sci, vmax_sci = zscale_sci.get_limits(sci_data)
@@ -8356,6 +9539,7 @@ class ImageDistortionCorrector:
                 origin="lower",
             )
             from ..core.plotting_utils import overlay_mask_hatch
+
             overlay_mask_hatch(ax1, ~np.isfinite(np.asarray(sci_data)))
             ax1.set_title("Science Image")
             cbar1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
@@ -8386,7 +9570,13 @@ class ImageDistortionCorrector:
                 else:
                     return f"{chr(65 + (i // 26) - 1)}{chr(65 + (i % 26))}"
 
-            def select_sources_spatially(catalog, max_sources, image_shape, selection_mode="uniform", random_seed=42):
+            def select_sources_spatially(
+                catalog,
+                max_sources,
+                image_shape,
+                selection_mode="uniform",
+                random_seed=42,
+            ):
                 """Pick up to max_sources for the overlay; uniform mode keeps
                 spatial coverage so crowded fields stay readable."""
                 if len(catalog) <= max_sources:
@@ -8440,7 +9630,9 @@ class ImageDistortionCorrector:
                         grid_cells[cell_key].append(source)
 
                     # Create all possible grid cells (even empty ones)
-                    all_grid_cells = [(gx, gy) for gx in range(n_grid) for gy in range(n_grid)]
+                    all_grid_cells = [
+                        (gx, gy) for gx in range(n_grid) for gy in range(n_grid)
+                    ]
 
                     # One source per populated cell first - spreads coverage evenly
                     selected_count = 0
@@ -8461,30 +9653,44 @@ class ImageDistortionCorrector:
                         for cell_key in all_grid_cells:
                             if cell_key in grid_cells:
                                 cell_sources = grid_cells[cell_key]
-                                if len(cell_sources) > 1:  # Skip the one we already took
+                                if (
+                                    len(cell_sources) > 1
+                                ):  # Skip the one we already took
                                     remaining_sources.extend(cell_sources[1:])
 
                         if remaining_sources:
                             _rng.shuffle(remaining_sources)
-                            additional_needed = min(remaining_needed, len(remaining_sources))
-                            selected_sources.extend(remaining_sources[:additional_needed])
+                            additional_needed = min(
+                                remaining_needed, len(remaining_sources)
+                            )
+                            selected_sources.extend(
+                                remaining_sources[:additional_needed]
+                            )
                             selected_count += additional_needed
 
                     # If still not enough (sparse catalog), add from any available sources
                     if selected_count < max_sources:
                         remaining_needed = max_sources - selected_count
                         used_sources = set(selected_sources)
-                        available_sources = [s for s in valid_sources if s not in used_sources]
+                        available_sources = [
+                            s for s in valid_sources if s not in used_sources
+                        ]
 
                         if available_sources:
                             _rng.shuffle(available_sources)
-                            additional_needed = min(remaining_needed, len(available_sources))
-                            selected_sources.extend(available_sources[:additional_needed])
+                            additional_needed = min(
+                                remaining_needed, len(available_sources)
+                            )
+                            selected_sources.extend(
+                                available_sources[:additional_needed]
+                            )
 
                     return selected_sources[:max_sources]
                 else:
                     # Default to uniform if invalid mode
-                    return select_sources_spatially(catalog, max_sources, image_shape, "uniform", random_seed)
+                    return select_sources_spatially(
+                        catalog, max_sources, image_shape, "uniform", random_seed
+                    )
 
             # Track which overlay styles are actually drawn so the figure
             # legend only lists markers that appear.
@@ -8494,8 +9700,14 @@ class ImageDistortionCorrector:
             sci_positions = []
             sci_h, sci_w = sci_data.shape
 
-            logging.info("Selecting %s science sources using '%s' mode", max_sources, selection_mode)
-            sci_selected = select_sources_spatially(sci_cat, max_sources, (sci_h, sci_w), selection_mode, random_seed)
+            logging.info(
+                "Selecting %s science sources using '%s' mode",
+                max_sources,
+                selection_mode,
+            )
+            sci_selected = select_sources_spatially(
+                sci_cat, max_sources, (sci_h, sci_w), selection_mode, random_seed
+            )
             for i, row in enumerate(sci_selected):
                 if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
                     x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
@@ -8505,7 +9717,14 @@ class ImageDistortionCorrector:
                     x_0based, y_0based = x_scaled - 1, y_scaled - 1
 
                     if not (0 <= x_0based < sci_w and 0 <= y_0based < sci_h):
-                        logging.debug("Science source %s out of bounds: (%.1f, %.1f) vs image (%s, %s)", i, x_0based, y_0based, sci_w, sci_h)
+                        logging.debug(
+                            "Science source %s out of bounds: (%.1f, %.1f) vs image (%s, %s)",
+                            i,
+                            x_0based,
+                            y_0based,
+                            sci_w,
+                            sci_h,
+                        )
                         continue
 
                     sci_positions.append((x_0based, y_0based))
@@ -8535,14 +9754,22 @@ class ImageDistortionCorrector:
                         fontsize=label_fontsize,
                         ha="center",
                         va="top",
-                        path_effects=[mpatheffects.withStroke(linewidth=1.2, foreground="white")],
+                        path_effects=[
+                            mpatheffects.withStroke(linewidth=1.2, foreground="white")
+                        ],
                     )
 
             ref_positions = []
             ref_h, ref_w = ref_data.shape
 
-            logging.info("Selecting %s reference sources using '%s' mode", max_sources, selection_mode)
-            ref_selected = select_sources_spatially(ref_cat, max_sources, (ref_h, ref_w), selection_mode, random_seed)
+            logging.info(
+                "Selecting %s reference sources using '%s' mode",
+                max_sources,
+                selection_mode,
+            )
+            ref_selected = select_sources_spatially(
+                ref_cat, max_sources, (ref_h, ref_w), selection_mode, random_seed
+            )
             for i, row in enumerate(ref_selected):
                 if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
                     x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
@@ -8552,7 +9779,14 @@ class ImageDistortionCorrector:
                     x_0based, y_0based = x_scaled - 1, y_scaled - 1
 
                     if not (0 <= x_0based < ref_w and 0 <= y_0based < ref_h):
-                        logging.debug("Reference source %s out of bounds: (%.1f, %.1f) vs image (%s, %s)", i, x_0based, y_0based, ref_w, ref_h)
+                        logging.debug(
+                            "Reference source %s out of bounds: (%.1f, %.1f) vs image (%s, %s)",
+                            i,
+                            x_0based,
+                            y_0based,
+                            ref_w,
+                            ref_h,
+                        )
                         continue
 
                     ref_positions.append((x_0based, y_0based))
@@ -8582,11 +9816,20 @@ class ImageDistortionCorrector:
                         fontsize=label_fontsize,
                         ha="center",
                         va="top",
-                        path_effects=[mpatheffects.withStroke(linewidth=1.2, foreground="white")],
+                        path_effects=[
+                            mpatheffects.withStroke(linewidth=1.2, foreground="white")
+                        ],
                     )
 
-            def plot_remaining_sources(ax, catalog, image_shape, rebin_scale, max_sources,
-                                     selected_count, catalog_type="sources"):
+            def plot_remaining_sources(
+                ax,
+                catalog,
+                image_shape,
+                rebin_scale,
+                max_sources,
+                selected_count,
+                catalog_type="sources",
+            ):
                 """Mark unselected sources as small crosses so full coverage
                 stays visible behind the labelled subset."""
 
@@ -8600,11 +9843,19 @@ class ImageDistortionCorrector:
                 remaining_sources = len(all_valid_sources) - selected_count
 
                 if remaining_sources > 0:
-                    ax.text(0.98, 0.98, f"+{remaining_sources} more {catalog_type}",
-                           transform=ax.transAxes, fontsize=8,
-                           ha='right', va='top',
-                           bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgrey', alpha=0.7),
-                           zorder=20)
+                    ax.text(
+                        0.98,
+                        0.98,
+                        f"+{remaining_sources} more {catalog_type}",
+                        transform=ax.transAxes,
+                        fontsize=8,
+                        ha="right",
+                        va="top",
+                        bbox=dict(
+                            boxstyle="round,pad=0.3", facecolor="lightgrey", alpha=0.7
+                        ),
+                        zorder=20,
+                    )
 
                     img_h, img_w = image_shape
                     cross_size = 3 * rebin_scale
@@ -8623,16 +9874,22 @@ class ImageDistortionCorrector:
                             continue
 
                         _cross_segs.append(
-                            ((x_0based - cross_size, y_0based), (x_0based + cross_size, y_0based))
+                            (
+                                (x_0based - cross_size, y_0based),
+                                (x_0based + cross_size, y_0based),
+                            )
                         )
                         _cross_segs.append(
-                            ((x_0based, y_0based - cross_size), (x_0based, y_0based + cross_size))
+                            (
+                                (x_0based, y_0based - cross_size),
+                                (x_0based, y_0based + cross_size),
+                            )
                         )
                     if _cross_segs:
                         ax.add_collection(
                             LineCollection(
                                 _cross_segs,
-                                colors=get_plot_color('unmatched'),
+                                colors=get_plot_color("unmatched"),
                                 linewidths=0.5,
                                 alpha=0.6,
                                 zorder=3,
@@ -8645,13 +9902,15 @@ class ImageDistortionCorrector:
             if scamp_matched_sources is not None:
                 from matplotlib.collections import PatchCollection
                 from matplotlib.patches import Rectangle as MplRect
-                _scamp_color = get_plot_color('scamp_matched')
+
+                _scamp_color = get_plot_color("scamp_matched")
                 _sq_size = max(circle_radius_sci, circle_radius_ref) * rebin_scale
                 _sq_half = _sq_size / 2.0
                 _sci_rects = [
                     MplRect(
                         (sx * rebin_scale - _sq_half, sy * rebin_scale - _sq_half),
-                        _sq_size, _sq_size,
+                        _sq_size,
+                        _sq_size,
                     )
                     for sx, sy in zip(
                         scamp_matched_sources.get("sci_x", []),
@@ -8660,15 +9919,21 @@ class ImageDistortionCorrector:
                     if np.isfinite(sx) and np.isfinite(sy)
                 ]
                 if _sci_rects:
-                    ax1.add_collection(PatchCollection(
-                        _sci_rects,
-                        edgecolor=_scamp_color, facecolor="none",
-                        linewidth=1.0, linestyle="-", zorder=6,
-                    ))
+                    ax1.add_collection(
+                        PatchCollection(
+                            _sci_rects,
+                            edgecolor=_scamp_color,
+                            facecolor="none",
+                            linewidth=1.0,
+                            linestyle="-",
+                            zorder=6,
+                        )
+                    )
                 _ref_rects = [
                     MplRect(
                         (rx * rebin_scale - _sq_half, ry * rebin_scale - _sq_half),
-                        _sq_size, _sq_size,
+                        _sq_size,
+                        _sq_size,
                     )
                     for rx, ry in zip(
                         scamp_matched_sources.get("ref_x", []),
@@ -8677,44 +9942,104 @@ class ImageDistortionCorrector:
                     if np.isfinite(rx) and np.isfinite(ry)
                 ]
                 if _ref_rects:
-                    ax2.add_collection(PatchCollection(
-                        _ref_rects,
-                        edgecolor=_scamp_color, facecolor="none",
-                        linewidth=1.0, linestyle="-", zorder=6,
-                    ))
+                    ax2.add_collection(
+                        PatchCollection(
+                            _ref_rects,
+                            edgecolor=_scamp_color,
+                            facecolor="none",
+                            linewidth=1.0,
+                            linestyle="-",
+                            zorder=6,
+                        )
+                    )
                 from matplotlib.lines import Line2D as _L2
-                _scamp_handle = _L2([0], [0], marker="s", color=_scamp_color,
-                                   markerfacecolor="none", markersize=6,
-                                   linestyle="None", label="SCAMP matched")
+
+                _scamp_handle = _L2(
+                    [0],
+                    [0],
+                    marker="s",
+                    color=_scamp_color,
+                    markerfacecolor="none",
+                    markersize=6,
+                    linestyle="None",
+                    label="SCAMP matched",
+                )
                 handles, labels = ax1.get_legend_handles_labels()
                 handles.append(_scamp_handle)
                 labels.append("SCAMP matched")
                 _leg = ax1.legend(
-                    handles, labels, loc="lower center",
-                    bbox_to_anchor=(0.5, 1.0), frameon=True,
-                    facecolor=get_plot_color('legend_facecolor'),
-                    edgecolor=get_plot_color('legend_edgecolor'),
+                    handles,
+                    labels,
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 1.0),
+                    frameon=True,
+                    facecolor=get_plot_color("legend_facecolor"),
+                    edgecolor=get_plot_color("legend_edgecolor"),
                     framealpha=0.9,
-                    handlelength=1.5, handletextpad=0.5, ncol=3,
+                    handlelength=1.5,
+                    handletextpad=0.5,
+                    ncol=3,
                 )
                 _leg.set_zorder(20)
 
-            sci_remaining = plot_remaining_sources(ax1, sci_cat, (sci_h, sci_w), rebin_scale,
-                                                  max_sources, len(sci_selected), "science sources")
+            sci_remaining = plot_remaining_sources(
+                ax1,
+                sci_cat,
+                (sci_h, sci_w),
+                rebin_scale,
+                max_sources,
+                len(sci_selected),
+                "science sources",
+            )
 
-            ref_remaining = plot_remaining_sources(ax2, ref_cat, (ref_h, ref_w), rebin_scale,
-                                                  max_sources, len(ref_selected), "reference sources")
+            ref_remaining = plot_remaining_sources(
+                ax2,
+                ref_cat,
+                (ref_h, ref_w),
+                rebin_scale,
+                max_sources,
+                len(ref_selected),
+                "reference sources",
+            )
 
-            total_sources_sci = len([row for row in sci_cat
-                                    if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames
-                                    and np.isfinite(row["XWIN_IMAGE"]) and np.isfinite(row["YWIN_IMAGE"])])
-            total_sources_ref = len([row for row in ref_cat
-                                    if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames
-                                    and np.isfinite(row["XWIN_IMAGE"]) and np.isfinite(row["YWIN_IMAGE"])])
+            total_sources_sci = len(
+                [
+                    row
+                    for row in sci_cat
+                    if "XWIN_IMAGE" in row.colnames
+                    and "YWIN_IMAGE" in row.colnames
+                    and np.isfinite(row["XWIN_IMAGE"])
+                    and np.isfinite(row["YWIN_IMAGE"])
+                ]
+            )
+            total_sources_ref = len(
+                [
+                    row
+                    for row in ref_cat
+                    if "XWIN_IMAGE" in row.colnames
+                    and "YWIN_IMAGE" in row.colnames
+                    and np.isfinite(row["XWIN_IMAGE"])
+                    and np.isfinite(row["YWIN_IMAGE"])
+                ]
+            )
 
-            logging.debug("Science: %s plotted + %s crosses = %s total", len(sci_selected), sci_remaining, total_sources_sci)
-            logging.debug("Reference: %s plotted + %s crosses = %s total", len(ref_selected), ref_remaining, total_sources_ref)
-            logging.debug("Plotted %s science and %s reference sources within image bounds", len(sci_positions), len(ref_positions))
+            logging.debug(
+                "Science: %s plotted + %s crosses = %s total",
+                len(sci_selected),
+                sci_remaining,
+                total_sources_sci,
+            )
+            logging.debug(
+                "Reference: %s plotted + %s crosses = %s total",
+                len(ref_selected),
+                ref_remaining,
+                total_sources_ref,
+            )
+            logging.debug(
+                "Plotted %s science and %s reference sources within image bounds",
+                len(sci_positions),
+                len(ref_positions),
+            )
 
             # Identify the overlay markers once at figure level; the
             # per-source letter labels already identify individual circles,
@@ -8724,31 +10049,60 @@ class ImageDistortionCorrector:
             handles = []
             if drew_matched:
                 handles.append(
-                    Line2D([0], [0], marker="o", linestyle="None", markersize=6,
-                           color=matched_circle_color, markerfacecolor="none",
-                           markeredgecolor=matched_circle_color,
-                           label="Matched source")
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="None",
+                        markersize=6,
+                        color=matched_circle_color,
+                        markerfacecolor="none",
+                        markeredgecolor=matched_circle_color,
+                        label="Matched source",
+                    )
                 )
             if drew_unmatched:
                 handles.append(
-                    Line2D([0], [0], marker="o", linestyle="None", markersize=6,
-                           color=unmatched_circle_color, markerfacecolor="none",
-                           markeredgecolor=unmatched_circle_color,
-                           label="Unmatched source")
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="None",
+                        markersize=6,
+                        color=unmatched_circle_color,
+                        markerfacecolor="none",
+                        markeredgecolor=unmatched_circle_color,
+                        label="Unmatched source",
+                    )
                 )
             if (sci_remaining or 0) > 0 or (ref_remaining or 0) > 0:
                 handles.append(
-                    Line2D([0], [0], marker="+", linestyle="None", markersize=6,
-                           color=get_plot_color('unmatched'), label="Additional sources")
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="+",
+                        linestyle="None",
+                        markersize=6,
+                        color=get_plot_color("unmatched"),
+                        label="Additional sources",
+                    )
                 )
             if handles:
                 fig.legend(
-                    handles=handles, loc="upper center",
-                    bbox_to_anchor=(0.5, 1.0), ncol=len(handles),
-                    fontsize=8, frameon=False,
+                    handles=handles,
+                    loc="upper center",
+                    bbox_to_anchor=(0.5, 1.0),
+                    ncol=len(handles),
+                    fontsize=8,
+                    frameon=False,
                 )
 
-            fig.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor=get_plot_color("figure_facecolor"))
+            fig.savefig(
+                output_plot_path,
+                dpi=150,
+                bbox_inches="tight",
+                facecolor=get_plot_color("figure_facecolor"),
+            )
             plt.close(fig)
             gc.collect()
         except Exception as e:
@@ -8759,7 +10113,10 @@ class ImageDistortionCorrector:
             lineno = exc_tb.tb_lineno
             logging.debug(
                 "Issue creating side by side plot: %s:%d: %s\n%s",
-                fname, lineno, e, traceback.format_exc(),
+                fname,
+                lineno,
+                e,
+                traceback.format_exc(),
             )
 
     def _filter_sci_to_ref_counterparts(
@@ -8808,7 +10165,9 @@ class ImageDistortionCorrector:
                     ("ALPHA_J2000", "DELTA_J2000"),
                 ]:
                     if ra_col in tbl.colnames and dec_col in tbl.colnames:
-                        return np.asarray(tbl[ra_col], float), np.asarray(tbl[dec_col], float)
+                        return np.asarray(tbl[ra_col], float), np.asarray(
+                            tbl[dec_col], float
+                        )
                 return None, None
 
             sci_ra, sci_dec = _get_ra_dec(sci_tab)
@@ -8841,9 +10200,10 @@ class ImageDistortionCorrector:
                     # and report n_before (unchanged).
                     self.logger.warning(
                         "[sci-to-ref filter] All %d science sources lack a "
-                        "reference counterpart within %.1f\"; refusing to "
+                        'reference counterpart within %.1f"; refusing to '
                         "empty the catalog (likely a large WCS offset).",
-                        n_before, match_radius_arcsec,
+                        n_before,
+                        match_radius_arcsec,
                     )
                     return n_before
                 sci_filtered = sci_tab[has_counterpart]
@@ -8852,15 +10212,19 @@ class ImageDistortionCorrector:
                     hdul.flush()
                 self.logger.info(
                     "[sci-to-ref filter] Dropped %d/%d science sources with no "
-                    "reference counterpart within %.1f\" (remaining: %d). "
+                    'reference counterpart within %.1f" (remaining: %d). '
                     "These are likely ghost/stacking artifacts.",
-                    n_dropped, n_before, match_radius_arcsec, n_after,
+                    n_dropped,
+                    n_before,
+                    match_radius_arcsec,
+                    n_after,
                 )
             else:
                 self.logger.debug(
                     "[sci-to-ref filter] All %d science sources have reference "
-                    "counterparts within %.1f\".",
-                    n_before, match_radius_arcsec,
+                    'counterparts within %.1f".',
+                    n_before,
+                    match_radius_arcsec,
                 )
 
             return n_after
@@ -8868,7 +10232,8 @@ class ImageDistortionCorrector:
         except Exception as e:
             self.logger.warning(
                 "[sci-to-ref filter] Failed (non-fatal): %s. "
-                "Proceeding with full science catalog.", e,
+                "Proceeding with full science catalog.",
+                e,
             )
             return -1
 
@@ -8966,11 +10331,19 @@ class ImageDistortionCorrector:
                     if "MAGERR_AUTO" in tbl.colnames
                     else 0.02
                 )
-                snr = (
-                    np.array(tbl["SNR_WIN"], float)
-                    if "SNR_WIN" in tbl.colnames
-                    else 0.0
-                )
+                if "SNR_WIN" in tbl.colnames:
+                    snr = np.array(tbl["SNR_WIN"], float)
+                elif "FLUX_AUTO" in tbl.colnames and "FLUXERR_AUTO" in tbl.colnames:
+                    _flux = np.abs(np.array(tbl["FLUX_AUTO"], float))
+                    _flux_err = np.array(tbl["FLUXERR_AUTO"], float)
+                    snr = np.where(_flux_err > 0, _flux / _flux_err, 0.0)
+                else:
+                    # Missing SNR must not silently discard every source.
+                    self.logger.warning(
+                        "SNR_WIN missing from a SExtractor MAG_AUTO catalog; "
+                        "no SNR-derived filtering possible for this table."
+                    )
+                    snr = 1.0
                 tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = mag, magerr, snr
             elif "FLUX_APER" in tbl.colnames:
                 flux = np.array(tbl["FLUX_APER"], float)
@@ -8988,7 +10361,11 @@ class ImageDistortionCorrector:
                 snr = np.where(flux_err > 0, np.abs(flux) / flux_err, 0.0)
                 tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = mag, magerr, snr
             else:
-                tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = np.nan, np.nan, 0.0
+                tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = (
+                    np.nan,
+                    np.nan,
+                    0.0,
+                )
             return tbl
 
         sci_cat = add_mag_snr_aper(sci_cat)
@@ -9018,9 +10395,8 @@ class ImageDistortionCorrector:
                 len(ref_cat_filtered),
             )
         if (
-            (len(sci_cat_filtered) < 3 or len(ref_cat_filtered) < 3)
-            and _snr_match_thresh > 1.0
-        ):
+            len(sci_cat_filtered) < 3 or len(ref_cat_filtered) < 3
+        ) and _snr_match_thresh > 1.0:
             _snr_match_thresh = 1.0
             sci_mask = sci_cat["SNR_APER"] >= _snr_match_thresh
             ref_mask = ref_cat["SNR_APER"] >= _snr_match_thresh
@@ -9069,7 +10445,6 @@ class ImageDistortionCorrector:
                 y = y - offset
             return x, y, coord_type
 
-
         sci_x, sci_y, sci_coord_type = get_xy(
             sci_cat_filtered, prefer_win=True, input_origin=1, output_origin=1
         )
@@ -9085,7 +10460,6 @@ class ImageDistortionCorrector:
             raise ValueError(
                 "Neither XWIN_WORLD/YWIN_WORLD nor X_WORLD/Y_WORLD found in catalog."
             )
-
 
         sci_ra, sci_dec = get_ra_dec(sci_cat_filtered)
         ref_ra, ref_dec = get_ra_dec(ref_cat_filtered)
@@ -9155,7 +10529,9 @@ class ImageDistortionCorrector:
                     # Median fallback when RANSAC fails
                     median_diff = np.median(sci_mag_clean - ref_mag_clean)
                     intercept = median_diff
-                    inlier_mask_clean = np.abs((sci_mag_clean - ref_mag_clean) - median_diff) < 1.0
+                    inlier_mask_clean = (
+                        np.abs((sci_mag_clean - ref_mag_clean) - median_diff) < 1.0
+                    )
                     if inlier_mask_clean.any():
                         inliers = np.zeros(len(sci_cat_matched), dtype=bool)
                         inliers[valid] = inlier_mask_clean
@@ -9181,9 +10557,15 @@ class ImageDistortionCorrector:
         if len(sci_cat_matched) >= 5 and intercept is not None:
             from ..core.functions import set_size
             from ..core.plotting_utils import (
-                apply_autophot_mplstyle, get_ransac_color, get_marker_size,
-                get_alpha, get_line_width, ransac_grid, ransac_savefig,
-                ransac_legend_top_outside, set_mag_axes_inverted_xy,
+                apply_autophot_mplstyle,
+                get_ransac_color,
+                get_marker_size,
+                get_alpha,
+                get_line_width,
+                ransac_grid,
+                ransac_savefig,
+                ransac_legend_top_outside,
+                set_mag_axes_inverted_xy,
                 get_plot_ext,
             )
 
@@ -9197,12 +10579,12 @@ class ImageDistortionCorrector:
                 xerr=np.array(ref_cat_matched["MAGERR_APER"], dtype=float),
                 yerr=np.array(sci_cat_matched["MAGERR_APER"], dtype=float),
                 fmt="o",
-                markersize=get_marker_size('medium'),
-                color=get_ransac_color('alignment'),
+                markersize=get_marker_size("medium"),
+                color=get_ransac_color("alignment"),
                 ecolor="lightgrey",
                 elinewidth=0.5,
-                capsize=get_marker_size('medium') / 4,
-                alpha=get_alpha('dark'),
+                capsize=get_marker_size("medium") / 4,
+                alpha=get_alpha("dark"),
                 label=f"Matched [{len(sci_cat_matched)}]",
             )
             x_fit = np.linspace(np.nanmin(ref_mag), np.nanmax(ref_mag), 100)
@@ -9210,14 +10592,18 @@ class ImageDistortionCorrector:
             residuals = sci_mag - (ref_mag + intercept)
             intercept_error = np.std(residuals) / np.sqrt(len(sci_mag))
             ax.fill_between(
-                x_fit, y_fit - intercept_error, y_fit + intercept_error,
-                color=get_ransac_color('error_band'), alpha=get_alpha('very_light'),
+                x_fit,
+                y_fit - intercept_error,
+                y_fit + intercept_error,
+                color=get_ransac_color("error_band"),
+                alpha=get_alpha("very_light"),
             )
             ax.plot(
-                x_fit, y_fit,
-                color=get_ransac_color('fit'),
+                x_fit,
+                y_fit,
+                color=get_ransac_color("fit"),
                 linestyle="--",
-                lw=get_line_width('medium'),
+                lw=get_line_width("medium"),
                 label=f"Fit: slope=1, intercept={intercept:.3f}",
             )
             ax.set_xlabel(r"Reference Instrumental Magnitude [mag]")
@@ -9228,7 +10614,10 @@ class ImageDistortionCorrector:
             _ext = get_plot_ext(self.input_yaml)
             ransac_savefig(
                 fig,
-                str(Path(sci_cat_path).parent / f"Mag_Fit_{Path(sci_cat_path).stem}{_ext}"),
+                str(
+                    Path(sci_cat_path).parent
+                    / f"Mag_Fit_{Path(sci_cat_path).stem}{_ext}"
+                ),
             )
             plt.close(fig)
 
@@ -9273,8 +10662,12 @@ class ImageDistortionCorrector:
                     "Spatial distribution: %dx%d grid, avg=%.1f/cell, "
                     "range=%d-%d/cell (some clustering present, "
                     "keeping all %d sources for maximum alignment coverage)",
-                    _n_bins, _n_bins, _avg_per_cell,
-                    _min_cell, _max_cell, _n_pre_spatial,
+                    _n_bins,
+                    _n_bins,
+                    _avg_per_cell,
+                    _min_cell,
+                    _max_cell,
+                    _n_pre_spatial,
                 )
 
         if len(sci_cat_matched) > nmax:
@@ -9361,7 +10754,11 @@ class ImageDistortionCorrector:
         for px, py in positions:
             sky_sci = sci_wcs.pixel_to_world(px, py)
             sky_ref = ref_wcs.pixel_to_world(px, py)
-            dra = (sky_sci.ra.deg - sky_ref.ra.deg) * 3600.0 * np.cos(np.radians(sky_sci.dec.deg))
+            dra = (
+                (sky_sci.ra.deg - sky_ref.ra.deg)
+                * 3600.0
+                * np.cos(np.radians(sky_sci.dec.deg))
+            )
             ddec = (sky_sci.dec.deg - sky_ref.dec.deg) * 3600.0
             dras.append(dra)
             ddecs.append(ddec)
@@ -9374,9 +10771,13 @@ class ImageDistortionCorrector:
         ddec_std = float(np.std(ddecs))
 
         self.logger.info(
-            "WCS header offset: dRA=%.1f\" dDec=%.1f\" (magnitude=%.1f\", "
-            "scatter: dRA_std=%.1f\" dDec_std=%.1f\")",
-            median_dra, median_ddec, offset_mag, dra_std, ddec_std,
+            'WCS header offset: dRA=%.1f" dDec=%.1f" (magnitude=%.1f", '
+            'scatter: dRA_std=%.1f" dDec_std=%.1f")',
+            median_dra,
+            median_ddec,
+            offset_mag,
+            dra_std,
+            ddec_std,
         )
 
         return median_dra, median_ddec
@@ -9440,7 +10841,11 @@ class ImageDistortionCorrector:
 
         # Offset vectors (sci - ref) in arcsec
         matched_ref = ref_coords[idx]
-        dra = (sci_ra - np.array(matched_ref.ra.deg)) * 3600.0 * np.cos(np.radians(sci_dec))
+        dra = (
+            (sci_ra - np.array(matched_ref.ra.deg))
+            * 3600.0
+            * np.cos(np.radians(sci_dec))
+        )
         ddec = (sci_dec - np.array(matched_ref.dec.deg)) * 3600.0
 
         dra_clipped = _sigma_clip(dra, sigma=2.5, maxiters=3)
@@ -9469,8 +10874,12 @@ class ImageDistortionCorrector:
         residual_sep = float(np.median(sep2.arcsec))
 
         self.logger.info(
-            "WCS offset estimate: dRA=%.1f\" dDec=%.1f\" (n_consistent=%d/%d, residual=%.1f\")",
-            median_dra, median_ddec, n_consistent, len(sci_cat), residual_sep,
+            'WCS offset estimate: dRA=%.1f" dDec=%.1f" (n_consistent=%d/%d, residual=%.1f")',
+            median_dra,
+            median_ddec,
+            n_consistent,
+            len(sci_cat),
+            residual_sep,
         )
 
         return median_dra, median_ddec, n_consistent
