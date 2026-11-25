@@ -5,6 +5,8 @@ returning synthetic raw catalogs whose column names match
 ``autophot/data/catalog.yml`` so the real ``clean()`` column mapping runs.
 """
 
+import csv
+import io
 import os
 import sys
 from pathlib import Path
@@ -778,6 +780,18 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+    @property
+    def text(self):
+        # The pipeline requests format=csv: render the same payload as CSV.
+        cols = [c["name"] for c in self._payload.get("info", [])]
+        if not cols:
+            return ""
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(cols)
+        writer.writerows(self._payload.get("data", []))
+        return buf.getvalue()
 
 
 def _ps_payload(n):
